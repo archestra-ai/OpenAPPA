@@ -209,7 +209,7 @@ mod tests {
         );
         trajectory.push_message(
             Label {
-                audience: Audience::Public,
+                audience: Audience::PUBLIC,
                 trust: Trust::SUSPICIOUS,
                 effects: Effects::declared([Effect::Egress]),
                 ..Label::identity()
