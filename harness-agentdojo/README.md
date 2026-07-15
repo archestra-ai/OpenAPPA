@@ -29,7 +29,7 @@ blocks tool calls whose contract the folded context cannot satisfy.
 uv sync
 
 # The benchmark, via OpenRouter (key from $OPENROUTER_API_KEY or
-# ../.env). Compare a defended and an undefended pipeline:
+# ../../.env). Compare a defended and an undefended pipeline:
 uv run baton-dojo bench --model openai/gpt-4o-mini-2024-07-18 --defense baton
 uv run baton-dojo bench --model openai/gpt-4o-mini-2024-07-18 --defense none
 

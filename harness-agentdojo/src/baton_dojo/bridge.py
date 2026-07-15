@@ -12,6 +12,7 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 BATON_CHECK_DIR = _REPO_ROOT / "check"
+REPO_TARGET_DIR = _REPO_ROOT / "target"
 
 UNKNOWN_POLICIES = ("deny", "allow_with_audit", "escalate")
 
@@ -59,7 +60,7 @@ def resolve_binary() -> Path:
         cwd=BATON_CHECK_DIR,
         check=True,
     )
-    path = _REPO_ROOT / "target" / "release" / "baton-check"
+    path = REPO_TARGET_DIR / "release" / "baton-check"
     if not path.is_file():
         raise FileNotFoundError(f"cargo build succeeded but {path} is missing")
     _binary_cache = path

@@ -45,5 +45,5 @@ def test_openrouter_api_key_strips_quotes(tmp_path, monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     env_file = tmp_path / ".env"
     env_file.write_text('OPENROUTER_API_KEY="sk-quoted-value"\n')
-    monkeypatch.setattr(pipeline, "AI_LABS_ENV", env_file)
+    monkeypatch.setattr(pipeline, "REPO_ENV", env_file)
     assert pipeline.openrouter_api_key() == "sk-quoted-value"
