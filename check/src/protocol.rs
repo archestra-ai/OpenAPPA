@@ -3,9 +3,9 @@
 use std::collections::BTreeSet;
 
 use baton_core::{
-    Audience, Authority, AuthorityName, BlockReason, Decision, Effect, Effects, Grant, KnownTrust,
-    Label, PolicyEngine, Requirements, Ruling, Speaker, TaintPolicy, ToolContract, ToolName,
-    ToolRequest, Trajectory, Trust, UnknownPolicy, UserId, Violation,
+    Audience, Authority, AuthorityName, BlockReason, Decision, Effect, Effects, Grant, KnownTrust, Label, PolicyEngine,
+    Requirements, Ruling, Speaker, TaintPolicy, ToolContract, ToolName, ToolRequest, Trajectory, Trust, UnknownPolicy,
+    UserId, Violation,
 };
 use serde::{Deserialize, Serialize};
 
@@ -64,7 +64,7 @@ pub enum TrustIn {
 }
 
 /// Sink requirements. Deliberately no audience rule: every output label this
-/// baton-check mints is `Audience::Public` (there is no per-datum audience source
+/// baton-check mints is `Audience::PUBLIC` (there is no per-datum audience source
 /// in the wire format yet), and against a public context a
 /// recipients-within-context rule could only ever reject the empty recipient
 /// set — a knob that cannot do what its name promises. Audience arrives
@@ -192,7 +192,7 @@ impl From<TrustIn> for Trust {
         match trust {
             TrustIn::Trusted => Self::TRUSTED,
             TrustIn::Suspicious => Self::SUSPICIOUS,
-            TrustIn::Unknown => Self::Unknown,
+            TrustIn::Unknown => Self::UNKNOWN,
         }
     }
 }
@@ -226,11 +226,9 @@ impl From<&ContractIn> for ToolContract {
                 forbid_prior_effects: effect_set(&contract.requires.forbid_prior_effects),
             },
             output_label: Label {
-                audience: Audience::Public,
+                audience: Audience::PUBLIC,
                 trust: contract.output.trust.into(),
-                effects: Effects::declared(
-                    contract.output.effects.iter().copied().map(Effect::from),
-                ),
+                effects: Effects::declared(contract.output.effects.iter().copied().map(Effect::from)),
                 audit: Vec::new(),
             },
         }
@@ -278,18 +276,15 @@ impl std::fmt::Display for ProtocolError {
                  the caller must only replay permitted calls"
             ),
             Self::ReplayRejected { index, tool } => {
-                write!(
-                    f,
-                    "executed[{index}] `{tool}`: permit rejected during replay"
-                )
+                write!(f, "executed[{index}] `{tool}`: permit rejected during replay")
             }
         }
     }
 }
 
 pub fn run(input: &Input) -> Result<Output, ProtocolError> {
-    let mut engine = PolicyEngine::new(DenyAll, input.unknown_policy.into())
-        .with_taint_policy(input.taint_policy.into());
+    let mut engine =
+        PolicyEngine::new(DenyAll, input.unknown_policy.into()).with_taint_policy(input.taint_policy.into());
     for contract in &input.contracts {
         engine
             .register(contract.into())
@@ -308,12 +303,12 @@ pub fn run(input: &Input) -> Result<Output, ProtocolError> {
     for (index, call) in input.executed.iter().enumerate() {
         match engine.evaluate(&trajectory, &call.tool_request()) {
             Decision::Permitted(permit) => {
-                trajectory.record_result(permit, "").map_err(|_| {
-                    ProtocolError::ReplayRejected {
+                trajectory
+                    .record_result(permit, "")
+                    .map_err(|_| ProtocolError::ReplayRejected {
                         index,
                         tool: call.tool.clone(),
-                    }
-                })?;
+                    })?;
             }
             Decision::Blocked { .. } => {
                 return Err(ProtocolError::ReplayBlocked {
@@ -324,25 +319,23 @@ pub fn run(input: &Input) -> Result<Output, ProtocolError> {
         }
     }
 
-    Ok(
-        match engine.evaluate(&trajectory, &input.proposed.tool_request()) {
-            Decision::Permitted(permit) => Output::Permitted {
-                audited: !permit.result_label().audit.is_empty(),
-                context: trajectory.context_label().to_string(),
-            },
-            Decision::Blocked { violations, reason } => {
-                let detail = std::iter::once(reason.to_string())
-                    .chain(violations.iter().map(|v| v.to_string()))
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                Output::Blocked {
-                    block_kind: (&reason).into(),
-                    violation_count: violations.len(),
-                    detail,
-                }
-            }
+    Ok(match engine.evaluate(&trajectory, &input.proposed.tool_request()) {
+        Decision::Permitted(permit) => Output::Permitted {
+            audited: !permit.result_label().audit.is_empty(),
+            context: trajectory.context_label().to_string(),
         },
-    )
+        Decision::Blocked { violations, reason } => {
+            let detail = std::iter::once(reason.to_string())
+                .chain(violations.iter().map(|v| v.to_string()))
+                .collect::<Vec<_>>()
+                .join("; ");
+            Output::Blocked {
+                block_kind: (&reason).into(),
+                violation_count: violations.len(),
+                detail,
+            }
+        }
+    })
 }
 
 impl CallIn {
