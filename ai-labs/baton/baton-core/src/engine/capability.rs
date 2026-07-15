@@ -60,7 +60,7 @@ impl ToolContract {
         Self {
             name: ToolName::new(name),
             requires: Requirements {
-                audience: AudienceRule::RecipientsWithinContext,
+                audience: AudienceRule::FromRecipients,
                 ..Requirements::default()
             },
             output_label: ValueLabel::identity(),

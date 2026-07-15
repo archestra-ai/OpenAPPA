@@ -144,7 +144,7 @@ fn random_trust_requirement(rng: &mut TinyRng) -> Option<KnownTrust> {
 fn random_audience_requirement(rng: &mut TinyRng) -> AudienceRule {
     match rng.below(2) {
         0 => AudienceRule::Unrestricted,
-        _ => AudienceRule::RecipientsWithinContext,
+        _ => AudienceRule::FromRecipients,
     }
 }
 
