@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// The sink-side proof for one dimension: three-valued, not a lattice
 /// comparison. `Holds` when the context satisfies the requirement,
@@ -24,16 +24,10 @@ pub trait HasBottom: Ord {
     fn bottom() -> Self;
 }
 
-/// A value type that designates its greatest element under [`Ord`]. Required by
-/// [`MaxLevel`], whose `Unknown` sits *just below* that top in the fold.
-pub trait HasTop: Ord {
-    fn top() -> Self;
-}
-
 /// The confidentiality-meet preset (generalizes `Audience`). The fold is the
 /// most-restrictive combine: a value is `All` (top / identity), a concrete
 /// `Only(set)`, or `Unknown` (absorbing). Adequacy is `covers`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum MeetSet<T: Ord> {
     All,
     Only(BTreeSet<T>),
@@ -74,7 +68,7 @@ impl<T: Ord + Clone> MeetSet<T> {
 
 /// The accumulating-union preset (generalizes `Effects`). A value is `Has(set)`
 /// (with `Has(∅)` the identity) or `Unknown` (absorbing). Adequacy is `avoids`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum JoinSet<T: Ord> {
     Has(BTreeSet<T>),
     Unknown,
@@ -114,7 +108,7 @@ impl<T: Ord + Clone> JoinSet<T> {
 
 /// The trust-like ordered preset (generalizes `Trust`). Worse = lower, fold =
 /// min, `Unknown` just above bottom, adequacy = `at_least(floor)` — "least wins".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum MinLevel<T: Ord> {
     Known(T),
     Unknown,
@@ -153,47 +147,6 @@ impl<T: Ord + Clone> MinLevel<T> {
     }
 }
 
-/// The classification-like ordered preset (the dual of [`MinLevel`], with no
-/// built-in instance yet). Worse = higher, fold = max, `Unknown` just below
-/// top, adequacy = `at_most(ceiling)` — "most sensitive wins".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MaxLevel<T: Ord> {
-    Known(T),
-    Unknown,
-}
-
-impl<T: Ord + HasTop> MaxLevel<T> {
-    /// Max fold over the total order `rest < Unknown < top`: a known top
-    /// dominates `Unknown`, while `Unknown` dominates every other known value.
-    #[must_use]
-    pub fn combine(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Known(a), Self::Known(b)) => Self::Known(a.max(b)),
-            (Self::Known(a), Self::Unknown) | (Self::Unknown, Self::Known(a)) => {
-                if a == T::top() {
-                    Self::Known(a)
-                } else {
-                    Self::Unknown
-                }
-            }
-            (Self::Unknown, Self::Unknown) => Self::Unknown,
-        }
-    }
-}
-
-impl<T: Ord + Clone> MaxLevel<T> {
-    /// Adequacy against a ceiling: a known value at or below the ceiling holds,
-    /// a higher one `Fails` (carrying the actual value), and `Unknown` is
-    /// `Unprovable`.
-    pub fn at_most(&self, ceiling: T) -> Adequacy<T> {
-        match self {
-            Self::Known(actual) if *actual <= ceiling => Adequacy::Holds,
-            Self::Known(actual) => Adequacy::Fails(actual.clone()),
-            Self::Unknown => Adequacy::Unprovable,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,22 +164,8 @@ mod tests {
         }
     }
 
-    impl HasTop for Level {
-        fn top() -> Self {
-            Self::High
-        }
-    }
-
     fn set(items: impl IntoIterator<Item = u8>) -> BTreeSet<u8> {
         items.into_iter().collect()
-    }
-
-    #[test]
-    fn has_bottom_and_top_are_the_extrema() {
-        for x in [Level::Low, Level::Mid, Level::High] {
-            assert!(Level::bottom() <= x, "bottom not <= {x:?}");
-            assert!(Level::top() >= x, "top not >= {x:?}");
-        }
     }
 
     #[test]
@@ -298,30 +237,6 @@ mod tests {
         assert_eq!(MinLevel::<Level>::Unknown.at_least(High), Adequacy::Unprovable);
     }
 
-    #[test]
-    fn max_level_folds_max_with_unknown_just_below_top() {
-        use Level::{High, Low, Mid};
-        assert_eq!(MaxLevel::Known(High).combine(MaxLevel::Unknown), MaxLevel::Known(High));
-        assert_eq!(MaxLevel::Known(Mid).combine(MaxLevel::Unknown), MaxLevel::Unknown);
-        assert_eq!(MaxLevel::Known(Low).combine(MaxLevel::Unknown), MaxLevel::Unknown);
-        assert_eq!(
-            MaxLevel::Known(Low).combine(MaxLevel::Known(High)),
-            MaxLevel::Known(High)
-        );
-        assert_eq!(MaxLevel::Known(Low).combine(MaxLevel::Known(Mid)), MaxLevel::Known(Mid));
-        assert_eq!(MaxLevel::<Level>::Unknown.combine(MaxLevel::Unknown), MaxLevel::Unknown);
-    }
-
-    #[test]
-    fn max_level_at_most_over_the_values() {
-        use Level::{High, Low, Mid};
-        assert_eq!(MaxLevel::Known(Low).at_most(Mid), Adequacy::Holds);
-        assert_eq!(MaxLevel::Known(Mid).at_most(Mid), Adequacy::Holds);
-        assert_eq!(MaxLevel::Known(High).at_most(Mid), Adequacy::Fails(High));
-        assert_eq!(MaxLevel::<Level>::Unknown.at_most(Low), Adequacy::Unprovable);
-        assert_eq!(MaxLevel::<Level>::Unknown.at_most(High), Adequacy::Unprovable);
-    }
-
     fn meet_samples() -> Vec<MeetSet<u8>> {
         vec![
             MeetSet::All,
@@ -346,15 +261,6 @@ mod tests {
             MinLevel::Known(Level::Mid),
             MinLevel::Known(Level::High),
             MinLevel::Unknown,
-        ]
-    }
-
-    fn max_samples() -> Vec<MaxLevel<Level>> {
-        vec![
-            MaxLevel::Known(Level::Low),
-            MaxLevel::Known(Level::Mid),
-            MaxLevel::Known(Level::High),
-            MaxLevel::Unknown,
         ]
     }
 
@@ -383,6 +289,5 @@ mod tests {
         check!(meet_samples());
         check!(join_samples());
         check!(min_samples());
-        check!(max_samples());
     }
 }

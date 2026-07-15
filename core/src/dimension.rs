@@ -4,11 +4,11 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::preset::{Adequacy, HasBottom, JoinSet, MeetSet, MinLevel};
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct UserId(String);
 
@@ -30,7 +30,7 @@ impl fmt::Display for UserId {
 
 /// Who is allowed to read a piece of data — an instance of
 /// [`MeetSet<UserId>`](crate::preset::MeetSet).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct Audience(MeetSet<UserId>);
 
@@ -53,9 +53,20 @@ impl Audience {
         self.0.covers(recipients)
     }
 
-    /// Grant application ([`Label::lift`](crate::label::Label::lift)): admit
-    /// `vouched` into the readers. `Public` stays public; `Unknown` becomes
-    /// exactly the vouched readers. Monotone in the adequacy order.
+    /// Adequacy of this audience for a public sink: does it admit everyone?
+    /// Only `Public` holds; a bounded reader set fails with itself as the
+    /// witness (no finite vouch covers "everyone"); `Unknown` is unprovable.
+    pub(crate) fn covers_everyone(&self) -> Adequacy<BTreeSet<UserId>> {
+        match &self.0 {
+            MeetSet::All => Adequacy::Holds,
+            MeetSet::Only(readers) => Adequacy::Fails(readers.clone()),
+            MeetSet::Unknown => Adequacy::Unprovable,
+        }
+    }
+
+    /// Endorse lift (durable relabel — see [`crate::transition::EndorseDelta`]):
+    /// admit `vouched` into the readers. `Public` stays public; `Unknown`
+    /// becomes exactly the vouched readers. Monotone in the adequacy order.
     pub(crate) fn admitting(&self, vouched: &BTreeSet<UserId>) -> Self {
         match &self.0 {
             MeetSet::All => Self(MeetSet::All),
@@ -64,15 +75,14 @@ impl Audience {
         }
     }
 
-    /// `self ⊑ other` in the adequacy (permissiveness) order: `Unknown` bottom,
-    /// `Public` top, `Readers` by inclusion.
-    #[cfg(test)]
-    pub(crate) fn adequacy_le(&self, other: &Self) -> bool {
-        match (&self.0, &other.0) {
-            (MeetSet::Unknown, _) => true,
-            (_, MeetSet::All) => true,
-            (MeetSet::Only(a), MeetSet::Only(b)) => a.is_subset(b),
-            _ => false,
+    /// The members of `required` this audience does not already admit — the
+    /// per-leaf endorse deficit. Empty for `Public`; everything for `Unknown`
+    /// (it bounds nothing, so every reader needs the vouch).
+    pub(crate) fn missing_readers(&self, required: &BTreeSet<UserId>) -> BTreeSet<UserId> {
+        match &self.0 {
+            MeetSet::All => BTreeSet::new(),
+            MeetSet::Only(readers) => required.difference(readers).cloned().collect(),
+            MeetSet::Unknown => required.clone(),
         }
     }
 }
@@ -96,7 +106,7 @@ impl fmt::Display for Audience {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum KnownTrust {
     Suspicious,
     Trusted,
@@ -119,7 +129,7 @@ impl fmt::Display for KnownTrust {
 
 /// How much the provenance of data is trusted — if that is known at all. An
 /// instance of [`MinLevel<KnownTrust>`](crate::preset::MinLevel).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct Trust(MinLevel<KnownTrust>);
 
@@ -139,29 +149,15 @@ impl Trust {
         self.0.at_least(floor)
     }
 
-    /// Grant application ([`Label::lift`](crate::label::Label::lift)): raise
-    /// trust to at least `attested`. A join (`max`), never a demotion — a
-    /// `Trusted` context is never lowered by a weaker attestation, and an
+    /// Endorse lift (durable relabel — see [`crate::transition::EndorseDelta`]):
+    /// raise trust to at least `attested`. A join (`max`), never a demotion —
+    /// a `Trusted` flow is never lowered by a weaker attestation, and an
     /// `Unknown` one becomes the attested judgement.
     pub(crate) fn raised_to(&self, attested: KnownTrust) -> Self {
         match self.0 {
             MinLevel::Known(actual) => Self(MinLevel::Known(actual.max(attested))),
             MinLevel::Unknown => Self(MinLevel::Known(attested)),
         }
-    }
-
-    /// `self ⊑ other` in the adequacy order: `Unknown` bottom, then
-    /// `Suspicious`, then `Trusted`.
-    #[cfg(test)]
-    pub(crate) fn adequacy_le(&self, other: &Self) -> bool {
-        fn rank(t: &MinLevel<KnownTrust>) -> u8 {
-            match t {
-                MinLevel::Unknown => 0,
-                MinLevel::Known(KnownTrust::Suspicious) => 1,
-                MinLevel::Known(KnownTrust::Trusted) => 2,
-            }
-        }
-        rank(&self.0) <= rank(&other.0)
     }
 }
 
@@ -174,7 +170,7 @@ impl fmt::Display for Trust {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum Effect {
     Mutation,
     Egress,
@@ -191,7 +187,7 @@ impl fmt::Display for Effect {
 
 /// Effects that have already happened in a context — an instance of
 /// [`JoinSet<Effect>`](crate::preset::JoinSet).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct Effects(JoinSet<Effect>);
 
@@ -217,10 +213,19 @@ impl Effects {
         self.0.avoids(forbidden)
     }
 
-    /// Grant application ([`Label::lift`](crate::label::Label::lift)): waive
-    /// `waived` from the present effects. `Unknown` stays `Unknown` — one
-    /// cannot attest a negative over it, which is why unprovable effects are
-    /// acknowledge-only, never grant-fixable.
+    /// The declared effect set, or `None` for `Unknown`. Used by the
+    /// structural narrowing relation, which must distinguish "provably these
+    /// effects" from "anything may happen".
+    pub(crate) fn declared_set(&self) -> Option<BTreeSet<Effect>> {
+        match &self.0 {
+            JoinSet::Has(set) => Some(set.clone()),
+            JoinSet::Unknown => None,
+        }
+    }
+
+    /// Waiver application (check-transient): waive `waived` from the present
+    /// effects. `Unknown` stays `Unknown` — one cannot attest a negative over
+    /// it, which is why unprovable effects are acknowledge-only.
     pub(crate) fn waiving(&self, waived: &BTreeSet<Effect>) -> Self {
         match &self.0 {
             JoinSet::Has(present) => Self(JoinSet::Has(present.difference(waived).copied().collect())),
@@ -228,14 +233,20 @@ impl Effects {
         }
     }
 
-    /// `self ⊑ other` in the adequacy order: `Unknown` bottom, `none()` top,
-    /// fewer present effects is more adequate.
-    #[cfg(test)]
-    pub(crate) fn adequacy_le(&self, other: &Self) -> bool {
-        match (&self.0, &other.0) {
-            (JoinSet::Unknown, _) => true,
-            (JoinSet::Has(a), JoinSet::Has(b)) => b.is_subset(a),
-            (JoinSet::Has(_), JoinSet::Unknown) => false,
+    /// The effects `self` (a call's proposed effects) would *add* to the
+    /// already-committed `past` surface: `None` when the flow is downhill on
+    /// effects (`past.combine(self) == past`), else `Some(growth)` — the
+    /// minimal effects whose commit equals committing `self`. Growth to
+    /// `Unknown` (an unannotated tool over a knowable past) is a real,
+    /// representable growth, distinct from any declared set.
+    pub(crate) fn growth_over(&self, past: &Effects) -> Option<Effects> {
+        if past.clone().combine(self.clone()) == *past {
+            return None;
+        }
+        match (past.declared_set(), self.declared_set()) {
+            (Some(committed), Some(proposed)) => Some(Self::declared(proposed.difference(&committed).copied())),
+            (_, None) => Some(Self::UNKNOWN),
+            (None, Some(_)) => Some(self.clone()),
         }
     }
 }
