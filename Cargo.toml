@@ -1,0 +1,6 @@
+[workspace]
+members = ["core", "check"]
+resolver = "2"
+
+[workspace.lints.rust]
+dead_code = "deny"

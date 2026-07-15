@@ -1,6 +1,6 @@
-# agentdojo-harness
+# harness-agentdojo
 
-Runs the [baton-core](../baton-core) information-flow policy engine as a
+Runs the [baton-core](../core) information-flow policy engine as a
 tool-call-veto defense inside [AgentDojo](https://github.com/ethz-spylab/agentdojo),
 the prompt-injection benchmark. Baton never reads the injected text: it tracks
 which sources a conversation's context came from (a per-turn label fold) and
@@ -8,7 +8,7 @@ blocks tool calls whose contract the folded context cannot satisfy.
 
 ## Layout
 
-- `../baton-check` — stateless Rust policy check over baton-core: one JSON
+- `../check` — stateless Rust policy check (`baton-check`) over baton-core: one JSON
   request (contracts + episode so far + proposed call) in on stdin, one
   decision out on stdout. Built automatically on first use
   (`cargo build --release`), or point `BATON_CHECK_BIN` at a binary.
@@ -29,7 +29,7 @@ blocks tool calls whose contract the folded context cannot satisfy.
 uv sync
 
 # The benchmark, via OpenRouter (key from $OPENROUTER_API_KEY or
-# ../../.env). Compare a defended and an undefended pipeline:
+# ../.env). Compare a defended and an undefended pipeline:
 uv run baton-dojo bench --model openai/gpt-4o-mini-2024-07-18 --defense baton
 uv run baton-dojo bench --model openai/gpt-4o-mini-2024-07-18 --defense none
 
@@ -58,8 +58,8 @@ resumes where it stopped.
 
 ```sh
 # build baton-check once and pin it, so the shards don't each rebuild it
-( cd ../baton-check && cargo build --release )
-export BATON_CHECK_BIN="$PWD/../baton-check/target/release/baton-check"
+( cd ../check && cargo build --release )
+export BATON_CHECK_BIN="$PWD/../target/release/baton-check"
 
 model=openai/gpt-4o-mini-2024-07-18
 for lo in 0 10 20 30; do                       # 4 shards of 10 user tasks each

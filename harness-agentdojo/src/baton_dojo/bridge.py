@@ -10,7 +10,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-BATON_CHECK_DIR = Path(__file__).resolve().parents[3] / "baton-check"
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+BATON_CHECK_DIR = _REPO_ROOT / "check"
 
 UNKNOWN_POLICIES = ("deny", "allow_with_audit", "escalate")
 
@@ -58,7 +59,7 @@ def resolve_binary() -> Path:
         cwd=BATON_CHECK_DIR,
         check=True,
     )
-    path = BATON_CHECK_DIR / "target" / "release" / "baton-check"
+    path = _REPO_ROOT / "target" / "release" / "baton-check"
     if not path.is_file():
         raise FileNotFoundError(f"cargo build succeeded but {path} is missing")
     _binary_cache = path

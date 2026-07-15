@@ -18,11 +18,11 @@ from baton_dojo.contracts import ContractTable
 from baton_dojo.defense import BatonToolsExecutor
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-AI_LABS_ENV = Path(__file__).resolve().parents[4] / ".env"
+AI_LABS_ENV = Path(__file__).resolve().parents[3] / ".env"
 
 
 def openrouter_api_key() -> str:
-    """$OPENROUTER_API_KEY, falling back to the ai-labs/.env file."""
+    """$OPENROUTER_API_KEY, falling back to the repo-root .env file."""
     key = os.environ.get("OPENROUTER_API_KEY")
     if key:
         return key

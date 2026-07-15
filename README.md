@@ -12,14 +12,13 @@ audited declassification. `Unknown` is a first-class value with policy-chosen
 meaning (annotate five high-risk tools, leave the rest unknown, still catch
 the obvious flows).
 
-Concepts and semantics are documented in `baton-core/src/lib.rs`.
+Concepts and semantics are documented in `core/src/lib.rs`.
 
 ```sh
-cd baton-core
-cargo run --example demo
+cargo run -p baton-core --example demo
 cargo test
 ```
 
-`agentdojo-harness/` evaluates the engine against the AgentDojo
-prompt-injection benchmark (with `baton-check`, a stateless JSON oracle over
+`harness-agentdojo/` evaluates the engine against the AgentDojo
+prompt-injection benchmark (with `check/`, a stateless JSON oracle over
 baton-core); see its README.
