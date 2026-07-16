@@ -1,0 +1,38 @@
+# The external approver: appa-proxy POSTs pending approvals here (the
+# `ops-approver` authority's webhook in policy.toml) and applies the ruling.
+# One deterministic rule over the engine's typed facts — deny when the flow's
+# provenance includes suspicious values, approve otherwise. It never sees
+# value bytes, only labels and provenance.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ops-approver
+  namespace: kagent
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: ops-approver }
+  template:
+    metadata:
+      labels: { app: ops-approver }
+    spec:
+      containers:
+        - name: ops-approver
+          image: ops-approver:poc
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: RUST_LOG
+              value: info
+          ports:
+            - containerPort: 8732
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ops-approver
+  namespace: kagent
+spec:
+  selector: { app: ops-approver }
+  ports:
+    - port: 8732
+      targetPort: 8732

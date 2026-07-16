@@ -294,10 +294,19 @@ async fn the_request_carries_the_approval_facts_and_never_value_bodies() {
     assert!(approval["grant"]["scope"].is_object(), "grant.scope: {approval}");
     let resolved = approval["resolved"].as_array().expect("resolved is an array");
     assert!(!resolved.is_empty(), "the grant must target violations");
-    assert!(
-        approval["ancestry"]["values"].is_object(),
-        "ancestry.values: {approval}"
-    );
+    let values = approval["ancestry"]["values"]
+        .as_object()
+        .expect("ancestry.values is an object");
+    assert!(!values.is_empty(), "the closure must carry the flow's values");
+    // Every value's trust wears the wire encoding out-of-process authorities
+    // key on (`{"Known": …}` or `"Unknown"`) — the demo approver reads this.
+    for (id, view) in values {
+        let trust = &view["label"]["trust"];
+        assert!(
+            trust == "Unknown" || trust.get("Known").is_some(),
+            "value {id} trust encoding drifted: {trust}"
+        );
+    }
     // Labels and provenance only — never user, model, tool-result, or
     // argument bytes.
     let text = String::from_utf8_lossy(body);
