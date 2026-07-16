@@ -1931,6 +1931,92 @@ fn constrain_plan_maps_to_narrower_tool() {
     assert!(plans.iter().any(|p| narrow_step(p.steps.first()).is_some()));
 }
 
+/// A narrow may never widen the resolved recipient set, even when the
+/// transition is otherwise impeccable and the narrow is the *only* thing that
+/// would unlock the flow: the target declares exactly the transition's effects
+/// and requirements that clear the source's trust breach. The one difference is
+/// which argument role it reads recipients from. Reading `to` (a subset — the
+/// same user) the narrow is planned; reading `cc` (a user the source never
+/// exposed context to) the gate refuses it and nothing unlocks. A registered
+/// transition is not a laundering route to a wider audience.
+#[test]
+fn a_narrow_may_not_widen_the_resolved_recipient_set() {
+    // The target contract, parameterized by the role it resolves recipients
+    // from. Its requirements are stated and permissive, so a narrow onto it
+    // clears the source's trust breach — the recipient gate is then the only
+    // thing that can refuse the hop.
+    let engine_reading = |role: &str| {
+        let send = ToolContract {
+            name: ToolName::new("email.send"),
+            requires: Some(Requirements {
+                trust: Some(KnownTrust::Trusted),
+                ..Requirements::default()
+            }),
+            output_label: ValueLabel::identity(),
+            effects: Effects::none(),
+            arguments: ArgumentSchema::with_recipients(ArgumentName::new("to")),
+        };
+        let archive = ToolContract {
+            name: ToolName::new("email.archive"),
+            requires: Some(Requirements::default()),
+            output_label: ValueLabel::identity(),
+            effects: Effects::none(),
+            arguments: ArgumentSchema::with_recipients(ArgumentName::new(role)),
+        };
+        let mut engine = engine_with([send, archive]);
+        engine
+            .register_action_transition(ActionTransition {
+                id: tref("to-archive"),
+                from_tool: ToolName::new("email.send"),
+                to_tool: ToolName::new("email.archive"),
+                effects: Effects::none(),
+            })
+            .unwrap();
+        engine
+    };
+    let blocked_request = |trajectory: &mut Trajectory| {
+        let secret = ingress(trajectory, &["alice", "mallory"], Trust::SUSPICIOUS, "secret");
+        let to = ingress(trajectory, &["alice", "mallory"], Trust::TRUSTED, "alice");
+        let cc = ingress(trajectory, &["alice", "mallory"], Trust::TRUSTED, "mallory");
+        ToolRequest::new(
+            ToolName::new("email.send"),
+            ArgumentTree::Object(BTreeMap::from([
+                (ArgumentName::new("body"), ArgumentTree::Value(secret)),
+                (ArgumentName::new("to"), ArgumentTree::Value(to)),
+                (ArgumentName::new("cc"), ArgumentTree::Value(cc)),
+            ])),
+            BTreeSet::new(),
+        )
+    };
+    let offers_narrow = |plans: &NonEmptyVec<RemedyPlan>| {
+        plans
+            .iter()
+            .any(|p| p.steps.iter().any(|s| narrow_step(s) == Some(&tref("to-archive"))))
+    };
+
+    // Control: recipients resolve to `{alice}` — the same set the source
+    // exposed. The subset holds, so the narrow is a real unlock. Without this
+    // arm the negative case below would pass for the wrong reason.
+    let subset_engine = engine_reading("to");
+    let mut trajectory = Trajectory::new();
+    let request = blocked_request(&mut trajectory);
+    assert!(
+        offers_narrow(&remediable(&subset_engine, &mut trajectory, request)),
+        "a recipient-preserving narrow is the fixture's only unlock and must be offered"
+    );
+
+    // The gate: recipients now resolve to `{mallory}`, outside the source's
+    // `{alice}`. Same transition, same breach, same everything else — refused,
+    // and with the sole unlock gone the flow is terminal.
+    let widening_engine = engine_reading("cc");
+    let mut trajectory = Trajectory::new();
+    let request = blocked_request(&mut trajectory);
+    match widening_engine.evaluate(&mut trajectory, request) {
+        Ok(FlowOutcome::Terminal { reason, .. }) => assert_eq!(reason, BlockReason::NoRemedy),
+        other => panic!("a recipient-widening narrow must not unlock the flow, got {other:?}"),
+    }
+}
+
 /// Narrowing re-decides the target's requirement fact rather than inheriting
 /// the source's: a transition onto a tool whose requirements were never stated
 /// must not launder the call into a free pass. The narrow clears the source's
@@ -3662,10 +3748,10 @@ fn external_waiver_denial_blocks_terminally() {
     ));
 }
 
-/// Stale and foreign step capabilities and approvals are refused without
-/// touching state.
+/// Stale step capabilities and approvals are refused without touching state.
+/// Foreign bindings are covered separately, per engine and per trajectory.
 #[test]
-fn stale_and_foreign_step_capabilities_are_refused() {
+fn stale_step_capabilities_and_approvals_are_refused() {
     let mut engine = engine_with([email_contract()]);
     engine.register_authority(human()).unwrap();
     let mut trajectory = Trajectory::new();
