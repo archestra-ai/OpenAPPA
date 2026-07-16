@@ -349,7 +349,7 @@ impl PolicyEngine {
     /// what the live recheck computes. Both hold a [`SimFlow`]: the planner's
     /// is the simulated state one hop out, the applier's is built from the
     /// pending action it is about to constrain.
-    pub(crate) fn constrain_gate<'a>(
+    pub(super) fn constrain_gate<'a>(
         &'a self,
         sim: &SimFlow,
         transition: &ActionTransition,
@@ -394,26 +394,29 @@ impl PolicyEngine {
         // vouch. A control-borne residual is left to the control-release lift
         // below. All contributing leaves must have a competent route, else
         // this state cannot clear the breach.
-        // The probe carries the raises as it walks, so on the accepting path it
-        // already *is* the post-raise state and `residual` its violations —
-        // adopt them rather than replaying the same raises onto `sim`. A
-        // rejected route short-circuits the collect, leaving the probe
-        // partially raised and unused.
+        // The probe carries the raises as it walks, so a route that clears
+        // every leaf already *is* the post-raise state and its residual the
+        // recomputed violations — yield them rather than replaying the same
+        // raises onto `sim`. A route with an unroutable leaf short-circuits the
+        // collect, and its partially-raised probe never leaves the block.
         let endorse = endorse_steps(&sim, &remaining);
-        let mut probe = sim.clone();
-        let mut residual = remaining.clone();
-        let raise_steps: Option<Vec<PlannedRemedy>> = endorse
-            .iter()
-            .map(|(leaf, delta)| {
-                let step = self.authorize_step(raise_authorization(*leaf, delta), residual.clone())?;
-                let raised = delta.raise(&probe.leaf_labels[leaf]);
-                probe.leaf_labels.insert(*leaf, raised);
-                residual = probe.violations(None);
-                Some(step)
-            })
-            .collect();
-        if let Some(raise_steps) = raise_steps {
-            sim = probe;
+        let raised_state: Option<(SimFlow, Vec<Violation>, Vec<PlannedRemedy>)> = {
+            let mut probe = sim.clone();
+            let mut residual = remaining.clone();
+            endorse
+                .iter()
+                .map(|(leaf, delta)| {
+                    let step = self.authorize_step(raise_authorization(*leaf, delta), residual.clone())?;
+                    let raised = delta.raise(&probe.leaf_labels[leaf]);
+                    probe.leaf_labels.insert(*leaf, raised);
+                    residual = probe.violations(None);
+                    Some(step)
+                })
+                .collect::<Option<Vec<_>>>()
+                .map(|raise_steps| (probe, residual, raise_steps))
+        };
+        if let Some((raised, residual, raise_steps)) = raised_state {
+            sim = raised;
             remaining = residual;
             steps.extend(raise_steps);
         }
