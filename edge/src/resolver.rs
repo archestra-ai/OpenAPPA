@@ -91,8 +91,9 @@ const MAX_APPROVAL_BYTES: usize = 1024 * 1024;
 impl WebhookResolver {
     /// One resolver for every declared endpoint (`Contracts::endpoints`);
     /// each approval is posted to the endpoint of the authority it names,
-    /// with that endpoint's timeout.
-    pub fn new(endpoints: impl IntoIterator<Item = (AuthorityName, AuthorityEndpoint)>) -> Result<Self, ResolveError> {
+    /// with that endpoint's timeout. Takes the map directly — the contracts
+    /// parser already guarantees one endpoint per authority.
+    pub fn new(endpoints: HashMap<AuthorityName, AuthorityEndpoint>) -> Result<Self, ResolveError> {
         // No redirects: a redirect would re-POST the approval payload to a
         // destination the operator did not configure. No proxies: an ambient
         // HTTP_PROXY must not silently reroute rulings. No retries: one
@@ -104,10 +105,7 @@ impl WebhookResolver {
             .no_proxy()
             .retry(reqwest::retry::never())
             .build()?;
-        Ok(Self {
-            endpoints: endpoints.into_iter().collect(),
-            client,
-        })
+        Ok(Self { endpoints, client })
     }
 }
 
@@ -117,23 +115,24 @@ impl AuthorityResolver for WebhookResolver {
             .endpoints
             .get(approval.authority())
             .ok_or_else(|| ResolveError::NoEndpoint(approval.authority().clone()))?;
-        let mut body = CappedWriter::new(MAX_APPROVAL_BYTES);
-        if let Err(e) = serde_json::to_writer(&mut body, approval) {
-            return Err(if body.overflowed {
-                ResolveError::OversizedApproval
-            } else {
-                ResolveError::UnserializableApproval(e.to_string())
-            });
-        }
+        let body = to_capped_json(approval, MAX_APPROVAL_BYTES)?;
         let mut response = self
             .client
             .post(endpoint.url())
             .timeout(endpoint.timeout())
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body.written)
+            .body(body)
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
+        // Strictly 2xx: `error_for_status` alone would let a 3xx response
+        // whose body happens to parse as a ruling become one — redirects are
+        // not followed, and a redirect is not a ruling.
+        if !response.status().is_success() {
+            return Err(ResolveError::MalformedRuling(format!(
+                "non-success status {}",
+                response.status()
+            )));
+        }
         let mut body = Vec::new();
         while let Some(chunk) = response.chunk().await? {
             if body.len() + chunk.len() > MAX_RULING_BYTES {
@@ -149,6 +148,16 @@ impl AuthorityResolver for WebhookResolver {
             WireRulingKind::Approve => Ruling::Approve { reason: wire.reason },
             WireRulingKind::Deny => Ruling::Deny { reason: wire.reason },
         })
+    }
+}
+
+/// Serialize to JSON, failing once the output would exceed `cap` bytes.
+fn to_capped_json<T: serde::Serialize>(value: &T, cap: usize) -> Result<Vec<u8>, ResolveError> {
+    let mut writer = CappedWriter::new(cap);
+    match serde_json::to_writer(&mut writer, value) {
+        Ok(()) => Ok(writer.written),
+        Err(_) if writer.overflowed => Err(ResolveError::OversizedApproval),
+        Err(e) => Err(ResolveError::UnserializableApproval(e.to_string())),
     }
 }
 
@@ -182,5 +191,26 @@ impl Write for CappedWriter {
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capped_serialization_survives_serde_buffering() {
+        // The overflow marker must be readable after serde_json's own error
+        // wrapping, and the bound must bind mid-stream, not post hoc.
+        let big = "x".repeat(1024);
+        assert!(matches!(
+            to_capped_json(&big, 512),
+            Err(ResolveError::OversizedApproval)
+        ));
+        let small = serde_json::json!({"authority": "auditor"});
+        assert_eq!(
+            to_capped_json(&small, 512).unwrap(),
+            serde_json::to_vec(&small).unwrap()
+        );
     }
 }

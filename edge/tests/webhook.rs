@@ -116,6 +116,41 @@ async fn a_server_error_fails_closed() {
 }
 
 #[tokio::test]
+async fn a_redirect_with_a_ruling_body_fails_closed() {
+    // Redirects are never followed, and a 3xx is not a success: a redirect
+    // whose body happens to parse as an approval must not become a ruling.
+    let base = serve(Router::new().route(
+        "/",
+        post(async || {
+            (
+                axum::http::StatusCode::FOUND,
+                [("location", "http://127.0.0.1:1/elsewhere")],
+                r#"{"ruling":"approve","reason":"smuggled in a redirect"}"#,
+            )
+        }),
+    ))
+    .await;
+    assert!(matches!(
+        verdict_via(&base, Duration::from_secs(5)).await,
+        Verdict::Unresolved { .. }
+    ));
+}
+
+#[tokio::test]
+async fn an_oversized_ruling_fails_closed() {
+    // 64 KiB of padding around a valid ruling is not a ruling.
+    let base = serve(Router::new().route(
+        "/",
+        post(async || format!(r#"{{"ruling":"approve","reason":"{}"}}"#, "p".repeat(70 * 1024))),
+    ))
+    .await;
+    assert!(matches!(
+        verdict_via(&base, Duration::from_secs(5)).await,
+        Verdict::Unresolved { .. }
+    ));
+}
+
+#[tokio::test]
 async fn a_timeout_fails_closed() {
     let base = serve(Router::new().route(
         "/",
@@ -165,7 +200,11 @@ async fn an_authority_without_an_endpoint_fails_closed_without_a_call() {
     let other = Contracts::from_toml(&policy(&base, 5000)).unwrap();
     let mut endpoints = other.endpoints.clone();
     let endpoint = endpoints.remove(&appa_core::AuthorityName::new("auditor")).unwrap();
-    let resolver = WebhookResolver::new([(appa_core::AuthorityName::new("someone-else"), endpoint)]).unwrap();
+    let resolver = WebhookResolver::new(std::collections::HashMap::from([(
+        appa_core::AuthorityName::new("someone-else"),
+        endpoint,
+    )]))
+    .unwrap();
 
     let verdict = session_for(&contracts, "hi")
         .verdict(
@@ -214,9 +253,24 @@ async fn the_request_carries_the_approval_facts_and_never_value_bodies() {
     let contracts = Contracts::from_toml(&policy(&base, 5000)).unwrap();
     let resolver = WebhookResolver::new(contracts.endpoints.clone()).unwrap();
     let user_text = "PASTED-SECRET-DO-NOT-SHIP";
-    let verdict = session_for(&contracts, user_text)
+    let mut session = session_for(&contracts, user_text);
+    session
+        .assistant_turn(
+            "MODEL-THOUGHTS-SENTINEL",
+            [ProposedCall {
+                id: "w0",
+                tool: "mystery_tool",
+                arguments: "{}",
+            }],
+        )
+        .unwrap();
+    session
+        .past_tool_result("w0", "TOOL-RESULT-SENTINEL", &resolver)
+        .await
+        .unwrap();
+    let verdict = session
         .verdict(
-            "{}",
+            "MODEL-BODY-SENTINEL",
             ProposedCall {
                 id: "w1",
                 tool: "mystery_tool",
@@ -229,17 +283,33 @@ async fn the_request_carries_the_approval_facts_and_never_value_bodies() {
     assert!(matches!(verdict, Verdict::Granted { .. }));
 
     let requests = captured.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    let (content_type, body) = &requests[0];
+    assert_eq!(requests.len(), 2, "one approval per escalating check");
+    let (content_type, body) = requests.last().unwrap();
     assert_eq!(content_type.as_deref(), Some("application/json"));
     let approval: serde_json::Value = serde_json::from_slice(body).unwrap();
     assert_eq!(approval["authority"], "auditor");
-    for key in ["grant", "resolved", "ancestry"] {
-        assert!(approval.get(key).is_some(), "approval must carry `{key}`");
-    }
+    // The typed shape, not just key presence: an exact grant (delta product +
+    // scope), the targeted violations, and the ancestry snapshot's values.
+    assert!(approval["grant"]["delta"].is_array(), "grant.delta: {approval}");
+    assert!(approval["grant"]["scope"].is_object(), "grant.scope: {approval}");
+    let resolved = approval["resolved"].as_array().expect("resolved is an array");
+    assert!(!resolved.is_empty(), "the grant must target violations");
+    assert!(
+        approval["ancestry"]["values"].is_object(),
+        "ancestry.values: {approval}"
+    );
+    // Labels and provenance only — never user, model, tool-result, or
+    // argument bytes.
     let text = String::from_utf8_lossy(body);
-    assert!(!text.contains(user_text), "user turn bytes must never leave");
-    assert!(!text.contains("ARGUMENT-BYTES"), "argument bytes must never leave");
+    for sentinel in [
+        user_text,
+        "MODEL-THOUGHTS-SENTINEL",
+        "MODEL-BODY-SENTINEL",
+        "TOOL-RESULT-SENTINEL",
+        "ARGUMENT-BYTES",
+    ] {
+        assert!(!text.contains(sentinel), "`{sentinel}` must never leave the session");
+    }
 }
 
 /// Split mandates across two webhook authorities: the first ruling round
@@ -328,6 +398,10 @@ async fn a_failing_second_round_leaves_the_flow_blocked_after_a_granted_first() 
         Verdict::Unresolved { authority } => assert_eq!(authority.as_str(), "effects-officer"),
         other => panic!("expected Unresolved, got {other:?}"),
     }
+    // Not exactly once: plans are recomputed after every applied step, and a
+    // recomputed plan may route another check-scoped grant to the same
+    // authority — one ruling per *approval* is the invariant, not one per
+    // authority.
     assert!(
         approvals.load(Ordering::SeqCst) >= 1,
         "the first authority's round must have been granted before the stall"
