@@ -28,7 +28,7 @@ OpenAPPA wraps the agent in a boundary where the colors finally mean something. 
 
 :::fig-guardrail:::
 
-## It's about making agents eventually work
+## OpenAPPA proactively communicates limitations instead of blocking
 
 OpenAPPA's checks are legible: when a flow can't happen, the agent learns why *before* anything runs — and a reason is something a language model can act on.
 
