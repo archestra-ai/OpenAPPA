@@ -96,7 +96,9 @@ else
 fi
 # The tainted delete escalates to the external approver, which sees the
 # suspicious provenance and denies — the block is an authority's ruling.
-if grep -q 'denied by ops-approver' <<<"$PROXY_LOG"; then
+# Scoped to the delete's own decision line: another denied mutation must not
+# stand in for it.
+if grep '"tool":"k8s_delete_resource"' <<<"$PROXY_LOG" | grep -q 'denied by ops-approver'; then
   echo "  ✓ tainted delete escalated and denied by ops-approver"
 elif grep -q 'requires approval from authority .ops-approver., which did not rule' <<<"$PROXY_LOG"; then
   echo "  ✗ ops-approver was consulted but produced no ruling (outage/timeout?)"; FAIL=1

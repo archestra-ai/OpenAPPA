@@ -72,8 +72,9 @@ and feeds the ruling back. Rules:
   ruling the authority did not make.
 - One ruling per approval; approvals never survive a process restart
   (core's linearity — only rulings are durable, and they live outside).
-- Shipped implementation: webhook. With no resolver configured,
-  escalations simply remain blocked — what the proxy does today.
+- Shipped implementation: webhook, routed per authority from the policy's
+  declared endpoints (the proxy drives it live). With no resolver
+  configured, escalations simply remain blocked.
 
 ## Principles
 

@@ -55,18 +55,22 @@ fn is_suspicious(trust: &Value) -> bool {
     trust == &json!({"Known": "Suspicious"})
 }
 
-async fn rule(Json(approval): Json<Value>) -> Json<Value> {
-    let authority = approval["authority"].as_str().unwrap_or("?");
-    let suspicious: Vec<&str> = approval["ancestry"]["values"]
-        .as_object()
-        .map(|values| {
-            values
-                .iter()
-                .filter(|(_, view)| is_suspicious(&view["label"]["trust"]))
-                .map(|(id, _)| id.as_str())
-                .collect()
-        })
-        .unwrap_or_default();
+async fn rule(Json(approval): Json<Value>) -> Result<Json<Value>, axum::http::StatusCode> {
+    // Rule only on well-formed typed facts. A body without a named authority
+    // and an ancestry snapshot is not an approval; answering it with a
+    // ruling would be ruling on nothing. A non-2xx is a non-ruling to the
+    // proxy — the flow stays blocked, fail closed.
+    let Some(authority) = approval["authority"].as_str() else {
+        return Err(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+    };
+    let Some(values) = approval["ancestry"]["values"].as_object() else {
+        return Err(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+    };
+    let suspicious: Vec<&str> = values
+        .iter()
+        .filter(|(_, view)| is_suspicious(&view["label"]["trust"]))
+        .map(|(id, _)| id.as_str())
+        .collect();
 
     let ruling = if suspicious.is_empty() {
         json!({
@@ -88,5 +92,5 @@ async fn rule(Json(approval): Json<Value>) -> Json<Value> {
         reason = ruling["reason"].as_str().unwrap_or("?"),
         "ruled"
     );
-    Json(ruling)
+    Ok(Json(ruling))
 }
