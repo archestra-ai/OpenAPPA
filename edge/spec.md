@@ -19,7 +19,8 @@ harness / protocol adapter  ⇄  appa-edge  ⇄  appa-core
         (wire formats)     (sessions, verdicts)  (pure policy)
 ```
 
-- appa-edge is the **only caller of the engine**.
+- appa-edge is the **only caller of the engine** (the target position; the
+  gateway demo and dojo still drive appa-core directly today).
 - appa-edge owns **all async orchestration and I/O lifecycles**. Actual
   protocol I/O is performed through adapter-supplied ports; appa-edge calls
   them and owns what happens before and after each call. appa-core stays pure,

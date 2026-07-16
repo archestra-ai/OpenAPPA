@@ -92,7 +92,7 @@ An escalate authority may declare where its rulings are served over HTTP:
 name = "ops-approver"
 rule = "escalate"
 trust = "trusted"
-webhook = { url = "http://ops-approver.kagent.svc/rule", timeout_ms = 30000 }
+webhook = { url = "http://ops-approver.kagent:8732/rule", timeout_ms = 30000 }
 ```
 
 `url` is a well-formed absolute `http`/`https` URL. `timeout_ms` bounds one
@@ -117,11 +117,11 @@ provenance closure, and its answer is authorization data. Point it only at a
 service the operator trusts, over TLS or a network you trust.
 
 Adapters differ in what they serve. appa-proxy requires the webhook on every
-escalate authority (it has no other approval channel) and consults it once
-per new call — never during history replay. The gateway demo rejects webhook
-declarations at load: its channel is human elicitation. An escalate
-authority *without* a webhook stays valid in the dialect for exactly that
-kind of adapter.
+escalate authority (it has no other approval channel) and consults it only
+for a *new* call — one POST per approval the remedy walk needs, never during
+history replay. The gateway demo rejects webhook declarations at load: its
+channel is human elicitation. An escalate authority *without* a webhook
+stays valid in the dialect for exactly that kind of adapter.
 
 ## Use Case: A Kubernetes Ops Agent
 

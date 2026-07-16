@@ -16,13 +16,19 @@ use axum::body::Bytes;
 use axum::http::HeaderMap;
 use axum::routing::post;
 
-/// One escalate authority, webhook-declared at `url`.
+/// One escalate authority, webhook-declared at `url`. `pod_logs` exists so a
+/// fixture can put a suspicious-labeled value into the closure.
 fn policy(url: &str, timeout_ms: u64) -> String {
     format!(
         r#"
         [[tool]]
         name = "mystery_tool"
         output = {{ trust = "trusted", audience = "public" }}
+
+        [[tool]]
+        name = "pod_logs"
+        output = {{ trust = "suspicious", audience = "public" }}
+        requires = {{}}
 
         [[authority]]
         name = "auditor"
@@ -259,7 +265,7 @@ async fn the_request_carries_the_approval_facts_and_never_value_bodies() {
             "MODEL-THOUGHTS-SENTINEL",
             [ProposedCall {
                 id: "w0",
-                tool: "mystery_tool",
+                tool: "pod_logs",
                 arguments: "{}",
             }],
         )
@@ -283,7 +289,9 @@ async fn the_request_carries_the_approval_facts_and_never_value_bodies() {
     assert!(matches!(verdict, Verdict::Granted { .. }));
 
     let requests = captured.lock().unwrap();
-    assert_eq!(requests.len(), 2, "one approval per escalating check");
+    // pod_logs declares `requires = {}` so its replay never escalates; only
+    // the new call's unknown-requirements check reaches the authority.
+    assert_eq!(requests.len(), 1, "one approval, for the new call only");
     let (content_type, body) = requests.last().unwrap();
     assert_eq!(content_type.as_deref(), Some("application/json"));
     let approval: serde_json::Value = serde_json::from_slice(body).unwrap();
@@ -307,6 +315,15 @@ async fn the_request_carries_the_approval_facts_and_never_value_bodies() {
             "value {id} trust encoding drifted: {trust}"
         );
     }
+    // The suspicious pod_logs result is in the closure, and its variant
+    // string is exactly what an approver matches on — a rename would make a
+    // suspicious-keyed authority silently approve everything.
+    assert!(
+        values
+            .values()
+            .any(|view| view["label"]["trust"] == serde_json::json!({"Known": "Suspicious"})),
+        "no value carries the exact suspicious encoding: {approval}"
+    );
     // Labels and provenance only — never user, model, tool-result, or
     // argument bytes.
     let text = String::from_utf8_lossy(body);

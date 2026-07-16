@@ -54,9 +54,14 @@ struct TrustedHistoryResolver;
 
 impl AuthorityResolver for TrustedHistoryResolver {
     async fn resolve(&self, approval: &PendingApproval) -> Result<Ruling, ResolveError> {
+        // The vouching, stated as what is actually known: the proxy trusts
+        // that the call was permitted before — it does not claim the named
+        // authority ruled (audit wording never asserts an act that may not
+        // have happened).
         Ok(Ruling::Approve {
             reason: format!(
-                "replayed from harness-supplied history; authority `{}` approved this call in a prior request",
+                "replayed from harness-supplied history; the proxy vouches this call was permitted in a prior \
+                 request (authority `{}` was not consulted)",
                 approval.authority()
             ),
         })
@@ -577,7 +582,9 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, denying).await.unwrap() });
         match tainted_delete_via(&kagent_policy(&url)).await {
             CallOutcome::Terminal { reason } => {
-                assert!(reason.contains("denied"), "reason: {reason}");
+                // Load-bearing wording: run-demo.sh greps this exact phrase
+                // in the sidecar's decision log.
+                assert!(reason.contains("denied by ops-approver"), "reason: {reason}");
             }
             other => panic!("expected Terminal, got {other:?}"),
         }
