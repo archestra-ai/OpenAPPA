@@ -68,7 +68,7 @@ pub struct Contracts {
 
 impl Contracts {
     pub fn from_toml(text: &str) -> Result<Self, ContractsError> {
-        RawConfig::deserialize(toml::Deserializer::new(text))?.build()
+        toml::from_str::<RawConfig>(text)?.build()
     }
 
     /// Whether a tool has a registered contract. Tools without one are outside

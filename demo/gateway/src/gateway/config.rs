@@ -127,7 +127,7 @@ impl GatewayConfig {
     /// unregistered (calling it is unprovable and routes through the authority
     /// chain like any unknown); a contract without a tool is a config error.
     pub fn from_toml(tools: &str, policy: &str) -> Result<Self, ConfigError> {
-        let raw = RawConfig::deserialize(toml::Deserializer::new(tools))?;
+        let raw: RawConfig = toml::from_str(tools)?;
         let policy = Contracts::from_toml(policy)?;
         raw.build(policy)
     }
