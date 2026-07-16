@@ -1,156 +1,90 @@
 # OpenAPPA
 
-OpenAPPA is the new home of the project previously developed as **baton**
-inside `archestra-ai/archestra` (`ai-labs/baton`). The code will be migrated
-here from archestra; until then this repo intentionally contains only this
-README, `CLAUDE.md`, and `website/`.
+OpenAPPA is an ADT-based information-flow policy engine for LLM agents.
+Instead of filtering prompts and outputs, it asks: *can this value, derived
+from these sources, legally flow into this sink?*
 
-## File Migration Proposal
+The engine is value-granular. A trajectory is an append-only log of scoped
+facts; values, effects, lifecycle, grants, and audit are projections over it.
+A tool request carries the executable argument tree (recipients, paths,
+payloads are values in it) plus the control dependencies of whatever selected
+the invocation, and is checked against
+`L_flow = combine(L_args, L_control)` — never against the whole conversation.
+A raw value elsewhere in the trajectory does not taint an unrelated sink,
+but it still taints anything derived from it, including the *choice* to act
+(implicit flows). Release appends the may-effect commitment before dispatch;
+a failure appends and removes nothing.
 
-Instructions for the agent migrating `ai-labs/baton` out of
-`archestra-ai/archestra` into this repo. This exact migration was already
-performed once (see git history up to commit `6fbe501`, later removed again
-to hand the migration over cleanly), so every step below is verified.
+Every proposed flow — a tool call or an assistant emission, same pipeline —
+settles in one of three outcomes: **allowed now** (a linear permit),
+**remediable** (a soft block with predicted plans), or **terminal** (a proven
+claim: the uncapped search established that no remedy exists under the
+registered capabilities). Stale, foreign, or conflicting proposals are
+refusals outside that tri-state and touch nothing. Remedies come in exactly
+two kinds:
 
-### 1. Directory mapping
+- **Reduce** — change the flow so it fits: derive a value through a
+  registered transformer (the raw source keeps its own label), or narrow the
+  pending action through a registered tool-identity mapping (network fetch →
+  cache-only fetch), verified never wider.
+- **Authorize** — grant the irreducible residual: an exact typed delta at an
+  exact scope — durable (minting a derived value under the raised label, the
+  source untouched), one pending action (an acquired effect growth, still
+  committed only at release), or one policy check (a transient lift or an
+  on-the-record acknowledgment of an unprovable fact; grants are issued and
+  consumed as facts, so a one-off can never be spent twice).
 
-Take the full `ai-labs/baton` tree from current archestra `main` and place it
-at the repo root with these renames (strip the `baton-` prefix; crate names
-inside `Cargo.toml` files stay `baton-*` — do not rename crates):
+A soft block returns the irreducible nondominated frontier of plans — no
+removable steps, no plan dominated by a smaller ask, incomparable
+alternatives retained (control-release rescue is size-first: all
+incomparable releases of the smallest cardinality that works; only a
+fruitless search sweeps the whole lattice, which is what proves a
+terminal block) — so the actor picks its remedy as early as possible. Authorities live in one registry — inline functions or external
+approval round-trips — routed by mandate competence over typed deltas and
+scopes, inline-first in registration order, with a fail-closed recheck after
+every grant. `Unknown` is a first-class label and fail-closed: an unprovable
+flow routes through the same authority chain as a breach, no policy knob —
+annotate five high-risk tools, leave the rest unknown, still catch the
+obvious flows.
 
-| archestra `ai-labs/baton/...` | OpenAPPA |
-|---|---|
-| `baton-core/` | `core/` |
-| `baton-check/` | `check/` |
-| `baton-contracts/` | `contracts/` |
-| `baton-dojo/` | `dojo/` |
-| `baton-proxy/` | `proxy/` |
-| `agentdojo-harness/` | `harness-agentdojo/` |
-| `baton-demo/` | `demo/gateway/` |
-| `demo/kagent/` | `demo/kagent/` |
-| `docs/` | `docs/` |
-| `baton-authority-model-design.md` | `docs/authority-model-design.md` |
-| `baton-declassifier-design.md` | `docs/declassifier-design.md` |
-| `README.md` | `README.md` (retitle to OpenAPPA, note the former baton name) |
+Every applied step is a linear capability bound to the event-frontier basis:
+one-shot, rechecked, audited; any appended fact invalidates everything minted
+before it. Dispatch is two-phase — release commits may-effects and renders
+the one canonical request from the exact checked tree, a receipt must close
+the action — and the assistant response is a mediated emission sink like any
+tool: caller-labeled assistant ingress does not typecheck.
 
-### 2. Root files to create
+`docs/spec.md` is the normative spec; `docs/authority-model-design.md` is
+the plan-of-record; `docs/declassifier-design.md` is the foundation
+rationale it builds on; concepts and semantics are documented in
+`core/src/lib.rs`.
 
-- `Cargo.toml` — workspace replacing the crates' membership in the ai-labs
-  workspace:
+```sh
+cargo test -p appa-core
 
-  ```toml
-  [workspace]
-  members = ["core", "check", "contracts", "dojo", "proxy"]
-  resolver = "2"
+./demo/gateway/run-gateway-demo.sh   # the end-to-end demo (needs OPENROUTER_API_KEY)
+```
 
-  [workspace.lints.rust]
-  dead_code = "deny"
-  ```
+`harness-agentdojo/` evaluates the engine against the AgentDojo
+prompt-injection benchmark (with `appa-check`, a stateless JSON oracle over
+appa-core); see its README.
 
-- `rustfmt.toml` — copy `ai-labs/rustfmt.toml` verbatim (edition 2024,
-  max_width 120; the crates are formatted against it).
-- `.gitignore` — `target/` and `.env`.
-- One `Cargo.lock` at the root (generate; `cargo check --workspace` does it).
-  `demo/gateway` and `demo/kagent/notify-mcp` are standalone on purpose: they
-  keep their empty `[workspace]` tables and their own `Cargo.lock` files.
+`proxy/` puts the engine on the **inference layer**: an OpenAI-compatible
+HTTP proxy that replays the conversation into a trajectory and blocks tool
+calls that fail their contract before the agent sees them, loading contracts
+via `contracts/`, a small crate that translates the declarative policy
+into appa-core `ToolContract`s. See its README.
 
-### 3. Reference fixes (all verified necessary)
+`demo/gateway/` is the ad-hoc demo harness: the **tool-layer gateway**
+(`README.md`, the demo above), a real rig agent talking to an MCP server that
+mimics an Archestra-style tool gateway — it serves a scenario's tools from
+TOML, checks every call against appa-core, **soft-blocks** breaches as
+ordinary tool results the model can act on, escalates to a human through MCP
+elicitation, on approval dispatches the exact canonical request the engine
+checked, and routes the agent's final answer through the reserved
+`appa__respond` tool so only the emission-checked rendering reaches the user.
 
-Cargo path deps:
-- `check/`, `contracts/`, `dojo/`: `baton-core = { path = "../baton-core" }` → `"../core"`.
-- `proxy/`: `"../baton-core"` → `"../core"`, `"../baton-contracts"` → `"../contracts"`.
-- `demo/gateway/`: `"../baton-core"` → `"../../core"` (one level deeper now).
-
-Rust sources (`.env` used to live at `ai-labs/.env`; now it is the repo root):
-- `dojo/src/main.rs`: `join("../../.env")` → `join("../.env")`; update the
-  `ai-labs/.env` comments/messages.
-- `demo/gateway/src/bin/{gateway_agent,demo_agent}.rs`, `src/demo_support.rs`:
-  the `join("../../.env")` path is still correct from `demo/gateway` (two
-  levels up = repo root) — only update `ai-labs/.env` comment/message text.
-
-Python (`harness-agentdojo/src/baton_dojo/`):
-- `bridge.py`: `BATON_CHECK_DIR = Path(__file__).resolve().parents[3] / "baton-check"`
-  and `AI_LABS_TARGET_DIR = BATON_CHECK_DIR.parents[1] / "target"` →
-
-  ```python
-  _REPO_ROOT = Path(__file__).resolve().parents[3]
-  BATON_CHECK_DIR = _REPO_ROOT / "check"
-  REPO_TARGET_DIR = _REPO_ROOT / "target"
-  ```
-
-  (rename all `AI_LABS_TARGET_DIR` uses; the binary lands in the root
-  workspace `target/`).
-- `pipeline.py`: `AI_LABS_ENV = ...parents[4] / ".env"` → `REPO_ENV = ...parents[3] / ".env"`;
-  rename uses, including `tests/test_bench.py`'s `monkeypatch.setattr(pipeline, "AI_LABS_ENV", ...)`.
-
-Shell scripts:
-- `demo/kagent/run-demo.sh`: `.env` sourcing `../../../.env` → `../../.env`;
-  docker build `(cd ../../.. && docker build -f baton/baton-proxy/Dockerfile ...)`
-  → `(cd ../.. && docker build -f proxy/Dockerfile ...)`; message text.
-- `demo/gateway/run-gateway-demo.sh` and `run-approver-demo.sh`: the
-  `$CRATE_DIR/../../.env` lookup is still correct; the worktree fallback
-  `$main_root/ai-labs/.env` → `$main_root/.env`; comment text.
-
-Docker:
-- `proxy/Dockerfile`: build context becomes the repo root
-  (`docker build -f proxy/Dockerfile -t baton-proxy:poc .`); update the header comment.
-- `proxy/Dockerfile.dockerignore`: rewrite for the new context — allow only
-  `Cargo.toml`, `Cargo.lock`, `core/**`, `check/**`, `contracts/**`,
-  `dojo/**`, `proxy/**`; keep the `**/target` and `proxy/wire-logs` excludes;
-  drop the ai-labs crates (`runner`, `analyzer`, `cli`, `dashboard`) and the
-  stale `baton-gateway` entry.
-
-Docs/text (old path → new path, throughout):
-- `../baton-core` → `../core`, `../baton-check` → `../check`, etc. in
-  `harness-agentdojo/README.md`, `proxy/README.md`, `dojo/README.md`.
-- `ai-labs/baton/baton-demo/run-*.sh` → `demo/gateway/run-*.sh` in
-  `demo/gateway/README.md` and `APPROVER.md`; `cd ai-labs/baton/baton-proxy` → `cd proxy`.
-- `baton-authority-model-design.md`/`baton-declassifier-design.md` links →
-  `docs/...` (root README, `core/CLAUDE.md`) or sibling-relative (within `docs/`).
-- `baton-core/src/lib.rs` → `core/src/lib.rs`; `ai-labs/.env` → repo-root `.env`.
-- `harness-agentdojo/README.md`: `export BATON_CHECK_BIN="$PWD/../../target/..."`
-  → `"$PWD/../target/..."`; `( cd ../baton-check ... )` → `( cd ../check ... )`.
-
-### 4. CI (`.github/`)
-
-- `.github/workflows/ci.yml` — port of archestra's `ai-labs-rust-checks` job
-  (from `.github/workflows/on-pull-requests.yml`) with a Python job added:
-  - `rust-checks` on `ubuntu-latest` (Blacksmith runners are not set up here):
-    checkout (pin by SHA, `persist-credentials: false`), `rustup show`, then
-    `cargo fmt --all --check`, `cargo check --workspace --locked`,
-    `cargo clippy --workspace --all-targets --locked -- -D warnings`,
-    `cargo test --workspace --locked`.
-  - `harness-tests`: `astral-sh/setup-uv` (pin by SHA), `uv sync --locked`,
-    `uv run pytest`, with `working-directory: ./harness-agentdojo`.
-  - Triggers: `push` to `main` + `pull_request`; `permissions: contents: read`.
-- `.github/dependabot.yml`: `cargo` at `/`, `uv` at `/harness-agentdojo`,
-  `github-actions` at `/`, weekly.
-- **Org Zizmor policy (auditor persona) will fail the required check unless**:
-  every dependabot update entry has `cooldown: { default-days: 7 }`, and the
-  workflow has a `concurrency` block
-  (`group: "ci-${{ github.event.pull_request.number || github.ref }}"`,
-  `cancel-in-progress: true`). Pin all action versions by commit SHA.
-
-### 5. Repo rules
-
-- Direct pushes to `main` are rejected: the org-required workflow
-  "Zizmor GitHub Actions Static Analysis" only runs on PRs, so everything
-  lands via PR.
-
-### 6. Archestra-side cleanup (in archestra, after the copy)
-
-- Delete `ai-labs/baton/`.
-- Remove the five `baton/*` entries from `ai-labs/Cargo.toml`
-  `[workspace] members` and refresh `ai-labs/Cargo.lock`
-  (`cargo metadata` from `ai-labs/` is enough); verify with
-  `cargo check --workspace --locked`.
-- The `ai-labs-rust-checks` CI job and the dependabot `cargo`/`ai-labs`
-  entry stay (other ai-labs crates use them).
-
-### 7. Verification (expected results from the previous run of this migration)
-
-- `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`: clean.
-- `cargo test --workspace --locked`: all pass (222 tests at archestra commit `f36b23c2d`).
-- `cargo check --locked` in `demo/gateway` (its tests pass too) and `demo/kagent/notify-mcp`.
-- `cd harness-agentdojo && uv sync --locked && uv run pytest`: all pass (26 tests).
-- Repo-wide grep for `ai-labs`, `baton/baton`, `../baton-` returns nothing.
+`demo/kagent/` wires appa-proxy into a stock [kagent](https://kagent.dev)
+agent as a pod sidecar: the agent is prompt-injected by a crashlooping pod's
+logs and OpenAPPA blocks the injected `kubectl delete`, with no changes to the
+agent. `./demo/kagent/run-demo.sh` runs it end-to-end on kind.
