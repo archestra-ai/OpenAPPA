@@ -356,7 +356,7 @@ impl PolicyEngine {
         tree: &ArgumentTree<ValueId>,
         store: &ValueStore,
     ) -> Result<(&'a ToolContract, BTreeSet<UserId>), TransitionFailure> {
-        transition.narrows_flow(&sim.tool, &sim.proposed_effects)?;
+        transition.narrows(&sim.tool, &sim.proposed_effects)?;
         let Some(target) = self.contracts.get(&transition.to_tool) else {
             return Err(TransitionFailure::ReductionRefused);
         };

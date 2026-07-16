@@ -138,6 +138,15 @@ observable; preserve it (there is a typed-order test).
   the transition's effects and must not widen the resolved recipient set —
   the PoC's structural relation covers tool identity, effects, and recipient
   roles; egress-destination and runtime-capability sets are not modeled).
+  **One gate, one relation.** `engine::planning::constrain_gate` is that
+  whole check, and prediction and validation share it: the planner filters
+  candidates with it, the applier rechecks live against the current
+  registries with it, both over a `SimFlow`. `narrows` states its tool/effects
+  half over values, not a `PendingAction`, so neither side needs a
+  representation the other cannot build. A second copy on either side is the
+  bug this shape exists to prevent — the two drifted apart once already, and a
+  planner/applier disagreement here hands the caller a
+  `TransitionFailure::ReductionRefused` on a step the planner promised.
   **Authorize** grants an exact `AuthorizationDelta` at an exact
   `AuthorizationScope`: a check-scoped lift (excepting a prior effect,
   standing in for a confirmation, releasing a control dep, acknowledging an
