@@ -20,7 +20,6 @@ use serde::Serialize;
 use crate::ToolName;
 use crate::audit::TransitionFailure;
 use crate::dimension::{Audience, Effects, KnownTrust, Trust, UserId};
-use crate::request::PendingAction;
 use crate::value::{OpaqueValue, TransformerRef, ValueLabel, ValueRef};
 
 /// A registered transformer's input predicate: which source values it
@@ -107,17 +106,16 @@ pub struct ActionTransition {
 }
 
 impl ActionTransition {
-    /// Structural capability relation: the transition applies only to a
-    /// pending action of its declared source tool, and its replacement
-    /// effects must be *verifiably* no broader — a declared set may narrow a
-    /// declared superset or replace `Unknown` (constraining an unbounded
-    /// action is the point of sandboxing), but nothing may widen to
-    /// `Unknown` or add effects.
-    pub fn narrows(&self, pending: &PendingAction) -> Result<(), TransitionFailure> {
-        if pending.current().tool != self.from_tool {
+    /// Structural capability relation: the transition applies only to a flow
+    /// of its declared source tool, and its replacement effects must be
+    /// *verifiably* no broader — a declared set may narrow a declared superset
+    /// or replace `Unknown` (constraining an unbounded action is the point of
+    /// sandboxing), but nothing may widen to `Unknown` or add effects.
+    pub fn narrows(&self, tool: &ToolName, proposed_effects: &Effects) -> Result<(), TransitionFailure> {
+        if *tool != self.from_tool {
             return Err(TransitionFailure::ReductionRefused);
         }
-        if effects_narrow(pending.proposed_effects(), &self.effects) {
+        if effects_narrow(proposed_effects, &self.effects) {
             Ok(())
         } else {
             Err(TransitionFailure::ReductionRefused)
@@ -255,27 +253,11 @@ pub struct DuplicateRegistration {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
 
     use super::*;
     use crate::contract::Unprovable;
     use crate::dimension::Effect;
-    use crate::request::{ArgumentTree, ToolRequest};
-    use crate::revision::ActionId;
     use crate::revision::ValueId;
-
-    fn pending(tool: &str, effects: Effects) -> PendingAction {
-        PendingAction::proposed(
-            ActionId::new(0),
-            crate::revision::FlowId::new(0),
-            ToolRequest::new(
-                ToolName::new(tool),
-                ArgumentTree::Object(BTreeMap::new()),
-                std::collections::BTreeSet::from([ValueId::new(0)]),
-            ),
-            effects,
-        )
-    }
 
     #[test]
     fn narrowing_accepts_subset_and_unknown_confinement() {
@@ -290,13 +272,13 @@ mod tests {
         };
 
         assert_eq!(
-            sandbox.narrows(&pending(
-                "shell.run",
-                Effects::declared([Effect::Mutation, Effect::Egress])
-            )),
+            sandbox.narrows(
+                &ToolName::new("shell.run"),
+                &Effects::declared([Effect::Mutation, Effect::Egress])
+            ),
             Ok(())
         );
-        assert_eq!(sandbox.narrows(&pending("shell.run", Effects::UNKNOWN)), Ok(()));
+        assert_eq!(sandbox.narrows(&ToolName::new("shell.run"), &Effects::UNKNOWN), Ok(()));
     }
 
     #[test]
@@ -311,7 +293,7 @@ mod tests {
             effects: Effects::declared([Effect::Mutation, Effect::Egress]),
         };
         assert_eq!(
-            widen.narrows(&pending("shell.run", Effects::declared([Effect::Mutation]))),
+            widen.narrows(&ToolName::new("shell.run"), &Effects::declared([Effect::Mutation])),
             Err(TransitionFailure::ReductionRefused)
         );
 
@@ -325,7 +307,7 @@ mod tests {
             effects: Effects::UNKNOWN,
         };
         assert_eq!(
-            to_unknown.narrows(&pending("shell.run", Effects::declared([Effect::Mutation]))),
+            to_unknown.narrows(&ToolName::new("shell.run"), &Effects::declared([Effect::Mutation])),
             Err(TransitionFailure::ReductionRefused)
         );
 
@@ -339,7 +321,7 @@ mod tests {
             effects: Effects::none(),
         };
         assert_eq!(
-            wrong_tool.narrows(&pending("shell.run", Effects::UNKNOWN)),
+            wrong_tool.narrows(&ToolName::new("shell.run"), &Effects::UNKNOWN),
             Err(TransitionFailure::ReductionRefused)
         );
     }

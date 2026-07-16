@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::ToolName;
 use crate::approval::{Authority, AuthorityMode};
-use crate::audit::AuthorityName;
+use crate::audit::{AuthorityName, TransitionFailure};
 use crate::contract::{AudienceRule, Fixability, Requirements, Unprovable, Verdict, Violation};
 use crate::dimension::{Effect, Effects, KnownTrust, UserId};
 use crate::plan::NonEmptyVec;
@@ -13,7 +13,7 @@ use crate::remedy::{
 };
 use crate::request::{ArgumentTree, EmissionRequest, ToolRequest};
 use crate::revision::{ActionId, FlowId, ValueId};
-use crate::transition::{ActionTransition, effects_narrow};
+use crate::transition::ActionTransition;
 use crate::turn::Trajectory;
 use crate::value::{TransformerRef, UnknownValue, ValueLabel, ValueStore};
 
@@ -234,7 +234,8 @@ impl PolicyEngine {
             }
             if ctx.narrows {
                 for transition in &self.action_transitions {
-                    let Some((target, recipients)) = self.sim_constrain_gate(&state.sim, transition, ctx) else {
+                    let Ok((target, recipients)) = self.constrain_gate(&state.sim, transition, ctx.tree, ctx.store)
+                    else {
                         continue;
                     };
                     let mut next = state.clone();
@@ -267,21 +268,31 @@ impl PolicyEngine {
         true
     }
 
-    fn sim_constrain_gate<'a>(
+    /// The structural gate a constrain must pass: the transition narrows the
+    /// flow's tool and proposed effects, the target contract exists and
+    /// declares exactly the transition's effects, and its argument schema does
+    /// not widen the resolved recipient set.
+    pub(super) fn constrain_gate<'a>(
         &'a self,
         sim: &SimFlow,
         transition: &ActionTransition,
-        ctx: &SearchCtx<'_>,
-    ) -> Option<(&'a ToolContract, BTreeSet<UserId>)> {
-        if transition.from_tool != sim.tool || !effects_narrow(&sim.proposed_effects, &transition.effects) {
-            return None;
-        }
-        let target = self.contracts.get(&transition.to_tool)?;
+        tree: &ArgumentTree<ValueId>,
+        store: &ValueStore,
+    ) -> Result<(&'a ToolContract, BTreeSet<UserId>), TransitionFailure> {
+        transition.narrows(&sim.tool, &sim.proposed_effects)?;
+        let Some(target) = self.contracts.get(&transition.to_tool) else {
+            return Err(TransitionFailure::ReductionRefused);
+        };
         if target.effects != transition.effects {
-            return None;
+            return Err(TransitionFailure::ReductionRefused);
         }
-        let recipients = target.arguments.resolve_recipients(ctx.tree, ctx.store).ok()?;
-        recipients.is_subset(&sim.recipients).then_some((target, recipients))
+        let Ok(recipients) = target.arguments.resolve_recipients(tree, store) else {
+            return Err(TransitionFailure::ReductionRefused);
+        };
+        if !recipients.is_subset(&sim.recipients) {
+            return Err(TransitionFailure::ReductionRefused);
+        }
+        Ok((target, recipients))
     }
 
     fn peel_state(&self, state: &ReduceState, ctx: &SearchCtx<'_>, out: &mut Vec<Candidate>) {
@@ -294,7 +305,7 @@ impl PolicyEngine {
         let mut remaining = sim.violations(None);
 
         let endorse = endorse_steps(&sim, &remaining);
-        let raise_steps: Option<Vec<PlannedRemedy>> = {
+        let raised_state: Option<(SimFlow, Vec<Violation>, Vec<PlannedRemedy>)> = {
             let mut probe = sim.clone();
             let mut residual = remaining.clone();
             endorse
@@ -306,14 +317,12 @@ impl PolicyEngine {
                     residual = probe.violations(None);
                     Some(step)
                 })
-                .collect()
+                .collect::<Option<Vec<_>>>()
+                .map(|raise_steps| (probe, residual, raise_steps))
         };
-        if let Some(raise_steps) = raise_steps {
-            for (leaf, delta) in endorse {
-                let raised = delta.raise(&sim.leaf_labels[&leaf]);
-                sim.leaf_labels.insert(leaf, raised);
-            }
-            remaining = sim.violations(None);
+        if let Some((raised, residual, raise_steps)) = raised_state {
+            sim = raised;
+            remaining = residual;
             steps.extend(raise_steps);
         }
 
@@ -514,7 +523,7 @@ impl PolicyEngine {
                     let Some(registered) = self.action_transitions.iter().find(|t| t.id == *transition) else {
                         return false;
                     };
-                    let Some((target, recipients)) = self.sim_constrain_gate(&sim, registered, ctx) else {
+                    let Ok((target, recipients)) = self.constrain_gate(&sim, registered, ctx.tree, ctx.store) else {
                         return false;
                     };
                     sim.tool = registered.to_tool.clone();

@@ -1780,6 +1780,74 @@ fn constrain_plan_maps_to_narrower_tool() {
 }
 
 #[test]
+fn a_narrow_may_not_widen_the_resolved_recipient_set() {
+    let engine_reading = |role: &str| {
+        let send = ToolContract {
+            name: ToolName::new("email.send"),
+            requires: Some(Requirements {
+                trust: Some(KnownTrust::Trusted),
+                ..Requirements::default()
+            }),
+            output_label: ValueLabel::identity(),
+            effects: Effects::none(),
+            arguments: ArgumentSchema::with_recipients(ArgumentName::new("to")),
+        };
+        let archive = ToolContract {
+            name: ToolName::new("email.archive"),
+            requires: Some(Requirements::default()),
+            output_label: ValueLabel::identity(),
+            effects: Effects::none(),
+            arguments: ArgumentSchema::with_recipients(ArgumentName::new(role)),
+        };
+        let mut engine = engine_with([send, archive]);
+        engine
+            .register_action_transition(ActionTransition {
+                id: tref("to-archive"),
+                from_tool: ToolName::new("email.send"),
+                to_tool: ToolName::new("email.archive"),
+                effects: Effects::none(),
+            })
+            .unwrap();
+        engine
+    };
+    let blocked_request = |trajectory: &mut Trajectory| {
+        let secret = ingress(trajectory, &["alice", "mallory"], Trust::SUSPICIOUS, "secret");
+        let to = ingress(trajectory, &["alice", "mallory"], Trust::TRUSTED, "alice");
+        let cc = ingress(trajectory, &["alice", "mallory"], Trust::TRUSTED, "mallory");
+        ToolRequest::new(
+            ToolName::new("email.send"),
+            ArgumentTree::Object(BTreeMap::from([
+                (ArgumentName::new("body"), ArgumentTree::Value(secret)),
+                (ArgumentName::new("to"), ArgumentTree::Value(to)),
+                (ArgumentName::new("cc"), ArgumentTree::Value(cc)),
+            ])),
+            BTreeSet::new(),
+        )
+    };
+    let offers_narrow = |plans: &NonEmptyVec<RemedyPlan>| {
+        plans
+            .iter()
+            .any(|p| p.steps.iter().any(|s| narrow_step(s) == Some(&tref("to-archive"))))
+    };
+
+    let subset_engine = engine_reading("to");
+    let mut trajectory = Trajectory::new();
+    let request = blocked_request(&mut trajectory);
+    assert!(
+        offers_narrow(&remediable(&subset_engine, &mut trajectory, request)),
+        "a recipient-preserving narrow is the fixture's only unlock and must be offered"
+    );
+
+    let widening_engine = engine_reading("cc");
+    let mut trajectory = Trajectory::new();
+    let request = blocked_request(&mut trajectory);
+    match widening_engine.evaluate(&mut trajectory, request) {
+        Ok(FlowOutcome::Terminal { reason, .. }) => assert_eq!(reason, BlockReason::NoRemedy),
+        other => panic!("a recipient-widening narrow must not unlock the flow, got {other:?}"),
+    }
+}
+
+#[test]
 fn narrowing_onto_an_unstated_contract_escalates_rather_than_unlocking() {
     let fetch = ToolContract {
         name: ToolName::new("web.fetch"),
@@ -3327,7 +3395,7 @@ fn external_waiver_denial_blocks_terminally() {
 }
 
 #[test]
-fn stale_and_foreign_step_capabilities_are_refused() {
+fn stale_step_capabilities_and_approvals_are_refused() {
     let mut engine = engine_with([email_contract()]);
     engine.register_authority(human()).unwrap();
     let mut trajectory = Trajectory::new();

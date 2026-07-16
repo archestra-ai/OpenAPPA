@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use tracing::debug;
 
 use crate::approval::{AncestrySnapshot, AuthorityMode, PendingApproval, Ruling, TrajectoryView};
@@ -9,16 +7,12 @@ use crate::dimension::Effects;
 use crate::remedy::{
     Authorization, AuthorizationScope, DeltaCoordinate, LabelRaise, Lift, PlannedRemedy, ReductionTarget,
 };
-use crate::request::ToolRequest;
 use crate::revision::{FlowId, PlanId, ValueId};
-use crate::transition::ActionTransition;
 use crate::turn::{ReductionSite, Trajectory};
 use crate::value::ValueLabel;
 
 use super::PolicyEngine;
-use super::capability::{
-    BlockReason, Emitted, FlowOutcome, FlowPermit, StepCapability, StepOutcome, StepRefused, ToolContract,
-};
+use super::capability::{BlockReason, Emitted, FlowOutcome, FlowPermit, StepCapability, StepOutcome, StepRefused};
 use super::planning::SimFlow;
 
 /// The result of routing a grant through the competent authorities: the first
@@ -227,10 +221,9 @@ impl PolicyEngine {
                     .pending_action()
                     .expect("a tool flow's pending action was resolved above");
                 let checked = pending.current().clone();
-                let recipients = SimFlow::of(trajectory, &checked, self.contracts.get(&checked.tool))
-                    .expect("pending action dependencies stay admitted")
-                    .recipients;
-                match self.constrain_gate(registered, pending, &checked, trajectory.store(), &recipients) {
+                let sim = SimFlow::of(trajectory, &checked, self.contracts.get(&checked.tool))
+                    .expect("pending action dependencies stay admitted");
+                match self.constrain_gate(&sim, registered, &checked.arguments, trajectory.store()) {
                     Ok(_) => {}
                     Err(failure) => {
                         trajectory.record_event(AuditEvent::StepFailed {
@@ -561,13 +554,13 @@ impl PolicyEngine {
         let contract = self.contracts.get(&checked.tool);
         let mut after = SimFlow::of(trajectory, &checked, contract).expect("pending action dependencies stay admitted");
         after.accepted_effects = after.accepted_effects.clone().combine(effects.clone());
-        if after
-            .violations(None)
+        let remaining = after.violations(None);
+        if remaining
             .iter()
             .any(|v| matches!(v, Violation::Breach(crate::contract::Breach::SurfaceGrowth { .. })))
         {
             debug!("acceptance did not clear the surface growth, failing closed");
-            return self.terminal(trajectory, after.violations(None), BlockReason::PostconditionFailed);
+            return self.terminal(trajectory, remaining, BlockReason::PostconditionFailed);
         }
         let acquired: Vec<Violation> = resolved
             .into_iter()
@@ -591,33 +584,5 @@ impl PolicyEngine {
         };
         trajectory.endorse_value(source, authority, delta, raised, kind.site());
         self.recheck(trajectory, kind)
-    }
-
-    /// The structural gate a constrain must pass, identical at planning and
-    /// application: the narrowing holds, the target contract exists and
-    /// declares exactly the transition's effects, and its argument schema
-    /// does not widen the resolved recipient set.
-    pub(super) fn constrain_gate<'a>(
-        &'a self,
-        transition: &ActionTransition,
-        pending: &crate::request::PendingAction,
-        checked: &ToolRequest,
-        store: &crate::value::ValueStore,
-        base_recipients: &BTreeSet<crate::dimension::UserId>,
-    ) -> Result<(&'a ToolContract, BTreeSet<crate::dimension::UserId>), crate::audit::TransitionFailure> {
-        transition.narrows(pending)?;
-        let Some(target) = self.contracts.get(&transition.to_tool) else {
-            return Err(crate::audit::TransitionFailure::ReductionRefused);
-        };
-        if target.effects != transition.effects {
-            return Err(crate::audit::TransitionFailure::ReductionRefused);
-        }
-        let Ok(recipients) = target.arguments.resolve_recipients(&checked.arguments, store) else {
-            return Err(crate::audit::TransitionFailure::ReductionRefused);
-        };
-        if !recipients.is_subset(base_recipients) {
-            return Err(crate::audit::TransitionFailure::ReductionRefused);
-        }
-        Ok((target, recipients))
     }
 }

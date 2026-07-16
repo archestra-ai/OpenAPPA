@@ -66,6 +66,7 @@ pub mod engine;
 // re-exported at the root: consumers read trajectory state through the
 // `Trajectory` accessors; the raw log is an audit/inspection surface.
 pub mod event;
+mod linearity;
 pub mod plan;
 pub mod projection;
 pub mod preset;
