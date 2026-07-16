@@ -391,6 +391,14 @@ requires = { audience = "$.args.too" }
         GatewayConfig::from_toml(SEND_TOOL, "[[tool]]\nname = \"ghost\"\nrequires = {}"),
         Err(ConfigError::ContractWithoutTool(tool)) if tool == "ghost"
     ));
+    // A webhook-declared authority would be silently ignored — the gateway's
+    // approval channel is human elicitation, so the config fails loudly.
+    let webhook_policy = "[[authority]]\nname = \"remote\"\nrule = \"escalate\"\nacquire_effects = true\n\
+                          webhook = { url = \"https://approvals.example/rule\" }";
+    assert!(matches!(
+        GatewayConfig::from_toml("", webhook_policy),
+        Err(ConfigError::WebhookAuthority(name)) if name == "remote"
+    ));
     // The escalation tool name is reserved in the catalog…
     let reserved = r#"
 [[tool]]

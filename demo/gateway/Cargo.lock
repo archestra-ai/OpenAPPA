@@ -71,6 +71,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "appa-contracts"
+version = "0.1.0"
+dependencies = [
+ "appa-core",
+ "serde",
+ "thiserror",
+ "toml",
+ "url",
+]
+
+[[package]]
+name = "appa-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "appa-demo"
+version = "0.1.0"
+dependencies = [
+ "appa-contracts",
+ "appa-core",
+ "axum",
+ "clap",
+ "rig-core",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -207,44 +246,6 @@ name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
-
-[[package]]
-name = "appa-contracts"
-version = "0.1.0"
-dependencies = [
- "appa-core",
- "serde",
- "thiserror",
- "toml",
-]
-
-[[package]]
-name = "appa-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "appa-demo"
-version = "0.1.0"
-dependencies = [
- "axum",
- "appa-contracts",
- "appa-core",
- "clap",
- "rig-core",
- "rmcp",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
 
 [[package]]
 name = "bitflags"
