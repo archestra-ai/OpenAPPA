@@ -103,7 +103,7 @@ elif grep -q 'requires approval from authority .ops-approver., which did not rul
 else
   echo "  ✗ no ops-approver denial in the proxy log — the delete never escalated"; FAIL=1
 fi
-if grep -q 'ruling=deny' <<<"$APPROVER_LOG"; then
+if grep 'ruled' <<<"$APPROVER_LOG" | grep -q 'ruling.*deny'; then
   echo "  ✓ ops-approver's own log shows the denial (suspicious provenance)"
   grep 'ruled' <<<"$APPROVER_LOG" | tail -3 | sed 's/^/    approver: /' || true
 else

@@ -82,6 +82,11 @@ async fn rule(Json(approval): Json<Value>) -> Json<Value> {
             ),
         })
     };
-    tracing::info!(authority, ruling = %ruling["ruling"], reason = %ruling["reason"], "ruled");
+    tracing::info!(
+        authority,
+        ruling = ruling["ruling"].as_str().unwrap_or("?"),
+        reason = ruling["reason"].as_str().unwrap_or("?"),
+        "ruled"
+    );
     Json(ruling)
 }
