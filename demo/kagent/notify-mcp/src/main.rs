@@ -41,6 +41,16 @@ struct Args {
     /// The internal ops hook `notify` delivers to.
     #[arg(long, env = "OPS_HOOK_URL", default_value = "http://ops-hook.shop/notify")]
     hook_url: String,
+    /// `Host` authorities accepted by the MCP transport. rmcp defaults to
+    /// loopback only (DNS-rebinding protection); in-cluster clients arrive
+    /// as the service DNS name, so the demo's authority is allowed here.
+    #[arg(
+        long,
+        env = "NOTIFY_MCP_ALLOWED_HOSTS",
+        value_delimiter = ',',
+        default_value = "notify-mcp.kagent:8731,localhost,127.0.0.1"
+    )]
+    allowed_hosts: Vec<String>,
 }
 
 #[tokio::main]
@@ -56,7 +66,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let local = listener.local_addr()?;
 
     let hook_url = args.hook_url.clone();
-    let config = StreamableHttpServerConfig::default();
+    // The config struct is non-exhaustive; mutate the default.
+    let mut config = StreamableHttpServerConfig::default();
+    config.allowed_hosts = args.allowed_hosts.clone();
     let service: StreamableHttpService<Webhooks, LocalSessionManager> = StreamableHttpService::new(
         move || {
             Ok(Webhooks {
