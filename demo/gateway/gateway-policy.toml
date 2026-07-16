@@ -1,5 +1,5 @@
 # Policy for the external-auditor scenario (see README): tool contracts and
-# authorities in the canonical baton-contracts dialect. The simulated tools
+# authorities in the canonical appa-contracts dialect. The simulated tools
 # these contracts govern live in gateway.toml; the two join by tool name.
 
 [[authority]]

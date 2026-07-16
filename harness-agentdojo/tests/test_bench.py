@@ -2,8 +2,8 @@
 
 import json
 
-from baton_dojo.bench import count_policy_blocks, episode_files
-from baton_dojo.defense import POLICY_BLOCK_SENTINEL
+from appa_dojo.bench import count_policy_blocks, episode_files
+from appa_dojo.defense import POLICY_BLOCK_SENTINEL
 
 
 def write_result(path, errors):
@@ -40,7 +40,7 @@ def test_episode_files_uses_none_for_clean_runs(tmp_path):
 
 
 def test_openrouter_api_key_strips_quotes(tmp_path, monkeypatch):
-    from baton_dojo import pipeline
+    from appa_dojo import pipeline
 
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     env_file = tmp_path / ".env"

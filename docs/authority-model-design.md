@@ -1,12 +1,12 @@
-# baton-core: compact architecture — plan-of-record
+# appa-core: compact architecture — plan-of-record
 
 **Status:** implemented. This is the **single plan-of-record** for the whole
 project: the model as built, the standing decisions that shaped it, and the
 decisions it superseded (kept legible in §4 — a plan-of-record does not erase
 its history). It supersedes the relevant sections of
-`baton-declassifier-design.md` (which remains the value-granular foundation
+`declassifier-design.md` (which remains the value-granular foundation
 rationale). The normative integration spec is `docs/spec.md`; concepts and
-semantics live in `baton-core/src/lib.rs`.
+semantics live in `../core/src/lib.rs`.
 
 ---
 
@@ -215,11 +215,11 @@ nothing and never clears a pending tool action). The two pending slots
 ## 5. Validation commands (every pass)
 
 ```sh
-cd ai-labs && cargo test --workspace \
+cargo test --workspace \
   && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check
-cd ai-labs/baton/baton-demo && cargo test --all-features && cargo fmt --check
-cd ai-labs && cargo test -p baton-check --test cli
-cd ai-labs/baton/agentdojo-harness && uv run pytest
+(cd demo/gateway && cargo test --all-features && cargo fmt --check)
+cargo test -p appa-check --test cli
+(cd harness-agentdojo && uv run pytest)
 ```
 
 Gate discipline (every pass): full validation → external + internal

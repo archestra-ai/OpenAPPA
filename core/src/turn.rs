@@ -64,7 +64,7 @@ pub enum Actor {
 ///
 /// ```compile_fail
 /// // The bypass is unrepresentable: `Speaker` has no assistant constructor.
-/// let speaker = baton_core::Speaker::Assistant;
+/// let speaker = appa_core::Speaker::Assistant;
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Speaker(UserTurn);

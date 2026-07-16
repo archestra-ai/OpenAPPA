@@ -1,17 +1,17 @@
-//! A baton policy gate over the agent's tool calls.
+//! An OpenAPPA policy gate over the agent's tool calls.
 //!
-//! [`BatonGate`] links [`baton_core`] in-process (no subprocess, full access to
-//! audience/effects labels) and drives baton's value-granular enforcement
+//! [`AppaGate`] links [`appa_core`] in-process (no subprocess, full access to
+//! audience/effects labels) and drives OpenAPPA's value-granular enforcement
 //! protocol — `evaluate → release → record_output` — over one run:
 //!
-//! * [`begin`](BatonGate::begin) seeds a trusted user turn;
-//! * [`check`](BatonGate::check) evaluates a proposed call against the folded
+//! * [`begin`](AppaGate::begin) seeds a trusted user turn;
+//! * [`check`](AppaGate::check) evaluates a proposed call against the folded
 //!   read context; a permitted call is *released on the spot* — may-effects
 //!   commit before anything runs — and the returned
 //!   [`GateVerdict::Execute`] carries the tool identity and arguments
 //!   recovered from the canonical checked request, the only call the harness
 //!   may run;
-//! * [`commit`](BatonGate::commit) consumes the dispatch receipt and folds the
+//! * [`commit`](AppaGate::commit) consumes the dispatch receipt and folds the
 //!   tool's contract-fixed output label into the trajectory as a new value.
 //!
 //! The engine is value-granular: a request names the values it depends on. The
@@ -33,7 +33,7 @@ use std::collections::HashMap;
 
 use std::collections::BTreeSet;
 
-use baton_core::{
+use appa_core::{
     ArgumentName, ArgumentSchema, ArgumentTree, AttentionRule, Authority, DispatchReceipt, EmissionPursuit,
     EmissionRequest, ExecutionToken, OpaqueValue, PolicyEngine, Pursuit, Requirements, ResponsePolicy, Speaker,
     StallCause, ToolContract, ToolName, ToolRequest, Trajectory, UserId, ValueId, ValueLabel, Violation,
@@ -46,7 +46,7 @@ pub enum GateVerdict {
     /// The call was checked and released: may-effects are already committed,
     /// and `tool`/`args` are recovered from the canonical checked request —
     /// the only call the harness may execute, followed by
-    /// [`BatonGate::commit`] with the result.
+    /// [`AppaGate::commit`] with the result.
     Execute { tool: String, args: serde_json::Value },
     /// The call is refused; `reason` is a human-readable block description.
     Block { reason: String },
@@ -77,8 +77,8 @@ const ARGS_ARG: &str = "__args";
 
 type RecipientFn = Box<dyn Fn(&serde_json::Value) -> Vec<UserId> + Send + Sync>;
 
-/// An in-process baton policy gate carrying one run's trajectory.
-pub struct BatonGate {
+/// An in-process OpenAPPA policy gate carrying one run's trajectory.
+pub struct AppaGate {
     engine: PolicyEngine,
     recipients: HashMap<String, RecipientFn>,
     trajectory: Trajectory,
@@ -90,12 +90,12 @@ pub struct BatonGate {
     pending: Option<DispatchReceipt>,
 }
 
-impl BatonGate {
+impl AppaGate {
     /// Start building a gate. With no registered authority the gate is fully
     /// fail-closed: any non-downhill flow blocks. Register authorities with
-    /// [`BatonGateBuilder::authority`] to let a mandated sign-off declassify.
-    pub fn builder() -> BatonGateBuilder {
-        BatonGateBuilder {
+    /// [`AppaGateBuilder::authority`] to let a mandated sign-off declassify.
+    pub fn builder() -> AppaGateBuilder {
+        AppaGateBuilder {
             authorities: Vec::new(),
             contracts: Vec::new(),
             recipients: HashMap::new(),
@@ -117,7 +117,7 @@ impl BatonGate {
     /// one is driven through its first plan by the registered inline authorities.
     /// A permit is released immediately — may-effects commit before anything
     /// runs — and the caller must execute exactly the returned canonical call,
-    /// then [`commit`](BatonGate::commit) the result.
+    /// then [`commit`](AppaGate::commit) the result.
     pub(crate) fn check(&mut self, tool: &str, args: &serde_json::Value) -> GateVerdict {
         // Refuse before touching the trajectory: a released dispatch must be
         // committed before the next proposal.
@@ -234,7 +234,7 @@ impl BatonGate {
     /// context (the same over-approximation every call check uses), and the
     /// emission is driven like any flow — remediable leaks walk their plans
     /// through the registered inline authorities. Requires
-    /// [`BatonGateBuilder::conversation_readers`]; an unconfigured response
+    /// [`AppaGateBuilder::conversation_readers`]; an unconfigured response
     /// sink fails closed like any uncontracted tool.
     pub(crate) fn check_emission(&mut self, text: &str) -> EmissionVerdict {
         if self.pending.is_some() {
@@ -338,16 +338,16 @@ fn block_reason(violations: &[Violation]) -> String {
         .join("; ")
 }
 
-/// Builder for a [`BatonGate`]. Add baton contracts, escalation authorities, and
-/// per-tool recipient extractors, then [`build`](BatonGateBuilder::build).
-pub struct BatonGateBuilder {
+/// Builder for a [`AppaGate`]. Add OpenAPPA contracts, escalation authorities, and
+/// per-tool recipient extractors, then [`build`](AppaGateBuilder::build).
+pub struct AppaGateBuilder {
     authorities: Vec<Authority>,
     contracts: Vec<ToolContract>,
     recipients: HashMap<String, RecipientFn>,
     conversation_readers: Option<BTreeSet<UserId>>,
 }
 
-impl BatonGateBuilder {
+impl AppaGateBuilder {
     /// Register an escalation authority. A mandated authority can declassify a
     /// boundary-crossing flow it vouches for (e.g. endorsing a send to a specific
     /// external recipient, or accepting an effect's first egress) instead of
@@ -365,7 +365,7 @@ impl BatonGateBuilder {
         self
     }
 
-    /// Register a baton contract (baton's real boundary: a tool's `requires`,
+    /// Register an OpenAPPA contract (OpenAPPA's real boundary: a tool's `requires`,
     /// `output_label`, and declared `effects`).
     pub fn contract(mut self, contract: ToolContract) -> Self {
         self.contracts.push(contract);
@@ -392,7 +392,7 @@ impl BatonGateBuilder {
     /// contract requiring an explicit confirmation (no confirming-turn API this
     /// slice). Contracts for tools with a recipient extractor have their argument
     /// schema wired to the gate's recipient key.
-    pub fn build(self) -> Result<BatonGate, DojoError> {
+    pub fn build(self) -> Result<AppaGate, DojoError> {
         let mut engine = PolicyEngine::new();
         for authority in self.authorities {
             engine.register_authority(authority).map_err(|e| DojoError::Policy {
@@ -428,14 +428,14 @@ impl BatonGateBuilder {
             engine = engine
                 .with_response_policy(ResponsePolicy {
                     requires: Requirements {
-                        audience: baton_core::AudienceRule::FromRecipients,
+                        audience: appa_core::AudienceRule::FromRecipients,
                         ..Requirements::default()
                     },
                     readers,
                 })
                 .expect("the gate registers its response policy before any evaluation");
         }
-        Ok(BatonGate {
+        Ok(AppaGate {
             engine,
             recipients: self.recipients,
             trajectory: Trajectory::new(),
@@ -447,7 +447,7 @@ impl BatonGateBuilder {
 
 #[cfg(test)]
 mod tests {
-    use baton_core::{
+    use appa_core::{
         Audience, AudienceRule, Authority, AuthorityMandate, Authorization, Effect, Effects, Requirements, Ruling,
         ToolContract, ToolName, TrajectoryView, Trust, UserId, ValueLabel, Violation,
     };
@@ -475,7 +475,7 @@ mod tests {
         }
     }
 
-    fn allow(gate: &mut BatonGate, tool: &str, args: serde_json::Value) {
+    fn allow(gate: &mut AppaGate, tool: &str, args: serde_json::Value) {
         executed(gate.check(tool, &args), tool, &args);
     }
 
@@ -489,7 +489,7 @@ mod tests {
                 trust: Trust::TRUSTED,
             },
             effects: Effects::none(),
-            arguments: baton_core::ArgumentSchema::opaque(),
+            arguments: appa_core::ArgumentSchema::opaque(),
         }
     }
 
@@ -503,7 +503,7 @@ mod tests {
             }),
             output_label: ValueLabel::identity(),
             effects: Effects::declared([Effect::Egress]),
-            arguments: baton_core::ArgumentSchema::opaque(),
+            arguments: appa_core::ArgumentSchema::opaque(),
         }
     }
 
@@ -524,7 +524,7 @@ mod tests {
     /// with no declared conversation readers fails closed.
     #[test]
     fn final_text_is_checked_as_an_emission() {
-        let mut gate = BatonGate::builder()
+        let mut gate = AppaGate::builder()
             .conversation_readers([UserId::new(ALICE), UserId::new(BOB)])
             .contract(read_contract("get_doc"))
             .build()
@@ -543,7 +543,7 @@ mod tests {
             EmissionVerdict::Block { reason } => panic!("expected Emit, got Block: {reason}"),
         }
 
-        let mut unconfigured = BatonGate::builder().contract(read_contract("get_doc")).build().unwrap();
+        let mut unconfigured = AppaGate::builder().contract(read_contract("get_doc")).build().unwrap();
         unconfigured.begin("hi");
         assert!(matches!(
             unconfigured.check_emission("anything"),
@@ -572,8 +572,8 @@ mod tests {
         Authority::inline("finance-approver", auditor_mandate(), approve)
     }
 
-    fn auditor_gate() -> BatonGate {
-        BatonGate::builder()
+    fn auditor_gate() -> AppaGate {
+        AppaGate::builder()
             .authority(auditor_authority())
             .contract(read_contract("list_invoices"))
             .contract(sink_contract("send_email"))
@@ -613,8 +613,8 @@ mod tests {
 
     /// Competent for the auditor, but rules out of process — so a walk that
     /// reaches its grant step blocks with `NeedsApproval` rather than permitting.
-    fn external_auditor_gate() -> BatonGate {
-        BatonGate::builder()
+    fn external_auditor_gate() -> AppaGate {
+        AppaGate::builder()
             .authority(Authority::external("finance-approver", auditor_mandate()))
             .contract(read_contract("list_invoices"))
             .contract(sink_contract("send_email"))
@@ -675,7 +675,7 @@ mod tests {
 
     #[test]
     fn public_egress_blocks_with_no_authority() {
-        let mut gate = BatonGate::builder()
+        let mut gate = AppaGate::builder()
             .contract(read_contract("fetch_recording"))
             .contract(sink_contract("open_issue"))
             .recipients_for("open_issue", |_| vec![UserId::new("world")])

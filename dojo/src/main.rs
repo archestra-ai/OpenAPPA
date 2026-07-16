@@ -1,19 +1,19 @@
-//! Run the baton-dojo case suite and print the utility/leak table.
+//! Run the appa-dojo case suite and print the utility/leak table.
 //!
 //! ```text
-//! cargo run -p baton-dojo                            # all cases, gate off and on
-//! cargo run -p baton-dojo -- recording_bug_filing    # one case, both
-//! cargo run -p baton-dojo -- --defended              # all cases, gate on only
-//! cargo run -p baton-dojo -- auditor_email --undefended
+//! cargo run -p appa-dojo                            # all cases, gate off and on
+//! cargo run -p appa-dojo -- recording_bug_filing    # one case, both
+//! cargo run -p appa-dojo -- --defended              # all cases, gate on only
+//! cargo run -p appa-dojo -- auditor_email --undefended
 //! ```
 //!
 //! By default each case runs twice — gate off, then on. `--defended` /
 //! `--undefended` restrict to one. Needs `OPENROUTER_API_KEY` (or a line in
-//! `ai-labs/.env`); `DOJO_MODEL` picks the model.
+//! the repository-root `.env`); `DOJO_MODEL` picks the model.
 
 use std::path::Path;
 
-use baton_dojo::{DojoError, Model, Scores, model, scenarios, suite};
+use appa_dojo::{DojoError, Model, Scores, model, scenarios, suite};
 
 /// Every case name the runner knows (kept in sync with the match arms below).
 const CASES: &[&str] = &["recording_bug_filing", "auditor_email"];
@@ -52,7 +52,7 @@ async fn main() -> Result<(), DojoError> {
     };
 
     let Some(api_key) = resolve_api_key() else {
-        eprintln!("set OPENROUTER_API_KEY (or add it to ai-labs/.env) to run the suite");
+        eprintln!("set OPENROUTER_API_KEY (or add it to the repository-root .env) to run the suite");
         return Ok(());
     };
     let model_id = std::env::var("DOJO_MODEL").unwrap_or_else(|_| "openai/gpt-4o-mini".to_owned());
@@ -78,7 +78,7 @@ async fn score_named(model: &Model, name: &str, defended: bool) -> Result<Scores
     })
 }
 
-/// `OPENROUTER_API_KEY` from the environment, else from `ai-labs/.env`.
+/// `OPENROUTER_API_KEY` from the environment, else from the repository-root `.env`.
 fn resolve_api_key() -> Option<String> {
     if let Ok(key) = std::env::var("OPENROUTER_API_KEY")
         && !key.is_empty()

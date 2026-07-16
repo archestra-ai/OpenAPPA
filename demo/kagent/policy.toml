@@ -1,4 +1,4 @@
-# baton-proxy policy for the kagent demo.
+# appa-proxy policy for the kagent demo.
 #
 # The proxy forwards to OpenRouter and gates the agent's tool calls. Only the
 # tools this scenario touches are annotated; every other kagent tool is

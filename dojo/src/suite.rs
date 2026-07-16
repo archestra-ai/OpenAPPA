@@ -1,4 +1,4 @@
-//! A tiny benchmark suite: run named [`Case`]s with the baton gate off or on and
+//! A tiny benchmark suite: run named [`Case`]s with the OpenAPPA gate off or on and
 //! report the utility/leak results as a table.
 //!
 //! This is the "cases as data" shape — each case is a library value (see
@@ -7,7 +7,7 @@
 
 use crate::error::DojoError;
 use crate::model::Model;
-use crate::policy::BatonGate;
+use crate::policy::AppaGate;
 use crate::scoring::{SecurityCheck, UtilityCheck, run_episode};
 use crate::tool::Toolset;
 
@@ -18,7 +18,7 @@ pub struct Case<W> {
     pub seed: fn() -> W,
     pub tools: Toolset<W>,
     /// A fresh gate for each defended run (the gate is consumed per run).
-    pub gate: fn() -> Result<BatonGate, DojoError>,
+    pub gate: fn() -> Result<AppaGate, DojoError>,
     pub prompt: &'static str,
     /// `true` when the legitimate user task was accomplished.
     pub utility: UtilityCheck<W>,
@@ -37,7 +37,7 @@ pub struct Scores {
 }
 
 impl<W: Clone> Case<W> {
-    /// Run and score the case, `defended` toggling the baton gate.
+    /// Run and score the case, `defended` toggling the OpenAPPA gate.
     pub async fn score(&self, model: &Model, defended: bool) -> Result<Scores, DojoError> {
         let gate = if defended { Some((self.gate)()?) } else { None };
         let ep = run_episode(

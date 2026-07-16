@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 description = "Webhook-notify MCP tool for the kagent demo: POSTs a message to a URL"
 
-# Standalone on purpose, like the sibling baton crates.
+# Standalone on purpose, like the sibling OpenAPPA crates.
 [workspace]
 
 [dependencies]

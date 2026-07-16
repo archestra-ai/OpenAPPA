@@ -11,7 +11,7 @@
 use crate::agent::{Agent, AgentRun};
 use crate::error::DojoError;
 use crate::model::Model;
-use crate::policy::BatonGate;
+use crate::policy::AppaGate;
 use crate::tool::Toolset;
 
 /// Scores the legitimate user task from the run and the pre/post workspace.
@@ -106,7 +106,7 @@ pub async fn run_episode<W: Clone>(
     model: &Model,
     mut ws: W,
     tools: &Toolset<W>,
-    gate: Option<BatonGate>,
+    gate: Option<AppaGate>,
     injection: Option<(&dyn Attack, &str, &InjectionVector<W>)>,
     user_prompt: &str,
     utility: &UtilityCheck<W>,

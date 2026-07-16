@@ -1,7 +1,7 @@
-//! Contracts TOML → baton-core ToolContracts. Parsed strictly
-//! (`deny_unknown_fields`, the baton-check discipline). The prototype's
+//! Contracts TOML → appa-core ToolContracts. Parsed strictly
+//! (`deny_unknown_fields`, the appa-check discipline). The prototype's
 //! `unknown_policy`/`taint_policy` knobs are gone on purpose: unknown-handling
-//! is authority registration in current baton-core. This crate translates
+//! is authority registration in current appa-core. This crate translates
 //! declared tool contracts and declared authorities: inline `allow` (the
 //! narrow acknowledge-only competence a policy may grant itself in TOML) and
 //! external `escalate` (a full-mandate authority whose rulings arrive out of
@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use baton_core::{
+use appa_core::{
     ArgumentName, ArgumentSchema, AttentionRule, Audience, AudienceRule, Authority, AuthorityMandate, Authorization,
     Effect, Effects, KnownTrust, Requirements, Ruling, ToolContract, ToolName, TrajectoryView, Trust, UserId,
     ValueLabel, Violation,
@@ -18,7 +18,7 @@ use baton_core::{
 // Only referenced from the test module's assertions on `Authority::mode`
 // (via `use super::*;`); a plain non-test build never names it.
 #[cfg(test)]
-use baton_core::AuthorityMode;
+use appa_core::AuthorityMode;
 use serde::Deserialize;
 
 #[derive(Debug, thiserror::Error)]

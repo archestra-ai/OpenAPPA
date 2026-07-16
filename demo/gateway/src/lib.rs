@@ -1,4 +1,4 @@
-//! baton-demo: the ad-hoc demo harness for the baton prototype, kept out of
+//! appa-demo: the ad-hoc demo harness for the OpenAPPA prototype, kept out of
 //! the shared workspace so its heavy demo deps stay out of the workspace build.
 //!
 //! [`gateway`] is the tool-layer MCP gateway demo — it serves a scenario's

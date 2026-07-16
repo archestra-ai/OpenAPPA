@@ -16,7 +16,7 @@ Verified against a live `kind` + Kagent install. These values are consumed by
 The Agent CRD exposes `spec.declarative.deployment.extraContainers` (`[]Object`,
 a standard k8s Container). Its own doc string: *"additional containers to run
 alongside the main agent container. Useful for sidecars such as token proxies,
-log shippers, or **security agents**."* baton-proxy rides here — no fallback needed.
+log shippers, or **security agents**."* appa-proxy rides here — no fallback needed.
 
 Also available on `spec.declarative.deployment`: `env` (`[]Object`, env on the
 main agent container), `labels`, `annotations`, `replicas`, `volumes`.

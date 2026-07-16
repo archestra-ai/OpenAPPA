@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tear down the kagent + baton-proxy demo.
+# Tear down the kagent + appa-proxy demo.
 #
 # Deletes the kind cluster (which removes kagent, the agent, the fixture, and
 # all secrets/configmaps in one shot). Pass --image to also remove the locally
@@ -8,8 +8,8 @@
 # Prereqs: kind, docker (only if using --image).
 set -euo pipefail
 
-CLUSTER=baton-poc
-IMAGES=(baton-proxy:poc notify-mcp:poc)
+CLUSTER=appa-poc
+IMAGES=(appa-proxy:poc notify-mcp:poc)
 
 remove_image=false
 [[ "${1:-}" == "--image" ]] && remove_image=true

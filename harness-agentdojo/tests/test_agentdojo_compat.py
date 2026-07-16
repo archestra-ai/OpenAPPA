@@ -3,7 +3,7 @@ security() checks that do `set(email.attachments)` don't crash the run."""
 
 from agentdojo.default_suites.v1.tools.types import CalendarEvent
 
-from baton_dojo import _agentdojo_compat
+from appa_dojo import _agentdojo_compat
 
 
 def _event(id_: str) -> CalendarEvent:

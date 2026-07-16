@@ -1,9 +1,9 @@
 //! The agent: give a [`Toolset`] and a workspace to a rig-core OpenRouter model
-//! and run the tool-calling loop, optionally behind a [`BatonGate`].
+//! and run the tool-calling loop, optionally behind a [`AppaGate`].
 //!
 //! rig-core owns the wire: `CompletionModel::completion` returns typed
 //! [`AssistantContent`] (text / tool calls / reasoning), so this loop reads those
-//! directly and keeps the baton `evaluate → execute → record_result` protocol at
+//! directly and keeps the OpenAPPA `evaluate → execute → record_result` protocol at
 //! the dispatch seam. A blocked call is not executed and its reason is handed back
 //! to the model as that tool's result.
 
@@ -13,7 +13,7 @@ use rig_core::completion::{CompletionModel, CompletionRequest};
 
 use crate::error::DojoError;
 use crate::model::Model;
-use crate::policy::{BatonGate, EmissionVerdict, GateVerdict};
+use crate::policy::{AppaGate, EmissionVerdict, GateVerdict};
 use crate::tool::{ToolError, Toolset};
 
 /// What one tool call produced.
@@ -23,7 +23,7 @@ pub enum ToolOutcome {
     Ok(serde_json::Value),
     /// Not run, or run and failed — the string is what the model was told.
     Error(String),
-    /// Refused by the baton policy gate before execution. The string is the block
+    /// Refused by the OpenAPPA policy gate before execution. The string is the block
     /// reason. This variant is reserved for policy denials only, so counting it
     /// yields a clean policy-block metric.
     Blocked(String),
@@ -58,7 +58,7 @@ pub struct AgentRun {
 }
 
 impl AgentRun {
-    /// The number of tool calls the baton gate blocked — the single source of
+    /// The number of tool calls the OpenAPPA gate blocked — the single source of
     /// truth for the policy-block metric.
     pub fn blocked_calls(&self) -> usize {
         self.tool_calls
@@ -108,13 +108,13 @@ impl<'m> Agent<'m> {
         self.drive(ws, tools, user_prompt.into(), None).await
     }
 
-    /// Run the tool-calling loop behind a baton policy gate. The gate is consumed
+    /// Run the tool-calling loop behind an OpenAPPA policy gate. The gate is consumed
     /// (it carries the run's trajectory); read `blocked_calls()` off the result.
     pub async fn run_defended<W>(
         &self,
         ws: &mut W,
         tools: &Toolset<W>,
-        mut gate: BatonGate,
+        mut gate: AppaGate,
         user_prompt: impl Into<String>,
     ) -> Result<AgentRun, DojoError> {
         self.drive(ws, tools, user_prompt.into(), Some(&mut gate)).await
@@ -125,7 +125,7 @@ impl<'m> Agent<'m> {
         ws: &mut W,
         tools: &Toolset<W>,
         user_prompt: String,
-        mut gate: Option<&mut BatonGate>,
+        mut gate: Option<&mut AppaGate>,
     ) -> Result<AgentRun, DojoError> {
         let schemas = tools.schemas();
         let tool_choice = (!schemas.is_empty()).then_some(ToolChoice::Auto);

@@ -1,6 +1,6 @@
 # Tool Contracts
 
-Baton reads its policy from one TOML file. The file names the upstream provider and a contract for each tool you want checked. Tools without a contract pass through untouched — annotate the risky few.
+OpenAPPA reads its policy from one TOML file. The file names the upstream provider and a contract for each tool you want checked. Tools without a contract pass through untouched — annotate the risky few.
 
 ```toml
 upstream_base_url = "https://openrouter.ai/api/v1"

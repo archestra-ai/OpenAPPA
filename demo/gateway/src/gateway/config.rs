@@ -1,6 +1,6 @@
 //! Gateway config → a policy engine plus the simulated tools it mediates.
 //! Two files: the tool catalog (this crate's own sims dialect) and the policy
-//! (contracts + authorities, parsed by `baton-contracts` — the one canonical
+//! (contracts + authorities, parsed by `appa-contracts` — the one canonical
 //! dialect). Both are parsed strictly (`deny_unknown_fields`): a typo in a
 //! config file must fail loudly, never silently weaken it.
 //!
@@ -12,24 +12,24 @@
 //! (the old gateway dialect could not). They work, with one wrinkle: the
 //! session soft-blocks first and resolves inline rulings only during the
 //! escalation's remedy walk — so a call an allow authority fully covers still
-//! round-trips through `baton__escalate`, which then executes without
+//! round-trips through `appa__escalate`, which then executes without
 //! prompting the human. The checked-in scenario uses only the escalate
 //! authority.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-use baton_contracts::{Contracts, ContractsError};
-use baton_core::{AudienceRule, ContractRefused, PolicyEngine, RegistrationRefused, RegistryFrozen, ToolName, UserId};
+use appa_contracts::{Contracts, ContractsError};
+use appa_core::{AudienceRule, ContractRefused, PolicyEngine, RegistrationRefused, RegistryFrozen, ToolName, UserId};
 use serde::Deserialize;
 
 /// The escalation tool the gateway itself serves; a scenario tool cannot
 /// shadow it, and the policy cannot contract it.
-pub const ESCALATE_TOOL: &str = "baton__escalate";
+pub const ESCALATE_TOOL: &str = "appa__escalate";
 /// The reserved MCP tool the agent's final answer must flow through: the
 /// gateway checks it at the engine's emission sink and returns only the
 /// permitted rendering. Reserved on the same terms as `ESCALATE_TOOL`.
-pub const RESPOND_TOOL: &str = "baton__respond";
+pub const RESPOND_TOOL: &str = "appa__respond";
 
 /// Which of the two config files an error came from — startup messages name
 /// the offending file.
@@ -122,7 +122,7 @@ pub struct GatewayConfig {
 
 impl GatewayConfig {
     /// Build from the two config files: `tools` is the simulated-tool catalog,
-    /// `policy` the contracts + authorities in the `baton-contracts` dialect.
+    /// `policy` the contracts + authorities in the `appa-contracts` dialect.
     /// The two join by tool name: a tool without a contract is served but
     /// unregistered (calling it is unprovable and routes through the authority
     /// chain like any unknown); a contract without a tool is a config error.
@@ -140,11 +140,11 @@ struct RawConfig {
     tools: Vec<ToolConfig>,
     /// Who reads the conversation. When present the engine registers the
     /// response-sink policy, and the agent's final answer is checked as an
-    /// emission flow through `baton__respond`. Absent, the emission check
+    /// emission flow through `appa__respond`. Absent, the emission check
     /// fails closed (no registered response policy).
     ///
     /// This lives with the tool catalog rather than the policy file because
-    /// the canonical `baton-contracts` dialect models tool contracts and
+    /// the canonical `appa-contracts` dialect models tool contracts and
     /// authorities; the response sink is neither.
     #[serde(default)]
     response: Option<ResponseConfig>,
@@ -194,7 +194,7 @@ impl RawConfig {
         }
 
         // Join the policy to the catalog. The reserved-name check runs first
-        // so a contracted `baton__escalate` reports as reserved, not as a
+        // so a contracted `appa__escalate` reports as reserved, not as a
         // contract without a tool.
         for contract in &policy.contracts {
             if contract.name.as_str() == ESCALATE_TOOL || contract.name.as_str() == RESPOND_TOOL {
@@ -203,7 +203,7 @@ impl RawConfig {
             let Some(sim) = tools.get(&contract.name) else {
                 return Err(ConfigError::ContractWithoutTool(contract.name.as_str().to_owned()));
             };
-            // baton-contracts validates only the `$.args.<arg>` path syntax;
+            // appa-contracts validates only the `$.args.<arg>` path syntax;
             // whether the argument exists is catalog knowledge. Without this
             // check a typo would load fine and then fail every call at the
             // engine as undeclared recipients — a load-time config bug
@@ -228,10 +228,10 @@ impl RawConfig {
         // The response sink: the agent's final answer is checked against this
         // audience, and only the permitted rendering is delivered.
         if let Some(response) = &self.response {
-            engine = engine.with_response_policy(baton_core::ResponsePolicy {
-                requires: baton_core::Requirements {
+            engine = engine.with_response_policy(appa_core::ResponsePolicy {
+                requires: appa_core::Requirements {
                     audience: AudienceRule::FromRecipients,
-                    ..baton_core::Requirements::default()
+                    ..appa_core::Requirements::default()
                 },
                 readers: response.readers.iter().map(UserId::new).collect(),
             })?;

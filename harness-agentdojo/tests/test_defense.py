@@ -1,4 +1,4 @@
-"""BatonToolsExecutor behavior on the real workspace suite, no LLM."""
+"""AppaToolsExecutor behavior on the real workspace suite, no LLM."""
 
 import pytest
 from agentdojo.agent_pipeline.tool_execution import ToolsExecutor
@@ -11,15 +11,15 @@ from agentdojo.types import (
     text_content_block_from_string,
 )
 
-from baton_dojo.bridge import Call
-from baton_dojo.contracts import load_table
-from baton_dojo.defense import (
+from appa_dojo.bridge import Call
+from appa_dojo.contracts import load_table
+from appa_dojo.defense import (
     EMPTY_FUNCTION_NAME_ERROR,
     INVALID_TOOL_ERROR_PREFIX,
     NESTED_CALL_ERROR,
     POLICY_BLOCK_SENTINEL,
     UNSETTLED_PREFIX,
-    BatonToolsExecutor,
+    AppaToolsExecutor,
     derive_episode,
     has_nested_call,
 )
@@ -50,8 +50,8 @@ def run_executor(executor, messages):
     return env, messages
 
 
-def executor(unknown_policy: str = "deny") -> BatonToolsExecutor:
-    return BatonToolsExecutor(TABLE, unknown_policy)
+def executor(unknown_policy: str = "deny") -> AppaToolsExecutor:
+    return AppaToolsExecutor(TABLE, unknown_policy)
 
 
 def test_clean_read_is_executed():
@@ -180,7 +180,7 @@ def test_derive_episode_classification():
 
 def test_unsettled_calls_are_not_replayed_as_executed():
     """A refused/unresolved call was never dispatched: it must not join the
-    executed episode on the next turn (baton would reject the replay)."""
+    executed episode on the next turn (OpenAPPA would reject the replay)."""
     call = FunctionCall(function="get_unread_emails", args={})
     messages = [
         user("do things"),
@@ -229,7 +229,7 @@ def test_nested_call_is_blocked_and_not_executed():
     runtime, env = fresh()
     outbox_before = len(env.inbox.emails)
     # send_email whose body is the result of a nested get_unread_emails: the
-    # nested reader would run inside run_function, unseen by baton.
+    # nested reader would run inside run_function, unseen by OpenAPPA.
     messages = [
         user("summarize and send"),
         assistant(
@@ -249,7 +249,7 @@ def test_nested_call_is_blocked_and_not_executed():
     assert len(env.inbox.emails) == outbox_before  # neither call ran
 
 
-def test_recipients_reach_baton_check():
+def test_recipients_reach_appa_check():
     calls = derive_episode(
         [
             user("x"),

@@ -4109,7 +4109,7 @@ fn capabilities_are_bound_to_their_engine() {
 }
 
 /// An action transition whose declared effects disagree with the target
-/// contract is never planned: the narrowing baton validates must be what
+/// contract is never planned: the narrowing OpenAPPA validates must be what
 /// the target actually does.
 #[test]
 fn constrain_with_mismatched_target_effects_is_not_planned() {

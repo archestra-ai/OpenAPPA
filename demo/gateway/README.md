@@ -1,19 +1,19 @@
-# baton-demo — the gateway demo
+# appa-demo — the gateway demo
 
-`baton-demo` is the ad-hoc demo harness for the baton prototype: the
+`appa-demo` is the ad-hoc demo harness for the OpenAPPA prototype: the
 **tool-layer gateway** described here. The inference-layer proxy is a separate
-crate, `baton-proxy`.
+crate, `appa-proxy`.
 
 A real agent, a real MCP gateway, and the policy engine between them. An rmcp
 server mimics an Archestra-style **tool gateway**: it serves a scenario's
-tools, checks every `tools/call` against baton-core, and **soft-blocks** calls
+tools, checks every `tools/call` against appa-core, and **soft-blocks** calls
 that breach policy — the block comes back as an ordinary tool result telling
 the model how to escalate. When the model escalates, a human rules once
 (through the MCP client's own UI, via elicitation), and the gateway dispatches
 the **exact canonical request the engine checked** — the model never re-issues
 the call, so nothing can drift between what was approved and what runs.
 
-Unlike `baton-proxy` (inference layer, full-conversation replay per request),
+Unlike `appa-proxy` (inference layer, full-conversation replay per request),
 the gateway sits on the tool layer and owns a live trajectory per MCP session.
 
 ## The flow
@@ -27,8 +27,8 @@ is not a reader of the invoices.
 2. The model calls `send_email(to = alex@finance-audit.com, …)`. The gateway
    folds the flow (arguments + control, conservatively all prior tool
    outputs), sees the auditor outside the audience, and returns a **soft
-   block**: violations plus "call `baton__escalate` with a reason".
-3. The model calls `baton__escalate(reason = …)`. The gateway walks the
+   block**: violations plus "call `appa__escalate` with a reason".
+3. The model calls `appa__escalate(reason = …)`. The gateway walks the
    engine's remedy plan; the first grant routes to the external
    `human-in-the-loop` authority, so it **elicits** the connected client's
    user. One accept/decline rules every authorization this remedy needs
@@ -40,13 +40,13 @@ is not a reader of the invoices.
    action; the model explains to the user instead.
 
 ```
-baton-agent (rig, LLM via OpenRouter — no proxy)
+appa-agent (rig, LLM via OpenRouter — no proxy)
    │  MCP (streamable HTTP; client supports elicitation)
    ▼
-baton-gateway ── tools/call ──▶ baton-core evaluate
+appa-gateway ── tools/call ──▶ appa-core evaluate
    │   permitted → execute simulated tool ← canonical request only
    │   remediable → soft-block tool result
-   │   baton__escalate → remedy walk → elicit human ──▶ y/N in the client
+   │   appa__escalate → remedy walk → elicit human ──▶ y/N in the client
    └── every decision narrated + optional JSONL log
 ```
 
@@ -56,7 +56,7 @@ Two TOML files declare the scenario, joined by tool name. `gateway.toml` is
 the demo-owned tool catalog: the tools the gateway serves (description, string
 arguments, a `result` template filled from the canonical request).
 `gateway-policy.toml` is the policy — tool contracts and authorities — in the
-canonical `baton-contracts` dialect, the same one `baton-proxy` reads: per
+canonical `appa-contracts` dialect, the same one `appa-proxy` reads: per
 tool a `requires` section (trust, an audience as `"public"`, a reader list, or
 `"$.args.<argument>"` naming the wire argument that carries recipients) and an
 `output` section (trust, audience, effects); per authority a `rule` —
@@ -64,7 +64,7 @@ tool a `requires` section (trust, an audience as `"public"`, a reader list, or
 the full-mandate human-in-the-loop authority the gateway elicits.
 
 A catalog tool without a contract is served but unregistered — calling it is
-unprovable and routes through the same authority chain, baton's fail-closed
+unprovable and routes through the same authority chain, OpenAPPA's fail-closed
 default. A contract naming no catalog tool is a load error. Within a present
 contract, omissions fail **closed**: an absent `requires` table means unknown
 requirements (write `requires = {}` to declare "considered, nothing
@@ -83,15 +83,15 @@ pending and can be escalated again.
 
 ## Run the demo
 
-Needs an `OPENROUTER_API_KEY` (environment or `ai-labs/.env`).
+Needs an `OPENROUTER_API_KEY` (environment or repository-root `.env`).
 
 ```sh
-ai-labs/baton/baton-demo/run-gateway-demo.sh
+./demo/gateway/run-gateway-demo.sh
 # gateway engine internals too:
-ai-labs/baton/baton-demo/run-gateway-demo.sh -v      # decision path
-ai-labs/baton/baton-demo/run-gateway-demo.sh -vv     # + label algebra
+./demo/gateway/run-gateway-demo.sh -v      # decision path
+./demo/gateway/run-gateway-demo.sh -vv     # + label algebra
 # different ask:
-ai-labs/baton/baton-demo/run-gateway-demo.sh --task "email the summary to bob@archestra.ai"
+./demo/gateway/run-gateway-demo.sh --task "email the summary to bob@archestra.ai"
 ```
 
 The gateway's narration (`✓ permitted`, `⚠ soft block`, `✋ approved →
@@ -101,10 +101,10 @@ send goes through, `n` and the model backs off.
 By hand instead:
 
 ```sh
-cd ai-labs/baton/baton-demo
-cargo run --bin baton-gateway -- -v                  # terminal 1
+cd demo/gateway
+cargo run --bin appa-gateway -- -v                  # terminal 1
 export OPENROUTER_API_KEY=sk-...                     # terminal 2
-cargo run --bin baton-gateway-agent
+cargo run --bin appa-gateway-agent
 ```
 
 `--log <file>` appends one JSON line per decision:
@@ -115,7 +115,7 @@ cargo run --bin baton-gateway-agent
 Register the gateway as an MCP server (streamable HTTP at
 `http://127.0.0.1:8732/mcp`) in any client that supports **elicitation**
 (e.g. Claude Code) — the approval prompt then renders in that client's own UI,
-and `baton-gateway-agent` is unnecessary. A client without elicitation gets a
+and `appa-gateway-agent` is unnecessary. A client without elicitation gets a
 denial (fail closed).
 
 ## Trust model (prototype)
@@ -151,8 +151,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --check
 ```
 
-This is the `baton-demo` crate (bins `baton-gateway` and `baton-gateway-agent`;
+This is the `appa-demo` crate (bins `appa-gateway` and `appa-gateway-agent`;
 library module `gateway`). Standalone on purpose — deliberately outside the
-shared `ai-labs` workspace, to keep the heavy demo deps (a full agent framework
+root workspace, to keep the heavy demo deps (a full agent framework
 and LLM client) out of the workspace build. Concepts of the policy engine live
-in `baton-core/src/lib.rs`.
+in `../../core/src/lib.rs`.

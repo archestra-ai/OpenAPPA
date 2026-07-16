@@ -1,24 +1,24 @@
-//! `baton-gateway`: the MCP server. Serves the scenario's tools from
-//! `gateway.toml` under the policy in `gateway-policy.toml` (baton-contracts
-//! dialect), mediates every `tools/call` through baton-core, soft-blocks
+//! `appa-gateway`: the MCP server. Serves the scenario's tools from
+//! `gateway.toml` under the policy in `gateway-policy.toml` (appa-contracts
+//! dialect), mediates every `tools/call` through appa-core, soft-blocks
 //! remediable breaches (the block is an ordinary tool result telling the model
-//! how to escalate), and on `baton__escalate` asks the human through MCP
+//! how to escalate), and on `appa__escalate` asks the human through MCP
 //! **elicitation** — so the approval prompt appears in the connected client's
 //! own UI — then dispatches the exact canonical request the engine checked.
 //!
 //! ```text
-//! cargo run --bin baton-gateway                # narration only
-//! cargo run --bin baton-gateway -- -v          # + engine decision path (debug)
-//! cargo run --bin baton-gateway -- -vv         # + label algebra (trace)
-//! cargo run --bin baton-gateway -- --log decisions.jsonl
+//! cargo run --bin appa-gateway                # narration only
+//! cargo run --bin appa-gateway -- -v          # + engine decision path (debug)
+//! cargo run --bin appa-gateway -- -vv         # + label algebra (trace)
+//! cargo run --bin appa-gateway -- --log decisions.jsonl
 //! ```
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use baton_demo::gateway::narrate::{DecisionLog, narrate};
-use baton_demo::gateway::{ConfigFile, ESCALATE_TOOL, GatewayConfig, Outcome, RESPOND_TOOL, Session};
+use appa_demo::gateway::narrate::{DecisionLog, narrate};
+use appa_demo::gateway::{ConfigFile, ESCALATE_TOOL, GatewayConfig, Outcome, RESPOND_TOOL, Session};
 use clap::Parser;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, Content, CreateElicitationRequestParams, ElicitationAction,
@@ -32,15 +32,15 @@ use rmcp::{ErrorData as McpError, ServerHandler};
 use tokio::net::TcpListener;
 
 #[derive(Parser)]
-#[command(about = "MCP gateway that mediates tool calls through baton-core")]
+#[command(about = "MCP gateway that mediates tool calls through appa-core")]
 struct Args {
     /// Address to listen on.
-    #[arg(long, env = "BATON_GATEWAY_ADDR", default_value = "127.0.0.1:8732")]
+    #[arg(long, env = "APPA_GATEWAY_ADDR", default_value = "127.0.0.1:8732")]
     addr: String,
     /// The tool catalog: simulated tools, their arguments and result templates.
     #[arg(long, default_value_os_t = default_config_path())]
     config: PathBuf,
-    /// The policy: tool contracts and authorities (baton-contracts dialect).
+    /// The policy: tool contracts and authorities (appa-contracts dialect).
     #[arg(long, default_value_os_t = default_policy_path())]
     policy: PathBuf,
     /// Append one JSON line per decision to this file.
@@ -64,8 +64,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let level = match args.verbose {
         0 => "warn",
-        1 => "baton_core=debug",
-        _ => "baton_core=trace",
+        1 => "appa_core=debug",
+        _ => "appa_core=trace",
     };
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::new(level))
@@ -106,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let router = axum::Router::new().nest_service("/mcp", service);
 
-    eprintln!("baton-gateway listening at http://{local}/mcp (approval via MCP elicitation)");
+    eprintln!("appa-gateway listening at http://{local}/mcp (approval via MCP elicitation)");
     axum::serve(listener, router).await?;
     Ok(())
 }
@@ -167,7 +167,7 @@ impl Gateway {
 impl ServerHandler for Gateway {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("baton-gateway", env!("CARGO_PKG_VERSION")))
+            .with_server_info(Implementation::new("appa-gateway", env!("CARGO_PKG_VERSION")))
     }
 
     fn list_tools(
@@ -192,7 +192,7 @@ impl ServerHandler for Gateway {
                 RESPOND_TOOL => match respond_text(&args) {
                     Ok(text) => session.respond(&text),
                     Err(reason) => Outcome::BadArguments {
-                        tool: baton_core::ToolName::new(RESPOND_TOOL),
+                        tool: appa_core::ToolName::new(RESPOND_TOOL),
                         reason,
                     },
                 },
@@ -207,7 +207,7 @@ impl ServerHandler for Gateway {
                             .await
                     }
                     Err(reason) => Outcome::BadArguments {
-                        tool: baton_core::ToolName::new(ESCALATE_TOOL),
+                        tool: appa_core::ToolName::new(ESCALATE_TOOL),
                         reason,
                     },
                 },
@@ -223,7 +223,7 @@ impl ServerHandler for Gateway {
     }
 }
 
-/// Enforce the advertised `baton__escalate` schema: `reason` (a string) is
+/// Enforce the advertised `appa__escalate` schema: `reason` (a string) is
 /// required and the only argument.
 fn escalate_reason(args: &serde_json::Map<String, serde_json::Value>) -> Result<String, String> {
     if let Some(unknown) = args.keys().find(|key| key.as_str() != "reason") {
@@ -324,7 +324,7 @@ fn render(outcome: Outcome) -> CallToolResult {
     }
 }
 
-fn bullet_violations(violations: &[baton_core::Violation]) -> String {
+fn bullet_violations(violations: &[appa_core::Violation]) -> String {
     violations
         .iter()
         .map(|v| format!("  · {v}"))

@@ -1,10 +1,10 @@
-# baton-core
+# appa-core
 
 Prototype value-granular IFC policy engine (edition 2024, `publish = false`).
 Dependencies: `tracing` (facade), `serde` (derive), `thiserror` (error types).
 Dev-only: `tracing-subscriber`, `criterion`, `proptest`, `clap`. Concepts and
 semantics live in `src/lib.rs`; the plan-of-record in
-`../baton-authority-model-design.md` (with `../baton-declassifier-design.md`
+`../docs/authority-model-design.md` (with `../docs/declassifier-design.md`
 as the foundation rationale it builds on); this file is the invariants an edit
 must not silently break.
 
@@ -176,8 +176,8 @@ observable; preserve it (there is a typed-order test).
 
 - No `dyn`/`Box`; newtypes over primitives; pattern matching over if-chains.
   Core ops emit `tracing` events (decision path at `debug!`, algebra at
-  `trace!`) — borrow-only, never behavior-changing; `baton-gateway -- -v`/`-vv`
-  (in `../baton-proxy`) selects the level.
+  `trace!`) — borrow-only, never behavior-changing; `appa-gateway -- -v`/`-vv`
+  (in `../proxy`) selects the level.
 - Validate every change: `cargo test`, `cargo clippy --all-targets -- -D warnings`,
   `cargo fmt --check`.
 - The algebra **laws** are real `proptest` properties

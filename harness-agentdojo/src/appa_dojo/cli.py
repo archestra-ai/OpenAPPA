@@ -1,4 +1,4 @@
-"""The baton-dojo command."""
+"""The appa-dojo command."""
 
 import argparse
 import sys
@@ -6,20 +6,20 @@ import sys
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="baton-dojo",
-        description="Run the baton IFC policy engine against AgentDojo",
+        prog="appa-dojo",
+        description="Run the OpenAPPA IFC policy engine against AgentDojo",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     bench = subparsers.add_parser(
         "bench",
-        help="real LLM benchmark via OpenRouter, with or without the baton defense",
+        help="real LLM benchmark via OpenRouter, with or without the OpenAPPA defense",
     )
     bench.add_argument("--suite", default="workspace")
     bench.add_argument("--benchmark-version", default="v1.2.2")
     bench.add_argument("--model", required=True, help="OpenRouter model id, e.g. openai/gpt-4o-mini")
     bench.add_argument("--attack", default="important_instructions")
-    bench.add_argument("--defense", choices=["baton", "none"], default="baton")
+    bench.add_argument("--defense", choices=["appa", "none"], default="appa")
     bench.add_argument(
         "--unknown-policy",
         choices=["deny", "allow_with_audit", "escalate"],
@@ -38,7 +38,7 @@ def main() -> None:
 
     args = parser.parse_args()
     if args.command == "bench":
-        from baton_dojo.bench import run_bench
+        from appa_dojo.bench import run_bench
 
         sys.exit(
             run_bench(

@@ -1,4 +1,4 @@
-"""BatonToolsExecutor: the stock ToolsExecutor with a baton gate per call.
+"""AppaToolsExecutor: the stock ToolsExecutor with an OpenAPPA gate per call.
 
 Stateless on purpose: AgentDojo reuses one pipeline object across every
 (user task x injection task) run, so the episode is re-derived from
@@ -22,14 +22,14 @@ from agentdojo.types import (
     text_content_block_from_string,
 )
 
-from baton_dojo.bridge import BatonBridge, Call
-from baton_dojo.contracts import ContractTable
+from appa_dojo.bridge import AppaBridge, Call
+from appa_dojo.contracts import ContractTable
 
-POLICY_BLOCK_SENTINEL = "Blocked by baton policy: "
+POLICY_BLOCK_SENTINEL = "Blocked by OpenAPPA policy: "
 # Refused/unresolved oracle answers are NOT policy blocks: the proposal was
 # invalid/stale/conflicting, or the oracle could not settle a continuation.
 # They must never acquire the policy-block sentinel (or its bench count).
-UNSETTLED_PREFIX = "Baton did not settle this call: "
+UNSETTLED_PREFIX = "OpenAPPA did not settle this call: "
 
 
 def denial_message(decision) -> str:
@@ -52,8 +52,8 @@ INVALID_TOOL_ERROR_PREFIX = "Invalid tool "
 
 # A tool argument may itself be a FunctionCall; run_function resolves those
 # recursively (functions_runtime._execute_nested_calls) before the outer body
-# runs, so a nested reader or sink would execute outside baton's view and its
-# taint would launder into the outer call's args. Baton cannot gate a flow it
+# runs, so a nested reader or sink would execute outside OpenAPPA's view and its
+# taint would launder into the outer call's args. OpenAPPA cannot gate a flow it
 # cannot see, so a nested call is refused fail-closed.
 NESTED_CALL_ERROR = "nested tool calls are not permitted under policy"
 
@@ -74,7 +74,7 @@ def has_nested_call(args) -> bool:
 def derive_episode(
     messages: Sequence[ChatMessage], table: ContractTable
 ) -> tuple[str, list[Call]]:
-    """(user prompt, executed calls) as baton must see them, from messages alone."""
+    """(user prompt, executed calls) as OpenAPPA must see them, from messages alone."""
     user_prompt = None
     for message in messages:
         if message["role"] == "user":
@@ -91,7 +91,7 @@ def derive_episode(
         if error is not None and (
             error.startswith(POLICY_BLOCK_SENTINEL)
             # An unsettled (refused/unresolved) call was never dispatched, so
-            # replaying it as executed would make baton reject the episode.
+            # replaying it as executed would make OpenAPPA reject the episode.
             or error.startswith(UNSETTLED_PREFIX)
             or error == EMPTY_FUNCTION_NAME_ERROR
             or error.startswith(INVALID_TOOL_ERROR_PREFIX)
@@ -107,8 +107,8 @@ def derive_episode(
     return user_prompt, executed
 
 
-class BatonToolsExecutor(ToolsExecutor):
-    """Executes tool calls the LLM emitted, unless baton blocks them.
+class AppaToolsExecutor(ToolsExecutor):
+    """Executes tool calls the LLM emitted, unless OpenAPPA blocks them.
 
     Blocked calls are not executed; the LLM sees the same error channel
     agentdojo uses for its own tool failures, prefixed with
@@ -124,7 +124,7 @@ class BatonToolsExecutor(ToolsExecutor):
     ) -> None:
         super().__init__(tool_output_formatter)
         self.table = table
-        self.bridge = BatonBridge(
+        self.bridge = AppaBridge(
             contracts=table.wire_contracts(),
             unknown_policy=unknown_policy,
             taint_policy=taint_policy,
@@ -174,7 +174,7 @@ class BatonToolsExecutor(ToolsExecutor):
                 continue
 
             # A nested tool call would execute inside run_function without ever
-            # reaching baton; refuse fail-closed rather than gate a flow we
+            # reaching OpenAPPA; refuse fail-closed rather than gate a flow we
             # cannot see. Kept before arg coercion — coercion only touches
             # strings, so it never removes a nested call.
             if has_nested_call(tool_call.args):
@@ -189,7 +189,7 @@ class BatonToolsExecutor(ToolsExecutor):
                 )
                 continue
 
-            # Stock arg coercion, before recipients extraction so baton sees
+            # Stock arg coercion, before recipients extraction so OpenAPPA sees
             # real lists rather than their string representations.
             for arg_k, arg_v in tool_call.args.items():
                 if isinstance(arg_v, str) and is_string_list(arg_v):

@@ -37,7 +37,7 @@ pub fn rewrite_response(session: &mut Session, response: &mut ChatResponse) -> V
         if choice.message.extra.contains_key("function_call") {
             replace_with_text(
                 &mut choice.message,
-                "This response used the deprecated `function_call` form, which baton-proxy cannot inspect. \
+                "This response used the deprecated `function_call` form, which appa-proxy cannot inspect. \
                  Use `tools`/`tool_calls` instead."
                     .to_string(),
             );

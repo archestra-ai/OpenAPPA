@@ -15,7 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use baton_core::{
+use appa_core::{
     ArgumentTree, AuthorityName, BlockReason, EmissionPursuit, EmissionRequest, ExecutionToken, FlowOutcome,
     FlowPermit, OpaqueValue, Pursuit, Ruling, StallCause, ToolName, ToolRequest, UserId, ValueId, Violation,
 };
@@ -55,7 +55,7 @@ pub enum Outcome {
     /// human decision is recorded either, and the pending action is kept so
     /// escalation can be retried.
     EscalationUnavailable { tool: ToolName },
-    /// `baton__escalate` with no soft-blocked call pending.
+    /// `appa__escalate` with no soft-blocked call pending.
     NothingPending,
     /// The remedy walk stalled (bound exhausted, stale step, failed
     /// transition); the pending action was abandoned.
@@ -95,7 +95,7 @@ struct PendingWire {
 
 pub struct Session {
     config: Arc<GatewayConfig>,
-    trajectory: baton_core::Trajectory,
+    trajectory: appa_core::Trajectory,
     /// Every tool output admitted so far — the conservative read/control set.
     context: BTreeSet<ValueId>,
     pending_wire: Option<PendingWire>,
@@ -105,7 +105,7 @@ impl Session {
     pub fn new(config: Arc<GatewayConfig>) -> Self {
         Self {
             config,
-            trajectory: baton_core::Trajectory::new(),
+            trajectory: appa_core::Trajectory::new(),
             context: BTreeSet::new(),
             pending_wire: None,
         }
@@ -339,7 +339,7 @@ impl Session {
     fn denied_or_terminal(
         &mut self,
         tool: &ToolName,
-        violations: Vec<baton_core::Violation>,
+        violations: Vec<appa_core::Violation>,
         reason: BlockReason,
     ) -> Outcome {
         self.pending_wire = None;
@@ -406,7 +406,7 @@ impl Session {
     /// external human blocks: response escalation is not wired in this demo
     /// (the follow-up ledger tracks it).
     pub fn respond(&mut self, text: &str) -> Outcome {
-        let sink = ToolName::new("baton__respond");
+        let sink = ToolName::new("appa__respond");
         let body =
             match self
                 .trajectory
@@ -522,7 +522,7 @@ fn approval_message(
     args: &BTreeMap<String, String>,
     recipients: &BTreeSet<UserId>,
     reason: &str,
-    pending: &baton_core::PendingApproval,
+    pending: &appa_core::PendingApproval,
 ) -> String {
     let recipients = match recipients.is_empty() {
         true => "no declared recipients".to_owned(),

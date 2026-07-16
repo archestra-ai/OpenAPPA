@@ -1,15 +1,15 @@
 //! Wire types and the replay-then-check semantics.
 //!
 //! One invocation is stateless: the caller sends the full episode so far
-//! (`executed`) plus one `proposed` call; baton-check rebuilds the trajectory
+//! (`executed`) plus one `proposed` call; appa-check rebuilds the trajectory
 //! from scratch, evaluates the proposed call, and reports a decision. Permits
 //! are born and consumed inside this single process run, so their linearity
 //! never crosses the process boundary.
 
 use std::collections::BTreeSet;
 
-use baton_core::contract::Breach;
-use baton_core::{
+use appa_core::contract::Breach;
+use appa_core::{
     ArgumentSchema, ArgumentTree, Audience, Authority, AuthorityMandate, Authorization, BlockReason, DeltaCoordinate,
     Effect, Effects, FlowOutcome, FlowRefusal, KnownTrust, OpaqueValue, PolicyEngine, Pursuit, Requirements, Ruling,
     Speaker, ToolContract, ToolName, ToolRequest, Trajectory, TrajectoryView, Trust, UserId, ValueId, ValueLabel,
@@ -72,7 +72,7 @@ pub enum TrustIn {
 }
 
 /// Sink requirements. Deliberately no audience rule: every output label this
-/// baton-check mints is `Audience::Public` (there is no per-datum audience source
+/// appa-check mints is `Audience::Public` (there is no per-datum audience source
 /// in the wire format yet), and against a public context a
 /// recipients-within-context rule could only ever reject the empty recipient
 /// set — a knob that cannot do what its name promises. Audience arrives
@@ -208,7 +208,7 @@ fn approve_effect_growth(
     _trajectory: &TrajectoryView<'_>,
 ) -> Option<Ruling> {
     acquires_effects(grant).then(|| Ruling::Approve {
-        reason: "legacy baton-check treats declared effects as ordinary trajectory state".to_owned(),
+        reason: "legacy appa-check treats declared effects as ordinary trajectory state".to_owned(),
     })
 }
 
@@ -280,7 +280,7 @@ impl From<&ContractIn> for ToolContract {
             name: ToolName::new(&contract.tool),
             // `RequiresIn`'s JSON wire uses `#[serde(default)]`, so an absent
             // `requires` and an explicit `requires: {}` are indistinguishable
-            // on this wire — baton-check always builds known requirements
+            // on this wire — appa-check always builds known requirements
             // here; honoring absent-means-`None` over JSON is out of scope.
             requires: Some(Requirements {
                 trust: contract.requires.trust.map(KnownTrust::from),
@@ -302,7 +302,7 @@ fn effect_set(effects: &[EffectIn]) -> BTreeSet<Effect> {
     effects.iter().copied().map(Effect::from).collect()
 }
 
-/// A protocol violation: caller and baton-check disagree about the episode. Never
+/// A protocol violation: caller and appa-check disagree about the episode. Never
 /// a decision — exit 2 upstream.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ProtocolError {
@@ -318,7 +318,7 @@ pub enum ProtocolError {
         index: usize,
         tool: String,
     },
-    /// `record_result` rejected a permit during replay — a baton-check bug, since
+    /// `record_result` rejected a permit during replay — an appa-check bug, since
     /// nothing else touches the trajectory between evaluate and record.
     ReplayRejected {
         index: usize,
@@ -392,10 +392,10 @@ fn configure_authorities(engine: &mut PolicyEngine, unknown_policy: UnknownPolic
 
     for authority in authorities {
         engine.register_authority(authority).map_err(|refused| match refused {
-            baton_core::RegistrationRefused::Duplicate(duplicate) => ProtocolError::DuplicateAuthority {
+            appa_core::RegistrationRefused::Duplicate(duplicate) => ProtocolError::DuplicateAuthority {
                 authority: duplicate.id,
             },
-            baton_core::RegistrationRefused::Frozen(_) => {
+            appa_core::RegistrationRefused::Frozen(_) => {
                 unreachable!("authorities are registered before any evaluation")
             }
         })?;
@@ -487,7 +487,7 @@ fn blocked_outcome(reason: &BlockReason, violations: &[Violation]) -> CallOutcom
 
 fn dispatch(
     trajectory: &mut Trajectory,
-    token: baton_core::ExecutionToken,
+    token: appa_core::ExecutionToken,
     audited: bool,
 ) -> Result<CallOutcome, CallError> {
     let (_, receipt) = trajectory.release(token).map_err(|_| CallError::TokenRejected)?;
@@ -582,10 +582,10 @@ pub fn run(input: &Input) -> Result<Output, ProtocolError> {
     configure_authorities(&mut engine, input.unknown_policy)?;
     for contract in &input.contracts {
         engine.register(contract.into()).map_err(|refused| match refused {
-            baton_core::ContractRefused::Duplicate(duplicate) => ProtocolError::DuplicateContract {
+            appa_core::ContractRefused::Duplicate(duplicate) => ProtocolError::DuplicateContract {
                 tool: duplicate.tool.to_string(),
             },
-            baton_core::ContractRefused::Frozen(_) => {
+            appa_core::ContractRefused::Frozen(_) => {
                 unreachable!("contracts are registered before any evaluation")
             }
         })?;

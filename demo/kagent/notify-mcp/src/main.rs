@@ -10,7 +10,7 @@
 //!   can bound who reads an arbitrary URL, so the policy declares this sink
 //!   public — only a publicly readable flow may use it.
 //!
-//! No policy lives here — baton-proxy decides whether a call may run; this
+//! No policy lives here — appa-proxy decides whether a call may run; this
 //! server just delivers what it is handed.
 
 use std::net::SocketAddr;

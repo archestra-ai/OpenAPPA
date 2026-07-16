@@ -1,6 +1,6 @@
-# baton
+# OpenAPPA
 
-Prototype of an ADT-based information-flow policy engine for LLM agents.
+OpenAPPA is an ADT-based information-flow policy engine for LLM agents.
 Instead of filtering prompts and outputs, it asks: *can this value, derived
 from these sources, legally flow into this sink?*
 
@@ -54,37 +54,37 @@ the one canonical request from the exact checked tree, a receipt must close
 the action — and the assistant response is a mediated emission sink like any
 tool: caller-labeled assistant ingress does not typecheck.
 
-`docs/spec.md` is the normative spec; `baton-authority-model-design.md` is
-the plan-of-record; `baton-declassifier-design.md` is the foundation
+`docs/spec.md` is the normative spec; `docs/authority-model-design.md` is
+the plan-of-record; `docs/declassifier-design.md` is the foundation
 rationale it builds on; concepts and semantics are documented in
-`baton-core/src/lib.rs`.
+`core/src/lib.rs`.
 
 ```sh
-cargo test -p baton-core
+cargo test -p appa-core
 
-baton-demo/run-gateway-demo.sh   # the end-to-end demo (needs OPENROUTER_API_KEY)
+./demo/gateway/run-gateway-demo.sh   # the end-to-end demo (needs OPENROUTER_API_KEY)
 ```
 
-`agentdojo-harness/` evaluates the engine against the AgentDojo
-prompt-injection benchmark (with `baton-check`, a stateless JSON oracle over
-baton-core); see its README.
+`harness-agentdojo/` evaluates the engine against the AgentDojo
+prompt-injection benchmark (with `appa-check`, a stateless JSON oracle over
+appa-core); see its README.
 
-`baton-proxy/` puts the engine on the **inference layer**: an OpenAI-compatible
+`proxy/` puts the engine on the **inference layer**: an OpenAI-compatible
 HTTP proxy that replays the conversation into a trajectory and blocks tool
 calls that fail their contract before the agent sees them, loading contracts
-via `baton-contracts/`, a small crate that translates the declarative policy
-into baton-core `ToolContract`s. See its README.
+via `contracts/`, a small crate that translates the declarative policy
+into appa-core `ToolContract`s. See its README.
 
-`baton-demo/` is the ad-hoc demo harness: the **tool-layer gateway**
+`demo/gateway/` is the ad-hoc demo harness: the **tool-layer gateway**
 (`README.md`, the demo above), a real rig agent talking to an MCP server that
 mimics an Archestra-style tool gateway — it serves a scenario's tools from
-TOML, checks every call against baton-core, **soft-blocks** breaches as
+TOML, checks every call against appa-core, **soft-blocks** breaches as
 ordinary tool results the model can act on, escalates to a human through MCP
 elicitation, on approval dispatches the exact canonical request the engine
 checked, and routes the agent's final answer through the reserved
-`baton__respond` tool so only the emission-checked rendering reaches the user.
+`appa__respond` tool so only the emission-checked rendering reaches the user.
 
-`demo/kagent/` wires baton-proxy into a stock [kagent](https://kagent.dev)
+`demo/kagent/` wires appa-proxy into a stock [kagent](https://kagent.dev)
 agent as a pod sidecar: the agent is prompt-injected by a crashlooping pod's
-logs and baton blocks the injected `kubectl delete`, with no changes to the
+logs and OpenAPPA blocks the injected `kubectl delete`, with no changes to the
 agent. `./demo/kagent/run-demo.sh` runs it end-to-end on kind.

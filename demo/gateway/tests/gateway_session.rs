@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use baton_demo::gateway::{ConfigError, GatewayConfig, Outcome, Session};
+use appa_demo::gateway::{ConfigError, GatewayConfig, Outcome, Session};
 
 const SCENARIO_TOOLS: &str = r#"
 [response]
@@ -94,7 +94,7 @@ fn out_of_audience_send_soft_blocks() {
             assert!(!violations.is_empty());
             assert_eq!(
                 recipients,
-                std::collections::BTreeSet::from([baton_core::UserId::new("alex@finance-audit.com")])
+                std::collections::BTreeSet::from([appa_core::UserId::new("alex@finance-audit.com")])
             );
         }
         other => panic!("expected a soft block, got {other:?}"),
@@ -371,7 +371,7 @@ name = "to"
         ),
         Err(ConfigError::Parse(_))
     ));
-    // Unknown field in the policy (surfaces through baton-contracts).
+    // Unknown field in the policy (surfaces through appa-contracts).
     assert!(matches!(
         GatewayConfig::from_toml(SEND_TOOL, "[[tool]]\nname = \"send\"\ntypo = 1"),
         Err(ConfigError::Contracts(_))
@@ -394,7 +394,7 @@ requires = { audience = "$.args.too" }
     // The escalation tool name is reserved in the catalog…
     let reserved = r#"
 [[tool]]
-name = "baton__escalate"
+name = "appa__escalate"
 description = "d"
 result = "r"
 "#;
@@ -404,7 +404,7 @@ result = "r"
     ));
     // …and in the policy, where it wins over the contract-without-tool check.
     assert!(matches!(
-        GatewayConfig::from_toml("", "[[tool]]\nname = \"baton__escalate\"\nrequires = {}"),
+        GatewayConfig::from_toml("", "[[tool]]\nname = \"appa__escalate\"\nrequires = {}"),
         Err(ConfigError::ReservedContractName)
     ));
     // Duplicate simulated tools collide.
@@ -464,18 +464,18 @@ async fn checked_in_config_preserves_the_demo_scenario() {
     // The old dialect defaulted a contract's output to public/trusted; the
     // canonical dialect fails closed on omissions, so the checked-in policy
     // must keep spelling both out.
-    let policy = baton_contracts::Contracts::from_toml(include_str!("../gateway-policy.toml"))
-        .expect("checked-in policy parses");
+    let policy =
+        appa_contracts::Contracts::from_toml(include_str!("../gateway-policy.toml")).expect("checked-in policy parses");
     let send = policy
         .contracts
         .iter()
         .find(|c| c.name.as_str() == "send_email")
         .expect("send_email is contracted");
-    assert_eq!(send.output_label.trust, baton_core::Trust::TRUSTED);
-    assert_eq!(send.output_label.audience, baton_core::Audience::PUBLIC);
+    assert_eq!(send.output_label.trust, appa_core::Trust::TRUSTED);
+    assert_eq!(send.output_label.audience, appa_core::Audience::PUBLIC);
     assert_eq!(
         send.effects,
-        baton_core::Effects::declared([baton_core::Effect::Egress]),
+        appa_core::Effects::declared([appa_core::Effect::Egress]),
         "send_email's egress moved from contract level into output.effects in the migration"
     );
 

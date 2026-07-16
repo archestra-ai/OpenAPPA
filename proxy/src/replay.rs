@@ -1,4 +1,4 @@
-//! Rebuild a baton trajectory from request `messages`, then evaluate each new
+//! Rebuild an OpenAPPA trajectory from request `messages`, then evaluate each new
 //! tool call against it. Stateless: the whole episode is replayed every request.
 //!
 //! The proxy mediates coarsely: it cannot see which values the model actually
@@ -15,7 +15,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use baton_core::{
+use appa_core::{
     ArgumentTree, OpaqueValue, PolicyEngine, Pursuit, RejectedToken, Speaker, ToolName, ToolRequest, Trajectory,
     UnknownValue, UserId, ValueId, Violation,
 };
@@ -252,8 +252,8 @@ impl<'a> Session<'a> {
     /// surface, and a check-scoped lift waived or acknowledged the facts of
     /// this one check.
     fn grant_trail(&self, audit_from: usize) -> Option<String> {
-        use baton_core::AuthorizationScope;
-        use baton_core::audit::AuditEvent;
+        use appa_core::AuthorizationScope;
+        use appa_core::audit::AuditEvent;
         let mut parts = Vec::new();
         for event in &self.trajectory.audit()[audit_from..] {
             if let AuditEvent::AuthorizationApplied {
@@ -284,8 +284,8 @@ impl<'a> Session<'a> {
         self.context_label().audience.to_string()
     }
 
-    fn context_label(&self) -> baton_core::ValueLabel {
-        baton_core::ValueLabel::fold(
+    fn context_label(&self) -> appa_core::ValueLabel {
+        appa_core::ValueLabel::fold(
             self.context
                 .iter()
                 .filter_map(|id| self.trajectory.value(*id).ok())

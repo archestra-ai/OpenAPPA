@@ -1,4 +1,4 @@
-# baton contracts for the AgentDojo `workspace` suite.
+# OpenAPPA contracts for the AgentDojo `workspace` suite.
 #
 # Labels derive from the SOURCE TYPE of a tool, never from whether a given
 # result actually carries an injection (that is the benchmark's ground truth,
@@ -11,7 +11,7 @@
 #   - requires_trust = "trusted": a sink that must not run from a context
 #     tainted by third-party text.
 #   - recipients_arg: which call argument names the people a sink exposes
-#     data to. Carried through to baton-check for the (v2, data-only)
+#     data to. Carried through to appa-check for the (v2, data-only)
 #     audience dimension; unused by the v1 trust-only checks.
 #
 # Every tool of the suite must appear exactly once: under unknown_policy

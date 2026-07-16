@@ -10,7 +10,7 @@
 //!
 //! Run with `cargo run --example recording_to_task`.
 
-use baton_core::{
+use appa_core::{
     ArgumentTree, FlowOutcome, OpaqueValue, PolicyEngine, Speaker, ToolContract, ToolName, ToolRequest, Trajectory,
     UserId, ValueId, ValueLabel,
 };

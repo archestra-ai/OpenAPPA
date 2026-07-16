@@ -1,21 +1,21 @@
-# The agent, its model config, and the baton-proxy sidecar.
+# The agent, its model config, and the appa-proxy sidecar.
 #
 # The agent's OpenAI client is pointed at the sidecar (localhost:8730); the
 # sidecar forwards to OpenRouter, gating each proposed tool call. The agent is
-# unaware baton exists.
+# unaware OpenAPPA exists.
 apiVersion: kagent.dev/v1alpha2
 kind: ModelConfig
 metadata:
-  name: baton-openrouter
+  name: appa-openrouter
   namespace: kagent
 spec:
   provider: OpenAI
   # Pick a current OpenRouter model id (see NOTES.md); overridable at run time.
   model: anthropic/claude-sonnet-4.5
-  apiKeySecret: baton-openrouter
+  apiKeySecret: appa-openrouter
   apiKeySecretKey: OPENROUTER_API_KEY
   openAI:
-    # Point the agent runtime at the in-pod baton-proxy sidecar, not OpenRouter.
+    # Point the agent runtime at the in-pod appa-proxy sidecar, not OpenRouter.
     baseUrl: http://localhost:8730/v1
 ---
 apiVersion: kagent.dev/v1alpha2
@@ -27,7 +27,7 @@ spec:
   type: Declarative
   description: Investigates and remediates Kubernetes workload issues.
   declarative:
-    modelConfig: baton-openrouter
+    modelConfig: appa-openrouter
     a2aConfig: {}
     systemMessage: |
       You are a Kubernetes operations agent. When asked about a problem, use the
@@ -59,15 +59,15 @@ spec:
             - http_post
     deployment:
       extraContainers:
-        - name: baton-proxy
-          image: baton-proxy:poc
+        - name: appa-proxy
+          image: appa-proxy:poc
           imagePullPolicy: IfNotPresent
           env:
             - name: RUST_LOG
               value: info
           args:
             - --policy
-            - /etc/baton/policy.toml
+            - /etc/appa/policy.toml
             - --addr
             - 0.0.0.0:8730
             - --log
@@ -75,10 +75,10 @@ spec:
           ports:
             - containerPort: 8730
           volumeMounts:
-            - name: baton-policy
-              mountPath: /etc/baton
+            - name: appa-policy
+              mountPath: /etc/appa
               readOnly: true
       volumes:
-        - name: baton-policy
+        - name: appa-policy
           configMap:
-            name: baton-policy
+            name: appa-policy

@@ -1,13 +1,13 @@
 [package]
-name = "baton-proxy"
+name = "appa-proxy"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "Inference-layer proxy that blocks tool calls failing their baton contract, over baton-core"
+description = "Inference-layer proxy that blocks tool calls failing their OpenAPPA contract, over appa-core"
 
 [dependencies]
-baton-core = { path = "../core" }
-baton-contracts = { path = "../contracts" }
+appa-core = { path = "../core" }
+appa-contracts = { path = "../contracts" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-std", "net"] }
 axum = "0.8"
 reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "json"] }
@@ -24,5 +24,5 @@ thiserror = "2"
 workspace = true
 
 [[bin]]
-name = "baton-proxy"
+name = "appa-proxy"
 path = "src/bin/proxy.rs"

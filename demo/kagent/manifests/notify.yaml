@@ -2,7 +2,7 @@
 # `notify(message)` POSTs to the fixed internal ops hook (OPS_HOOK_URL), and
 # `http_post(url, message)` POSTs anywhere — plus the RemoteMCPServer CR that
 # makes them available to kagent agents. The tools enforce nothing themselves;
-# baton-proxy gates them via their declared sink audiences (policy.toml).
+# appa-proxy gates them via their declared sink audiences (policy.toml).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -45,7 +45,7 @@ metadata:
   name: notify-tools
   namespace: kagent
 spec:
-  description: Webhook notify tool for the baton demo
+  description: Webhook notify tool for the OpenAPPA demo
   protocol: STREAMABLE_HTTP
   url: http://notify-mcp.kagent:8731/mcp
   timeout: 30s

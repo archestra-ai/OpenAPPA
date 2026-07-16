@@ -1,4 +1,4 @@
-//! # baton-core
+//! # appa-core
 //!
 //! A prototype information-flow policy engine for LLM agent trajectories, in
 //! the language-based IFC tradition (Sabelfeld/Myers): instead of asking "did
@@ -107,13 +107,13 @@ impl fmt::Display for ToolName {
 }
 
 // The crate root re-exports two tiers of the public surface. Everything else
-// stays reachable through its own module (`baton_core::audit::AuditEvent`, …)
+// stays reachable through its own module (`appa_core::audit::AuditEvent`, …)
 // but is deliberately not hoisted here: those types are read off returned
 // values, never constructed by a consumer, so they don't belong in the API
 // namespace a caller builds against.
 
 // ── Core ────────────────────────────────────────────────────────────────
-// The vocabulary you cannot use baton without: build an engine, run a
+// The vocabulary you cannot use OpenAPPA without: build an engine, run a
 // trajectory, evaluate a flow, dispatch it, or handle a block.
 pub use contract::{Requirements, Violation};
 pub use dimension::{Audience, Effect, Effects, KnownTrust, Trust, UserId};

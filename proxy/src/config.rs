@@ -1,7 +1,7 @@
 //! Proxy runtime config: the upstream base URL plus the embedded contracts
-//! document (see `baton-contracts` for the `[contracts.*]` schema). The
+//! document (see `appa-contracts` for the `[contracts.*]` schema). The
 //! prototype's `unknown_policy`/`taint_policy`/`approval_tool` fields are gone:
-//! unknown-handling is authority registration in current baton-core. Only
+//! unknown-handling is authority registration in current appa-core. Only
 //! inline `allow` authorities may be declared; `escalate` (external)
 //! authorities are rejected at load — the proxy has no human channel to serve
 //! them, so a silently-registered one could never rule: every call routed to
@@ -9,8 +9,8 @@
 //! instead of the config failing at startup. Flows no declared authority
 //! covers fail closed.
 
-use baton_contracts::{Contracts, ContractsError};
-use baton_core::AuthorityMode;
+use appa_contracts::{Contracts, ContractsError};
+use appa_core::AuthorityMode;
 use serde::Deserialize;
 
 #[derive(Debug, thiserror::Error)]
@@ -81,7 +81,7 @@ mod tests {
         assert_eq!(p.upstream_base_url, "http://upstream.invalid");
         assert_eq!(
             p.contracts.trajectory_label.audience,
-            baton_core::Audience::readers([baton_core::UserId::new("operator")])
+            appa_core::Audience::readers([appa_core::UserId::new("operator")])
         );
         assert_eq!(p.contracts.contracts.len(), 1);
     }

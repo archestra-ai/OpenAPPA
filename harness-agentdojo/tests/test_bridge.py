@@ -1,15 +1,15 @@
-"""Bridge round-trips against the real baton-check binary."""
+"""Bridge round-trips against the real appa-check binary."""
 
 import pytest
 
-from baton_dojo.bridge import BatonBridge, BatonProtocolError, Call
-from baton_dojo.contracts import load_table
+from appa_dojo.bridge import AppaBridge, AppaProtocolError, Call
+from appa_dojo.contracts import load_table
 
 TABLE = load_table("workspace")
 
 
-def bridge(policy: str = "deny") -> BatonBridge:
-    return BatonBridge(contracts=TABLE.wire_contracts(), unknown_policy=policy)
+def bridge(policy: str = "deny") -> AppaBridge:
+    return AppaBridge(contracts=TABLE.wire_contracts(), unknown_policy=policy)
 
 
 def test_clean_context_permits_sink():
@@ -25,15 +25,15 @@ def test_clean_context_permits_sink():
 def test_blocked_decisions_are_policy_blocks_and_refusals_are_not():
     """Only a genuine `blocked` decision acquires the policy-block sentinel;
     refused/unresolved oracle answers must never count as policy blocks."""
-    from baton_dojo.bridge import BatonDecision
-    from baton_dojo.defense import POLICY_BLOCK_SENTINEL, denial_message
+    from appa_dojo.bridge import AppaDecision
+    from appa_dojo.defense import POLICY_BLOCK_SENTINEL, denial_message
 
-    blocked = BatonDecision(decision="blocked", block_kind="denied_by_authority", detail="d")
+    blocked = AppaDecision(decision="blocked", block_kind="denied_by_authority", detail="d")
     assert denial_message(blocked).startswith(POLICY_BLOCK_SENTINEL)
     assert blocked.blocked and not blocked.permitted
 
-    refused = BatonDecision(decision="refused", refusal_kind="stale_basis", detail="d")
-    unresolved = BatonDecision(decision="unresolved", unresolved_kind="stalled", detail="d")
+    refused = AppaDecision(decision="refused", refusal_kind="stale_basis", detail="d")
+    unresolved = AppaDecision(decision="unresolved", unresolved_kind="stalled", detail="d")
     for decision in (refused, unresolved):
         assert not decision.permitted and not decision.blocked
         assert not denial_message(decision).startswith(POLICY_BLOCK_SENTINEL)
@@ -58,7 +58,7 @@ def test_unregistered_tool_follows_unknown_policy():
 
 
 def test_replaying_a_blocked_call_raises_protocol_error():
-    with pytest.raises(BatonProtocolError):
+    with pytest.raises(AppaProtocolError):
         bridge().check(
             "summarize my emails",
             executed=[

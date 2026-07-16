@@ -1,4 +1,4 @@
-# Transitions and declassifiers in baton: design note
+# Transitions and declassifiers in OpenAPPA: design note
 
 Status: foundation design — fully built, then extended by the authority model
 and finally by the **compact architecture** (two-kind Reduce/Authorize remedy
@@ -7,17 +7,17 @@ mediated sink, complete-search nondominated plan frontiers, and append-only
 event-log trajectory state). The five-kind transition taxonomy and the mutable
 trajectory state this note describes no longer exist in code. Superseded in
 places (marked inline with `> **Superseded.**` blockquotes);
-`baton-authority-model-design.md` is the plan-of-record and `docs/spec.md` the
+`authority-model-design.md` is the plan-of-record and `spec.md` the
 normative spec. The code sketches below are historical: the code is the
 reference.
 
-This revision follows source review of `baton-core`, the platform Dual LLM
+This revision follows source review of `appa-core`, the platform Dual LLM
 implementation, and recent agent IFC work. It makes three scope decisions explicit:
 
-1. Post-hoc sanitization (B2) is in scope, so baton needs value-granular IFC. A fresh
+1. Post-hoc sanitization (B2) is in scope, so OpenAPPA needs value-granular IFC. A fresh
    turn cannot untaint the current whole-trajectory fold.
 2. A human-registered transformer is a trusted primitive at the algebra boundary.
-   baton validates its declared state transition, not whether its implementation
+   OpenAPPA validates its declared state transition, not whether its implementation
    actually removed sensitive content. Implementation robustness belongs to the
    harness.
 3. Remedy planning is generic, but application uses closed typed transition domains.
@@ -40,13 +40,13 @@ different state transitions:
 > since Build 3, raising trust or audience is a *durable* fiat relabel
 > (`EndorseValue` minting a new value under endorsed provenance). A transient
 > waiver covers only prior effects, a confirmation stand-in, and named
-> control-dep release. See `baton-authority-model-design.md` §1.4/§5 Build 3.
+> control-dep release. See `authority-model-design.md` §1.4/§5 Build 3.
 
 The recipient needs the original bytes. An authority accepts the risk for this flow.
 The value and its label do not change; the engine transiently loosens the sink check,
 rechecks, and records the exception.
 
-This is baton's current mechanism. Depending on the dimension, the canonical operation
+This is OpenAPPA's current mechanism. Depending on the dimension, the canonical operation
 is declassification (audience), endorsement (trust), or authorization (effects and
 confirmation).
 
@@ -63,7 +63,7 @@ The source value remains present and keeps `l`. `V'` receives new identity and
 provenance. This supports post-hoc B2 without claiming the earlier raw turn disappeared.
 
 Examples include PII redaction, aggregation, format conversion, and an operator-trusted
-LLM rewrite. baton treats `F` as trusted because an operator registered it. It does not
+LLM rewrite. OpenAPPA treats `F` as trusted because an operator registered it. It does not
 inspect the bytes or prove that `l'` is semantically correct.
 
 ### C. Constrain a pending action
@@ -97,7 +97,7 @@ The common rule is:
 > model this section motivates is what was built. The argument stands as
 > rationale only.
 
-baton currently checks a request against one label folded from every turn:
+OpenAPPA currently checks a request against one label folded from every turn:
 
 - `ToolRequest` has only a tool name and recipients, with no arguments or per-value
   labels (`contract.rs`).
@@ -156,7 +156,7 @@ tool. A detached label sidecar is not sufficient.
 > **Superseded.** Historical sketch. The shipped `ToolRequest` (`request.rs`)
 > carries a control dependency *set* (`BTreeSet<ValueId>`), never a
 > caller-supplied `control: ValueLabel` — this sketch's shape is exactly the
-> relabeling hole `baton-core/CLAUDE.md` forbids.
+> relabeling hole `appa-core/CLAUDE.md` forbids.
 
 ```rust
 struct ToolRequest {
@@ -249,13 +249,13 @@ rendered from that exact checked tree. There is no separate raw model string tha
 returned after the check.
 
 Timing, termination, resource usage, and other covert channels remain outside the PoC
-guarantee. The harness may normalize them, but baton does not model them.
+guarantee. The harness may normalize them, but OpenAPPA does not model them.
 
 ---
 
 ## 4. Labels, effects, and typed deltas
 
-There is no single useful `l' < l` implementation in current baton. Audience, trust,
+There is no single useful `l' < l` implementation in current OpenAPPA. Audience, trust,
 and effects have different fold and adequacy orders, and `Unknown` has dimension-specific
 semantics. Registration must declare and validate a typed delta per dimension.
 
@@ -312,7 +312,7 @@ The product design should later add explicit tool/argument bindings so a globall
 registered transformer is applicable only where policy allows it. That binding is not
 needed to demonstrate the algebra.
 
-Registration establishes an operator trust decision, not content correctness. baton
+Registration establishes an operator trust decision, not content correctness. OpenAPPA
 can enforce:
 
 - the selected transformer was registered;
@@ -321,7 +321,7 @@ can enforce:
 - undeclared dimensions and unrelated state were not changed;
 - the result is bound to the right trajectory revision and plan step.
 
-baton cannot enforce:
+OpenAPPA cannot enforce:
 
 - that PII was actually removed;
 - that an LLM ignored prompt injection;
@@ -329,7 +329,7 @@ baton cannot enforce:
 - that a remote model or prompt remained unchanged behind a mutable alias.
 
 Audit wording must therefore say "admitted under the transition declared by registered
-transformer X/version Y," never "baton verified this content as Public."
+transformer X/version Y," never "OpenAPPA verified this content as Public."
 
 ### Bounded-channel guidance belongs to the harness
 
@@ -428,7 +428,7 @@ record.
 > (Endorse / Waive / Accept / Acknowledge) an authority rules on, and the
 > step composition below exists.
 
-Current baton already product-composes multiple dimensions into one `Grant`; what it
+Current OpenAPPA already product-composes multiple dimensions into one `Grant`; what it
 lacks is composition across independently authorized and state-changing steps.
 
 ### Terminal and remediable blocks are different types
@@ -458,7 +458,7 @@ not part of the PoC algebra.
 > registry and name space, competence-routed on the `ProposedGrant`,
 > inline-first in registration order, abstain falls through. The
 > `PendingApproval` linearity guarantees at the end of this section survive
-> unchanged. See `baton-authority-model-design.md` §1.8/§4 S2.
+> unchanged. See `authority-model-design.md` §1.8/§4 S2.
 
 The current `Authority` trait combines mandate discovery, synchronous execution,
 attribution, and adjudication. It explicitly admits humans, webhooks, and LLM judges,
@@ -552,7 +552,7 @@ Preserved or strengthened:
   and rechecked against the original sink postcondition.
 - A block with no plan remains an explicit terminal outcome.
 
-Not guaranteed by baton:
+Not guaranteed by OpenAPPA:
 
 - semantic correctness or prompt-injection robustness of a registered transformer;
 - timing-, termination-, retry-, or resource-based noninterference;
@@ -564,7 +564,7 @@ Not guaranteed by baton:
 The precise PoC confidentiality claim is:
 
 > Given correct ingress labels, complete mediation, conservative explicit and control
-> dependency propagation, and trusted registered transformers, baton prevents
+> dependency propagation, and trusted registered transformers, OpenAPPA prevents
 > unauthorized value and action flows modulo the transitions and waivers explicitly
 > declared by policy.
 

@@ -1,5 +1,5 @@
-//! `baton-proxy`: an OpenAI chat-completions proxy that blocks tool calls
-//! failing their baton contract. Point a harness's `base_url` at it; a blocked
+//! `appa-proxy`: an OpenAI chat-completions proxy that blocks tool calls
+//! failing their OpenAPPA contract. Point a harness's `base_url` at it; a blocked
 //! call is stripped from the response and never reaches the harness.
 
 use std::fs::OpenOptions;
@@ -9,14 +9,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use appa_proxy::wire::{ChatResponse, RequestView};
+use appa_proxy::{Policy, Session, TurnDecision, rewrite_response};
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use baton_proxy::wire::{ChatResponse, RequestView};
-use baton_proxy::{Policy, Session, TurnDecision, rewrite_response};
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use serde_json::Value;
 use tokio::net::TcpListener;
@@ -25,7 +25,7 @@ use tokio::net::TcpListener;
 const FORWARD_HEADERS: &[&str] = &["http-referer", "x-title", "openai-organization"];
 
 #[derive(Parser)]
-#[command(about = "Inference-layer proxy that blocks tool calls failing their baton contract")]
+#[command(about = "Inference-layer proxy that blocks tool calls failing their OpenAPPA contract")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -36,24 +36,24 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Pretty-print a wire log or trajectory log (defaults to the newest
-    /// wire-logs/model-wire-*.jsonl), highlighting the turns baton rewrote.
+    /// wire-logs/model-wire-*.jsonl), highlighting the turns OpenAPPA rewrote.
     Render { file: Option<PathBuf> },
 }
 
 #[derive(ClapArgs)]
 struct ServeArgs {
     /// Path to the policy file.
-    #[arg(long, env = "BATON_PROXY_POLICY", default_value = "policy.toml")]
+    #[arg(long, env = "APPA_PROXY_POLICY", default_value = "policy.toml")]
     policy: PathBuf,
     /// Address to listen on.
-    #[arg(long, env = "BATON_PROXY_ADDR", default_value = "127.0.0.1:8730")]
+    #[arg(long, env = "APPA_PROXY_ADDR", default_value = "127.0.0.1:8730")]
     addr: String,
     /// Append one JSON line per evaluated tool-call turn to this file.
-    #[arg(long, env = "BATON_PROXY_LOG")]
+    #[arg(long, env = "APPA_PROXY_LOG")]
     log: Option<PathBuf>,
     /// Directory for the raw model-wire log: one timestamped file per run, one
     /// JSON line per turn (request, raw model response, returned response).
-    #[arg(long, env = "BATON_PROXY_WIRE_DIR")]
+    #[arg(long, env = "APPA_PROXY_WIRE_DIR")]
     wire_log_dir: Option<PathBuf>,
 }
 
@@ -124,7 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_state(app);
 
     let listener = TcpListener::bind(&args.addr).await?;
-    tracing::info!(addr = %listener.local_addr()?, "baton-proxy listening");
+    tracing::info!(addr = %listener.local_addr()?, "appa-proxy listening");
     axum::serve(listener, router).await?;
     Ok(())
 }
@@ -206,7 +206,7 @@ async fn handler(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -
         Err(e) => {
             return error(
                 StatusCode::BAD_GATEWAY,
-                format!("upstream returned a response baton-proxy could not inspect: {e}"),
+                format!("upstream returned a response appa-proxy could not inspect: {e}"),
             );
         }
     };
@@ -296,7 +296,7 @@ fn json_bytes(status: StatusCode, body: Vec<u8>) -> Response {
 
 fn error(status: StatusCode, message: String) -> Response {
     tracing::warn!(%status, message, "returning error");
-    let body = serde_json::json!({ "error": { "message": message, "type": "baton_proxy_error" } });
+    let body = serde_json::json!({ "error": { "message": message, "type": "appa_proxy_error" } });
     (status, [(header::CONTENT_TYPE, "application/json")], body.to_string()).into_response()
 }
 
@@ -380,7 +380,7 @@ fn render_turn(row: &Value, p: &Paint) {
                 "  {} {}  {}",
                 p.dim("proxy sends"),
                 p.yellow(s),
-                p.wrap("⟵ REWRITTEN by baton", "1;33")
+                p.wrap("⟵ REWRITTEN by OpenAPPA", "1;33")
             );
         }
     } else {

@@ -1,6 +1,6 @@
-# Baton Spec v0
+# OpenAPPA Spec v0
 
-Baton is an information-flow policy engine for AI agents. It sits between the agent and its tools: every proposed flow — a tool call or an assistant message about to leave the mediation boundary — is checked before it happens. It tracks where information came from and decides whether it may flow into tools and external recipients.
+OpenAPPA is an information-flow policy engine for AI agents. It sits between the agent and its tools: every proposed flow — a tool call or an assistant message about to leave the mediation boundary — is checked before it happens. It tracks where information came from and decides whether it may flow into tools and external recipients.
 
 # Glossary
 
@@ -28,16 +28,16 @@ Baton is an information-flow policy engine for AI agents. It sits between the ag
 
 **Transformer** - a registered function that derives a new value from an existing one under a declared, typically less restrictive label. The source value keeps its label; registration is a trust decision about the transformer, not a verification of its outputs.
 
-**Remedy plan** - Baton's prediction for unblocking a soft-blocked flow: an ordered, non-empty list of remedies of exactly two kinds —
+**Remedy plan** - OpenAPPA's prediction for unblocking a soft-blocked flow: an ordered, non-empty list of remedies of exactly two kinds —
 
 - **Reduce**: change the proposed flow so it fits the current authorization context. Typed targets: derive a value through a registered transformer, or narrow the pending action through a registered tool-identity transition (verified never wider).
 - **Authorize**: grant the irreducible residual — an exact metadata delta at an exact scope: a durable derived value (minting a new value under the raised label; the source is never relabeled), one pending action (an acquired effect growth), or one policy check (a check-transient lift or an on-the-record acknowledgment of an unprovable fact).
 
 A plan identifies the authorities competent for each Authorize step (prediction metadata; routing is resolved live at application). A plan is a prediction, never a permit.
 
-# How Baton works
+# How OpenAPPA works
 
-Baton does two things, and keeps them strictly separate:
+OpenAPPA does two things, and keeps them strictly separate:
 
 **Propagation.** Every admitted value's label is computed at admission: caller-labeled only at ingress (the explicit trust boundary), the conservative fold of its dependency sets everywhere else. A flow's label is the causal projection `combine(L_args, L_control)` over exactly the values it depends on. Per dimension:
 
@@ -65,7 +65,7 @@ Checks are based on Label algebra only — dimension propagation, adequacy, and 
 flowchart LR
     Harness --> Proxy
     subgraph Proxy
-        subgraph Engine["Baton Engine"]
+        subgraph Engine["OpenAPPA Engine"]
             Contract["Tool Contract"]
         end
     end
@@ -80,15 +80,15 @@ flowchart LR
     class Contract green
 ```
 
-- **Blue** — NOT a part of baton itself. We provide a spec how to implement it and maybe an example implementation.
-- **Yellow** — Baton itself.
-- **Green** — Interface to extend/configure baton. We provide several examples.
+- **Blue** — NOT a part of OpenAPPA itself. We provide a spec how to implement it and maybe an example implementation.
+- **Yellow** — OpenAPPA itself.
+- **Green** — Interface to extend/configure OpenAPPA. We provide several examples.
 
 # Spec
 
 ## How to integrate with your agent
 
-Baton runs inside a proxy between the agent and its inference provider, or inside a tool gateway between the agent and its tools. The agent talks to the mediator as if it were the upstream API.
+OpenAPPA runs inside a proxy between the agent and its inference provider, or inside a tool gateway between the agent and its tools. The agent talks to the mediator as if it were the upstream API.
 
 On each round-trip, the mediator:
 
@@ -103,9 +103,9 @@ On each round-trip, the mediator:
 
 The agent executes only tool calls that arrive in an inference response, and the user sees only renderings the emission sink permitted. A blocked flow never arrives, so it never happens.
 
-## How to implement Baton
+## How to implement OpenAPPA
 
-Baton is a type-first engine: everything is inferred and enforced through the type system. Permits (`ExecutionToken`, step capabilities, pending approvals) are linear values — non-cloneable, serialize-only, no public constructor, bound to trajectory + basis (+ flow/plan/step), spent on use. The `DispatchReceipt` is linear too but binds to the action's released lifecycle rather than the basis: it closes a dispatch that already happened, so an unrelated later fact (a checked emission, a new value) must not wedge the released action — permits authorize future state changes and stale; receipts record past ones and do not. Deserializing one would forge linearity, so none exists. Remedy plans returned for a soft block are the **irreducible nondominated frontier**: no plan has a removable step (removing any step breaks the predicted unlock), no plan is dominated by another that predicts the same resulting flow with a smaller authorization ask (typed partial orders per delta coordinate and scope; different asks are incomparable and both retained), and the serialization order is deterministic. Control-release rescue is size-first: the frontier carries every incomparable release of the smallest successful cardinality; a larger inclusion-minimal release with no successful proper subset is not enumerated (that would forfeit the early exit), while a fruitless search still sweeps the full lattice — exactly the Terminal proof. The consumer — model, harness, or human — picks from the frontier; core orders plans, not authorities.
+OpenAPPA is a type-first engine: everything is inferred and enforced through the type system. Permits (`ExecutionToken`, step capabilities, pending approvals) are linear values — non-cloneable, serialize-only, no public constructor, bound to trajectory + basis (+ flow/plan/step), spent on use. The `DispatchReceipt` is linear too but binds to the action's released lifecycle rather than the basis: it closes a dispatch that already happened, so an unrelated later fact (a checked emission, a new value) must not wedge the released action — permits authorize future state changes and stale; receipts record past ones and do not. Deserializing one would forge linearity, so none exists. Remedy plans returned for a soft block are the **irreducible nondominated frontier**: no plan has a removable step (removing any step breaks the predicted unlock), no plan is dominated by another that predicts the same resulting flow with a smaller authorization ask (typed partial orders per delta coordinate and scope; different asks are incomparable and both retained), and the serialization order is deterministic. Control-release rescue is size-first: the frontier carries every incomparable release of the smallest successful cardinality; a larger inclusion-minimal release with no successful proper subset is not enumerated (that would forfeit the early exit), while a fruitless search still sweeps the full lattice — exactly the Terminal proof. The consumer — model, harness, or human — picks from the frontier; core orders plans, not authorities.
 
 ## ALGEBRA
 

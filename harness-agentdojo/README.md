@@ -1,21 +1,21 @@
-# agentdojo-harness
+# AgentDojo Harness
 
-Runs the [baton-core](../baton-core) information-flow policy engine as a
+Runs the [appa-core](../core) information-flow policy engine as a
 tool-call-veto defense inside [AgentDojo](https://github.com/ethz-spylab/agentdojo),
-the prompt-injection benchmark. Baton never reads the injected text: it tracks
+the prompt-injection benchmark. OpenAPPA never reads the injected text: it tracks
 which sources a conversation's context came from (a per-turn label fold) and
 blocks tool calls whose contract the folded context cannot satisfy.
 
 ## Layout
 
-- `../baton-check` — stateless Rust policy check over baton-core: one JSON
+- `../check` — stateless Rust policy check over appa-core: one JSON
   request (contracts + episode so far + proposed call) in on stdin, one
   decision out on stdout. Built automatically on first use
-  (`cargo build --release`), or point `BATON_CHECK_BIN` at a binary.
-- `src/baton_dojo/defense.py` — `BatonToolsExecutor`, a drop-in replacement
-  for AgentDojo's `ToolsExecutor`: consults baton-check before executing each
+  (`cargo build --release`), or point `APPA_CHECK_BIN` at a binary.
+- `src/appa_dojo/defense.py` — `AppaToolsExecutor`, a drop-in replacement
+  for AgentDojo's `ToolsExecutor`: consults appa-check before executing each
   tool call the LLM emits; blocked calls come back on the normal tool-error
-  channel (`Blocked by baton policy: …`) and are never executed. Stateless —
+  channel (`Blocked by OpenAPPA policy: …`) and are never executed. Stateless —
   the episode is re-derived from the message history on every call.
 - `contracts/workspace.toml` — the policy as data: every suite tool labeled by
   its *source type* (never by whether a given result actually carries an
@@ -29,12 +29,12 @@ blocks tool calls whose contract the folded context cannot satisfy.
 uv sync
 
 # The benchmark, via OpenRouter (key from $OPENROUTER_API_KEY or
-# ../../.env). Compare a defended and an undefended pipeline:
-uv run baton-dojo bench --model openai/gpt-4o-mini-2024-07-18 --defense baton
-uv run baton-dojo bench --model openai/gpt-4o-mini-2024-07-18 --defense none
+# ../.env). Compare a defended and an undefended pipeline:
+uv run appa-dojo bench --model openai/gpt-4o-mini-2024-07-18 --defense appa
+uv run appa-dojo bench --model openai/gpt-4o-mini-2024-07-18 --defense none
 
 # Narrow a run: subsets, attack, policy, log directory.
-uv run baton-dojo bench --model openai/gpt-4o-mini-2024-07-18 \
+uv run appa-dojo bench --model openai/gpt-4o-mini-2024-07-18 \
   --user-tasks user_task_0 user_task_13 --injection-tasks injection_task_0 \
   --attack important_instructions --unknown-policy allow_with_audit --logdir runs
 ```
@@ -57,14 +57,14 @@ different cells of the grid, cached cells are skipped, and a killed run just
 resumes where it stopped.
 
 ```sh
-# build baton-check once and pin it, so the shards don't each rebuild it
-( cd ../baton-check && cargo build --release )
-export BATON_CHECK_BIN="$PWD/../../target/release/baton-check"
+# build appa-check once and pin it, so the shards don't each rebuild it
+( cd ../check && cargo build --release )
+export APPA_CHECK_BIN="$PWD/../target/release/appa-check"
 
 model=openai/gpt-4o-mini-2024-07-18
 for lo in 0 10 20 30; do                       # 4 shards of 10 user tasks each
   tasks=$(seq $lo $((lo + 9)) | sed 's/^/user_task_/')
-  uv run baton-dojo bench --model "$model" --defense baton \
+  uv run appa-dojo bench --model "$model" --defense appa \
     --user-tasks $tasks --logdir runs > "runs/shard_$lo.log" 2>&1 &
 done
 wait
@@ -73,7 +73,7 @@ wait
 Each shard prints only its own slice. To get whole-suite numbers, run one
 plain `bench` over all tasks afterwards — every episode is cached, so it just
 reads the grid and prints the totals. (Run the loop again with `--defense none`
-for the undefended baseline; those shards spawn no baton-check.)
+for the undefended baseline; those shards spawn no appa-check.)
 
 ## The trust-only limitation
 

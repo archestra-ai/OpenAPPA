@@ -1,13 +1,13 @@
-"""Real LLM benchmark: AgentDojo's runners with the baton defense in the loop."""
+"""Real LLM benchmark: AgentDojo's runners with the OpenAPPA defense in the loop."""
 
 import json
 from pathlib import Path
 
 from agentdojo.task_suite.load_suites import get_suite
 
-from baton_dojo.contracts import load_table
-from baton_dojo.defense import POLICY_BLOCK_SENTINEL
-from baton_dojo.pipeline import build_pipeline
+from appa_dojo.contracts import load_table
+from appa_dojo.defense import POLICY_BLOCK_SENTINEL
+from appa_dojo.pipeline import build_pipeline
 
 
 def mean(values) -> float | None:
@@ -65,7 +65,7 @@ def run_bench(
     import agentdojo.attacks  # noqa: F401
     from agentdojo.attacks.attack_registry import load_attack
 
-    from baton_dojo import _agentdojo_compat
+    from appa_dojo import _agentdojo_compat
 
     _agentdojo_compat.apply()
     from agentdojo.benchmark import (

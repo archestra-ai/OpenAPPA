@@ -1,7 +1,7 @@
 //! Plumbing for the demo agent (`bin/gateway_agent.rs`): the
 //! terminal-prompting MCP elicitation handler and OpenRouter key resolution.
 //!
-//! Deliberately NOT part of the `baton_demo` library — demo scaffolding must
+//! Deliberately NOT part of the `appa_demo` library — demo scaffolding must
 //! not sit in its API. The demo bin includes this file directly with
 //! `#[path = "../demo_support.rs"] mod demo_support;`.
 
@@ -77,7 +77,7 @@ pub fn clean_key(raw: &str) -> String {
     t.to_string()
 }
 
-/// Read `OPENROUTER_API_KEY` from `ai-labs/.env` (two levels up from this crate),
+/// Read `OPENROUTER_API_KEY` from the repository-root `.env` (two levels up from this crate),
 /// the same file the AgentDojo harness uses. Returns `None` if absent.
 pub fn key_from_env_file() -> Option<String> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env");

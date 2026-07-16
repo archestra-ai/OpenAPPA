@@ -2,10 +2,10 @@
 //!
 //! The send crosses the audience boundary (the auditor is not an internal reader),
 //! but a mandated authority declassifies it, so the gate permits it with no utility
-//! cost. Utility-only — there is no attacker; it measures whether baton lets the
+//! cost. Utility-only — there is no attacker; it measures whether OpenAPPA lets the
 //! legitimate, authorized flow through.
 
-use baton_core::{
+use appa_core::{
     ArgumentSchema, AudienceRule, Authority, AuthorityMandate, Authorization, Effect, Effects, Requirements, Ruling,
     ToolContract, ToolName, TrajectoryView, UserId, ValueLabel, Violation,
 };
@@ -14,7 +14,7 @@ use serde_json::json;
 
 use super::{ALICE, BOB, str_arg};
 use crate::error::DojoError;
-use crate::policy::BatonGate;
+use crate::policy::AppaGate;
 use crate::suite::Case;
 use crate::tool::Toolset;
 
@@ -82,8 +82,8 @@ fn seed() -> Invoices {
     }
 }
 
-fn gate() -> Result<BatonGate, DojoError> {
-    BatonGate::builder()
+fn gate() -> Result<AppaGate, DojoError> {
+    AppaGate::builder()
         .conversation_readers([UserId::new(ALICE), UserId::new(BOB)])
         .authority(finance_approver())
         .contract(ToolContract::source(

@@ -1,7 +1,7 @@
 //! Read this quarter's invoices from the internal system (readable only by the
 //! finance team), then e-mail the report to an *external auditor* who is **not**
 //! a reader of that data. The send crosses the audience boundary and is the
-//! first egress this turn — so baton routes it to a mandated sign-off that
+//! first egress this turn — so OpenAPPA routes it to a mandated sign-off that
 //! *declassifies* it (endorses the auditor in) and *accepts* the egress, leaving
 //! an audit record, rather than letting it out silently.
 //!
@@ -11,7 +11,7 @@
 //!
 //! Run with `cargo run --example external_auditor`.
 
-use baton_core::{
+use appa_core::{
     ArgumentTree, Authority, AuthorityMandate, Authorization, FlowOutcome, OpaqueValue, PolicyEngine, Pursuit, Ruling,
     Speaker, ToolContract, ToolName, ToolRequest, Trajectory, TrajectoryView, UserId, ValueId, ValueLabel, Violation,
 };

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the whole baton-gateway demo: gateway + agent, one terminal.
+# Run the whole appa-gateway demo: gateway + agent, one terminal.
 #
 # Works from any checkout or git worktree — all paths derive from this script's
 # location. A leading -v/-vv is given to the gateway (engine decision path /
@@ -15,7 +15,7 @@ TARGET_DIR="$CRATE_DIR/target"
 cd "$CRATE_DIR"
 
 GATEWAY_ADDR="127.0.0.1:8732"
-DECISIONS_LOG=/tmp/baton-gateway-decisions.jsonl
+DECISIONS_LOG=/tmp/appa-gateway-decisions.jsonl
 
 GATEWAY_FLAGS=()
 if [[ "${1:-}" == "-v" || "${1:-}" == "-vv" ]]; then
@@ -24,8 +24,8 @@ if [[ "${1:-}" == "-v" || "${1:-}" == "-vv" ]]; then
 fi
 
 # --- resolve the OpenRouter key -------------------------------------------------
-# In order: the environment, this checkout's ai-labs/.env, then the main
-# checkout's ai-labs/.env (a linked worktree does not carry untracked files).
+# In order: the environment, this checkout's root .env, then the main
+# checkout's root .env (a linked worktree does not carry untracked files).
 read_env_key() {
   [[ -f "$1" ]] || return 1
   local val
@@ -43,7 +43,7 @@ if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
   [[ -n "$key" ]] && export OPENROUTER_API_KEY="$key"
 fi
 if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
-  echo "no OPENROUTER_API_KEY: set it, or add it to ai-labs/.env" >&2
+  echo "no OPENROUTER_API_KEY: set it, or add it to the repository-root .env" >&2
   exit 1
 fi
 
@@ -57,8 +57,8 @@ cleanup() { for p in "${pids[@]:-}"; do kill "$p" 2>/dev/null || true; done; }
 trap cleanup EXIT INT TERM
 
 : > "$DECISIONS_LOG"  # fresh per run
-echo "starting baton-gateway ($GATEWAY_ADDR)…"
-"$TARGET_DIR/debug/baton-gateway" --addr "$GATEWAY_ADDR" --log "$DECISIONS_LOG" ${GATEWAY_FLAGS[@]+"${GATEWAY_FLAGS[@]}"} &
+echo "starting appa-gateway ($GATEWAY_ADDR)…"
+"$TARGET_DIR/debug/appa-gateway" --addr "$GATEWAY_ADDR" --log "$DECISIONS_LOG" ${GATEWAY_FLAGS[@]+"${GATEWAY_FLAGS[@]}"} &
 pids+=($!)
 
 wait_port() {
@@ -75,7 +75,7 @@ wait_port "$GATEWAY_ADDR"
 # --- run the agent (foreground: answer y/n at the approval prompt) ---------------
 echo "running demo — answer y/n when the approval prompt appears."
 echo
-"$TARGET_DIR/debug/baton-gateway-agent" "$@"
+"$TARGET_DIR/debug/appa-gateway-agent" "$@"
 
 echo
 echo "decision log (one JSON line per decision): $DECISIONS_LOG"

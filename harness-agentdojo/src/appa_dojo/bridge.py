@@ -1,7 +1,7 @@
-"""Subprocess bridge to baton-check.
+"""Subprocess bridge to appa-check.
 
 Stateless by design: every check ships the whole episode (user prompt +
-executed calls) and baton-check rebuilds the trajectory from scratch, so no
+executed calls) and appa-check rebuilds the trajectory from scratch, so no
 permits or trajectories ever live across the process boundary.
 """
 
@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-BATON_CHECK_DIR = _REPO_ROOT / "check"
+APPA_CHECK_DIR = _REPO_ROOT / "check"
 REPO_TARGET_DIR = _REPO_ROOT / "target"
 
 UNKNOWN_POLICIES = ("deny", "allow_with_audit", "escalate")
@@ -19,8 +19,8 @@ UNKNOWN_POLICIES = ("deny", "allow_with_audit", "escalate")
 _binary_cache: Path | None = None
 
 
-class BatonProtocolError(RuntimeError):
-    """baton-check rejected the request (exit 2): caller and baton-check disagree."""
+class AppaProtocolError(RuntimeError):
+    """appa-check rejected the request (exit 2): caller and appa-check disagree."""
 
 
 @dataclass(frozen=True)
@@ -33,7 +33,7 @@ class Call:
 
 
 @dataclass(frozen=True)
-class BatonDecision:
+class AppaDecision:
     """One oracle answer. `decision` mirrors the wire: "permitted" |
     "blocked" (a terminal policy outcome) | "refused" (an invalid/stale/
     conflicting proposal — no policy judgment) | "unresolved" (a
@@ -56,33 +56,33 @@ class BatonDecision:
 
 
 def resolve_binary() -> Path:
-    """`$BATON_CHECK_BIN` if set, else build the sibling crate once."""
+    """`$APPA_CHECK_BIN` if set, else build the sibling crate once."""
     global _binary_cache
     if _binary_cache is not None:
         return _binary_cache
     import os
 
-    override = os.environ.get("BATON_CHECK_BIN")
+    override = os.environ.get("APPA_CHECK_BIN")
     if override:
         path = Path(override)
         if not path.is_file():
-            raise FileNotFoundError(f"BATON_CHECK_BIN={override} does not exist")
+            raise FileNotFoundError(f"APPA_CHECK_BIN={override} does not exist")
         _binary_cache = path
         return path
 
     subprocess.run(
         ["cargo", "build", "--release", "--quiet"],
-        cwd=BATON_CHECK_DIR,
+        cwd=APPA_CHECK_DIR,
         check=True,
     )
-    path = REPO_TARGET_DIR / "release" / "baton-check"
+    path = REPO_TARGET_DIR / "release" / "appa-check"
     if not path.is_file():
         raise FileNotFoundError(f"cargo build succeeded but {path} is missing")
     _binary_cache = path
     return path
 
 
-class BatonBridge:
+class AppaBridge:
     def __init__(
         self,
         contracts: list[dict],
@@ -95,7 +95,7 @@ class BatonBridge:
         self.unknown_policy = unknown_policy
         self.taint_policy = taint_policy
 
-    def check(self, user_prompt: str, executed: list[Call], proposed: Call) -> BatonDecision:
+    def check(self, user_prompt: str, executed: list[Call], proposed: Call) -> AppaDecision:
         request = {
             "unknown_policy": self.unknown_policy,
             "taint_policy": self.taint_policy,
@@ -111,32 +111,32 @@ class BatonBridge:
             text=True,
         )
         if result.returncode == 2:
-            raise BatonProtocolError(json.loads(result.stdout)["error"])
+            raise AppaProtocolError(json.loads(result.stdout)["error"])
         if result.returncode != 0:
             raise RuntimeError(
-                f"baton-check exited {result.returncode}: {result.stderr.strip()}"
+                f"appa-check exited {result.returncode}: {result.stderr.strip()}"
             )
         output = json.loads(result.stdout)
         match output["decision"]:
             case "permitted":
-                return BatonDecision(decision="permitted", audited=output["audited"])
+                return AppaDecision(decision="permitted", audited=output["audited"])
             case "blocked":
-                return BatonDecision(
+                return AppaDecision(
                     decision="blocked",
                     block_kind=output["block_kind"],
                     detail=output["detail"],
                 )
             case "refused":
-                return BatonDecision(
+                return AppaDecision(
                     decision="refused",
                     refusal_kind=output["refusal_kind"],
                     detail=output["detail"],
                 )
             case "unresolved":
-                return BatonDecision(
+                return AppaDecision(
                     decision="unresolved",
                     unresolved_kind=output["unresolved_kind"],
                     detail=output["detail"],
                 )
             case other:
-                raise BatonProtocolError(f"unknown decision {other!r}")
+                raise AppaProtocolError(f"unknown decision {other!r}")

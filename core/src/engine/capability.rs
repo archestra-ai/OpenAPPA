@@ -82,7 +82,7 @@ impl ToolContract {
 /// use:
 ///
 /// ```compile_fail
-/// fn release_twice(mut trajectory: baton_core::Trajectory, token: baton_core::ExecutionToken) {
+/// fn release_twice(mut trajectory: appa_core::Trajectory, token: appa_core::ExecutionToken) {
 ///     let _ = trajectory.release(token);
 ///     let _ = trajectory.release(token);
 /// }

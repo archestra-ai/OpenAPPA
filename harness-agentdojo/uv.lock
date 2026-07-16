@@ -69,7 +69,7 @@ wheels = [
 ]
 
 [[package]]
-name = "baton-dojo"
+name = "appa-dojo"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

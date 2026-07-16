@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use baton_core::{
+use appa_core::{
     ArgumentName, ArgumentSchema, ArgumentTree, AttentionRule, Audience, AudienceRule, Effects, KnownTrust,
     OpaqueValue, PolicyEngine, Requirements, Speaker, ToolContract, ToolName, ToolRequest, Trajectory, Trust, UserId,
     ValueId, ValueLabel,

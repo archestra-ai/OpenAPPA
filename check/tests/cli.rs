@@ -4,7 +4,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 fn run_binary(stdin: &str) -> (i32, serde_json::Value) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_baton-check"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_appa-check"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

@@ -18,7 +18,7 @@
 //! the registered capability space.
 //!
 //! ```
-//! use baton_core::engine::{
+//! use appa_core::engine::{
 //!     BlockReason, CanonicalRequest, DispatchReceipt, DuplicateContract, Emitted, EngineId, ExecutionToken,
 //!     FlowOutcome, FlowPermit, FlowRefusal, PolicyEngine, RejectedToken, ResponsePolicy, StepCapability,
 //!     StepOutcome, StepRefused, ToolContract,

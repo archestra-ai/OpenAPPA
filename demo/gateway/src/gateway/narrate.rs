@@ -1,5 +1,5 @@
 //! Console narration and the JSONL decision log — the gateway's devex layer.
-//! One compact colored line per decision on stderr (baton-core's own
+//! One compact colored line per decision on stderr (appa-core's own
 //! reasoning streams there too, at `-v`/`-vv`); one JSON object per decision
 //! in the optional `--log` file: `ts_ms`, `tool`, `recipients`, `outcome`,
 //! `reason`.
@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use baton_core::UserId;
+use appa_core::UserId;
 use serde::Serialize;
 
 use crate::gateway::session::Outcome;
@@ -140,9 +140,9 @@ impl DecisionLog {
         let empty = BTreeSet::new();
         let (tool, recipients, kind, reason) = match outcome {
             Outcome::Executed { tool, .. } => (tool.to_string(), &empty, "permitted", String::new()),
-            Outcome::Responded { .. } => ("baton__respond".to_owned(), &empty, "responded", String::new()),
+            Outcome::Responded { .. } => ("appa__respond".to_owned(), &empty, "responded", String::new()),
             Outcome::ResponseBlocked { reason, .. } => {
-                ("baton__respond".to_owned(), &empty, "response_blocked", reason.clone())
+                ("appa__respond".to_owned(), &empty, "response_blocked", reason.clone())
             }
             Outcome::SoftBlocked {
                 tool,
@@ -155,7 +155,7 @@ impl DecisionLog {
             Outcome::EscalationUnavailable { tool } => {
                 (tool.to_string(), &empty, "escalation_unavailable", String::new())
             }
-            Outcome::NothingPending => ("baton__escalate".to_owned(), &empty, "nothing_pending", String::new()),
+            Outcome::NothingPending => ("appa__escalate".to_owned(), &empty, "nothing_pending", String::new()),
             Outcome::RemedyStalled { tool, cause, .. } => (tool.to_string(), &empty, "stalled", format!("{cause:?}")),
             Outcome::ExecutorFailed { tool, reason } => (tool.to_string(), &empty, "executor_failed", reason.clone()),
             Outcome::BadArguments { tool, reason } => (tool.to_string(), &empty, "bad_arguments", reason.clone()),
@@ -180,6 +180,6 @@ impl DecisionLog {
     }
 }
 
-fn join(violations: &[baton_core::Violation]) -> String {
+fn join(violations: &[appa_core::Violation]) -> String {
     violations.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("; ")
 }

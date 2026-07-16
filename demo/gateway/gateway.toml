@@ -9,7 +9,7 @@
 
 # Who reads this conversation: the agent's final answer is checked at the
 # response sink against this audience, and only the permitted rendering is
-# delivered (via the reserved `baton__respond` tool). The contracts and
+# delivered (via the reserved `appa__respond` tool). The contracts and
 # authorities live in the policy file (`gateway-policy.toml`); the response
 # sink is neither, so it stays here with the tool catalog.
 [response]

@@ -1,4 +1,4 @@
-"""Assemble AgentDojo pipelines, with or without the baton defense."""
+"""Assemble AgentDojo pipelines, with or without the OpenAPPA defense."""
 
 import os
 from pathlib import Path
@@ -14,15 +14,15 @@ from agentdojo.agent_pipeline import (
 )
 from agentdojo.agent_pipeline.agent_pipeline import load_system_message
 
-from baton_dojo.contracts import ContractTable
-from baton_dojo.defense import BatonToolsExecutor
+from appa_dojo.contracts import ContractTable
+from appa_dojo.defense import AppaToolsExecutor
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 REPO_ENV = Path(__file__).resolve().parents[3] / ".env"
 
 
 def openrouter_api_key() -> str:
-    """$OPENROUTER_API_KEY, falling back to the ai-labs/.env file."""
+    """$OPENROUTER_API_KEY, falling back to the repository-root .env file."""
     key = os.environ.get("OPENROUTER_API_KEY")
     if key:
         return key
@@ -49,14 +49,14 @@ def build_pipeline(
     taint_policy: str = "allow",
 ) -> AgentPipeline:
     """The stock pipeline shape with the executor swapped per `defense`."""
-    if defense == "baton":
-        executor = BatonToolsExecutor(table, unknown_policy, taint_policy)
-        name = f"{model.replace('/', '_')}-baton-{unknown_policy}"
+    if defense == "appa":
+        executor = AppaToolsExecutor(table, unknown_policy, taint_policy)
+        name = f"{model.replace('/', '_')}-appa-{unknown_policy}"
     elif defense == "none":
         executor = ToolsExecutor()
         name = f"{model.replace('/', '_')}-none"
     else:
-        raise ValueError(f"defense must be 'baton' or 'none', got {defense!r}")
+        raise ValueError(f"defense must be 'appa' or 'none', got {defense!r}")
 
     llm = OpenAILLM(
         openai.OpenAI(base_url=OPENROUTER_BASE_URL, api_key=openrouter_api_key()),

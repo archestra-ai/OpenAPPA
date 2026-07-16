@@ -1,4 +1,4 @@
-"""Load a suite's contract table and turn it into baton-check wire format."""
+"""Load a suite's contract table and turn it into appa-check wire format."""
 
 import tomllib
 from dataclasses import dataclass
@@ -24,7 +24,7 @@ class ContractTable:
     tools: dict[str, ToolPolicy]
 
     def wire_contracts(self) -> list[dict]:
-        """The `contracts` fragment of a baton-check request."""
+        """The `contracts` fragment of an appa-check request."""
         contracts = []
         for policy in self.tools.values():
             contract: dict = {"tool": policy.tool, "output": {"trust": policy.output_trust}}

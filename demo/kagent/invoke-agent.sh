@@ -9,7 +9,7 @@ AGENT=ops-agent
 
 # The A2A server is on the kagent controller's HTTP port (default 8083):
 #   <controller>:8083/api/a2a/<ns>/<agent>
-kubectl port-forward -n "$NS" svc/kagent-controller 8083:8083 >/tmp/baton-a2a-pf.log 2>&1 &
+kubectl port-forward -n "$NS" svc/kagent-controller 8083:8083 >/tmp/appa-a2a-pf.log 2>&1 &
 PF=$!
 trap 'kill $PF 2>/dev/null || true' EXIT
 until curl -s -o /dev/null "http://127.0.0.1:8083/"; do sleep 1; done
