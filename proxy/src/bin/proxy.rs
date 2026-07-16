@@ -196,12 +196,12 @@ async fn handler(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -
         }
     };
 
-    let mut session = match Session::build(&app.policy, &view.messages) {
+    let mut session = match Session::build(&app.policy, &view.messages).await {
         Ok(session) => session,
         Err(e) => return error(StatusCode::CONFLICT, format!("policy replay failed: {e}")),
     };
     let context_audience = session.context_audience();
-    let decisions = rewrite_response(&mut session, &mut response);
+    let decisions = rewrite_response(&mut session, &mut response).await;
     let rewritten = decisions.iter().filter(|d| d.rewritten()).count();
     if rewritten > 0 {
         tracing::info!(rewritten, "blocked tool call(s)");
