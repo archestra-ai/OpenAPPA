@@ -7,16 +7,20 @@
 //! its contract: the offending message is replaced with a stop explanation, so
 //! the blocked call never reaches the harness and is never executed.
 //!
-//! Only inline `allow` authorities declared in the policy TOML are registered;
-//! `escalate` (external) authorities are rejected at load — the proxy has no
-//! human channel. A flow no declared authority covers is blocked, fail
-//! closed. Human-in-the-loop approval lives on the tool layer instead — soft
-//! blocks, escalation, canonical dispatch — in the `appa-demo` gateway; an
-//! inference-layer approval flow would be a port to External authorities
-//! (`PendingApproval` + `apply_approval`).
+//! Authorities come in two kinds. Inline `allow` authorities rule
+//! in-process. `escalate` (external) authorities are served over HTTP: each
+//! must declare a `webhook` endpoint (rejected at load otherwise), a *new*
+//! call's escalation POSTs the pending approval there and applies the ruling
+//! back, and any non-ruling — timeout, transport error, malformed body —
+//! leaves the call blocked, fail closed. History replay never re-fires a
+//! webhook: a tool result in the request `messages` is admitted under the
+//! proxy's standing trust decision that harness-supplied history is genuine
+//! (see `replay::TrustedHistoryResolver`). A flow no declared authority
+//! covers is blocked, fail closed.
 //!
 //! Nothing here is cryptographic: authenticity rests on the harness only
-//! recording tool results that real MCP servers returned. See `README.md`.
+//! recording tool results that real MCP servers returned, and on the proxy
+//! port being reachable only by that harness. See `README.md`.
 //!
 //! [`Trajectory`]: appa_core::Trajectory
 
