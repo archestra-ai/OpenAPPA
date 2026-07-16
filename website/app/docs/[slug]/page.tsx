@@ -1,0 +1,43 @@
+import type { Metadata } from "next";
+import { notFound, redirect } from "next/navigation";
+
+import { DocContent } from "@/components/DocContent";
+import { DocShell } from "@/components/DocShell";
+import { generateTableOfContents, getAllDocs, getDocBySlug } from "@/lib/docs";
+
+interface Props {
+  params: Promise<{ slug: string }>;
+}
+
+export function generateStaticParams() {
+  return getAllDocs()
+    .filter((doc) => doc.slug !== "index")
+    .map((doc) => ({ slug: doc.slug }));
+}
+
+export async function generateMetadata({ params }: Props): Promise<Metadata> {
+  const { slug } = await params;
+  const doc = getDocBySlug(slug);
+  if (!doc) return {};
+  return { title: doc.title, description: doc.description };
+}
+
+export default async function DocPage({ params }: Props) {
+  const { slug } = await params;
+  if (slug === "index") redirect("/");
+
+  const doc = getDocBySlug(slug);
+  if (!doc) notFound();
+
+  const toc = generateTableOfContents(doc.content);
+
+  return (
+    <DocShell toc={toc}>
+      <div className="prose">
+        <h1>{doc.title}</h1>
+      </div>
+      {doc.description && <p className="doc-description">{doc.description}</p>}
+      <DocContent content={doc.content} />
+    </DocShell>
+  );
+}

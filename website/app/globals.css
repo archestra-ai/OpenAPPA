@@ -1,0 +1,638 @@
+@import "tailwindcss";
+
+/* ————————————————————————————————————————————————
+   Design tokens — warm monochrome, pale chartreuse accent
+   ———————————————————————————————————————————————— */
+:root {
+  /* neutrals — warm-tinted, never pure gray */
+  --bg: hsl(40, 25%, 99%);
+  --bg-weak: hsl(42, 18%, 96%);
+  --bg-weak-hover: hsl(42, 15%, 93%);
+  --bg-strong: hsl(30, 8%, 12%);
+
+  --text: hsl(30, 4%, 34%);
+  --text-weak: hsl(32, 3%, 54%);
+  --text-strong: hsl(30, 8%, 11%);
+  --text-inverted: hsl(40, 25%, 99%);
+
+  --border: hsl(36, 8%, 79%);
+  --border-weak: hsl(38, 8%, 86%);
+  --icon: hsl(32, 4%, 51%);
+
+  /* accent — one interactive hue: links, active nav, focus (AA on --bg) */
+  --accent: hsl(151, 55%, 28%);
+  --accent-hover: hsl(152, 62%, 21%);
+  --accent-bg: hsl(148, 42%, 93%);
+  --accent-border: hsl(150, 28%, 68%);
+
+  /* semantics — reserved for meaning, not decoration */
+  --warn: hsl(36, 80%, 33%);
+  --warn-bg: hsl(42, 75%, 93%);
+  --danger: hsl(4, 60%, 42%);
+  --danger-bg: hsl(6, 70%, 95%);
+  --info: hsl(215, 60%, 40%);
+  --info-bg: hsl(215, 55%, 93%);
+
+  /* syntax — neutrals carry structure, hue only where it informs */
+  --syn-comment: hsl(32, 3%, 54%);
+  --syn-keyword: hsl(30, 8%, 11%);
+  --syn-string: hsl(151, 45%, 30%);
+  --syn-number: hsl(36, 75%, 34%);
+  --syn-fn: hsl(30, 8%, 24%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: hsl(30, 6%, 8%);
+    --bg-weak: hsl(30, 5%, 11%);
+    --bg-weak-hover: hsl(30, 5%, 15%);
+    --bg-strong: hsl(40, 12%, 92%);
+
+    --text: hsl(35, 6%, 72%);
+    --text-weak: hsl(33, 4%, 50%);
+    --text-strong: hsl(40, 12%, 93%);
+    --text-inverted: hsl(30, 6%, 8%);
+
+    --border: hsl(30, 4%, 30%);
+    --border-weak: hsl(30, 4%, 21%);
+    --icon: hsl(32, 4%, 46%);
+
+    --accent: hsl(146, 45%, 62%);
+    --accent-hover: hsl(146, 52%, 72%);
+    --accent-bg: hsl(150, 28%, 13%);
+    --accent-border: hsl(150, 22%, 32%);
+
+    --warn: hsl(40, 70%, 62%);
+    --warn-bg: hsl(40, 40%, 12%);
+    --danger: hsl(5, 70%, 68%);
+    --danger-bg: hsl(6, 40%, 14%);
+    --info: hsl(212, 55%, 65%);
+    --info-bg: hsl(215, 30%, 14%);
+
+    --syn-comment: hsl(33, 4%, 50%);
+    --syn-keyword: hsl(40, 12%, 93%);
+    --syn-string: hsl(146, 42%, 63%);
+    --syn-number: hsl(40, 68%, 63%);
+    --syn-fn: hsl(38, 10%, 84%);
+  }
+}
+
+html {
+  background: var(--bg);
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--accent-bg);
+  color: var(--text-strong);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ————————————————————————————————————————————————
+   Header
+   ———————————————————————————————————————————————— */
+.site-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 24px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border-weak);
+}
+
+.wordmark {
+  display: flex;
+  align-items: flex-start;
+  color: var(--text-strong);
+  text-decoration: none;
+}
+
+
+.site-header nav {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+}
+
+.site-header nav a {
+  color: var(--icon);
+  text-decoration: none;
+}
+
+.site-header nav a:hover {
+  color: var(--text-strong);
+}
+
+/* ————————————————————————————————————————————————
+   Shell — sidebar | content | toc
+   ———————————————————————————————————————————————— */
+.shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-height: calc(100vh - 62px);
+}
+
+@media (min-width: 1024px) {
+  .shell {
+    grid-template-columns: 16rem minmax(0, 1fr);
+  }
+}
+
+@media (min-width: 1280px) {
+  .shell {
+    grid-template-columns: 16rem minmax(0, 1fr) 15rem;
+  }
+}
+
+.sidebar {
+  display: none;
+}
+
+@media (min-width: 1024px) {
+  .sidebar {
+    display: block;
+    border-right: 1px solid var(--border-weak);
+  }
+
+  .sidebar-inner {
+    position: sticky;
+    top: 62px;
+    max-height: calc(100vh - 62px);
+    overflow-y: auto;
+    padding: 24px 0;
+  }
+}
+
+.sidebar-category {
+  padding: 0 24px 6px;
+  color: var(--text-strong);
+  font-weight: 500;
+}
+
+.sidebar-inner > div + div {
+  margin-top: 24px;
+}
+
+.sidebar a {
+  display: block;
+  padding: 4px 24px;
+  color: var(--text-weak);
+  text-decoration: none;
+  border-left: 2px solid transparent;
+}
+
+.sidebar a:hover {
+  background: var(--bg-weak);
+  color: var(--text-strong);
+}
+
+.sidebar a[aria-current="page"] {
+  border-left-color: var(--accent);
+  background: var(--accent-bg);
+  color: var(--text-strong);
+  font-weight: 600;
+}
+
+/* ————————————————————————————————————————————————
+   Main column
+   ———————————————————————————————————————————————— */
+.doc-main {
+  padding: 2.5rem 3rem 5rem;
+  max-width: 46rem;
+  width: 100%;
+}
+
+@media (max-width: 768px) {
+  .doc-main {
+    padding: 1.5rem 1.5rem 4rem;
+  }
+}
+
+.doc-description {
+  margin-top: 0.4rem;
+  color: var(--text-weak);
+}
+
+/* ————————————————————————————————————————————————
+   Table of contents
+   ———————————————————————————————————————————————— */
+.toc {
+  display: none;
+}
+
+@media (min-width: 1280px) {
+  .toc {
+    display: block;
+  }
+
+  .toc-inner {
+    position: sticky;
+    top: 62px;
+    max-height: calc(100vh - 62px);
+    overflow-y: auto;
+    padding: 24px 0;
+  }
+}
+
+.toc-title {
+  padding: 0 24px 12px;
+  color: var(--text-strong);
+  font-size: 14px;
+}
+
+.toc a {
+  display: block;
+  padding: 4px 24px;
+  color: var(--text-weak);
+  text-decoration: none;
+}
+
+.toc a.depth-3 {
+  padding-left: 40px;
+}
+
+.toc a:hover {
+  background: var(--bg-weak);
+  color: var(--text-strong);
+}
+
+.toc a.active {
+  color: var(--accent);
+}
+
+/* ————————————————————————————————————————————————
+   Prose (rendered markdown)
+   ———————————————————————————————————————————————— */
+.prose h1 {
+  font-size: 26px;
+  font-weight: 500;
+  color: var(--text-strong);
+  line-height: 1.3;
+}
+
+.prose h2 {
+  font-size: 22px;
+  font-weight: 500;
+  color: var(--text-strong);
+  margin: 2.5rem 0 0.75rem;
+  padding-top: 2rem;
+  border-top: 1px solid var(--border-weak);
+  line-height: 1.35;
+}
+
+.prose h3 {
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--text-strong);
+  margin: 2rem 0 0.5rem;
+}
+
+.prose h4 {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--text-strong);
+  margin: 1.5rem 0 0.5rem;
+}
+
+.prose p {
+  margin: 0.75rem 0;
+}
+
+.prose strong {
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.prose em {
+  color: var(--text-strong);
+}
+
+.prose a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--accent-border);
+}
+
+.prose a:hover {
+  color: var(--accent-hover);
+  text-decoration-color: var(--accent-hover);
+}
+
+.prose ul,
+.prose ol {
+  margin: 0.75rem 0;
+  padding: 0;
+  list-style: none;
+}
+
+.prose li {
+  position: relative;
+  padding-left: 1.4em;
+  margin: 0.4rem 0;
+}
+
+.prose ul > li::before {
+  content: "–";
+  position: absolute;
+  left: 0;
+  color: var(--text-weak);
+}
+
+.prose ol {
+  counter-reset: item;
+}
+
+.prose ol > li::before {
+  counter-increment: item;
+  content: counter(item) ".";
+  position: absolute;
+  left: 0;
+  color: var(--text-weak);
+}
+
+/* landing page: [*] markers, opencode-style */
+.landing .prose ul > li::before {
+  content: "[*]";
+  color: var(--accent);
+}
+
+.landing .prose li {
+  padding-left: 2.4em;
+}
+
+.prose code {
+  background: var(--bg-weak);
+  border: 1px solid var(--border-weak);
+  border-radius: 3px;
+  padding: 0.1em 0.35em;
+  font-size: 13px;
+  color: var(--text-strong);
+}
+
+.prose pre {
+  background: var(--bg-weak);
+  border: 1px solid var(--border-weak);
+  border-radius: 6px;
+  padding: 14px 16px;
+  margin: 0.75rem 0 2rem;
+  overflow-x: auto;
+  line-height: 1.6;
+}
+
+.prose pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.prose blockquote {
+  border-left: 2px solid var(--border);
+  padding-left: 1rem;
+  margin: 1rem 0;
+  color: var(--text-weak);
+}
+
+.prose hr {
+  border: none;
+  border-top: 1px solid var(--border-weak);
+  margin: 2rem 0;
+}
+
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-size: 13px;
+}
+
+.prose th,
+.prose td {
+  border: 1px solid var(--border-weak);
+  padding: 6px 12px;
+  text-align: left;
+}
+
+.prose th {
+  background: var(--bg-weak);
+  color: var(--text-strong);
+  font-weight: 500;
+}
+
+/* heading anchor links */
+.heading-anchor {
+  margin-left: 0.4em;
+  color: var(--text-weak);
+  opacity: 0;
+  text-decoration: none;
+}
+
+.prose h2:hover .heading-anchor,
+.prose h3:hover .heading-anchor,
+.prose h4:hover .heading-anchor {
+  opacity: 1;
+}
+
+/* ————————————————————————————————————————————————
+   Code block chrome (copy button)
+   ———————————————————————————————————————————————— */
+.codeblock {
+  position: relative;
+}
+
+.codeblock .copy {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  border: 1px solid var(--border-weak);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--icon);
+  font-size: 12px;
+  font-family: inherit;
+  padding: 2px 8px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.codeblock:hover .copy {
+  opacity: 1;
+}
+
+.codeblock .copy:hover {
+  color: var(--text-strong);
+}
+
+.codeblock .copy.copied {
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+  color: var(--accent);
+  opacity: 1;
+}
+
+/* ————————————————————————————————————————————————
+   Syntax highlighting (highlight.js classes)
+   ———————————————————————————————————————————————— */
+.hljs-comment,
+.hljs-quote {
+  color: var(--syn-comment);
+  font-style: italic;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-meta,
+.hljs-name,
+.hljs-built_in,
+.hljs-tag {
+  color: var(--syn-keyword);
+  font-weight: 500;
+}
+
+.hljs-string,
+.hljs-attr,
+.hljs-symbol,
+.hljs-addition,
+.hljs-regexp {
+  color: var(--syn-string);
+}
+
+.hljs-number,
+.hljs-literal,
+.hljs-deletion {
+  color: var(--syn-number);
+}
+
+.hljs-title,
+.hljs-function,
+.hljs-section,
+.hljs-type,
+.hljs-class {
+  color: var(--syn-fn);
+}
+
+/* ————————————————————————————————————————————————
+   Landing hero
+   ———————————————————————————————————————————————— */
+.hero {
+  padding-bottom: 0.5rem;
+}
+
+.hero h1 {
+  font-size: 32px;
+  font-weight: 500;
+  color: var(--text-strong);
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+}
+
+.hero .tagline {
+  margin-top: 0.5rem;
+  color: var(--text-weak);
+  font-size: 15px;
+}
+
+/* ————————————————————————————————————————————————
+   Interactive figures (tutorial)
+   ———————————————————————————————————————————————— */
+.flow-figure {
+  margin: 1.5rem 0 2rem;
+  border: 1px solid var(--border-weak);
+  border-radius: 6px;
+  padding: 16px;
+}
+
+.flow-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.flow-controls button {
+  border: 1px solid var(--border-weak);
+  border-radius: 4px;
+  background: var(--bg-weak);
+  color: var(--text-strong);
+  font-family: inherit;
+  font-size: 11px;
+  width: 34px;
+  height: 26px;
+  cursor: pointer;
+}
+
+.flow-controls button:hover {
+  border-color: var(--border);
+}
+
+.flow-controls input[type="range"] {
+  flex: 1;
+  accent-color: var(--accent);
+}
+
+/* ————————————————————————————————————————————————
+   Logo gallery (docs)
+   ———————————————————————————————————————————————— */
+.logo-gallery-item {
+  margin: 1.5rem 0 2rem;
+}
+
+.logo-gallery-label {
+  color: var(--text-strong);
+  font-weight: 500;
+}
+
+.logo-gallery-note {
+  color: var(--text-weak);
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.logo-gallery-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 32px;
+  padding: 20px 24px;
+  border: 1px solid var(--border-weak);
+  border-radius: 6px;
+  color: var(--text-strong);
+}
+
+/* ————————————————————————————————————————————————
+   Footer
+   ———————————————————————————————————————————————— */
+.site-footer {
+  display: flex;
+  justify-content: space-between;
+  padding: 20px 24px;
+  border-top: 1px solid var(--border-weak);
+  color: var(--text-weak);
+  font-size: 13px;
+}
+
+.site-footer a {
+  color: var(--text-weak);
+  text-decoration: none;
+}
+
+.site-footer a:hover {
+  color: var(--text-strong);
+}
