@@ -10,7 +10,7 @@ description = "Webhook-notify MCP tool for the kagent demo: POSTs a message to a
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
-rmcp = { version = "1.7", features = ["server", "transport-streamable-http-server"] }
+rmcp = { version = "2.2", features = ["server", "transport-streamable-http-server"] }
 axum = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 serde_json = "1"

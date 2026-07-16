@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, Implementation, ListToolsResult, PaginatedRequestParams,
+    CallToolRequestParams, CallToolResult, ContentBlock, Implementation, ListToolsResult, PaginatedRequestParams,
     ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
@@ -120,19 +120,23 @@ impl ServerHandler for Webhooks {
                 NOTIFY_TOOL => self.hook_url.clone(),
                 HTTP_POST_TOOL => match string_arg(&args, "url") {
                     Some(url) => url,
-                    None => return Ok(CallToolResult::error(vec![Content::text("missing required `url`")])),
+                    None => {
+                        return Ok(CallToolResult::error(vec![ContentBlock::text(
+                            "missing required `url`",
+                        )]));
+                    }
                 },
                 other => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                    return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                         "unknown tool `{other}`"
                     ))]));
                 }
             };
             match deliver(&url, &message).await {
-                Ok(status) => Ok(CallToolResult::success(vec![Content::text(format!(
+                Ok(status) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                     "delivered to {url}: HTTP {status}"
                 ))])),
-                Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                     "delivery to {url} failed: {e}"
                 ))])),
             }
