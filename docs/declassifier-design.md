@@ -156,7 +156,7 @@ tool. A detached label sidecar is not sufficient.
 > **Superseded.** Historical sketch. The shipped `ToolRequest` (`request.rs`)
 > carries a control dependency *set* (`BTreeSet<ValueId>`), never a
 > caller-supplied `control: ValueLabel` — this sketch's shape is exactly the
-> relabeling hole `appa-core/CLAUDE.md` forbids.
+> relabeling hole the root `CLAUDE.md` forbids.
 
 ```rust
 struct ToolRequest {

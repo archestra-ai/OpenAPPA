@@ -44,8 +44,9 @@ external authorities and transformers, never in the engine.
 3. `docs/declassifier-design.md` — foundation rationale, superseded in places
    (marked inline). Its code sketches are historical; the code is the reference.
 4. `core/src/lib.rs` — concepts and semantics of the engine.
-5. `core/CLAUDE.md` — the invariants a core edit must not silently break.
-   **Read it before touching `core/`.**
+5. The "Core engine invariants" subsections of "Gotchas" below — the
+   invariants a core edit must not silently break. **Read them before
+   touching `core/`.**
 
 An unfinished higher-level vision document (Baton/APPA first principles)
 exists outside this repository; its key theses are folded into the "Mental
@@ -59,7 +60,9 @@ Cargo workspace members: `core`, `check`, `contracts`, `dojo`, `proxy`.
 Workspace lint: `dead_code = "deny"` — unused code fails the build.
 
 - `core/` — `appa-core`, the engine. Prototype, `publish = false`, edition
-  2024. Everything else is an integration around it.
+  2024. Runtime deps are only `tracing` (facade), `serde` (derive), and
+  `thiserror`; `tracing-subscriber`, `criterion`, `proptest`, `clap` are
+  dev-only. Everything else is an integration around it.
 - `check/` — `appa-check`, a stateless JSON oracle over appa-core: one request
   (contracts + episode so far + proposed call) on stdin, one decision on
   stdout. Used as a subprocess by the Python harness. Its wire format is
@@ -161,11 +164,22 @@ demos) need `OPENROUTER_API_KEY` (environment or repo-root `.env`);
 ### Algebra and terminology traps
 
 - **Two orders on the same dimension — never conflate them.** The taint fold
-  (`combine`) and the adequacy relation are different structures, and trust's
-  `Unknown` sits in *opposite* positions: definite in the fold (between
-  Trusted and Suspicious), incomparable/bottom → `Unprovable` in adequacy.
-  The operation is `combine`; do not call it a join. `widening_over` is a
-  third *derived* relation (dual of adequacy), not a third order.
+  (`core/src/dimension.rs::combine`, `ValueLabel::combine`) is per dimension
+  a commutative, idempotent semilattice where `Unknown` has a *definite*
+  position (absorbing for audience/effects; between Trusted and Suspicious
+  for trust). The adequacy relation (`covers` / `at_least` / `avoids`,
+  returning `Adequacy<W>`: `Holds` / `Fails(witness)` / `Unprovable`) is the
+  sink-side proof — there `Unknown` is **incomparable / bottom →
+  `Unprovable`**; trust is the only dimension where the two orders disagree
+  on `Unknown`. The operation is `combine`; do not call it a join.
+  `widening_over` is a third *derived* relation (the dual of adequacy), not a
+  third order: it powers the no-widening invariant — effects growth binds
+  live at the flow check; trust/audience widening is prevented at admission
+  by construction (the conservative fold absorbs a wider declaration —
+  `debug_assert`-guarded, test-pinned). `Requirements::check_flow` is a thin
+  *ordered* composition over the adequacy relations — the emission order
+  (trust, audience, attention, effects) is observable; preserve it (there is
+  a typed-order test).
 - **Audience folds by intersection, not union** — a deliberate deviation from
   early notes (union would make the sink check vacuous; see
   `dimension::Audience`). Declassification (growing the reader set) is only
@@ -190,35 +204,154 @@ demos) need `OPENROUTER_API_KEY` (environment or repo-root `.env`);
   as a grant consumption at release. It was never built as a dimension — do
   not add one.
 
-### Engine invariants (details in `core/CLAUDE.md` — read it before editing core)
+### Core engine invariants: values, flows, admission
 
-- Values are immutable; a transformer derives a *new* value; nothing ever
-  mutates or relabels a source. Durable authority raises mint a new
-  `Provenance::Endorsed` value via the raise helpers, never `combine`.
-- Admission is engine-owned; `Trajectory::ingress` is the only caller-labeled
-  path. Requests carry control *dependency sets*, never a caller-supplied
-  control label (that would be a relabeling hole). Caller-labeled assistant
-  ingress does not typecheck — the response is a mediated emission sink like
-  any tool.
-- One build path: every read model is a full reprojection of the event log
-  after each atomic batch. Never add a second incremental fold over `Fact`.
-- Linear capabilities (`ExecutionToken`, `DispatchReceipt`, `StepCapability`,
-  `PendingApproval`) are non-`Clone`, `Serialize`-only, no public
-  constructor. **Never add `Deserialize`** — deserializing one forges
-  linearity. Receipts are lifecycle-bound (they close a dispatch that already
-  happened); everything else is revision-bound and staled by any appended
-  fact.
-- Plans are predictions, never permits: only the head step is executable,
-  every applied step triggers full re-evaluation, and authority routing is
-  resolved live at application — which is why registries freeze at the first
-  evaluation (`RegistryFrozen`). That rule is load-bearing for *safety*, not
-  determinism.
-- One gate, one relation: `engine::planning::constrain_gate` is the whole
-  narrowing check for both planner and applier. Never duplicate it.
-- Transactional labeling: a tool call that dispatched has its label in the
-  trajectory forever — release appends the may-effect commitment before
-  dispatch, failure appends and removes nothing. No post-hoc sanitizing can
-  clear the log; facts only grow.
+- Values are **immutable**: body, label, and provenance fixed at admission. A
+  transformer derives a *new* value; nothing mutates or relabels a source.
+  Durable authority raises mint a new `Provenance::Endorsed` value via the
+  raise helpers, never `combine`.
+- Checks fold **exactly a flow's dependencies**:
+  `L_flow = combine(L_args, L_control)` from the request's argument-tree
+  leaves plus its mandatory control set — never the whole trajectory.
+  Requests carry control *dependency sets*, never a caller-supplied control
+  label (that would be a relabeling hole).
+- **Admission is engine-owned.** `Trajectory::ingress` is the only
+  caller-labeled path (the explicit trust boundary). Model outputs fold their
+  mandatory read+control sets; tool outputs fold
+  `combine(intrinsic, args, control)` where the contract's intrinsic label can
+  only worsen the fold; only a validated transformer admission may sit below
+  the conservative fold, and only under its *declared* output label.
+  Caller-labeled assistant ingress does not typecheck — the response is a
+  mediated emission sink like any tool. `ValueStore` mutators stay
+  `pub(crate)` — never add a public `insert(bytes, label)`.
+- Effects are **monotone trajectory state**, committed at release (a
+  may-effect commitment fact: failure appends and removes nothing); the
+  committed past is a projection over commitment facts. Labeling is
+  transactional: a tool call that dispatched has its label in the trajectory
+  forever — no post-hoc sanitizing can clear the log; facts only grow. Audit
+  is **control-plane history** (`AuditEvent`), never a label field; failed
+  transitions audit an event and create no value or action.
+
+### Core engine invariants: the event log, revisions, linear capabilities
+
+- The `EventSet` is the authoritative state: every public `Trajectory`
+  mutation prevalidates, then appends **one atomic batch** of facts; lifecycle
+  contradictions (double release, completion-before-release, double grant
+  consumption) are refused at admission — the single enforcement point.
+- **One build path.** Every derived read model — labels, provenance, turns,
+  committed effects, audit, both pending slots — is a `TrajectoryProjection`
+  of the log, rebuilt in full by `Trajectory::commit` after each batch. Never
+  add a second, incremental fold over `Fact` (that is what this design
+  deleted: a parallel `apply` plus a parity suite to police it, whose state
+  half was tautological — it rebuilt with the same `apply` it was checking).
+  Full reprojection per mutation is deliberate. Its cost is O(dependency
+  edges), not O(events): `value_labels` refolds every historical value's whole
+  dependency set, so a trajectory whose values cite many predecessors is cubic
+  over its life, not quadratic (the old admission-time fold paid each value's
+  fold once). If that ever matters, make the *one* path incremental, never add
+  a second. The `ValueStore` holds **bodies only**: a label lives in the
+  projection, and `ValueRef` composes the two for reading.
+- `Revision` digests the event frontier; every appended batch advances it.
+  Plans live in a side cache bound to their basis and append nothing — the
+  per-evaluation `CheckPerformed` fact is what preserves cross-evaluate
+  staling.
+- Capabilities — `ExecutionToken`, `DispatchReceipt`, `StepCapability`,
+  `PendingApproval` — are **non-`Clone`, `Serialize`-only, no public
+  constructor**, spent on use. All but the receipt bind trajectory + revision
+  (+ action/plan/step); a `DispatchReceipt` is deliberately lifecycle-bound
+  instead (trajectory + action in Released phase) — it records a dispatch
+  that already happened, so unrelated later mutations must not wedge the
+  action. Plans, step capabilities, and pending approvals additionally bind the
+  `EngineId` whose registries produced them — a capability never resolves
+  against another engine's registries. Never add `Deserialize`: deserializing
+  one forges the linearity. `Trajectory` itself is not serde at all.
+- Two-phase dispatch: `release` commits may-effects, spends any pending
+  confirmation, renders the **one** canonical request from the exact checked
+  tree, and mints the receipt; `record_output`/`record_failure` consume the
+  receipt and close the action. There is deliberately no one-call shortcut
+  that skips the canonical request — do not add one. Binding failures
+  (stale/foreign) refuse *without* touching state; the capability is consumed
+  either way. Receipts are lifecycle-bound, not revision-bound: a receipt
+  closes a dispatch that already happened, so unrelated mutations after
+  release (a checked emission, a new value) never wedge the released action —
+  only foreign, wrong-action, or already-closed receipts refuse. Tokens,
+  step capabilities, and approvals authorize *future* changes and stay
+  revision-bound. The pending action's (possibly constrained) proposed effects
+  are the single source of truth for what release commits.
+- Confirmation stays structural on user turns; it survives remedy steps on
+  the confirmed action and is spent atomically at release as a grant
+  consumption fact (facts only grow, so a receipt-declared failure cannot
+  resurrect a spent confirmation). One-off (`PolicyCheck`-scoped) grants
+  follow the same issued/consumed model — a second consumption is
+  unrepresentable at admission.
+
+### Core engine invariants: pending action, plans, remedies
+
+- At most one `PendingAction`; it keeps the **immutable original** proposal
+  (identity basis for idempotent re-entry) and the **current** constrained
+  form (what is checked and dispatched). A different proposal while one is
+  pending is refused, never queued. Terminal blocks clear the slot;
+  remediable blocks keep it.
+- Every checked flow — a tool dispatch or an assistant emission — settles in
+  one tri-state `FlowOutcome`: `AllowedNow(permit)`, `Remediable` (carrying a
+  `NonEmptyVec<RemedyPlan>` — "remediable with zero plans" is
+  unrepresentable), or `Terminal`. Invalid, stale, foreign, or conflicting
+  proposals are `FlowRefusal`s on a separate channel, outside the tri-state,
+  touching no state. The two pending slots (action, emission) are
+  independent and per-kind single-slot; a blocked emission never clears a
+  pending action. Plans are predictions, not permits: plain serializable
+  data, revision-bound, recomputed after every applied step; only the head
+  step is executable; each step is a `PlannedRemedy` (the remedy plus its
+  competent routes and the violations the authority is shown), and applying
+  any remedy triggers the full re-evaluation as an execution invariant, never
+  a plan-step object.
+- The two-kind remedy vocabulary enforces conservation laws. **Reduce**
+  answers to registered reduction relations: a value derivation
+  (`ReductionTarget::DeriveValue`) cannot touch actions or past effects and
+  wears its transformer's declared output label; an action narrowing
+  (`ReductionTarget::NarrowAction`) goes only through registered
+  tool-identity mappings verified never wider (`ActionTransition::narrows` —
+  subset or unknown-confinement; the target contract must declare exactly
+  the transition's effects and must not widen the resolved recipient set —
+  the PoC's structural relation covers tool identity, effects, and recipient
+  roles; egress-destination and runtime-capability sets are not modeled).
+  **One gate, one relation.** `engine::planning::constrain_gate` is that whole
+  check, over a `SimFlow`: the planner filters candidates with it, the applier
+  rechecks live against the current registries with it. `narrows` states its
+  tool/effects half over values, not a `PendingAction`, so neither side needs a
+  representation the other cannot build. Never duplicate this gate — a
+  planner/applier disagreement returns `TransitionFailure::ReductionRefused` on
+  a step the planner promised.
+  **Authorize** grants an exact `AuthorizationDelta` at an exact
+  `AuthorizationScope`: a check-scoped lift (excepting a prior effect,
+  standing in for a confirmation, releasing a control dep, acknowledging an
+  unprovable fact) changes no stored state; a durable raise
+  (`AuthorizationScope::DerivedValue`) mints a *new* value like a transform —
+  the authority raises `source`'s label with the raise helpers
+  (`raised_to`/`admitting`, never `combine`), and the new value carries the
+  raised label under `Provenance::Endorsed`, the source untouched. So raising
+  trust or audience is durable and scoped to the derived value, never a
+  check-transient lift. An `Authorization` is proposal data, not a
+  capability; a product delta carries every atomic coordinate it asks for,
+  so `AuthorityMandate::authorizes` requires `acknowledge_unknown` to clear
+  an unknown even when the lift coordinates alone are covered. Authority
+  comes from competence routing + the fail-closed recheck
+  (`PostconditionFailed`, or a re-evaluation that re-routes the residual,
+  blocks rather than permitting an under-covered flow).
+- Registration is an operator trust decision, not content correctness: audit
+  wording says "admitted under the transition declared by registered
+  transformer X", never "verified as clean". Registries are populated at
+  construction, duplicates refused, never silently replaced. Authorities
+  (`Authority { name, mandate, mode: Inline(fn) | External }`) share one
+  registry and name space; a grant routes to competent authorities inline-first
+  then external, each in registration order, and an inline abstention (`None`)
+  falls through to the next competent authority. Routing is resolved **live at
+  application** against the current registry (a minted plan no longer pins its
+  authority), so the construction-time-only rule is load-bearing for *safety*,
+  not merely determinism: registering an authority between minting a plan and
+  applying its step would change which authority rules it. The rule is
+  mechanical: the first evaluation freezes the registries, and any later
+  registration is refused (`RegistryFrozen`).
 
 ### Layer differences (the same engine, different guarantees)
 
@@ -339,7 +472,7 @@ Mechanics:
   pattern matching over if-chains.
 - No `dyn`/`Box` in engine state; no trait without at least two real
   implementations or a real boundary. Transformers are plain `fn` pointers
-  beside a serializable descriptor — no capturing closures.
+  (`TransformerFn`) beside a serializable descriptor — no capturing closures.
 - Minimize the public API surface: a few coarse operations over many tiny
   exported helpers. In core, keep `ValueStore` mutators `pub(crate)` and
   never hoist read-only audit/projection types into the root re-exports.
@@ -356,7 +489,8 @@ Mechanics:
   human-elicitation await to serialize the session.
 - Observability is `tracing` only (decision path at `debug!`, algebra at
   `trace!`), borrow-only and never behavior-changing; exporter wiring stays
-  out of core.
+  out of core (`appa-gateway -- -v`/`-vv` in `demo/gateway` selects the
+  level).
 - Public domain structs own their data; cloning small IDs/config is fine,
   cloning hot-path buffers is not.
 
