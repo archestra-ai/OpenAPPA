@@ -9,11 +9,12 @@
 //! before external ones regardless of declaration order.
 
 use std::collections::{BTreeSet, HashMap};
+use std::time::Duration;
 
 use appa_core::{
-    ArgumentName, ArgumentSchema, AttentionRule, Audience, AudienceRule, Authority, AuthorityMandate, Authorization,
-    Effect, Effects, KnownTrust, Requirements, Ruling, ToolContract, ToolName, TrajectoryView, Trust, UserId,
-    ValueLabel, Violation,
+    ArgumentName, ArgumentSchema, AttentionRule, Audience, AudienceRule, Authority, AuthorityMandate, AuthorityName,
+    Authorization, Effect, Effects, KnownTrust, Requirements, Ruling, ToolContract, ToolName, TrajectoryView, Trust,
+    UserId, ValueLabel, Violation,
 };
 // Only referenced from the test module's assertions on `Authority::mode`
 // (via `use super::*;`); a plain non-test build never names it.
@@ -49,6 +50,17 @@ pub enum ContractsError {
     EmptyAuthorityName,
     #[error("duplicate authority `{0}`")]
     DuplicateAuthority(String),
+    #[error(
+        "allow authority `{0}` may not declare a webhook (rulings for rule = \"allow\" are inline; an out-of-process channel needs rule = \"escalate\")"
+    )]
+    AllowAuthorityWebhook(String),
+    #[error("authority `{authority}` webhook url is invalid: {reason}")]
+    WebhookUrl { authority: String, reason: String },
+    #[error(
+        "authority `{0}` webhook timeout_ms must be between 1 and {max}",
+        max = MAX_WEBHOOK_TIMEOUT_MS
+    )]
+    WebhookTimeout(String),
 }
 
 /// The parsed policy document: the Trajectory's default labels and the
@@ -64,6 +76,63 @@ pub struct Contracts {
     pub recipients_args: HashMap<ToolName, String>,
     /// Authorities declared inline in the policy TOML (`[[authority]]`).
     pub authorities: Vec<Authority>,
+    /// HTTP ruling endpoints for escalate authorities that declared a
+    /// `webhook` table, keyed by authority name. Carried beside
+    /// `authorities` because core's `Authority` deliberately holds no
+    /// transport configuration; the integration's resolver consumes this.
+    pub endpoints: HashMap<AuthorityName, AuthorityEndpoint>,
+}
+
+/// A declared escalate authority's HTTP ruling endpoint, validated at parse:
+/// a well-formed absolute http(s) URL and a bounded timeout. The endpoint is
+/// operator-declared, trusted config — the ruling it returns is authorization
+/// data, so run it over TLS or a network you trust.
+#[derive(Debug, Clone)]
+pub struct AuthorityEndpoint {
+    url: String,
+    timeout: Duration,
+}
+
+const DEFAULT_WEBHOOK_TIMEOUT_MS: u64 = 30_000;
+/// An approval loop runs up to a bounded number of rounds, so the per-ruling
+/// timeout caps how long a session can stay parked on one flow.
+const MAX_WEBHOOK_TIMEOUT_MS: u64 = 300_000;
+
+impl AuthorityEndpoint {
+    fn from_spec(authority: &str, spec: WebhookSpec) -> Result<Self, ContractsError> {
+        let parsed = url::Url::parse(&spec.url).map_err(|e| ContractsError::WebhookUrl {
+            authority: authority.to_string(),
+            reason: e.to_string(),
+        })?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(ContractsError::WebhookUrl {
+                authority: authority.to_string(),
+                reason: format!("scheme `{}` is not http or https", parsed.scheme()),
+            });
+        }
+        if parsed.host().is_none() {
+            return Err(ContractsError::WebhookUrl {
+                authority: authority.to_string(),
+                reason: "url has no host".to_string(),
+            });
+        }
+        let timeout_ms = spec.timeout_ms.unwrap_or(DEFAULT_WEBHOOK_TIMEOUT_MS);
+        if !(1..=MAX_WEBHOOK_TIMEOUT_MS).contains(&timeout_ms) {
+            return Err(ContractsError::WebhookTimeout(authority.to_string()));
+        }
+        Ok(Self {
+            url: spec.url,
+            timeout: Duration::from_millis(timeout_ms),
+        })
+    }
+
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
 }
 
 impl Contracts {
@@ -137,12 +206,17 @@ impl RawConfig {
         }
 
         let mut authorities = Vec::new();
+        let mut endpoints = HashMap::new();
         let mut seen_authorities = BTreeSet::new();
         for spec in self.authority {
             if !seen_authorities.insert(spec.name.clone()) {
                 return Err(ContractsError::DuplicateAuthority(spec.name));
             }
-            authorities.push(spec.build()?);
+            let (authority, endpoint) = spec.build()?;
+            if let Some(endpoint) = endpoint {
+                endpoints.insert(authority.name.clone(), endpoint);
+            }
+            authorities.push(authority);
         }
 
         Ok(Contracts {
@@ -150,6 +224,7 @@ impl RawConfig {
             contracts,
             recipients_args,
             authorities,
+            endpoints,
         })
     }
 }
@@ -393,6 +468,20 @@ struct AuthoritySpec {
     may_release_control: Option<bool>,
     #[serde(default)]
     acquire_effects: Option<bool>,
+    /// Where this escalate authority's rulings are served over HTTP; absent
+    /// means the integration's own channel (elicitation, or blocked).
+    #[serde(default)]
+    webhook: Option<WebhookSpec>,
+}
+
+/// The `webhook = { url = "…", timeout_ms = … }` inline table on an
+/// escalate authority.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WebhookSpec {
+    url: String,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
 }
 
 /// The one inline ruling TOML can declare: approve everything routed here.
@@ -414,7 +503,7 @@ fn allow_ruling(
 }
 
 impl AuthoritySpec {
-    fn build(self) -> Result<Authority, ContractsError> {
+    fn build(self) -> Result<(Authority, Option<AuthorityEndpoint>), ContractsError> {
         if self.name.is_empty() {
             return Err(ContractsError::EmptyAuthorityName);
         }
@@ -425,7 +514,10 @@ impl AuthoritySpec {
         }
     }
 
-    fn build_allow(self) -> Result<Authority, ContractsError> {
+    fn build_allow(self) -> Result<(Authority, Option<AuthorityEndpoint>), ContractsError> {
+        if self.webhook.is_some() {
+            return Err(ContractsError::AllowAuthorityWebhook(self.name));
+        }
         let has_mandate_field = self.trust.is_some()
             || self.audience.is_some()
             || self.waive_prior_effects.is_some()
@@ -438,14 +530,11 @@ impl AuthoritySpec {
         if self.acknowledge_unknown != Some(true) {
             return Err(ContractsError::AuthorityImpotent(self.name));
         }
-        Ok(Authority::inline(
-            &self.name,
-            AuthorityMandate::none().acknowledge_unknown(),
-            allow_ruling,
-        ))
+        let authority = Authority::inline(&self.name, AuthorityMandate::none().acknowledge_unknown(), allow_ruling);
+        Ok((authority, None))
     }
 
-    fn build_escalate(self) -> Result<Authority, ContractsError> {
+    fn build_escalate(self) -> Result<(Authority, Option<AuthorityEndpoint>), ContractsError> {
         if self.audience.as_ref().is_some_and(Vec::is_empty) {
             return Err(ContractsError::EmptyAuthorityAudience(self.name));
         }
@@ -461,7 +550,11 @@ impl AuthoritySpec {
         if mandate == AuthorityMandate::none() {
             return Err(ContractsError::AuthorityImpotent(self.name));
         }
-        Ok(Authority::external(&self.name, mandate))
+        let endpoint = self
+            .webhook
+            .map(|spec| AuthorityEndpoint::from_spec(&self.name, spec))
+            .transpose()?;
+        Ok((Authority::external(&self.name, mandate), endpoint))
     }
 }
 
@@ -835,5 +928,92 @@ mod tests {
             Contracts::from_toml(dup),
             Err(ContractsError::DuplicateAuthority(_))
         ));
+    }
+
+    #[test]
+    fn escalate_webhook_populates_endpoint_with_default_timeout() {
+        let c = Contracts::from_toml(
+            r#"
+            [[authority]]
+            name = "compliance"
+            rule = "escalate"
+            acquire_effects = true
+            webhook = { url = "https://approvals.example.com/rule" }
+
+            [[authority]]
+            name = "ops"
+            rule = "escalate"
+            trust = "trusted"
+            webhook = { url = "http://ops-approver.kagent.svc/rule", timeout_ms = 5000 }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.authorities.len(), 2);
+        assert_eq!(c.endpoints.len(), 2);
+        let compliance = &c.endpoints[&AuthorityName::new("compliance")];
+        assert_eq!(compliance.url(), "https://approvals.example.com/rule");
+        assert_eq!(compliance.timeout(), Duration::from_millis(30_000));
+        let ops = &c.endpoints[&AuthorityName::new("ops")];
+        assert_eq!(ops.url(), "http://ops-approver.kagent.svc/rule");
+        assert_eq!(ops.timeout(), Duration::from_millis(5000));
+    }
+
+    #[test]
+    fn escalate_without_webhook_declares_no_endpoint() {
+        let c =
+            Contracts::from_toml("[[authority]]\nname = \"h\"\nrule = \"escalate\"\nacquire_effects = true").unwrap();
+        assert_eq!(c.authorities.len(), 1);
+        assert!(c.endpoints.is_empty());
+    }
+
+    #[test]
+    fn allow_authority_rejects_webhook() {
+        let text = "[[authority]]\nname = \"a\"\nrule = \"allow\"\nacknowledge_unknown = true\n\
+                    webhook = { url = \"https://x.example\" }";
+        assert!(matches!(
+            Contracts::from_toml(text),
+            Err(ContractsError::AllowAuthorityWebhook(name)) if name == "a"
+        ));
+    }
+
+    #[test]
+    fn webhook_rejects_malformed_and_non_http_urls() {
+        for url in ["not a url", "ftp://x.example/rule", "unix:/run/sock", "https://"] {
+            let text = format!(
+                "[[authority]]\nname = \"h\"\nrule = \"escalate\"\nacquire_effects = true\n\
+                 webhook = {{ url = \"{url}\" }}"
+            );
+            assert!(
+                matches!(
+                    Contracts::from_toml(&text),
+                    Err(ContractsError::WebhookUrl { authority, .. }) if authority == "h"
+                ),
+                "url `{url}` should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn webhook_rejects_out_of_range_timeouts() {
+        for timeout in ["0", "300001"] {
+            let text = format!(
+                "[[authority]]\nname = \"h\"\nrule = \"escalate\"\nacquire_effects = true\n\
+                 webhook = {{ url = \"https://x.example/rule\", timeout_ms = {timeout} }}"
+            );
+            assert!(
+                matches!(
+                    Contracts::from_toml(&text),
+                    Err(ContractsError::WebhookTimeout(name)) if name == "h"
+                ),
+                "timeout_ms {timeout} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn webhook_rejects_unknown_fields() {
+        let text = "[[authority]]\nname = \"h\"\nrule = \"escalate\"\nacquire_effects = true\n\
+                    webhook = { url = \"https://x.example\", retries = 3 }";
+        assert!(matches!(Contracts::from_toml(text), Err(ContractsError::Parse(_))));
     }
 }
