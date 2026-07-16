@@ -3662,10 +3662,10 @@ fn external_waiver_denial_blocks_terminally() {
     ));
 }
 
-/// Stale and foreign step capabilities and approvals are refused without
-/// touching state.
+/// Stale step capabilities and approvals are refused without touching state.
+/// Foreign bindings are covered separately, per engine and per trajectory.
 #[test]
-fn stale_and_foreign_step_capabilities_are_refused() {
+fn stale_step_capabilities_and_approvals_are_refused() {
     let mut engine = engine_with([email_contract()]);
     engine.register_authority(human()).unwrap();
     let mut trajectory = Trajectory::new();

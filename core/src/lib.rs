@@ -66,6 +66,9 @@ pub mod engine;
 // re-exported at the root: consumers read trajectory state through the
 // `Trajectory` accessors; the raw log is an audit/inspection surface.
 pub mod event;
+// Compile-time assertions that the linear capabilities stay `Serialize`-only
+// and non-`Clone`. No runtime surface; the module exists to fail the build.
+mod linearity;
 pub mod plan;
 pub mod projection;
 // Technically public (reusable label algebras) but never re-exported at the

@@ -115,10 +115,18 @@ impl ActionTransition {
     /// action is the point of sandboxing), but nothing may widen to
     /// `Unknown` or add effects.
     pub fn narrows(&self, pending: &PendingAction) -> Result<(), TransitionFailure> {
-        if pending.current().tool != self.from_tool {
+        self.narrows_flow(&pending.current().tool, pending.proposed_effects())
+    }
+
+    /// The relation itself, over the tool and proposed effects alone. The
+    /// planner holds a simulated flow rather than a pending action, so the
+    /// state it narrows is supplied as values; [`narrows`](Self::narrows) is
+    /// the same relation read off a live pending action.
+    pub(crate) fn narrows_flow(&self, tool: &ToolName, proposed_effects: &Effects) -> Result<(), TransitionFailure> {
+        if *tool != self.from_tool {
             return Err(TransitionFailure::ReductionRefused);
         }
-        if effects_narrow(pending.proposed_effects(), &self.effects) {
+        if effects_narrow(proposed_effects, &self.effects) {
             Ok(())
         } else {
             Err(TransitionFailure::ReductionRefused)
