@@ -85,7 +85,7 @@ fn resolve_api_key() -> Option<String> {
     {
         return Some(key);
     }
-    let env_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env");
+    let env_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.env");
     let contents = std::fs::read_to_string(env_path).ok()?;
     contents.lines().find_map(|line| {
         let value = line

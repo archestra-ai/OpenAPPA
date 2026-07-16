@@ -18,7 +18,7 @@ from baton_dojo.contracts import ContractTable
 from baton_dojo.defense import BatonToolsExecutor
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-AI_LABS_ENV = Path(__file__).resolve().parents[4] / ".env"
+REPO_ENV = Path(__file__).resolve().parents[3] / ".env"
 
 
 def openrouter_api_key() -> str:
@@ -26,8 +26,8 @@ def openrouter_api_key() -> str:
     key = os.environ.get("OPENROUTER_API_KEY")
     if key:
         return key
-    if AI_LABS_ENV.exists():
-        for line in AI_LABS_ENV.read_text().splitlines():
+    if REPO_ENV.exists():
+        for line in REPO_ENV.read_text().splitlines():
             line = line.strip()
             if line.startswith("OPENROUTER_API_KEY="):
                 value = line.split("=", 1)[1].strip()
@@ -36,7 +36,7 @@ def openrouter_api_key() -> str:
                 if value:
                     return value
     raise RuntimeError(
-        f"OPENROUTER_API_KEY not set and not found in {AI_LABS_ENV}; "
+        f"OPENROUTER_API_KEY not set and not found in {REPO_ENV}; "
         "bench mode needs an OpenRouter key"
     )
 

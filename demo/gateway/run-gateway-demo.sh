@@ -38,7 +38,7 @@ if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
   key="$(read_env_key "$CRATE_DIR/../../.env" || true)"
   if [[ -z "$key" ]] && git -C "$CRATE_DIR" rev-parse --git-common-dir >/dev/null 2>&1; then
     main_root="$(cd "$CRATE_DIR" && cd "$(dirname "$(git rev-parse --git-common-dir)")" && pwd)"
-    key="$(read_env_key "$main_root/ai-labs/.env" || true)"
+    key="$(read_env_key "$main_root/.env" || true)"
   fi
   [[ -n "$key" ]] && export OPENROUTER_API_KEY="$key"
 fi

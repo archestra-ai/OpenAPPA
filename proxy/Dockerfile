@@ -1,5 +1,5 @@
-# Build context is ai-labs (the reduced build reuses the workspace lockfile).
-#   docker build -f baton/baton-proxy/Dockerfile -t baton-proxy:poc .
+# Build context is the repository root.
+#   docker build -f proxy/Dockerfile -t baton-proxy:poc .
 # Pin to bookworm so the runtime glibc (debian:bookworm-slim) matches the
 # build glibc — rust:1-slim tracks trixie and links a newer glibc.
 FROM rust:1-slim-bookworm AS build

@@ -19,9 +19,9 @@ IMAGE=baton-proxy:poc
 NOTIFY_IMAGE=notify-mcp:poc
 
 # Source OPENROUTER_API_KEY from ai-labs/.env if not already set.
-if [[ -z "${OPENROUTER_API_KEY:-}" && -f ../../../.env ]]; then
+if [[ -z "${OPENROUTER_API_KEY:-}" && -f ../../.env ]]; then
   # shellcheck disable=SC1091
-  set -a; . ../../../.env; set +a
+  set -a; . ../../.env; set +a
 fi
 : "${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY (or put it in ai-labs/.env)}"
 
@@ -39,7 +39,7 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version "$KAGENT_VERSION" -n "$NS"
 
 echo "▸ baton-proxy image"
-(cd ../../.. && docker build -q -f baton/baton-proxy/Dockerfile -t "$IMAGE" .)
+(cd ../.. && docker build -q -f proxy/Dockerfile -t "$IMAGE" .)
 kind load docker-image "$IMAGE" --name "$CLUSTER"
 
 echo "▸ notify-mcp image"
