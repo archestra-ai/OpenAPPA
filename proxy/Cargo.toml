@@ -8,6 +8,7 @@ description = "Inference-layer proxy that blocks tool calls failing their OpenAP
 [dependencies]
 appa-core = { path = "../core" }
 appa-contracts = { path = "../contracts" }
+appa-edge = { path = "../edge" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-std", "net"] }
 axum = "0.8"
 reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "json"] }

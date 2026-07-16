@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "check", "contracts", "dojo", "proxy"]
+members = ["core", "check", "contracts", "dojo", "edge", "proxy"]
 resolver = "2"
 
 [workspace.lints.rust]
