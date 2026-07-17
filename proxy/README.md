@@ -14,10 +14,26 @@ blocked call is never returned to the harness and never executed.
 
 Unprovable flows fail closed unless the policy declares an authority competent
 to acknowledge them (see the Policy section) — anything an authority cannot
-clear stays blocked. (The earlier human-approval variant — where a blocked
-call became a request to a human over MCP — is in PR #6551 on `main`; it
-predates the current value-granular appa-core and will return as a port to
-External authorities.)
+clear stays blocked.
+
+External approval is served over HTTP: an `escalate` authority must declare a
+`webhook` endpoint (the proxy's one approval channel — declared without one,
+the config fails at startup). When a new call needs that authority's grant,
+the proxy POSTs the pending approval — the typed grant, the violations, the
+label/provenance ancestry, never value bytes — to the declared endpoint and
+applies the `approve`/`deny` answer. Any non-ruling (timeout, transport
+error, malformed body) leaves the call blocked.
+
+History replay never re-fires a webhook. The proxy is stateless — external
+grants do not survive the per-request rebuild — so replayed tool results are
+admitted under a standing trust decision: **harness-supplied history is
+genuine**. A tool result in `messages` implies the proxy permitted that call
+in a prior request; an honest harness executes only calls the proxy let
+through, and the model cannot author `role = "tool"` messages. The ruling's
+audit reason states the vouching. This assumption is environmental — the
+proxy port must be reachable only by the harness (in the kagent demo it is a
+localhost sidecar). A durable ruling store — the proxy's own record of past
+rulings, replayed instead of vouched — is the planned replacement.
 
 ## Policy
 

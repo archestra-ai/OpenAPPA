@@ -10,6 +10,7 @@ appa-core = { path = "../core" }
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 thiserror = "2"
+url = "2"
 
 [lints]
 workspace = true
