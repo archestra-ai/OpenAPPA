@@ -243,19 +243,6 @@ pub fn flow_slots(events: &EventSet) -> (Option<PendingAction>, Option<PendingEm
     (pending, pending_emission)
 }
 
-/// The live pending action, rebuilt from proposal/reduction/lifecycle facts —
-/// including its `current` argument tree, replayed through the same
-/// `substitute` the live path uses.
-pub fn pending_action(events: &EventSet) -> Option<PendingAction> {
-    flow_slots(events).0
-}
-
-/// The live pending emission, rebuilt from its proposal and body-substitution
-/// facts.
-pub fn pending_emission(events: &EventSet) -> Option<PendingEmission> {
-    flow_slots(events).1
-}
-
 /// The confirmation currently in force: the newest turn's, only if it is a
 /// confirming user turn whose confirmation no consumption fact has spent.
 pub fn confirmation_available(events: &EventSet) -> Option<(TurnId, ToolName)> {
@@ -360,7 +347,6 @@ pub struct TrajectoryProjection {
     pending_action: Option<PendingAction>,
     pending_emission: Option<PendingEmission>,
     confirmation_available: Option<(TurnId, ToolName)>,
-    grant_availability: BTreeMap<GrantId, crate::remedy::Authorization>,
 }
 
 impl Default for TrajectoryProjection {
@@ -381,7 +367,6 @@ impl TrajectoryProjection {
             pending_action,
             pending_emission,
             confirmation_available: confirmation_available(events),
-            grant_availability: grant_availability(events),
         }
     }
 
@@ -393,12 +378,6 @@ impl TrajectoryProjection {
 
     pub fn provenance_of(&self, value: ValueId) -> Option<&Provenance> {
         self.provenance.get(&value)
-    }
-
-    /// How many values the log has admitted. Ids are minted sequentially, so
-    /// this is also one past the highest admitted [`ValueId`].
-    pub fn admitted_values(&self) -> usize {
-        self.value_labels.len()
     }
 
     /// Fold the labels of `ids`. Fails loudly on an unknown id: silently
@@ -453,10 +432,6 @@ impl TrajectoryProjection {
 
     pub fn confirmation_available(&self) -> Option<&(TurnId, ToolName)> {
         self.confirmation_available.as_ref()
-    }
-
-    pub fn grant_availability(&self) -> &BTreeMap<GrantId, crate::remedy::Authorization> {
-        &self.grant_availability
     }
 }
 

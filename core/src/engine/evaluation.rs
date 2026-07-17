@@ -93,7 +93,7 @@ impl PolicyEngine {
 
     /// Evaluate one assistant emission through the same pipeline as any tool
     /// sink, under the reserved sink name
-    /// [`RESPONSE_SINK`](super::capability::RESPONSE_SINK) and the registered
+    /// `RESPONSE_SINK` and the registered
     /// [`ResponsePolicy`](super::ResponsePolicy). Core never infers that a
     /// turn is "final": the caller proposes an emission whenever assistant
     /// output is about to cross the mediation boundary.

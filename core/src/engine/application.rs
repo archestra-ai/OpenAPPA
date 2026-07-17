@@ -157,19 +157,15 @@ impl PolicyEngine {
                 current: trajectory.revision(),
             });
         }
-        let stored = stored_plan(trajectory, capability.plan)?;
-        let step = stored
+        debug_assert_eq!(capability.step, 0, "mint_step only mints the executable head step");
+        let step = stored_plan(trajectory, capability.plan)
+            .expect("a revision-bound step capability names a stored plan")
             .steps
             .get(capability.step)
-            .ok_or(StepRefused::NoSuchStep {
-                plan: capability.plan,
-                step: capability.step,
-            })?
+            .expect("a revision-bound step capability names its minted head step")
             .clone();
-        if capability.step != 0 {
-            return Err(StepRefused::NotNextStep { step: capability.step });
-        }
-        let kind = pending_flow_kind(trajectory, capability.flow)?;
+        let kind = pending_flow_kind(trajectory, capability.flow)
+            .expect("a revision-bound step capability targets the still-pending flow");
 
         match step {
             PlannedRemedy::Reduce(ReductionTarget::DeriveValue { source, transformer }) => {
@@ -179,7 +175,8 @@ impl PolicyEngine {
                     .find(|t| t.descriptor.transformer == transformer)
                     .expect("plans reference only registered transformers");
                 let source_value = trajectory.value(source).expect("plans reference only admitted values");
-                if let Err(failure) = registered.accepts(&source_value) {
+                if !registered.descriptor.precondition.matches(source_value.label()) {
+                    let failure = crate::audit::TransitionFailure::ReductionRefused;
                     trajectory.fail_transform(
                         source,
                         registered.descriptor.transformer.clone(),

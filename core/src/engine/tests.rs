@@ -155,6 +155,13 @@ fn step_targets(step: &PlannedRemedy) -> Option<&[Violation]> {
     }
 }
 
+fn step_routes(step: &PlannedRemedy) -> Option<Vec<&str>> {
+    match step {
+        PlannedRemedy::Authorize { routes, .. } => Some(routes.iter().map(|name| name.as_str()).collect()),
+        PlannedRemedy::Reduce(_) => None,
+    }
+}
+
 fn release_step(step: &PlannedRemedy) -> Option<BTreeSet<ValueId>> {
     let PlannedRemedy::Authorize { authorization, .. } = step else {
         return None;
@@ -4461,6 +4468,87 @@ fn rescue_composes_endorse_then_release_for_a_masked_flow() {
     let audit = trajectory.audit();
     assert!(audit.iter().any(|e| applied_raise(e).is_some()));
     assert!(audit.iter().any(|e| applied_lift(e).is_some()));
+}
+
+#[test]
+fn rescue_steps_pin_their_routes_and_target_vectors() {
+    let mut engine = engine_with([masked_contract()]);
+    engine
+        .register_authority(inline_authority("endorser", endorser_mandate(), approve_all))
+        .unwrap();
+    engine
+        .register_authority(inline_authority("releaser", releaser_mandate(), approve_all))
+        .unwrap();
+    let mut trajectory = Trajectory::new();
+    trajectory.seed_committed_effects(Effects::declared([Effect::Egress]));
+    let (_, secret, request) = masked_flow(&mut trajectory);
+
+    let plans = remediable(&engine, &mut trajectory, request);
+    assert_eq!(plans.len(), 1);
+    let steps = &plans.first().steps;
+    assert_eq!(steps.len(), 2);
+
+    assert_eq!(step_routes(steps.first()), Some(vec!["endorser"]));
+    assert_eq!(
+        step_targets(steps.first()),
+        Some(&[Violation::Unprovable(Unprovable::TrustUnknown)][..])
+    );
+
+    let waiver = steps.get(1).unwrap();
+    assert_eq!(step_routes(waiver), Some(vec!["releaser"]));
+    assert_eq!(release_step(waiver), Some(BTreeSet::from([secret])));
+    assert_eq!(
+        step_targets(waiver),
+        Some(
+            &[Violation::Breach(crate::contract::Breach::AudienceExceeds {
+                outside: BTreeSet::from([user("bob")]),
+            })][..]
+        )
+    );
+}
+
+#[test]
+fn rescue_accept_and_waiver_pin_their_actual_flow_targets() {
+    let mut engine = engine_with([masked_contract()]);
+    engine
+        .register_authority(inline_authority("endorser", endorser_mandate(), approve_all))
+        .unwrap();
+    engine
+        .register_authority(inline_authority("releaser", releaser_mandate(), approve_all))
+        .unwrap();
+    engine.register_authority(inline_acquirer()).unwrap();
+    let mut trajectory = Trajectory::new();
+    let (_, secret, request) = masked_flow(&mut trajectory);
+
+    let plans = remediable(&engine, &mut trajectory, request);
+    assert_eq!(plans.len(), 1);
+    let steps = &plans.first().steps;
+    assert_eq!(steps.len(), 3);
+    let audience_deficit = Violation::Breach(crate::contract::Breach::AudienceExceeds {
+        outside: BTreeSet::from([user("bob")]),
+    });
+
+    assert_eq!(step_routes(steps.first()), Some(vec!["endorser"]));
+
+    let accept = steps.get(1).unwrap();
+    assert_eq!(step_routes(accept), Some(vec!["acquirer"]));
+    assert_eq!(acquire_step(accept), Some(Effects::declared([Effect::Egress])));
+    assert_eq!(
+        step_targets(accept),
+        Some(
+            &[
+                audience_deficit.clone(),
+                Violation::Breach(crate::contract::Breach::SurfaceGrowth {
+                    growth: Effects::declared([Effect::Egress]),
+                }),
+            ][..]
+        )
+    );
+
+    let waiver = steps.get(2).unwrap();
+    assert_eq!(step_routes(waiver), Some(vec!["releaser"]));
+    assert_eq!(release_step(waiver), Some(BTreeSet::from([secret])));
+    assert_eq!(step_targets(waiver), Some(&[audience_deficit][..]));
 }
 
 #[test]

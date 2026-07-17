@@ -20,11 +20,6 @@ use crate::value::{TransformerRef, UnknownValue, ValueLabel, ValueStore};
 use super::PolicyEngine;
 use super::capability::{RESPONSE_SINK, ResponsePolicy, ToolContract};
 
-struct JointRescue {
-    endorse: Vec<(ValueId, LabelRaise, Vec<Violation>)>,
-    delta: Lift,
-}
-
 struct SearchCtx<'a> {
     store: &'a ValueStore,
     tree: &'a ArgumentTree<ValueId>,
@@ -387,34 +382,9 @@ impl PolicyEngine {
         };
         self.minimal_joint_releases(base, &ids, ctx.acquire, ctx.flow)
             .into_iter()
-            .filter_map(|rescue| {
-                let mut sim = base.clone();
-                let mut steps = Vec::new();
-                for (leaf, delta, targets) in &rescue.endorse {
-                    let step = self.authorize_step(raise_authorization(*leaf, delta), targets.clone())?;
-                    let raised = delta.raise(&sim.leaf_labels[leaf]);
-                    sim.leaf_labels.insert(*leaf, raised);
-                    steps.push(step);
-                }
-                let mut remaining = sim.violations(None);
-                if let Some(growth) = surface_growth_of(&remaining) {
-                    let action = ctx.acquire?;
-                    let grant = acquire_authorization(action, &growth);
-                    let step = self.authorize_step(grant, remaining.clone())?;
-                    sim.accepted_effects = sim.accepted_effects.clone().combine(growth);
-                    remaining = sim.violations(None);
-                    steps.push(step);
-                }
-                if !sim.violations(Some(&rescue.delta)).is_empty() {
-                    return None;
-                }
-                let grant = authorization_for(&rescue.delta, &remaining, ctx.flow);
-                let step = self.authorize_step(grant, remaining)?;
-                steps.push(step);
-                NonEmptyVec::from_vec(steps).map(|steps| Candidate {
-                    steps,
-                    group: group.clone(),
-                })
+            .map(|steps| Candidate {
+                steps,
+                group: group.clone(),
             })
             .collect()
     }
@@ -444,9 +414,9 @@ impl PolicyEngine {
         ids: &[ValueId],
         acquire: Option<ActionId>,
         flow: FlowId,
-    ) -> Vec<JointRescue> {
+    ) -> Vec<NonEmptyVec<PlannedRemedy>> {
         for size in 1..=ids.len() {
-            let hits: Vec<JointRescue> = Combinations::new(ids.len(), size)
+            let hits: Vec<NonEmptyVec<PlannedRemedy>> = Combinations::new(ids.len(), size)
                 .filter_map(|combo| {
                     let release: BTreeSet<ValueId> = combo.iter().map(|&i| ids[i]).collect();
                     self.joint_rescue(base, &release, acquire, flow)
@@ -465,37 +435,38 @@ impl PolicyEngine {
         release: &BTreeSet<ValueId>,
         acquire: Option<ActionId>,
         flow: FlowId,
-    ) -> Option<JointRescue> {
+    ) -> Option<NonEmptyVec<PlannedRemedy>> {
         let mut projected = base.clone();
         projected.control_labels.retain(|id, _| !release.contains(id));
-        let mut endorse = Vec::new();
+        let mut actual = base.clone();
+        let mut steps = Vec::new();
         let mut residual = projected.violations(None);
         while let Some((leaf, delta)) = endorse_steps(&projected, &residual).into_iter().next() {
-            if !self.can_authorize(&raise_authorization(leaf, &delta)) {
-                return None;
-            }
+            let step = self.authorize_step(raise_authorization(leaf, &delta), residual)?;
             let raised = delta.raise(&projected.leaf_labels[&leaf]);
-            projected.leaf_labels.insert(leaf, raised);
-            endorse.push((leaf, delta, residual));
+            projected.leaf_labels.insert(leaf, raised.clone());
+            actual.leaf_labels.insert(leaf, raised);
+            steps.push(step);
             residual = projected.violations(None);
         }
-        if let Some(growth) = surface_growth_of(&residual) {
+        let mut remaining = actual.violations(None);
+        if let Some(growth) = surface_growth_of(&remaining) {
             let action = acquire?;
-            if !self.can_authorize(&acquire_authorization(action, &growth)) {
-                return None;
-            }
-            projected.accepted_effects = projected.accepted_effects.clone().combine(growth);
+            let step = self.authorize_step(acquire_authorization(action, &growth), remaining)?;
+            projected.accepted_effects = projected.accepted_effects.clone().combine(growth.clone());
+            actual.accepted_effects = actual.accepted_effects.clone().combine(growth);
             residual = projected.violations(None);
+            remaining = actual.violations(None);
+            steps.push(step);
         }
         let mut delta = needed_delta(&residual);
         delta.control_release = release.clone();
-        if !self.can_authorize(&authorization_for(&delta, &residual, flow)) {
-            return None;
-        }
         if !projected.violations(Some(&delta)).is_empty() {
             return None;
         }
-        Some(JointRescue { endorse, delta })
+        let step = self.authorize_step(authorization_for(&delta, &remaining, flow), remaining)?;
+        steps.push(step);
+        NonEmptyVec::from_vec(steps)
     }
 
     fn replay_unlocks(&self, base: &SimFlow, ctx: &SearchCtx<'_>, steps: &[&PlannedRemedy]) -> bool {
@@ -641,10 +612,6 @@ impl PolicyEngine {
             .iter()
             .filter(move |a| matches!(a.mode, AuthorityMode::External) && a.mandate.authorizes(ask));
         inline.chain(external)
-    }
-
-    fn can_authorize(&self, ask: &Authorization) -> bool {
-        self.competent_authorities(ask).next().is_some()
     }
 }
 
@@ -1188,4 +1155,145 @@ fn endorse_steps(sim: &SimFlow, violations: &[Violation]) -> Vec<(ValueId, Label
         }
     }
     steps
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::approval::{Authority, Ruling, TrajectoryView};
+    use crate::contract::{AttentionRule, Breach};
+    use crate::dimension::Trust;
+    use crate::transition::AuthorityMandate;
+
+    fn approve_all(_: &Authorization, _: &[Violation], _: &TrajectoryView) -> Option<Ruling> {
+        Some(Ruling::Approve {
+            reason: "approved".to_owned(),
+        })
+    }
+
+    fn engine_with_waiver(mandate: AuthorityMandate) -> PolicyEngine {
+        let mut engine = PolicyEngine::new();
+        engine
+            .register_authority(Authority::inline("waiver", mandate, approve_all))
+            .unwrap();
+        engine
+    }
+
+    fn probe_sim(requires: Requirements, controls: &[(ValueId, ValueLabel)]) -> SimFlow {
+        SimFlow {
+            leaf_labels: BTreeMap::new(),
+            control_labels: controls.iter().cloned().collect(),
+            tool: ToolName::new("probe.sink"),
+            requires,
+            recipients: BTreeSet::new(),
+            past_effects: Effects::none(),
+            proposed_effects: Effects::none(),
+            accepted_effects: Effects::none(),
+            confirmed: None,
+            extra: Vec::new(),
+        }
+    }
+
+    fn release_of(steps: &NonEmptyVec<PlannedRemedy>) -> BTreeSet<ValueId> {
+        let PlannedRemedy::Authorize { authorization, .. } = steps.first() else {
+            panic!("a rescue candidate ends in an authorize step");
+        };
+        authorization
+            .delta()
+            .coordinates()
+            .find_map(|c| match c {
+                DeltaCoordinate::ReleaseControl(deps) => Some(deps.clone()),
+                _ => None,
+            })
+            .expect("a rescue waiver carries its release")
+    }
+
+    #[test]
+    fn joint_release_sweep_collects_every_first_cardinality_success() {
+        let engine = engine_with_waiver(AuthorityMandate {
+            confirms: true,
+            may_release_control: true,
+            ..AuthorityMandate::none()
+        });
+        let (s1, s2) = (ValueId::new(1), ValueId::new(2));
+        let sim = probe_sim(
+            Requirements {
+                attention: AttentionRule::ExplicitConfirmation,
+                ..Requirements::default()
+            },
+            &[(s1, ValueLabel::identity()), (s2, ValueLabel::identity())],
+        );
+
+        let hits = engine.minimal_joint_releases(&sim, &[s1, s2], None, FlowId::new(0));
+
+        assert_eq!(hits.len(), 2);
+        assert_eq!(release_of(&hits[0]), BTreeSet::from([s1]));
+        assert_eq!(release_of(&hits[1]), BTreeSet::from([s2]));
+        for hit in &hits {
+            assert_eq!(hit.len(), 1);
+            let PlannedRemedy::Authorize { routes, targets, .. } = hit.first() else {
+                panic!("the sole step is the waiver");
+            };
+            assert_eq!(routes.iter().map(|r| r.as_str()).collect::<Vec<_>>(), ["waiver"]);
+            assert_eq!(
+                targets,
+                &[Violation::Breach(Breach::ConfirmationMissing {
+                    tool: ToolName::new("probe.sink"),
+                })]
+            );
+        }
+    }
+
+    #[test]
+    fn joint_release_sweep_ascends_past_a_failed_cardinality() {
+        let engine = engine_with_waiver(AuthorityMandate {
+            may_release_control: true,
+            ..AuthorityMandate::none()
+        });
+        let (s1, s2) = (ValueId::new(1), ValueId::new(2));
+        let suspicious = ValueLabel {
+            trust: Trust::SUSPICIOUS,
+            ..ValueLabel::identity()
+        };
+        let sim = probe_sim(
+            Requirements {
+                trust: Some(KnownTrust::Trusted),
+                ..Requirements::default()
+            },
+            &[(s1, suspicious.clone()), (s2, suspicious)],
+        );
+
+        let hits = engine.minimal_joint_releases(&sim, &[s1, s2], None, FlowId::new(0));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(release_of(&hits[0]), BTreeSet::from([s1, s2]));
+
+        let incompetent = engine_with_waiver(AuthorityMandate::none());
+        let sim = probe_sim(
+            Requirements {
+                trust: Some(KnownTrust::Trusted),
+                ..Requirements::default()
+            },
+            &[
+                (
+                    s1,
+                    ValueLabel {
+                        trust: Trust::SUSPICIOUS,
+                        ..ValueLabel::identity()
+                    },
+                ),
+                (
+                    s2,
+                    ValueLabel {
+                        trust: Trust::SUSPICIOUS,
+                        ..ValueLabel::identity()
+                    },
+                ),
+            ],
+        );
+        assert!(
+            incompetent
+                .minimal_joint_releases(&sim, &[s1, s2], None, FlowId::new(0))
+                .is_empty()
+        );
+    }
 }

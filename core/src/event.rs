@@ -19,12 +19,6 @@ use crate::value::{TransformerRef, ValueLabel};
 #[serde(transparent)]
 pub struct EventId(u64);
 
-impl EventId {
-    pub fn index(self) -> u64 {
-        self.0
-    }
-}
-
 impl fmt::Display for EventId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "event#{}", self.0)
@@ -49,30 +43,6 @@ impl fmt::Display for Basis {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "basis#{}", self.0)
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum Subject {
-    Value(ValueId),
-    Action(ActionId),
-    Turn(TurnId),
-    Check(FlowId),
-    Grant(GrantId),
-    Trajectory,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub enum Scope {
-    Value,
-    Action,
-    Trajectory,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum Issuer {
-    Harness,
-    Engine,
-    Authority(AuthorityName),
 }
 
 /// How an admitted value came to exist, carrying exactly the admission-time
@@ -210,95 +180,11 @@ pub enum Fact {
     },
 }
 
-impl Fact {
-    fn subject(&self) -> Subject {
-        match self {
-            Self::ValueAdmitted { value, .. } | Self::ResponseEmitted { value } => Subject::Value(*value),
-            Self::TurnAppended { turn, .. } | Self::ConfirmationSpent { turn } => Subject::Turn(*turn),
-            Self::ActionProposed { action, .. }
-            | Self::ActionConstrained { action, .. }
-            | Self::ArgumentSubstituted { action, .. }
-            | Self::GrowthAccepted { action, .. }
-            | Self::EffectsCommitted { action, .. }
-            | Self::ActionReleased { action }
-            | Self::ActionCompleted { action, .. }
-            | Self::DispatchFailed { action }
-            | Self::ActionAbandoned { action } => Subject::Action(*action),
-            Self::GrantIssued { grant, .. } | Self::GrantConsumed { grant, .. } => Subject::Grant(*grant),
-            Self::CheckPerformed { flow, .. }
-            | Self::EmissionProposed { flow, .. }
-            | Self::EmissionBodySubstituted { flow, .. }
-            | Self::EmissionAbandoned { flow } => Subject::Check(*flow),
-            Self::AuthorizationApplied { authorization, .. } | Self::AuthorizationDenied { authorization, .. } => {
-                match &authorization.scope() {
-                    AuthorizationScope::DerivedValue { source } => Subject::Value(*source),
-                    AuthorizationScope::PendingAction { action } => Subject::Action(*action),
-                    AuthorizationScope::PolicyCheck { flow } => Subject::Check(*flow),
-                }
-            }
-            Self::ControlPlane { .. } => Subject::Trajectory,
-        }
-    }
-
-    fn scope(&self) -> Scope {
-        match self {
-            Self::ValueAdmitted { .. } => Scope::Value,
-            Self::ActionProposed { .. }
-            | Self::ActionConstrained { .. }
-            | Self::ArgumentSubstituted { .. }
-            | Self::GrowthAccepted { .. }
-            | Self::ActionReleased { .. }
-            | Self::ActionCompleted { .. }
-            | Self::DispatchFailed { .. }
-            | Self::ActionAbandoned { .. }
-            | Self::CheckPerformed { .. }
-            | Self::EmissionProposed { .. }
-            | Self::EmissionBodySubstituted { .. }
-            | Self::EmissionAbandoned { .. }
-            | Self::GrantIssued { .. }
-            | Self::GrantConsumed { .. } => Scope::Action,
-            Self::AuthorizationApplied { authorization, .. } | Self::AuthorizationDenied { authorization, .. } => {
-                match &authorization.scope() {
-                    AuthorizationScope::DerivedValue { .. } => Scope::Value,
-                    AuthorizationScope::PendingAction { .. } => Scope::Action,
-                    AuthorizationScope::PolicyCheck { .. } => Scope::Action,
-                }
-            }
-            Self::TurnAppended { .. }
-            | Self::EffectsCommitted { .. }
-            | Self::ConfirmationSpent { .. }
-            | Self::ResponseEmitted { .. }
-            | Self::ControlPlane { .. } => Scope::Trajectory,
-        }
-    }
-
-    fn issuer(&self) -> Issuer {
-        match self {
-            Self::ValueAdmitted {
-                origin: ValueOrigin::Ingress { .. },
-                ..
-            } => Issuer::Harness,
-            Self::ValueAdmitted {
-                origin: ValueOrigin::Endorsed { authority, .. },
-                ..
-            } => Issuer::Authority(authority.clone()),
-            Self::GrowthAccepted { authority, .. }
-            | Self::GrantIssued { authority, .. }
-            | Self::AuthorizationApplied { authority, .. }
-            | Self::AuthorizationDenied { authority, .. } => Issuer::Authority(authority.clone()),
-            _ => Issuer::Engine,
-        }
-    }
-}
-
-/// One admitted event: an identified, scoped fact bound to the frontier it
-/// was appended against.
+/// One admitted event: an identified fact bound to the frontier it was
+/// appended against.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Event {
     pub id: EventId,
-    pub subject: Subject,
-    pub scope: Scope,
-    pub issuer: Issuer,
     pub basis: Basis,
     pub fact: Fact,
 }
@@ -359,21 +245,7 @@ pub struct EventSet {
     events: Vec<Event>,
     batches: u64,
     #[serde(skip)]
-    admitted_values: BTreeSet<ValueId>,
-    #[serde(skip)]
-    admitted_turns: BTreeSet<TurnId>,
-    #[serde(skip)]
-    confirming_turns: BTreeSet<TurnId>,
-    #[serde(skip)]
-    spent_confirmations: BTreeSet<TurnId>,
-    #[serde(skip)]
-    live_action: Option<(ActionId, ActionPhase)>,
-    #[serde(skip)]
-    live_emission: Option<FlowId>,
-    #[serde(skip)]
-    issued_grants: BTreeMap<GrantId, FlowId>,
-    #[serde(skip)]
-    consumed_grants: BTreeSet<GrantId>,
+    state: ProbeState,
 }
 
 impl EventSet {
@@ -397,11 +269,10 @@ impl EventSet {
     ///
     /// Crate-internal on purpose: there is no public write surface into an
     /// event set — engine-owned batches are the only admission path, so a
-    /// forged event (wrong basis, unknown endorse source, fabricated
-    /// issuer/scope) is unrepresentable outside the crate rather than merely
-    /// refused. Test-only today — replay exists for the event-algebra
-    /// property tests; a future rehydration API must validate a foreign log
-    /// through this same path.
+    /// forged event (wrong basis, unknown endorse source) is unrepresentable
+    /// outside the crate rather than merely refused. Test-only today — replay
+    /// exists for the event-algebra property tests; a future rehydration API
+    /// must validate a foreign log through this same path.
     #[cfg(test)]
     pub(crate) fn admit(&mut self, event: Event) -> Result<(), EventConflict> {
         match event.id.0.cmp(&(self.events.len() as u64)) {
@@ -447,9 +318,6 @@ impl EventSet {
         for fact in facts {
             let event = Event {
                 id: self.next_id(),
-                subject: fact.subject(),
-                scope: fact.scope(),
-                issuer: fact.issuer(),
                 basis,
                 fact,
             };
@@ -461,16 +329,7 @@ impl EventSet {
     }
 
     fn check_batch(&self, facts: &[Fact]) -> Result<(), EventConflict> {
-        let mut probe = ProbeState {
-            admitted_values: self.admitted_values.clone(),
-            admitted_turns: self.admitted_turns.clone(),
-            confirming_turns: self.confirming_turns.clone(),
-            spent_confirmations: self.spent_confirmations.clone(),
-            live_action: self.live_action,
-            live_emission: self.live_emission,
-            issued_grants: self.issued_grants.clone(),
-            consumed_grants: self.consumed_grants.clone(),
-        };
+        let mut probe = self.state.clone();
         for fact in facts {
             probe.check(fact)?;
             probe.index(fact);
@@ -480,42 +339,15 @@ impl EventSet {
 
     #[cfg(test)]
     fn check_fact(&self, fact: &Fact) -> Result<(), EventConflict> {
-        ProbeState {
-            admitted_values: self.admitted_values.clone(),
-            admitted_turns: self.admitted_turns.clone(),
-            confirming_turns: self.confirming_turns.clone(),
-            spent_confirmations: self.spent_confirmations.clone(),
-            live_action: self.live_action,
-            live_emission: self.live_emission,
-            issued_grants: self.issued_grants.clone(),
-            consumed_grants: self.consumed_grants.clone(),
-        }
-        .check(fact)
+        self.state.check(fact)
     }
 
     fn index_fact(&mut self, fact: &Fact) {
-        let mut state = ProbeState {
-            admitted_values: std::mem::take(&mut self.admitted_values),
-            admitted_turns: std::mem::take(&mut self.admitted_turns),
-            confirming_turns: std::mem::take(&mut self.confirming_turns),
-            spent_confirmations: std::mem::take(&mut self.spent_confirmations),
-            live_action: self.live_action,
-            live_emission: self.live_emission,
-            issued_grants: std::mem::take(&mut self.issued_grants),
-            consumed_grants: std::mem::take(&mut self.consumed_grants),
-        };
-        state.index(fact);
-        self.admitted_values = state.admitted_values;
-        self.admitted_turns = state.admitted_turns;
-        self.confirming_turns = state.confirming_turns;
-        self.spent_confirmations = state.spent_confirmations;
-        self.live_action = state.live_action;
-        self.live_emission = state.live_emission;
-        self.issued_grants = state.issued_grants;
-        self.consumed_grants = state.consumed_grants;
+        self.state.index(fact);
     }
 }
 
+#[derive(Debug, Clone, Default)]
 struct ProbeState {
     admitted_values: BTreeSet<ValueId>,
     admitted_turns: BTreeSet<TurnId>,

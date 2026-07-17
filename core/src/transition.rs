@@ -20,7 +20,7 @@ use serde::Serialize;
 use crate::ToolName;
 use crate::audit::TransitionFailure;
 use crate::dimension::{Audience, Effects, KnownTrust, Trust, UserId};
-use crate::value::{OpaqueValue, TransformerRef, ValueLabel, ValueRef};
+use crate::value::{OpaqueValue, TransformerRef, ValueLabel};
 
 /// A registered transformer's input predicate: which source values it
 /// declares itself applicable to. `None` on a dimension means "any".
@@ -78,19 +78,6 @@ pub struct RegisteredTransformer {
     pub run: TransformerFn,
 }
 
-impl RegisteredTransformer {
-    /// Pure precondition check against a concrete source value. Identity was
-    /// already fixed by the caller holding the `ValueId`; this validates the
-    /// declared label predicate.
-    pub fn accepts(&self, source: &ValueRef<'_>) -> Result<(), TransitionFailure> {
-        if self.descriptor.precondition.matches(source.label()) {
-            Ok(())
-        } else {
-            Err(TransitionFailure::ReductionRefused)
-        }
-    }
-}
-
 /// A registered action transition: an explicit tool-identity mapping with
 /// declared replacement effects (e.g. network fetch → cache-only fetch).
 /// Arguments and control dependencies are never touched — unchanged
@@ -115,20 +102,17 @@ impl ActionTransition {
         if *tool != self.from_tool {
             return Err(TransitionFailure::ReductionRefused);
         }
-        if effects_narrow(proposed_effects, &self.effects) {
+        let narrower = match (proposed_effects.declared_set(), self.effects.declared_set()) {
+            (None, Some(_)) => true,
+            (Some(old_set), Some(new_set)) => new_set.is_subset(&old_set),
+            // Never widen to Unknown.
+            (_, None) => false,
+        };
+        if narrower {
             Ok(())
         } else {
             Err(TransitionFailure::ReductionRefused)
         }
-    }
-}
-
-pub(crate) fn effects_narrow(old: &Effects, new: &Effects) -> bool {
-    match (old.declared_set(), new.declared_set()) {
-        (None, Some(_)) => true,
-        (Some(old_set), Some(new_set)) => new_set.is_subset(&old_set),
-        // Never widen to Unknown.
-        (_, None) => false,
     }
 }
 

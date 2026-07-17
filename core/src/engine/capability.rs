@@ -230,8 +230,6 @@ pub enum StepRefused {
     },
     #[error("capability was minted under {minted_by}, not {this}")]
     ForeignEngine { minted_by: EngineId, this: EngineId },
-    #[error("action {action} is not pending on this trajectory")]
-    ActionNotPending { action: ActionId },
     #[error("flow {flow} has no pending proposal on this trajectory")]
     FlowNotPending { flow: crate::revision::FlowId },
 }

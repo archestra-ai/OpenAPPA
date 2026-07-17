@@ -14,7 +14,7 @@
 //! Admission is engine-owned: [`Trajectory::ingress`] is the only
 //! caller-labeled path (the explicit trust boundary); a model output's label
 //! is computed from its mandatory dependency sets; a tool result enters only
-//! by consuming the [`ExecutionToken`](crate::engine::ExecutionToken) the
+//! by consuming the [`ExecutionToken`] the
 //! policy minted for it.
 
 use std::fmt;

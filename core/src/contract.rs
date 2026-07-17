@@ -167,9 +167,8 @@ impl fmt::Display for Violation {
 /// breach/unprovable *provability* axis: what a remedy can do about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Fixability {
-    GrantFixable,
+    Fixable,
     AcknowledgeOnly,
-    AcceptFixable,
     Structural,
 }
 
@@ -183,10 +182,10 @@ impl Violation {
                 | Breach::AudienceNotPublic { .. }
                 | Breach::ForbiddenPriorEffects { .. }
                 | Breach::ConfirmationMissing { .. }
-                | Breach::ConfirmationForOtherTool { .. },
+                | Breach::ConfirmationForOtherTool { .. }
+                | Breach::SurfaceGrowth { .. },
             )
-            | Self::Unprovable(Unprovable::TrustUnknown | Unprovable::AudienceUnknown) => Fixability::GrantFixable,
-            Self::Breach(Breach::SurfaceGrowth { .. }) => Fixability::AcceptFixable,
+            | Self::Unprovable(Unprovable::TrustUnknown | Unprovable::AudienceUnknown) => Fixability::Fixable,
             Self::Unprovable(
                 Unprovable::EffectsUnknown | Unprovable::NoContract { .. } | Unprovable::RequirementsUnknown,
             ) => Fixability::AcknowledgeOnly,
