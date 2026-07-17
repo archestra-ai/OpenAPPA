@@ -49,7 +49,7 @@ struct RawProxyConfig {
 
 impl Policy {
     pub fn from_toml(text: &str) -> Result<Self, ConfigError> {
-        let raw = RawProxyConfig::deserialize(toml::Deserializer::new(text))?;
+        let raw: RawProxyConfig = toml::from_str(text)?;
         let contracts = Contracts::from_toml(&raw.contracts.to_string())?;
         if let Some(external) = contracts
             .authorities
