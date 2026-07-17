@@ -96,7 +96,7 @@ pub struct ValueView {
 /// values (argument leaves and control dependencies) — every ancestor they
 /// derive from — so an out-of-process authority can inspect suspicious ancestry
 /// exactly as an inline one walks [`TrajectoryView::ancestry`] (D3). The
-/// closure is intrinsic to [`Self::of`], so every grant site (waive, accept,
+/// closure is intrinsic to `Self::of`, so every grant site (waive, accept,
 /// endorse) carries it uniformly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AncestrySnapshot {

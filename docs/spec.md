@@ -116,7 +116,7 @@ L' = L ∪ { event }
 combine = union
 ```
 
-Every accepted event records its subject, fact, scope, issuer, and basis. Under the single-writer discipline the set is totally ordered, so union degenerates to ordered append with idempotent duplicate admission; a fact that contradicts the admitted lifecycle (a second release, a completion before release, a second consumption of a grant) is refused at admission. Facts only grow; nothing is ever removed.
+Every accepted event records its fact and the frontier basis it was appended against. Under the single-writer discipline the set is totally ordered, so union degenerates to ordered append with idempotent duplicate admission; a fact that contradicts the admitted lifecycle (a second release, a completion before release, a second consumption of a grant) is refused at admission. Facts only grow; nothing is ever removed.
 
 Everything else is a projection:
 

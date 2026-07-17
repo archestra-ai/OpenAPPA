@@ -191,15 +191,14 @@ impl fmt::Display for Violation {
 /// breach/unprovable *provability* axis: what a remedy can do about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Fixability {
-    /// A transition or waiver can address it.
-    GrantFixable,
+    /// A remedy can address it: a transition, a waiver, or (for surface
+    /// growth) an `Accept` acquisition — the remedy planner routes by the
+    /// violation itself, not by this tag.
+    Fixable,
     /// Nothing to lift — one cannot attest a negative over `Unknown` effects,
     /// nor conjure a missing contract. A waiver may only accept the fact on
     /// the record.
     AcknowledgeOnly,
-    /// A surface growth (criterion (1)) that only an `Accept` authority may
-    /// acquire on the pending action; a waiver cannot address it.
-    AcceptFixable,
     /// An integration bug (the caller definitionally holds the data); nothing
     /// may override it.
     Structural,
@@ -215,10 +214,10 @@ impl Violation {
                 | Breach::AudienceNotPublic { .. }
                 | Breach::ForbiddenPriorEffects { .. }
                 | Breach::ConfirmationMissing { .. }
-                | Breach::ConfirmationForOtherTool { .. },
+                | Breach::ConfirmationForOtherTool { .. }
+                | Breach::SurfaceGrowth { .. },
             )
-            | Self::Unprovable(Unprovable::TrustUnknown | Unprovable::AudienceUnknown) => Fixability::GrantFixable,
-            Self::Breach(Breach::SurfaceGrowth { .. }) => Fixability::AcceptFixable,
+            | Self::Unprovable(Unprovable::TrustUnknown | Unprovable::AudienceUnknown) => Fixability::Fixable,
             Self::Unprovable(
                 Unprovable::EffectsUnknown | Unprovable::NoContract { .. } | Unprovable::RequirementsUnknown,
             ) => Fixability::AcknowledgeOnly,

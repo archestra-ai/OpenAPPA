@@ -90,8 +90,8 @@ semantics live in `../core/src/lib.rs`.
    release exists; the Terminal proof still performs the complete sweep when
    nothing succeeds.
 
-6. **Append-only algebraic state.** The trajectory is an `EventSet` of scoped
-   facts (`Event { subject, fact, scope, issuer, basis }`); one public mutation
+6. **Append-only algebraic state.** The trajectory is an `EventSet` of
+   facts (`Event { id, basis, fact }`); one public mutation
    = prevalidation + one atomic batch; lifecycle contradictions (a second
    release, a completion before release, a second consumption of a grant) are
    refused at admission — the single enforcement point. Labels, effects,

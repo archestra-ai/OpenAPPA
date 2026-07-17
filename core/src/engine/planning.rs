@@ -20,16 +20,6 @@ use crate::value::{TransformerRef, UnknownValue, ValueLabel, ValueStore};
 use super::PolicyEngine;
 use super::capability::{RESPONSE_SINK, ResponsePolicy, ToolContract};
 
-/// A successful joint-cleanability probe: the per-leaf raises — each with the
-/// projected residual at its own peel, the vector its ruling authority is
-/// shown — and the final waiver (release + residual lift + acknowledged
-/// facts). The raise list may be empty: a non-monotone subset release can be
-/// clean on its own.
-struct JointRescue {
-    endorse: Vec<(ValueId, LabelRaise, Vec<Violation>)>,
-    delta: Lift,
-}
-
 /// What the search needs to know about one checked flow beyond its
 /// [`SimFlow`]: the value store and argument tree (recipient resolution for
 /// narrowing hops), the acquisition target (`None` for an emission — it
@@ -510,38 +500,9 @@ impl PolicyEngine {
         };
         self.minimal_joint_releases(base, &ids, ctx.acquire, ctx.flow)
             .into_iter()
-            .filter_map(|rescue| {
-                // A rescue raise's `targets` are the *projected post-release*
-                // residual at its own peel — the vector its ruling authority
-                // is shown; the actual flow may not mention the deficit at
-                // all while a masking control dependency holds.
-                let mut sim = base.clone();
-                let mut steps = Vec::new();
-                for (leaf, delta, targets) in &rescue.endorse {
-                    let step = self.authorize_step(raise_authorization(*leaf, delta), targets.clone())?;
-                    let raised = delta.raise(&sim.leaf_labels[leaf]);
-                    sim.leaf_labels.insert(*leaf, raised);
-                    steps.push(step);
-                }
-                let mut remaining = sim.violations(None);
-                if let Some(growth) = surface_growth_of(&remaining) {
-                    let action = ctx.acquire?;
-                    let grant = acquire_authorization(action, &growth);
-                    let step = self.authorize_step(grant, remaining.clone())?;
-                    sim.accepted_effects = sim.accepted_effects.clone().combine(growth);
-                    remaining = sim.violations(None);
-                    steps.push(step);
-                }
-                if !sim.violations(Some(&rescue.delta)).is_empty() {
-                    return None;
-                }
-                let grant = authorization_for(&rescue.delta, &remaining, ctx.flow);
-                let step = self.authorize_step(grant, remaining)?;
-                steps.push(step);
-                NonEmptyVec::from_vec(steps).map(|steps| Candidate {
-                    steps,
-                    group: group.clone(),
-                })
+            .map(|steps| Candidate {
+                steps,
+                group: group.clone(),
             })
             .collect()
     }
@@ -571,9 +532,9 @@ impl PolicyEngine {
         ids: &[ValueId],
         acquire: Option<ActionId>,
         flow: FlowId,
-    ) -> Vec<JointRescue> {
+    ) -> Vec<NonEmptyVec<PlannedRemedy>> {
         for size in 1..=ids.len() {
-            let hits: Vec<JointRescue> = Combinations::new(ids.len(), size)
+            let hits: Vec<NonEmptyVec<PlannedRemedy>> = Combinations::new(ids.len(), size)
                 .filter_map(|combo| {
                     let release: BTreeSet<ValueId> = combo.iter().map(|&i| ids[i]).collect();
                     self.joint_rescue(base, &release, acquire, flow)
@@ -586,19 +547,30 @@ impl PolicyEngine {
         Vec::new()
     }
 
-    /// One joint-cleanability probe for a release candidate. `None` when any
+    /// One joint-cleanability probe for a release candidate, emitting the
+    /// planned steps in the same walk that proves them. `None` when any
     /// required grant has no competent authority or the composed remedies do
     /// not clear the projection. An empty endorse set is a valid solve: a
     /// non-monotone subset release can be clean on its own.
+    ///
+    /// Two residual views feed the steps. The raises peel against the
+    /// *projected post-release* residual — the deficit a masking control
+    /// dependency hides from the actual vector. The Accept and the final
+    /// waiver are shown the *actual* (unreleased) flow's residual at their
+    /// point in the sequence, so the ruling authority still sees what the
+    /// release itself will clear.
     fn joint_rescue(
         &self,
         base: &SimFlow,
         release: &BTreeSet<ValueId>,
         acquire: Option<ActionId>,
         flow: FlowId,
-    ) -> Option<JointRescue> {
+    ) -> Option<NonEmptyVec<PlannedRemedy>> {
         let mut projected = base.clone();
         projected.control_labels.retain(|id, _| !release.contains(id));
+        // The unreleased twin: the raises apply to both, only `projected`
+        // sheds the released control labels.
+        let mut actual = base.clone();
         // `violations(None)`, not `violations(Some(_))`: the projection must
         // keep acknowledge-only facts (they route the final grant to an
         // `acknowledge_unknown` competence) and the growth breach.
@@ -610,34 +582,34 @@ impl PolicyEngine {
         // deficits an earlier raise already cleared and never asked for a
         // raise the fold no longer needs. Terminates: every step strictly
         // raises one leaf's label, bounded by leaves × dimensions.
-        let mut endorse = Vec::new();
+        let mut steps = Vec::new();
         let mut residual = projected.violations(None);
         while let Some((leaf, delta)) = endorse_steps(&projected, &residual).into_iter().next() {
-            if !self.can_authorize(&raise_authorization(leaf, &delta)) {
-                return None;
-            }
+            let step = self.authorize_step(raise_authorization(leaf, &delta), residual)?;
             let raised = delta.raise(&projected.leaf_labels[&leaf]);
-            projected.leaf_labels.insert(leaf, raised);
-            endorse.push((leaf, delta, residual));
+            projected.leaf_labels.insert(leaf, raised.clone());
+            actual.leaf_labels.insert(leaf, raised);
+            steps.push(step);
             residual = projected.violations(None);
         }
-        if let Some(growth) = surface_growth_of(&residual) {
+        let mut remaining = actual.violations(None);
+        if let Some(growth) = surface_growth_of(&remaining) {
             let action = acquire?;
-            if !self.can_authorize(&acquire_authorization(action, &growth)) {
-                return None;
-            }
-            projected.accepted_effects = projected.accepted_effects.clone().combine(growth);
+            let step = self.authorize_step(acquire_authorization(action, &growth), remaining)?;
+            projected.accepted_effects = projected.accepted_effects.clone().combine(growth.clone());
+            actual.accepted_effects = actual.accepted_effects.clone().combine(growth);
             residual = projected.violations(None);
+            remaining = actual.violations(None);
+            steps.push(step);
         }
         let mut delta = needed_delta(&residual);
         delta.control_release = release.clone();
-        if !self.can_authorize(&authorization_for(&delta, &residual, flow)) {
-            return None;
-        }
         if !projected.violations(Some(&delta)).is_empty() {
             return None;
         }
-        Some(JointRescue { endorse, delta })
+        let step = self.authorize_step(authorization_for(&delta, &remaining, flow), remaining)?;
+        steps.push(step);
+        NonEmptyVec::from_vec(steps)
     }
 
     /// Replay a step sequence verbatim against the base simulation and
@@ -812,14 +784,6 @@ impl PolicyEngine {
             .iter()
             .filter(move |a| matches!(a.mode, AuthorityMode::External) && a.mandate.authorizes(ask));
         inline.chain(external)
-    }
-
-    /// Is any authority competent for `grant`? A grant step (waiver, accept, or
-    /// acknowledgment) is enumerated only when one exists; the actual ruling —
-    /// which an inline authority may abstain from, falling through to the next —
-    /// happens at application.
-    fn can_authorize(&self, ask: &Authorization) -> bool {
-        self.competent_authorities(ask).next().is_some()
     }
 }
 
@@ -1429,4 +1393,162 @@ fn endorse_steps(sim: &SimFlow, violations: &[Violation]) -> Vec<(ValueId, Label
         }
     }
     steps
+}
+
+/// Direct probes of the rescue search. These pin behavior the black-box
+/// engine tests cannot reach: a rescue candidate whose deficit an ordinary
+/// no-release waiver also clears is dominance-pruned from the frontier, so
+/// the collect-every-success-of-the-first-cardinality semantics are only
+/// observable on `minimal_joint_releases` itself. Real engine, real
+/// authorities — only the `SimFlow` is constructed directly.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::approval::{Authority, Ruling, TrajectoryView};
+    use crate::contract::{AttentionRule, Breach};
+    use crate::dimension::Trust;
+    use crate::transition::AuthorityMandate;
+
+    fn approve_all(_: &Authorization, _: &[Violation], _: &TrajectoryView) -> Option<Ruling> {
+        Some(Ruling::Approve {
+            reason: "approved".to_owned(),
+        })
+    }
+
+    fn engine_with_waiver(mandate: AuthorityMandate) -> PolicyEngine {
+        let mut engine = PolicyEngine::new();
+        engine
+            .register_authority(Authority::inline("waiver", mandate, approve_all))
+            .unwrap();
+        engine
+    }
+
+    fn probe_sim(requires: Requirements, controls: &[(ValueId, ValueLabel)]) -> SimFlow {
+        SimFlow {
+            leaf_labels: BTreeMap::new(),
+            control_labels: controls.iter().cloned().collect(),
+            tool: ToolName::new("probe.sink"),
+            requires,
+            recipients: BTreeSet::new(),
+            past_effects: Effects::none(),
+            proposed_effects: Effects::none(),
+            accepted_effects: Effects::none(),
+            confirmed: None,
+            extra: Vec::new(),
+        }
+    }
+
+    fn release_of(steps: &NonEmptyVec<PlannedRemedy>) -> BTreeSet<ValueId> {
+        let PlannedRemedy::Authorize { authorization, .. } = steps.first() else {
+            panic!("a rescue candidate ends in an authorize step");
+        };
+        authorization
+            .delta()
+            .coordinates()
+            .find_map(|c| match c {
+                DeltaCoordinate::ReleaseControl(deps) => Some(deps.clone()),
+                _ => None,
+            })
+            .expect("a rescue waiver carries its release")
+    }
+
+    /// Every success of the first successful cardinality is collected, in
+    /// lexicographic combination order — the sweep must not stop at the
+    /// first routable hit. Two identity-labeled control deps under a
+    /// confirmation-requiring sink: either single release composes with the
+    /// confirmation stand-in, so size 1 yields exactly two candidates.
+    #[test]
+    fn joint_release_sweep_collects_every_first_cardinality_success() {
+        let engine = engine_with_waiver(AuthorityMandate {
+            confirms: true,
+            may_release_control: true,
+            ..AuthorityMandate::none()
+        });
+        let (s1, s2) = (ValueId::new(1), ValueId::new(2));
+        let sim = probe_sim(
+            Requirements {
+                attention: AttentionRule::ExplicitConfirmation,
+                ..Requirements::default()
+            },
+            &[(s1, ValueLabel::identity()), (s2, ValueLabel::identity())],
+        );
+
+        let hits = engine.minimal_joint_releases(&sim, &[s1, s2], None, FlowId::new(0));
+
+        assert_eq!(hits.len(), 2);
+        assert_eq!(release_of(&hits[0]), BTreeSet::from([s1]));
+        assert_eq!(release_of(&hits[1]), BTreeSet::from([s2]));
+        for hit in &hits {
+            assert_eq!(hit.len(), 1);
+            let PlannedRemedy::Authorize { routes, targets, .. } = hit.first() else {
+                panic!("the sole step is the waiver");
+            };
+            assert_eq!(routes.iter().map(|r| r.as_str()).collect::<Vec<_>>(), ["waiver"]);
+            assert_eq!(
+                targets,
+                &[Violation::Breach(Breach::ConfirmationMissing {
+                    tool: ToolName::new("probe.sink"),
+                })]
+            );
+        }
+    }
+
+    /// A fully failed cardinality does not end the sweep: two suspicious
+    /// control deps under a trusted sink defeat every single release (the
+    /// kept dep still carries the breach, and trust is not liftable), and
+    /// the pair is found at size 2.
+    #[test]
+    fn joint_release_sweep_ascends_past_a_failed_cardinality() {
+        let engine = engine_with_waiver(AuthorityMandate {
+            may_release_control: true,
+            ..AuthorityMandate::none()
+        });
+        let (s1, s2) = (ValueId::new(1), ValueId::new(2));
+        let suspicious = ValueLabel {
+            trust: Trust::SUSPICIOUS,
+            ..ValueLabel::identity()
+        };
+        let sim = probe_sim(
+            Requirements {
+                trust: Some(KnownTrust::Trusted),
+                ..Requirements::default()
+            },
+            &[(s1, suspicious.clone()), (s2, suspicious)],
+        );
+
+        let hits = engine.minimal_joint_releases(&sim, &[s1, s2], None, FlowId::new(0));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(release_of(&hits[0]), BTreeSet::from([s1, s2]));
+
+        // And with no release competence, the same sweep exhausts every
+        // size and proves nothing unlocks — the Terminal claim's shape.
+        let incompetent = engine_with_waiver(AuthorityMandate::none());
+        let sim = probe_sim(
+            Requirements {
+                trust: Some(KnownTrust::Trusted),
+                ..Requirements::default()
+            },
+            &[
+                (
+                    s1,
+                    ValueLabel {
+                        trust: Trust::SUSPICIOUS,
+                        ..ValueLabel::identity()
+                    },
+                ),
+                (
+                    s2,
+                    ValueLabel {
+                        trust: Trust::SUSPICIOUS,
+                        ..ValueLabel::identity()
+                    },
+                ),
+            ],
+        );
+        assert!(
+            incompetent
+                .minimal_joint_releases(&sim, &[s1, s2], None, FlowId::new(0))
+                .is_empty()
+        );
+    }
 }

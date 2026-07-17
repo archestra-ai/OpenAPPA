@@ -114,7 +114,12 @@ fn email_request(trajectory: &mut Trajectory, body: ValueId, recipient: &str) ->
 /// paired `store_body` call would desynchronize them. `store_body`'s own check
 /// is a `debug_assert`, which says nothing in a release build.
 fn assert_bodies_track_the_log(trajectory: &Trajectory) {
-    let projected = trajectory.view().admitted_values();
+    let projected = trajectory
+        .events()
+        .events()
+        .iter()
+        .filter(|event| matches!(event.fact, crate::event::Fact::ValueAdmitted { .. }))
+        .count();
     for id in 0..projected {
         let id = ValueId::new(id as u64);
         assert!(
@@ -252,7 +257,9 @@ fn transform_remedy_walk_advances_one_batch_per_mutation() {
     // The projected `current` tree is the substituted one: the tainted body
     // is gone and the derived value took its slot, while the original
     // proposal (the re-entry identity basis) still names the source.
-    let projected = projection::pending_action(trajectory.events()).expect("action pending until release");
+    let projected = projection::flow_slots(trajectory.events())
+        .0
+        .expect("action pending until release");
     assert!(!projected.current().arguments.leaves().contains(&body));
     assert!(projected.original().arguments.leaves().contains(&body));
     assert_eq!(
