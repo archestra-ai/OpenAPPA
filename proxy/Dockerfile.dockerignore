@@ -9,6 +9,8 @@
 !contracts/**
 !dojo
 !dojo/**
+!edge
+!edge/**
 !proxy
 !proxy/**
 

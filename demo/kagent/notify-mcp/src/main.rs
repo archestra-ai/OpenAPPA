@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, Implementation, ListToolsResult, PaginatedRequestParams,
+    CallToolRequestParams, CallToolResult, ContentBlock, Implementation, ListToolsResult, PaginatedRequestParams,
     ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
@@ -39,6 +39,13 @@ struct Args {
     addr: String,
     #[arg(long, env = "OPS_HOOK_URL", default_value = "http://ops-hook.shop/notify")]
     hook_url: String,
+    #[arg(
+        long,
+        env = "NOTIFY_MCP_ALLOWED_HOSTS",
+        value_delimiter = ',',
+        default_value = "notify-mcp.kagent:8731,localhost,127.0.0.1"
+    )]
+    allowed_hosts: Vec<String>,
 }
 
 #[tokio::main]
@@ -54,7 +61,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let local = listener.local_addr()?;
 
     let hook_url = args.hook_url.clone();
-    let config = StreamableHttpServerConfig::default();
+    // The config struct is non-exhaustive; mutate the default.
+    let mut config = StreamableHttpServerConfig::default();
+    config.allowed_hosts = args.allowed_hosts.clone();
     let service: StreamableHttpService<Webhooks, LocalSessionManager> = StreamableHttpService::new(
         move || {
             Ok(Webhooks {
@@ -118,19 +127,23 @@ impl ServerHandler for Webhooks {
                 NOTIFY_TOOL => self.hook_url.clone(),
                 HTTP_POST_TOOL => match string_arg(&args, "url") {
                     Some(url) => url,
-                    None => return Ok(CallToolResult::error(vec![Content::text("missing required `url`")])),
+                    None => {
+                        return Ok(CallToolResult::error(vec![ContentBlock::text(
+                            "missing required `url`",
+                        )]));
+                    }
                 },
                 other => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                    return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                         "unknown tool `{other}`"
                     ))]));
                 }
             };
             match deliver(&url, &message).await {
-                Ok(status) => Ok(CallToolResult::success(vec![Content::text(format!(
+                Ok(status) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                     "delivered to {url}: HTTP {status}"
                 ))])),
-                Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                     "delivery to {url} failed: {e}"
                 ))])),
             }

@@ -37,7 +37,12 @@ appa-edge performs the outbound call and feeds the ruling back. Outbound
 only: the edge is a client everywhere, it never listens. The edge never
 rules — on timeout, transport error, or no resolver, no ruling is applied at
 all; the flow fails closed by the absence of a grant. Shipped implementation:
-`WebhookResolver`. With `NoResolver`, escalations simply remain blocked.
+`WebhookResolver`, built from the policy's declared endpoints
+(`Contracts::endpoints`): each approval is POSTed to the endpoint of exactly
+the authority it names, with that endpoint's timeout; an authority with no
+declared endpoint fails closed without any HTTP call. The client follows no
+redirects, uses no ambient proxy, and never retries — one ruling per
+approval. With `NoResolver`, escalations simply remain blocked.
 
 **Cancellation** — `verdict`/`dispatch` hold linear core capabilities across
 their awaits. A future dropped mid-await poisons the session: every further

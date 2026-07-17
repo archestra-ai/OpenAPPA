@@ -9,7 +9,7 @@
 set -euo pipefail
 
 CLUSTER=appa-poc
-IMAGES=(appa-proxy:poc notify-mcp:poc)
+IMAGES=(appa-proxy:poc notify-mcp:poc ops-approver:poc)
 
 remove_image=false
 [[ "${1:-}" == "--image" ]] && remove_image=true

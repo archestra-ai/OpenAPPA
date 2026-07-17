@@ -43,7 +43,12 @@ name = "k8s_describe_resource"
 output = { trust = "trusted", audience = ["operator", "sre-team"] }
 
 # --- Guarded sinks: a mutation may only run from a trusted flow. ---------------
-# A flow tainted by suspicious log output fails this bar and is blocked.
+# A flow tainted by suspicious log output fails this bar. With `ops-approver`
+# declared below, the failure escalates instead of blocking outright: the
+# proxy POSTs the pending approval — the typed grant and the flow's
+# label/provenance ancestry, never value bytes — to the approver, which
+# denies anything derived from suspicious text. The injected delete is still
+# stopped; the decision is now an authority's ruling, on the record.
 # Outputs (mutation confirmations) are declared explicitly: under the unknown
 # default an omitted output would wedge any flow continuing past a success.
 [[contracts.tool]]
@@ -94,9 +99,26 @@ requires = { audience = "public" }
 # The three readers above declare no `requires` — under fail-closed semantics
 # every call to them escalates as "tool requirements unknown". This authority
 # acknowledges exactly those unprovable facts, on the record; it cannot clear
-# proven breaches (the trust-gated mutations and audience-gated egress above
-# stay blocked without it ever being consulted).
+# proven breaches. Inline authorities route before external ones, so the
+# reads never reach `ops-approver`.
 [[contracts.authority]]
 name = "default-allow"
 rule = "allow"
 acknowledge_unknown = true
+
+# --- External approver: trust breaches escalate over HTTP. ----------------------
+# The dynamic authorizer. A trust-gated mutation from a tainted flow routes
+# its grant here: the proxy POSTs the pending approval to the webhook and
+# applies the ruling — deny and the call is blocked as the authority's
+# decision; no ruling (timeout, outage) and it stays blocked, fail closed.
+# The mandate is exactly what the tainted delete needs: raise trust to
+# trusted and release the tainted control dependency (the suspicious logs
+# taint the *choice* to act, not just the arguments). The audience-gated
+# egress is outside this mandate, so the injected http_post stays terminal —
+# no authority is competent for an unbounded public sink.
+[[contracts.authority]]
+name = "ops-approver"
+rule = "escalate"
+trust = "trusted"
+may_release_control = true
+webhook = { url = "http://ops-approver.kagent:8732/rule", timeout_ms = 10000 }

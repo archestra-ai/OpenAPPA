@@ -1,13 +1,14 @@
 //! Benchmark: `evaluate` cost as the trajectory grows.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::hint::black_box;
 
 use appa_core::{
     ArgumentName, ArgumentSchema, ArgumentTree, AttentionRule, Audience, AudienceRule, Effects, KnownTrust,
     OpaqueValue, PolicyEngine, Requirements, Speaker, ToolContract, ToolName, ToolRequest, Trajectory, Trust, UserId,
     ValueId, ValueLabel,
 };
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 const TOOL_COUNT: usize = 50;
 const USER_COUNT: usize = 20;

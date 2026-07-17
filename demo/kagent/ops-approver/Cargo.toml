@@ -1,18 +1,16 @@
 [package]
-name = "notify-mcp"
+name = "ops-approver"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "Webhook-notify MCP tool for the kagent demo: POSTs a message to a URL"
+description = "External approver for the kagent demo: rules on appa-proxy's pending approvals"
 
 # Standalone on purpose, like the sibling OpenAPPA crates.
 [workspace]
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
-rmcp = { version = "2.2", features = ["server", "transport-streamable-http-server"] }
 axum = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"

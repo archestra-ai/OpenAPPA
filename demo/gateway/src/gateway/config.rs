@@ -51,6 +51,10 @@ pub enum ConfigError {
     UnknownRecipientsArg { tool: String, arg: String },
     #[error("tool `{tool}`: {problem}")]
     BadResultTemplate { tool: String, problem: String },
+    #[error(
+        "authority `{0}` declares a webhook, which the gateway does not serve (its approval channel is human elicitation); remove the webhook table"
+    )]
+    WebhookAuthority(String),
 }
 
 impl ConfigError {
@@ -66,7 +70,8 @@ impl ConfigError {
             | Self::RegistrationRefused(_)
             | Self::ReservedContractName
             | Self::ContractWithoutTool(_)
-            | Self::UnknownRecipientsArg { .. } => ConfigFile::Policy,
+            | Self::UnknownRecipientsArg { .. }
+            | Self::WebhookAuthority(_) => ConfigFile::Policy,
         }
     }
 }
@@ -110,7 +115,7 @@ impl GatewayConfig {
     /// unregistered (calling it is unprovable and routes through the authority
     /// chain like any unknown); a contract without a tool is a config error.
     pub fn from_toml(tools: &str, policy: &str) -> Result<Self, ConfigError> {
-        let raw = RawConfig::deserialize(toml::Deserializer::new(tools))?;
+        let raw: RawConfig = toml::from_str(tools)?;
         let policy = Contracts::from_toml(policy)?;
         raw.build(policy)
     }
@@ -143,6 +148,12 @@ struct ToolConfig {
 
 impl RawConfig {
     fn build(self, policy: Contracts) -> Result<GatewayConfig, ConfigError> {
+        // A declared webhook would be silently ignored here — the gateway
+        // resolves escalations by asking the human over MCP elicitation, not
+        // HTTP. Config that lies about the approval channel fails at load.
+        if let Some((name, _)) = policy.endpoints.iter().next() {
+            return Err(ConfigError::WebhookAuthority(name.as_str().to_owned()));
+        }
         let mut engine = PolicyEngine::new();
         let mut tools = BTreeMap::new();
 

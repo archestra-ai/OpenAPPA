@@ -11,7 +11,7 @@ metadata:
 spec:
   provider: OpenAI
   # Pick a current OpenRouter model id (see NOTES.md); overridable at run time.
-  model: anthropic/claude-sonnet-4.5
+  model: anthropic/claude-haiku-4.5
   apiKeySecret: appa-openrouter
   apiKeySecretKey: OPENROUTER_API_KEY
   openAI:

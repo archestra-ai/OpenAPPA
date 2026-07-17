@@ -367,6 +367,12 @@ requires = { audience = "$.args.too" }
         GatewayConfig::from_toml(SEND_TOOL, "[[tool]]\nname = \"ghost\"\nrequires = {}"),
         Err(ConfigError::ContractWithoutTool(tool)) if tool == "ghost"
     ));
+    let webhook_policy = "[[authority]]\nname = \"remote\"\nrule = \"escalate\"\nacquire_effects = true\n\
+                          webhook = { url = \"https://approvals.example/rule\" }";
+    assert!(matches!(
+        GatewayConfig::from_toml("", webhook_policy),
+        Err(ConfigError::WebhookAuthority(name)) if name == "remote"
+    ));
     let reserved = r#"
 [[tool]]
 name = "appa__escalate"

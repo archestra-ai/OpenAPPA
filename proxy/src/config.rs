@@ -1,6 +1,7 @@
 
 use appa_contracts::{Contracts, ContractsError};
 use appa_core::AuthorityMode;
+use appa_edge::{ResolveError, WebhookResolver};
 use serde::Deserialize;
 
 #[derive(Debug, thiserror::Error)]
@@ -10,9 +11,11 @@ pub enum ConfigError {
     #[error(transparent)]
     Contracts(#[from] ContractsError),
     #[error(
-        "authority `{0}` has rule = \"escalate\", which the proxy cannot serve (no human channel); use rule = \"allow\" or remove it"
+        "authority `{0}` has rule = \"escalate\" but no webhook, which the proxy cannot serve; declare webhook = {{ url = \"…\" }} or remove it"
     )]
-    EscalateAuthority(String),
+    EscalateWithoutWebhook(String),
+    #[error("webhook resolver could not be built: {0}")]
+    Resolver(#[from] ResolveError),
 }
 
 /// The runtime policy the proxy evaluates against. Built once at startup and
@@ -21,6 +24,9 @@ pub enum ConfigError {
 pub struct Policy {
     pub upstream_base_url: String,
     pub contracts: Contracts,
+    /// Routes each pending approval to the declared endpoint of the
+    /// authority it names; built once from `contracts.endpoints`.
+    pub resolver: WebhookResolver,
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,18 +39,20 @@ struct RawProxyConfig {
 
 impl Policy {
     pub fn from_toml(text: &str) -> Result<Self, ConfigError> {
-        let raw = RawProxyConfig::deserialize(toml::Deserializer::new(text))?;
+        let raw: RawProxyConfig = toml::from_str(text)?;
         let contracts = Contracts::from_toml(&raw.contracts.to_string())?;
         if let Some(external) = contracts
             .authorities
             .iter()
-            .find(|a| matches!(a.mode, AuthorityMode::External))
+            .find(|a| matches!(a.mode, AuthorityMode::External) && !contracts.endpoints.contains_key(&a.name))
         {
-            return Err(ConfigError::EscalateAuthority(external.name.as_str().to_string()));
+            return Err(ConfigError::EscalateWithoutWebhook(external.name.as_str().to_string()));
         }
+        let resolver = WebhookResolver::new(contracts.endpoints.clone())?;
         Ok(Self {
             upstream_base_url: raw.upstream_base_url,
             contracts,
+            resolver,
         })
     }
 }
@@ -83,7 +91,7 @@ mod tests {
     }
 
     #[test]
-    fn escalate_authority_is_rejected_at_load() {
+    fn escalate_authority_without_webhook_is_rejected_at_load() {
         let text = r#"
             upstream_base_url = "http://upstream.invalid"
 
@@ -94,8 +102,26 @@ mod tests {
         "#;
         assert!(matches!(
             Policy::from_toml(text),
-            Err(ConfigError::EscalateAuthority(name)) if name == "human-in-the-loop"
+            Err(ConfigError::EscalateWithoutWebhook(name)) if name == "human-in-the-loop"
         ));
+    }
+
+    #[test]
+    fn escalate_authority_with_webhook_loads() {
+        let p = Policy::from_toml(
+            r#"
+            upstream_base_url = "http://upstream.invalid"
+
+            [[contracts.authority]]
+            name = "ops-approver"
+            rule = "escalate"
+            acquire_effects = true
+            webhook = { url = "http://ops-approver.kagent.svc/rule" }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(p.contracts.authorities.len(), 1);
+        assert_eq!(p.contracts.endpoints.len(), 1);
     }
 
     #[test]
