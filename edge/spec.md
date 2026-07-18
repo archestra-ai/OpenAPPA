@@ -123,7 +123,12 @@ does not wrap, rename, or duplicate a core entity merely to make it look
 edge-owned. When appa-edge implements a core concept, the integration point
 is called `<Entity>Resolver`: `AuthorityResolver` implements the outbound leg
 of core's external `Authority`, and the follow-up `ContractResolver` resolves
-core's `ToolContract`.
+core's `ToolContract`. Inline transformers need no resolver — core runs
+their registered code inside the remedy walk; the edge's additions are on
+the verdict side (canonical arguments when a derivation substituted the
+payload, and the recipient-integrity guard's `IntegrityBlocked` outcome). A
+webhook-served *external* transformer would be a `TransformerResolver` under
+this convention — deliberately deferred, not designed here.
 
 appa-edge may define the small number of types needed for its own
 orchestration and adapter boundaries, starting with `Session`. A new type must
