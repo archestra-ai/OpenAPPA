@@ -1,10 +1,13 @@
 //! Rewrite a chat-completions response so blocked tool calls never reach the
-//! harness.
+//! harness — and so a transformed call reaches it with the canonical
+//! arguments the engine checked, never the model's proposal.
 //!
 //! Per choice: if any evaluated call is blocked, the whole message is replaced
 //! with a stop explanation on the normal text channel — the model sees why and
 //! takes a different approach; nothing blocked is ever executed. Permitted
-//! calls (and tools outside the policy) ride through untouched.
+//! calls (and tools outside the policy) ride through untouched; a granted
+//! call whose payload a registered transformer derived has its `arguments`
+//! replaced with the canonical bytes.
 
 use crate::replay::{CallOutcome, Session};
 use crate::wire::{ChatResponse, ResponseMessage};
@@ -16,14 +19,24 @@ pub struct TurnDecision {
     pub tool: String,
     pub outcome: &'static str,
     pub reason: Option<String>,
+    /// A registered transformer derived this call's payload; its wire
+    /// arguments were replaced with the canonical bytes.
+    pub transformed: bool,
 }
 
 impl TurnDecision {
-    /// Whether this decision changed what the model asked for. A granted call
-    /// rides through with its original arguments, same as a permitted one —
-    /// only a terminal block rewrites the message.
-    pub fn rewritten(&self) -> bool {
+    /// Whether the call was blocked — never executed, message replaced with
+    /// the stop explanation.
+    pub fn blocked(&self) -> bool {
         self.outcome == "terminal"
+    }
+
+    /// Whether this decision changed the response the harness sees: a
+    /// terminal block replaces the message; a transformed grant replaces the
+    /// call's arguments. A transformed call is rewritten but NOT blocked —
+    /// it runs, with the canonical bytes.
+    pub fn rewritten(&self) -> bool {
+        self.blocked() || self.transformed
     }
 }
 
@@ -48,6 +61,7 @@ pub async fn rewrite_response(session: &mut Session, response: &mut ChatResponse
                 tool: "function_call".to_string(),
                 outcome: "terminal",
                 reason: Some("deprecated function_call form is not inspectable".to_string()),
+                transformed: false,
             });
             continue;
         }
@@ -77,8 +91,22 @@ pub async fn rewrite_response(session: &mut Session, response: &mut ChatResponse
         if !terminals.is_empty() {
             replace_with_text(&mut choice.message, terminal_text(&terminals));
             choice.finish_reason = Some("stop".to_string());
+            continue;
         }
-        // else: every call permitted — leave the choice untouched.
+        // Every call runs: ship each transformed call's canonical arguments
+        // in place of the model's proposal — what executes is what the
+        // engine checked.
+        if let Some(wire_calls) = choice.message.tool_calls.as_mut() {
+            for (call, outcome) in wire_calls.iter_mut().zip(&outcomes) {
+                if let CallOutcome::Granted {
+                    canonical_arguments: Some(args),
+                    ..
+                } = outcome
+                {
+                    call.function.arguments = args.clone();
+                }
+            }
+        }
     }
     decisions
 }
@@ -89,16 +117,22 @@ fn decision_of(tool: &str, outcome: &CallOutcome) -> TurnDecision {
             tool: tool.to_string(),
             outcome: "permitted",
             reason: None,
+            transformed: false,
         },
-        CallOutcome::Granted { reason } => TurnDecision {
+        CallOutcome::Granted {
+            reason,
+            canonical_arguments,
+        } => TurnDecision {
             tool: tool.to_string(),
             outcome: "granted",
             reason: Some(reason.clone()),
+            transformed: canonical_arguments.is_some(),
         },
         CallOutcome::Terminal { reason } => TurnDecision {
             tool: tool.to_string(),
             outcome: "terminal",
             reason: Some(reason.clone()),
+            transformed: false,
         },
     }
 }
@@ -177,6 +211,49 @@ mod tests {
         assert_eq!(decisions[0].outcome, "permitted");
         assert!(response.choices[0].message.tool_calls.is_some());
         assert_eq!(response.choices[0].finish_reason.as_deref(), Some("tool_calls"));
+    }
+
+    #[tokio::test]
+    async fn transformed_grant_ships_canonical_arguments_without_blocking() {
+        use crate::replay::redaction_policy;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::{Arc, atomic::Ordering};
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counted = hits.clone();
+        let router = axum::Router::new().route(
+            "/",
+            axum::routing::post(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                async { r#"{"ruling":"approve","reason":"cleared by ops"}"# }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let p = redaction_policy(&url);
+        let messages = vec![
+            user("why is checkout crashlooping?"),
+            assistant_call("c1", "k8s_get_pod_logs", "{}"),
+            tool_result("c1", "ERROR checkout: customer alice@example.com cannot pay"),
+        ];
+        let mut session = Session::build(&p, &messages).await.unwrap();
+        let mut response = tool_call_response("notify", r#"{"message":"paging about alice@example.com's checkout"}"#);
+
+        let decisions = rewrite_response(&mut session, &mut response).await;
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].outcome, "granted");
+        assert!(decisions[0].transformed);
+        assert!(decisions[0].rewritten(), "a transformed call changes the response");
+        assert!(!decisions[0].blocked(), "a transformed call is never a block");
+
+        // The call still runs — same finish_reason — but with the canonical
+        // redacted arguments in place of the model's proposal.
+        assert_eq!(response.choices[0].finish_reason.as_deref(), Some("tool_calls"));
+        let calls = response.choices[0].message.tool_calls.as_ref().unwrap();
+        assert!(calls[0].function.arguments.contains("[redacted-email]"));
+        assert!(!calls[0].function.arguments.contains("alice@example.com"));
     }
 
     #[tokio::test]

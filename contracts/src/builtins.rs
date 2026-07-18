@@ -6,6 +6,7 @@
 //! transformer X", not "verified as clean").
 
 use appa_core::{OpaqueValue, TransformerError, TransformerFn};
+use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 
 /// Every builtin name the dialect accepts, for the load-error message.
 pub(crate) const KNOWN_NAMES: &[&str] = &["redact-email"];
@@ -28,15 +29,90 @@ const REPLACEMENT: &str = "[redacted-email]";
 /// they are schema, not payload), and reserialized only when something was
 /// redacted, so an address-free body round-trips byte-identical. A non-JSON
 /// body is a `TransformerError` — fail closed, no half-scanned admission.
+/// So is a document with duplicate object keys: parsing would collapse them,
+/// and a first-wins downstream parser could read an occurrence this walk
+/// never saw — refuse rather than redact half a document.
 fn redact_email(body: &OpaqueValue) -> Result<OpaqueValue, TransformerError> {
-    let mut doc: serde_json::Value = serde_json::from_str(body.as_str()).map_err(|e| TransformerError {
-        message: format!("redact-email: body is not JSON: {e}"),
+    let mut deserializer = serde_json::Deserializer::from_str(body.as_str());
+    let NoDupValue(mut doc) = NoDupValue::deserialize(&mut deserializer).map_err(|e| TransformerError {
+        message: format!("redact-email: body is not JSON without duplicate keys: {e}"),
+    })?;
+    deserializer.end().map_err(|e| TransformerError {
+        message: format!("redact-email: body is not a single JSON document: {e}"),
     })?;
     if redact_strings(&mut doc) == 0 {
         return Ok(body.clone());
     }
     let out = serde_json::to_string(&doc).expect("a decoded JSON document reserializes");
     Ok(OpaqueValue::new(out))
+}
+
+/// A `serde_json::Value` whose deserialization refuses duplicate object keys
+/// at every nesting level (plain `Value` silently keeps one occurrence).
+struct NoDupValue(serde_json::Value);
+
+impl<'de> Deserialize<'de> for NoDupValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(NoDupVisitor)
+    }
+}
+
+struct NoDupVisitor;
+
+impl<'de> Visitor<'de> for NoDupVisitor {
+    type Value = NoDupValue;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a JSON value without duplicate object keys")
+    }
+
+    fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E> {
+        Ok(NoDupValue(serde_json::Value::Bool(v)))
+    }
+
+    fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E> {
+        Ok(NoDupValue(v.into()))
+    }
+
+    fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E> {
+        Ok(NoDupValue(v.into()))
+    }
+
+    fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E> {
+        Ok(NoDupValue(v.into()))
+    }
+
+    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
+        Ok(NoDupValue(serde_json::Value::String(v.to_string())))
+    }
+
+    fn visit_string<E>(self, v: String) -> Result<Self::Value, E> {
+        Ok(NoDupValue(serde_json::Value::String(v)))
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(NoDupValue(serde_json::Value::Null))
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut items = Vec::new();
+        while let Some(NoDupValue(item)) = seq.next_element()? {
+            items.push(item);
+        }
+        Ok(NoDupValue(serde_json::Value::Array(items)))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut object = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if object.contains_key(&key) {
+                return Err(serde::de::Error::custom(format!("duplicate object key `{key}`")));
+            }
+            let NoDupValue(value) = map.next_value()?;
+            object.insert(key, value);
+        }
+        Ok(NoDupValue(serde_json::Value::Object(object)))
+    }
 }
 
 fn redact_strings(value: &mut serde_json::Value) -> usize {
@@ -70,7 +146,10 @@ fn redact_emails_in(s: &str) -> (String, usize) {
         if bytes[i] == b'@' {
             let start = local_start(bytes, i);
             let end = domain_end(bytes, i);
-            if start < i && end > i + 1 && valid_domain(&s[i + 1..end]) {
+            // `start >= emitted` refuses a candidate whose local part
+            // overlaps text an earlier match already consumed
+            // (`a@b.co@d.co`) — the slice below would invert otherwise.
+            if start >= emitted && start < i && end > i + 1 && valid_domain(&s[i + 1..end]) {
                 out.push_str(&s[emitted..start]);
                 out.push_str(REPLACEMENT);
                 count += 1;
@@ -117,15 +196,16 @@ fn domain_end(bytes: &[u8], at: usize) -> usize {
 }
 
 fn valid_domain(domain: &str) -> bool {
-    let labels: Vec<&str> = domain.split('.').collect();
-    if labels.len() < 2 {
-        return false;
+    let mut labels = 0;
+    let mut tld = "";
+    for label in domain.split('.') {
+        if label.is_empty() || label.starts_with('-') || label.ends_with('-') {
+            return false;
+        }
+        labels += 1;
+        tld = label;
     }
-    let all_wellformed = labels
-        .iter()
-        .all(|l| !l.is_empty() && !l.starts_with('-') && !l.ends_with('-'));
-    let tld = labels.last().expect("split yields at least one label");
-    all_wellformed && tld.len() >= 2 && tld.bytes().all(|b| b.is_ascii_alphabetic())
+    labels >= 2 && tld.len() >= 2 && tld.bytes().all(|b| b.is_ascii_alphabetic())
 }
 
 #[cfg(test)]
@@ -163,6 +243,55 @@ mod tests {
         let out = redact(r#"{"m":"contact alice@example.com now"}"#).unwrap();
         let doc: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(doc["m"], "contact [redacted-email] now");
+    }
+
+    #[test]
+    fn overlapping_candidates_redact_the_first_and_skip_the_consumed_tail() {
+        // Regression: the second candidate's local part lies inside the
+        // consumed first match — must not panic, must not double-redact.
+        let out = redact(r#"{"m":"a@b.co@d.co"}"#).unwrap();
+        let doc: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(doc["m"], "[redacted-email]@d.co");
+    }
+
+    #[test]
+    fn multibyte_neighbors_of_the_at_sign_never_match_or_panic() {
+        for body in [
+            r#"{"m":"é@example.com"}"#,
+            r#"{"m":"a@éxample.com"}"#,
+            r#"{"m":"héllo wörld @ é"}"#,
+        ] {
+            assert_eq!(redact(body).unwrap(), body, "body `{body}` should be untouched");
+        }
+    }
+
+    #[test]
+    fn long_tokens_do_not_blow_up() {
+        let long = format!(r#"{{"m":"a@{}aa"}}"#, "a.".repeat(10_000));
+        let out = redact(&long).unwrap();
+        assert!(out.contains("[redacted-email]"));
+    }
+
+    #[test]
+    fn duplicate_object_keys_are_refused_at_every_level() {
+        for body in [
+            r#"{"x":"alice@example.com","x":"clean"}"#,
+            r#"{"outer":{"x":"alice@example.com","x":"clean"}}"#,
+            r#"{"a":[{"x":1,"x":2}]}"#,
+        ] {
+            assert!(redact(body).is_err(), "body `{body}` should be refused");
+        }
+    }
+
+    #[test]
+    fn redaction_preserves_member_order_of_unrelated_keys() {
+        let out = redact(r#"{"z":"alice@example.com","a":1}"#).unwrap();
+        assert_eq!(out, r#"{"z":"[redacted-email]","a":1}"#);
+    }
+
+    #[test]
+    fn trailing_garbage_after_the_document_is_refused() {
+        assert!(redact(r#"{"m":"x"} trailing"#).is_err());
     }
 
     #[test]
@@ -246,6 +375,13 @@ mod tests {
             let body = doc.to_string();
             prop_assume!(!body.contains('@'));
             prop_assert_eq!(redact(&body).unwrap(), body);
+        }
+
+        #[test]
+        fn law_never_panics_on_arbitrary_bytes(body in ".{0,200}") {
+            // Raw, not JSON-shaped: the transformer must refuse or redact,
+            // never panic.
+            let _ = redact_email(&OpaqueValue::new(body));
         }
     }
 

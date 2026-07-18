@@ -74,7 +74,10 @@ async fn verdict_via(url: &str, timeout: Duration) -> Verdict {
 async fn an_approving_webhook_grants() {
     let base = serve(Router::new().route("/", post(async || r#"{"ruling":"approve","reason":"looks fine"}"#))).await;
     match verdict_via(&base, Duration::from_secs(5)).await {
-        Verdict::Granted { trail } => assert!(trail.contains("auditor"), "trail: {trail}"),
+        Verdict::Granted {
+            trail,
+            canonical_arguments: None,
+        } => assert!(trail.contains("auditor"), "trail: {trail}"),
         other => panic!("expected Granted, got {other:?}"),
     }
 }

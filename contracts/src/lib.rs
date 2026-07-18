@@ -1167,8 +1167,9 @@ mod tests {
         let text = "[[transformer]]\nname = \"t\"\nbuiltin = \"redact-ssn\"\n\
                     output = { trust = \"trusted\", audience = \"public\" }";
         match Contracts::from_toml(text) {
-            Err(e @ ContractsError::UnknownBuiltin { .. }) => {
-                assert!(e.to_string().contains("redact-email"), "message lists known builtins");
+            Err(ContractsError::UnknownBuiltin { transformer, builtin }) => {
+                assert_eq!(transformer, "t");
+                assert_eq!(builtin, "redact-ssn");
             }
             other => panic!("expected UnknownBuiltin, got {other:?}"),
         }
