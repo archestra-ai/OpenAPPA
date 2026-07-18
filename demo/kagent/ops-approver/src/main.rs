@@ -30,6 +30,7 @@ use std::net::SocketAddr;
 use axum::Json;
 use axum::routing::post;
 use clap::Parser;
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[derive(Parser)]
@@ -57,60 +58,87 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// One grant coordinate, classified. Everything not explicitly recognized —
-/// and everything recognized but outside this authority's two expected grant
-/// shapes — is `Unrulable`.
-enum Coordinate {
-    /// `{"RaiseLabel": {"trust": "Trusted"|"Suspicious", ...}}`
-    TrustRaise,
-    /// `{"ReleaseControl": [value ids]}`
-    ReleaseControl,
-    Unrulable,
+/// Strict mirrors of the wire shapes appa-core serializes for a grant —
+/// mirrors, never the capability itself (a `PendingApproval` cannot be
+/// deserialized; out of process it is evidence to read). An externally
+/// tagged coordinate this enum does not name, an out-of-range payload, or
+/// an unknown field anywhere is a deserialization error → 422, never an
+/// approval.
+// Mirror payloads exist to *validate* the wire shape, not to be read —
+// dead-code lints on their fields are the point, not an oversight.
+#[allow(dead_code)]
+#[derive(Deserialize)]
+enum WireCoordinate {
+    RaiseLabel(WireRaise),
+    AcquireEffects(Value),
+    ExceptPriorEffects(Value),
+    StandInConfirmation,
+    ReleaseControl(Vec<u64>),
+    AcknowledgeUnknown(Value),
 }
 
-/// Classify one wire coordinate against appa-core's `DeltaCoordinate`
-/// encoding: externally tagged, one variant key per object.
-fn classify(coordinate: &Value) -> Coordinate {
-    let Some(object) = coordinate.as_object() else {
-        // Unit variants (`"StandInConfirmation"`) land here: recognized in
-        // the encoding, but not a grant this authority expects to rule on.
-        return Coordinate::Unrulable;
-    };
-    if object.len() != 1 {
-        return Coordinate::Unrulable;
-    }
-    match (object.get("RaiseLabel"), object.get("ReleaseControl")) {
-        (Some(raise), None) => match raise.get("trust") {
-            Some(Value::String(_)) => Coordinate::TrustRaise,
-            // An audience-only (or malformed) raise is not a trust raise,
-            // but it is not something this authority approves either.
-            _ => Coordinate::Unrulable,
-        },
-        (None, Some(deps)) if deps.is_array() => Coordinate::ReleaseControl,
-        _ => Coordinate::Unrulable,
-    }
+#[allow(dead_code)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireRaise {
+    #[serde(default)]
+    trust: Option<WireKnownTrust>,
+    #[serde(default)]
+    audience: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+enum WireKnownTrust {
+    Trusted,
+    Suspicious,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+enum WireScope {
+    DerivedValue { source: u64 },
+    PendingAction { action: u64 },
+    PolicyCheck { flow: u64 },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireGrant {
+    delta: Vec<WireCoordinate>,
+    scope: WireScope,
 }
 
 async fn rule(Json(approval): Json<Value>) -> Result<Json<Value>, axum::http::StatusCode> {
-    // Rule only on well-formed typed facts. A body without a named
-    // authority, an ancestry snapshot, and a non-empty grant delta is not an
+    // Rule only on well-formed typed facts. A body without this authority's
+    // own name, an ancestry snapshot, and a strictly-parsed grant is not an
     // approval; answering it with a ruling would be ruling on nothing. A
     // non-2xx is a non-ruling to the proxy — the flow stays blocked.
     let Some(authority) = approval["authority"].as_str() else {
         return Err(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
     };
+    if authority != "ops-approver" {
+        return Err(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+    }
     let Some(values) = approval["ancestry"]["values"].as_object() else {
         return Err(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
     };
-    let Some(delta) = approval["grant"]["delta"].as_array() else {
+    let Ok(grant) = serde_json::from_value::<WireGrant>(approval["grant"].clone()) else {
         return Err(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
     };
-    if delta.is_empty() {
+    if grant.delta.is_empty() {
         return Err(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
     }
 
-    let coordinates: Vec<Coordinate> = delta.iter().map(classify).collect();
-    let ruling = if coordinates.iter().any(|c| matches!(c, Coordinate::TrustRaise)) {
+    let trust_raise = grant
+        .delta
+        .iter()
+        .any(|c| matches!(c, WireCoordinate::RaiseLabel(WireRaise { trust: Some(_), .. })));
+    let release_only = grant
+        .delta
+        .iter()
+        .all(|c| matches!(c, WireCoordinate::ReleaseControl(deps) if !deps.is_empty()))
+        && matches!(grant.scope, WireScope::PolicyCheck { .. });
+    let ruling = if trust_raise {
         let suspicious: Vec<&str> = values
             .iter()
             .filter(|(_, view)| view["label"]["trust"] == json!({"Known": "Suspicious"}))
@@ -127,7 +155,7 @@ async fn rule(Json(approval): Json<Value>) -> Result<Json<Value>, axum::http::St
             )
         };
         json!({ "ruling": "deny", "reason": reason })
-    } else if coordinates.iter().all(|c| matches!(c, Coordinate::ReleaseControl)) {
+    } else if release_only {
         json!({
             "ruling": "approve",
             "reason": "the grant releases control dependencies only: every value flowing is within its declared \
@@ -135,8 +163,8 @@ async fn rule(Json(approval): Json<Value>) -> Result<Json<Value>, axum::http::St
                        authority's mandate",
         })
     } else {
-        // Recognized-but-unexpected or unrecognized coordinates: not a grant
-        // this rule covers. Refuse to rule rather than approve by fallback.
+        // Recognized-but-unexpected coordinates or scopes: not a grant this
+        // rule covers. Refuse to rule rather than approve by fallback.
         return Err(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
     };
 
@@ -187,16 +215,14 @@ mod tests {
     async fn a_product_containing_a_trust_raise_is_denied() {
         let delta = json!([
             {"RaiseLabel": {"trust": "Trusted", "audience": null}},
-            {"ReleaseControl": ["v1", "v3"]},
+            {"ReleaseControl": [1, 3]},
         ]);
         assert_eq!(decide(approval(delta)).await.unwrap()["ruling"], "deny");
     }
 
     #[tokio::test]
     async fn a_release_control_only_delta_is_approved() {
-        let ruling = decide(approval(json!([{"ReleaseControl": ["v1", "v3"]}])))
-            .await
-            .unwrap();
+        let ruling = decide(approval(json!([{"ReleaseControl": [1, 3]}]))).await.unwrap();
         assert_eq!(ruling["ruling"], "approve");
         assert!(
             ruling["reason"]
@@ -235,5 +261,28 @@ mod tests {
         ] {
             assert!(decide(body).await.is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn foreign_authorities_wrong_scopes_and_degenerate_releases_are_refused() {
+        // A body naming another authority is not this service's to rule on.
+        let mut foreign = approval(json!([{"ReleaseControl": [1]}]));
+        foreign["authority"] = json!("someone-else");
+        assert!(decide(foreign).await.is_err());
+        // A release grant is check-scoped by construction; any other scope
+        // shape is not the expected grant.
+        let mut wrong_scope = approval(json!([{"ReleaseControl": [1]}]));
+        wrong_scope["grant"]["scope"] = json!({"DerivedValue": {"source": 4}});
+        assert!(decide(wrong_scope).await.is_err());
+        let mut forged_scope = approval(json!([{"ReleaseControl": [1]}]));
+        forged_scope["grant"]["scope"] = json!("forged");
+        assert!(decide(forged_scope).await.is_err());
+        // Degenerate release sets: nothing released, or non-id elements.
+        assert!(decide(approval(json!([{"ReleaseControl": []}]))).await.is_err());
+        assert!(decide(approval(json!([{"ReleaseControl": [null]}]))).await.is_err());
+        // Unknown fields inside the grant are wire drift, not evidence.
+        let mut extra = approval(json!([{"ReleaseControl": [1]}]));
+        extra["grant"]["extra"] = json!(1);
+        assert!(decide(extra).await.is_err());
     }
 }

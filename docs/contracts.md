@@ -170,10 +170,11 @@ implementations:
 When a transformation is applied, the call's canonical arguments are the
 derived bytes: appa-proxy rewrites the tool call in the response so the
 harness executes exactly what the engine checked, and its decision log
-carries the transform trail. The gateway registers transformers the same
-way (inline code needs no channel, unlike a webhook authority), though its
-string argument leaves mean `redact-email` — which transforms JSON
-documents — fails closed rather than applying there today. A
+carries the transform trail. The gateway demo rejects transformer
+declarations at load for now: its argument leaves are raw strings and the
+builtins transform JSON documents, so a declaration there would be a
+planner-visible dead end — the same fail-loud stance it takes on webhook
+authorities. A
 transformer can never clear a *control* taint — the choice to act keeps its
 provenance — so a transformed flow typically still needs an authority's
 `may_release_control` grant; the planner composes both into one plan.

@@ -147,12 +147,17 @@ fn redact_emails_in(s: &str) -> (String, usize) {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'@' {
-            let start = local_start(bytes, i);
+            // Clamp the local part at the consumed boundary: text an earlier
+            // match already replaced behaves like any non-local character
+            // (exactly what the replacement token's `]` would be on a
+            // rescan), so one pass reaches the fixpoint — no accepted
+            // address survives and a second pass changes nothing
+            // (`a@b.co_c@d.co` redacts twice in one pass; `a@b.co@d.co`'s
+            // second candidate clamps to an empty local and is refused,
+            // matching the rescan where `]@d.co` has no local either).
+            let start = local_start(bytes, i).max(emitted);
             let end = domain_end(bytes, i);
-            // `start >= emitted` refuses a candidate whose local part
-            // overlaps text an earlier match already consumed
-            // (`a@b.co@d.co`) — the slice below would invert otherwise.
-            if start >= emitted && start < i && end > i + 1 && valid_domain(&s[i + 1..end]) {
+            if start < i && end > i + 1 && valid_domain(&s[i + 1..end]) {
                 out.push_str(&s[emitted..start]);
                 out.push_str(REPLACEMENT);
                 count += 1;
@@ -258,6 +263,21 @@ mod tests {
         let out = redact(r#"{"m":"a@b.co@d.co"}"#).unwrap();
         let doc: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(doc["m"], "[redacted-email]@d.co");
+    }
+
+    #[test]
+    fn a_clamped_local_part_still_redacts_the_second_address_in_one_pass() {
+        // Regression (review blocker): with a skip-on-overlap rule,
+        // `c@d.co`'s local part reaches into the consumed first match, the
+        // candidate is skipped, and the "declassified" output still carries
+        // an address — and a second pass would then redact it, breaking
+        // idempotence and replay convergence. Clamping redacts both in one
+        // pass.
+        let out = redact(r#"{"m":"a@b.co_c@d.co"}"#).unwrap();
+        let doc: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(doc["m"], "[redacted-email][redacted-email]");
+        // And the fixpoint holds.
+        assert_eq!(redact(&out).unwrap(), out);
     }
 
     #[test]

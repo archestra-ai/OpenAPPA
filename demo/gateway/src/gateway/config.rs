@@ -69,6 +69,10 @@ pub enum ConfigError {
         "authority `{0}` declares a webhook, which the gateway does not serve (its approval channel is human elicitation); remove the webhook table"
     )]
     WebhookAuthority(String),
+    #[error(
+        "transformer `{0}` cannot apply at the gateway (its argument leaves are raw strings, and the builtins transform JSON documents); remove the [[transformer]] table"
+    )]
+    Transformer(String),
 }
 
 impl ConfigError {
@@ -88,7 +92,8 @@ impl ConfigError {
             | Self::ReservedContractName
             | Self::ContractWithoutTool(_)
             | Self::UnknownRecipientsArg { .. }
-            | Self::WebhookAuthority(_) => ConfigFile::Policy,
+            | Self::WebhookAuthority(_)
+            | Self::Transformer(_) => ConfigFile::Policy,
         }
     }
 }
@@ -179,6 +184,16 @@ impl RawConfig {
         if let Some((name, _)) = policy.endpoints.iter().next() {
             return Err(ConfigError::WebhookAuthority(name.as_str().to_owned()));
         }
+        // A registered transformer would be planner-visible but could never
+        // successfully apply: gateway argument leaves are raw strings, and
+        // the dialect's builtins transform JSON documents. Registering it
+        // anyway would turn provable Terminal blocks into stalled derive
+        // attempts. Fail loudly instead — the mirror of the webhook
+        // rejection — until the gateway builds a JSON arguments-document
+        // payload leaf like appa-edge's.
+        if let Some(transformer) = policy.transformers.first() {
+            return Err(ConfigError::Transformer(transformer.descriptor.transformer.id.clone()));
+        }
         let mut engine = PolicyEngine::new();
         let mut tools = BTreeMap::new();
 
@@ -234,19 +249,6 @@ impl RawConfig {
         }
         for authority in policy.authorities {
             engine.register_authority(authority)?;
-        }
-        // Inline transformers need no channel — unlike webhook authorities,
-        // a dialect-declared transformer serves any adapter, so the gateway
-        // registers them like every other embedding. Known limitation: the
-        // gateway's argument leaves are raw strings, while the current
-        // builtin (`redact-email`) transforms JSON documents — a derive
-        // step planned against a string leaf fails closed at application
-        // (`TransitionFailure`, flow stays blocked). Registering anyway
-        // keeps the dialect unforked; a JSON arguments-document payload
-        // leaf (as appa-edge now builds) is the follow-up that makes the
-        // builtin live here.
-        for transformer in policy.transformers {
-            engine.register_transformer(transformer)?;
         }
 
         // The response sink: the agent's final answer is checked against this

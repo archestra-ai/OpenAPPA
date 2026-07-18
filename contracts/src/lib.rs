@@ -76,6 +76,10 @@ pub enum ContractsError {
         known = builtins::KNOWN_NAMES.join(", ")
     )]
     UnknownBuiltin { transformer: String, builtin: String },
+    #[error(
+        "transformer `{0}` must declare a total output label — both trust and audience (the declared transition is the operator's trust decision; nothing here defaults to unknown)"
+    )]
+    TransformerOutput(String),
 }
 
 /// The parsed policy document: the Trajectory's default labels and the
@@ -530,7 +534,10 @@ struct TransformerSpec {
     /// key means "any" (core `LabelPredicate` semantics).
     #[serde(default)]
     precondition: Option<PreconditionSpec>,
-    output: TransformerOutputSpec,
+    /// Optional at parse so a missing or partial table reports as the named
+    /// `TransformerOutput` load error, not a generic parse failure.
+    #[serde(default)]
+    output: Option<TransformerOutputSpec>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -543,12 +550,15 @@ struct PreconditionSpec {
 }
 
 /// The declared output label: both dimensions required — unlike a tool's
-/// `output`, nothing here defaults to unknown.
+/// `output`, nothing here defaults to unknown. Fields are `Option` only so
+/// a partial table reports as `TransformerOutput`, never as unknown labels.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TransformerOutputSpec {
-    trust: TrustSpec,
-    audience: AudienceSpec,
+    #[serde(default)]
+    trust: Option<TrustSpec>,
+    #[serde(default)]
+    audience: Option<AudienceSpec>,
 }
 
 impl TransformerSpec {
@@ -569,6 +579,16 @@ impl TransformerSpec {
                 audience: spec.audience.as_ref().map(AudienceSpec::to_audience).transpose()?,
             },
         };
+        let output = match self.output {
+            Some(TransformerOutputSpec {
+                trust: Some(trust),
+                audience: Some(audience),
+            }) => ValueLabel {
+                trust: trust.to_trust(),
+                audience: audience.to_audience()?,
+            },
+            _ => return Err(ContractsError::TransformerOutput(self.name)),
+        };
         Ok(RegisteredTransformer {
             descriptor: TransformerDescriptor {
                 transformer: TransformerRef {
@@ -576,10 +596,7 @@ impl TransformerSpec {
                     version: 1,
                 },
                 precondition,
-                output: ValueLabel {
-                    trust: self.output.trust.to_trust(),
-                    audience: self.output.audience.to_audience()?,
-                },
+                output,
             },
             run,
         })
@@ -1197,15 +1214,16 @@ mod tests {
     #[test]
     fn transformer_output_is_required_and_total() {
         // Missing output table entirely, and each partially written form:
-        // fail closed at parse, never default to unknown.
+        // the named load error, never a default to unknown.
         for text in [
             "[[transformer]]\nname = \"t\"\nbuiltin = \"redact-email\"".to_string(),
             "[[transformer]]\nname = \"t\"\nbuiltin = \"redact-email\"\noutput = { trust = \"trusted\" }".to_string(),
             "[[transformer]]\nname = \"t\"\nbuiltin = \"redact-email\"\noutput = { audience = \"public\" }".to_string(),
+            "[[transformer]]\nname = \"t\"\nbuiltin = \"redact-email\"\noutput = {}".to_string(),
         ] {
             assert!(
-                matches!(Contracts::from_toml(&text), Err(ContractsError::Parse(_))),
-                "`{text}` should fail to parse"
+                matches!(Contracts::from_toml(&text), Err(ContractsError::TransformerOutput(ref n)) if n == "t"),
+                "`{text}` should be the named output error"
             );
         }
     }

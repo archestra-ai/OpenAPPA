@@ -77,9 +77,6 @@ pub async fn rewrite_response(session: &mut Session, response: &mut ChatResponse
         for call in &calls {
             outcomes.push(session.evaluate_new_call(call).await);
         }
-        for (call, outcome) in calls.iter().zip(&outcomes) {
-            decisions.push(decision_of(&call.function.name, outcome));
-        }
 
         let terminals: Vec<&str> = outcomes
             .iter()
@@ -89,9 +86,29 @@ pub async fn rewrite_response(session: &mut Session, response: &mut ChatResponse
             })
             .collect();
         if !terminals.is_empty() {
+            // The whole message is replaced, so NOTHING in this choice
+            // executes — a permitted or granted sibling is suppressed, and
+            // the record must never claim its (possibly canonical)
+            // arguments were shipped.
+            for (call, outcome) in calls.iter().zip(&outcomes) {
+                decisions.push(match outcome {
+                    CallOutcome::Terminal { .. } | CallOutcome::IntegrityBlocked { .. } => {
+                        decision_of(&call.function.name, outcome)
+                    }
+                    CallOutcome::Permitted | CallOutcome::Granted { .. } => TurnDecision {
+                        tool: call.function.name.clone(),
+                        outcome: "suppressed",
+                        reason: Some("a sibling call was blocked; nothing in this message was executed".to_string()),
+                        transformed: false,
+                    },
+                });
+            }
             replace_with_text(&mut choice.message, terminal_text(&terminals));
             choice.finish_reason = Some("stop".to_string());
             continue;
+        }
+        for (call, outcome) in calls.iter().zip(&outcomes) {
+            decisions.push(decision_of(&call.function.name, outcome));
         }
         // Every call runs: ship each transformed call's canonical arguments
         // in place of the model's proposal — what executes is what the
@@ -260,6 +277,59 @@ mod tests {
         let calls = response.choices[0].message.tool_calls.as_ref().unwrap();
         assert!(calls[0].function.arguments.contains("[redacted-email]"));
         assert!(!calls[0].function.arguments.contains("alice@example.com"));
+    }
+
+    fn two_call_response(first: (&str, &str), second: (&str, &str)) -> ChatResponse {
+        serde_json::from_value(serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": null,
+                "tool_calls": [
+                    {"id": "c8", "type": "function", "function": {"name": first.0, "arguments": first.1}},
+                    {"id": "c9", "type": "function", "function": {"name": second.0, "arguments": second.1}},
+                ]},
+                "finish_reason": "tool_calls"}]
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_terminal_sibling_suppresses_a_transformed_grant_in_both_orders() {
+        use crate::replay::redaction_policy;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let approving = axum::Router::new().route(
+            "/",
+            axum::routing::post(async || r#"{"ruling":"approve","reason":"ok"}"#),
+        );
+        tokio::spawn(async move { axum::serve(listener, approving).await.unwrap() });
+        let p = redaction_policy(&url);
+        let messages = vec![
+            user("why is checkout crashlooping?"),
+            assistant_call("c1", "k8s_get_pod_logs", "{}"),
+            tool_result("c1", "ERROR checkout: customer alice@example.com cannot pay"),
+        ];
+        let good = r#"{"message":"paging about alice@example.com"}"#;
+        // "not json" arguments are terminal (malformed, cannot be checked).
+        for (first, second, suppressed_index) in [
+            (("notify", good), ("notify", "not json"), 0),
+            (("notify", "not json"), ("notify", good), 1),
+        ] {
+            let mut session = Session::build(&p, &messages).await.unwrap();
+            let mut response = two_call_response(first, second);
+            let decisions = rewrite_response(&mut session, &mut response).await;
+            assert_eq!(decisions.len(), 2);
+            let suppressed = &decisions[suppressed_index];
+            let terminal = &decisions[1 - suppressed_index];
+            assert_eq!(terminal.outcome, "terminal");
+            // The whole message was replaced: nothing executed, so the
+            // record must not claim the transformed call's canonical
+            // arguments were shipped.
+            assert_eq!(suppressed.outcome, "suppressed");
+            assert!(!suppressed.transformed);
+            assert!(!suppressed.blocked());
+            assert!(response.choices[0].message.tool_calls.is_none());
+            assert_eq!(response.choices[0].finish_reason.as_deref(), Some("stop"));
+        }
     }
 
     #[test]

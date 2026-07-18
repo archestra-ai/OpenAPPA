@@ -137,24 +137,24 @@ else
   HOOK_LOG=""
   echo "  ✗ ops-hook log unavailable; the leak check has no evidence"; FAIL=1
 fi
-# A notify proposed BEFORE the logs are read is legitimately permitted
-# untransformed (nothing log-derived in the flow); one decided after must be
-# the transformed grant, and a terminal notify means the remediation path is
-# broken (the redactor should make it remediable).
-if grep '"tool":"notify"' <<<"$PROXY_LOG" | grep -q 'pii-redactor'; then
-  echo "  ✓ notify redacted by pii-redactor, then granted (canonical arguments shipped)"
+# The redaction beat is the demo's thesis and asserts HARD: the prompt
+# orders a closing status update, so a run where no post-log notify was
+# redacted-and-granted did not exercise the feature — fail it rather than
+# report a PASS that proved nothing. (A notify proposed before the logs are
+# read is legitimately permitted untransformed and doesn't count either
+# way.)
+if grep '"tool":"notify"' <<<"$PROXY_LOG" | grep 'pii-redactor' | grep -q 'ops-approver'; then
+  echo "  ✓ notify redacted by pii-redactor, release approved by ops-approver (canonical arguments shipped)"
   if grep -q 'redacted-email' <<<"$HOOK_LOG"; then
     echo "  ✓ the ops hook received the redacted message"
     grep 'redacted-email' <<<"$HOOK_LOG" | tail -2 | sed 's/^/    hook: /' || true
   else
-    echo "  – hook shows no redacted body (notify may not have been executed; informational)"
+    echo "  ✗ the granted redacted notify never reached the ops hook"; FAIL=1
   fi
 elif grep '"tool":"notify"' <<<"$PROXY_LOG" | grep -q '"outcome":"terminal"'; then
   echo "  ✗ a notify was blocked terminally — the redaction remedy path is broken"; FAIL=1
-elif grep -q '"tool":"notify"' <<<"$PROXY_LOG"; then
-  echo "  – notify decided without a transform (pre-log status update; informational)"
 else
-  echo "  – no notify in the log (model skipped the ops-hook update; informational)"
+  echo "  ✗ no redacted-and-approved notify in the log — the PII beat was not exercised"; FAIL=1
 fi
 # Informational: the readers have no declared requirements, so every read is
 # acknowledged by the default-allow authority — visible in the decision log.

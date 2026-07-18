@@ -711,11 +711,18 @@ mod tests {
         for coordinate in delta {
             let object = coordinate.as_object().expect("externally tagged coordinate");
             assert_eq!(object.len(), 1, "one variant key: {coordinate}");
-            assert!(
-                object.get("ReleaseControl").is_some_and(|deps| deps.is_array()),
-                "the notify grant must be release-control-only: {coordinate}"
-            );
+            let deps = object
+                .get("ReleaseControl")
+                .and_then(|deps| deps.as_array())
+                .expect("the notify grant must be release-control-only");
+            assert!(!deps.is_empty() && deps.iter().all(serde_json::Value::is_u64));
         }
+        // Check-scoped, as the approver's strict mirror requires.
+        assert!(
+            approvals[0]["grant"]["scope"]["PolicyCheck"].is_object(),
+            "scope: {}",
+            approvals[0]["grant"]["scope"]
+        );
     }
 
     #[tokio::test]
