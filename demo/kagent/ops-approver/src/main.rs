@@ -116,14 +116,17 @@ async fn rule(Json(approval): Json<Value>) -> Result<Json<Value>, axum::http::St
             .filter(|(_, view)| view["label"]["trust"] == json!({"Known": "Suspicious"}))
             .map(|(id, _)| id.as_str())
             .collect();
-        json!({
-            "ruling": "deny",
-            "reason": format!(
+        let reason = if suspicious.is_empty() {
+            "the grant asks to vouch a value as trusted; this authority does not vouch content it cannot audit"
+                .to_string()
+        } else {
+            format!(
                 "the grant asks to vouch a value as trusted; the flow's provenance includes suspicious values ({}): \
                  third-party text may not drive this action",
                 suspicious.join(", ")
-            ),
-        })
+            )
+        };
+        json!({ "ruling": "deny", "reason": reason })
     } else if coordinates.iter().all(|c| matches!(c, Coordinate::ReleaseControl)) {
         json!({
             "ruling": "approve",

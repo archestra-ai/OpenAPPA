@@ -28,7 +28,7 @@ impl TurnDecision {
     /// Whether the call was blocked — never executed, message replaced with
     /// the stop explanation.
     pub fn blocked(&self) -> bool {
-        self.outcome == "terminal"
+        self.outcome == "terminal" || self.outcome == "integrity_blocked"
     }
 
     /// Whether this decision changed the response the harness sees: a
@@ -84,7 +84,7 @@ pub async fn rewrite_response(session: &mut Session, response: &mut ChatResponse
         let terminals: Vec<&str> = outcomes
             .iter()
             .filter_map(|o| match o {
-                CallOutcome::Terminal { reason } => Some(reason.as_str()),
+                CallOutcome::Terminal { reason } | CallOutcome::IntegrityBlocked { reason } => Some(reason.as_str()),
                 CallOutcome::Permitted | CallOutcome::Granted { .. } => None,
             })
             .collect();
@@ -131,6 +131,12 @@ fn decision_of(tool: &str, outcome: &CallOutcome) -> TurnDecision {
         CallOutcome::Terminal { reason } => TurnDecision {
             tool: tool.to_string(),
             outcome: "terminal",
+            reason: Some(reason.clone()),
+            transformed: false,
+        },
+        CallOutcome::IntegrityBlocked { reason } => TurnDecision {
+            tool: tool.to_string(),
+            outcome: "integrity_blocked",
             reason: Some(reason.clone()),
             transformed: false,
         },
@@ -254,6 +260,20 @@ mod tests {
         let calls = response.choices[0].message.tool_calls.as_ref().unwrap();
         assert!(calls[0].function.arguments.contains("[redacted-email]"));
         assert!(!calls[0].function.arguments.contains("alice@example.com"));
+    }
+
+    #[test]
+    fn integrity_block_is_blocked_but_distinct_from_terminal_on_the_record() {
+        let d = decision_of(
+            "send",
+            &CallOutcome::IntegrityBlocked {
+                reason: "diverged".into(),
+            },
+        );
+        assert_eq!(d.outcome, "integrity_blocked");
+        assert!(d.blocked(), "an integrity block never executes");
+        assert!(d.rewritten());
+        assert!(!d.transformed);
     }
 
     #[tokio::test]

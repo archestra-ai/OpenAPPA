@@ -27,7 +27,10 @@ const REPLACEMENT: &str = "[redacted-email]";
 /// decodes to an email when the harness parses the arguments). The document
 /// is decoded, each string *value* redacted (object keys are left alone —
 /// they are schema, not payload), and reserialized only when something was
-/// redacted, so an address-free body round-trips byte-identical. A non-JSON
+/// redacted, so an address-free body round-trips byte-identical. When a
+/// redaction does occur, reserialization normalizes the rest of the
+/// document too — whitespace, number spelling, escape forms — while member
+/// order is preserved (see Cargo.toml's `preserve_order` note). A non-JSON
 /// body is a `TransformerError` — fail closed, no half-scanned admission.
 /// So is a document with duplicate object keys: parsing would collapse them,
 /// and a first-wins downstream parser could read an occurrence this walk
@@ -239,9 +242,12 @@ mod tests {
 
     #[test]
     fn decodes_unicode_escaped_at_sign() {
-        // @ is `@` once decoded — the reason redaction is JSON-aware.
-        let out = redact(r#"{"m":"contact alice@example.com now"}"#).unwrap();
-        let doc: Value = serde_json::from_str(&out).unwrap();
+        // The wire body spells the @ as the JSON escape @ — a raw byte
+        // scan would never see an address here. This is the reason
+        // redaction is JSON-aware.
+        let body = r#"{"m":"contact alice\u0040example.com now"}"#;
+        assert!(!body.contains('@'), "the fixture must not contain a literal @");
+        let doc: Value = serde_json::from_str(&redact(body).unwrap()).unwrap();
         assert_eq!(doc["m"], "contact [redacted-email] now");
     }
 

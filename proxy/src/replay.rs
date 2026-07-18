@@ -43,6 +43,11 @@ pub enum CallOutcome {
     /// unavailable (no competent authority) or did not settle within the
     /// step budget.
     Terminal { reason: String },
+    /// Block: the edge's recipient-integrity guard refused a derivation
+    /// that rewrote the canonical recipients away from what was checked.
+    /// Kept distinct from `Terminal` on the record: the engine proved no
+    /// no-remedy claim here — the edge declined to ship a divergent call.
+    IntegrityBlocked { reason: String },
 }
 
 /// Replay-side resolver: approves every escalation a historical call needs,
@@ -149,7 +154,7 @@ impl Session {
                 reason: trail,
                 canonical_arguments,
             },
-            Ok(Verdict::IntegrityBlocked { detail, .. }) => CallOutcome::Terminal {
+            Ok(Verdict::IntegrityBlocked { detail, .. }) => CallOutcome::IntegrityBlocked {
                 reason: format!(
                     "`{tool}` was blocked: a derivation rewrote the canonical arguments away from what was checked \
                      ({detail}); the call will not run"
@@ -493,16 +498,23 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Serve an approving webhook on an ephemeral port, counting hits.
-    async fn approving_webhook() -> (String, Arc<AtomicUsize>) {
+    type Approvals = Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
+
+    /// Serve an approving webhook on an ephemeral port, counting hits and
+    /// capturing each posted approval body.
+    async fn capturing_webhook() -> (String, Arc<AtomicUsize>, Approvals) {
         let hits = Arc::new(AtomicUsize::new(0));
+        let bodies: Approvals = Arc::default();
         let counted = hits.clone();
+        let captured = bodies.clone();
         let router = axum::Router::new().route(
             "/",
-            axum::routing::post(move || {
+            axum::routing::post(move |body: axum::body::Bytes| {
                 let counted = counted.clone();
+                let captured = captured.clone();
                 async move {
                     counted.fetch_add(1, Ordering::SeqCst);
+                    captured.lock().unwrap().push(serde_json::from_slice(&body).unwrap());
                     r#"{"ruling":"approve","reason":"cleared by ops"}"#
                 }
             }),
@@ -510,7 +522,13 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        (format!("http://{addr}"), hits)
+        (format!("http://{addr}"), hits, bodies)
+    }
+
+    /// Serve an approving webhook on an ephemeral port, counting hits.
+    async fn approving_webhook() -> (String, Arc<AtomicUsize>) {
+        let (url, hits, _) = capturing_webhook().await;
+        (url, hits)
     }
 
     /// `mystery_tool` has unknown requirements and the only competent
@@ -667,7 +685,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_pii_notify_is_redacted_then_approved_with_canonical_arguments() {
-        let (url, hits) = approving_webhook().await;
+        let (url, hits, approvals) = capturing_webhook().await;
         let policy = redaction_policy(&url);
         let mut session = Session::build(&policy, &pii_history()).await.unwrap();
         match session.evaluate_new_call(&call("notify", PII_ARGS)).await {
@@ -683,6 +701,21 @@ mod tests {
             other => panic!("expected transformed grant, got {other:?}"),
         }
         assert_eq!(hits.load(Ordering::SeqCst), 1, "exactly one approval round trip");
+        // The engine-produced grant is exactly the shape the demo's
+        // ops-approver approves: every coordinate a ReleaseControl — if a
+        // product delta ever grows another coordinate, the demo's happy
+        // path becomes a 422 and this catches it before demo runtime.
+        let approvals = approvals.lock().unwrap();
+        let delta = approvals[0]["grant"]["delta"].as_array().expect("delta is an array");
+        assert!(!delta.is_empty());
+        for coordinate in delta {
+            let object = coordinate.as_object().expect("externally tagged coordinate");
+            assert_eq!(object.len(), 1, "one variant key: {coordinate}");
+            assert!(
+                object.get("ReleaseControl").is_some_and(|deps| deps.is_array()),
+                "the notify grant must be release-control-only: {coordinate}"
+            );
+        }
     }
 
     #[tokio::test]

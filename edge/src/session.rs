@@ -15,6 +15,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use appa_contracts::Contracts;
 use appa_core::audit::AuditEvent;
+use appa_core::value::Provenance;
 use appa_core::{
     ArgumentName, ArgumentTree, AuthorityName, AuthorizationScope, BlockReason, CanonicalRequest, FlowOutcome,
     FlowPermit, FlowRefusal, OpaqueValue, PolicyEngine, Pursuit, Speaker, StallCause, ToolName, ToolRequest,
@@ -307,7 +308,7 @@ impl Session {
         let verdict = match self.settle(built.request, resolver).await {
             // Check-only: the token is dropped, never released.
             Settled::Token(_token) => {
-                let canonical_arguments = self.canonical_arguments(built.payload, audit_from);
+                let canonical_arguments = self.canonical_arguments(built.payload);
                 if let Some(args) = &canonical_arguments
                     && let Err(detail) = self.recipient_integrity(&tool, &built.recipients, args)
                 {
@@ -357,7 +358,6 @@ impl Session {
             .build_tool_request(&tool, arguments, proposed_by)
             .map_err(|_| EdgeError::MalformedArguments { tool: tool.clone() })?;
 
-        let audit_from = self.trajectory.audit().len();
         let token = match self.settle(built.request, resolver).await {
             Settled::Token(token) => token,
             Settled::Blocked(verdict) => {
@@ -367,7 +367,7 @@ impl Session {
         };
         // The guard runs before release: a blocked dispatch must commit no
         // effects, and the token is simply dropped.
-        if let Some(args) = self.canonical_arguments(built.payload, audit_from)
+        if let Some(args) = self.canonical_arguments(built.payload)
             && let Err(detail) = self.recipient_integrity(&tool, &built.recipients, &args)
         {
             self.clear_pending()?;
@@ -636,33 +636,50 @@ impl Session {
         })
     }
 
-    /// The canonical arguments, iff a `DeriveValue` remedy substituted the
-    /// payload leaf of the pending action's current tree. Detection is
-    /// typed, never byte comparison: the current leaf must be the `derived`
-    /// of an applied `ValueTransition` in this evaluation's audit window (an
-    /// idempotent transformer substitutes a new value with identical bytes,
-    /// and that substitution still is the checked tree). An authority's
-    /// durable raise also substitutes a new leaf, but an endorsed value
-    /// carries the *same* bytes by engine construction — nothing to ship.
-    fn canonical_arguments(&self, original_payload: ValueId, audit_from: usize) -> Option<String> {
+    /// The canonical arguments, iff a registered transformer's derivation is
+    /// anywhere in the current payload leaf's substitution chain. Detection
+    /// is typed provenance, never byte comparison: walk from the current
+    /// leaf back to the original payload — `Transformed` and `Endorsed` are
+    /// the only substituting origins, and an endorsement can sit *on top of*
+    /// a derivation (a durable raise on the redacted value), so the chain,
+    /// not the top link, decides. An endorsed-only chain carries the source
+    /// bytes unchanged by engine construction — nothing to ship. A chain
+    /// this walk cannot account for fails toward shipping: the checked
+    /// tree's bytes are always safe to ship, the proposal's are not.
+    fn canonical_arguments(&self, original_payload: ValueId) -> Option<String> {
         let pending = self.trajectory.pending_action()?;
         let payload = pending.current().arguments.top_level(&ArgumentName::new(PAYLOAD_ARG))?;
         let ArgumentTree::Value(id) = payload else {
             return None;
         };
-        if *id == original_payload {
-            return None;
+        let mut cursor = *id;
+        let mut transformed = false;
+        while cursor != original_payload {
+            let value = self
+                .trajectory
+                .value(cursor)
+                .expect("the pending action's current tree references only admitted values");
+            match value.provenance() {
+                Provenance::Transformed { source, .. } => {
+                    transformed = true;
+                    cursor = *source;
+                }
+                Provenance::Endorsed { source, .. } => {
+                    cursor = *source;
+                }
+                _ => {
+                    transformed = true;
+                    break;
+                }
+            }
         }
-        let transformed = self.trajectory.audit()[audit_from..].iter().any(|event| {
-            matches!(
-                event,
-                AuditEvent::ValueTransition { derived: Some(derived), .. } if derived == id
-            )
-        });
         if !transformed {
             return None;
         }
-        let body = self.trajectory.value(*id).ok()?;
+        let body = self
+            .trajectory
+            .value(*id)
+            .expect("the pending action's current tree references only admitted values");
         Some(body.body().as_str().to_string())
     }
 
@@ -673,6 +690,15 @@ impl Session {
     /// evaluated. Compare as sets (core's own resolved-recipient
     /// representation — order- and duplicate-insensitive); any difference,
     /// and any failure to parse or re-extract, fails closed.
+    ///
+    /// Defense in depth, structurally unreachable end-to-end today: at this
+    /// coarse layer a recipient leaf always wears the actor fold, so any
+    /// sink violation a transformer could clear also implicates the
+    /// recipient leaf itself, which only an authority raise can fix — and
+    /// wherever those raises are competent, the shorter pure-authorize plan
+    /// sorts ahead of every derive route. The guard exists because none of
+    /// that is an invariant: finer dependency discovery or pass-by-reference
+    /// labels (both planned) make the derive-on-recipients path live.
     fn recipient_integrity(
         &self,
         tool: &ToolName,
@@ -1402,6 +1428,60 @@ mod tests {
         }
         assert_eq!(applied_transitions(&s), 1);
         assert!(!s.pending_call());
+    }
+
+    #[tokio::test]
+    async fn an_endorsement_on_top_of_the_derivation_still_ships_the_redacted_canonicals() {
+        // Regression (review blocker): a durable raise substitutes an
+        // *endorsed* leaf on top of the derived one; detection keyed to the
+        // top link alone would return no canonical arguments and the
+        // adapter would ship the unredacted proposal. The chain decides.
+        let policy = r#"
+            [trajectory]
+            audience = ["operator", "sre-team"]
+
+            [[tool]]
+            name = "read_private"
+            output = { trust = "suspicious", audience = ["operator"] }
+            requires = {}
+
+            [[tool]]
+            name = "page"
+            output = { trust = "trusted", audience = ["operator", "sre-team"] }
+            requires = { trust = "trusted", audience = ["operator", "sre-team"] }
+
+            [[transformer]]
+            name = "pii-redactor"
+            builtin = "redact-email"
+            precondition = { audience = ["operator"] }
+            output = { trust = "suspicious", audience = ["operator", "sre-team"] }
+
+            [[authority]]
+            name = "ops"
+            rule = "escalate"
+            trust = "trusted"
+            may_release_control = true
+        "#;
+        let mut s = session(policy, "page the on-call about checkout");
+        narrow_context(&mut s).await;
+        let proposed = ProposedCall {
+            id: "c2",
+            tool: "page",
+            arguments: r#"{"message":"customer alice@example.com is blocked"}"#,
+        };
+        let verdict = s.verdict("paging", proposed, &Rule(approve)).await.unwrap();
+        match verdict {
+            Verdict::Granted {
+                trail,
+                canonical_arguments: Some(args),
+            } => {
+                assert!(trail.contains("pii-redactor/v1"), "trail: {trail}");
+                assert!(trail.contains("endorsed by 'ops'"), "trail: {trail}");
+                assert!(args.contains("[redacted-email]"), "args: {args}");
+                assert!(!args.contains("alice@example.com"), "args: {args}");
+            }
+            other => panic!("expected transformed-and-endorsed grant, got {other:?}"),
+        }
     }
 
     #[tokio::test]

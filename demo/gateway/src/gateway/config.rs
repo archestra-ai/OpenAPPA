@@ -237,7 +237,14 @@ impl RawConfig {
         }
         // Inline transformers need no channel — unlike webhook authorities,
         // a dialect-declared transformer serves any adapter, so the gateway
-        // registers them like every other embedding.
+        // registers them like every other embedding. Known limitation: the
+        // gateway's argument leaves are raw strings, while the current
+        // builtin (`redact-email`) transforms JSON documents — a derive
+        // step planned against a string leaf fails closed at application
+        // (`TransitionFailure`, flow stays blocked). Registering anyway
+        // keeps the dialect unforked; a JSON arguments-document payload
+        // leaf (as appa-edge now builds) is the follow-up that makes the
+        // builtin live here.
         for transformer in policy.transformers {
             engine.register_transformer(transformer)?;
         }
