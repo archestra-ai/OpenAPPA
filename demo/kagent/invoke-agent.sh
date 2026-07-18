@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
-# Drive the ops-agent one turn over A2A and print its reply.
-# Usage: ./invoke-agent.sh "your prompt"
+# Drive the ops-agent one turn over A2A and print its reply as a readable
+# transcript (see render-a2a.py). Pass --raw first to get the untouched JSON.
+# Usage: ./invoke-agent.sh [--raw] "your prompt"
 set -euo pipefail
 
-PROMPT="${1:?usage: invoke-agent.sh <prompt>}"
+RENDER="$(dirname "$0")/render-a2a.py"
+if [[ "${1:-}" == "--raw" ]]; then
+  RENDER=cat
+  shift
+fi
+PROMPT="${1:?usage: invoke-agent.sh [--raw] <prompt>}"
 NS=kagent
 AGENT=ops-agent
 
@@ -19,4 +25,4 @@ curl -s -X POST "http://127.0.0.1:8083/api/a2a/${NS}/${AGENT}" \
   -d "$(cat <<JSON
 {"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"role":"user","parts":[{"kind":"text","text":$(printf '%s' "$PROMPT" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')}],"messageId":"demo-1"}}}
 JSON
-)"
+)" | "$RENDER"
