@@ -235,6 +235,12 @@ impl RawConfig {
         for authority in policy.authorities {
             engine.register_authority(authority)?;
         }
+        // Inline transformers need no channel — unlike webhook authorities,
+        // a dialect-declared transformer serves any adapter, so the gateway
+        // registers them like every other embedding.
+        for transformer in policy.transformers {
+            engine.register_transformer(transformer)?;
+        }
 
         // The response sink: the agent's final answer is checked against this
         // audience, and only the permitted rendering is delivered.

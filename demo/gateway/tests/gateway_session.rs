@@ -399,6 +399,11 @@ requires = { audience = "$.args.too" }
         GatewayConfig::from_toml("", webhook_policy),
         Err(ConfigError::WebhookAuthority(name)) if name == "remote"
     ));
+    // An inline transformer needs no channel: the gateway registers dialect
+    // transformers like every other embedding, so the config loads.
+    let transformer_policy = "[[transformer]]\nname = \"pii-redactor\"\nbuiltin = \"redact-email\"\n\
+                              output = { trust = \"trusted\", audience = \"public\" }";
+    assert!(GatewayConfig::from_toml("", transformer_policy).is_ok());
     // The escalation tool name is reserved in the catalog…
     let reserved = r#"
 [[tool]]
