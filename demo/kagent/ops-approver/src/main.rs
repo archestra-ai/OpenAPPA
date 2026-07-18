@@ -81,13 +81,15 @@ enum WireCoordinate {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WireRaise {
-    #[serde(default)]
+    // serde reads an absent Option field as null. Core always serializes
+    // both fields, but tolerating absence here is harmless in the safe
+    // direction: a RaiseLabel can only ever deny, never approve.
     trust: Option<WireKnownTrust>,
-    #[serde(default)]
     audience: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 enum WireKnownTrust {
     Trusted,
     Suspicious,
@@ -95,6 +97,7 @@ enum WireKnownTrust {
 
 #[allow(dead_code)]
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 enum WireScope {
     DerivedValue { source: u64 },
     PendingAction { action: u64 },
@@ -280,9 +283,19 @@ mod tests {
         // Degenerate release sets: nothing released, or non-id elements.
         assert!(decide(approval(json!([{"ReleaseControl": []}]))).await.is_err());
         assert!(decide(approval(json!([{"ReleaseControl": [null]}]))).await.is_err());
-        // Unknown fields inside the grant are wire drift, not evidence.
+        // Unknown fields inside the grant, its scope, or a raise are wire
+        // drift, not evidence.
         let mut extra = approval(json!([{"ReleaseControl": [1]}]));
         extra["grant"]["extra"] = json!(1);
         assert!(decide(extra).await.is_err());
+        let mut scope_extra = approval(json!([{"ReleaseControl": [1]}]));
+        scope_extra["grant"]["scope"] = json!({"PolicyCheck": {"flow": 7, "extra": 1}});
+        assert!(decide(scope_extra).await.is_err());
+        // A raise with an absent (not null) audience field still reads as a
+        // trust raise — and a raise can only deny, never approve.
+        let ruling = decide(approval(json!([{"RaiseLabel": {"trust": "Trusted"}}])))
+            .await
+            .unwrap();
+        assert_eq!(ruling["ruling"], "deny");
     }
 }
