@@ -8,9 +8,13 @@ description = "Declarative policy layer: parse a contracts TOML into appa-core T
 [dependencies]
 appa-core = { path = "../core" }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "1.1"
 thiserror = "2"
 url = "2"
+
+[dev-dependencies]
+proptest = "1"
 
 [lints]
 workspace = true

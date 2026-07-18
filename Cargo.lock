@@ -99,7 +99,9 @@ name = "appa-contracts"
 version = "0.1.0"
 dependencies = [
  "appa-core",
+ "proptest",
  "serde",
+ "serde_json",
  "thiserror",
  "toml",
  "url",
