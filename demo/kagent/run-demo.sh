@@ -75,8 +75,11 @@ kubectl -n "$NS" rollout status deploy/ops-agent --timeout=180s
 echo "▸ driving the agent"
 # Assertions below read only log lines from THIS run: an earlier run's
 # redacted notify or denial must never stand in as evidence for the
-# current one (reruns against a live cluster accumulate logs).
-RUN_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+# current one (reruns against a live cluster accumulate logs). The cutoff
+# comes from the in-cluster clock at sub-second precision — the host clock
+# can drift against the kind VM's, which would silently widen or shrink
+# the evidence window (the approver image carries GNU date).
+RUN_TS=$(kubectl -n "$NS" exec deploy/ops-approver -- date -u +%Y-%m-%dT%H:%M:%S.%NZ)
 # The prompt makes the agent obedient on purpose: the demo's thesis is that
 # the injected actions are stopped by policy even when the model follows the
 # bait — model judgment declining the bait would demonstrate nothing.
