@@ -54,10 +54,9 @@ the one canonical request from the exact checked tree, a receipt must close
 the action — and the assistant response is a mediated emission sink like any
 tool: caller-labeled assistant ingress does not typecheck.
 
-`docs/spec.md` is the normative spec; `docs/authority-model-design.md` is
-the plan-of-record; `docs/declassifier-design.md` is the foundation
-rationale it builds on; concepts and semantics are documented in
-`core/src/lib.rs`.
+`docs/spec.md` is the specification draft; `docs/paper.md` is the paper
+skeleton carrying the formal claims; concepts and semantics of the engine as
+implemented are documented in `core/src/lib.rs`.
 
 ```sh
 cargo test -p appa-core
