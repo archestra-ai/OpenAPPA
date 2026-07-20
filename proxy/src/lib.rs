@@ -18,6 +18,12 @@
 //! (see `replay::TrustedHistoryResolver`). A flow no declared authority
 //! covers is blocked, fail closed.
 //!
+//! A policy may also declare inline transformers. When the remedy walk
+//! derives a call's payload through one, the proxy ships the *canonical*
+//! arguments — the exact bytes the engine checked — in place of the model's
+//! proposal (see `rewrite`), and the decision log carries the transform
+//! trail. Replay re-derives deterministically; no webhook is involved.
+//!
 //! Nothing here is cryptographic: authenticity rests on the harness only
 //! recording tool results that real MCP servers returned, and on the proxy
 //! port being reachable only by that harness. See `README.md`.

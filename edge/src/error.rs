@@ -15,6 +15,8 @@ pub enum EdgeError {
     DuplicateContract(ToolName),
     #[error("duplicate authority registration: {0}")]
     DuplicateAuthority(String),
+    #[error("duplicate transformer registration: {0}")]
+    DuplicateTransformer(String),
     /// A historical result no longer passes policy — the session cannot be
     /// rebuilt on it and must fail closed.
     #[error("a previously-executed call to `{tool}` no longer passes policy: {reason}")]

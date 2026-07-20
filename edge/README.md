@@ -44,6 +44,19 @@ declared endpoint fails closed without any HTTP call. The client follows no
 redirects, uses no ambient proxy, and never retries — one ruling per
 approval. With `NoResolver`, escalations simply remain blocked.
 
+**Transformers and canonical arguments** — `Session::new` registers the
+policy's inline transformers (`Contracts::transformers`) beside its
+contracts and authorities; the engine's remedy walk applies them without
+any resolver — inline code needs no channel. When a derivation substitutes
+a call's payload, the granted verdict carries the **canonical arguments**
+(the exact bytes the engine checked); the adapter must ship those, never
+the proposal's. Before surfacing them, the edge runs a recipient-integrity
+guard: if the derivation rewrote a contract-designated recipient field away
+from the checked recipient set — or made it unreadable — the flow ends in
+a distinct `IntegrityBlocked` verdict, never a dispatch (and never a
+fabricated `Terminal`, which stays reserved for the engine's proven
+no-remedy claim).
+
 **Cancellation** — `verdict`/`dispatch` hold linear core capabilities across
 their awaits. A future dropped mid-await poisons the session: every further
 mutating call fails with `EdgeError::Poisoned`, and the adapter reconstructs

@@ -8,9 +8,19 @@ description = "Declarative policy layer: parse a contracts TOML into appa-core T
 [dependencies]
 appa-core = { path = "../core" }
 serde = { version = "1", features = ["derive"] }
+# preserve_order: a redacted document must keep its member order — the
+# canonical arguments replace the model's proposal, and reordering unrelated
+# keys is a gratuitous diff (sorted-map default would do exactly that).
+# Feature unification flips every serde_json::Map in the workspace from
+# sorted to insertion-order serialization — a deliberate, benign blast
+# radius (wire passthroughs now preserve upstream member order).
+serde_json = { version = "1", features = ["preserve_order"] }
 toml = "1.1"
 thiserror = "2"
 url = "2"
+
+[dev-dependencies]
+proptest = "1"
 
 [lints]
 workspace = true
