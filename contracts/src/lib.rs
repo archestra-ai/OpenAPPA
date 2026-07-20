@@ -2,19 +2,25 @@
 //! (`deny_unknown_fields`, the appa-check discipline). The prototype's
 //! `unknown_policy`/`taint_policy` knobs are gone on purpose: unknown-handling
 //! is authority registration in current appa-core. This crate translates
-//! declared tool contracts and declared authorities: inline `allow` (the
+//! declared tool contracts, declared authorities — inline `allow` (the
 //! narrow acknowledge-only competence a policy may grant itself in TOML) and
 //! external `escalate` (a full-mandate authority whose rulings arrive out of
-//! process — a human channel). The engine routes competent inline authorities
-//! before external ones regardless of declaration order.
+//! process — a human channel) — and declared transformers (`[[transformer]]`:
+//! a compiled-in builtin bound to an operator-declared precondition and
+//! output label; declassification via a registered transformer). The engine
+//! routes competent inline authorities before external ones regardless of
+//! declaration order.
+
+mod builtins;
 
 use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
 use appa_core::{
     ArgumentName, ArgumentSchema, AttentionRule, Audience, AudienceRule, Authority, AuthorityMandate, AuthorityName,
-    Authorization, Effect, Effects, KnownTrust, Requirements, Ruling, ToolContract, ToolName, TrajectoryView, Trust,
-    UserId, ValueLabel, Violation,
+    Authorization, Effect, Effects, KnownTrust, LabelPredicate, RegisteredTransformer, Requirements, Ruling,
+    ToolContract, ToolName, TrajectoryView, TransformerDescriptor, TransformerRef, Trust, UserId, ValueLabel,
+    Violation,
 };
 #[cfg(test)]
 use appa_core::AuthorityMode;
@@ -59,6 +65,19 @@ pub enum ContractsError {
         max = MAX_WEBHOOK_TIMEOUT_MS
     )]
     WebhookTimeout(String),
+    #[error("transformer name may not be empty")]
+    EmptyTransformerName,
+    #[error("duplicate transformer `{0}`")]
+    DuplicateTransformer(String),
+    #[error(
+        "transformer `{transformer}` names unknown builtin `{builtin}` (known builtins: {known})",
+        known = builtins::KNOWN_NAMES.join(", ")
+    )]
+    UnknownBuiltin { transformer: String, builtin: String },
+    #[error(
+        "transformer `{0}` must declare a total output label — both trust and audience (the declared transition is the operator's trust decision; nothing here defaults to unknown)"
+    )]
+    TransformerOutput(String),
 }
 
 /// The parsed policy document: the Trajectory's default labels and the
@@ -77,6 +96,10 @@ pub struct Contracts {
     /// `authorities` because core's `Authority` deliberately holds no
     /// transport configuration; the integration's resolver consumes this.
     pub endpoints: HashMap<AuthorityName, AuthorityEndpoint>,
+    /// Transformers declared in the policy TOML (`[[transformer]]`), ready
+    /// to register: each binds a compiled-in builtin implementation to its
+    /// operator-declared precondition and output label.
+    pub transformers: Vec<RegisteredTransformer>,
 }
 
 /// A declared escalate authority's HTTP ruling endpoint, validated at parse:
@@ -151,6 +174,8 @@ struct RawConfig {
     tool: Vec<ToolSpec>,
     #[serde(default)]
     authority: Vec<AuthoritySpec>,
+    #[serde(default)]
+    transformer: Vec<TransformerSpec>,
 }
 
 impl RawConfig {
@@ -213,12 +238,22 @@ impl RawConfig {
             authorities.push(authority);
         }
 
+        let mut transformers: Vec<RegisteredTransformer> = Vec::new();
+        let mut seen_transformers = BTreeSet::new();
+        for spec in self.transformer {
+            if !seen_transformers.insert(spec.name.clone()) {
+                return Err(ContractsError::DuplicateTransformer(spec.name));
+            }
+            transformers.push(spec.build()?);
+        }
+
         Ok(Contracts {
             trajectory_label,
             contracts,
             recipients_args,
             authorities,
             endpoints,
+            transformers,
         })
     }
 }
@@ -447,6 +482,77 @@ struct WebhookSpec {
     url: String,
     #[serde(default)]
     timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TransformerSpec {
+    name: String,
+    builtin: String,
+    #[serde(default)]
+    precondition: Option<PreconditionSpec>,
+    #[serde(default)]
+    output: Option<TransformerOutputSpec>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreconditionSpec {
+    #[serde(default)]
+    trust: Option<TrustSpec>,
+    #[serde(default)]
+    audience: Option<AudienceSpec>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TransformerOutputSpec {
+    #[serde(default)]
+    trust: Option<TrustSpec>,
+    #[serde(default)]
+    audience: Option<AudienceSpec>,
+}
+
+impl TransformerSpec {
+    fn build(self) -> Result<RegisteredTransformer, ContractsError> {
+        if self.name.is_empty() {
+            return Err(ContractsError::EmptyTransformerName);
+        }
+        let Some(run) = builtins::resolve(&self.builtin) else {
+            return Err(ContractsError::UnknownBuiltin {
+                transformer: self.name,
+                builtin: self.builtin,
+            });
+        };
+        let precondition = match self.precondition {
+            None => LabelPredicate::any(),
+            Some(spec) => LabelPredicate {
+                trust: spec.trust.as_ref().map(TrustSpec::to_trust),
+                audience: spec.audience.as_ref().map(AudienceSpec::to_audience).transpose()?,
+            },
+        };
+        let output = match self.output {
+            Some(TransformerOutputSpec {
+                trust: Some(trust),
+                audience: Some(audience),
+            }) => ValueLabel {
+                trust: trust.to_trust(),
+                audience: audience.to_audience()?,
+            },
+            _ => return Err(ContractsError::TransformerOutput(self.name)),
+        };
+        Ok(RegisteredTransformer {
+            descriptor: TransformerDescriptor {
+                transformer: TransformerRef {
+                    id: self.name,
+                    version: 1,
+                },
+                precondition,
+                output,
+            },
+            run,
+        })
+    }
 }
 
 fn allow_ruling(
@@ -969,5 +1075,120 @@ mod tests {
         let text = "[[authority]]\nname = \"h\"\nrule = \"escalate\"\nacquire_effects = true\n\
                     webhook = { url = \"https://x.example\", retries = 3 }";
         assert!(matches!(Contracts::from_toml(text), Err(ContractsError::Parse(_))));
+    }
+
+    #[test]
+    fn transformer_builds_registered_descriptor() {
+        let c = Contracts::from_toml(
+            r#"
+            [[transformer]]
+            name = "pii-redactor"
+            builtin = "redact-email"
+            precondition = { audience = ["operator"] }
+            output = { trust = "suspicious", audience = ["operator", "sre-team"] }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.transformers.len(), 1);
+        let d = &c.transformers[0].descriptor;
+        assert_eq!(
+            d.transformer,
+            TransformerRef {
+                id: "pii-redactor".to_string(),
+                version: 1
+            }
+        );
+        assert_eq!(d.precondition.trust, None);
+        assert_eq!(
+            d.precondition.audience,
+            Some(Audience::readers([UserId::new("operator")]))
+        );
+        assert_eq!(d.output.trust, Trust::SUSPICIOUS);
+        assert_eq!(
+            d.output.audience,
+            Audience::readers([UserId::new("operator"), UserId::new("sre-team")])
+        );
+    }
+
+    #[test]
+    fn transformer_without_precondition_applies_to_any_label() {
+        let c = Contracts::from_toml(
+            "[[transformer]]\nname = \"t\"\nbuiltin = \"redact-email\"\n\
+             output = { trust = \"trusted\", audience = \"public\" }",
+        )
+        .unwrap();
+        assert_eq!(c.transformers[0].descriptor.precondition, LabelPredicate::any());
+    }
+
+    #[test]
+    fn transformer_rejects_unknown_builtin_naming_the_known_set() {
+        let text = "[[transformer]]\nname = \"t\"\nbuiltin = \"redact-ssn\"\n\
+                    output = { trust = \"trusted\", audience = \"public\" }";
+        match Contracts::from_toml(text) {
+            Err(ContractsError::UnknownBuiltin { transformer, builtin }) => {
+                assert_eq!(transformer, "t");
+                assert_eq!(builtin, "redact-ssn");
+            }
+            other => panic!("expected UnknownBuiltin, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transformer_rejects_empty_name_and_duplicates() {
+        assert!(matches!(
+            Contracts::from_toml(
+                "[[transformer]]\nname = \"\"\nbuiltin = \"redact-email\"\n\
+                 output = { trust = \"trusted\", audience = \"public\" }"
+            ),
+            Err(ContractsError::EmptyTransformerName)
+        ));
+        let dup = "[[transformer]]\nname = \"t\"\nbuiltin = \"redact-email\"\n\
+                   output = { trust = \"trusted\", audience = \"public\" }\n\
+                   [[transformer]]\nname = \"t\"\nbuiltin = \"redact-email\"\n\
+                   output = { trust = \"trusted\", audience = \"public\" }";
+        assert!(matches!(
+            Contracts::from_toml(dup),
+            Err(ContractsError::DuplicateTransformer(name)) if name == "t"
+        ));
+    }
+
+    #[test]
+    fn transformer_output_is_required_and_total() {
+        for text in [
+            "[[transformer]]\nname = \"t\"\nbuiltin = \"redact-email\"".to_string(),
+            "[[transformer]]\nname = \"t\"\nbuiltin = \"redact-email\"\noutput = { trust = \"trusted\" }".to_string(),
+            "[[transformer]]\nname = \"t\"\nbuiltin = \"redact-email\"\noutput = { audience = \"public\" }".to_string(),
+            "[[transformer]]\nname = \"t\"\nbuiltin = \"redact-email\"\noutput = {}".to_string(),
+        ] {
+            assert!(
+                matches!(Contracts::from_toml(&text), Err(ContractsError::TransformerOutput(ref n)) if n == "t"),
+                "`{text}` should be the named output error"
+            );
+        }
+    }
+
+    #[test]
+    fn transformer_rejects_unknown_fields_everywhere() {
+        for text in [
+            "[[transformer]]\nname = \"t\"\nbuiltin = \"redact-email\"\n\
+             output = { trust = \"trusted\", audience = \"public\" }\n\
+             webhook = { url = \"https://x.example\" }",
+            "[[transformer]]\nname = \"t\"\nbuiltin = \"redact-email\"\n\
+             precondition = { effects = [\"egress\"] }\n\
+             output = { trust = \"trusted\", audience = \"public\" }",
+            "[[transformer]]\nname = \"t\"\nbuiltin = \"redact-email\"\n\
+             output = { trust = \"trusted\", audience = \"public\", effects = [] }",
+        ] {
+            assert!(
+                matches!(Contracts::from_toml(text), Err(ContractsError::Parse(_))),
+                "`{text}` should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn policies_without_transformers_declare_none() {
+        let c = Contracts::from_toml(DEMO).unwrap();
+        assert!(c.transformers.is_empty());
     }
 }

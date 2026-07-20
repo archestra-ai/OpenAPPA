@@ -8,6 +8,8 @@ pub enum EdgeError {
     DuplicateContract(ToolName),
     #[error("duplicate authority registration: {0}")]
     DuplicateAuthority(String),
+    #[error("duplicate transformer registration: {0}")]
+    DuplicateTransformer(String),
     #[error("a previously-executed call to `{tool}` no longer passes policy: {reason}")]
     ReplayBlocked { tool: ToolName, reason: String },
     #[error("a previously-executed call to `{tool}` has arguments that cannot be parsed")]

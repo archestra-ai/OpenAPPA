@@ -35,6 +35,17 @@ proxy port must be reachable only by the harness (in the kagent demo it is a
 localhost sidecar). A durable ruling store — the proxy's own record of past
 rulings, replayed instead of vouched — is the planned replacement.
 
+A policy may also declare inline transformers (`[[contracts.transformer]]`,
+see [docs/contracts.md](../docs/contracts.md)). When the remedy walk derives
+a call's payload through one — redacting PII from a message before it
+reaches its sink, say — the proxy rewrites the tool call in the response
+with the **canonical arguments** the engine actually checked; the harness
+never executes the unredacted proposal. The decision log marks the turn
+`granted` with the transform trail, counted as rewritten but not blocked.
+Replay needs nothing new: the transformer re-runs deterministically during
+the rebuild (planning reads labels, not bytes), so redacted history
+re-derives the same canonical bytes without any webhook.
+
 ## Policy
 
 The proxy loads one TOML document: the upstream URL plus a `[contracts]` block

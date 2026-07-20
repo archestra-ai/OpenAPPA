@@ -28,10 +28,15 @@ upstream_base_url = "https://openrouter.ai/api/v1"
 trust = "trusted"
 audience = ["operator", "sre-team"]
 
-# --- Injection vector: pod logs are third-party text, team-private. ------------
+# --- Injection vector: pod logs are third-party text — and raw logs may carry
+# customer data (the crashlooping checkout logs a customer email), so only the
+# operator reads them raw: the audience narrows to ["operator"]. Anything
+# derived from the logs inherits that narrow audience until a registered
+# transformer redacts it (the `pii-redactor` below) or an authority vouches
+# readers in (none is audience-competent here — deliberately).
 [[contracts.tool]]
 name = "k8s_get_pod_logs"
-output = { trust = "suspicious", audience = ["operator", "sre-team"] }
+output = { trust = "suspicious", audience = ["operator"] }
 
 # --- Trusted readers: pure cluster state, team-private. ------------------------
 [[contracts.tool]]
@@ -73,8 +78,14 @@ requires = { trust = "trusted" }
 #
 # `notify` posts to one fixed destination, the internal ops hook (baked into
 # notify-mcp). Its sink audience is therefore static: the people who read that
-# hook. The team-private flow covers them, so status updates go through — even
-# from a suspicious-tainted flow; trust and audience are independent dimensions.
+# hook — the whole team. Once the agent has read the operator-only logs, its
+# status update carries their narrow audience and fails this bar; the remedy
+# plan the engine predicts is [redact via `pii-redactor`, release the control
+# dependency via `ops-approver`] — the message is derived through the
+# redactor (safe for the team under its declared output), the approver signs
+# off on the release, and the hook receives the redacted text. The proxy
+# ships the canonical redacted arguments; the raw email never leaves the
+# operator's audience.
 [[contracts.tool]]
 name = "notify"
 output = { trust = "trusted", audience = ["operator", "sre-team"] }
@@ -95,6 +106,21 @@ name = "http_post"
 output = { trust = "trusted", audience = ["operator", "sre-team"] }
 requires = { audience = "public" }
 
+# --- Transformer: PII redaction as audience declassification. -------------------
+# The one registered reduction: derive a value with email addresses replaced
+# by `[redacted-email]`, admitted under the declared output label. The
+# declaration is the trust decision — the output *widens the audience* (the
+# redacted text is safe for the whole team) and deliberately restates
+# suspicious trust: redaction does not make third-party text trustworthy,
+# and a trust-raising output would let the planner launder the injected
+# delete through the redactor. Precondition: applies to operator-only
+# values, exactly what log-derived data folds to.
+[[contracts.transformer]]
+name = "pii-redactor"
+builtin = "redact-email"
+precondition = { audience = ["operator"] }
+output = { trust = "suspicious", audience = ["operator", "sre-team"] }
+
 # --- Default authorizer: unknowns pass with receipts. ---------------------------
 # The three readers above declare no `requires` — under fail-closed semantics
 # every call to them escalates as "tool requirements unknown". This authority
@@ -106,15 +132,18 @@ name = "default-allow"
 rule = "allow"
 acknowledge_unknown = true
 
-# --- External approver: trust breaches escalate over HTTP. ----------------------
-# The dynamic authorizer. A trust-gated mutation from a tainted flow routes
-# its grant here: the proxy POSTs the pending approval to the webhook and
-# applies the ruling — deny and the call is blocked as the authority's
-# decision; no ruling (timeout, outage) and it stays blocked, fail closed.
-# The mandate is exactly what the tainted delete needs: raise trust to
-# trusted and release the tainted control dependency (the suspicious logs
-# taint the *choice* to act, not just the arguments). The audience-gated
-# egress is outside this mandate, so the injected http_post stays terminal —
+# --- External approver: grants escalate over HTTP. ------------------------------
+# The dynamic authorizer. A grant that needs this authority routes here: the
+# proxy POSTs the pending approval to the webhook and applies the ruling —
+# deny and the call is blocked as the authority's decision; no ruling
+# (timeout, outage) and it stays blocked, fail closed. The approver rules on
+# the grant's typed coordinates: it DENIES any delta asking to vouch a value
+# as trusted (the injected delete's head grant — third-party text stays
+# untrusted, whatever the model's paraphrase says) and APPROVES a
+# release-control-only delta (the redacted notify — the values flowing are
+# within their declared bounds; only the *choice* was informed by the logs).
+# Anything else is a 422, never an approval. The mandate covers both grant
+# kinds; audience stays outside it, so the injected http_post is terminal —
 # no authority is competent for an unbounded public sink.
 [[contracts.authority]]
 name = "ops-approver"

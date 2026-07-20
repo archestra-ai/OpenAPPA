@@ -139,4 +139,11 @@ mod tests {
         .unwrap();
         assert_eq!(p.contracts.authorities.len(), 1);
     }
+
+    #[test]
+    fn kagent_demo_policy_loads() {
+        let p = Policy::from_toml(include_str!("../../demo/kagent/policy.toml")).expect("demo policy parses");
+        assert_eq!(p.contracts.transformers.len(), 1);
+        assert!(!p.contracts.endpoints.is_empty());
+    }
 }

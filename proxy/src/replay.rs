@@ -19,8 +19,12 @@ pub enum ReplayError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallOutcome {
     Permitted,
-    Granted { reason: String },
+    Granted {
+        reason: String,
+        canonical_arguments: Option<String>,
+    },
     Terminal { reason: String },
+    IntegrityBlocked { reason: String },
 }
 
 struct TrustedHistoryResolver;
@@ -97,7 +101,19 @@ impl Session {
         };
         match self.inner.verdict(&proposer_body, proposed, &self.resolver).await {
             Ok(Verdict::Permitted) => CallOutcome::Permitted,
-            Ok(Verdict::Granted { trail }) => CallOutcome::Granted { reason: trail },
+            Ok(Verdict::Granted {
+                trail,
+                canonical_arguments,
+            }) => CallOutcome::Granted {
+                reason: trail,
+                canonical_arguments,
+            },
+            Ok(Verdict::IntegrityBlocked { detail, .. }) => CallOutcome::IntegrityBlocked {
+                reason: format!(
+                    "`{tool}` was blocked: a derivation rewrote the canonical arguments away from what was checked \
+                     ({detail}); the call will not run"
+                ),
+            },
             Ok(Verdict::Terminal { violations, reason }) => CallOutcome::Terminal {
                 reason: format!("`{tool}` was blocked ({}): {}", reason, describe(&violations)),
             },
@@ -160,6 +176,45 @@ pub(crate) fn tests_policy() -> Policy {
         acknowledge_unknown = true
         "#,
     )
+    .expect("test policy parses")
+}
+
+/// The kagent-demo-shaped redaction policy: raw pod logs are readable by the
+/// operator only, notify's sink wants the whole team, the redactor's declared
+/// output widens the audience, and the webhook-served approver can release
+/// control but cannot touch audience or trust.
+#[cfg(test)]
+pub(crate) fn redaction_policy(url: &str) -> Policy {
+    Policy::from_toml(&format!(
+        r#"
+        upstream_base_url = "http://upstream.invalid"
+
+        [contracts.trajectory]
+        audience = ["operator", "sre-team"]
+
+        [[contracts.tool]]
+        name = "k8s_get_pod_logs"
+        output = {{ trust = "suspicious", audience = ["operator"] }}
+        requires = {{}}
+
+        [[contracts.tool]]
+        name = "notify"
+        output = {{ trust = "trusted", audience = ["operator", "sre-team"] }}
+        requires = {{ audience = ["operator", "sre-team"] }}
+
+        [[contracts.transformer]]
+        name = "pii-redactor"
+        builtin = "redact-email"
+        precondition = {{ audience = ["operator"] }}
+        output = {{ trust = "suspicious", audience = ["operator", "sre-team"] }}
+
+        [[contracts.authority]]
+        name = "ops-approver"
+        rule = "escalate"
+        may_release_control = true
+        webhook = {{ url = "{url}", timeout_ms = 5000 }}
+        "#
+    ))
     .expect("test policy parses")
 }
 
@@ -307,7 +362,10 @@ mod tests {
         let policy = tests_policy();
         let mut session = Session::build(&policy, &[user("hi")]).await.unwrap();
         match session.evaluate_new_call(&call("mystery_tool", "{}")).await {
-            CallOutcome::Granted { reason } => {
+            CallOutcome::Granted {
+                reason,
+                canonical_arguments: None,
+            } => {
                 assert!(reason.contains("default-allow"), "reason: {reason}");
                 assert!(reason.contains("tool requirements unknown"), "reason: {reason}");
             }
@@ -391,15 +449,21 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    async fn approving_webhook() -> (String, Arc<AtomicUsize>) {
+    type Approvals = Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
+
+    async fn capturing_webhook() -> (String, Arc<AtomicUsize>, Approvals) {
         let hits = Arc::new(AtomicUsize::new(0));
+        let bodies: Approvals = Arc::default();
         let counted = hits.clone();
+        let captured = bodies.clone();
         let router = axum::Router::new().route(
             "/",
-            axum::routing::post(move || {
+            axum::routing::post(move |body: axum::body::Bytes| {
                 let counted = counted.clone();
+                let captured = captured.clone();
                 async move {
                     counted.fetch_add(1, Ordering::SeqCst);
+                    captured.lock().unwrap().push(serde_json::from_slice(&body).unwrap());
                     r#"{"ruling":"approve","reason":"cleared by ops"}"#
                 }
             }),
@@ -407,7 +471,12 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        (format!("http://{addr}"), hits)
+        (format!("http://{addr}"), hits, bodies)
+    }
+
+    async fn approving_webhook() -> (String, Arc<AtomicUsize>) {
+        let (url, hits, _) = capturing_webhook().await;
+        (url, hits)
     }
 
     fn escalate_policy(url: &str) -> Policy {
@@ -435,7 +504,10 @@ mod tests {
         let policy = escalate_policy(&url);
         let mut session = Session::build(&policy, &[user("hi")]).await.unwrap();
         match session.evaluate_new_call(&call("mystery_tool", "{}")).await {
-            CallOutcome::Granted { reason } => assert!(reason.contains("auditor"), "reason: {reason}"),
+            CallOutcome::Granted {
+                reason,
+                canonical_arguments: None,
+            } => assert!(reason.contains("auditor"), "reason: {reason}"),
             other => panic!("expected Granted, got {other:?}"),
         }
         assert_eq!(hits.load(Ordering::SeqCst), 1);
@@ -512,7 +584,10 @@ mod tests {
     async fn a_tainted_delete_escalates_and_the_approver_decides() {
         let (url, hits) = approving_webhook().await;
         match tainted_delete_via(&kagent_policy(&url)).await {
-            CallOutcome::Granted { reason } => assert!(reason.contains("ops-approver"), "reason: {reason}"),
+            CallOutcome::Granted {
+                reason,
+                canonical_arguments: None,
+            } => assert!(reason.contains("ops-approver"), "reason: {reason}"),
             other => panic!("expected Granted, got {other:?}"),
         }
         assert!(hits.load(Ordering::SeqCst) >= 1);
@@ -529,6 +604,88 @@ mod tests {
                 assert!(reason.contains("denied by ops-approver"), "reason: {reason}");
             }
             other => panic!("expected Terminal, got {other:?}"),
+        }
+    }
+
+    const PII_ARGS: &str = r#"{"message":"checkout failing for alice@example.com, paging the team"}"#;
+
+    fn pii_history() -> Vec<RequestMessage> {
+        vec![
+            user("why is checkout crashlooping?"),
+            assistant_call("c1", "k8s_get_pod_logs", "{}"),
+            tool_result("c1", "ERROR checkout: customer alice@example.com cannot pay"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_pii_notify_is_redacted_then_approved_with_canonical_arguments() {
+        let (url, hits, approvals) = capturing_webhook().await;
+        let policy = redaction_policy(&url);
+        let mut session = Session::build(&policy, &pii_history()).await.unwrap();
+        match session.evaluate_new_call(&call("notify", PII_ARGS)).await {
+            CallOutcome::Granted {
+                reason,
+                canonical_arguments: Some(args),
+            } => {
+                assert!(reason.contains("pii-redactor/v1"), "reason: {reason}");
+                assert!(reason.contains("ops-approver"), "reason: {reason}");
+                assert!(args.contains("[redacted-email]"), "args: {args}");
+                assert!(!args.contains("alice@example.com"), "args: {args}");
+            }
+            other => panic!("expected transformed grant, got {other:?}"),
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "exactly one approval round trip");
+        let approvals = approvals.lock().unwrap();
+        let delta = approvals[0]["grant"]["delta"].as_array().expect("delta is an array");
+        assert!(!delta.is_empty());
+        for coordinate in delta {
+            let object = coordinate.as_object().expect("externally tagged coordinate");
+            assert_eq!(object.len(), 1, "one variant key: {coordinate}");
+            let deps = object
+                .get("ReleaseControl")
+                .and_then(|deps| deps.as_array())
+                .expect("the notify grant must be release-control-only");
+            assert!(!deps.is_empty() && deps.iter().all(serde_json::Value::is_u64));
+        }
+        assert!(
+            approvals[0]["grant"]["scope"]["PolicyCheck"].is_object(),
+            "scope: {}",
+            approvals[0]["grant"]["scope"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_redacted_call_replays_without_webhooks_and_rederives_identically() {
+        let (url, hits) = approving_webhook().await;
+        let policy = redaction_policy(&url);
+        let mut session = Session::build(&policy, &pii_history()).await.unwrap();
+        let redacted = match session.evaluate_new_call(&call("notify", PII_ARGS)).await {
+            CallOutcome::Granted {
+                canonical_arguments: Some(args),
+                ..
+            } => args,
+            other => panic!("expected transformed grant, got {other:?}"),
+        };
+        let after_first = hits.load(Ordering::SeqCst);
+
+        let mut messages = pii_history();
+        messages.push(assistant_call("c2", "notify", &redacted));
+        messages.push(tool_result("c2", "sent"));
+        let mut session = Session::build(&policy, &messages)
+            .await
+            .expect("redacted history replays");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            after_first,
+            "replay must not fire webhooks"
+        );
+
+        match session.evaluate_new_call(&call("notify", &redacted)).await {
+            CallOutcome::Granted {
+                canonical_arguments: Some(args),
+                ..
+            } => assert_eq!(args, redacted),
+            other => panic!("expected transformed grant, got {other:?}"),
         }
     }
 

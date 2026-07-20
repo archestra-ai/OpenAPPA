@@ -202,9 +202,13 @@ async fn handler(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -
     };
     let context_audience = session.context_audience();
     let decisions = rewrite_response(&mut session, &mut response).await;
-    let rewritten = decisions.iter().filter(|d| d.rewritten()).count();
-    if rewritten > 0 {
-        tracing::info!(rewritten, "blocked tool call(s)");
+    let blocked = decisions.iter().filter(|d| d.blocked()).count();
+    if blocked > 0 {
+        tracing::info!(blocked, "blocked tool call(s)");
+    }
+    let transformed = decisions.iter().filter(|d| d.transformed).count();
+    if transformed > 0 {
+        tracing::info!(transformed, "transformed tool call(s): canonical arguments shipped");
     }
     log_turns(&app, &context_audience, &decisions);
     log_wire(&app, request_json, &bytes, &response);

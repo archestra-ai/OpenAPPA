@@ -373,6 +373,12 @@ requires = { audience = "$.args.too" }
         GatewayConfig::from_toml("", webhook_policy),
         Err(ConfigError::WebhookAuthority(name)) if name == "remote"
     ));
+    let transformer_policy = "[[transformer]]\nname = \"pii-redactor\"\nbuiltin = \"redact-email\"\n\
+                              output = { trust = \"trusted\", audience = \"public\" }";
+    assert!(matches!(
+        GatewayConfig::from_toml("", transformer_policy),
+        Err(ConfigError::Transformer(name)) if name == "pii-redactor"
+    ));
     let reserved = r#"
 [[tool]]
 name = "appa__escalate"

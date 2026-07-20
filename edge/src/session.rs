@@ -4,10 +4,11 @@ use std::collections::{BTreeSet, HashMap};
 
 use appa_contracts::Contracts;
 use appa_core::audit::AuditEvent;
+use appa_core::value::Provenance;
 use appa_core::{
-    ArgumentTree, AuthorityName, AuthorizationScope, BlockReason, CanonicalRequest, FlowOutcome, FlowPermit,
-    FlowRefusal, OpaqueValue, PolicyEngine, Pursuit, Speaker, StallCause, ToolName, ToolRequest, Trajectory, ValueId,
-    ValueLabel, Violation,
+    ArgumentName, ArgumentTree, AuthorityName, AuthorizationScope, BlockReason, CanonicalRequest, FlowOutcome,
+    FlowPermit, FlowRefusal, OpaqueValue, PolicyEngine, Pursuit, Speaker, StallCause, ToolName, ToolRequest,
+    Trajectory, ValueId, ValueLabel, Violation,
 };
 
 use crate::error::EdgeError;
@@ -40,7 +41,10 @@ struct Proposal {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Verdict {
     Permitted,
-    Granted { trail: String },
+    Granted {
+        trail: String,
+        canonical_arguments: Option<String>,
+    },
     Executed { output: ValueId, result: String },
     ExecutorFailed { reason: String },
     Terminal {
@@ -53,6 +57,12 @@ pub enum Verdict {
     },
     Refused(FlowRefusal),
     Unresolved { authority: AuthorityName },
+    /// A derivation rewrote the canonical arguments so that the
+    /// contract-designated recipients no longer match the checked recipient
+    /// set — or made them unreadable. Distinct from `Terminal` on purpose:
+    /// the engine proved nothing here; the edge fails the dispatch closed
+    /// because what would run diverges from what was checked.
+    IntegrityBlocked { tool: ToolName, detail: String },
 }
 
 enum Settled {
@@ -87,6 +97,11 @@ impl Session {
             engine
                 .register_authority(authority.clone())
                 .map_err(|e| EdgeError::DuplicateAuthority(e.to_string()))?;
+        }
+        for transformer in &contracts.transformers {
+            engine
+                .register_transformer(transformer.clone())
+                .map_err(|e| EdgeError::DuplicateTransformer(e.to_string()))?;
         }
         Ok(Self {
             contracts,
@@ -146,7 +161,7 @@ impl Session {
         if !self.contracts.has_contract(&proposal.tool) {
             return Ok(());
         }
-        let request = self
+        let built = self
             .build_tool_request(&proposal.tool, &proposal.arguments, proposal.proposer)
             .map_err(|_| {
                 self.poisoned = true;
@@ -154,7 +169,7 @@ impl Session {
                     tool: proposal.tool.clone(),
                 }
             })?;
-        let blocked = match self.settle(request, resolver).await {
+        let blocked = match self.settle(built.request, resolver).await {
             Settled::Token(token) => {
                 let (_canonical, receipt) = self.trajectory.release(token).map_err(|e| self.condemn(e.into()))?;
                 let result = self
@@ -198,7 +213,7 @@ impl Session {
             return Ok(Verdict::Permitted);
         }
         let proposed_by = self.admit_assistant(proposer_body.to_string())?;
-        let request = self
+        let built = self
             .build_tool_request(&tool, call.arguments, proposed_by)
             .map_err(|_| EdgeError::MalformedArguments { tool: tool.clone() })?;
         self.proposals.insert(
@@ -211,12 +226,24 @@ impl Session {
         );
 
         let audit_from = self.trajectory.audit().len();
-        let verdict = match self.settle(request, resolver).await {
+        let verdict = match self.settle(built.request, resolver).await {
             // Check-only: the token is dropped, never released.
-            Settled::Token(_token) => match self.grant_trail(audit_from) {
-                None => Verdict::Permitted,
-                Some(trail) => Verdict::Granted { trail },
-            },
+            Settled::Token(_token) => {
+                let canonical_arguments = self.canonical_arguments(built.payload);
+                if let Some(args) = &canonical_arguments
+                    && let Err(detail) = self.recipient_integrity(&tool, &built.recipients, args)
+                {
+                    self.clear_pending()?;
+                    return Ok(Verdict::IntegrityBlocked { tool, detail });
+                }
+                match self.remedy_trail(audit_from) {
+                    None => Verdict::Permitted,
+                    Some(trail) => Verdict::Granted {
+                        trail,
+                        canonical_arguments,
+                    },
+                }
+            }
             Settled::Blocked(verdict) => verdict,
         };
         self.clear_pending()?;
@@ -240,17 +267,23 @@ impl Session {
             return Ok(Verdict::Permitted);
         }
         let proposed_by = self.admit_assistant(proposer_body.to_string())?;
-        let request = self
+        let built = self
             .build_tool_request(&tool, arguments, proposed_by)
             .map_err(|_| EdgeError::MalformedArguments { tool: tool.clone() })?;
 
-        let token = match self.settle(request, resolver).await {
+        let token = match self.settle(built.request, resolver).await {
             Settled::Token(token) => token,
             Settled::Blocked(verdict) => {
                 self.clear_pending()?;
                 return Ok(verdict);
             }
         };
+        if let Some(args) = self.canonical_arguments(built.payload)
+            && let Err(detail) = self.recipient_integrity(&tool, &built.recipients, &args)
+        {
+            self.clear_pending()?;
+            return Ok(Verdict::IntegrityBlocked { tool, detail });
+        }
         let (canonical, receipt) = self
             .trajectory
             .release(token)
@@ -368,26 +401,35 @@ impl Session {
         }
     }
 
-    fn grant_trail(&self, audit_from: usize) -> Option<String> {
+    fn remedy_trail(&self, audit_from: usize) -> Option<String> {
         let mut parts = Vec::new();
         for event in &self.trajectory.audit()[audit_from..] {
-            if let AuditEvent::AuthorizationApplied {
-                authorization,
-                authority,
-                resolved,
-                ..
-            } = event
-            {
-                let authority = authority.as_str();
-                parts.push(match authorization.scope() {
-                    AuthorizationScope::DerivedValue { .. } => format!("endorsed by '{authority}'"),
-                    AuthorizationScope::PendingAction { .. } => {
-                        format!("accepted by '{authority}': {}", describe(resolved))
-                    }
-                    AuthorizationScope::PolicyCheck { .. } => {
-                        format!("acknowledged by '{authority}': {}", describe(resolved))
-                    }
-                });
+            match event {
+                AuditEvent::AuthorizationApplied {
+                    authorization,
+                    authority,
+                    resolved,
+                    ..
+                } => {
+                    let authority = authority.as_str();
+                    parts.push(match authorization.scope() {
+                        AuthorizationScope::DerivedValue { .. } => format!("endorsed by '{authority}'"),
+                        AuthorizationScope::PendingAction { .. } => {
+                            format!("accepted by '{authority}': {}", describe(resolved))
+                        }
+                        AuthorizationScope::PolicyCheck { .. } => {
+                            format!("acknowledged by '{authority}': {}", describe(resolved))
+                        }
+                    });
+                }
+                AuditEvent::ValueTransition {
+                    transformer,
+                    derived: Some(_),
+                    ..
+                } => {
+                    parts.push(format!("derived by registered transformer '{transformer}'"));
+                }
+                _ => {}
             }
         }
         if parts.is_empty() { None } else { Some(parts.join("; ")) }
@@ -415,7 +457,7 @@ impl Session {
         tool: &ToolName,
         arguments: &str,
         proposed_by: ValueId,
-    ) -> Result<ToolRequest, MalformedArgs> {
+    ) -> Result<BuiltRequest, MalformedArgs> {
         let trimmed = arguments.trim();
         let value: serde_json::Value = if trimmed.is_empty() {
             serde_json::Value::Object(serde_json::Map::new())
@@ -426,12 +468,23 @@ impl Session {
             return Err(MalformedArgs);
         }
 
+        let payload_bytes = if trimmed.is_empty() { "{}" } else { trimmed };
+        let payload = self
+            .trajectory
+            .admit_model_output(
+                OpaqueValue::new(payload_bytes),
+                BTreeSet::from([proposed_by]),
+                BTreeSet::from([proposed_by]),
+            )
+            .map_err(|_| MalformedArgs)?;
         let mut fields: Vec<(String, ArgumentTree<ValueId>)> =
-            vec![("payload".to_string(), ArgumentTree::from(proposed_by))];
+            vec![(PAYLOAD_ARG.to_string(), ArgumentTree::from(payload))];
+        let mut recipients = BTreeSet::new();
         if let Some(arg_name) = self.contracts.recipients_args.get(tool) {
-            let recipients = extract_recipients(&value, arg_name)?;
-            if !recipients.is_empty() {
-                let leaves = recipients
+            let extracted = extract_recipients(&value, arg_name)?;
+            recipients = extracted.iter().cloned().collect();
+            if !extracted.is_empty() {
+                let leaves = extracted
                     .into_iter()
                     .map(|recipient| {
                         self.trajectory
@@ -448,12 +501,79 @@ impl Session {
             }
         }
 
-        Ok(ToolRequest::new(
-            tool.clone(),
-            ArgumentTree::object(fields),
-            self.context.iter().copied(),
-        ))
+        Ok(BuiltRequest {
+            request: ToolRequest::new(tool.clone(), ArgumentTree::object(fields), self.context.iter().copied()),
+            payload,
+            recipients,
+        })
     }
+
+    fn canonical_arguments(&self, original_payload: ValueId) -> Option<String> {
+        let pending = self.trajectory.pending_action()?;
+        let payload = pending.current().arguments.top_level(&ArgumentName::new(PAYLOAD_ARG))?;
+        let ArgumentTree::Value(id) = payload else {
+            return None;
+        };
+        let mut cursor = *id;
+        let mut transformed = false;
+        while cursor != original_payload {
+            let value = self
+                .trajectory
+                .value(cursor)
+                .expect("the pending action's current tree references only admitted values");
+            match value.provenance() {
+                Provenance::Transformed { source, .. } => {
+                    transformed = true;
+                    cursor = *source;
+                }
+                Provenance::Endorsed { source, .. } => {
+                    cursor = *source;
+                }
+                _ => {
+                    transformed = true;
+                    break;
+                }
+            }
+        }
+        if !transformed {
+            return None;
+        }
+        let body = self
+            .trajectory
+            .value(*id)
+            .expect("the pending action's current tree references only admitted values");
+        Some(body.body().as_str().to_string())
+    }
+
+    fn recipient_integrity(
+        &self,
+        tool: &ToolName,
+        checked: &BTreeSet<String>,
+        canonical_arguments: &str,
+    ) -> Result<(), String> {
+        let Some(arg_name) = self.contracts.recipients_args.get(tool) else {
+            return Ok(());
+        };
+        let doc: serde_json::Value = serde_json::from_str(canonical_arguments)
+            .map_err(|e| format!("canonical arguments are not valid JSON: {e}"))?;
+        let extracted = extract_recipients(&doc, arg_name)
+            .map_err(|_| format!("canonical `{arg_name}` no longer holds extractable recipients"))?;
+        let canonical: BTreeSet<String> = extracted.into_iter().collect();
+        if &canonical != checked {
+            return Err(format!(
+                "canonical recipients {canonical:?} diverge from the checked recipients {checked:?}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+const PAYLOAD_ARG: &str = "payload";
+
+struct BuiltRequest {
+    request: ToolRequest,
+    payload: ValueId,
+    recipients: BTreeSet<String>,
 }
 
 struct MalformedArgs;
@@ -652,7 +772,10 @@ mod tests {
     async fn unknown_requirements_granted_by_allow_authority() {
         let mut s = session(&format!("{TOOLS}{ALLOW_AUTHORITY}"), "hi");
         match check(&mut s, "mystery_tool").await {
-            Verdict::Granted { trail } => {
+            Verdict::Granted {
+                trail,
+                canonical_arguments: None,
+            } => {
                 assert!(trail.contains("default-allow"), "trail: {trail}");
                 assert!(trail.contains("tool requirements unknown"), "trail: {trail}");
             }
@@ -721,7 +844,10 @@ mod tests {
         let mut s = session(&format!("{TOOLS}{ESCALATE_AUTHORITY}"), "hi");
         let verdict = s.verdict("{}", call("mystery_tool"), &Rule(approve)).await.unwrap();
         match verdict {
-            Verdict::Granted { trail } => assert!(trail.contains("auditor"), "trail: {trail}"),
+            Verdict::Granted {
+                trail,
+                canonical_arguments: None,
+            } => assert!(trail.contains("auditor"), "trail: {trail}"),
             other => panic!("expected Granted, got {other:?}"),
         }
         assert_eq!(authorization_applied(&s), 1);
@@ -991,7 +1117,10 @@ mod tests {
             .await
             .unwrap();
         match verdict {
-            Verdict::Granted { trail } => {
+            Verdict::Granted {
+                trail,
+                canonical_arguments: None,
+            } => {
                 assert!(trail.contains("audience-officer"), "trail: {trail}");
                 assert!(trail.contains("effects-officer"), "trail: {trail}");
             }
@@ -1034,5 +1163,216 @@ mod tests {
             .unwrap();
         assert!(matches!(verdict, Verdict::Executed { .. }), "got: {verdict:?}");
         assert!(!s.pending_call());
+    }
+
+    const TRANSFORMER_POLICY: &str = r#"
+        [trajectory]
+        audience = ["operator", "sre-team"]
+
+        [[tool]]
+        name = "read_private"
+        output = { trust = "suspicious", audience = ["operator"] }
+        requires = {}
+
+        [[tool]]
+        name = "notify"
+        output = { trust = "trusted", audience = ["operator", "sre-team"] }
+        requires = { audience = ["operator", "sre-team"] }
+
+        [[tool]]
+        name = "k8s_delete"
+        requires = { trust = "trusted" }
+
+        [[transformer]]
+        name = "pii-redactor"
+        builtin = "redact-email"
+        precondition = { audience = ["operator"] }
+        output = { trust = "suspicious", audience = ["operator", "sre-team"] }
+
+        [[authority]]
+        name = "ops"
+        rule = "escalate"
+        may_release_control = true
+    "#;
+
+    async fn narrow_context(s: &mut Session) {
+        s.assistant_turn("reading", [call("read_private")]).unwrap();
+        s.past_tool_result(
+            "c1",
+            "customer alice@example.com reported checkout failing",
+            &NoResolver,
+        )
+        .await
+        .unwrap();
+    }
+
+    fn applied_transitions(session: &Session) -> usize {
+        session
+            .audit()
+            .iter()
+            .filter(|e| matches!(e, AuditEvent::ValueTransition { derived: Some(_), .. }))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn reduce_then_release_grants_with_canonical_redacted_arguments() {
+        let mut s = session(TRANSFORMER_POLICY, "why is checkout failing?");
+        narrow_context(&mut s).await;
+        let proposed = ProposedCall {
+            id: "c2",
+            tool: "notify",
+            arguments: r#"{"message":"paging about alice@example.com's checkout"}"#,
+        };
+        let verdict = s.verdict("notify the team", proposed, &Rule(approve)).await.unwrap();
+        match verdict {
+            Verdict::Granted {
+                trail,
+                canonical_arguments: Some(args),
+            } => {
+                assert!(
+                    trail.contains("derived by registered transformer 'pii-redactor/v1'"),
+                    "trail: {trail}"
+                );
+                assert!(trail.contains("'ops'"), "trail: {trail}");
+                assert!(args.contains("[redacted-email]"), "args: {args}");
+                assert!(!args.contains("alice@example.com"), "args: {args}");
+            }
+            other => panic!("expected transformed grant, got {other:?}"),
+        }
+        assert_eq!(applied_transitions(&s), 1);
+        assert!(!s.pending_call());
+    }
+
+    #[tokio::test]
+    async fn an_endorsement_on_top_of_the_derivation_still_ships_the_redacted_canonicals() {
+        let policy = r#"
+            [trajectory]
+            audience = ["operator", "sre-team"]
+
+            [[tool]]
+            name = "read_private"
+            output = { trust = "suspicious", audience = ["operator"] }
+            requires = {}
+
+            [[tool]]
+            name = "page"
+            output = { trust = "trusted", audience = ["operator", "sre-team"] }
+            requires = { trust = "trusted", audience = ["operator", "sre-team"] }
+
+            [[transformer]]
+            name = "pii-redactor"
+            builtin = "redact-email"
+            precondition = { audience = ["operator"] }
+            output = { trust = "suspicious", audience = ["operator", "sre-team"] }
+
+            [[authority]]
+            name = "ops"
+            rule = "escalate"
+            trust = "trusted"
+            may_release_control = true
+        "#;
+        let mut s = session(policy, "page the on-call about checkout");
+        narrow_context(&mut s).await;
+        let proposed = ProposedCall {
+            id: "c2",
+            tool: "page",
+            arguments: r#"{"message":"customer alice@example.com is blocked"}"#,
+        };
+        let verdict = s.verdict("paging", proposed, &Rule(approve)).await.unwrap();
+        match verdict {
+            Verdict::Granted {
+                trail,
+                canonical_arguments: Some(args),
+            } => {
+                assert!(trail.contains("pii-redactor/v1"), "trail: {trail}");
+                assert!(trail.contains("endorsed by 'ops'"), "trail: {trail}");
+                assert!(args.contains("[redacted-email]"), "args: {args}");
+                assert!(!args.contains("alice@example.com"), "args: {args}");
+            }
+            other => panic!("expected transformed-and-endorsed grant, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn denied_release_after_derivation_stays_blocked_and_the_derived_value_remains() {
+        let mut s = session(TRANSFORMER_POLICY, "why is checkout failing?");
+        narrow_context(&mut s).await;
+        let proposed = ProposedCall {
+            id: "c2",
+            tool: "notify",
+            arguments: r#"{"message":"paging about alice@example.com's checkout"}"#,
+        };
+        let verdict = s.verdict("notify the team", proposed, &Rule(deny)).await.unwrap();
+        assert!(matches!(verdict, Verdict::Terminal { .. }), "got: {verdict:?}");
+        assert_eq!(applied_transitions(&s), 1);
+    }
+
+    #[tokio::test]
+    async fn audience_widening_redactor_never_rescues_a_trust_violation() {
+        let mut s = session(TRANSFORMER_POLICY, "why is checkout failing?");
+        narrow_context(&mut s).await;
+        let verdict = s
+            .verdict("cleanup", call_with("c2", "k8s_delete", "{}"), &Rule(approve))
+            .await
+            .unwrap();
+        match verdict {
+            Verdict::Terminal { violations, .. } => {
+                assert!(describe(&violations).contains("trust"), "got: {violations:?}")
+            }
+            other => panic!("expected Terminal, got {other:?}"),
+        }
+        assert_eq!(applied_transitions(&s), 0);
+    }
+
+    fn call_with<'a>(id: &'a str, tool: &'a str, arguments: &'a str) -> ProposedCall<'a> {
+        ProposedCall { id, tool, arguments }
+    }
+
+    #[tokio::test]
+    async fn payload_and_recipient_values_are_request_local() {
+        let mut s = session(TRANSFORMER_POLICY, "hi");
+        let before = s.context.len();
+        let _ = s
+            .verdict(
+                "notify",
+                call_with("c2", "notify", r#"{"message":"all quiet"}"#),
+                &NoResolver,
+            )
+            .await
+            .unwrap();
+        assert_eq!(s.context.len(), before + 1);
+    }
+
+    const RECIPIENTS_POLICY: &str = r#"
+        [[tool]]
+        name = "send"
+        requires = { audience = "$.args.to" }
+    "#;
+
+    #[test]
+    fn recipient_integrity_holds_under_reordering_and_duplicates() {
+        let s = session(RECIPIENTS_POLICY, "hi");
+        let tool = ToolName::new("send");
+        let checked: BTreeSet<String> = ["alice".to_string(), "bob".to_string()].into();
+        s.recipient_integrity(&tool, &checked, r#"{"to":["bob","alice","alice"],"message":"x"}"#)
+            .expect("set semantics: order and duplicates are not divergence");
+    }
+
+    #[test]
+    fn recipient_integrity_fails_closed_on_divergence_and_unreadable_canonicals() {
+        let s = session(RECIPIENTS_POLICY, "hi");
+        let tool = ToolName::new("send");
+        let checked: BTreeSet<String> = ["alice".to_string()].into();
+        assert!(
+            s.recipient_integrity(&tool, &checked, r#"{"to":"charlie"}"#)
+                .is_err_and(|detail| detail.contains("diverge")),
+        );
+        assert!(
+            s.recipient_integrity(&tool, &checked, "not json")
+                .is_err_and(|detail| detail.contains("not valid JSON")),
+        );
+        assert!(s.recipient_integrity(&tool, &checked, r#"{"to":42}"#).is_err());
+        s.recipient_integrity(&ToolName::new("other"), &checked, "not json")
+            .expect("no recipients_args, no guard");
     }
 }
