@@ -20,7 +20,7 @@ external authorities and transformers, never in the engine.
   package is `appa-dojo`).
 - "Engine", "Trajectory", "Value", "Label", "Dimension", "Authority",
   "Transformer", "Remedy plan" are defined terms — use them as the glossary in
-  `docs/spec.md` defines them, not colloquially.
+  `docs/spec.md` and `core/src/lib.rs` define them, not colloquially.
 - **Agentic terminology first, IFC/security names as anchors.** In comments,
   docs, and identifiers, lead with the agentic vocabulary — *trajectory* (not
   execution trace / session history), *flow* (not information transfer /
@@ -35,24 +35,20 @@ external authorities and transformers, never in the engine.
 
 ## Document precedence
 
-1. `docs/spec.md` — the normative integration spec.
-2. `docs/authority-model-design.md` — the plan-of-record: the model as built,
-   standing decisions, and (§4) superseded decisions. **Do not resurrect
-   anything from §4 silently** — the five-kind remedy taxonomy, plan caps,
-   bounded rescue, plan postures, mutable trajectory state, and the separate
-   response pipeline are all deliberately gone.
-3. `docs/declassifier-design.md` — foundation rationale, superseded in places
-   (marked inline). Its code sketches are historical; the code is the reference.
-4. `core/src/lib.rs` — concepts and semantics of the engine.
-5. The "Core engine invariants" subsections of "Gotchas" below — the
+1. `docs/spec.md` — the specification draft: the two-monoid model as the
+   product, written for engineers. Takes priority over implementation details
+   where they conflict.
+2. `docs/paper.md` — the paper skeleton: the same model with its formal
+   claims, theorem scoping, and citation anchors.
+3. `core/src/lib.rs` — concepts and semantics of the engine as implemented.
+4. The "Core engine invariants" subsections of "Gotchas" below — the
    invariants a core edit must not silently break. **Read them before
    touching `core/`.**
 
-An unfinished higher-level vision document (Baton/APPA first principles)
-exists outside this repository; its key theses are folded into the "Mental
-model" and "Gotchas" sections below. Treat those principles as design
-direction when they conflict with incidental implementation details — the
-sections below, not an unfindable file, are the reference.
+The "Mental model" and "Gotchas" sections below describe the engine as
+implemented; where they diverge from `docs/spec.md`, the spec is design
+direction and the sections below remain the reference for editing `core/`
+today.
 
 ## Workspace map
 
