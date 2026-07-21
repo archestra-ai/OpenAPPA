@@ -2,12 +2,10 @@
 
 use std::collections::BTreeSet;
 
-use appa_core::contract::Breach;
 use appa_core::{
-    ArgumentSchema, ArgumentTree, Audience, Authority, AuthorityMandate, Authorization, BlockReason, DeltaCoordinate,
-    Effect, Effects, FlowOutcome, FlowRefusal, KnownTrust, OpaqueValue, PolicyEngine, Pursuit, Requirements, Ruling,
-    Speaker, ToolContract, ToolName, ToolRequest, Trajectory, TrajectoryView, Trust, UserId, ValueId, ValueLabel,
-    Violation,
+    ArgumentSchema, ArgumentTree, Audience, Authority, AuthorityMandate, Authorization, BlockReason, Effect, Effects,
+    FlowOutcome, FlowRefusal, KnownTrust, OpaqueValue, PolicyEngine, Pursuit, Requirements, Ruling, Speaker,
+    ToolContract, ToolName, ToolRequest, Trajectory, TrajectoryView, Trust, UserId, ValueId, ValueLabel, Violation,
 };
 use serde::{Deserialize, Serialize};
 
@@ -170,36 +168,15 @@ fn refusal_kind(refusal: &FlowRefusal) -> RefusalKind {
     }
 }
 
-fn acquires_effects(grant: &Authorization) -> bool {
-    grant
-        .delta()
-        .coordinates()
-        .any(|coordinate| matches!(coordinate, DeltaCoordinate::AcquireEffects(_)))
-}
-
-fn approve_effect_growth(
-    grant: &Authorization,
-    _violations: &[Violation],
-    _trajectory: &TrajectoryView<'_>,
-) -> Option<Ruling> {
-    acquires_effects(grant).then(|| Ruling::Approve {
-        reason: "legacy appa-check treats declared effects as ordinary trajectory state".to_owned(),
-    })
-}
-
 fn approve_unknown(
-    grant: &Authorization,
+    _grant: &Authorization,
     violations: &[Violation],
     _trajectory: &TrajectoryView<'_>,
 ) -> Option<Ruling> {
-    (!acquires_effects(grant)
-        && !violations.is_empty()
-        && violations.iter().all(|violation| {
-            matches!(
-                violation,
-                Violation::Unprovable(_) | Violation::Breach(Breach::SurfaceGrowth { .. })
-            )
-        }))
+    (!violations.is_empty()
+        && violations
+            .iter()
+            .all(|violation| matches!(violation, Violation::Unprovable(_))))
     .then(|| Ruling::Approve {
         reason: "legacy allow_with_audit policy acknowledged the unknown flow".to_owned(),
     })
@@ -218,7 +195,6 @@ fn broad_mandate() -> AuthorityMandate {
         .confirms()
         .acknowledge_unknown()
         .release_control()
-        .acquire_effects()
 }
 
 impl From<TrustIn> for Trust {
@@ -347,11 +323,7 @@ enum CallError {
 }
 
 fn configure_authorities(engine: &mut PolicyEngine, unknown_policy: UnknownPolicyIn) -> Result<(), ProtocolError> {
-    let mut authorities = vec![Authority::inline(
-        "legacy-effects",
-        AuthorityMandate::none().acquire_effects(),
-        approve_effect_growth,
-    )];
+    let mut authorities = Vec::new();
     if unknown_policy == UnknownPolicyIn::AllowWithAudit {
         authorities.push(Authority::inline("allow-unknown", broad_mandate(), approve_unknown));
     }
@@ -420,7 +392,7 @@ fn would_degrade(trajectory: &Trajectory, context: &ValueLabel, contract: Option
 fn blocked_violations<P>(blocked: &FlowOutcome<P>) -> &[Violation] {
     match blocked {
         FlowOutcome::AllowedNow(_) => &[],
-        FlowOutcome::Terminal { violations, .. } | FlowOutcome::Remediable { violations, .. } => violations,
+        FlowOutcome::Blocked { violations, .. } => violations,
     }
 }
 
@@ -496,14 +468,10 @@ fn evaluate_call(
             if unknown_policy == UnknownPolicyIn::Deny && has_unknown {
                 let detail = violations
                     .iter()
-                    .filter(|violation| !matches!(violation, Violation::Breach(Breach::SurfaceGrowth { .. })))
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()
                     .join("; ");
-                let violation_count = violations
-                    .iter()
-                    .filter(|violation| !matches!(violation, Violation::Breach(Breach::SurfaceGrowth { .. })))
-                    .count();
+                let violation_count = violations.len();
                 trajectory
                     .abandon_pending()
                     .expect("an oracle-denied action was never released");

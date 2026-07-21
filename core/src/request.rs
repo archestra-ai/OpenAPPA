@@ -279,15 +279,14 @@ impl PendingEmission {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ActionState {
     Proposed,
-    Constrained,
     Released,
 }
 
 /// The stored pending action. It retains BOTH the immutable original
 /// proposal (the identity basis for idempotent re-entry) and the current,
-/// possibly constrained form (what actually gets checked and dispatched) —
+/// possibly reduced form (what actually gets checked and dispatched) —
 /// `ActionId` alone cannot distinguish re-entry of the original from an
-/// independent proposal that merely equals the constrained form.
+/// independent proposal that merely equals the reduced form.
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct PendingAction {
     id: ActionId,
@@ -295,7 +294,6 @@ pub struct PendingAction {
     original: ToolRequest,
     current: ToolRequest,
     proposed_effects: Effects,
-    accepted_effects: Effects,
     state: ActionState,
 }
 
@@ -307,7 +305,6 @@ impl PendingAction {
             original: request.clone(),
             current: request,
             proposed_effects,
-            accepted_effects: Effects::none(),
             state: ActionState::Proposed,
         }
     }
@@ -332,10 +329,6 @@ impl PendingAction {
         &self.proposed_effects
     }
 
-    pub fn accepted_effects(&self) -> &Effects {
-        &self.accepted_effects
-    }
-
     pub fn state(&self) -> ActionState {
         self.state
     }
@@ -349,20 +342,6 @@ impl PendingAction {
     /// identity basis, never dispatched.
     pub(crate) fn substitute_argument(&mut self, from: ValueId, to: ValueId) {
         self.current.arguments.substitute(from, to);
-    }
-
-    /// A `ConstrainAction` step narrowed this action through a registered
-    /// tool-identity mapping.
-    pub(crate) fn constrain(&mut self, to_tool: ToolName, effects: Effects) {
-        self.current.tool = to_tool;
-        self.proposed_effects = effects;
-        self.state = ActionState::Constrained;
-    }
-
-    /// An `AcceptGrowth` step acquired `effects` for this action. Monotone: an
-    /// acceptance only adds to the acquired surface.
-    pub(crate) fn accept_growth(&mut self, effects: Effects) {
-        self.accepted_effects = self.accepted_effects.clone().combine(effects);
     }
 }
 

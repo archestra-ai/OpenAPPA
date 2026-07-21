@@ -16,9 +16,11 @@ use crate::engine::EngineId;
 use crate::remedy::PlannedRemedy;
 use crate::revision::{FlowId, PlanId, Revision};
 
-/// A vector that provably holds at least one element. "Remediable with zero
-/// plans" is unrepresentable — a block with no plan is the explicit
-/// [`crate::engine::FlowOutcome::Terminal`].
+/// A vector that provably holds at least one element. A remedy plan with
+/// zero steps, an authorization with zero routes: unrepresentable. (A block
+/// with zero *plans* is the explicit terminal disposition on
+/// [`crate::engine::FlowOutcome::Blocked`] — that emptiness is semantic, a
+/// proof, not a shape to forbid.)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct NonEmptyVec<T>(Vec<T>);

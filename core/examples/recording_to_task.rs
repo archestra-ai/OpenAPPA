@@ -63,8 +63,10 @@ fn main() {
     print!("  open public issue → {WORLD}: ");
     match engine.evaluate(&mut trajectory, open) {
         Ok(FlowOutcome::AllowedNow(_)) => println!("PERMITTED (unexpected: no authority is mandated)"),
-        Ok(FlowOutcome::Terminal { reason, .. }) => println!("BLOCKED — {reason}"),
-        Ok(FlowOutcome::Remediable { .. }) => {
+        Ok(FlowOutcome::Blocked {
+            terminal: Some(reason), ..
+        }) => println!("BLOCKED — {reason}"),
+        Ok(FlowOutcome::Blocked { .. }) => {
             println!("BLOCKED — remediable, but no registered authority can clear it")
         }
         Err(refusal) => println!("REFUSED — {refusal}"),

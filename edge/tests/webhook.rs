@@ -438,7 +438,6 @@ async fn a_failing_second_round_leaves_the_flow_blocked_after_a_granted_first() 
         name = "effects-officer"
         rule = "escalate"
         may_release_control = true
-        acquire_effects = true
         webhook = {{ url = "{stalling}", timeout_ms = 200 }}
         "#
     );

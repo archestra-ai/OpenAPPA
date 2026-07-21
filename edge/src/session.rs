@@ -383,13 +383,17 @@ impl Session {
                 Ok(FlowOutcome::AllowedNow(FlowPermit::Emit(_))) => {
                     unreachable!("a tool flow never settles to an emission permit")
                 }
-                Ok(FlowOutcome::Remediable { .. }) => {
+                Ok(FlowOutcome::Blocked {
+                    terminal: Some(reason),
+                    violations,
+                    ..
+                }) => {
+                    return Settled::Blocked(Verdict::Terminal { violations, reason });
+                }
+                Ok(FlowOutcome::Blocked { .. }) => {
                     pursuit = self
                         .engine
                         .pursue(&mut self.trajectory, request.clone(), MAX_REMEDY_STEPS);
-                }
-                Ok(FlowOutcome::Terminal { violations, reason }) => {
-                    return Settled::Blocked(Verdict::Terminal { violations, reason });
                 }
                 Err(refused) => {
                     return Settled::Blocked(Verdict::Stalled {
@@ -414,9 +418,6 @@ impl Session {
                     let authority = authority.as_str();
                     parts.push(match authorization.scope() {
                         AuthorizationScope::DerivedValue { .. } => format!("endorsed by '{authority}'"),
-                        AuthorizationScope::PendingAction { .. } => {
-                            format!("accepted by '{authority}': {}", describe(resolved))
-                        }
                         AuthorizationScope::PolicyCheck { .. } => {
                             format!("acknowledged by '{authority}': {}", describe(resolved))
                         }
@@ -1076,7 +1077,6 @@ mod tests {
         name = "effects-officer"
         rule = "escalate"
         may_release_control = true
-        acquire_effects = true
     "#;
 
     #[tokio::test]

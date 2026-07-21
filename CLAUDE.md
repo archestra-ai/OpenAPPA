@@ -52,7 +52,7 @@ today.
 
 ## Workspace map
 
-Cargo workspace members: `core`, `check`, `contracts`, `dojo`, `proxy`.
+Cargo workspace members: `core`, `check`, `contracts`, `dojo`, `edge`, `proxy`.
 Workspace lint: `dead_code = "deny"` — unused code fails the build.
 
 - `core/` — `appa-core`, the engine. Prototype, `publish = false`, edition
@@ -69,12 +69,17 @@ Workspace lint: `dead_code = "deny"` — unused code fails the build.
 - `contracts/` — `appa-contracts`, translates the declarative TOML policy
   dialect (`docs/contracts.md`) into appa-core `ToolContract`s. Shared by the
   proxy and the gateway demo — one canonical dialect, don't fork it.
+- `edge/` — `appa-edge`, the session/mediation layer the proxy drives: it
+  owns the engine, replays admitted context into a `Trajectory`, settles
+  each proposed call through `pursue`/`apply_approval` (webhook-resolved
+  external rulings), and reads the audit projection for its decision log.
+  Trimming core's API must account for edge as a first-class consumer.
 - `proxy/` — `appa-proxy`, the **inference-layer** integration: an
-  OpenAI-compatible HTTP proxy. Stateless — on every `/v1/chat/completions`
-  response it replays the supported conversation history into a fresh
-  `Trajectory` (system/developer roles and uncontracted tool results are
-  skipped) and rewrites blocked tool calls into stop explanations before the
-  harness sees them.
+  OpenAI-compatible HTTP proxy over appa-edge. Stateless — on every
+  `/v1/chat/completions` response it replays the supported conversation
+  history into a fresh `Trajectory` (system/developer roles and
+  uncontracted tool results are skipped) and rewrites blocked tool calls
+  into stop explanations before the harness sees them.
 - `dojo/` — `appa-dojo`, a Rust-native AgentDojo-style benchmark substrate
   with the engine linked in-process (full audience/effects/authority access,
   unlike the appa-check wire format). Scenario catalog in `src/scenarios/`,
@@ -113,16 +118,16 @@ demos) need `OPENROUTER_API_KEY` (environment or repo-root `.env`);
   adequacy relation at the sink (holds / fails(witness) / unprovable). Never
   describe the fold as "declassification" — declassification only ever
   happens through an explicit transformer or authority.
-- **Tri-state outcomes, fail-closed.** Every well-formed flow — a tool call
+- **Binary outcomes, fail-closed.** Every well-formed flow — a tool call
   or an assistant emission, same pipeline — settles as **AllowedNow** (a
-  linear permit), **Remediable** (soft block with a non-empty frontier of
-  predicted plans), or **Terminal** (a *proven* no-remedy claim — the search
-  is uncapped, so Terminal is never "nothing found within budget"). Stale,
+  linear permit) or **Blocked** with the exact failed predicates plus the
+  frontier of predicted plans, where an **empty frontier is a proof** of
+  unremediability (the search is uncapped, so terminal is never "nothing
+  found within budget"; `terminal` then names the disposition). Stale,
   foreign, or conflicting proposals are refusals on a separate channel,
-  outside the tri-state, touching nothing.
+  outside the outcome, touching nothing.
 - **Two remedy kinds only.** *Reduce* (derive a value through a registered
-  transformer, or narrow the action through a registered transition verified
-  never wider) and *Authorize* (an exact typed delta at an exact scope). The
+  transformer) and *Authorize* (an exact typed delta at an exact scope). The
   soft block is the product thesis: it forces the actor to choose — preserve
   outer-world capability or enter a restricted context — *before* fetching
   data ("shift the reasoning left").
@@ -168,11 +173,14 @@ demos) need `OPENROUTER_API_KEY` (environment or repo-root `.env`);
   sink-side proof — there `Unknown` is **incomparable / bottom →
   `Unprovable`**; trust is the only dimension where the two orders disagree
   on `Unknown`. The operation is `combine`; do not call it a join.
-  `widening_over` is a third *derived* relation (the dual of adequacy), not a
-  third order: it powers the no-widening invariant — effects growth binds
-  live at the flow check; trust/audience widening is prevented at admission
-  by construction (the conservative fold absorbs a wider declaration —
-  `debug_assert`-guarded, test-pinned). `Requirements::check_flow` is a thin
+  `widening_over` is a third *derived* relation (the dual of adequacy, on
+  trust and audience only), not a third order: it powers the no-widening
+  invariant, which those two dimensions enforce at admission by construction
+  (the conservative fold absorbs a wider declaration —
+  `debug_assert`-guarded, test-pinned). Effects are trajectory state:
+  recorded at release, consulted by `forbid_prior_effects` — applied, never
+  checked for growth (the v2 alignment removed the effects-acquisition
+  gate). `Requirements::check_flow` is a thin
   *ordered* composition over the adequacy relations — the emission order
   (trust, audience, attention, effects) is observable; preserve it (there is
   a typed-order test).
@@ -191,14 +199,17 @@ demos) need `OPENROUTER_API_KEY` (environment or repo-root `.env`);
   action space; that is the vision's state-acquisition concern, and it looks
   backwards under textbook IFC. In current core the restrictive pure read
   itself is `AllowedNow` — the narrowing binds when a *dependent* flow later
-  hits a wider sink. The effects axis is the one place acquisition is gated
-  today: proposed effects growth soft-bans at the flow check. A
-  pre-acquisition soft gate on restrictive *reads* is vision-ahead-of-code
-  (see below), not current behavior.
-- **Attention is a requirement, not a label dimension.** An explicit user
-  confirmation is satisfied structurally by a confirming user turn and spent
-  as a grant consumption at release. It was never built as a dimension — do
-  not add one.
+  hits a wider sink. No acquisition gate exists in current core (the
+  effects-growth soft-ban was removed with the v2 alignment); the v2
+  label-descent pre-acquisition gate is vision-ahead-of-code (see below),
+  not current behavior.
+- **Attention is a requirement, not a label dimension.** An explicit
+  confirmation demand (`AttentionRule::ExplicitConfirmation`) is satisfiable
+  ONLY by a competent authority's check-scoped stand-in ruling
+  (`confirms = true` in its mandate; generic routing, not yet v2's named
+  `confirmed_by(A)`), and fails closed with no competent authority. The
+  structural confirming-user-turn path was removed in the v2 alignment. It
+  was never built as a dimension — do not add one.
 
 ### Core engine invariants: values, flows, admission
 
@@ -231,9 +242,11 @@ demos) need `OPENROUTER_API_KEY` (environment or repo-root `.env`);
 ### Core engine invariants: the event log, revisions, linear capabilities
 
 - The `EventSet` is the authoritative state: every public `Trajectory`
-  mutation prevalidates, then appends **one atomic batch** of facts; lifecycle
-  contradictions (double release, completion-before-release, double grant
-  consumption) are refused at admission — the single enforcement point.
+  mutation prevalidates, then appends **one atomic batch** of facts;
+  lifecycle contradictions (double release, completion-before-release) are
+  refused at admission — the single enforcement point. Authorization replay
+  is NOT an admission concern: no stored grant exists, so double use is
+  prevented entirely by the linear capabilities.
 - **One build path.** Every derived read model — labels, provenance, turns,
   committed effects, audit, both pending slots — is a `TrajectoryProjection`
   of the log, rebuilt in full by `Trajectory::commit` after each batch. Never
@@ -261,9 +274,8 @@ demos) need `OPENROUTER_API_KEY` (environment or repo-root `.env`);
   `EngineId` whose registries produced them — a capability never resolves
   against another engine's registries. Never add `Deserialize`: deserializing
   one forges the linearity. `Trajectory` itself is not serde at all.
-- Two-phase dispatch: `release` commits may-effects, spends any pending
-  confirmation, renders the **one** canonical request from the exact checked
-  tree, and mints the receipt; `record_output`/`record_failure` consume the
+- Two-phase dispatch: `release` commits may-effects, renders the **one**
+  canonical request from the exact checked tree, and mints the receipt; `record_output`/`record_failure` consume the
   receipt and close the action. There is deliberately no one-call shortcut
   that skips the canonical request — do not add one. Binding failures
   (stale/foreign) refuse *without* touching state; the capability is consumed
@@ -272,28 +284,30 @@ demos) need `OPENROUTER_API_KEY` (environment or repo-root `.env`);
   release (a checked emission, a new value) never wedge the released action —
   only foreign, wrong-action, or already-closed receipts refuse. Tokens,
   step capabilities, and approvals authorize *future* changes and stay
-  revision-bound. The pending action's (possibly constrained) proposed effects
-  are the single source of truth for what release commits.
-- Confirmation stays structural on user turns; it survives remedy steps on
-  the confirmed action and is spent atomically at release as a grant
-  consumption fact (facts only grow, so a receipt-declared failure cannot
-  resurrect a spent confirmation). One-off (`PolicyCheck`-scoped) grants
-  follow the same issued/consumed model — a second consumption is
-  unrepresentable at admission.
+  revision-bound. The pending action's proposed effects are the single
+  source of truth for what release commits.
+- A confirmation stand-in is check-transient like every lift: one ruling
+  admits exactly one dispatch, and a repeat proposal demands a fresh ruling
+  — nothing stored can be replayed. A one-off (`PolicyCheck`-scoped)
+  authorization lands as a single `AuthorizationApplied` fact — approval and
+  application coincide in one batch, so no stored grant object exists
+  between them to consume twice; replay and double-use protection live
+  entirely on the linear capabilities.
 
 ### Core engine invariants: pending action, plans, remedies
 
 - At most one `PendingAction`; it keeps the **immutable original** proposal
-  (identity basis for idempotent re-entry) and the **current** constrained
-  form (what is checked and dispatched). A different proposal while one is
-  pending is refused, never queued. Terminal blocks clear the slot;
-  remediable blocks keep it.
+  (identity basis for idempotent re-entry) and the **current** reduced form
+  (what is checked and dispatched). A different proposal while one is
+  pending is refused, never queued. Terminal blocks (empty plan frontier)
+  clear the slot; remediable blocks (non-empty frontier) keep it.
 - Every checked flow — a tool dispatch or an assistant emission — settles in
-  one tri-state `FlowOutcome`: `AllowedNow(permit)`, `Remediable` (carrying a
-  `NonEmptyVec<RemedyPlan>` — "remediable with zero plans" is
-  unrepresentable), or `Terminal`. Invalid, stale, foreign, or conflicting
-  proposals are `FlowRefusal`s on a separate channel, outside the tri-state,
-  touching no state. The two pending slots (action, emission) are
+  one binary `FlowOutcome`: `AllowedNow(permit)` or `Blocked { violations,
+  plans, terminal }` where `plans.is_empty() == terminal.is_some()` is an
+  engine-construction invariant (blocks are built only by the
+  remediable/terminal helpers, never assembled field-by-field). Invalid,
+  stale, foreign, or conflicting proposals are `FlowRefusal`s on a separate
+  channel, outside the outcome, touching no state. The two pending slots (action, emission) are
   independent and per-kind single-slot; a blocked emission never clears a
   pending action. Plans are predictions, not permits: plain serializable
   data, revision-bound, recomputed after every applied step; only the head
@@ -304,20 +318,14 @@ demos) need `OPENROUTER_API_KEY` (environment or repo-root `.env`);
 - The two-kind remedy vocabulary enforces conservation laws. **Reduce**
   answers to registered reduction relations: a value derivation
   (`ReductionTarget::DeriveValue`) cannot touch actions or past effects and
-  wears its transformer's declared output label; an action narrowing
-  (`ReductionTarget::NarrowAction`) goes only through registered
-  tool-identity mappings verified never wider (`ActionTransition::narrows` —
-  subset or unknown-confinement; the target contract must declare exactly
-  the transition's effects and must not widen the resolved recipient set —
-  the PoC's structural relation covers tool identity, effects, and recipient
-  roles; egress-destination and runtime-capability sets are not modeled).
-  **One gate, one relation.** `engine::planning::constrain_gate` is that whole
-  check, over a `SimFlow`: the planner filters candidates with it, the applier
-  rechecks live against the current registries with it. `narrows` states its
-  tool/effects half over values, not a `PendingAction`, so neither side needs a
-  representation the other cannot build. Never duplicate this gate — a
-  planner/applier disagreement returns `TransitionFailure::ReductionRefused` on
-  a step the planner promised.
+  wears its transformer's declared output label; its registered relation
+  (the declared label precondition) is the one gate — the planner filters
+  candidates with it and the applier rechecks it live against the current
+  registries, so a planner/applier disagreement returns
+  `TransitionFailure::ReductionRefused` on a step the planner promised.
+  (Registered action-narrowing transitions were removed in the v2
+  alignment; the v2 remedy vocabulary is sanitizer derivations and
+  compiled composites.)
   **Authorize** grants an exact `AuthorizationDelta` at an exact
   `AuthorizationScope`: a check-scoped lift (excepting a prior effect,
   standing in for a confirmation, releasing a control dep, acknowledging an
@@ -438,8 +446,8 @@ Where an invariant should live:
   (`pub(crate)`). Zero cleverness, removes whole test categories.
 - **Temporal/stateful invariants → one runtime choke point, never
   typestate.** Lifecycle ordering (no double release, no
-  completion-before-release, no double grant consumption) is refused at
-  event admission — the single enforcement point — because encoding it as
+  completion-before-release) is refused at event admission — the single
+  enforcement point — because encoding it as
   type-state would infect every signature with generics. This is a
   deliberate standing decision, not a gap.
 - **The budget test: type-level enforcement is worth it only while it stays

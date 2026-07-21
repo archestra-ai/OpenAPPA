@@ -8,7 +8,7 @@ use crate::approval::PendingApproval;
 use crate::audit::AuthorityName;
 use crate::contract::{AudienceRule, Requirements, Violation};
 use crate::dimension::{Effect, Effects};
-use crate::plan::{NonEmptyVec, RemedyPlan};
+use crate::plan::RemedyPlan;
 use crate::request::{ArgumentName, ArgumentSchema};
 use crate::revision::{ActionId, PlanId, Revision, ValueId};
 use crate::turn::TrajectoryId;
@@ -286,7 +286,7 @@ impl fmt::Display for BlockReason {
 }
 
 /// An invalid, stale, foreign, or conflicting proposal, refused before any
-/// policy judgment — outside the tri-state, touching no state (no revision
+/// policy judgment — outside the flow outcome, touching no state (no revision
 /// advance, no event, no cleared slot). Distinct from a [`BlockReason`]:
 /// a refusal says "this request does not describe the trajectory's current
 /// state", not "policy forbids this flow".
@@ -309,22 +309,43 @@ pub enum FlowRefusal {
 #[must_use = "a dropped FlowOutcome loses the permit or the flow's continuation"]
 pub enum FlowOutcome<P> {
     AllowedNow(P),
-    Remediable {
+    Blocked {
         violations: Vec<Violation>,
-        plans: NonEmptyVec<RemedyPlan>,
-    },
-    Terminal {
-        violations: Vec<Violation>,
-        reason: BlockReason,
+        plans: Vec<RemedyPlan>,
+        terminal: Option<BlockReason>,
     },
 }
 
 impl<P> FlowOutcome<P> {
+    pub(crate) fn remediable(violations: Vec<Violation>, plans: Vec<RemedyPlan>) -> Self {
+        debug_assert!(!plans.is_empty(), "a remediable block carries at least one plan");
+        Self::Blocked {
+            violations,
+            plans,
+            terminal: None,
+        }
+    }
+
+    pub(crate) fn terminal(violations: Vec<Violation>, reason: BlockReason) -> Self {
+        Self::Blocked {
+            violations,
+            plans: Vec::new(),
+            terminal: Some(reason),
+        }
+    }
+
     pub(crate) fn map_allowed<Q>(self, f: impl FnOnce(P) -> Q) -> FlowOutcome<Q> {
         match self {
             Self::AllowedNow(permit) => FlowOutcome::AllowedNow(f(permit)),
-            Self::Remediable { violations, plans } => FlowOutcome::Remediable { violations, plans },
-            Self::Terminal { violations, reason } => FlowOutcome::Terminal { violations, reason },
+            Self::Blocked {
+                violations,
+                plans,
+                terminal,
+            } => FlowOutcome::Blocked {
+                violations,
+                plans,
+                terminal,
+            },
         }
     }
 }

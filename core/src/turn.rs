@@ -37,15 +37,9 @@ use crate::request::{ActionState, EmissionRequest, PendingAction, PendingEmissio
 use crate::revision::{ActionId, FlowId, PlanId, Revision, TransitionId, TurnId, ValueId};
 use crate::value::{OpaqueValue, UnknownValue, ValueLabel, ValueRef, ValueStore};
 
-/// A user's contribution to a turn: who spoke, and whether they explicitly
-/// confirmed one named tool. The `confirms` field is structural, not a label:
-/// only user turns carry it, so "only the user confirms" holds by construction
-/// rather than by a runtime check — an assistant or tool actor has no such
-/// field to forge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UserTurn {
     pub id: UserId,
-    pub confirms: Option<ToolName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -71,18 +65,7 @@ pub struct Speaker(UserTurn);
 
 impl Speaker {
     pub fn user(id: UserId) -> Self {
-        Self(UserTurn { id, confirms: None })
-    }
-
-    /// A user message that explicitly confirms one named tool. The
-    /// confirmation is valid only while this is the newest turn and it has
-    /// not been spent by an action release — see
-    /// [`Trajectory::pending_confirmation`].
-    pub fn confirming(id: UserId, tool: ToolName) -> Self {
-        Self(UserTurn {
-            id,
-            confirms: Some(tool),
-        })
+        Self(UserTurn { id })
     }
 }
 
@@ -140,7 +123,6 @@ pub struct Trajectory {
     next_action: u64,
     next_flow: u64,
     next_transition: u64,
-    next_grant: u64,
     plans: Vec<RemedyPlan>,
     next_plan: u64,
 }
@@ -164,7 +146,6 @@ impl Trajectory {
             next_action: 0,
             next_flow: 0,
             next_transition: 0,
-            next_grant: 0,
             plans: Vec::new(),
             next_plan: 0,
         }
@@ -188,7 +169,7 @@ impl Trajectory {
     /// when a batch of facts is accepted, so every capability bound to it is
     /// invalidated by any state change.
     pub fn revision(&self) -> Revision {
-        Revision::of_frontier(self.events.frontier())
+        self.events.frontier()
     }
 
     pub fn turns(&self) -> &[Turn] {
@@ -306,15 +287,13 @@ impl Trajectory {
         };
 
         // Dispatch boundary: commit may-effects before release.
-        let mut batch = vec![Fact::EffectsCommitted {
-            action: parts.action,
-            effects: parts.proposed_effects.clone(),
-        }];
-        if let Some((turn, _)) = self.view.confirmation_available() {
-            batch.push(Fact::ConfirmationSpent { turn: *turn });
-        }
-        batch.push(Fact::ActionReleased { action: parts.action });
-        self.commit(batch);
+        self.commit(vec![
+            Fact::EffectsCommitted {
+                action: parts.action,
+                effects: parts.proposed_effects.clone(),
+            },
+            Fact::ActionReleased { action: parts.action },
+        ]);
         debug!(action = %parts.action, "release: effects committed, action released");
 
         let canonical = CanonicalRequest {
@@ -359,9 +338,7 @@ impl Trajectory {
     }
 
     /// Declare the dispatch failed and close the action. The effects
-    /// committed at release stay — failure never removes them — and a
-    /// confirmation spent at release stays spent, so the confirming turn
-    /// cannot authorize a second attempt.
+    /// committed at release stay — failure never removes them.
     pub fn record_failure(&mut self, receipt: DispatchReceipt) -> Result<(), RejectedToken> {
         let parts = self.validate_receipt(receipt)?;
         self.commit(vec![Fact::DispatchFailed { action: parts.action }]);
@@ -427,14 +404,6 @@ impl Trajectory {
             }
             None => Ok(()),
         }
-    }
-
-    /// The user confirmation currently in force, if any: the newest turn's,
-    /// only if that turn is a user turn, and only if an action release has
-    /// not already spent it. "A confirmation authorizes the immediately
-    /// following action, never a later one."
-    pub fn pending_confirmation(&self) -> Option<&ToolName> {
-        self.view.confirmation_available().map(|(_, tool)| tool)
     }
 
     pub(crate) fn set_pending(
@@ -514,11 +483,11 @@ impl Trajectory {
         self.commit(vec![Fact::ControlPlane { event }]);
     }
 
-    /// Record an applied check-scoped authorization as its full one-off
-    /// grant lifecycle in one batch: issued, consumed by exactly this check
-    /// (referencing the flow and, for a tool flow, the pending action), and
-    /// audited. Consumption is keyed by the grant at event admission, so a
-    /// second consumption of the same grant is unrepresentable.
+    /// Record an applied check-scoped authorization as one scoped fact.
+    /// Approval and application coincide in one batch — there is no stored
+    /// grant object between them to consume twice; replay and double-use
+    /// protection live entirely on the linear capabilities
+    /// (`ExecutionToken`, `StepCapability`, `PendingApproval`).
     pub(crate) fn record_applied_authorization(
         &mut self,
         transition: TransitionId,
@@ -526,35 +495,21 @@ impl Trajectory {
         authority: crate::audit::AuthorityName,
         resolved: Vec<crate::contract::Violation>,
     ) {
-        let grant = crate::revision::GrantId::new(self.next_grant);
-        self.next_grant += 1;
-        let crate::remedy::AuthorizationScope::PolicyCheck { flow } = *authorization.scope() else {
-            unreachable!(
-                "only check-scoped authorizations ride this path; durable and action scopes mint their value/marker instead"
-            );
-        };
-        let action = self
-            .view
-            .pending_action()
-            .filter(|pending| pending.flow() == flow)
-            .map(PendingAction::id);
-        let batch = vec![
-            Fact::GrantIssued {
-                grant,
-                authorization: authorization.clone(),
-                authority: authority.clone(),
-            },
-            Fact::GrantConsumed { grant, flow, action },
-            Fact::AuthorizationApplied {
-                transition,
-                authorization,
-                authority,
-                resolved,
-                derived: None,
-                labels: None,
-            },
-        ];
-        self.commit(batch);
+        debug_assert!(
+            matches!(
+                authorization.scope(),
+                crate::remedy::AuthorizationScope::PolicyCheck { .. }
+            ),
+            "only check-scoped authorizations ride this path; durable scopes mint their value instead"
+        );
+        self.commit(vec![Fact::AuthorizationApplied {
+            transition,
+            authorization,
+            authority,
+            resolved,
+            derived: None,
+            labels: None,
+        }]);
     }
 
     /// Audit a denied authorization: one typed audit event and its fact, one
@@ -644,66 +599,6 @@ impl Trajectory {
         self.commit(vec![Fact::ControlPlane { event }]);
     }
 
-    pub(crate) fn apply_constraint(&mut self, to_tool: ToolName, effects: crate::dimension::Effects) {
-        let transition = self.mint_transition();
-        let action = self
-            .view
-            .pending_action()
-            .expect("pending action validated by the engine")
-            .id();
-        self.commit(vec![
-            Fact::ActionConstrained {
-                action,
-                to_tool,
-                effects,
-            },
-            Fact::ControlPlane {
-                event: AuditEvent::ActionConstrained {
-                    transition,
-                    action,
-                    outcome: crate::audit::TransitionOutcome::Applied,
-                },
-            },
-        ]);
-    }
-
-    /// Apply a granted `AcceptGrowth` step as one transaction: record the
-    /// authorized surface growth on the pending action and audit the authority.
-    /// The effect still commits at release like any other proposed effect.
-    pub(crate) fn accept_growth(
-        &mut self,
-        effects: crate::dimension::Effects,
-        authority: crate::audit::AuthorityName,
-        resolved: Vec<crate::contract::Violation>,
-    ) {
-        let transition = self.mint_transition();
-        let action = self
-            .view
-            .pending_action()
-            .expect("pending action validated by the engine")
-            .id();
-        let acquisition = crate::remedy::Authorization::new(
-            crate::remedy::AuthorizationDelta::single(crate::remedy::DeltaCoordinate::AcquireEffects(effects.clone())),
-            crate::remedy::AuthorizationScope::PendingAction { action },
-        )
-        .expect("the engine accepts only non-empty growths");
-        self.commit(vec![
-            Fact::GrowthAccepted {
-                action,
-                effects,
-                authority: authority.clone(),
-            },
-            Fact::AuthorizationApplied {
-                transition,
-                authorization: acquisition,
-                authority,
-                resolved,
-                derived: None,
-                labels: None,
-            },
-        ]);
-    }
-
     /// Apply a granted fiat `Derive` (Endorse) step as one transaction: admit a new
     /// value carrying `source`'s bytes under the authority-`raised` label,
     /// substitute it into the pending action's current argument tree, and audit
@@ -789,9 +684,8 @@ impl Trajectory {
     }
 
     /// Test setup: establish that `effects` were already committed in this
-    /// trajectory's past, as a prior dispatch would have. Lets a test whose
-    /// subject is the confidentiality axis exercise an egress-bearing sink
-    /// without criterion (1) (surface growth) firing on the first egress.
+    /// trajectory's past, as a prior dispatch would have — e.g. to exercise
+    /// `forbid_prior_effects` or an `Unknown` committed surface.
     #[cfg(test)]
     pub(crate) fn seed_committed_effects(&mut self, effects: crate::dimension::Effects) {
         let action = ActionId::new(self.next_action);
@@ -901,41 +795,5 @@ mod tests {
         assert_eq!(trajectory.turns().len(), 1);
         assert!(trajectory.revision() > before);
         assert_eq!(trajectory.value(derived).unwrap().label().trust, Trust::SUSPICIOUS);
-    }
-
-    #[test]
-    fn confirmation_lasts_exactly_one_turn() {
-        let mut trajectory = Trajectory::new();
-        trajectory.ingress(
-            Speaker::confirming(UserId::new("alice"), ToolName::new("db.drop")),
-            ValueLabel::identity(),
-            OpaqueValue::new("yes, drop it"),
-        );
-        assert_eq!(trajectory.pending_confirmation(), Some(&ToolName::new("db.drop")));
-
-        trajectory.ingress(
-            Speaker::user(UserId::new("alice")),
-            ValueLabel::identity(),
-            OpaqueValue::new("unrelated"),
-        );
-        assert_eq!(trajectory.pending_confirmation(), None);
-    }
-
-    #[test]
-    fn confirmation_survives_value_admission_but_not_spending() {
-        let mut trajectory = Trajectory::new();
-        let raw = trajectory.ingress(
-            Speaker::confirming(UserId::new("alice"), ToolName::new("db.drop")),
-            ValueLabel::identity(),
-            OpaqueValue::new("yes"),
-        );
-        trajectory
-            .admit_model_output(OpaqueValue::new("derived"), BTreeSet::from([raw]), BTreeSet::new())
-            .unwrap();
-        assert_eq!(trajectory.pending_confirmation(), Some(&ToolName::new("db.drop")));
-
-        let newest = TurnId::new((trajectory.turns().len() - 1) as u64);
-        trajectory.commit(vec![Fact::ConfirmationSpent { turn: newest }]);
-        assert_eq!(trajectory.pending_confirmation(), None);
     }
 }

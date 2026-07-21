@@ -11,11 +11,15 @@ pub struct Revision(u64);
 impl Revision {
     pub const INITIAL: Self = Self(0);
 
-    /// The digest of an event frontier: the revision *is* the number of
-    /// accepted batches, so any admitted batch stales everything bound
-    /// before it.
-    pub(crate) fn of_frontier(frontier: crate::event::Basis) -> Self {
-        Self(frontier.index())
+    /// The revision *is* the number of accepted batches, so any admitted
+    /// batch stales everything bound before it.
+    pub(crate) fn of_batches(batches: u64) -> Self {
+        Self(batches)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn index(self) -> u64 {
+        self.0
     }
 
     #[must_use]
@@ -61,14 +65,6 @@ macro_rules! sequential_id {
         }
     };
 }
-
-sequential_id!(
-    /// Identity of one issued one-off grant within its trajectory: a
-    /// check-scoped authorization becomes an issued grant consumed by its
-    /// check, so reuse is refusable at event admission.
-    pub GrantId,
-    "grant"
-);
 
 sequential_id!(
     /// Identity of one stored value within its trajectory. Identifies

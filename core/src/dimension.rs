@@ -1,5 +1,5 @@
 //! Label dimensions: the crate's three built-in instances of the generic
-//! [`crate::preset`] algebras, plus their value types.
+//! `preset` algebras, plus their value types.
 //!
 //! Each dimension is a newtype over its preset and delegates its `combine` (the
 //! taint fold) and adequacy relation to it; [`crate::value::ValueLabel::combine`]
@@ -10,18 +10,18 @@
 //! and `Unknown` has a definite position in each (absorbing for audience and
 //! effects; between `Trusted` and `Suspicious` for trust). This is the taint
 //! fold — distinct from the sink-side adequacy relation, where `Unknown` is
-//! instead incomparable → [`Adequacy::Unprovable`](crate::preset).
+//! instead incomparable → `Adequacy::Unprovable` (see `preset`).
 //!
-//! Each dimension also carries a **widening relation** (`widening_over`), the
-//! dual of adequacy: whether one element exposes strictly more than a
-//! baseline — more readers, a higher trust assertion, a grown effect surface
-//! — with the excess as the witness. The general no-widening law is that a
-//! derived state is never wider than its causal input fold unless an
-//! authority explicitly authorized the widening. Trust and audience enforce
-//! it at admission by construction (the conservative fold absorbs any wider
-//! declared output — see `value.rs`); effects are not a value dimension, so
-//! their instance binds at the flow check as the surface-growth criterion,
-//! cleared only by an `AcquireEffects` authorization.
+//! Trust and audience also carry a **widening relation** (`widening_over`),
+//! the dual of adequacy: whether one element exposes strictly more than a
+//! baseline — more readers, a higher trust assertion — with the excess as
+//! the witness. The no-widening law is that a derived state is never wider
+//! than its causal input fold unless an authority explicitly authorized the
+//! widening; both dimensions enforce it at admission by construction (the
+//! conservative fold absorbs any wider declared output — see `value.rs`).
+//! Effects are trajectory state, recorded at release and consulted by
+//! history requirements (`forbid_prior_effects`) — applied, never checked
+//! for growth.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -51,7 +51,7 @@ impl fmt::Display for UserId {
 }
 
 /// Who is allowed to read a piece of data — an instance of
-/// [`MeetSet<UserId>`](crate::preset::MeetSet).
+/// `MeetSet<UserId>` (see `preset`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct Audience(MeetSet<UserId>);
@@ -172,7 +172,7 @@ impl fmt::Display for KnownTrust {
 }
 
 /// How much the provenance of data is trusted — if that is known at all. An
-/// instance of [`MinLevel<KnownTrust>`](crate::preset::MinLevel).
+/// instance of `MinLevel<KnownTrust>` (see `preset`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct Trust(MinLevel<KnownTrust>);
@@ -244,7 +244,7 @@ impl fmt::Display for Effect {
 }
 
 /// Effects that have already happened in a context — an instance of
-/// [`JoinSet<Effect>`](crate::preset::JoinSet).
+/// `JoinSet<Effect>` (see `preset`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct Effects(JoinSet<Effect>);
@@ -271,16 +271,6 @@ impl Effects {
         self.0.avoids(forbidden)
     }
 
-    /// The declared effect set, or `None` for `Unknown`. Used by the
-    /// structural narrowing relation, which must distinguish "provably these
-    /// effects" from "anything may happen".
-    pub(crate) fn declared_set(&self) -> Option<BTreeSet<Effect>> {
-        match &self.0 {
-            JoinSet::Has(set) => Some(set.clone()),
-            JoinSet::Unknown => None,
-        }
-    }
-
     /// Waiver application (check-transient): waive `waived` from the present
     /// effects. `Unknown` stays `Unknown` — one cannot attest a negative over
     /// it, which is why unprovable effects are acknowledge-only.
@@ -288,17 +278,6 @@ impl Effects {
         match &self.0 {
             JoinSet::Has(present) => Self(JoinSet::Has(present.difference(waived).copied().collect())),
             JoinSet::Unknown => Self(JoinSet::Unknown),
-        }
-    }
-
-    pub(crate) fn widening_over(&self, past: &Effects) -> Option<Effects> {
-        if past.clone().combine(self.clone()) == *past {
-            return None;
-        }
-        match (past.declared_set(), self.declared_set()) {
-            (Some(committed), Some(proposed)) => Some(Self::declared(proposed.difference(&committed).copied())),
-            (_, None) => Some(Self::UNKNOWN),
-            (None, Some(_)) => Some(self.clone()),
         }
     }
 }
@@ -476,14 +455,6 @@ mod tests {
         assert_eq!(a.widening_over(&Audience::PUBLIC), None);
         assert_eq!(Audience::UNKNOWN.widening_over(&a), None);
         assert_eq!(a.widening_over(&Audience::UNKNOWN), Some(a.clone()));
-
-        let egress = Effects::declared([Effect::Egress]);
-        assert_eq!(Effects::none().widening_over(&egress), None);
-        assert_eq!(
-            Effects::declared([Effect::Egress, Effect::Mutation]).widening_over(&egress),
-            Some(Effects::declared([Effect::Mutation]))
-        );
-        assert_eq!(Effects::UNKNOWN.widening_over(&egress), Some(Effects::UNKNOWN));
     }
 
     #[test]

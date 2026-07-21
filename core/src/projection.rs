@@ -19,13 +19,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::ToolName;
 use crate::audit::AuditEvent;
 use crate::dimension::Effects;
 use crate::event::{EventSet, Fact, ValueOrigin};
 use crate::request::{PendingAction, PendingEmission};
-use crate::revision::{GrantId, TurnId, ValueId};
-use crate::turn::{Actor, Turn};
+use crate::revision::ValueId;
+use crate::turn::Turn;
 use crate::value::{Provenance, UnknownValue, ValueLabel};
 
 /// Per-value labels: each value's label recomputed from its origin — the
@@ -188,23 +187,11 @@ fn apply_flow_fact(pending: &mut Option<PendingAction>, pending_emission: &mut O
                 effects.clone(),
             ));
         }
-        Fact::ActionConstrained { to_tool, effects, .. } => {
-            pending
-                .as_mut()
-                .expect("admission guarantees a live action")
-                .constrain(to_tool.clone(), effects.clone());
-        }
         Fact::ArgumentSubstituted { from, to, .. } => {
             pending
                 .as_mut()
                 .expect("admission guarantees a live action")
                 .substitute_argument(*from, *to);
-        }
-        Fact::GrowthAccepted { effects, .. } => {
-            pending
-                .as_mut()
-                .expect("admission guarantees a live action")
-                .accept_growth(effects.clone());
         }
         Fact::ActionReleased { .. } => {
             pending
@@ -241,55 +228,6 @@ pub fn flow_slots(events: &EventSet) -> (Option<PendingAction>, Option<PendingEm
         apply_flow_fact(&mut pending, &mut pending_emission, &event.fact);
     }
     (pending, pending_emission)
-}
-
-/// The confirmation currently in force: the newest turn's, only if it is a
-/// confirming user turn whose confirmation no consumption fact has spent.
-pub fn confirmation_available(events: &EventSet) -> Option<(TurnId, ToolName)> {
-    let mut newest: Option<(TurnId, Option<ToolName>)> = None;
-    let mut spent: BTreeSet<TurnId> = BTreeSet::new();
-    for event in events.events() {
-        match &event.fact {
-            Fact::TurnAppended { turn, actor, .. } => {
-                let confirms = match actor {
-                    Actor::User(user) => user.confirms.clone(),
-                    Actor::Assistant | Actor::Tool(_) => None,
-                };
-                newest = Some((*turn, confirms));
-            }
-            Fact::ConfirmationSpent { turn } => {
-                spent.insert(*turn);
-            }
-            _ => {}
-        }
-    }
-    match newest {
-        Some((turn, Some(tool))) if !spent.contains(&turn) => Some((turn, tool)),
-        _ => None,
-    }
-}
-
-/// One-off grant availability: issued grants whose consumption fact has not
-/// (yet) been admitted. The engine issues and consumes a check-scoped grant
-/// in the same batch, so under the current issuance discipline this is empty
-/// between mutations — the projection exists because facts only grow: a
-/// consumed grant is unavailable by *projection*, never by removal.
-pub fn grant_availability(events: &EventSet) -> BTreeMap<GrantId, crate::remedy::Authorization> {
-    let mut available = BTreeMap::new();
-    for event in events.events() {
-        match &event.fact {
-            Fact::GrantIssued {
-                grant, authorization, ..
-            } => {
-                available.insert(*grant, authorization.clone());
-            }
-            Fact::GrantConsumed { grant, .. } => {
-                available.remove(grant);
-            }
-            _ => {}
-        }
-    }
-    available
 }
 
 /// The control-plane audit history, synthesized from the facts: typed facts
@@ -346,7 +284,6 @@ pub struct TrajectoryProjection {
     audit: Vec<AuditEvent>,
     pending_action: Option<PendingAction>,
     pending_emission: Option<PendingEmission>,
-    confirmation_available: Option<(TurnId, ToolName)>,
 }
 
 impl Default for TrajectoryProjection {
@@ -366,7 +303,6 @@ impl TrajectoryProjection {
             audit: audit_events(events),
             pending_action,
             pending_emission,
-            confirmation_available: confirmation_available(events),
         }
     }
 
@@ -429,10 +365,6 @@ impl TrajectoryProjection {
     pub fn pending_emission(&self) -> Option<&PendingEmission> {
         self.pending_emission.as_ref()
     }
-
-    pub fn confirmation_available(&self) -> Option<&(TurnId, ToolName)> {
-        self.confirmation_available.as_ref()
-    }
 }
 
 #[cfg(test)]
@@ -460,7 +392,7 @@ mod tests {
             events,
             id,
             ValueOrigin::Ingress {
-                turn: TurnId::new(id),
+                turn: crate::revision::TurnId::new(id),
                 label,
             },
         )

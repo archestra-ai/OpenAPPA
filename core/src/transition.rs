@@ -17,9 +17,7 @@ use std::collections::BTreeSet;
 
 use serde::Serialize;
 
-use crate::ToolName;
-use crate::audit::TransitionFailure;
-use crate::dimension::{Audience, Effects, KnownTrust, Trust, UserId};
+use crate::dimension::{Audience, KnownTrust, Trust, UserId};
 use crate::value::{OpaqueValue, TransformerRef, ValueLabel};
 
 /// A registered transformer's input predicate: which source values it
@@ -78,44 +76,6 @@ pub struct RegisteredTransformer {
     pub run: TransformerFn,
 }
 
-/// A registered action transition: an explicit tool-identity mapping with
-/// declared replacement effects (e.g. network fetch → cache-only fetch).
-/// Arguments and control dependencies are never touched — unchanged
-/// arguments retain their identities by construction.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ActionTransition {
-    pub id: TransformerRef,
-    pub from_tool: ToolName,
-    pub to_tool: ToolName,
-    /// The constrained action's proposed effects. Verified narrower, never
-    /// inferred: see [`ActionTransition::narrows`].
-    pub effects: Effects,
-}
-
-impl ActionTransition {
-    /// Structural capability relation: the transition applies only to a flow
-    /// of its declared source tool, and its replacement effects must be
-    /// *verifiably* no broader — a declared set may narrow a declared superset
-    /// or replace `Unknown` (constraining an unbounded action is the point of
-    /// sandboxing), but nothing may widen to `Unknown` or add effects.
-    pub fn narrows(&self, tool: &ToolName, proposed_effects: &Effects) -> Result<(), TransitionFailure> {
-        if *tool != self.from_tool {
-            return Err(TransitionFailure::ReductionRefused);
-        }
-        let narrower = match (proposed_effects.declared_set(), self.effects.declared_set()) {
-            (None, Some(_)) => true,
-            (Some(old_set), Some(new_set)) => new_set.is_subset(&old_set),
-            // Never widen to Unknown.
-            (_, None) => false,
-        };
-        if narrower {
-            Ok(())
-        } else {
-            Err(TransitionFailure::ReductionRefused)
-        }
-    }
-}
-
 /// A registered authority's competence: the largest elevation it may grant,
 /// trajectory-independent. Endorse dimensions are *bounded* (a [`KnownTrust`]
 /// ceiling, an audience it may vouch); every other elevation is a boolean
@@ -129,10 +89,6 @@ pub struct AuthorityMandate {
     pub confirms: bool,
     pub acknowledge_unknown: bool,
     pub may_release_control: bool,
-    /// Competent to acquire a new effect for one action — authorize a
-    /// criterion-(1) surface growth. Distinct from waiving an *already-committed*
-    /// prior effect (`waive_prior_effects`).
-    pub acquire_effects: bool,
 }
 
 impl AuthorityMandate {
@@ -179,15 +135,6 @@ impl AuthorityMandate {
         self
     }
 
-    /// Competent to acquire a new effect for one action. A global capability:
-    /// `covers` does not scope it to particular effects, so an acquirer may
-    /// accept *any* surface growth its routing reaches, not just one kind.
-    #[must_use]
-    pub fn acquire_effects(mut self) -> Self {
-        self.acquire_effects = true;
-        self
-    }
-
     /// The typed competence relation: is this mandate competent for the
     /// asked authorization? Every atomic coordinate of the delta must be
     /// covered — a label raise by the trust ceiling and vouchable readers, a
@@ -217,7 +164,6 @@ impl AuthorityMandate {
                 };
                 trust_ok && audience_ok
             }
-            DeltaCoordinate::AcquireEffects(_) => self.acquire_effects,
             DeltaCoordinate::ExceptPriorEffects(_) => self.waive_prior_effects,
             DeltaCoordinate::StandInConfirmation => self.confirms,
             DeltaCoordinate::ReleaseControl(_) => self.may_release_control,
@@ -244,73 +190,6 @@ mod tests {
     use crate::revision::ValueId;
 
     #[test]
-    fn narrowing_accepts_subset_and_unknown_confinement() {
-        let sandbox = ActionTransition {
-            id: TransformerRef {
-                id: "sandbox".into(),
-                version: 1,
-            },
-            from_tool: ToolName::new("shell.run"),
-            to_tool: ToolName::new("shell.run.sandboxed"),
-            effects: Effects::declared([Effect::Mutation]),
-        };
-
-        assert_eq!(
-            sandbox.narrows(
-                &ToolName::new("shell.run"),
-                &Effects::declared([Effect::Mutation, Effect::Egress])
-            ),
-            Ok(())
-        );
-        assert_eq!(sandbox.narrows(&ToolName::new("shell.run"), &Effects::UNKNOWN), Ok(()));
-    }
-
-    #[test]
-    fn narrowing_rejects_widening_and_wrong_tool() {
-        let widen = ActionTransition {
-            id: TransformerRef {
-                id: "widen".into(),
-                version: 1,
-            },
-            from_tool: ToolName::new("shell.run"),
-            to_tool: ToolName::new("shell.run"),
-            effects: Effects::declared([Effect::Mutation, Effect::Egress]),
-        };
-        assert_eq!(
-            widen.narrows(&ToolName::new("shell.run"), &Effects::declared([Effect::Mutation])),
-            Err(TransitionFailure::ReductionRefused)
-        );
-
-        let to_unknown = ActionTransition {
-            id: TransformerRef {
-                id: "to-unknown".into(),
-                version: 1,
-            },
-            from_tool: ToolName::new("shell.run"),
-            to_tool: ToolName::new("shell.run"),
-            effects: Effects::UNKNOWN,
-        };
-        assert_eq!(
-            to_unknown.narrows(&ToolName::new("shell.run"), &Effects::declared([Effect::Mutation])),
-            Err(TransitionFailure::ReductionRefused)
-        );
-
-        let wrong_tool = ActionTransition {
-            id: TransformerRef {
-                id: "wrong".into(),
-                version: 1,
-            },
-            from_tool: ToolName::new("web.fetch"),
-            to_tool: ToolName::new("web.fetch.cached"),
-            effects: Effects::none(),
-        };
-        assert_eq!(
-            wrong_tool.narrows(&ToolName::new("shell.run"), &Effects::UNKNOWN),
-            Err(TransitionFailure::ReductionRefused)
-        );
-    }
-
-    #[test]
     fn typed_competence_is_diagonal_and_products_need_every_coordinate() {
         use crate::remedy::{Authorization, AuthorizationDelta, AuthorizationScope, DeltaCoordinate, LabelRaise};
         use crate::revision::FlowId;
@@ -320,9 +199,6 @@ mod tests {
             let scope = match &coordinate {
                 DeltaCoordinate::RaiseLabel(_) => AuthorizationScope::DerivedValue {
                     source: ValueId::new(0),
-                },
-                DeltaCoordinate::AcquireEffects(_) => AuthorizationScope::PendingAction {
-                    action: crate::revision::ActionId::new(0),
                 },
                 _ => AuthorizationScope::PolicyCheck { flow: FlowId::new(0) },
             };
@@ -358,10 +234,6 @@ mod tests {
             (
                 AuthorityMandate::none().acknowledge_unknown(),
                 ask(DeltaCoordinate::AcknowledgeUnknown(vec![Unprovable::EffectsUnknown])),
-            ),
-            (
-                AuthorityMandate::none().acquire_effects(),
-                ask(DeltaCoordinate::AcquireEffects(Effects::declared([Effect::Egress]))),
             ),
         ];
         for (i, (mandate, _)) in cases.iter().enumerate() {

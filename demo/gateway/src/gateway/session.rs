@@ -151,12 +151,20 @@ impl Session {
                 }
             }
             Ok(FlowOutcome::AllowedNow(token)) => self.dispatch(sim, token),
-            Ok(FlowOutcome::Remediable { violations, .. }) => Outcome::SoftBlocked {
+            Ok(FlowOutcome::Blocked {
+                violations,
+                terminal: None,
+                ..
+            }) => Outcome::SoftBlocked {
                 tool: sim.name.clone(),
                 violations,
                 recipients,
             },
-            Ok(FlowOutcome::Terminal { violations, reason }) => {
+            Ok(FlowOutcome::Blocked {
+                violations,
+                terminal: Some(reason),
+                ..
+            }) => {
                 self.pending_wire = None;
                 Outcome::TerminalBlocked {
                     tool: sim.name.clone(),
@@ -247,8 +255,12 @@ impl Session {
                 Ok(FlowOutcome::AllowedNow(FlowPermit::Emit(_))) => {
                     unreachable!("a tool flow's approval settles in an execution permit")
                 }
-                Ok(FlowOutcome::Remediable { .. }) => continue,
-                Ok(FlowOutcome::Terminal { violations, reason }) => {
+                Ok(FlowOutcome::Blocked { terminal: None, .. }) => continue,
+                Ok(FlowOutcome::Blocked {
+                    violations,
+                    terminal: Some(reason),
+                    ..
+                }) => {
                     return self.denied_or_terminal(&tool, violations, reason);
                 }
                 Err(refused) => {

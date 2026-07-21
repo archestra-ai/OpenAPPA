@@ -8,10 +8,9 @@ rule = "escalate"
 # Whom this authority may endorse data for — explicit, no wildcards.
 audience = ["alice@archestra.ai", "bob@archestra.ai", "alex@finance-audit.com"]
 # The conservative provenance fold makes an out-of-audience send both
-# argument-borne (endorse) and control-borne (release), and the first egress
-# grows the effect surface (accept) — one human ruling covers all of it.
+# argument-borne (endorse) and control-borne (release) — one human ruling
+# covers all of it.
 may_release_control = true
-acquire_effects = true
 confirms = true
 acknowledge_unknown = true
 

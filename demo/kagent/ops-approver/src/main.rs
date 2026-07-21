@@ -61,7 +61,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[derive(Deserialize)]
 enum WireCoordinate {
     RaiseLabel(WireRaise),
-    AcquireEffects(Value),
     ExceptPriorEffects(Value),
     StandInConfirmation,
     ReleaseControl(Vec<u64>),
@@ -88,7 +87,6 @@ enum WireKnownTrust {
 #[serde(deny_unknown_fields)]
 enum WireScope {
     DerivedValue { source: u64 },
-    PendingAction { action: u64 },
     PolicyCheck { flow: u64 },
 }
 
@@ -225,6 +223,7 @@ mod tests {
             json!([{"AcknowledgeUnknown": []}]),                         // recognized, not expected
             json!([{"RaiseLabel": {"trust": null, "audience": ["x"]}}]), // audience-only raise
             json!([{"Forged": 1}]),                                      // unrecognized
+            json!([{"AcquireEffects": {"Has": ["Egress"]}}]),            // retired coordinate
             json!([{"ReleaseControl": "not-an-array"}]),                 // malformed payload
             json!([{"ReleaseControl": ["v1"], "RaiseLabel": {}}]),       // two tags in one object
         ] {

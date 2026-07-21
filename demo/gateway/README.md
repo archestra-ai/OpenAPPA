@@ -33,7 +33,7 @@ is not a reader of the invoices.
    `human-in-the-loop` authority, so it **elicits** the connected client's
    user. One accept/decline rules every authorization this remedy needs
    (durably raise the argument values' labels, release the control
-   dependencies, acquire the egress growth).
+   dependencies).
 4. On accept, the engine permits; the gateway releases and dispatches the
    canonical request, and the escalation result returns `GRANTED — executed`
    with the tool's real output. On decline: `DENIED`, terminal for that

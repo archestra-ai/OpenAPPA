@@ -81,11 +81,6 @@ pub enum AuditEvent {
         declared_output: ValueLabel,
         outcome: TransitionOutcome,
     },
-    ActionConstrained {
-        transition: TransitionId,
-        action: ActionId,
-        outcome: TransitionOutcome,
-    },
     AuthorizationApplied {
         transition: TransitionId,
         authorization: Authorization,
@@ -101,11 +96,6 @@ pub enum AuditEvent {
     },
     EffectsCommitted { action: ActionId, effects: Effects },
     DispatchFailed { action: ActionId },
-    StepFailed {
-        plan: PlanId,
-        step: u64,
-        failure: TransitionFailure,
-    },
     ApprovalRequested {
         plan: PlanId,
         authority: AuthorityName,
@@ -132,10 +122,6 @@ impl fmt::Display for AuditEvent {
                 (None, TransitionOutcome::Applied) => {
                     write!(f, "transition of {source} by {transformer} applied")
                 }
-            },
-            Self::ActionConstrained { action, outcome, .. } => match outcome {
-                TransitionOutcome::Applied => write!(f, "{action} constrained"),
-                TransitionOutcome::Failed(failure) => write!(f, "constraining {action} failed: {failure}"),
             },
             Self::AuthorizationApplied {
                 authorization,
@@ -164,9 +150,6 @@ impl fmt::Display for AuditEvent {
             }
             Self::DispatchFailed { action } => {
                 write!(f, "{action} dispatch failed; committed effects stay")
-            }
-            Self::StepFailed { plan, step, failure } => {
-                write!(f, "{plan} step {step} refused: {failure}")
             }
             Self::ApprovalRequested { plan, authority, .. } => {
                 write!(f, "{plan}: approval requested from {authority}")

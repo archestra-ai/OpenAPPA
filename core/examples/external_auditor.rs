@@ -1,9 +1,8 @@
 //! Read this quarter's invoices from the internal system (readable only by the
 //! finance team), then e-mail the report to an *external auditor* who is **not**
-//! a reader of that data. The send crosses the audience boundary and is the
-//! first egress this turn — so OpenAPPA routes it to a mandated sign-off that
-//! *declassifies* it (endorses the auditor in) and *accepts* the egress, leaving
-//! an audit record, rather than letting it out silently.
+//! a reader of that data. The send crosses the audience boundary, so OpenAPPA
+//! routes it to a mandated sign-off that *declassifies* it (endorses the
+//! auditor in), leaving an audit record, rather than letting it out silently.
 
 use appa_core::{
     ArgumentTree, Authority, AuthorityMandate, Authorization, FlowOutcome, OpaqueValue, PolicyEngine, Pursuit, Ruling,
@@ -27,7 +26,7 @@ fn approve_auditor(_: &Authorization, _: &[Violation], _: &TrajectoryView<'_>) -
 fn finance_approver() -> Authority {
     Authority::inline(
         "finance-approver",
-        AuthorityMandate::none().vouch_audience([u(AUDITOR)]).acquire_effects(),
+        AuthorityMandate::none().vouch_audience([u(AUDITOR)]),
         approve_auditor,
     )
 }
@@ -79,7 +78,7 @@ fn main() {
             trajectory
                 .record_output(receipt, OpaqueValue::new("message-id: 1"))
                 .unwrap();
-            println!("PERMITTED (finance approver endorsed the auditor and accepted the egress)");
+            println!("PERMITTED (finance approver endorsed the auditor)");
         }
         Pursuit::Terminal { reason, .. } => println!("BLOCKED — {reason}"),
         other => println!("BLOCKED — {other:?}"),

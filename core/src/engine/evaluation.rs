@@ -2,7 +2,6 @@ use tracing::debug;
 
 use crate::contract::{Fixability, Violation};
 use crate::dimension::Effects;
-use crate::plan::NonEmptyVec;
 use crate::request::{EmissionRequest, ToolRequest};
 use crate::revision::ActionId;
 use crate::turn::Trajectory;
@@ -51,7 +50,12 @@ impl PolicyEngine {
         let intrinsic = contract
             .map(|c| c.output_label.clone())
             .unwrap_or_else(ValueLabel::unknown);
-        let proposed_effects = sim.proposed_effects.clone();
+        let proposed_effects = match trajectory.pending_action() {
+            Some(pending) => pending.proposed_effects().clone(),
+            None => contract
+                .map(|c| c.effects.clone())
+                .unwrap_or(crate::dimension::Effects::UNKNOWN),
+        };
         let violations = sim.violations(None);
 
         if violations.is_empty() {
@@ -79,15 +83,13 @@ impl PolicyEngine {
         let pending = trajectory.pending_action().expect("pending action set above");
         let flow = pending.flow();
         let drafts = self.plan_frontier(trajectory, &checked_request, contract, pending);
-        match NonEmptyVec::from_vec(trajectory.store_plans(flow, Some(action), self.id, drafts)) {
-            Some(plans) => {
-                debug!(count = plans.len(), "blocked (remediable)");
-                Ok(FlowOutcome::Remediable { violations, plans })
-            }
-            None => {
-                debug!("blocked (no remedy)");
-                Ok(self.terminal(trajectory, violations, BlockReason::NoRemedy))
-            }
+        let plans = trajectory.store_plans(flow, Some(action), self.id, drafts);
+        if plans.is_empty() {
+            debug!("blocked (no remedy)");
+            Ok(self.terminal(trajectory, violations, BlockReason::NoRemedy))
+        } else {
+            debug!(count = plans.len(), "blocked (remediable)");
+            Ok(FlowOutcome::remediable(violations, plans))
         }
     }
 
@@ -154,15 +156,13 @@ impl PolicyEngine {
             None => trajectory.set_pending_emission(request),
         };
         let drafts = self.emission_plan_frontier(trajectory, &checked, flow);
-        match NonEmptyVec::from_vec(trajectory.store_plans(flow, None, self.id, drafts)) {
-            Some(plans) => {
-                debug!(count = plans.len(), "emission blocked (remediable)");
-                Ok(FlowOutcome::Remediable { violations, plans })
-            }
-            None => {
-                debug!("emission blocked (no remedy)");
-                Ok(self.terminal_emission(trajectory, violations, BlockReason::NoRemedy))
-            }
+        let plans = trajectory.store_plans(flow, None, self.id, drafts);
+        if plans.is_empty() {
+            debug!("emission blocked (no remedy)");
+            Ok(self.terminal_emission(trajectory, violations, BlockReason::NoRemedy))
+        } else {
+            debug!(count = plans.len(), "emission blocked (remediable)");
+            Ok(FlowOutcome::remediable(violations, plans))
         }
     }
 
@@ -203,7 +203,7 @@ impl PolicyEngine {
         reason: BlockReason,
     ) -> FlowOutcome<P> {
         trajectory.clear_pending();
-        FlowOutcome::Terminal { violations, reason }
+        FlowOutcome::terminal(violations, reason)
     }
 
     /// A terminal emission block clears the pending emission slot — and only
@@ -215,6 +215,6 @@ impl PolicyEngine {
         reason: BlockReason,
     ) -> FlowOutcome<P> {
         trajectory.clear_pending_emission();
-        FlowOutcome::Terminal { violations, reason }
+        FlowOutcome::terminal(violations, reason)
     }
 }

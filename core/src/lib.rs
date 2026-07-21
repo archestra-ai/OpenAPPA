@@ -29,13 +29,14 @@
 //!   emission ([`request::EmissionRequest`]) is a flow to the reserved
 //!   response sink through the same pipeline — core never infers that a turn
 //!   is "final", and caller-labeled assistant ingress does not typecheck.
-//! - Every checked flow settles in one tri-state [`engine::FlowOutcome`]:
-//!   allowed now (a linear permit), remediable (the irreducible nondominated
-//!   frontier of predicted [`plan::RemedyPlan`]s — `Reduce` via registered
-//!   transformers/transitions, `Authorize` as an exact typed delta at an
-//!   exact scope), or terminal — a proven no-remedy claim (the search is
-//!   uncapped). Stale, foreign, or conflicting proposals are
-//!   [`engine::FlowRefusal`]s outside the tri-state and touch nothing.
+//! - Every checked flow settles in one binary [`engine::FlowOutcome`]:
+//!   allowed now (a linear permit), or blocked with the exact failed
+//!   predicates and the irreducible nondominated frontier of predicted
+//!   [`plan::RemedyPlan`]s (`Reduce` via registered transformers,
+//!   `Authorize` as an exact typed delta at an exact scope) — where an
+//!   *empty* frontier is a proven no-remedy claim (the search is uncapped),
+//!   never a shrug. Stale, foreign, or conflicting proposals are
+//!   [`engine::FlowRefusal`]s outside the outcome and touch nothing.
 //! - Effects commit when dispatch begins (release appends the may-effect
 //!   commitment; a later failure appends and removes nothing). Audit is
 //!   control-plane history ([`audit::AuditEvent`], a derived read model),
@@ -69,7 +70,7 @@ pub mod event;
 mod linearity;
 pub mod plan;
 pub mod projection;
-pub mod preset;
+pub(crate) mod preset;
 pub mod remedy;
 pub mod request;
 pub mod revision;
@@ -118,25 +119,19 @@ pub use engine::{
 };
 pub use request::{ArgumentName, ArgumentSchema, ArgumentTree, EmissionRequest, ToolRequest};
 pub use revision::{Revision, ValueId};
-pub use turn::{DispatchInFlight, Speaker, Trajectory};
+pub use turn::{Speaker, Trajectory};
 pub use value::{OpaqueValue, UnknownValue, ValueLabel};
 
-pub use approval::{
-    AncestrySnapshot, Authority, AuthorityFn, AuthorityMode, PendingApproval, Ruling, TrajectoryView, ValueView,
-};
-pub use audit::{AuthorityName, TransitionFailure};
+pub use approval::{Authority, AuthorityMode, PendingApproval, Ruling, TrajectoryView};
+pub use audit::AuthorityName;
 pub use contract::{AttentionRule, AudienceRule};
 pub use engine::{
     BlockReason, ContractRefused, EmissionPursuit, RegistrationRefused, RegistryFrozen, ResponsePolicy, StepCapability,
     StepOutcome, StepRefused,
 };
-pub use plan::{NonEmptyVec, RemedyPlan};
-pub use remedy::{
-    Authorization, AuthorizationDelta, AuthorizationScope, DeltaCoordinate, LabelRaise, PlannedRemedy, ReductionTarget,
-};
-pub use revision::{FlowId, PlanId};
+pub use remedy::{Authorization, AuthorizationScope, DeltaCoordinate};
 pub use transition::{
-    ActionTransition, AuthorityMandate, DuplicateRegistration, LabelPredicate, RegisteredTransformer,
-    TransformerDescriptor, TransformerError, TransformerFn,
+    AuthorityMandate, DuplicateRegistration, LabelPredicate, RegisteredTransformer, TransformerDescriptor,
+    TransformerError, TransformerFn,
 };
 pub use value::TransformerRef;
