@@ -40,6 +40,13 @@ external authorities and transformers, never in the engine.
    where they conflict.
 2. `docs/paper.md` — the paper skeleton: the same model with its formal
    claims, theorem scoping, and citation anchors.
+
+Spec vs paper: the spec is the human-readable account, the paper the
+academic one; both are skeletons with placeholders today (the spec's
+interfaces need substantial work, the paper's prose is still slop). Develop
+them together and keep them in sync — the paper may be a *subset* of the
+spec in essence: corner cases that don't fit the paper elegantly still must
+land in the spec, and nothing in the paper may contradict it.
 3. `core/src/lib.rs` — concepts and semantics of the engine as implemented.
 4. The "Core engine invariants" subsections of "Gotchas" below — the
    invariants a core edit must not silently break. **Read them before
