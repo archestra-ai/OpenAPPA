@@ -81,18 +81,8 @@ pub enum Breach {
     ConfirmationMissing {
         tool: ToolName,
     },
-    ConfirmationForOtherTool {
-        confirmed: ToolName,
-        requested: ToolName,
-    },
     ForbiddenPriorEffects {
         effects: BTreeSet<Effect>,
-    },
-    /// The call's proposed effects would grow the committed effect surface by
-    /// `growth` (criterion (1)): the flow is not downhill on effects. Cleared
-    /// only by an `Accept` authority acquiring the growth, never by a waiver.
-    SurfaceGrowth {
-        growth: Effects,
     },
 }
 
@@ -120,10 +110,7 @@ impl fmt::Display for Breach {
                 write!(f, "audience-guarded sink called with no recipients")
             }
             Self::ConfirmationMissing { tool } => {
-                write!(f, "no explicit user confirmation for `{tool}`")
-            }
-            Self::ConfirmationForOtherTool { confirmed, requested } => {
-                write!(f, "confirmation was for `{confirmed}`, not `{requested}`")
+                write!(f, "no explicit confirmation for `{tool}`")
             }
             Self::ForbiddenPriorEffects { effects } => {
                 write!(f, "trajectory already carries forbidden effects:")?;
@@ -131,9 +118,6 @@ impl fmt::Display for Breach {
                     write!(f, " {e}")?;
                 }
                 Ok(())
-            }
-            Self::SurfaceGrowth { growth } => {
-                write!(f, "proposed effects grow the committed surface by {growth}")
             }
         }
     }
@@ -191,9 +175,8 @@ impl fmt::Display for Violation {
 /// breach/unprovable *provability* axis: what a remedy can do about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Fixability {
-    /// A remedy can address it: a transition, a waiver, or (for surface
-    /// growth) an `Accept` acquisition — the remedy planner routes by the
-    /// violation itself, not by this tag.
+    /// A remedy can address it: a transition or a waiver — the remedy
+    /// planner routes by the violation itself, not by this tag.
     Fixable,
     /// Nothing to lift — one cannot attest a negative over `Unknown` effects,
     /// nor conjure a missing contract. A waiver may only accept the fact on
@@ -213,9 +196,7 @@ impl Violation {
                 | Breach::AudienceExceeds { .. }
                 | Breach::AudienceNotPublic { .. }
                 | Breach::ForbiddenPriorEffects { .. }
-                | Breach::ConfirmationMissing { .. }
-                | Breach::ConfirmationForOtherTool { .. }
-                | Breach::SurfaceGrowth { .. },
+                | Breach::ConfirmationMissing { .. },
             )
             | Self::Unprovable(Unprovable::TrustUnknown | Unprovable::AudienceUnknown) => Fixability::Fixable,
             Self::Unprovable(
@@ -239,7 +220,7 @@ impl Requirements {
     /// The value-granular sink check: audience and trust against the flow
     /// label (`L_flow = combine(L_args, L_control)` — see [`crate::request`]),
     /// effects against the trajectory's monotone past effects, attention
-    /// against the structural pending confirmation.
+    /// against an authority's check-scoped confirmation stand-in.
     ///
     /// An ordered Writer, not commutative validation: the emission order
     /// (trust, audience, attention, effects) is an observable part of the
@@ -250,7 +231,7 @@ impl Requirements {
         &self,
         flow: &ValueLabel,
         past_effects: &Effects,
-        confirmation: Option<&ToolName>,
+        confirmed: bool,
         tool: &ToolName,
         recipients: &BTreeSet<UserId>,
     ) -> Verdict {
@@ -305,18 +286,11 @@ impl Requirements {
             }
         }
 
-        match (self.attention, confirmation) {
-            (AttentionRule::NotRequired, _) => {}
-            (AttentionRule::ExplicitConfirmation, Some(confirmed)) if confirmed == tool => {}
-            (AttentionRule::ExplicitConfirmation, Some(confirmed)) => {
-                violations.push(Violation::Breach(Breach::ConfirmationForOtherTool {
-                    confirmed: confirmed.clone(),
-                    requested: tool.clone(),
-                }));
-            }
-            (AttentionRule::ExplicitConfirmation, None) => {
-                violations.push(Violation::Breach(Breach::ConfirmationMissing { tool: tool.clone() }));
-            }
+        // `confirmed` is "confirmed for this check" — an authority's
+        // check-scoped stand-in covers exactly the checked flow, so there is
+        // no tool identity to mismatch.
+        if self.attention == AttentionRule::ExplicitConfirmation && !confirmed {
+            violations.push(Violation::Breach(Breach::ConfirmationMissing { tool: tool.clone() }));
         }
 
         if !self.forbid_prior_effects.is_empty() {
@@ -368,7 +342,7 @@ mod tests {
         let tool = ToolName::new("db.drop");
         let recipients = BTreeSet::from([user("bob")]);
 
-        let verdict = requirements.check_flow(&flow, &Effects::declared([Effect::Egress]), None, &tool, &recipients);
+        let verdict = requirements.check_flow(&flow, &Effects::declared([Effect::Egress]), false, &tool, &recipients);
         assert_eq!(
             verdict,
             Verdict::Escalate(vec![
@@ -401,7 +375,7 @@ mod tests {
         let verdict = requirements.check_flow(
             &flow,
             &Effects::none(),
-            None,
+            false,
             &ToolName::new("email.send"),
             &BTreeSet::from([user("bob")]),
         );
@@ -418,7 +392,7 @@ mod tests {
         let verdict = requirements.check_flow(
             &ValueLabel::unknown(),
             &Effects::none(),
-            None,
+            false,
             &ToolName::new("email.send"),
             &BTreeSet::from([user("bob")]),
         );
@@ -445,7 +419,7 @@ mod tests {
             trust: Trust::TRUSTED,
         };
         assert_eq!(
-            requirements.check_flow(&public, &Effects::none(), None, &tool, &no_recipients),
+            requirements.check_flow(&public, &Effects::none(), false, &tool, &no_recipients),
             Verdict::Allow
         );
 
@@ -454,7 +428,7 @@ mod tests {
             trust: Trust::TRUSTED,
         };
         assert_eq!(
-            requirements.check_flow(&bounded, &Effects::none(), None, &tool, &no_recipients),
+            requirements.check_flow(&bounded, &Effects::none(), false, &tool, &no_recipients),
             Verdict::Escalate(vec![Violation::Breach(Breach::AudienceNotPublic {
                 readers: BTreeSet::from([user("operator")]),
             })])
@@ -465,7 +439,7 @@ mod tests {
             trust: Trust::TRUSTED,
         };
         assert_eq!(
-            requirements.check_flow(&unknown, &Effects::none(), None, &tool, &no_recipients),
+            requirements.check_flow(&unknown, &Effects::none(), false, &tool, &no_recipients),
             Verdict::Escalate(vec![Violation::Unprovable(Unprovable::AudienceUnknown)])
         );
     }
@@ -484,7 +458,7 @@ mod tests {
             trust: Trust::TRUSTED,
         };
         assert_eq!(
-            requirements.check_flow(&covering, &Effects::none(), None, &tool, &no_recipients),
+            requirements.check_flow(&covering, &Effects::none(), false, &tool, &no_recipients),
             Verdict::Allow
         );
 
@@ -494,7 +468,7 @@ mod tests {
             trust: Trust::TRUSTED,
         };
         assert_eq!(
-            requirements.check_flow(&public, &Effects::none(), None, &tool, &no_recipients),
+            requirements.check_flow(&public, &Effects::none(), false, &tool, &no_recipients),
             Verdict::Allow
         );
 
@@ -503,7 +477,7 @@ mod tests {
             trust: Trust::TRUSTED,
         };
         assert_eq!(
-            requirements.check_flow(&excluding, &Effects::none(), None, &tool, &no_recipients),
+            requirements.check_flow(&excluding, &Effects::none(), false, &tool, &no_recipients),
             Verdict::Escalate(vec![Violation::Breach(Breach::AudienceExceeds {
                 outside: BTreeSet::from([user("ops-hook")]),
             })])
@@ -519,7 +493,7 @@ mod tests {
         let verdict = requirements.check_flow(
             &ValueLabel::identity(),
             &Effects::none(),
-            None,
+            false,
             &ToolName::new("email.send"),
             &BTreeSet::new(),
         );
@@ -530,30 +504,6 @@ mod tests {
         assert_eq!(
             Violation::Breach(Breach::UndeclaredRecipients).fixability(),
             Fixability::Structural
-        );
-    }
-
-    #[test]
-    fn check_flow_confirmation_must_name_this_tool() {
-        let requirements = Requirements {
-            attention: AttentionRule::ExplicitConfirmation,
-            ..Requirements::default()
-        };
-        let confirmed = ToolName::new("other.tool");
-        let requested = ToolName::new("db.drop");
-        let verdict = requirements.check_flow(
-            &ValueLabel::identity(),
-            &Effects::none(),
-            Some(&confirmed),
-            &requested,
-            &BTreeSet::new(),
-        );
-        assert_eq!(
-            verdict,
-            Verdict::Escalate(vec![Violation::Breach(Breach::ConfirmationForOtherTool {
-                confirmed,
-                requested,
-            })])
         );
     }
 }

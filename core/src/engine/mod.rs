@@ -11,9 +11,9 @@
 //!
 //! The remedy machinery lives here too: a blocked flow returns the complete
 //! nondominated frontier of irreducible remedy plans — `Reduce` steps
-//! (derive a value, narrow the action) execute their registered
-//! implementations directly, `Authorize` steps are competence-routed to an
-//! authority; every applied step is audited and rechecked fail-closed. The
+//! (derive a value through a registered transformer) execute their
+//! registered implementations directly, `Authorize` steps are
+//! competence-routed to an authority; every applied step is audited and rechecked fail-closed. The
 //! search is uncapped, so a terminal block is a proven no-remedy claim over
 //! the registered capability space.
 //!
@@ -34,7 +34,7 @@ use tracing::debug;
 
 use crate::ToolName;
 use crate::approval::Authority;
-use crate::transition::{ActionTransition, DuplicateRegistration, RegisteredTransformer};
+use crate::transition::{DuplicateRegistration, RegisteredTransformer};
 
 mod application;
 mod capability;
@@ -85,7 +85,6 @@ pub struct PolicyEngine {
     id: EngineId,
     contracts: BTreeMap<ToolName, ToolContract>,
     transformers: Vec<RegisteredTransformer>,
-    action_transitions: Vec<ActionTransition>,
     authorities: Vec<Authority>,
     response_policy: Option<ResponsePolicy>,
     /// Set by the first evaluation; registration afterwards is refused.
@@ -129,7 +128,6 @@ impl PolicyEngine {
             id: EngineId::next(),
             contracts: BTreeMap::new(),
             transformers: Vec::new(),
-            action_transitions: Vec::new(),
             authorities: Vec::new(),
             response_policy: None,
             evaluated: std::sync::atomic::AtomicBool::new(false),
@@ -177,22 +175,6 @@ impl PolicyEngine {
         }
         debug!(transformer = %id, "register_transformer: registered");
         self.transformers.push(transformer);
-        Ok(())
-    }
-
-    /// Register an action transition (an explicit tool-identity mapping with
-    /// declared replacement effects). Fails on a duplicate identity+version.
-    pub fn register_action_transition(&mut self, transition: ActionTransition) -> Result<(), RegistrationRefused> {
-        self.frozen()?;
-        if self.action_transitions.iter().any(|t| t.id == transition.id) {
-            debug!(transition = %transition.id, "register_action_transition: duplicate refused");
-            return Err(DuplicateRegistration {
-                id: transition.id.to_string(),
-            }
-            .into());
-        }
-        debug!(transition = %transition.id, "register_action_transition: registered");
-        self.action_transitions.push(transition);
         Ok(())
     }
 

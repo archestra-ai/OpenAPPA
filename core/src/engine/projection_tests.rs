@@ -83,7 +83,6 @@ fn approving_human() -> crate::approval::Authority {
             confirms: true,
             acknowledge_unknown: true,
             may_release_control: true,
-            acquire_effects: true,
         },
         approve,
     )
@@ -181,16 +180,12 @@ fn permitted_dispatch_advances_one_batch_per_mutation() {
     });
 }
 
-/// Walk the Accept route for a genuinely egress-bearing dispatch, so the
-/// committed-effects projection is exercised against a real growth
-/// acquisition rather than seeded state.
 #[test]
-fn accepted_egress_dispatch_advances_one_batch_per_mutation() {
+fn egress_dispatch_advances_one_batch_per_mutation() {
     let mut engine = PolicyEngine::new();
     engine
         .register(email_contract(Effects::declared([Effect::Egress])))
         .unwrap();
-    engine.register_authority(approving_human()).unwrap();
     let mut trajectory = Trajectory::new();
 
     let body = trajectory.ingress(
@@ -200,17 +195,10 @@ fn accepted_egress_dispatch_advances_one_batch_per_mutation() {
     );
     let request = email_request(&mut trajectory, body, "bob");
 
-    // The first egress is a surface growth: proposal + check, two batches.
-    let plans = match tracked(&mut trajectory, 2, |t| engine.evaluate(t, request)) {
-        Ok(FlowOutcome::Remediable { plans, .. }) => plans,
-        other => panic!("expected a remediable block, got {other:?}"),
-    };
-    // The inline authority acquires the growth (one batch); the recheck
-    // permits via re-entry (no batch).
-    let capability = engine.mint_step(&trajectory, plans.first().id, 0).unwrap();
-    let token = match tracked(&mut trajectory, 1, |t| engine.apply_step(t, capability).unwrap()) {
-        StepOutcome::Advanced(FlowOutcome::AllowedNow(FlowPermit::Execute(token))) => token,
-        other => panic!("expected the accept to permit, got {other:?}"),
+    // A clean egress permits directly: proposal + check, one batch.
+    let token = match tracked(&mut trajectory, 1, |t| engine.evaluate(t, request)) {
+        Ok(FlowOutcome::AllowedNow(token)) => token,
+        other => panic!("expected a permit, got {other:?}"),
     };
 
     let receipt = tracked(&mut trajectory, 1, |t| t.release(token).unwrap().1);
@@ -243,13 +231,21 @@ fn transform_remedy_walk_advances_one_batch_per_mutation() {
     // A fresh remediable evaluation proposes the action and performs the
     // check: two batches.
     let plans = match tracked(&mut trajectory, 2, |t| engine.evaluate(t, request)) {
-        Ok(FlowOutcome::Remediable { plans, .. }) => plans,
+        Ok(FlowOutcome::Blocked {
+            plans, terminal: None, ..
+        }) => plans,
         other => panic!("expected a remediable block, got {other:?}"),
     };
 
     // Applying the transform admits the derived value and substitutes it
     // (one batch); the internal recheck permits via re-entry (no batch).
-    let capability = engine.mint_step(&trajectory, plans.first().id, 0).unwrap();
+    let capability = engine
+        .mint_step(
+            &trajectory,
+            plans.first().expect("a remediable block carries plans").id,
+            0,
+        )
+        .unwrap();
     let token = match tracked(&mut trajectory, 1, |t| engine.apply_step(t, capability).unwrap()) {
         StepOutcome::Advanced(FlowOutcome::AllowedNow(FlowPermit::Execute(token))) => token,
         other => panic!("expected the transform to permit, got {other:?}"),
@@ -294,10 +290,18 @@ fn endorse_approval_walk_advances_one_batch_per_mutation() {
     let request = email_request(&mut trajectory, body, "charlie");
 
     let plans = match tracked(&mut trajectory, 2, |t| engine.evaluate(t, request)) {
-        Ok(FlowOutcome::Remediable { plans, .. }) => plans,
+        Ok(FlowOutcome::Blocked {
+            plans, terminal: None, ..
+        }) => plans,
         other => panic!("expected a remediable block, got {other:?}"),
     };
-    let capability = engine.mint_step(&trajectory, plans.first().id, 0).unwrap();
+    let capability = engine
+        .mint_step(
+            &trajectory,
+            plans.first().expect("a remediable block carries plans").id,
+            0,
+        )
+        .unwrap();
     // The endorse admits the raised value and substitutes it (one batch);
     // the recheck permits via re-entry (no batch).
     let outcome = tracked(&mut trajectory, 1, |t| engine.apply_step(t, capability).unwrap());
@@ -327,14 +331,9 @@ fn declared_failure_advances_one_batch_per_mutation() {
         OpaqueValue::new("notes"),
     );
     let request = email_request(&mut trajectory, body, "bob");
-    let plans = match engine.evaluate(&mut trajectory, request) {
-        Ok(FlowOutcome::Remediable { plans, .. }) => plans,
-        other => panic!("expected a remediable block, got {other:?}"),
-    };
-    let capability = engine.mint_step(&trajectory, plans.first().id, 0).unwrap();
-    let token = match engine.apply_step(&mut trajectory, capability).unwrap() {
-        StepOutcome::Advanced(FlowOutcome::AllowedNow(FlowPermit::Execute(token))) => token,
-        other => panic!("expected the accept to permit, got {other:?}"),
+    let token = match engine.evaluate(&mut trajectory, request) {
+        Ok(FlowOutcome::AllowedNow(token)) => token,
+        other => panic!("expected a permit, got {other:?}"),
     };
     let receipt = tracked(&mut trajectory, 1, |t| t.release(token).unwrap().1);
 
@@ -344,39 +343,6 @@ fn declared_failure_advances_one_batch_per_mutation() {
         projection::committed_effects(trajectory.events()),
         Effects::declared([Effect::Egress])
     );
-}
-
-#[test]
-fn confirmation_spend_advances_one_batch_per_mutation() {
-    let mut engine = PolicyEngine::new();
-    engine.register(email_contract(Effects::none())).unwrap();
-    let mut trajectory = Trajectory::new();
-
-    let body = trajectory.ingress(
-        Speaker::user(user("alice")),
-        ValueLabel::trusted_readers([user("alice"), user("bob")]),
-        OpaqueValue::new("notes"),
-    );
-    let request = email_request(&mut trajectory, body, "bob");
-
-    // The confirming turn is the newest turn when the flow releases.
-    tracked(&mut trajectory, 1, |t| {
-        t.ingress(
-            Speaker::confirming(user("alice"), ToolName::new("email.send")),
-            ValueLabel::identity(),
-            OpaqueValue::new("yes, send it"),
-        )
-    });
-    assert!(projection::confirmation_available(trajectory.events()).is_some());
-
-    let token = match tracked(&mut trajectory, 1, |t| engine.evaluate(t, request)) {
-        Ok(FlowOutcome::AllowedNow(token)) => token,
-        other => panic!("expected a permit, got {other:?}"),
-    };
-    // Release spends the confirmation: its batch carries the consumption
-    // fact, and both truths agree it is gone.
-    tracked(&mut trajectory, 1, |t| t.release(token).unwrap().1);
-    assert!(projection::confirmation_available(trajectory.events()).is_none());
 }
 
 /// Labels are causal projections, never trajectory-wide taints: an

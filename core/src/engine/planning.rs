@@ -3,34 +3,27 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::ToolName;
 use crate::approval::{Authority, AuthorityMode};
-use crate::audit::{AuthorityName, TransitionFailure};
+use crate::audit::AuthorityName;
 use crate::contract::{AudienceRule, Fixability, Requirements, Unprovable, Verdict, Violation};
-use crate::dimension::{Effect, Effects, KnownTrust, UserId};
+use crate::dimension::{Effect, Effects, KnownTrust};
 use crate::plan::NonEmptyVec;
 use crate::remedy::{
     Authorization, AuthorizationDelta, AuthorizationScope, DeltaCoordinate, LabelRaise, Lift, PlannedRemedy,
     ReductionTarget,
 };
 use crate::request::{ArgumentTree, EmissionRequest, ToolRequest};
-use crate::revision::{ActionId, FlowId, ValueId};
-use crate::transition::ActionTransition;
+use crate::revision::{FlowId, ValueId};
 use crate::turn::Trajectory;
-use crate::value::{TransformerRef, UnknownValue, ValueLabel, ValueStore};
+use crate::value::{TransformerRef, UnknownValue, ValueLabel};
 
 use super::PolicyEngine;
 use super::capability::{RESPONSE_SINK, ResponsePolicy, ToolContract};
 
 /// What the search needs to know about one checked flow beyond its
-/// [`SimFlow`]: the value store and argument tree (recipient resolution for
-/// narrowing hops), the acquisition target (`None` for an emission — it
-/// proposes no effects), whether narrowing applies at all (an emission has no
-/// tool identity to narrow), and the checked flow the lifts scope to.
+/// [`SimFlow`]: the argument tree and the checked flow the lifts scope to.
 struct SearchCtx<'a> {
-    store: &'a ValueStore,
     tree: &'a ArgumentTree<ValueId>,
-    acquire: Option<ActionId>,
     flow: FlowId,
-    narrows: bool,
 }
 
 /// One candidate plan, carried with its dominance-group identity.
@@ -64,8 +57,8 @@ struct ReduceState {
     path: BTreeSet<StateKey>,
 }
 
-/// The semantic identity of a reduce-state: the per-leaf labels, the tool
-/// identity, and the proposed effects. Requirements and recipients are
+/// The semantic identity of a reduce-state: the per-leaf labels and the
+/// tool identity. Requirements and recipients are
 /// functions of the tool's contract over the fixed request tree, so they
 /// need no separate coordinate. Deduplication is deliberately per-route
 /// only (a route never revisits its own semantic state): a global
@@ -79,7 +72,6 @@ struct ReduceState {
 struct StateKey {
     labels: Vec<(ValueId, ValueLabel)>,
     tool: ToolName,
-    proposed_effects: Effects,
 }
 
 impl StateKey {
@@ -87,7 +79,6 @@ impl StateKey {
         Self {
             labels: sim.leaf_labels.iter().map(|(id, label)| (*id, label.clone())).collect(),
             tool: sim.tool.clone(),
-            proposed_effects: sim.proposed_effects.clone(),
         }
     }
 }
@@ -118,18 +109,14 @@ impl PolicyEngine {
             Err(_) => return Vec::new(),
         };
         let ctx = SearchCtx {
-            store: trajectory.store(),
             tree: &checked.arguments,
-            acquire: Some(pending.id()),
             flow: pending.flow(),
-            narrows: true,
         };
         self.frontier(&base, recipient_leaves_for(contract, ctx.tree), &ctx)
     }
 
     /// The plan frontier for a pending emission: the same pipeline over the
-    /// body tree, with no narrowing (an emission has no tool identity to
-    /// narrow) and no acquisition (an emission proposes no effects).
+    /// body tree.
     pub(super) fn emission_plan_frontier(
         &self,
         trajectory: &Trajectory,
@@ -141,11 +128,8 @@ impl PolicyEngine {
             Err(_) => return Vec::new(),
         };
         let ctx = SearchCtx {
-            store: trajectory.store(),
             tree: &checked.body,
-            acquire: None,
             flow,
-            narrows: false,
         };
         self.frontier(&base, BTreeSet::new(), &ctx)
     }
@@ -163,7 +147,7 @@ impl PolicyEngine {
         ctx: &SearchCtx<'_>,
     ) -> Vec<NonEmptyVec<PlannedRemedy>> {
         let mut candidates: Vec<Candidate> = Vec::new();
-        for state in self.reduce_states(base, base_recipient_leaves, ctx) {
+        for state in self.reduce_states(base, base_recipient_leaves) {
             self.peel_state(&state, ctx, &mut candidates);
         }
         candidates.extend(self.rescue_candidates(base, ctx));
@@ -193,7 +177,7 @@ impl PolicyEngine {
         deduped.retain(|candidate| {
             let steps: Vec<&PlannedRemedy> = candidate.steps.iter().collect();
             debug_assert!(
-                self.replay_unlocks(base, ctx, &steps),
+                self.replay_unlocks(base, &steps),
                 "every generated plan must predict a clean flow"
             );
             (0..steps.len()).all(|removed| {
@@ -202,7 +186,7 @@ impl PolicyEngine {
                     .enumerate()
                     .filter_map(|(i, step)| (i != removed).then_some(*step))
                     .collect();
-                !self.replay_unlocks(base, ctx, &reduced)
+                !self.replay_unlocks(base, &reduced)
             })
         });
 
@@ -229,8 +213,8 @@ impl PolicyEngine {
     }
 
     /// Breadth-first walk of every reduce-route reachable from the checked
-    /// flow: a transformer application to any non-recipient leaf, or a gated
-    /// action transition from the current tool, in registration order.
+    /// flow: a transformer application to any non-recipient leaf, in
+    /// registration order.
     /// The only pruning is path-local: a route never revisits its own
     /// semantic state, so every route is a simple path over the finite state
     /// space (leaf labels range over {original} ∪ registered outputs, tools
@@ -242,12 +226,7 @@ impl PolicyEngine {
     /// are cyclic on one ordering's path but simple on another's, and a
     /// reorder would fabricate a step sequence the walk never verified —
     /// each emitted route keeps its discovered order verbatim.
-    fn reduce_states(
-        &self,
-        base: &SimFlow,
-        base_recipient_leaves: BTreeSet<ValueId>,
-        ctx: &SearchCtx<'_>,
-    ) -> Vec<ReduceState> {
+    fn reduce_states(&self, base: &SimFlow, base_recipient_leaves: BTreeSet<ValueId>) -> Vec<ReduceState> {
         let base_key = StateKey::of(base);
         let mut queue = VecDeque::from([ReduceState {
             sim: base.clone(),
@@ -281,33 +260,6 @@ impl PolicyEngine {
                     queue.push_back(next);
                 }
             }
-            if ctx.narrows {
-                for transition in &self.action_transitions {
-                    let Ok((target, recipients)) = self.constrain_gate(&state.sim, transition, ctx.tree, ctx.store)
-                    else {
-                        continue;
-                    };
-                    let mut next = state.clone();
-                    next.sim.tool = transition.to_tool.clone();
-                    // Retargeting re-decides the target's requirement fact: a
-                    // narrow may move to a tool whose requirements are unstated
-                    // (escalates) or away from one (the stale unknown drops).
-                    next.sim.adopt_requires(&target.requires);
-                    next.sim.recipients = recipients;
-                    // The narrow shrinks the proposed effects, so any surface
-                    // growth is recomputed against the reduced set — an
-                    // acquire then authorizes only the residual growth.
-                    next.sim.proposed_effects = transition.effects.clone();
-                    next.recipient_leaves = recipient_leaves_for(Some(target), ctx.tree);
-                    if !Self::enter(&mut next) {
-                        continue;
-                    }
-                    next.steps.push(PlannedRemedy::Reduce(ReductionTarget::NarrowAction {
-                        transition: transition.id.clone(),
-                    }));
-                    queue.push_back(next);
-                }
-            }
             // The dominance-group identity is order-insensitive by design
             // (per-leaf derivation chains + final tool): stable-sort the
             // route's derive pairs by leaf so interleavings land in one
@@ -330,44 +282,12 @@ impl PolicyEngine {
         true
     }
 
-    /// The structural gate a constrain must pass: the transition narrows the
-    /// flow's tool and proposed effects, the target contract exists and
-    /// declares exactly the transition's effects, and its argument schema does
-    /// not widen the resolved recipient set.
-    ///
-    /// Planning and application share it, so a predicted narrow means exactly
-    /// what the live recheck computes. Both hold a [`SimFlow`]: the planner's
-    /// is the simulated state one hop out, the applier's is built from the
-    /// pending action it is about to constrain.
-    pub(super) fn constrain_gate<'a>(
-        &'a self,
-        sim: &SimFlow,
-        transition: &ActionTransition,
-        tree: &ArgumentTree<ValueId>,
-        store: &ValueStore,
-    ) -> Result<(&'a ToolContract, BTreeSet<UserId>), TransitionFailure> {
-        transition.narrows(&sim.tool, &sim.proposed_effects)?;
-        let Some(target) = self.contracts.get(&transition.to_tool) else {
-            return Err(TransitionFailure::ReductionRefused);
-        };
-        if target.effects != transition.effects {
-            return Err(TransitionFailure::ReductionRefused);
-        }
-        let Ok(recipients) = target.arguments.resolve_recipients(tree, store) else {
-            return Err(TransitionFailure::ReductionRefused);
-        };
-        if !recipients.is_subset(&sim.recipients) {
-            return Err(TransitionFailure::ReductionRefused);
-        }
-        Ok((target, recipients))
-    }
-
-    /// The deterministic authorize peels for one reduce-state: durable raises
-    /// for the arg-borne confidentiality residual, an acquisition for any
-    /// surface growth, then — when a residual remains — one candidate plan
-    /// per clearing lift alternative (the least-privilege control-release
-    /// variant and the plain lift are genuinely different asks; dominance,
-    /// not enumeration order, decides between them).
+    /// The deterministic authorize peels for one reduce-state: durable
+    /// raises for the arg-borne confidentiality residual, then — when a
+    /// residual remains — one candidate plan per clearing lift alternative
+    /// (the least-privilege control-release variant and the plain lift are
+    /// genuinely different asks; dominance, not enumeration order, decides
+    /// between them).
     fn peel_state(&self, state: &ReduceState, ctx: &SearchCtx<'_>, out: &mut Vec<Candidate>) {
         let group = GroupKey {
             derives: state.derives.clone(),
@@ -409,25 +329,6 @@ impl PolicyEngine {
             sim = raised;
             remaining = residual;
             steps.extend(raise_steps);
-        }
-
-        // Criterion (1): peel any surface growth into an acquire step before
-        // a lift handles the confidentiality residual. Acquire composes
-        // additively with a lift — they are separate steps to separate
-        // competences (acquire_effects vs the lift dims).
-        if let Some(growth) = surface_growth_of(&remaining) {
-            // No acquisition target (an emission flow), or no competent
-            // acquirer: this state cannot reach a clean residual.
-            let Some(action) = ctx.acquire else {
-                return;
-            };
-            let grant = acquire_authorization(action, &growth);
-            let Some(step) = self.authorize_step(grant, remaining.clone()) else {
-                return;
-            };
-            sim.accepted_effects = sim.accepted_effects.clone().combine(growth);
-            remaining = sim.violations(None);
-            steps.push(step);
         }
 
         if remaining.is_empty() {
@@ -485,10 +386,9 @@ impl PolicyEngine {
     /// joint cleanability: project the release, derive per-leaf Endorse
     /// deltas from the projection (a candidate may need none — releasing a
     /// non-monotone *subset* can be clean on its own, which the release-all
-    /// anchored ordinary solver misses), compose an Accept for any projected
-    /// growth and the final waiver (carrying its acknowledge-only facts),
-    /// and keep the candidate iff every grant is authorizable and the
-    /// projection then clears.
+    /// anchored ordinary solver misses), compose the final waiver (carrying
+    /// its acknowledge-only facts), and keep the candidate iff every grant
+    /// is authorizable and the projection then clears.
     fn rescue_candidates(&self, base: &SimFlow, ctx: &SearchCtx<'_>) -> Vec<Candidate> {
         if base.control_labels.is_empty() {
             return Vec::new();
@@ -498,7 +398,7 @@ impl PolicyEngine {
             derives: Vec::new(),
             tool: base.tool.clone(),
         };
-        self.minimal_joint_releases(base, &ids, ctx.acquire, ctx.flow)
+        self.minimal_joint_releases(base, &ids, ctx.flow)
             .into_iter()
             .map(|steps| Candidate {
                 steps,
@@ -526,18 +426,12 @@ impl PolicyEngine {
     /// exists" into "none was found where we looked"). The empty release is
     /// not probed: an unreleased endorse-plus-waiver solve is the ordinary
     /// peels' domain, and its candidates are already in the pool.
-    fn minimal_joint_releases(
-        &self,
-        base: &SimFlow,
-        ids: &[ValueId],
-        acquire: Option<ActionId>,
-        flow: FlowId,
-    ) -> Vec<NonEmptyVec<PlannedRemedy>> {
+    fn minimal_joint_releases(&self, base: &SimFlow, ids: &[ValueId], flow: FlowId) -> Vec<NonEmptyVec<PlannedRemedy>> {
         for size in 1..=ids.len() {
             let hits: Vec<NonEmptyVec<PlannedRemedy>> = Combinations::new(ids.len(), size)
                 .filter_map(|combo| {
                     let release: BTreeSet<ValueId> = combo.iter().map(|&i| ids[i]).collect();
-                    self.joint_rescue(base, &release, acquire, flow)
+                    self.joint_rescue(base, &release, flow)
                 })
                 .collect();
             if !hits.is_empty() {
@@ -555,15 +449,13 @@ impl PolicyEngine {
     ///
     /// Two residual views feed the steps. The raises peel against the
     /// *projected post-release* residual — the deficit a masking control
-    /// dependency hides from the actual vector. The Accept and the final
-    /// waiver are shown the *actual* (unreleased) flow's residual at their
-    /// point in the sequence, so the ruling authority still sees what the
-    /// release itself will clear.
+    /// dependency hides from the actual vector. The final waiver is shown
+    /// the *actual* (unreleased) flow's residual, so the ruling authority
+    /// still sees what the release itself will clear.
     fn joint_rescue(
         &self,
         base: &SimFlow,
         release: &BTreeSet<ValueId>,
-        acquire: Option<ActionId>,
         flow: FlowId,
     ) -> Option<NonEmptyVec<PlannedRemedy>> {
         let mut projected = base.clone();
@@ -592,16 +484,7 @@ impl PolicyEngine {
             steps.push(step);
             residual = projected.violations(None);
         }
-        let mut remaining = actual.violations(None);
-        if let Some(growth) = surface_growth_of(&remaining) {
-            let action = acquire?;
-            let step = self.authorize_step(acquire_authorization(action, &growth), remaining)?;
-            projected.accepted_effects = projected.accepted_effects.clone().combine(growth.clone());
-            actual.accepted_effects = actual.accepted_effects.clone().combine(growth);
-            residual = projected.violations(None);
-            remaining = actual.violations(None);
-            steps.push(step);
-        }
+        let remaining = actual.violations(None);
         let mut delta = needed_delta(&residual);
         delta.control_release = release.clone();
         if !projected.violations(Some(&delta)).is_empty() {
@@ -615,10 +498,10 @@ impl PolicyEngine {
     /// Replay a step sequence verbatim against the base simulation and
     /// report whether it predicts a clean flow. Every reduce step re-checks
     /// its registered relation against the replayed state (a transformer
-    /// whose precondition no longer matches, or a transition whose gate no
-    /// longer holds, breaks the prediction); authorize steps apply their
+    /// whose precondition no longer matches breaks the prediction);
+    /// authorize steps apply their
     /// coordinates; the final check runs under the last lift, if any.
-    fn replay_unlocks(&self, base: &SimFlow, ctx: &SearchCtx<'_>, steps: &[&PlannedRemedy]) -> bool {
+    fn replay_unlocks(&self, base: &SimFlow, steps: &[&PlannedRemedy]) -> bool {
         let mut sim = base.clone();
         let mut lift: Option<Lift> = None;
         for step in steps {
@@ -639,53 +522,27 @@ impl PolicyEngine {
                     }
                     sim.leaf_labels.insert(*source, registered.descriptor.output.clone());
                 }
-                PlannedRemedy::Reduce(ReductionTarget::NarrowAction { transition }) => {
-                    let Some(registered) = self.action_transitions.iter().find(|t| t.id == *transition) else {
-                        return false;
-                    };
-                    let Ok((target, recipients)) = self.constrain_gate(&sim, registered, ctx.tree, ctx.store) else {
-                        return false;
-                    };
-                    sim.tool = registered.to_tool.clone();
-                    sim.adopt_requires(&target.requires);
-                    sim.recipients = recipients;
-                    sim.proposed_effects = registered.effects.clone();
-                }
                 PlannedRemedy::Authorize { authorization, .. } => {
-                    for coordinate in authorization.delta().coordinates() {
-                        match (coordinate, authorization.scope()) {
-                            (DeltaCoordinate::RaiseLabel(raise), AuthorizationScope::DerivedValue { source }) => {
-                                let Some(label) = sim.leaf_labels.get(source) else {
-                                    return false;
-                                };
-                                let raised = raise.raise(label);
-                                sim.leaf_labels.insert(*source, raised);
-                            }
-                            (DeltaCoordinate::AcquireEffects(effects), _) => {
-                                sim.accepted_effects = sim.accepted_effects.clone().combine(effects.clone());
-                            }
-                            (lift_coordinate, _) => {
-                                let entry = lift.get_or_insert_with(Lift::empty);
-                                match lift_coordinate {
-                                    DeltaCoordinate::ExceptPriorEffects(effects) => {
-                                        entry
-                                            .prior_effects
-                                            .get_or_insert_with(BTreeSet::new)
-                                            .extend(effects.iter().copied());
-                                    }
-                                    DeltaCoordinate::StandInConfirmation => entry.confirms = true,
-                                    DeltaCoordinate::ReleaseControl(deps) => {
-                                        entry.control_release.extend(deps.iter().copied());
-                                    }
-                                    // Acknowledged facts are cleared by the
-                                    // presence of any lift on the recheck.
-                                    DeltaCoordinate::AcknowledgeUnknown(_) => {}
-                                    DeltaCoordinate::RaiseLabel(_) | DeltaCoordinate::AcquireEffects(_) => {
-                                        unreachable!("matched above")
-                                    }
-                                }
-                            }
-                        }
+                    if let AuthorizationScope::DerivedValue { source } = authorization.scope() {
+                        let raise = authorization
+                            .delta()
+                            .coordinates()
+                            .find_map(|coordinate| match coordinate {
+                                DeltaCoordinate::RaiseLabel(raise) => Some(raise),
+                                _ => None,
+                            })
+                            .expect("a derived-value authorization carries a raise");
+                        let Some(label) = sim.leaf_labels.get(source) else {
+                            return false;
+                        };
+                        let raised = raise.raise(label);
+                        sim.leaf_labels.insert(*source, raised);
+                    }
+                    // The one shared coordinate→lift fold; a raise-only
+                    // delta constitutes no lift (presence would clear
+                    // acknowledge-only facts it never acknowledged).
+                    if Lift::lifts(authorization.delta()) {
+                        lift.get_or_insert_with(Lift::empty).absorb(authorization.delta());
                     }
                 }
             }
@@ -866,13 +723,12 @@ fn same_step_sequence(a: &NonEmptyVec<PlannedRemedy>, b: &NonEmptyVec<PlannedRem
 
 /// The total authorization a plan asks for, folded into one comparable
 /// vector of atomic coordinates. Scope targets are pinned by validated
-/// construction (a raise lives at its derived value, an acquisition at the
-/// one pending action, lifts at the one policy check), so the vector keys on
-/// coordinate kind — plus the raised leaf for raises.
+/// construction (a raise lives at its derived value, lifts at the one
+/// policy check), so the vector keys on coordinate kind — plus the raised
+/// leaf for raises.
 #[derive(Default)]
 pub(super) struct AskVector {
     raises: BTreeMap<ValueId, LabelRaise>,
-    acquire: Option<Effects>,
     except: Option<BTreeSet<Effect>>,
     confirm: bool,
     release: Option<BTreeSet<ValueId>>,
@@ -899,12 +755,6 @@ impl AskVector {
                         }
                     }
                     (DeltaCoordinate::RaiseLabel(_), _) => unreachable!("validated construction pins raise scope"),
-                    (DeltaCoordinate::AcquireEffects(effects), _) => {
-                        vector.acquire = Some(match vector.acquire.take() {
-                            Some(acquired) => acquired.combine(effects.clone()),
-                            None => effects.clone(),
-                        });
-                    }
                     (DeltaCoordinate::ExceptPriorEffects(effects), _) => {
                         vector
                             .except
@@ -956,7 +806,6 @@ pub(super) fn ask_cmp(a: &AskVector, b: &AskVector) -> Option<Ordering> {
         };
         acc = combine_orders(acc, step)?;
     }
-    acc = combine_orders(acc, option_effects_cmp(&a.acquire, &b.acquire)?)?;
     acc = combine_orders(acc, option_set_cmp(&a.except, &b.except)?)?;
     acc = combine_orders(acc, a.confirm.cmp(&b.confirm))?;
     acc = combine_orders(acc, option_set_cmp(&a.release, &b.release)?)?;
@@ -994,22 +843,6 @@ fn set_cmp<T: Ord>(a: &BTreeSet<T>, b: &BTreeSet<T>) -> Option<Ordering> {
     }
 }
 
-/// Effects order: declared sets by inclusion; anything declared is less than
-/// `Unknown` (acquiring an unknown surface asks for everything).
-fn option_effects_cmp(a: &Option<Effects>, b: &Option<Effects>) -> Option<Ordering> {
-    match (a, b) {
-        (None, None) => Some(Ordering::Equal),
-        (None, Some(_)) => Some(Ordering::Less),
-        (Some(_), None) => Some(Ordering::Greater),
-        (Some(x), Some(y)) => match (x.declared_set(), y.declared_set()) {
-            (Some(x), Some(y)) => set_cmp(&x, &y),
-            (Some(_), None) => Some(Ordering::Less),
-            (None, Some(_)) => Some(Ordering::Greater),
-            (None, None) => Some(Ordering::Equal),
-        },
-    }
-}
-
 /// Acknowledgment order: presence asks for the acknowledge competence even
 /// with no facts; fact lists compare as sets by inclusion.
 fn acknowledged_cmp(a: &Option<Vec<Unprovable>>, b: &Option<Vec<Unprovable>>) -> Option<Ordering> {
@@ -1043,14 +876,6 @@ pub(crate) struct SimFlow {
     pub(crate) requires: Requirements,
     pub(crate) recipients: BTreeSet<crate::dimension::UserId>,
     pub(crate) past_effects: Effects,
-    /// The effects this call proposes (the contract's, or the pending action's
-    /// possibly-constrained effects on re-entry). Criterion (1) checks whether
-    /// committing them would grow the past surface.
-    pub(crate) proposed_effects: Effects,
-    /// Surface growth already acquired for the pending action; suppresses the
-    /// growth soft-ban for the effects it covers.
-    pub(crate) accepted_effects: Effects,
-    pub(crate) confirmed: Option<ToolName>,
     /// Violations independent of the check (a missing contract).
     pub(crate) extra: Vec<Violation>,
 }
@@ -1082,16 +907,6 @@ impl SimFlow {
                 })],
             ),
         };
-        // Proposed and accepted effects come from the pending action when one
-        // exists (its proposed_effects reflect any constrain narrowing; its
-        // accepted_effects any prior Accept), else the contract's declaration.
-        let (proposed_effects, accepted_effects) = match trajectory.pending_action() {
-            Some(pending) => (pending.proposed_effects().clone(), pending.accepted_effects().clone()),
-            None => (
-                contract.map(|c| c.effects.clone()).unwrap_or(Effects::UNKNOWN),
-                Effects::none(),
-            ),
-        };
         let mut sim = Self {
             leaf_labels,
             control_labels,
@@ -1099,9 +914,6 @@ impl SimFlow {
             requires: Requirements::default(),
             recipients,
             past_effects: trajectory.past_effects().clone(),
-            proposed_effects,
-            accepted_effects,
-            confirmed: trajectory.pending_confirmation().cloned(),
             extra,
         };
         if let Some(c) = contract {
@@ -1112,7 +924,7 @@ impl SimFlow {
 
     /// Adopt a contract's requirement declaration: known requirements are
     /// checked; unknown ones (None) contribute the RequirementsUnknown fact
-    /// instead. Keeps `extra` consistent when a constrain retargets the sim.
+    /// instead.
     pub(crate) fn adopt_requires(&mut self, requires: &Option<Requirements>) {
         self.extra
             .retain(|v| !matches!(v, Violation::Unprovable(Unprovable::RequirementsUnknown)));
@@ -1127,10 +939,9 @@ impl SimFlow {
 
     /// The simulation state of one emission flow's check, under the reserved
     /// response sink and the registered [`ResponsePolicy`]. An emission
-    /// proposes no effects and acquires none; its recipients are the policy's
-    /// declared readers. `confirmed` is deliberately `None`: a user
-    /// confirmation names a tool and never satisfies the response sink's
-    /// attention rule — only an authority's confirmation stand-in can.
+    /// proposes no effects; its recipients are the policy's declared
+    /// readers. Only an authority's check-scoped confirmation stand-in can
+    /// satisfy the response sink's attention rule.
     pub(crate) fn of_emission(
         trajectory: &Trajectory,
         checked: &EmissionRequest,
@@ -1162,9 +973,6 @@ impl SimFlow {
             requires,
             recipients,
             past_effects: trajectory.past_effects().clone(),
-            proposed_effects: Effects::none(),
-            accepted_effects: Effects::none(),
-            confirmed: None,
             extra,
         })
     }
@@ -1192,35 +1000,20 @@ impl SimFlow {
         // leaf value (folded above), not a transient whole-flow lift.
         let flow = ValueLabel::fold(self.leaf_labels.values().cloned()).combine(control);
         let mut past = self.past_effects.clone();
-        let mut confirmed = self.confirmed.clone();
+        let mut confirmed = false;
         if let Some(w) = waiver {
             if let Some(waived) = &w.prior_effects {
                 past = past.waiving(waived);
             }
-            if w.confirms {
-                confirmed = Some(self.tool.clone());
-            }
+            confirmed = w.confirms;
         }
         let mut remaining = self.extra.clone();
         match self
             .requires
-            .check_flow(&flow, &past, confirmed.as_ref(), &self.tool, &self.recipients)
+            .check_flow(&flow, &past, confirmed, &self.tool, &self.recipients)
         {
             Verdict::Allow => {}
             Verdict::Escalate(violations) => remaining.extend(violations),
-        }
-        // Criterion (1) — the effects instance of the general no-widening law
-        // (`widening_over`, the dimension interface's dual of adequacy).
-        // Trust and audience enforce theirs at admission by construction (the
-        // conservative fold absorbs a wider declared output); effects are
-        // trajectory state, so their instance binds here. The check is over
-        // the *committed* surface, not the waiver-adjusted `past` — a waiver
-        // lifts a prior-effect sink check, not what the call would commit. An
-        // Accept marker (accepted_effects) suppresses growth it already
-        // acquired.
-        let effective_past = self.past_effects.clone().combine(self.accepted_effects.clone());
-        if let Some(growth) = self.proposed_effects.widening_over(&effective_past) {
-            remaining.push(Violation::Breach(crate::contract::Breach::SurfaceGrowth { growth }));
         }
         if waiver.is_some() {
             remaining.retain(|v| v.fixability() != Fixability::AcknowledgeOnly);
@@ -1276,29 +1069,10 @@ pub(super) fn raise_authorization(source: ValueId, delta: &LabelRaise) -> Author
     .expect("the planner raises only non-empty deltas at their derived-value scope")
 }
 
-/// The action-scoped acquisition authorization for a surface growth.
-pub(super) fn acquire_authorization(action: ActionId, growth: &Effects) -> Authorization {
-    Authorization::new(
-        AuthorizationDelta::single(DeltaCoordinate::AcquireEffects(growth.clone())),
-        AuthorizationScope::PendingAction { action },
-    )
-    .expect("a surface-growth witness is never empty")
-}
-
-/// The surface growth in a violation set, if any — the effects an Accept step
-/// must acquire. There is at most one (the growth check pushes a single
-/// `SurfaceGrowth`).
-fn surface_growth_of(violations: &[Violation]) -> Option<Effects> {
-    violations.iter().find_map(|violation| match violation {
-        Violation::Breach(crate::contract::Breach::SurfaceGrowth { growth }) => Some(growth.clone()),
-        _ => None,
-    })
-}
-
 /// The delta that would cover the grant-fixable *non-relabel* gaps in
 /// `violations`: prior effects and confirmation. Trust and audience are no
-/// longer waived — they route to Endorse steps — and acknowledge-only,
-/// surface-growth, and structural members contribute no lift.
+/// longer waived — they route to Endorse steps — and acknowledge-only and
+/// structural members contribute no lift.
 fn needed_delta(violations: &[Violation]) -> Lift {
     use crate::contract::Breach;
     let mut delta = Lift::empty();
@@ -1310,17 +1084,16 @@ fn needed_delta(violations: &[Violation]) -> Lift {
                     .get_or_insert_with(BTreeSet::new)
                     .extend(effects.iter().copied());
             }
-            Violation::Breach(Breach::ConfirmationMissing { .. } | Breach::ConfirmationForOtherTool { .. }) => {
+            Violation::Breach(Breach::ConfirmationMissing { .. }) => {
                 delta.confirms = true;
             }
-            // Trust/audience route to Endorse; surface growth to Accept;
-            // acknowledge-only and structural members contribute no lift.
+            // Trust/audience route to Endorse; acknowledge-only and
+            // structural members contribute no lift.
             Violation::Breach(
                 Breach::TrustBelow { .. }
                 | Breach::AudienceExceeds { .. }
                 | Breach::AudienceNotPublic { .. }
-                | Breach::UndeclaredRecipients
-                | Breach::SurfaceGrowth { .. },
+                | Breach::UndeclaredRecipients,
             )
             | Violation::Unprovable(
                 Unprovable::TrustUnknown
@@ -1431,9 +1204,6 @@ mod tests {
             requires,
             recipients: BTreeSet::new(),
             past_effects: Effects::none(),
-            proposed_effects: Effects::none(),
-            accepted_effects: Effects::none(),
-            confirmed: None,
             extra: Vec::new(),
         }
     }
@@ -1473,7 +1243,7 @@ mod tests {
             &[(s1, ValueLabel::identity()), (s2, ValueLabel::identity())],
         );
 
-        let hits = engine.minimal_joint_releases(&sim, &[s1, s2], None, FlowId::new(0));
+        let hits = engine.minimal_joint_releases(&sim, &[s1, s2], FlowId::new(0));
 
         assert_eq!(hits.len(), 2);
         assert_eq!(release_of(&hits[0]), BTreeSet::from([s1]));
@@ -1516,7 +1286,7 @@ mod tests {
             &[(s1, suspicious.clone()), (s2, suspicious)],
         );
 
-        let hits = engine.minimal_joint_releases(&sim, &[s1, s2], None, FlowId::new(0));
+        let hits = engine.minimal_joint_releases(&sim, &[s1, s2], FlowId::new(0));
         assert_eq!(hits.len(), 1);
         assert_eq!(release_of(&hits[0]), BTreeSet::from([s1, s2]));
 
@@ -1547,7 +1317,7 @@ mod tests {
         );
         assert!(
             incompetent
-                .minimal_joint_releases(&sim, &[s1, s2], None, FlowId::new(0))
+                .minimal_joint_releases(&sim, &[s1, s2], FlowId::new(0))
                 .is_empty()
         );
     }

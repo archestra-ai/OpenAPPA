@@ -1,9 +1,9 @@
 //! The two-kind remedy vocabulary: `Reduce` and `Authorize`.
 //!
 //! A remedy either **reduces** the proposed flow so it fits the current
-//! authorization context (derive a value through a registered transformer,
-//! narrow the action through a registered transition — every reducer answers
-//! to a registered, validated reduction relation), or **authorizes** the
+//! authorization context (derive a value through a registered transformer —
+//! every reducer answers to a registered, validated reduction relation), or
+//! **authorizes** the
 //! irreducible residual: an exact metadata delta at an exact scope. Durable
 //! and one-off authorization are the same kind with different scopes;
 //! targets, deltas, scopes, and bindings stay typed and auditable —
@@ -16,9 +16,9 @@ use serde::Serialize;
 
 use crate::audit::AuthorityName;
 use crate::contract::{Unprovable, Violation};
-use crate::dimension::{Effect, Effects, KnownTrust, UserId};
+use crate::dimension::{Effect, KnownTrust, UserId};
 use crate::plan::NonEmptyVec;
-use crate::revision::{ActionId, FlowId, ValueId};
+use crate::revision::{FlowId, ValueId};
 use crate::value::TransformerRef;
 
 /// A durable confidentiality raise: a trust attestation and/or an audience
@@ -90,6 +90,39 @@ impl Lift {
     pub(crate) fn empty() -> Self {
         Self::default()
     }
+
+    /// Whether a delta carries any check-transient coordinate — i.e. whether
+    /// applying it constitutes a lift at all. A pure durable raise does not:
+    /// treating it as one would let a raise-only grant clear
+    /// acknowledge-only facts by mere presence.
+    pub(crate) fn lifts(delta: &AuthorizationDelta) -> bool {
+        delta
+            .coordinates()
+            .any(|coordinate| !matches!(coordinate, DeltaCoordinate::RaiseLabel(_)))
+    }
+
+    /// Fold a delta's check-transient coordinates into this lift — the one
+    /// coordinate→lift conversion, shared by the applier and the planner's
+    /// replay. `RaiseLabel` contributes nothing (a durable relabel is not a
+    /// lift); `AcknowledgeUnknown` contributes no field — its effect is the
+    /// caller's presence rule (any lift clears acknowledge-only facts on the
+    /// recheck).
+    pub(crate) fn absorb(&mut self, delta: &AuthorizationDelta) {
+        for coordinate in delta.coordinates() {
+            match coordinate {
+                DeltaCoordinate::ExceptPriorEffects(effects) => {
+                    self.prior_effects
+                        .get_or_insert_with(BTreeSet::new)
+                        .extend(effects.iter().copied());
+                }
+                DeltaCoordinate::StandInConfirmation => self.confirms = true,
+                DeltaCoordinate::ReleaseControl(deps) => {
+                    self.control_release.extend(deps.iter().copied());
+                }
+                DeltaCoordinate::RaiseLabel(_) | DeltaCoordinate::AcknowledgeUnknown(_) => {}
+            }
+        }
+    }
 }
 
 /// One atomic coordinate of an authorization delta. Each names exactly one
@@ -100,9 +133,6 @@ impl Lift {
 pub enum DeltaCoordinate {
     /// Durably raise a value's label (the old Endorse).
     RaiseLabel(LabelRaise),
-    /// Acquire a surface growth on the pending action (the old Accept); the
-    /// effect still commits at release, never early.
-    AcquireEffects(Effects),
     /// Treat these already-committed prior effects as excepted for one check.
     ExceptPriorEffects(BTreeSet<Effect>),
     /// Stand in for a user confirmation on one check.
@@ -120,7 +150,6 @@ impl DeltaCoordinate {
     fn rank(&self) -> u8 {
         match self {
             Self::RaiseLabel(_) => 0,
-            Self::AcquireEffects(_) => 1,
             Self::ExceptPriorEffects(_) => 2,
             Self::StandInConfirmation => 3,
             Self::ReleaseControl(_) => 4,
@@ -133,7 +162,6 @@ impl fmt::Display for DeltaCoordinate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::RaiseLabel(raise) => write!(f, "raise {raise}"),
-            Self::AcquireEffects(effects) => write!(f, "acquire {effects}"),
             Self::ExceptPriorEffects(effects) => write!(f, "except {} prior effect(s)", effects.len()),
             Self::StandInConfirmation => write!(f, "confirmation"),
             Self::ReleaseControl(deps) => write!(f, "release {} control dep(s)", deps.len()),
@@ -186,9 +214,6 @@ pub enum AuthorizationScope {
     /// Durable: mint an authorized derived value carrying `source`'s bytes
     /// under the raised label; the immutable source is never relabeled.
     DerivedValue { source: ValueId },
-    /// One pending action (an acquired surface growth lives with the action
-    /// until it commits at release).
-    PendingAction { action: ActionId },
     /// One policy check of one flow: check-transient, stored nowhere.
     PolicyCheck { flow: FlowId },
 }
@@ -197,7 +222,6 @@ impl fmt::Display for AuthorizationScope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DerivedValue { source } => write!(f, "derived value of {source}"),
-            Self::PendingAction { action } => write!(f, "{action}"),
             Self::PolicyCheck { flow } => write!(f, "one check of {flow}"),
         }
     }
@@ -217,8 +241,7 @@ pub struct Authorization {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MalformedAuthorization {
     /// The coordinate's kind cannot apply at the requested scope: a durable
-    /// raise lives at [`AuthorizationScope::DerivedValue`], a surface
-    /// acquisition at [`AuthorizationScope::PendingAction`], and the
+    /// raise lives at [`AuthorizationScope::DerivedValue`], and the
     /// check-transient lifts at [`AuthorizationScope::PolicyCheck`].
     #[error("{coordinate} does not apply at {scope}")]
     CoordinateOutsideScope {
@@ -246,10 +269,6 @@ impl Authorization {
                 (coordinate, &scope),
                 (DeltaCoordinate::RaiseLabel(_), AuthorizationScope::DerivedValue { .. })
                     | (
-                        DeltaCoordinate::AcquireEffects(_),
-                        AuthorizationScope::PendingAction { .. }
-                    )
-                    | (
                         DeltaCoordinate::ExceptPriorEffects(_)
                             | DeltaCoordinate::StandInConfirmation
                             | DeltaCoordinate::ReleaseControl(_)
@@ -265,7 +284,6 @@ impl Authorization {
             }
             let noop = match coordinate {
                 DeltaCoordinate::RaiseLabel(raise) => raise.is_empty(),
-                DeltaCoordinate::AcquireEffects(effects) => effects == &Effects::none(),
                 DeltaCoordinate::ExceptPriorEffects(effects) => effects.is_empty(),
                 DeltaCoordinate::ReleaseControl(deps) => deps.is_empty(),
                 DeltaCoordinate::StandInConfirmation | DeltaCoordinate::AcknowledgeUnknown(_) => false,
@@ -312,9 +330,9 @@ mod tests {
         AuthorizationScope::PolicyCheck { flow: FlowId::new(0) }
     }
 
-    /// One coordinate per kind: application rules on at most one raise,
-    /// acquisition, or lift of each kind, so a duplicated kind is refused
-    /// rather than silently dropped.
+    /// One coordinate per kind: application rules on at most one raise or
+    /// lift of each kind, so a duplicated kind is refused rather than
+    /// silently dropped.
     #[test]
     fn construction_refuses_duplicate_coordinate_kinds() {
         let release_a = DeltaCoordinate::ReleaseControl(std::collections::BTreeSet::from([ValueId::new(0)]));
@@ -341,26 +359,15 @@ mod tests {
             trust: Some(KnownTrust::Trusted),
             audience: None,
         });
-        let acquire = DeltaCoordinate::AcquireEffects(Effects::declared([Effect::Egress]));
         let lift = DeltaCoordinate::StandInConfirmation;
         let derived = AuthorizationScope::DerivedValue {
             source: ValueId::new(0),
         };
-        let action = AuthorizationScope::PendingAction {
-            action: ActionId::new(0),
-        };
 
         assert!(Authorization::new(AuthorizationDelta::single(raise.clone()), derived.clone()).is_ok());
-        assert!(Authorization::new(AuthorizationDelta::single(acquire.clone()), action.clone()).is_ok());
         assert!(Authorization::new(AuthorizationDelta::single(lift.clone()), check_scope()).is_ok());
 
-        for (coordinate, wrong_scope) in [
-            (raise.clone(), check_scope()),
-            (raise.clone(), action),
-            (acquire.clone(), derived.clone()),
-            (acquire, check_scope()),
-            (lift, derived),
-        ] {
+        for (coordinate, wrong_scope) in [(raise.clone(), check_scope()), (lift, derived.clone())] {
             assert!(matches!(
                 Authorization::new(AuthorizationDelta::single(coordinate), wrong_scope),
                 Err(MalformedAuthorization::CoordinateOutsideScope { .. })
@@ -373,15 +380,12 @@ mod tests {
                 trust: Some(KnownTrust::Trusted),
                 audience: None,
             }),
-            DeltaCoordinate::AcquireEffects(Effects::declared([Effect::Egress])),
+            DeltaCoordinate::StandInConfirmation,
         ])
         .expect("two coordinates");
         for scope in [
             AuthorizationScope::DerivedValue {
                 source: ValueId::new(0),
-            },
-            AuthorizationScope::PendingAction {
-                action: ActionId::new(0),
             },
             check_scope(),
         ] {
@@ -401,12 +405,6 @@ mod tests {
                 DeltaCoordinate::RaiseLabel(LabelRaise::default()),
                 AuthorizationScope::DerivedValue {
                     source: ValueId::new(0),
-                },
-            ),
-            (
-                DeltaCoordinate::AcquireEffects(Effects::none()),
-                AuthorizationScope::PendingAction {
-                    action: ActionId::new(0),
                 },
             ),
             (DeltaCoordinate::ExceptPriorEffects(BTreeSet::new()), check_scope()),
@@ -429,9 +427,8 @@ mod tests {
 }
 
 /// A typed reduction target: what a `Reduce` remedy changes, always through
-/// a registered relation (a transformer's declared output, an action
-/// transition's verified narrowing) — fewer arguments or changed bytes are
-/// not inherently safer.
+/// a registered relation (a transformer's declared output) — fewer
+/// arguments or changed bytes are not inherently safer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum ReductionTarget {
     /// Derive a new value in `source`'s argument slot through the registered
@@ -440,16 +437,12 @@ pub enum ReductionTarget {
         source: ValueId,
         transformer: TransformerRef,
     },
-    /// Replace the pending action through the registered tool-identity
-    /// transition, verified never wider.
-    NarrowAction { transition: TransformerRef },
 }
 
 impl fmt::Display for ReductionTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DeriveValue { source, transformer } => write!(f, "derive {source} via {transformer}"),
-            Self::NarrowAction { transition } => write!(f, "narrow action via {transition}"),
         }
     }
 }

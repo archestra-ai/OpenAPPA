@@ -54,9 +54,7 @@ impl fmt::Display for AuthorityName {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum TransitionFailure {
     /// The registered reduction relation does not hold for the current
-    /// state: a transformer's label predicate did not match its source, or
-    /// an action transition's structural narrowing gate refused (wrong
-    /// source tool, widened effects or recipients, missing target contract).
+    /// state: the transformer's label predicate did not match its source.
     ReductionRefused,
     /// The transformer implementation reported an error.
     TransformerError { message: String },
@@ -96,11 +94,6 @@ pub enum AuditEvent {
         declared_output: ValueLabel,
         outcome: TransitionOutcome,
     },
-    ActionConstrained {
-        transition: TransitionId,
-        action: ActionId,
-        outcome: TransitionOutcome,
-    },
     /// An authority granted and the engine applied a typed authorization —
     /// an exact delta at an exact scope. `derived` names the authorized
     /// derived value a durable grant minted (the raise is the authority's
@@ -128,13 +121,6 @@ pub enum AuditEvent {
     /// release stay: after dispatch starts, a timeout or crash cannot prove
     /// an effect did not happen.
     DispatchFailed { action: ActionId },
-    /// A plan step's application was refused (its precondition posture no
-    /// longer held). The remaining plan is discarded.
-    StepFailed {
-        plan: PlanId,
-        step: u64,
-        failure: TransitionFailure,
-    },
     /// A grant-bearing step (waiver, acknowledgment, accept, or endorse)
     /// reached an external authority: the ruling is pending re-entry.
     ApprovalRequested {
@@ -164,10 +150,6 @@ impl fmt::Display for AuditEvent {
                     write!(f, "transition of {source} by {transformer} applied")
                 }
             },
-            Self::ActionConstrained { action, outcome, .. } => match outcome {
-                TransitionOutcome::Applied => write!(f, "{action} constrained"),
-                TransitionOutcome::Failed(failure) => write!(f, "constraining {action} failed: {failure}"),
-            },
             Self::AuthorizationApplied {
                 authorization,
                 authority,
@@ -195,9 +177,6 @@ impl fmt::Display for AuditEvent {
             }
             Self::DispatchFailed { action } => {
                 write!(f, "{action} dispatch failed; committed effects stay")
-            }
-            Self::StepFailed { plan, step, failure } => {
-                write!(f, "{plan} step {step} refused: {failure}")
             }
             Self::ApprovalRequested { plan, authority, .. } => {
                 write!(f, "{plan}: approval requested from {authority}")

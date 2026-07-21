@@ -34,9 +34,9 @@ use std::collections::HashMap;
 use std::collections::BTreeSet;
 
 use appa_core::{
-    ArgumentName, ArgumentSchema, ArgumentTree, AttentionRule, Authority, DispatchReceipt, EmissionPursuit,
-    EmissionRequest, ExecutionToken, OpaqueValue, PolicyEngine, Pursuit, Requirements, ResponsePolicy, Speaker,
-    StallCause, ToolContract, ToolName, ToolRequest, Trajectory, UserId, ValueId, ValueLabel, Violation,
+    ArgumentName, ArgumentSchema, ArgumentTree, Authority, DispatchReceipt, EmissionPursuit, EmissionRequest,
+    ExecutionToken, OpaqueValue, PolicyEngine, Pursuit, Requirements, ResponsePolicy, Speaker, StallCause,
+    ToolContract, ToolName, ToolRequest, Trajectory, UserId, ValueId, ValueLabel, Violation,
 };
 
 use crate::error::DojoError;
@@ -388,10 +388,11 @@ impl AppaGateBuilder {
         self
     }
 
-    /// Build the gate. Rejects duplicate authorities and contracts, and any
-    /// contract requiring an explicit confirmation (no confirming-turn API this
-    /// slice). Contracts for tools with a recipient extractor have their argument
-    /// schema wired to the gate's recipient key.
+    /// Build the gate. Rejects duplicate authorities and contracts.
+    /// Contracts for tools with a recipient extractor have their argument
+    /// schema wired to the gate's recipient key. An explicit-confirmation
+    /// demand routes through registered `confirms`-competent authorities
+    /// like any other grant, and fails closed without one.
     pub fn build(self) -> Result<AppaGate, DojoError> {
         let mut engine = PolicyEngine::new();
         for authority in self.authorities {
@@ -400,22 +401,6 @@ impl AppaGateBuilder {
             })?;
         }
         for mut contract in self.contracts {
-            // `None` (unknown requirements) never declares an explicit
-            // confirmation demand — that is a distinct fail-closed gap the
-            // engine enforces itself (`RequirementsUnknown`), not this
-            // slice's "no confirming-turn API" restriction.
-            let wants_confirmation = contract
-                .requires
-                .as_ref()
-                .is_some_and(|requires| requires.attention == AttentionRule::ExplicitConfirmation);
-            if wants_confirmation {
-                return Err(DojoError::UnsupportedContract {
-                    detail: format!(
-                        "tool `{}` requires explicit confirmation, unsupported this slice",
-                        contract.name.as_str()
-                    ),
-                });
-            }
             let tool = contract.name.as_str().to_owned();
             if self.recipients.contains_key(&tool) {
                 contract.arguments = ArgumentSchema::with_recipients(ArgumentName::new(RECIPIENT_ARG));
@@ -513,11 +498,9 @@ mod tests {
         })
     }
 
-    /// Vouches in exactly the auditor and accepts the resulting first egress.
+    /// Vouches in exactly the auditor.
     fn auditor_mandate() -> AuthorityMandate {
-        AuthorityMandate::none()
-            .vouch_audience([UserId::new(AUDITOR)])
-            .acquire_effects()
+        AuthorityMandate::none().vouch_audience([UserId::new(AUDITOR)])
     }
 
     /// The final text is an emission flow: readable context emits; a gate
@@ -593,8 +576,8 @@ mod tests {
         gate.begin("email the report to the auditor");
         allow(&mut gate, "list_invoices", json!({}));
         gate.commit("<invoices>").unwrap();
-        // Crosses the audience boundary and is the first egress; the finance
-        // approver endorses the auditor in and accepts the egress.
+        // Crosses the audience boundary; the finance approver endorses the
+        // auditor in.
         allow(&mut gate, "send_email", json!({ "to": AUDITOR }));
     }
 

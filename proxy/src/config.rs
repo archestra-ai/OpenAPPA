@@ -108,7 +108,7 @@ mod tests {
             [[contracts.authority]]
             name = "human-in-the-loop"
             rule = "escalate"
-            acquire_effects = true
+            may_release_control = true
         "#;
         assert!(matches!(
             Policy::from_toml(text),
@@ -125,7 +125,7 @@ mod tests {
             [[contracts.authority]]
             name = "ops-approver"
             rule = "escalate"
-            acquire_effects = true
+            may_release_control = true
             webhook = { url = "http://ops-approver.kagent.svc/rule" }
             "#,
         )

@@ -44,22 +44,20 @@ pub struct Invoices {
 
 /// Approves any grant routed here. Competence is gated by the mandate below —
 /// the engine only routes a grant to this authority when its mandate covers it —
-/// so an unconditional approval vouches in exactly the external auditor (and
-/// accepts the send's first egress), and nothing else.
+/// so an unconditional approval vouches in exactly the external auditor, and
+/// nothing else.
 fn approve_auditor(_: &Authorization, _: &[Violation], _: &TrajectoryView<'_>) -> Option<Ruling> {
     Some(Ruling::Approve {
         reason: "approved sending financials to the external auditor".to_owned(),
     })
 }
 
-/// Vouches in exactly the external auditor (audience) and accepts the resulting
-/// first egress (`acquire_effects`); competent for nothing else.
+/// Vouches in exactly the external auditor (audience); competent for
+/// nothing else.
 fn finance_approver() -> Authority {
     Authority::inline(
         "finance-approver",
-        AuthorityMandate::none()
-            .vouch_audience([UserId::new(AUDITOR)])
-            .acquire_effects(),
+        AuthorityMandate::none().vouch_audience([UserId::new(AUDITOR)]),
         approve_auditor,
     )
 }

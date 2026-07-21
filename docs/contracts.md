@@ -81,7 +81,6 @@ declares:
 | `confirms`            | `true`                     | stand in for a user confirmation           |
 | `acknowledge_unknown` | `true`                     | clear an unprovable fact                   |
 | `may_release_control` | `true`                     | release a control dependency               |
-| `acquire_effects`     | `true`                     | admit proposed effect growth               |
 
 ### Webhook rulings
 

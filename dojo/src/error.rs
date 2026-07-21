@@ -26,11 +26,6 @@ pub enum DojoError {
     #[error("duplicate tool name: {0}")]
     DuplicateTool(String),
 
-    /// An OpenAPPA contract this slice cannot honour was supplied (e.g. one that
-    /// requires an explicit user confirmation, for which there is no turn API yet).
-    #[error("unsupported OpenAPPA contract: {detail}")]
-    UnsupportedContract { detail: String },
-
     /// Two OpenAPPA contracts were declared for the same tool.
     #[error("duplicate OpenAPPA contract for tool: {tool}")]
     DuplicateContract { tool: String },

@@ -501,8 +501,6 @@ struct AuthoritySpec {
     acknowledge_unknown: Option<bool>,
     #[serde(default)]
     may_release_control: Option<bool>,
-    #[serde(default)]
-    acquire_effects: Option<bool>,
     /// Where this escalate authority's rulings are served over HTTP; absent
     /// means the integration's own channel (elicitation, or blocked).
     #[serde(default)]
@@ -641,8 +639,7 @@ impl AuthoritySpec {
             || self.audience.is_some()
             || self.waive_prior_effects.is_some()
             || self.confirms.is_some()
-            || self.may_release_control.is_some()
-            || self.acquire_effects.is_some();
+            || self.may_release_control.is_some();
         if has_mandate_field {
             return Err(ContractsError::AllowAuthorityMandate(self.name));
         }
@@ -664,7 +661,6 @@ impl AuthoritySpec {
             confirms: self.confirms.unwrap_or(false),
             acknowledge_unknown: self.acknowledge_unknown.unwrap_or(false),
             may_release_control: self.may_release_control.unwrap_or(false),
-            acquire_effects: self.acquire_effects.unwrap_or(false),
         };
         if mandate == AuthorityMandate::none() {
             return Err(ContractsError::AuthorityImpotent(self.name));
@@ -930,7 +926,6 @@ mod tests {
             "waive_prior_effects = true",
             "confirms = false",
             "may_release_control = true",
-            "acquire_effects = true",
         ] {
             let text = format!("[[authority]]\nname = \"a\"\nrule = \"allow\"\nacknowledge_unknown = true\n{field}");
             assert!(
@@ -966,7 +961,6 @@ mod tests {
             confirms = true
             acknowledge_unknown = true
             may_release_control = true
-            acquire_effects = true
             "#,
         )
         .unwrap();
@@ -983,22 +977,30 @@ mod tests {
         assert!(authority.mandate.confirms);
         assert!(authority.mandate.acknowledge_unknown);
         assert!(authority.mandate.may_release_control);
-        assert!(authority.mandate.acquire_effects);
+    }
+
+    /// The retired `acquire_effects` mandate field is a loud unknown-field
+    /// parse error on stale policies, never a semantic ignore.
+    #[test]
+    fn stale_acquire_effects_field_is_a_parse_error() {
+        assert!(matches!(
+            Contracts::from_toml("[[authority]]\nname = \"h\"\nrule = \"escalate\"\nacquire_effects = true"),
+            Err(ContractsError::Parse(_))
+        ));
     }
 
     #[test]
     fn escalate_authority_with_partial_mandate_leaves_rest_unset() {
-        let c =
-            Contracts::from_toml("[[authority]]\nname = \"h\"\nrule = \"escalate\"\nacquire_effects = true").unwrap();
+        let c = Contracts::from_toml("[[authority]]\nname = \"h\"\nrule = \"escalate\"\nmay_release_control = true")
+            .unwrap();
         let authority = &c.authorities[0];
         assert!(matches!(authority.mode, AuthorityMode::External));
-        assert!(authority.mandate.acquire_effects);
+        assert!(authority.mandate.may_release_control);
         assert_eq!(authority.mandate.trust, None);
         assert_eq!(authority.mandate.audience, None);
         assert!(!authority.mandate.waive_prior_effects);
         assert!(!authority.mandate.confirms);
         assert!(!authority.mandate.acknowledge_unknown);
-        assert!(!authority.mandate.may_release_control);
     }
 
     #[test]
@@ -1012,7 +1014,7 @@ mod tests {
         // distinct competence.
         let all_false = "[[authority]]\nname = \"h\"\nrule = \"escalate\"\n\
                          waive_prior_effects = false\nconfirms = false\nacknowledge_unknown = false\n\
-                         may_release_control = false\nacquire_effects = false";
+                         may_release_control = false";
         assert!(matches!(
             Contracts::from_toml(all_false),
             Err(ContractsError::AuthorityImpotent(_))
@@ -1056,7 +1058,7 @@ mod tests {
             [[authority]]
             name = "compliance"
             rule = "escalate"
-            acquire_effects = true
+            may_release_control = true
             webhook = { url = "https://approvals.example.com/rule" }
 
             [[authority]]
@@ -1079,8 +1081,8 @@ mod tests {
 
     #[test]
     fn escalate_without_webhook_declares_no_endpoint() {
-        let c =
-            Contracts::from_toml("[[authority]]\nname = \"h\"\nrule = \"escalate\"\nacquire_effects = true").unwrap();
+        let c = Contracts::from_toml("[[authority]]\nname = \"h\"\nrule = \"escalate\"\nmay_release_control = true")
+            .unwrap();
         assert_eq!(c.authorities.len(), 1);
         assert!(c.endpoints.is_empty());
     }
@@ -1099,7 +1101,7 @@ mod tests {
     fn webhook_rejects_malformed_and_non_http_urls() {
         for url in ["not a url", "ftp://x.example/rule", "unix:/run/sock", "https://"] {
             let text = format!(
-                "[[authority]]\nname = \"h\"\nrule = \"escalate\"\nacquire_effects = true\n\
+                "[[authority]]\nname = \"h\"\nrule = \"escalate\"\nmay_release_control = true\n\
                  webhook = {{ url = \"{url}\" }}"
             );
             assert!(
@@ -1116,7 +1118,7 @@ mod tests {
     fn webhook_rejects_out_of_range_timeouts() {
         for timeout in ["0", "300001"] {
             let text = format!(
-                "[[authority]]\nname = \"h\"\nrule = \"escalate\"\nacquire_effects = true\n\
+                "[[authority]]\nname = \"h\"\nrule = \"escalate\"\nmay_release_control = true\n\
                  webhook = {{ url = \"https://x.example/rule\", timeout_ms = {timeout} }}"
             );
             assert!(
@@ -1131,7 +1133,7 @@ mod tests {
 
     #[test]
     fn webhook_rejects_unknown_fields() {
-        let text = "[[authority]]\nname = \"h\"\nrule = \"escalate\"\nacquire_effects = true\n\
+        let text = "[[authority]]\nname = \"h\"\nrule = \"escalate\"\nmay_release_control = true\n\
                     webhook = { url = \"https://x.example\", retries = 3 }";
         assert!(matches!(Contracts::from_toml(text), Err(ContractsError::Parse(_))));
     }

@@ -40,7 +40,7 @@ impl World {
                 .expect("benchmark tool names are unique");
         }
 
-        let (trajectory, values) = random_trajectory(&mut rng, turn_count, &users, &tool_names);
+        let (trajectory, values) = random_trajectory(&mut rng, turn_count, &users);
         let requests = (0..REQUEST_COUNT)
             .map(|_| random_request(&mut rng, &tool_names, &values))
             .collect();
@@ -70,21 +70,12 @@ fn random_contract(rng: &mut TinyRng, name: ToolName, users: &[UserId]) -> ToolC
 
 /// Build a trajectory of `turn_count` ingressed values and return the ids so
 /// requests can reference them.
-fn random_trajectory(
-    rng: &mut TinyRng,
-    turn_count: usize,
-    users: &[UserId],
-    tool_names: &[ToolName],
-) -> (Trajectory, Vec<ValueId>) {
+fn random_trajectory(rng: &mut TinyRng, turn_count: usize, users: &[UserId]) -> (Trajectory, Vec<ValueId>) {
     let mut trajectory = Trajectory::new();
     let mut values = Vec::with_capacity(turn_count);
     for turn_index in 0..turn_count {
-        let speaker = match rng.below(8) {
-            0 => Speaker::confirming(random_user(rng, users), random_tool(rng, tool_names)),
-            _ => Speaker::user(random_user(rng, users)),
-        };
         values.push(trajectory.ingress(
-            speaker,
+            Speaker::user(random_user(rng, users)),
             random_label(rng, users),
             OpaqueValue::new(format!("turn-{turn_index}")),
         ));

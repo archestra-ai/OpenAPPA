@@ -492,13 +492,17 @@ impl Session {
                 Ok(FlowOutcome::AllowedNow(FlowPermit::Emit(_))) => {
                     unreachable!("a tool flow never settles to an emission permit")
                 }
-                Ok(FlowOutcome::Remediable { .. }) => {
+                Ok(FlowOutcome::Blocked {
+                    terminal: Some(reason),
+                    violations,
+                    ..
+                }) => {
+                    return Settled::Blocked(Verdict::Terminal { violations, reason });
+                }
+                Ok(FlowOutcome::Blocked { .. }) => {
                     pursuit = self
                         .engine
                         .pursue(&mut self.trajectory, request.clone(), MAX_REMEDY_STEPS);
-                }
-                Ok(FlowOutcome::Terminal { violations, reason }) => {
-                    return Settled::Blocked(Verdict::Terminal { violations, reason });
                 }
                 Err(refused) => {
                     return Settled::Blocked(Verdict::Stalled {
@@ -515,9 +519,8 @@ impl Session {
     ///
     /// The engine records every grant as one `AuthorizationApplied`; its
     /// scope says which kind it was: a durable raise on a derived value is an
-    /// endorsement, a grant against the pending action acquired its effect
-    /// surface, and a check-scoped lift waived or acknowledged the facts of
-    /// this one check. An applied `ValueTransition` is the other remedy
+    /// endorsement, and a check-scoped lift waived or acknowledged the facts
+    /// of this one check. An applied `ValueTransition` is the other remedy
     /// kind: a value derived by a registered transformer — admitted under
     /// the transition it declared, never "verified as clean".
     fn remedy_trail(&self, audit_from: usize) -> Option<String> {
@@ -533,9 +536,6 @@ impl Session {
                     let authority = authority.as_str();
                     parts.push(match authorization.scope() {
                         AuthorizationScope::DerivedValue { .. } => format!("endorsed by '{authority}'"),
-                        AuthorizationScope::PendingAction { .. } => {
-                            format!("accepted by '{authority}': {}", describe(resolved))
-                        }
                         AuthorizationScope::PolicyCheck { .. } => {
                             format!("acknowledged by '{authority}': {}", describe(resolved))
                         }
@@ -1252,7 +1252,6 @@ mod tests {
         name = "effects-officer"
         rule = "escalate"
         may_release_control = true
-        acquire_effects = true
     "#;
 
     #[tokio::test]

@@ -29,6 +29,11 @@ name = "subject"
 
 [[tool.arg]]
 name = "body"
+
+[[tool]]
+name = "db_drop"
+description = "Drop the database."
+result = "Database dropped."
 "#;
 
 const SCENARIO_POLICY: &str = r#"
@@ -37,7 +42,6 @@ name = "human-in-the-loop"
 rule = "escalate"
 audience = ["alice@archestra.ai", "bob@archestra.ai", "alex@finance-audit.com"]
 may_release_control = true
-acquire_effects = true
 confirms = true
 acknowledge_unknown = true
 
@@ -50,6 +54,11 @@ output = { audience = ["alice@archestra.ai", "bob@archestra.ai"], trust = "trust
 name = "send_email"
 requires = { audience = "$.args.to" }
 output = { audience = "public", trust = "trusted", effects = ["egress"] }
+
+[[tool]]
+name = "db_drop"
+requires = { attention = "explicit_confirmation" }
+output = { audience = "public", trust = "trusted", effects = ["mutation"] }
 "#;
 
 fn session() -> Session {
@@ -238,7 +247,6 @@ audience = ["alice@archestra.ai", "bob@archestra.ai", "alex@finance-audit.com"]
 name = "effects-officer"
 rule = "escalate"
 may_release_control = true
-acquire_effects = true
 
 [[tool]]
 name = "invoices_list"
@@ -393,7 +401,7 @@ requires = { audience = "$.args.too" }
     ));
     // A webhook-declared authority would be silently ignored — the gateway's
     // approval channel is human elicitation, so the config fails loudly.
-    let webhook_policy = "[[authority]]\nname = \"remote\"\nrule = \"escalate\"\nacquire_effects = true\n\
+    let webhook_policy = "[[authority]]\nname = \"remote\"\nrule = \"escalate\"\nmay_release_control = true\n\
                           webhook = { url = \"https://approvals.example/rule\" }";
     assert!(matches!(
         GatewayConfig::from_toml("", webhook_policy),
@@ -559,4 +567,37 @@ fn respond_blocks_a_leak_and_delivers_nothing() {
         matches!(outcome, Outcome::ResponseBlocked { .. }),
         "expected a blocked response, got {outcome:?}"
     );
+}
+
+/// An explicit-confirmation demand routes to the confirms-competent human:
+/// approval admits exactly one dispatch, and a repeat is a fresh soft block
+/// demanding a fresh ruling.
+#[tokio::test]
+async fn attention_demand_is_confirmed_through_elicitation_once() {
+    let mut session = session();
+    let Outcome::SoftBlocked { .. } = session.call_tool("db_drop", &args(&[])) else {
+        panic!("expected the confirmation demand to soft-block");
+    };
+    let Outcome::Granted { result, .. } = session.escalate("operator confirms", |_| async { Some(true) }).await else {
+        panic!("expected the confirmation to grant");
+    };
+    assert_eq!(result, "Database dropped.");
+    // The ruling covered that one dispatch: a repeat demands a fresh one.
+    match session.call_tool("db_drop", &args(&[])) {
+        Outcome::SoftBlocked { .. } => {}
+        other => panic!("expected a fresh soft block, got {other:?}"),
+    }
+}
+
+/// A declined confirmation fails closed.
+#[tokio::test]
+async fn attention_demand_denied_stays_blocked() {
+    let mut session = session();
+    let Outcome::SoftBlocked { .. } = session.call_tool("db_drop", &args(&[])) else {
+        panic!("expected the confirmation demand to soft-block");
+    };
+    match session.escalate("operator declines", |_| async { Some(false) }).await {
+        Outcome::Denied { .. } => {}
+        other => panic!("expected the denial to report Denied, got {other:?}"),
+    }
 }

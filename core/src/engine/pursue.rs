@@ -178,8 +178,17 @@ impl PolicyEngine {
         loop {
             let (violations, plans) = match outcome {
                 FlowOutcome::AllowedNow(permit) => return Driven::Allowed(permit),
-                FlowOutcome::Terminal { violations, reason } => return Driven::Terminal { violations, reason },
-                FlowOutcome::Remediable { violations, plans } => (violations, plans),
+                FlowOutcome::Blocked {
+                    violations,
+                    plans,
+                    terminal,
+                } => match terminal {
+                    // A proven terminal settles before the bound is even
+                    // consulted: exhausting zero budget cannot demote a
+                    // proof into a stall.
+                    Some(reason) => return Driven::Terminal { violations, reason },
+                    None => (violations, plans),
+                },
             };
             if steps >= max_steps {
                 debug!(steps, "pursuit stalled: step bound exhausted");
@@ -190,7 +199,7 @@ impl PolicyEngine {
                 };
             }
             steps += 1;
-            let plan = plans.first().id;
+            let plan = plans.first().expect("a non-terminal block carries plans").id;
             let capability = match self.mint_step(trajectory, plan, 0) {
                 Ok(capability) => capability,
                 Err(refused) => {

@@ -1,9 +1,8 @@
 //! Read this quarter's invoices from the internal system (readable only by the
 //! finance team), then e-mail the report to an *external auditor* who is **not**
-//! a reader of that data. The send crosses the audience boundary and is the
-//! first egress this turn — so OpenAPPA routes it to a mandated sign-off that
-//! *declassifies* it (endorses the auditor in) and *accepts* the egress, leaving
-//! an audit record, rather than letting it out silently.
+//! a reader of that data. The send crosses the audience boundary, so OpenAPPA
+//! routes it to a mandated sign-off that *declassifies* it (endorses the
+//! auditor in), leaving an audit record, rather than letting it out silently.
 //!
 //! Contrast with `recording_to_task`, where the boundary crossing (to the whole
 //! public) is *refused*: same `AudienceExceeds` breach, opposite ruling —
@@ -28,7 +27,7 @@ fn u(id: &str) -> UserId {
 
 /// Approves any grant routed here. Competence is gated by the mandate, so an
 /// unconditional approval vouches in exactly `AUDITOR` and accepts the send's
-/// first egress — and is not competent to wave data to anyone else.
+/// and is not competent to wave data to anyone else.
 fn approve_auditor(_: &Authorization, _: &[Violation], _: &TrajectoryView<'_>) -> Option<Ruling> {
     Some(Ruling::Approve {
         reason: "approved sending financials to the external auditor".to_owned(),
@@ -38,7 +37,7 @@ fn approve_auditor(_: &Authorization, _: &[Violation], _: &TrajectoryView<'_>) -
 fn finance_approver() -> Authority {
     Authority::inline(
         "finance-approver",
-        AuthorityMandate::none().vouch_audience([u(AUDITOR)]).acquire_effects(),
+        AuthorityMandate::none().vouch_audience([u(AUDITOR)]),
         approve_auditor,
     )
 }
@@ -82,7 +81,7 @@ fn main() {
         trajectory.value(report).unwrap().label()
     );
 
-    // E-mail the report to the auditor: an audience breach and the first egress,
+    // E-mail the report to the auditor: an audience breach,
     // both cleared by the mandated finance approver as `pursue` walks the plan.
     let send = email(&mut trajectory, report, AUDITOR);
     print!("  email → {AUDITOR}: ");
@@ -92,7 +91,7 @@ fn main() {
             trajectory
                 .record_output(receipt, OpaqueValue::new("message-id: 1"))
                 .unwrap();
-            println!("PERMITTED (finance approver endorsed the auditor and accepted the egress)");
+            println!("PERMITTED (finance approver endorsed the auditor)");
         }
         Pursuit::Terminal { reason, .. } => println!("BLOCKED — {reason}"),
         other => println!("BLOCKED — {other:?}"),

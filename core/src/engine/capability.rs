@@ -8,7 +8,7 @@ use crate::approval::PendingApproval;
 use crate::audit::AuthorityName;
 use crate::contract::{AudienceRule, Requirements, Violation};
 use crate::dimension::{Effect, Effects};
-use crate::plan::{NonEmptyVec, RemedyPlan};
+use crate::plan::RemedyPlan;
 use crate::request::{ArgumentName, ArgumentSchema};
 use crate::revision::{ActionId, PlanId, Revision, ValueId};
 use crate::turn::TrajectoryId;
@@ -328,7 +328,7 @@ impl fmt::Display for BlockReason {
 }
 
 /// An invalid, stale, foreign, or conflicting proposal, refused before any
-/// policy judgment — outside the tri-state, touching no state (no revision
+/// policy judgment — outside the flow outcome, touching no state (no revision
 /// advance, no event, no cleared slot). Distinct from a [`BlockReason`]:
 /// a refusal says "this request does not describe the trajectory's current
 /// state", not "policy forbids this flow".
@@ -360,27 +360,54 @@ pub enum FlowRefusal {
 pub enum FlowOutcome<P> {
     /// The checked flow satisfies policy now.
     AllowedNow(P),
-    /// Blocked, with at least one predicted remedy plan that can unlock it.
-    /// A plan is a prediction, never a permit.
-    Remediable {
+    /// Blocked, carrying the exact failed predicates and the frontier of
+    /// predicted remedy plans (predictions, never permits). An **empty**
+    /// frontier is a *proof* of unremediability over the registered
+    /// capability space — `terminal` then names the settled disposition and
+    /// the pending slot was cleared; a non-empty frontier keeps the slot
+    /// for re-entry and `terminal` is `None`. The correlation is an
+    /// engine-construction invariant: every block is built by the
+    /// remediable/terminal helpers, never assembled field-by-field.
+    Blocked {
         violations: Vec<Violation>,
-        plans: NonEmptyVec<RemedyPlan>,
-    },
-    /// Blocked, and no available remedy can unlock it under the current
-    /// policy and registered capabilities.
-    Terminal {
-        violations: Vec<Violation>,
-        reason: BlockReason,
+        plans: Vec<RemedyPlan>,
+        terminal: Option<BlockReason>,
     },
 }
 
 impl<P> FlowOutcome<P> {
+    /// A block with a non-empty plan frontier (the pending slot stays).
+    pub(crate) fn remediable(violations: Vec<Violation>, plans: Vec<RemedyPlan>) -> Self {
+        debug_assert!(!plans.is_empty(), "a remediable block carries at least one plan");
+        Self::Blocked {
+            violations,
+            plans,
+            terminal: None,
+        }
+    }
+
+    /// A proven no-remedy block (the caller has cleared the pending slot).
+    pub(crate) fn terminal(violations: Vec<Violation>, reason: BlockReason) -> Self {
+        Self::Blocked {
+            violations,
+            plans: Vec::new(),
+            terminal: Some(reason),
+        }
+    }
+
     /// Map the permit payload, preserving the policy outcome.
     pub(crate) fn map_allowed<Q>(self, f: impl FnOnce(P) -> Q) -> FlowOutcome<Q> {
         match self {
             Self::AllowedNow(permit) => FlowOutcome::AllowedNow(f(permit)),
-            Self::Remediable { violations, plans } => FlowOutcome::Remediable { violations, plans },
-            Self::Terminal { violations, reason } => FlowOutcome::Terminal { violations, reason },
+            Self::Blocked {
+                violations,
+                plans,
+                terminal,
+            } => FlowOutcome::Blocked {
+                violations,
+                plans,
+                terminal,
+            },
         }
     }
 }

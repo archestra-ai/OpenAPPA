@@ -8,9 +8,8 @@
 //! and control sets are **all prior tool outputs** — the model saw every
 //! result, so the conservative fold is the honest one — and the request's
 //! control set is that same context. Consequently an out-of-audience send is
-//! both argument-borne (endorse) and control-borne (release), plus a
-//! first-egress surface growth (accept): several grants, one human ruling per
-//! authority (see [`Session::escalate`]).
+//! both argument-borne (endorse) and control-borne (release): several
+//! grants, one human ruling per authority (see [`Session::escalate`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -202,12 +201,20 @@ impl Session {
                 }
             }
             Ok(FlowOutcome::AllowedNow(token)) => self.dispatch(sim, token),
-            Ok(FlowOutcome::Remediable { violations, .. }) => Outcome::SoftBlocked {
+            Ok(FlowOutcome::Blocked {
+                violations,
+                terminal: None,
+                ..
+            }) => Outcome::SoftBlocked {
                 tool: sim.name.clone(),
                 violations,
                 recipients,
             },
-            Ok(FlowOutcome::Terminal { violations, reason }) => {
+            Ok(FlowOutcome::Blocked {
+                violations,
+                terminal: Some(reason),
+                ..
+            }) => {
                 self.pending_wire = None;
                 Outcome::TerminalBlocked {
                     tool: sim.name.clone(),
@@ -305,8 +312,12 @@ impl Session {
                 Ok(FlowOutcome::AllowedNow(FlowPermit::Emit(_))) => {
                     unreachable!("a tool flow's approval settles in an execution permit")
                 }
-                Ok(FlowOutcome::Remediable { .. }) => continue,
-                Ok(FlowOutcome::Terminal { violations, reason }) => {
+                Ok(FlowOutcome::Blocked { terminal: None, .. }) => continue,
+                Ok(FlowOutcome::Blocked {
+                    violations,
+                    terminal: Some(reason),
+                    ..
+                }) => {
                     return self.denied_or_terminal(&tool, violations, reason);
                 }
                 Err(refused) => {

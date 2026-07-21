@@ -1,5 +1,5 @@
 //! Label dimensions: the crate's three built-in instances of the generic
-//! [`crate::preset`] algebras, plus their value types.
+//! `preset` algebras, plus their value types.
 //!
 //! Each dimension is a newtype over its preset and delegates its `combine` (the
 //! taint fold) and adequacy relation to it; [`crate::value::ValueLabel::combine`]
@@ -10,18 +10,18 @@
 //! and `Unknown` has a definite position in each (absorbing for audience and
 //! effects; between `Trusted` and `Suspicious` for trust). This is the taint
 //! fold — distinct from the sink-side adequacy relation, where `Unknown` is
-//! instead incomparable → [`Adequacy::Unprovable`](crate::preset).
+//! instead incomparable → `Adequacy::Unprovable` (see `preset`).
 //!
-//! Each dimension also carries a **widening relation** (`widening_over`), the
-//! dual of adequacy: whether one element exposes strictly more than a
-//! baseline — more readers, a higher trust assertion, a grown effect surface
-//! — with the excess as the witness. The general no-widening law is that a
-//! derived state is never wider than its causal input fold unless an
-//! authority explicitly authorized the widening. Trust and audience enforce
-//! it at admission by construction (the conservative fold absorbs any wider
-//! declared output — see `value.rs`); effects are not a value dimension, so
-//! their instance binds at the flow check as the surface-growth criterion,
-//! cleared only by an `AcquireEffects` authorization.
+//! Trust and audience also carry a **widening relation** (`widening_over`),
+//! the dual of adequacy: whether one element exposes strictly more than a
+//! baseline — more readers, a higher trust assertion — with the excess as
+//! the witness. The no-widening law is that a derived state is never wider
+//! than its causal input fold unless an authority explicitly authorized the
+//! widening; both dimensions enforce it at admission by construction (the
+//! conservative fold absorbs any wider declared output — see `value.rs`).
+//! Effects are trajectory state, recorded at release and consulted by
+//! history requirements (`forbid_prior_effects`) — applied, never checked
+//! for growth.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -52,7 +52,7 @@ impl fmt::Display for UserId {
 }
 
 /// Who is allowed to read a piece of data — an instance of
-/// [`MeetSet<UserId>`](crate::preset::MeetSet).
+/// `MeetSet<UserId>` (see `preset`).
 ///
 /// The fold is the most-restrictive combine (the confidentiality meet):
 /// readers of a combination are those allowed to read *every* part. The
@@ -190,7 +190,7 @@ impl fmt::Display for KnownTrust {
 }
 
 /// How much the provenance of data is trusted — if that is known at all. An
-/// instance of [`MinLevel<KnownTrust>`](crate::preset::MinLevel).
+/// instance of `MinLevel<KnownTrust>` (see `preset`).
 ///
 /// `Unknown` is structurally separate from the known judgements so nothing
 /// can treat it as "probably fine" by accident: requirements are expressed
@@ -281,7 +281,7 @@ impl fmt::Display for Effect {
 }
 
 /// Effects that have already happened in a context — an instance of
-/// [`JoinSet<Effect>`](crate::preset::JoinSet).
+/// `JoinSet<Effect>` (see `preset`).
 ///
 /// Union fold; [`none`](Effects::none) (`Has(∅)`) is the identity, and
 /// [`UNKNOWN`](Effects::UNKNOWN) (an unannotated tool ran, so anything may have
@@ -314,16 +314,6 @@ impl Effects {
         self.0.avoids(forbidden)
     }
 
-    /// The declared effect set, or `None` for `Unknown`. Used by the
-    /// structural narrowing relation, which must distinguish "provably these
-    /// effects" from "anything may happen".
-    pub(crate) fn declared_set(&self) -> Option<BTreeSet<Effect>> {
-        match &self.0 {
-            JoinSet::Has(set) => Some(set.clone()),
-            JoinSet::Unknown => None,
-        }
-    }
-
     /// Waiver application (check-transient): waive `waived` from the present
     /// effects. `Unknown` stays `Unknown` — one cannot attest a negative over
     /// it, which is why unprovable effects are acknowledge-only.
@@ -331,29 +321,6 @@ impl Effects {
         match &self.0 {
             JoinSet::Has(present) => Self(JoinSet::Has(present.difference(waived).copied().collect())),
             JoinSet::Unknown => Self(JoinSet::Unknown),
-        }
-    }
-
-    /// Widening relation (dual of adequacy) — the effects instance of the
-    /// general no-widening law, where it binds at the *flow check* (effects
-    /// are trajectory state, not a value dimension, so admission cannot
-    /// enforce it): the effects `self` (a call's proposed effects) would
-    /// *add* to the already-committed `past` surface. `None` when the flow is
-    /// downhill on effects (`past.combine(self) == past`), else
-    /// `Some(growth)` — the minimal effects whose commit equals committing
-    /// `self`. Growth to `Unknown` (an unannotated tool over a knowable past)
-    /// is a real, representable growth, distinct from any declared set.
-    pub(crate) fn widening_over(&self, past: &Effects) -> Option<Effects> {
-        if past.clone().combine(self.clone()) == *past {
-            return None;
-        }
-        match (past.declared_set(), self.declared_set()) {
-            (Some(committed), Some(proposed)) => Some(Self::declared(proposed.difference(&committed).copied())),
-            // An `Unknown` proposal over a knowable past grows the surface to
-            // `Unknown`; a declared proposal over an `Unknown` past is absorbed
-            // above (that branch returns `None`).
-            (_, None) => Some(Self::UNKNOWN),
-            (None, Some(_)) => Some(self.clone()),
         }
     }
 }
@@ -543,15 +510,6 @@ mod tests {
         assert_eq!(a.widening_over(&Audience::PUBLIC), None);
         assert_eq!(Audience::UNKNOWN.widening_over(&a), None);
         assert_eq!(a.widening_over(&Audience::UNKNOWN), Some(a.clone()));
-
-        // Effects: the growth is the witness — the flow-check instance.
-        let egress = Effects::declared([Effect::Egress]);
-        assert_eq!(Effects::none().widening_over(&egress), None);
-        assert_eq!(
-            Effects::declared([Effect::Egress, Effect::Mutation]).widening_over(&egress),
-            Some(Effects::declared([Effect::Mutation]))
-        );
-        assert_eq!(Effects::UNKNOWN.widening_over(&egress), Some(Effects::UNKNOWN));
     }
 
     #[test]

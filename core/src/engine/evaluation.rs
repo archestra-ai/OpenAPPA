@@ -2,7 +2,6 @@ use tracing::debug;
 
 use crate::contract::{Fixability, Violation};
 use crate::dimension::Effects;
-use crate::plan::NonEmptyVec;
 use crate::request::{EmissionRequest, ToolRequest};
 use crate::revision::ActionId;
 use crate::turn::Trajectory;
@@ -19,7 +18,7 @@ impl PolicyEngine {
     /// action, and decision-time audit appends control-plane events.
     /// Re-evaluating the same original request is idempotent re-entry — it
     /// reuses the stored pending action. An invalid, stale, or conflicting
-    /// proposal is a [`FlowRefusal`], outside the policy tri-state and
+    /// proposal is a [`FlowRefusal`], outside the policy outcome and
     /// touching nothing: a *different* proposal while one is pending, a
     /// released action's re-entry (dispatch in flight), or a reference to a
     /// value this trajectory never admitted.
@@ -66,9 +65,7 @@ impl PolicyEngine {
         // One source of truth for what the flow reports: the same `SimFlow`
         // the planner predicts with and `apply_step` validates against.
         // Construction happens only after the pending-slot gate above, so a
-        // pending action feeding it is always this very request's re-entry
-        // (its proposed/accepted effects reflect any constrain narrowing or
-        // prior Accept).
+        // pending action feeding it is always this very request's re-entry.
         let contract = self.contracts.get(&checked_request.tool);
         let sim = match SimFlow::of(trajectory, &checked_request, contract) {
             Ok(sim) => sim,
@@ -81,7 +78,15 @@ impl PolicyEngine {
         let intrinsic = contract
             .map(|c| c.output_label.clone())
             .unwrap_or_else(ValueLabel::unknown);
-        let proposed_effects = sim.proposed_effects.clone();
+        // The pending action's proposed effects are the single source of
+        // truth for what release commits; a fresh proposal takes the
+        // contract's declaration (Unknown without a contract).
+        let proposed_effects = match trajectory.pending_action() {
+            Some(pending) => pending.proposed_effects().clone(),
+            None => contract
+                .map(|c| c.effects.clone())
+                .unwrap_or(crate::dimension::Effects::UNKNOWN),
+        };
         let violations = sim.violations(None);
 
         if violations.is_empty() {
@@ -123,15 +128,13 @@ impl PolicyEngine {
         // empty return is a proven no-remedy claim over the registered
         // capability space (the rescue sweep is exhaustive on failure).
         let drafts = self.plan_frontier(trajectory, &checked_request, contract, pending);
-        match NonEmptyVec::from_vec(trajectory.store_plans(flow, Some(action), self.id, drafts)) {
-            Some(plans) => {
-                debug!(count = plans.len(), "blocked (remediable)");
-                Ok(FlowOutcome::Remediable { violations, plans })
-            }
-            None => {
-                debug!("blocked (no remedy)");
-                Ok(self.terminal(trajectory, violations, BlockReason::NoRemedy))
-            }
+        let plans = trajectory.store_plans(flow, Some(action), self.id, drafts);
+        if plans.is_empty() {
+            debug!("blocked (no remedy)");
+            Ok(self.terminal(trajectory, violations, BlockReason::NoRemedy))
+        } else {
+            debug!(count = plans.len(), "blocked (remediable)");
+            Ok(FlowOutcome::remediable(violations, plans))
         }
     }
 
@@ -213,15 +216,13 @@ impl PolicyEngine {
             None => trajectory.set_pending_emission(request),
         };
         let drafts = self.emission_plan_frontier(trajectory, &checked, flow);
-        match NonEmptyVec::from_vec(trajectory.store_plans(flow, None, self.id, drafts)) {
-            Some(plans) => {
-                debug!(count = plans.len(), "emission blocked (remediable)");
-                Ok(FlowOutcome::Remediable { violations, plans })
-            }
-            None => {
-                debug!("emission blocked (no remedy)");
-                Ok(self.terminal_emission(trajectory, violations, BlockReason::NoRemedy))
-            }
+        let plans = trajectory.store_plans(flow, None, self.id, drafts);
+        if plans.is_empty() {
+            debug!("emission blocked (no remedy)");
+            Ok(self.terminal_emission(trajectory, violations, BlockReason::NoRemedy))
+        } else {
+            debug!(count = plans.len(), "emission blocked (remediable)");
+            Ok(FlowOutcome::remediable(violations, plans))
         }
     }
 
@@ -262,7 +263,7 @@ impl PolicyEngine {
         reason: BlockReason,
     ) -> FlowOutcome<P> {
         trajectory.clear_pending();
-        FlowOutcome::Terminal { violations, reason }
+        FlowOutcome::terminal(violations, reason)
     }
 
     /// A terminal emission block clears the pending emission slot — and only
@@ -274,6 +275,6 @@ impl PolicyEngine {
         reason: BlockReason,
     ) -> FlowOutcome<P> {
         trajectory.clear_pending_emission();
-        FlowOutcome::Terminal { violations, reason }
+        FlowOutcome::terminal(violations, reason)
     }
 }
