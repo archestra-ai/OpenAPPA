@@ -17,86 +17,68 @@ guardrails: prompt-injection classifiers, regex filters, and output hygiene.
 These judge \emph{content}, so they are bypassed by paraphrase, offer no
 guarantees against non-adversarial agent errors, and treat prompt injection as an
 isolated bug rather than a symptom of mixed-confidentiality processing. At the
-other pole, hard restriction: allowlists, human approval on every call,
+other pole, hard restriction: allowlists, human approval on every call, and
 no-tools-after-untrusted-read policies. These judge \emph{structure} but do so
 statically and coarsely, taxing every benign action and destroying agent
 utility.
 
-Agent information-flow control (IFC) supplies a third point. CaMeL separates
+Agent information-flow control (IFC) offers a third approach. CaMeL separates
 control and data flow~\cite{camel2025}; Fides propagates confidentiality and
-integrity labels through messages, actions, arguments, and results, then
-checks consequential calls against deterministic policies~\cite{fides}. Fides
-also identifies the utility problem central to this paper: letting a
-restrictive result enter planner context can disable useful later calls. It
-responds by selectively storing such results in labeled variables and
-revealing constrained derivatives through a quarantined LLM. \appa{} builds
-directly on this premise. It does not claim deterministic IFC enforcement or
-selective hiding as new; it asks whether a restrictive read can be explored
-without tainting the long-lived planner trajectory at all.
+integrity labels through messages, actions, arguments, and results, checking
+consequential calls against deterministic policies~\cite{fides}. Fides
+also identifies the utility problem central to this paper: allowing a
+restrictive result to enter planner context can permanently disable useful subsequent
+calls. Fides addresses this by selectively storing such results in labeled variables
+and revealing constrained derivatives through a quarantined LLM. \appa{} builds
+directly on this premise. Rather than claiming deterministic IFC enforcement or
+selective variable hiding as novelties, \appa{} asks whether a restrictive read
+can be explored without tainting the long-lived planner trajectory at all.
 
-The fixed point first. \appa{}'s entire run state is two monoids. A
-\textbf{label}---audience (a reader set) $\times$ trust (a rank in a finite
-chain)---travels with the data and is \emph{checked}; tool contracts declare
-label \emph{actions} (restrictive reads intersect and take minima---in v1 the
-only action kind: rulings cover gaps check-transiently and never act on the
-label), and the trajectory label is the composition of the actions of the
-calls that actually dispatched. An append-only \textbf{event log} travels with
-the run and is \emph{recorded, never approved}: world events (egress,
-mutation) appended at dispatch, and governance events (rulings and the
-dispatches that consume them, boundaries, sanitizer applications, casts).
-Every policy decision is a label comparison or a log predicate, or a declared
-per-call attention demand; anything imperative---approval, sanitization, ACL
-resolution---lives in registered components outside the engine. With no
-permissive action the fold is a bag of meets---commutative, monotone,
-settling; the non-commutative algebra (a restricted read \emph{after} a
-granted widening re-narrowing the state and evicting the added readers) moves
-wholesale into the epoch-wide-raise extension---expressible, deliberately not
-taken (\S\ref{sec:limitations}).
+Formally, \appa{} maintains execution state using two core abstractions.
+First, a \textbf{label}---defined as an audience (a reader set) $\times$ trust (a rank
+in a finite chain)---accompanies data and is verified at policy checks. Tool contracts
+declare label \emph{actions} (restrictive reads intersect reader sets and take minimum
+trust levels), and the overall trajectory label is the composition of actions from all
+dispatched calls. Second, an append-only \textbf{event log} records execution history
+without requiring separate approval. The log captures world events (such as external egress
+or state mutations) upon dispatch, as well as governance events (rulings, boundary markers,
+sanitizer invocations, and label casts). Every policy decision reduces to a label comparison,
+a log predicate, or a declared per-call attention requirement; imperative logic---such as approval
+workflows, sanitizers, and ACL resolution---resides in registered external components.
+Because label actions only restrict access, label updates are monotone and commutative,
+ensuring predictable, deterministic state aggregation.
 
-The central construction is \textbf{branching as taint prevention}. Classical
-IFC prices release: reads are free, and the taint bill arrives at the sink.
-\appa{} instead intercepts a prospective descent before the read and can fork
-a child trajectory. The child inherits the parent's label---a fresh public
-slate would be a laundering primitive---and only the child receives the
-restrictive result. It can inspect that result and invoke further tools under
-its descended label, while the parent remains exactly at its pre-fork label.
-At exit, the branch is abandoned or returns one explicitly labeled value. A
-raw return carries its restriction into the parent by meet; preserving the
-parent therefore requires a predeclared sanitizer or a quarantine-exit
-attestation that bounds the derivative. \appa{} never removes taint from an
-already exposed trajectory. It prevents the exposure and confines any
-resulting descent to a disposable child.
+The central mechanism of \appa{} is \textbf{branching as taint prevention}. In classical
+IFC, read operations incur no immediate restriction, and enforcement occurs when sensitive
+data reaches an external sink. \appa{} instead intercepts a prospective label descent prior to
+the read operation and can fork a child trajectory. The child inherits the parent's label to
+prevent policy evasion, and only the child receives the restrictive result. The child can inspect
+the result and execute further tool calls under its descended label, while the parent trajectory
+remains unaffected at its pre-fork label. At exit, the branch is either abandoned or returns a single
+explicitly labeled value. Returning raw data propagates restrictions back to the parent via label
+intersection; preserving the parent's broader access therefore requires a registered sanitizer or a
+quarantine-exit attestation that bounds the derivative value. \appa{} never removes taint from an
+already exposed trajectory; instead, it prevents exposure by confining restrictive descents to disposable
+child branches.
 
-This construction turns acquisition itself into a policy event. \appa{} orders
-label states by restrictiveness and soft-blocks any call whose prospective
-state strictly descends. The resulting plans make the choice explicit: accept
-the narrowing in the current trajectory, fork and confine it, apply a
-registered sanitizer, or decline the read. Because raise-free steps only
-descend and every remedy is statically declared, the remedy space is finite
-and enumerable from the registry. An empty set is therefore a proof that no
-registered release-side remedy exists rather than a search timeout.
-(Acquisition blocks are not empty: accepting the descent is always available
-and branching is available in confining deployments.)
+This design transforms data acquisition into an explicit policy event. \appa{} orders label states
+by restrictiveness and soft-blocks any tool call whose prospective state strictly descends in permission.
+The resulting execution options present clear choices: accept the label narrowing in the current
+trajectory, fork and confine the observation within a child branch, apply a registered sanitizer, or
+decline the read. Because non-elevating steps only descend in permission and all remedies are statically
+registered, the candidate plan space is finite and fully enumerable. Consequently, an empty candidate plan
+set serves as a formal proof that no registered remedy exists for a given action, rather than an incomplete
+search result.
 
-Two rules keep branches from becoming laundering or history-erasure
-primitives. First, fork copies the parent's current label and merge absorbs
-the returned value by intersection/minimum, so a child cannot widen its parent
-by returning mislabeled raw data. Second, all branches append world events to
-one shared log in real time: an egress that happened in a child happened in
-the world, even if the child is later abandoned. These are the two senses in
-which branching prevents trajectory taint without pretending the branch never
-existed.
+Two structural rules ensure that branching preserves security guarantees and execution integrity. First, a child trajectory inherits its parent's label at fork time and any merged result updates the parent label via set intersection and minimum trust rank, preventing unvalidated data elevation. Second, all branches append real-world side-effects (such as external egress) to a single, globally shared event log in real time; even if a child branch is later abandoned, its real-world side-effects remain recorded. Thus, branching isolates trajectory taint without concealing executed actions.
 
-Atomic, call-scoped judgment supports the construction where discretionary
-release is necessary. The engine renders a pending call (tool plus resolved
-arguments and provenance, never the agent's paraphrase), puts that exact
-call to an authority, and on approval dispatches it in the same
-indivisible step. Approval and dispatch coincide, so no grant object exists to
-steal, replay, or misbind; the ruling covers one dispatch while the label
-stays put. Together with remedy-set soundness---every offered plan is
-individually sound, so which plan a possibly tainted agent selects is
-security-irrelevant---this gives the branch exit an agentic
-robust-declassification discipline~\cite{zdancewic2001robust}.
+Atomic, call-scoped judgment supports this architecture when discretionary release is required.
+The engine renders the pending tool call with its fully resolved arguments and provenance (rather than
+relying on agent paraphrases), submits the exact call to an authorizing policy component, and dispatches
+it in a single indivisible step upon approval. Because approval and dispatch coincide, no reusable grant
+tokens are created, preventing replay or misbinding attacks. Combined with the soundness of the candidate
+plan set---where every proposed plan is individually safe regardless of which option a potentially untrusted
+agent selects---this yields a robust declassification discipline for agentic workflows~\cite{zdancewic2001robust}.
 
 Contributions, in order of importance:
 \begin{enumerate}
