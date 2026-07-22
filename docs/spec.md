@@ -267,7 +267,7 @@ top, not a bigger policy engine.)
 A contract declares one contribution per piece of state — `delta` for the
 label, `emits` for the log — plus `requires` and routing-only `tags`:
 
-- **`delta`** — the label action. Checked *before* it is applied: the state
+- **`delta`** — the label action. Checked *before* it is applied: the label
   the call would commit must pass, so a delta can be blocked, remedied, or
   require a ruling.
 - **`emits`** — the effects a successful call appends, an unordered
@@ -348,9 +348,9 @@ simply declares its recipients.
 **2. Narrowing.** Do not touch more secrets than the task really
 needs. Every contribution moves the label down or leaves it in place — on
 both axes, no exceptions: v1 has no permissive deltas, and rulings cover
-gaps without touching the label. A call whose committed state would
+gaps without touching the label. A call whose committed label would
 strictly narrow is deliberately soft-blocked; a repeat that leaves the
-state unchanged is not. The point: committing to restricted data
+label unchanged is not. The point: committing to restricted data
 voluntarily shrinks the **release frontier** — what the agent may still
 release, and to whom, without a further ruling. APPA makes that a
 conscious, remediable choice *before* the data is fetched, instead of a
@@ -377,11 +377,11 @@ ones a deliberate, remediable choice.
 The central thesis: **down is free, up needs authority** — and APPA asks the
 agent to choose between preserving its release frontier and entering a
 restricted context *before* fetching the data. The soft block shifts the
-reasoning left. Spelled out: a requirement that fails because the state is
+reasoning left. Spelled out: a requirement that fails because the label is
 too *low* — an unmet `includes`, an unmet trust floor — is cured only by
 a ruling covering the gap; no sequence of unruled steps can ever cure
 it, because unruled steps only narrow. A requirement that fails because the
-state is too *high* — a cap with outsiders in the context — is
+label is too *high* — a cap with outsiders in the context — is
 cured by narrowing: free, modulo the agent's acceptance. ("Free" means no
 security power is exercised — not frictionless.)
 
@@ -389,12 +389,12 @@ security power is exercised — not frictionless.)
 
 Ordered checks, each with its clock:
 
-- **The narrowing check** runs first, on the state the dispatch would
+- **The narrowing check** runs first, on the label the dispatch would
   *commit* — the current label with the call's own `delta` applied. A
   strict narrowing is soft-blocked (see The check), and
   dispatch waits for the agent's acceptance of exactly that narrowing.
-- **Label requirements** then evaluate on the current state — which, with
-  an accepted narrowing in force, *is* the state the dispatch commits. The
+- **Label requirements** then evaluate on the current label — which, with
+  an accepted narrowing in force, *is* the label the dispatch commits. The
   order is load-bearing: checked before the narrowing, a call could outrun
   its own consequences. The attack: `search_and_share` with
   `requires = { audience = { includes = ["public"] } }` and
@@ -467,12 +467,12 @@ Two facts about the list:
   mandates that cover them; for a narrowing soft block, the acceptance
   plan — always available, from no registry entry at all, because it
   grants nothing (so a narrowing block is never terminal; the
-  empty-list proof concerns requirement gaps). For a gap the state is too
+  empty-list proof concerns requirement gaps). For a gap the label is too
   *low* for — an unmet floor, an unmet `includes` — nothing outside
   that enumeration can ever cure it, because unruled steps only narrow;
   the history and attention cures — a `k`-emitting tool, a waiving or
   attending mandate — are registry entries by definition. (A cap gap —
-  the state too *high* — is the one species cured by narrowing itself,
+  the label too *high* — is the one species cured by narrowing itself,
   free modulo acceptance; see The check.) The
   agent provably should not spend turns on an unliftable restriction.
 
@@ -554,7 +554,7 @@ the currency it acts on:
 - a **cover up to a ceiling** — admitting a dispatch over an unmet trust
   floor (endorsing up to a rank — e.g. a human reviewed the fetched page
   and ruled the content safe) or over an unmet `includes` (vouching
-  readers, up to a declared set). The label does not move; the ceiling
+  readers, up to a declared reader set). The label does not move; the ceiling
   bounds the gap one ruling may cover;
 - a **named waiver** — covering a failed `no_prior` for the admitted
   dispatch only, naming the event kinds it may waive;
@@ -1007,7 +1007,7 @@ xor resolver-implemented**.
   `mutation`): appended to the log when the call succeeds, read back by
   history requirements.
 - **Requires** — a contract's conditions: label requirements (checked
-  against the state the call would commit), history requirements
+  against the label the call would commit), history requirements
   (checked against the log as it stands), and attention demands (per-call,
   never satisfied by history).
 - **Requirement gap** — an unmet entry of a contract's `requires` — a
