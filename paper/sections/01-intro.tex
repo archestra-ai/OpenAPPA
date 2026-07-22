@@ -12,15 +12,15 @@ In all these cases, exposing a capable agent to private data, external sinks,
 and unvetted content turns read access into a vector for exfiltration and policy
 breaches.
 
-Many deployed defenses cluster at two poles. At one pole, imperative
-guardrails: prompt-injection classifiers, regex filters, and output hygiene.
-These judge \emph{content}, so they are bypassed by paraphrase, offer no
+Existing defenses generally fall into two main paradigms. On one hand, imperative
+guardrails---such as prompt-injection classifiers, regex filters, and output hygiene rules---judge
+\emph{content}. Consequently, they are easily bypassed by paraphrasing, offer no
 guarantees against non-adversarial agent errors, and treat prompt injection as an
-isolated bug rather than a symptom of mixed-confidentiality processing. At the
-other pole, hard restriction: allowlists, human approval on every call, and
-no-tools-after-untrusted-read policies. These judge \emph{structure} but do so
-statically and coarsely, taxing every benign action and destroying agent
-utility.
+isolated bug rather than a symptom of mixed-confidentiality processing. On the
+other hand, static structural restrictions---such as allowlists, mandatory human approval,
+and policies disabling tool use after reading untrusted data---judge \emph{structure}.
+However, they do so statically and coarsely, taxing every benign action and destroying
+agent utility.
 
 Agent information-flow control (IFC) offers a third approach. CaMeL separates
 control and data flow~\cite{camel2025}; Fides propagates confidentiality and
