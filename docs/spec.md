@@ -959,7 +959,7 @@ The engine is two layers. The **inner layer is the pure decision core** —
 `check(state, transition) → verdict`, `apply(state, transition) → state'`,
 no IO, no clock: semantically a function of the full event log, so every
 decision is replayable from the log alone. In practice the wire contract
-passes the log's cached views — the label state, the seen-effect-kinds set,
+passes the log's cached views — the label, the seen-effect-kinds set,
 pending-plan records, boundary positions — rather than the raw log; sound
 because every view is recomputable by replay. The **outer layer owns
 state**: durable append with pluggable destinations (a local file for a
