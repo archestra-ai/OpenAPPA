@@ -17,10 +17,10 @@ Every v1 step is a meet. Because both carriers are finite, label state descends 
 This is label stabilization, not run termination: identity deltas may repeat forever. Proof in Appendix~\ref{app:proofs}.
 
 \paragraph{Branch state.}
-Labels are trajectory-local, whereas the event log is run-wide. A \texttt{fork(p)} creates a child with $L_c := L_p$ and a predeclared exit contract; subsequent child transitions fold only into $L_c$. Parent and child nevertheless append to the same serialized event log. Before an explicit \texttt{submit\_result(v)} merge, the parent receives neither child context nor value bytes.
+Labels are trajectory-local, whereas the event log is run-wide. A \texttt{fork(p)} creates a child with $L_c := L_p$ and a predeclared exit contract; subsequent child calls fold only into $L_c$. Parent and child nevertheless append to the same serialized event log. Before an explicit \texttt{submit\_result(v)} merge, the parent receives neither child context nor value bytes.
 
 \begin{proposition}[Parent preservation]\label{prop:preservation}
-For every child trace beginning at a fork, $L_c \le L_p^{\mathrm{fork}}$, and every child transition leaves the parent's label unchanged. Abandonment therefore preserves the parent exactly. A merge computes $L_p' = L_p \meet \lab(v)$, so it cannot widen the parent and preserves it exactly iff $L_p \le \lab(v)$.
+For every child trace beginning at a fork, $L_c \le L_p^{\mathrm{fork}}$, and every child call leaves the parent's label unchanged. Abandonment therefore preserves the parent exactly. A merge computes $L_p' = L_p \meet \lab(v)$, so it cannot widen the parent and preserves it exactly iff $L_p \le \lab(v)$.
 \end{proposition}
 \begin{definition}[Taint-preventing branch]
 A branch is taint-preventing when it is abandoned or exits under the adequacy relation $L_p \le \lab(v)$.

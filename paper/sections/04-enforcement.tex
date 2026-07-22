@@ -11,7 +11,7 @@ In a confining deployment, the preferred remedy is to fork before dispatch and r
 The release frontier is a theorem about the system, not the checked object. Release-side requirements monotone in $s$ imply that descent can only shrink the ruling-free satisfiable set. By contrast, $\subseteq$ source bounds are antimonotone---descent can enable them---which is why they lie outside the frontier account.
 
 \paragraph{Sign rule.}
-Deltas never raise, the only sign invariant needed in v1. A call such as \texttt{search\_and\_share} may simultaneously have a restrictive delta and a release-side requirement gap. The agent must accept or fork the narrowing, while a ruling separately covers the gap. A tool whose action grants access, such as \texttt{share\_doc(doc, outsider)}, is modeled as fetch composed with grant-access so that each transition remains simple to rule upon.
+Deltas never raise, the only sign invariant needed in v1. A call such as \texttt{search\_and\_share} may simultaneously have a restrictive delta and a release-side requirement gap. The agent must accept or fork the narrowing, while a ruling separately covers the gap. A tool whose action grants access, such as \texttt{share\_doc(doc, outsider)}, is modeled as fetch composed with grant-access so that each call remains simple to rule upon.
 
 \paragraph{Two clocks.}
 Label requirements are checked against the prospective state $\fold(L,\texttt{delta(call)})$ that dispatch would commit. Otherwise, \texttt{search\_and\_share} with \texttt{requires: audience=public} and \texttt{delta: audience=internal} could pass on current state even though its own dispatch commits the internal bytes it shares. History predicates instead inspect the log as-is, by construction a pre-state: a call's \texttt{emits} cannot satisfy its own precondition.
@@ -31,4 +31,4 @@ The proposition is vacuous in v1, where no widening exists to evict. Proof in Ap
 \paragraph{Remedy-plan delivery.}
 Plans are executable objects identified behind one stable, run-start agent tool, \texttt{execute\_remedy\_plan(plan\_id)}; injecting tools mid-conversation would break prompt caches. The identifier and dispatch, and any ruling carried by the plan, are logged. Demanded but otherwise nonfailed predicates use the same block shape: an unmet attention demand is the failed predicate, and its remedy is an atomic ruling from an attending authority.
 
-\fixme{Open question---the shape of a \texttt{prior(k)} plan: plan execution spans two transitions (the event-minting call and then the original call); per-transition checking inside one plan execution remains unresolved.}
+\fixme{Open question---the shape of a \texttt{prior(k)} plan: plan execution spans two calls (the event-minting call and then the original call); per-call checking inside one plan execution remains unresolved.}
