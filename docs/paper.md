@@ -30,7 +30,7 @@ rephrasing — or hard restriction, which destroys the agent's utility. We
 present APPA, a declarative information-flow policy engine for agentic
 workloads whose entire run state is two monoids: a *label* (audience × trust)
 acted on by tool-declared deltas, and an append-only *event log*. Tool
-contracts declare a label action, emitted world events, and requirements;
+contracts declare a label action, emitted effects, and requirements;
 every proposed call is checked by label arithmetic, log predicates, and
 declared per-call attention demands — never content.
 Two design moves distinguish APPA from classical IFC transplants. First,
@@ -77,8 +77,8 @@ the data and is *checked*; tool contracts declare label *actions*
 rulings cover gaps check-transiently and never act on the label), and the
 trajectory label is the composition of the
 actions of the calls that actually dispatched. An append-only **event log**
-travels with the run and is *recorded, never approved*: world events
-(egress, mutation) appended at dispatch, and governance events (rulings and
+travels with the run and is *recorded, never approved*: effects
+(egress, mutation) appended on success, and governance events (rulings and
 the dispatches that consume them, boundaries, sanitizer applications,
 casts). Every policy decision is a label comparison or a log
 predicate, or a declared per-call attention demand; anything imperative —
@@ -213,33 +213,34 @@ Contributions:
   termination — identity deltas may repeat forever.) [Trivial; powers
   §4's completeness claim, so state it.]
 - **The log monoid.** Free monoid on events under concatenation; appended,
-  never checked. World events at dispatch — one append point, deliberately
-  off any pre/post axis; fail-closed for `no_prior` (attempt-on-record even
-  if the call fails); a positive `prior(k)` proves dispatch, not
-  outer-world success (outcome-sensitive events future work, consistent
-  with outer-system outages being out of scope). Governance events: rulings
+  never checked. Effects append on success — one append point, deliberately
+  off any pre/post axis; a call that dispatched but failed appends nothing
+  (a failed send may still have reached an inbox — accepted for
+  simplicity, with the invoke/append crash gap, §9); a positive `prior(k)`
+  proves the tool reported success, nothing more about the outer
+  world. Governance events: rulings
   and the dispatches that consume them, boundaries (turn end / fork /
   merge — punctuation, not decisions), the agent's descent acceptances,
   sanitizer applications, casts.
   Consulted exactly three ways: history predicates, ruling validity, audit.
-  Views (e.g. seen-event-kinds) are monoid homomorphisms, cached; the
+  Views (e.g. seen-effect-kinds) are monoid homomorphisms, cached; the
   "effects dimension" of earlier designs is precisely such a projection,
   demoted from the label — an effect is about what the run *did*, not what
   the data *is*. Folding events into the label is possible as notation (a
   product of monoids is a monoid) and destructive as semantics: per-value
   vs per-run merge, predicate polarity, and consumability would all
   re-emerge as special cases inside the "unified" object.
-- **World events as the sanctioned pressure-release valve**: bespoke gating
-  rituals encode as event vocabulary plus a resolver-implemented authority (a
+- **Effects as the sanctioned pressure-release valve**: bespoke gating
+  rituals encode as effect vocabulary plus a resolver-implemented authority (a
   `finance.spend` magnitude summed as a log view deciding auto-approve vs
-  page-a-human) — a named event in an auditable log, not a distortion of
+  page-a-human) — a named effect in an auditable log, not a distortion of
   the label algebra; ordered magnitudes in the checked algebra deliberately
   out of scope.
 - **Contracts.** One contribution per monoid — `delta` (checked before
   applied) + `emits` (applied, never checked) — plus `requires`: label
   requirements (floor, cover `⊇ recipients`, source bound `⊆ C` /
   `strict`), history predicates (`no_prior` persistent-negative,
-  waivable; `prior` persistent-positive, remedy = make the event happen),
+  waivable; `prior` persistent-positive, remedy = make the effect happen),
   and **attention demands** — named per-call marks, never satisfied by
   history (durable-vs-per-call is precisely the effects/attention split);
   met only by a ruling from an attending authority inside atomic plan
@@ -261,8 +262,9 @@ Contributions:
   only via suspicious/unknown content; authorities/sanitizers/casts — with
   the dynamic resolvers implementing them — plus
   config are the trusted base; serialized durable log assumed
-  (crash-atomicity and branch concurrency are enforcement-layer
-  obligations; history predicates sound per-line under concurrency); covert
+  (append serialization across branches is an enforcement-layer
+  obligation; a history check is only as sound as the log it has seen, and
+  the invoke/append crash gap is accepted, not defended — §9); covert
   channels from a malicious model out of scope.
 
 ## 4. Enforcement: the two checks (bullets)
@@ -294,8 +296,9 @@ Contributions:
   modeled as a composite so each transition stays simple to rule on.
 - **Two clocks.** Label requirements on the prospective state
   `fold(L, delta(call))` — the state the dispatch would commit. The attack
-  otherwise: `search_and_share` with `requires: {audience: public}`,
-  `delta: {audience: internal}` — passes on the current state while the
+  otherwise: `search_and_share` with
+  `requires = { audience = { includes = ["public"] } }`,
+  `delta = { audience = { exactly = ["internal"] } }` — passes on the current state while the
   bytes it shares *are* the internal data its own dispatch commits. History
   predicates on the log as-is (= pre-state by construction; a call's emits
   can't trigger its own precondition). ⊆-bounds default prospective (the
@@ -328,18 +331,21 @@ Contributions:
   intersection removes every reader not in the new content's own reader
   set; survivors are entitled by construction; evicted readers receive no
   post-read content. Vacuous in v1 — no widening ever exists to evict.
-- **Remedy-plan delivery**: plans are executable objects with ids behind
-  one stable agent-facing tool (`execute_remedy_plan(plan_id)`, present
-  from run start — mid-conversation tool injection breaks prompt caches);
-  the id, the dispatch, and — for ruling-carrying plans — the ruling all
-  land in the log.
+- **Remedy-plan delivery**: plans are executable objects with ids; every
+  engine-side plan runs behind one stable agent-facing tool
+  (`execute_remedy_plan(plan_id)`, present from run start —
+  mid-conversation tool injection breaks prompt caches); on execution the
+  id, the dispatch, and — for ruling-carrying plans — the ruling all land
+  in the log. A `prior(k)` plan carries no engine-side step (below).
 - Resolved: demanded-but-not-failed predicates (an attention demand on an
   otherwise-passing call) surface through the same block shape — the unmet
   demand is the failed predicate; the remedy plan is the atomic ruling by
   an attending authority.
-- FixMe: open question — the shape of a `prior(k)` plan: plan execution
-  spans two transitions (the event-minting call, then the original one);
-  per-transition checking inside one plan execution is unresolved.
+- Resolved: the shape of a `prior(k)` plan — no engine-side step: the plan
+  names a registered tool whose `emits` include `k`, and the agent
+  dispatches that tool as an ordinary, separately-checked call before
+  re-proposing the original — two transitions, each under its own check,
+  nothing atomic between them.
 
 ## 5. Atomic rulings and robust declassification (bullets)
 
@@ -368,7 +374,7 @@ Contributions:
   consumable resource, now spent in the same breath it is minted.]
 - **Call-scoped release is the only ruling**: it covers one dispatch and
   the fold does not change — the release is recorded in the log (ruling +
-  world event) while the label keeps describing what the data *is*. This is
+  effect) while the label keeps describing what the data *is*. This is
   the branch-confined construction promoted to the semantics: the
   trajectory never holds a widened state at all. The **epoch-wide raise**
   (a ruling-carried permissive delta persisting until the next narrowing
@@ -429,9 +435,9 @@ Contributions:
   a declared target ceiling.
 - Sudo metaphor, honest sense: one command, one elevation, nothing ambient
   afterwards.
-- FixMe: open question — response-sink mechanics: what contract governs the
-  assistant's reply and how it enters the check pipeline; only the
-  no-self-approval bar is specified.
+- Resolved: response-sink mechanics beyond the bar above — the contract
+  governing the assistant's reply and its entry into the check pipeline —
+  are explicitly out of scope for this version.
 - FixMe: the precise formal statement of robust declassification under
   call-scoped release — the sink relation becomes "holds, or covered by a
   mandated ruling," so the label is a truthful description of the data, not
@@ -487,9 +493,11 @@ Contributions:
   stand — honest prefix, no undo promised); actor never holds steps ⇒
   cannot cherry-pick. Non-confining deployments cannot compile composites —
   documented trade.
-- FixMe: open question — cross-line `no_prior` under the shared log: a
-  child's egress fails a parent's `no_prior(egress)`; intended conservatism,
-  or needs line scoping (cf. the parked line-scoped `prior(k)`, §9).
+- Resolved: cross-line `no_prior` under the shared log is deliberately
+  global — a child's egress fails a parent's `no_prior(egress)`; effects
+  are facts about the world, not about a line. Line scoping (the
+  once-parked line-scoped `prior(k)`) is rejected (§9 states the accepted
+  edge).
 
 ## 7. Implementation (bullets)
 
@@ -497,24 +505,25 @@ Contributions:
   verdict`, `apply(state, transition) → state'`, no IO, no clock;
   semantically a function of the full event log, every decision replayable
   from the log alone; the wire passes homomorphic views (fold state,
-  seen-event-kinds, pending-plan records, boundary positions), sound
+  seen-effect-kinds, pending-plan records, boundary positions), sound
   because every view is itself a fold. **Outer: owns state** — durable
   append with pluggable destinations (local file / database), serialization,
-  the dispatch-atomicity obligations of the threat model. Harness authors
+  the durability obligations of the threat model. Harness authors
   implement neither.
 - Type-invariant-first: transition invariants enforced via the type system;
   external labels and authority decisions are trusted inputs. Design
   guideline (not a model claim): the checker free of ad-hoc conditionals —
   label arithmetic and log predicates only; imperative logic in registered
   externals.
-- FixMe: config surface deliberately undecided; constraints any surface must
-  keep: mandates only — no grant objects anywhere; the **no-empty-mandate
-  rule** (an authority whose mandate covers nothing is a loud load error — the
-  empty-`remedy_plans` proof depends on it); block messages surface the
-  applicable remedy plans, naming eligible authorities where a plan
-  carries a ruling; explicit set relations on every audience
-  mention (includes / exactly / may-add); scope routed by tags only; casts
-  constant XOR resolver-implemented.
+- Config surface: a TOML dialect is drafted in the spec — still a draft,
+  but every spec example is written in it. Constraints any shipped surface
+  must keep: mandates only — no grant objects anywhere; the
+  **no-empty-mandate rule** (an authority whose mandate covers nothing is
+  a loud load error — the empty-`remedy_plans` proof depends on it); block
+  messages surface the applicable remedy plans, naming eligible
+  authorities where a plan carries a ruling; explicit set relations on
+  every audience mention (includes / exactly / may-add); scope routed by
+  tags only; casts constant XOR resolver-implemented.
 - [TODO: LoC, dependency count — smallness as auditable-TCB argument.]
 
 ## 8. Evaluation (stubs — all TODO)
@@ -532,7 +541,7 @@ Contributions:
 - Non-goals stated: no content-level detection benchmark (we do not inspect
   content); latency microbenchmarks optional.
 - FixMe: the implemented engine trails this model in places. Closed by the
-  spec alignment: binary outcomes, world events as log state with an open
+  spec alignment: binary outcomes, effects as log state with an open
   declared vocabulary (`no_prior`, named per-dispatch waivers). Still
   predecessor-shaped: value-granular per-flow labels rather than the
   per-run label, check timing on the current rather than committed state,
@@ -548,17 +557,19 @@ Contributions:
 - Approval fatigue: the real attack surface of any HITL scheme; adoption
   concern, out of scope — the algebra is only as good as the authorities
   and contracts registered into it.
-- FixMe: **dispatch atomicity — one open ruling**: the crash gap between invoking
-  a tool and appending its events. (a) durable outbox — invocation + events
-  commit as one durable record before the invoke; storage-layer clause,
-  invisible to contract authors, log stays *true* (recommendation on
-  record); vs (b) polarity-split events (`attempted`/`done`; negatives gate
-  on attempted, positives on done) — fail-closed both ways but
-  reintroduces the pre/post axis into every contract and leaves permanent
-  conservative lies in the log.
-- FixMe (parked): outcome-sensitive completion events; line-scoped
-  `prior(k)` (a steered quarantined child can mint a parent-gate event with
-  a real, harmless dispatch).
+- **Dispatch atomicity — resolved**: effects append when the tool call
+  succeeds; the invoke/append crash gap and the
+  failed-call-may-still-have-egressed window are accepted for simplicity
+  in this version. The durable outbox (invocation + effects committed as
+  one durable record before the invoke; storage-layer clause, invisible to
+  contract authors) remains the hardening path; polarity-split
+  `attempted`/`done` events are rejected — they would reintroduce the
+  pre/post axis into every contract.
+- FixMe (parked): outcome-sensitive completion events (an effect proves
+  the tool reported success, nothing further about the outer world).
+  Global history's accepted edge, stated honestly: a steered quarantined
+  child can satisfy a parent's `prior(k)` gate with a real, harmless
+  dispatch — line-scoped `prior(k)` was considered and rejected (§6).
 - **Epoch-wide raise (expressible, not taken)**: the ruling-carried
   persistent widening, evicted by the next narrowing. The extension is
   algebraically coherent and comes as one package — the permissive
