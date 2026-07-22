@@ -89,9 +89,9 @@ flowchart LR
 The mediation loop, on each round-trip: the run's turns accumulate into the
 trajectory; every tool call the model proposes is checked before dispatch; an
 allowed call runs and, on success, its declared contributions land (label
-delta and effects); a blocked call never runs — the model receives the exact
-failed predicates and the available remedy plans instead, and can execute an
-engine-side plan by id (see The check).
+delta and effects); a blocked call never runs — the model receives exactly what
+failed — requirement gaps or a narrowing — and the available remedy plans
+instead, and can execute an engine-side plan by id (see The check).
 
 ## What APPA protects against
 
@@ -194,7 +194,7 @@ the reader set from either side:
 A contract's `delta` describes what a successful call does to the
 trajectory label — and every delta is *restrictive*: intersect the
 audience, take the minimum trust. There is no permissive delta. A ruling
-covers a requirements gap for one dispatch while the label stays put (see
+covers a requirement gap for one dispatch while the label stays put (see
 Rulings), so the label only ever moves down, and settles — no oscillation,
 and no replay needed to compute it: the whole history collapses to a
 running intersection and minimum.
@@ -240,7 +240,7 @@ state.
 The typical pattern — a convention, not a rule: integrity via trust floors
 on mutating tools, confidentiality via audience covers on publishing tools;
 any contract may combine any requirements. History requirements gate a
-dispatch like any other predicate — the log is not advisory — but on a
+dispatch like any other requirement — the log is not advisory — but on a
 different question: the label answers *what the information is*, the log
 answers *what has already happened*. They stay separate pieces of state
 because their algebra differs — the label folds down and settles (minimum,
@@ -334,8 +334,8 @@ dialect.
 ## The check
 
 Before every tool call the contract is evaluated. The outcome is binary —
-allow, or block with the exact failed predicates. The check itself is
-two-fold:
+allow, or block with exactly what failed: requirement gaps, a narrowing,
+or both. The check itself is two-fold:
 
 **1. Tool requirement compatibility.** Never widen the audience, never act
 on worse trust than the tool requires: the trajectory label satisfies the
@@ -359,7 +359,7 @@ no security power is exercised; what makes the stop deliberate is that the
 agent chooses the plan (see Rulings for how this composes with rulings).
 
 Deltas never raise — the only sign rule v1 needs. A call may carry a
-restrictive delta and a release-side requirement gap at once
+restrictive delta and a requirement gap at once
 (`search_and_share` is exactly that); then both gates apply: the agent
 accepts the narrowing, a ruling covers the gap, and neither substitutes
 for the other. A tool whose *action* is itself a grant of access
@@ -435,13 +435,19 @@ no engine-side step and no id-execution path (see below).
 ```ts
 type CheckOutcome =
   | { outcome: "allow" }
-  | { outcome: "block"; failed_predicates: Predicate[]; remedy_plans: RemedyPlan[] };
+  | { outcome: "block";
+      requirement_gaps: RequirementGap[];  // unmet entries of `requires`
+      narrowing?: Narrowing;               // present when the call's own delta fired check 2
+      remedy_plans: RemedyPlan[] };
 ```
 
 An attention demand on an otherwise-passing call surfaces through this
-same block shape: the unmet demand is reported as the failed predicate,
-and the remedy plan is the atomic ruling by an attending authority —
-demanded and failed predicates share one wire.
+same block shape: the unmet demand is a requirement gap like any other —
+attention is the third kind of `requires` — and the remedy plan is the
+atomic ruling by an attending authority. A narrowing is reported in its
+own slot, never as a requirement gap: nothing in `requires` failed, and
+the acceptance plan, not a ruling, answers it. A call like
+`search_and_share` fills both.
 
 Two facts about the list:
 
@@ -460,8 +466,13 @@ Two facts about the list:
   mandates that cover them; for a narrowing soft block, the acceptance
   plan — always available, from no registry entry at all, because it
   grants nothing (so a narrowing block is never terminal; the
-  empty-list proof concerns requirement-side gaps). For release-side failures nothing outside that
-  enumeration can ever cure the gap, because unruled steps only narrow. The
+  empty-list proof concerns requirement gaps). For a gap the state is too
+  *low* for — an unmet floor, an uncovered recipient — nothing outside
+  that enumeration can ever cure it, because unruled steps only narrow;
+  the history and attention cures — a `k`-emitting tool, a waiving or
+  attending mandate — are registry entries by definition. (A cap gap —
+  the state too *high* — is the one species cured by narrowing itself,
+  free modulo acceptance; see The check.) The
   agent provably should not spend turns on an unliftable restriction.
 
 Plans divide by who executes them. A plan whose steps are engine-side
@@ -479,7 +490,7 @@ Authorities are the single home of judgment in APPA — every act of human or
 policy discretion is an authority **ruling**, one format, appended to the
 log. Two halves of one principle bound what a ruling can do:
 
-- **A ruling admits a dispatch despite a requirements gap; it never edits
+- **A ruling admits a dispatch despite a requirement gap; it never edits
   the trajectory.** The trajectory changes only through what the admitted
   call itself commits — its `delta` and its `emits`. An authority never
   rewrites the label directly; a ruling over a call with no delta and no
@@ -531,7 +542,7 @@ vocabulary is **mandates**, **rulings**, and **log records**.
 ### Mandates
 
 There are no ruling kinds at runtime. One engine rule instead: **a call
-dispatches iff every failed or demanded predicate is covered by the
+dispatches iff every requirement gap is covered by the
 rulings that admit it — each issuer's mandate covering what it admitted;
 the rulings bind the same rendered call and are consumed together in one
 atomic step.** (Usually that is one ruling; two-eyes configurations
@@ -548,8 +559,7 @@ the currency it acts on:
   dispatch only, naming the event kinds it may waive;
 - **attends** — the attention marks whose demands this authority's ruling
   satisfies. Deliberate consequence: a single ruling by an attending
-  authority over a call satisfies both a failed requirement predicate and
-  an attention
+  authority over a call covers both a label or history gap and an attention
   demand on the same call — one review is one review; a deployer who wants
   two eyes declares two marks attended by different authorities. What no
   ruling ever satisfies is the agent's acceptance of a narrowing.
@@ -560,7 +570,7 @@ above). A deployer who wants a human on expensive narrowings anyway
 attaches an attention mark to the narrowing tools — opt-in, never a
 default authority.
 
-**Requirement failures route by tags, exclusively.** A mandate says what
+**Requirement gaps route by tags, exclusively.** A mandate says what
 an authority may
 grant; its **scope** — the tags it covers — says over which calls; the two
 questions never share a mechanism. An authority with no declared scope
@@ -584,7 +594,7 @@ One structural bar concerns the assistant's own reply to the user (the
 response sink): when the trajectory is restricted enough that even showing
 content to the user is a release, that release takes a *distinct*
 authority's ruling — **no ruling issued by the end user may cover any
-predicate of a response-sink release**, whatever
+requirement gap of a response-sink release**, whatever
 mandate the user otherwise holds. The user cannot self-approve seeing
 restricted content: the approval request would arrive on the very channel
 being released, and an in-band self-confirmation is structurally not a check
@@ -999,6 +1009,9 @@ xor resolver-implemented**.
   against the state the call would commit), history requirements
   (checked against the log as it stands), and attention demands (per-call,
   never satisfied by history).
+- **Requirement gap** — an unmet entry of a contract's `requires` — a
+  label, history, or attention gap — reported in a block. Distinct from
+  a narrowing, which fails no requirement.
 - **Attention mark** — a named, per-call demand for a fresh ruling by an
   attending authority; the shared vocabulary through which tools demand
   review and authorities offer it, without naming each other.
