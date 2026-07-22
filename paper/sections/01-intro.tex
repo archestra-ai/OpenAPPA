@@ -1,20 +1,26 @@
 \section{Introduction}\label{sec:intro}
 
-An LLM agent with tools is a confused deputy in the textbook sense: it acts
-with the authority of its principal while taking instructions, in the same
-channel, from whatever text its tools return. Prompt injection is not a bug in
-any one model but a structural property of this arrangement: give a capable
-agent private data, attacker-influenced content, and an egress channel, and
-read access becomes exfiltration.
+An LLM agent with tools operates as a confused deputy in the textbook sense:
+it acts with the authority of its principal while consuming data and
+instructions across shared channels. Whenever an agent processes sensitive
+context alongside unvetted tool outputs, external inputs, or untrusted data,
+structural risks inevitably arise. Unauthorized data exfiltration, unintended
+tool calls, and policy violations can result not only from adversarial prompt
+injection---where attacker-controlled text hijacks control flow---but also from
+model hallucinations, ambiguous instructions, or miscalibrated agent reasoning.
+In all these cases, exposing a capable agent to private data, external sinks,
+and unvetted content turns read access into a vector for exfiltration and policy
+breaches.
 
 Many deployed defenses cluster at two poles. At one pole, imperative
-guardrails: classifiers, regex filters, prompt hygiene. These judge
-\emph{content}, so they are bypassed by paraphrase and give no account of what
-they guarantee. At the other pole, hard restriction: allowlists, human
-approval on every call, no-tools-after-untrusted-read policies. These judge
-\emph{structure} but do so statically and coarsely, so they tax every benign
-action to stop a rare malicious one, and agents lose the utility that
-justified their deployment.
+guardrails: prompt-injection classifiers, regex filters, and output hygiene.
+These judge \emph{content}, so they are bypassed by paraphrase, offer no
+guarantees against non-adversarial agent errors, and treat prompt injection as an
+isolated bug rather than a symptom of mixed-confidentiality processing. At the
+other pole, hard restriction: allowlists, human approval on every call,
+no-tools-after-untrusted-read policies. These judge \emph{structure} but do so
+statically and coarsely, taxing every benign action and destroying agent
+utility.
 
 Agent information-flow control (IFC) supplies a third point. CaMeL separates
 control and data flow~\cite{camel2025}; Fides propagates confidentiality and

@@ -1,6 +1,9 @@
-LLM agents are confused deputies by construction: they wield their operator's
-authority while consuming attacker-influenced text, and prompt-injection
-attacks routinely convert read access into exfiltration. Content-based
+LLM agents operate with significant authority over external tools and data,
+making them confused deputies whenever they consume unvetted inputs or process
+mixed-confidentiality context. In these environments, risks such as unauthorized
+data exfiltration or policy violations arise structurally---whether triggered by
+adversarial prompt injection, model hallucinations, or errant agent tool
+use---converting routine read access into security breaches. Content-based
 guardrails remain bypassable by rephrasing, while coarse hard restriction
 destroys utility. Fides establishes a stronger point in this design space: an
 agent planner can track confidentiality and integrity labels, enforce policies
