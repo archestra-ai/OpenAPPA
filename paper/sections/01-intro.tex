@@ -19,8 +19,8 @@ guarantees against non-adversarial agent errors, and treat prompt injection as a
 isolated bug rather than a symptom of mixed-confidentiality processing. On the
 other hand, static structural restrictions---such as allowlists, mandatory human approval,
 and policies disabling tool use after reading untrusted data---judge \emph{structure}.
-However, they do so statically and coarsely, taxing every benign action and destroying
-agent utility.
+However, they do so statically and coarsely, imposing operational overhead on benign
+actions and severely degrading agent utility.
 
 Agent information-flow control (IFC) offers a third approach. CaMeL separates
 control and data flow~\cite{camel2025}; Fides propagates confidentiality and
