@@ -494,8 +494,8 @@ log. Two halves of one principle bound what a ruling can do:
 - **A ruling admits a dispatch despite a requirement gap; it never edits
   the trajectory.** The trajectory changes only through what the admitted
   call itself commits — its `delta` and its `emits`. An authority never
-  rewrites the label directly; a ruling over a call with no delta and no
-  emits changes nothing but the log.
+  rewrites the label directly; a ruling over a call with no `delta` and no
+  `emits` changes nothing but the log.
 - **A ruling cannot substitute for the agent's acceptance.** A dispatch
   whose delta would shrink the release frontier needs the *agent's*
   explicit acceptance of that narrowing as a plan step (see The check) —
@@ -1001,11 +1001,9 @@ xor resolver-implemented**.
   it is (trust).
 - **Delta** — a contract's declared label action, applied when the call
   succeeds.
-- **Emits** — a contract's declared effects, appended when the call
-  succeeds.
 - **Effect** — a recorded fact of what the run did outside (`egress`,
-  `mutation`): appended to the log when the call succeeds, read back by
-  history requirements.
+  `mutation`): declared by a contract as `emits`, appended to the log when
+  the call succeeds, read back by history requirements.
 - **Requires** — a contract's conditions: label requirements (checked
   against the label the call would commit), history requirements
   (checked against the log as it stands), and attention demands (per-call,
