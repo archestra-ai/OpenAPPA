@@ -1,0 +1,14 @@
+\section{Implementation}\label{sec:implementation}
+
+APPA is divided into two layers. The inner layer is a pure algebra exposing \texttt{check(state, transition)} $\mathbin{\to}$ \texttt{verdict} and \texttt{apply(state, transition)} $\mathbin{\to}$ \texttt{state'}, with neither I/O nor a clock. Semantically, it is a function of the complete event log, so every decision is replayable from that log alone. On the wire, the implementation passes homomorphic views---the folded state, seen event kinds, pending-plan records, and boundary positions---which is sound because each view is itself a fold.
+
+The outer layer owns state: durable append through pluggable destinations such as a local file or database, serialization, the trajectory tree, and the dispatch-atomicity obligations assumed by the threat model. It creates child contexts, keeps their bytes disjoint from the parent, folds labels independently for each trajectory, and checks the actual return label before \texttt{merge}. These are security obligations of the branch manager, not conveniences delegated to harness authors.
+
+The implementation is type-invariant-first: transition invariants are enforced through the type system, while external labels and authority decisions remain trusted inputs. As a design guideline rather than a model claim, the checker contains no ad hoc policy conditionals; it performs label arithmetic and log predicates, leaving imperative logic to registered external components.
+
+Branch-lifecycle records---\texttt{fork}, \texttt{submit}, \texttt{abandon}, and \texttt{merge}---carry stable parent and child identifiers. Property tests generate arbitrary child traces and check Proposition~\ref{prop:preservation}: child-only actions do not alter the parent fold, a merge is exactly one meet with the submitted value's label, and every world event remains in the shared log after abandonment.
+
+\fixme{The configuration surface is deliberately undecided; constraints that every surface must preserve are listed below.}
+Configuration contains mandates only, with no grant objects anywhere. It enforces the \emph{no-empty-mandate rule}: an authority whose mandate covers nothing causes a loud load error, because the proof represented by empty \texttt{remedy\_plans} depends on this invariant. Block messages expose applicable remedy plans and name eligible authorities when a plan carries a ruling. Every audience mention states its set relation explicitly---includes, exactly, or may-add---while scope is routed only by tags. Casts are either constant or resolver-implemented, exclusively.
+
+\todo{LoC, dependency count --- smallness as auditable-TCB argument}.

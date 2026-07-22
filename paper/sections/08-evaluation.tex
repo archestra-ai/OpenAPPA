@@ -1,0 +1,29 @@
+\section{Evaluation}\label{sec:evaluation}
+
+\stub{Evaluation is designed but not yet run; this section states the protocol and metrics. Numbers TODO.}
+
+\paragraph{Primary question.}
+Does \texttt{fork}-before-read preserve the security of label-based enforcement while avoiding the post-read utility loss caused by tainting a long-lived planner context? The evaluation must measure this directly; a generic defended-versus-undefended result does not test the paper's contribution.
+
+\paragraph{Paired trajectory benchmark.}
+We will construct AgentDojo episodes~\cite{debenedettiAgentDojoDynamicEnvironment2024} in which an agent (i) performs a task requiring inspection of restrictive or attacker-controlled data and then (ii) performs an independent benign action whose sink would be disabled by the descended label. Variants will cover a first task that needs no return, a schema-bounded derivative, and a return that cannot be safely derived. We will report second-task completion, strict descents of the \emph{parent} label, preservation of the parent's ruling-free release frontier, and branch outcome (\texttt{abandon}, bounded return, or rejected or accepted raw \texttt{merge}).
+
+\paragraph{Security question.}
+We will run AgentDojo injection tasks with the attacker controlling child-visible content and attempting (a) direct child egress, (b) raw-data return through \texttt{submit\_result}, (c) schema-conforming semantic laundering, and (d) history erasure by abandonment. We will report attack success and the structural check that blocked each attempt. Branching should improve utility, not weaken sink enforcement; schema-only exits are intentionally expected to fail against semantic laundering unless backed by a trusted attestation.
+
+\paragraph{Baselines and ablations.}
+We will compare an undefended agent; sink-only IFC that always accepts acquisition taint; hard decline of restrictive reads; Fides's basic and selective-hiding planners~\cite{fides}; APPA with branching disabled; and full APPA. An abandon-only bounded-exit ablation will separate the value of isolation from that of the trusted derivative mechanism. We will not present copied or discardable branch logs as a useful ablation because they violate the threat model; we will test them only as negative invariant cases.
+
+\paragraph{Main metrics.}
+Alongside existing task utility and injection attack success, we will measure parent-label descents avoided, post-acquisition benign actions completed, branches created, abandoned, and merged, exit rejections, authority interventions, and token and latency overhead per branch. Both security and utility must be reported, because preventing label creep is a utility claim under fixed enforcement.
+
+\paragraph{Case study.}
+We will run the CRM/invoice pattern from \S\ref{sec:branching} end-to-end through the real engine and publish its contracts, parent/child label traces, shared log, injected payload, exit attestation, and post-merge benign action.
+
+\paragraph{Secondary study.}
+We will annotate \texttt{k risky tools}, leave the rest Unknown, and sweep cast policy. This study remains subordinate to the branch comparison: gradual annotation is supporting machinery, not the main contribution.
+
+\paragraph{Non-goals.}
+We do not conduct a content-level detection benchmark because APPA does not inspect content. Branch latency and token overhead are required rather than optional measurements because branch isolation duplicates context.
+
+\fixme{The implemented engine trails this model in places. Closed by the spec alignment: binary outcomes, world events as log state with an open declared vocabulary (\texttt{no\_prior}, named per-dispatch waivers). Still predecessor-shaped: value-granular per-flow labels rather than the per-run label, check timing on the current rather than committed state, no fork-before-dispatch trajectory isolation, no checked exit/merge, no atomic render$\rightarrow$rule$\rightarrow$dispatch plan objects, no \texttt{prior(k)}, no boundary events. The paper cannot claim an evaluation of branching as taint prevention until fork isolation and checked exits exist. If they remain absent, frame the implementation only as a predecessor implementing the sink/taint half and do not present its AgentDojo numbers as evidence for the main contribution.}

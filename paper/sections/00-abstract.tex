@@ -1,0 +1,34 @@
+LLM agents are confused deputies by construction: they wield their operator's
+authority while consuming attacker-influenced text, and prompt-injection
+attacks routinely convert read access into exfiltration. Content-based
+guardrails remain bypassable by rephrasing, while coarse hard restriction
+destroys utility. Fides establishes a stronger point in this design space: an
+agent planner can track confidentiality and integrity labels, enforce policies
+deterministically, and selectively hide or reveal data to preserve
+utility~\cite{fides}. \appa{} takes that result as its starting point and asks
+how to avoid tainting the planner's continuing trajectory in the first place.
+
+We present \appa{}, whose main contribution is \emph{branching as taint
+prevention}. Before any call that would restrict the trajectory label, the
+runtime can fork a child at the parent's current label and dispatch the call
+only there. The child may descend and inspect the raw result; the parent never
+observes it and therefore does not descend. The child can be abandoned, or it
+can return only through a predeclared, policy-checked exit whose result label
+is merged into the parent. A raw or still-restrictive result narrows the
+parent on merge; a trusted sanitizer or quarantine-exit attestation may
+instead return a bounded derivative. This is prevention, not untainting: no
+operation clears a label from data already observed by a trajectory.
+
+The construction is enforced by a declarative policy layer whose run state is
+two monoids: a \emph{label} (audience $\times$ trust) acted on by
+tool-declared deltas, and an append-only \emph{event log}. A prospective
+acquisition check turns every restrictive call into an explicit choice to
+accept, branch, sanitize, or decline. Branches share the world-event log, so
+isolation cannot erase an egress or satisfy history predicates on a fictitious
+fresh run. Atomic, call-scoped authority rulings permit exceptional dispatches
+without widening the parent or child. We prove monotone descent and
+settlement, parent preservation before merge, merge confinement, and remedy
+completeness; describe an implementation split into a pure decision core and a
+state-owning shell; and evaluate on
+AgentDojo~\cite{debenedettiAgentDojoDynamicEnvironment2024}.
+\todo{one sentence of results.}

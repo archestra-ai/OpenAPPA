@@ -1,0 +1,206 @@
+@online{caiGhostAgentRedefining2026,
+  title = {Ghost in the {{Agent}}: {{Redefining Information Flow Tracking}} for {{LLM Agents}}},
+  shorttitle = {Ghost in the {{Agent}}},
+  author = {Cai, Yuandao and Tang, Wensheng and Wen, Cheng and Qin, Shengchao},
+  date = {2026-04-25},
+  eprint = {2604.23374},
+  eprinttype = {arXiv},
+  eprintclass = {cs.CR},
+  doi = {10.48550/arXiv.2604.23374},
+  url = {http://arxiv.org/abs/2604.23374},
+  urldate = {2026-07-20},
+  abstract = {Autonomous Large Language Model (LLM) agents are increasingly deployed to conduct complex tasks by interacting with external tools, APIs, and memory stores. However, processing untrusted external data exposes these agents to severe security threats, such as indirect prompt injection and unauthorized tool execution. Securing these systems requires effective information flow tracking. Yet, traditional taint analysis that is designed for program memory states fundamentally fails when applied to LLMs, where data propagation is governed by probabilistic natural language reasoning. In this paper, we present NeuroTaint, the first comprehensive taint tracking framework tailored for the unique information flow characteristics of LLM agents. Our key insight is that taint propagation in LLM agents must be understood not only as explicit content transfer, but also as semantic transformation, causal influence on decisions, and cross-session persistence through memory. NeuroTaint therefore audits execution traces offline to reconstruct provenance from untrusted sources to privileged sinks using semantic evidence, causal reasoning, and persistent context tracking, rather than relying on exact string matches or pre-defined source-sink paths alone. Extensive evaluation using TaintBench, our 400-scenario benchmark spanning 20 real-world agent frameworks, shows that NeuroTaint substantially outperforms FIDES, an information-flow-control (IFC)-style baseline for LLM agents, in source-sink propagation detection. We further show that NeuroTaint remains effective on established agent-security benchmarks, including InjecAgent and ToolEmu, while operating offline with modest additional auditing cost.},
+  pubstate = {prepublished},
+  keywords = {Computer Science - Cryptography and Security},
+  file = {/Users/vadimliventsev/Zotero/storage/KCLG733Q/Cai et al. - 2026 - Ghost in the Agent Redefining Information Flow Tracking for LLM Agents.pdf}
+}
+
+@online{debenedettiAgentDojoDynamicEnvironment2024,
+  title = {{{AgentDojo}}: {{A Dynamic Environment}} to {{Evaluate Prompt Injection Attacks}} and {{Defenses}} for {{LLM Agents}}},
+  shorttitle = {{{AgentDojo}}},
+  author = {Debenedetti, Edoardo and Zhang, Jie and Balunović, Mislav and Beurer-Kellner, Luca and Fischer, Marc and Tramèr, Florian},
+  date = {2024-11-24},
+  eprint = {2406.13352},
+  eprinttype = {arXiv},
+  eprintclass = {cs.CR},
+  doi = {10.48550/arXiv.2406.13352},
+  url = {http://arxiv.org/abs/2406.13352},
+  urldate = {2026-07-20},
+  abstract = {AI agents aim to solve complex tasks by combining text-based reasoning with external tool calls. Unfortunately, AI agents are vulnerable to prompt injection attacks where data returned by external tools hijacks the agent to execute malicious tasks. To measure the adversarial robustness of AI agents, we introduce AgentDojo, an evaluation framework for agents that execute tools over untrusted data. To capture the evolving nature of attacks and defenses, AgentDojo is not a static test suite, but rather an extensible environment for designing and evaluating new agent tasks, defenses, and adaptive attacks. We populate the environment with 97 realistic tasks (e.g., managing an email client, navigating an e-banking website, or making travel bookings), 629 security test cases, and various attack and defense paradigms from the literature. We find that AgentDojo poses a challenge for both attacks and defenses: state-of-the-art LLMs fail at many tasks (even in the absence of attacks), and existing prompt injection attacks break some security properties but not all. We hope that AgentDojo can foster research on new design principles for AI agents that solve common tasks in a reliable and robust manner.. We release the code for AgentDojo at https://github.com/ethz-spylab/agentdojo.},
+  pubstate = {prepublished},
+  keywords = {Computer Science - Cryptography and Security,Computer Science - Machine Learning},
+  file = {/Users/vadimliventsev/Zotero/storage/PV2T6V4E/Debenedetti et al. - 2024 - AgentDojo A Dynamic Environment to Evaluate Prompt Injection Attacks and Defenses for LLM Agents.pdf;/Users/vadimliventsev/Zotero/storage/WMVEBGEN/2406.html}
+}
+
+@online{fides,
+  title = {Securing {{AI Agents}} with {{Information-Flow Control}}},
+  author = {Costa, Manuel and Köpf, Boris and Kolluri, Aashish and Paverd, Andrew and Russinovich, Mark and Salem, Ahmed and Tople, Shruti and Wutschitz, Lukas and Zanella-Béguelin, Santiago},
+  date = {2025-09-03},
+  eprint = {2505.23643},
+  eprinttype = {arXiv},
+  eprintclass = {cs.CR},
+  doi = {10.48550/arXiv.2505.23643},
+  url = {http://arxiv.org/abs/2505.23643},
+  urldate = {2026-07-20},
+  abstract = {As AI agents become increasingly autonomous and capable, ensuring their security against vulnerabilities such as prompt injection becomes critical. This paper explores the use of information-flow control (IFC) to provide security guarantees for AI agents. We present a formal model to reason about the security and expressiveness of agent planners. Using this model, we characterize the class of properties enforceable by dynamic taint-tracking and construct a taxonomy of tasks to evaluate security and utility trade-offs of planner designs. Informed by this exploration, we present Fides, a planner that tracks confidentiality and integrity labels, deterministically enforces security policies, and introduces novel primitives for selectively hiding information. Its evaluation in AgentDojo demonstrates that this approach enables us to complete a broad range of tasks with security guarantees. A tutorial to walk readers through the the concepts introduced in the paper can be found at https://github.com/microsoft/fides},
+  pubstate = {prepublished},
+  keywords = {Computer Science - Artificial Intelligence,Computer Science - Cryptography and Security},
+  file = {/Users/vadimliventsev/Zotero/storage/FQXANV6C/Costa et al. - 2025 - Securing AI Agents with Information-Flow Control.pdf;/Users/vadimliventsev/Zotero/storage/DPMTAUXB/2505.html}
+}
+
+@online{ouyangMemLineageLineageGuidedEnforcement2026,
+  title = {{{MemLineage}}: {{Lineage-Guided Enforcement}} for {{LLM Agent Memory}}},
+  shorttitle = {{{MemLineage}}},
+  author = {Ouyang, Ciyan and Hou, Rui},
+  date = {2026-05-14},
+  eprint = {2605.14421},
+  eprinttype = {arXiv},
+  eprintclass = {cs.CR},
+  doi = {10.48550/arXiv.2605.14421},
+  url = {http://arxiv.org/abs/2605.14421},
+  urldate = {2026-07-20},
+  abstract = {We introduce MemLineage, a defense for LLM agent memory that attaches both cryptographic provenance and LLM-mediated derivation lineage to every entry. Recent and concurrent work shows that untrusted content can be written into persistent agent state and re-enter later sessions as an instruction; the remaining systems question is how to preserve useful memory recall while preventing such state from justifying sensitive actions. MemLineage treats this as a chain-of-custody problem rather than a filtering problem. It is a six-module design around an RFC-6962 Merkle log over per-principal Ed25519-signed entries: a weighted derivation DAG records which retrieved entries influenced each new memory, and a max-of-strong-edges propagation rule makes Untrusted-Path Persistence hold for any chain whose attribution edges remain above threshold. The sensitive-action gate then refuses dispatches whose active justification descends from an external ancestor, while still allowing benign recall. We evaluate three defense cells against three memory-poisoning workloads on a deterministic mechanism-isolation harness; MemLineage is the only configuration in that harness that drives all three columns to zero ASR, while sub-millisecond per-operation overhead keeps it well below the noise floor of any LLM call. A Codex-backed AgentDojo bridge further separates strong-model behavior from defense-layer behavior: under an intentionally vulnerable tool-output profile, no-defense and signature-only baselines fail on all six banking pairs, while all MemLineage rows reduce strict AgentDojo ASR to zero. The core deterministic artifacts are byte-equal CI-verified; hosted-model AgentDojo and live-model sweeps are recorded as auditable logs rather than byte-pinned artifacts.},
+  pubstate = {prepublished},
+  keywords = {Computer Science - Artificial Intelligence,Computer Science - Cryptography and Security},
+  file = {/Users/vadimliventsev/Zotero/storage/UREL6S7V/Ouyang and Hou - 2026 - MemLineage Lineage-Guided Enforcement for LLM Agent Memory.pdf}
+}
+
+@online{wangAgentTracesTrust2026,
+  title = {From {{Agent Traces}} to {{Trust}}: {{A Survey}} of {{Evidence Tracing}} and {{Execution Provenance}} in {{LLM Agents}}},
+  shorttitle = {From {{Agent Traces}} to {{Trust}}},
+  author = {Wang, Yiqi and Zhang, Jiaqi and Cai, Taotao and Liu, Zirui and Sun, Qingqiang and Sun, Zequn and Wu, Zhangkai and Dong, Manqing and Zheng, Mingkai and Yin, Xuefei and Zhu, Yanming},
+  date = {2026-06-28},
+  eprint = {2606.04990},
+  eprinttype = {arXiv},
+  eprintclass = {cs.CR},
+  doi = {10.48550/arXiv.2606.04990},
+  url = {http://arxiv.org/abs/2606.04990},
+  urldate = {2026-07-21},
+  abstract = {Large language model (LLM)-based agents are evolving from passive text generators into autonomous systems capable of planning, tool use, retrieval, memory access, environmental interaction, and multi-agent collaboration. These capabilities expand agent autonomy, but also make agent behavior harder to verify, debug, and audit. Final-answer accuracy alone cannot explain how an output was produced, which evidence supported each claim, whether tool calls were justified, how memory influenced later decisions, or where failures originated. This survey examines evidence tracing and execution provenance as foundations for process-level accountability in trustworthy LLM agents. We define execution provenance as the typed graph of an agent execution and evidence tracing as its projection onto evidence-support relations. This perspective connects retrieval grounding, claim support, tool-use safety, memory lineage, observability, debugging, audit, and recovery within a unified framework. We introduce a taxonomy covering trace sources, evidence and execution units, provenance relations, tracing granularity and timing, representation forms, and trust functions. We then review key methodological directions, including provenance representation, evidence attribution, tool-use provenance, runtime guardrails, provenance-bearing memory, observability, and failure diagnosis. Finally, we discuss benchmarks, datasets, metrics, and open challenges for building provenance-aware, auditable, and recoverable agent systems.},
+  pubstate = {prepublished},
+  keywords = {Computer Science - Artificial Intelligence,Computer Science - Cryptography and Security},
+  file = {/Users/vadimliventsev/Zotero/storage/KBDAEVPK/Wang et al. - 2026 - From Agent Traces to Trust A Survey of Evidence Tracing and Execution Provenance in LLM Agents.pdf;/Users/vadimliventsev/Zotero/storage/SPXJ9JP2/2606.html}
+}
+
+%% ---- Classical / background references added for the LaTeX draft ----
+
+@article{denning1976lattice,
+  author = {Denning, Dorothy E.},
+  title = {A Lattice Model of Secure Information Flow},
+  journal = {Communications of the ACM},
+  volume = {19},
+  number = {5},
+  pages = {236--243},
+  year = {1976},
+  doi = {10.1145/360051.360056}
+}
+
+@inproceedings{goguen1982security,
+  author = {Goguen, Joseph A. and Meseguer, Jos{\'e}},
+  title = {Security Policies and Security Models},
+  booktitle = {IEEE Symposium on Security and Privacy},
+  pages = {11--20},
+  year = {1982},
+  doi = {10.1109/SP.1982.10014}
+}
+
+@inproceedings{myers1997dlm,
+  author = {Myers, Andrew C. and Liskov, Barbara},
+  title = {A Decentralized Model for Information Flow Control},
+  booktitle = {Proceedings of the 16th ACM Symposium on Operating Systems Principles (SOSP)},
+  pages = {129--142},
+  year = {1997},
+  doi = {10.1145/268998.266669}
+}
+
+@article{sabelfeld2009declassification,
+  author = {Sabelfeld, Andrei and Sands, David},
+  title = {Declassification: Dimensions and Principles},
+  journal = {Journal of Computer Security},
+  volume = {17},
+  number = {5},
+  pages = {517--548},
+  year = {2009},
+  doi = {10.3233/JCS-2009-0352}
+}
+
+@inproceedings{zdancewic2001robust,
+  author = {Zdancewic, Steve and Myers, Andrew C.},
+  title = {Robust Declassification},
+  booktitle = {Proceedings of the 14th IEEE Computer Security Foundations Workshop (CSFW)},
+  pages = {15--23},
+  year = {2001},
+  doi = {10.1109/CSFW.2001.930133}
+}
+
+@article{saltzer1975protection,
+  author = {Saltzer, Jerome H. and Schroeder, Michael D.},
+  title = {The Protection of Information in Computer Systems},
+  journal = {Proceedings of the IEEE},
+  volume = {63},
+  number = {9},
+  pages = {1278--1308},
+  year = {1975},
+  doi = {10.1109/PROC.1975.9939}
+}
+
+@inproceedings{katsumata2014graded,
+  author = {Katsumata, Shin-ya},
+  title = {Parametric Effect Monads and Semantics of Effect Systems},
+  booktitle = {Proceedings of the 41st ACM SIGPLAN-SIGACT Symposium on Principles of Programming Languages (POPL)},
+  pages = {633--645},
+  year = {2014},
+  doi = {10.1145/2535838.2535846}
+}
+
+@inproceedings{disney2011gradual,
+  author = {Disney, Tim and Flanagan, Cormac},
+  title = {Gradual Information Flow Typing},
+  booktitle = {International Workshop on Scripts to Programs (STOP)},
+  year = {2011}
+}
+
+@inproceedings{fennell2013gradual,
+  author = {Fennell, Luminous and Thiemann, Peter},
+  title = {Gradual Security Typing with References},
+  booktitle = {Proceedings of the 26th IEEE Computer Security Foundations Symposium (CSF)},
+  pages = {224--239},
+  year = {2013},
+  doi = {10.1109/CSF.2013.22}
+}
+
+@inproceedings{wadler1990linear,
+  author = {Wadler, Philip},
+  title = {Linear Types Can Change the World!},
+  booktitle = {Programming Concepts and Methods},
+  publisher = {North-Holland},
+  year = {1990}
+}
+
+@online{willison2023dual,
+  author = {Willison, Simon},
+  title = {The Dual LLM Pattern for Building AI Assistants That Can Resist Prompt Injection},
+  year = {2023},
+  url = {https://simonwillison.net/2023/Apr/25/dual-llm-pattern/},
+  urldate = {2026-07-20}
+}
+
+@online{camel2025,
+  author = {Debenedetti, Edoardo and Shumailov, Ilia and Fan, Tianqi and Hayes, Jamie and Carlini, Nicholas and Fabian, Daniel and Kern, Christoph and Shi, Chongyang and Terzis, Andreas and Tram{\`e}r, Florian},
+  title = {Defeating Prompt Injections by Design},
+  eprint = {2503.18813},
+  eprinttype = {arXiv},
+  eprintclass = {cs.CR},
+  year = {2025},
+  doi = {10.48550/arXiv.2503.18813},
+  url = {http://arxiv.org/abs/2503.18813}
+}
+
+@online{adts2026,
+  title = {TODO: resolve citation -- ADTs/monads as vehicle for agent security},
+  author = {{TODO}},
+  eprint = {2603.00991},
+  eprinttype = {arXiv},
+  year = {2026},
+  note = {Placeholder entry referenced in skeleton as arXiv:2603.00991; verify authors and title}
+}

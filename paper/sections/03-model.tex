@@ -1,0 +1,47 @@
+\section{The Model}\label{sec:model}
+
+\paragraph{Label state.}
+The label state is $S = \powerset(U) \times T$, where the first component is a reader set over a finite universe $U$ and the second is a trust rank in a finite chain $T$. Readers may be named, nested groups; these groups are symbolic and closed under $\cap$ and $\cup$, while configured containments are data rather than code. Registered resolvers determine raw-identifier membership afresh at each check. Thus, removing a member excludes it from all later checks, but does not retroactively change earlier decisions. The trust-chain instance is deployment-configurable. Powersets and finite chains make both components lawful by construction, without proof obligations for deployers.
+
+\paragraph{Checked actions.}
+The checked monoid is the monoid of policy actions on $S$, with composition and the do-nothing identity. In v1 its only nonidentity action is restrictive: $(\cap A, \min r)$. Rulings cover requirement gaps transiently and never act on the label. Consequently, \fold is a composition of meets and is commutative and monotone. The expressible but deliberately omitted epoch-wide extension (\S\ref{sec:limitations}) adds a ruling-carried permissive action $(\cup B, \max r)$ up to a ceiling; precisely where authority enters, its fold becomes noncommutative.
+
+\begin{proposition}[Collapse]\label{prop:collapse}
+In v1, the fold collapses to a running meet---one keep-set and one minimum---and therefore requires no replay. Under the epoch-wide extension, every composite of audience actions has the form $s \mapsto (s \cap A) \cup B$: the keep-then-add pair is the balance, and individual actions are the transactions.
+\end{proposition}
+Proof in Appendix~\ref{app:proofs}.
+
+\begin{proposition}[Monotone descent and settlement]\label{prop:descent}
+Every v1 step is a meet. Because both carriers are finite, label state descends monotonically and settles after finitely many strict descents.
+\end{proposition}
+This is label stabilization, not run termination: identity deltas may repeat forever. Proof in Appendix~\ref{app:proofs}.
+
+\paragraph{Branch state.}
+Labels are trajectory-local, whereas the event log is run-wide. A \texttt{fork(p)} creates a child with $L_c := L_p$ and a predeclared exit contract; subsequent child transitions fold only into $L_c$. Parent and child nevertheless append to the same serialized event log. Before an explicit \texttt{submit\_result(v)} merge, the parent receives neither child context nor value bytes.
+
+\begin{proposition}[Parent preservation]\label{prop:preservation}
+For every child trace beginning at a fork, $L_c \le L_p^{\mathrm{fork}}$, and every child transition leaves the parent's label unchanged. Abandonment therefore preserves the parent exactly. A merge computes $L_p' = L_p \meet \lab(v)$, so it cannot widen the parent and preserves it exactly iff $L_p \le \lab(v)$.
+\end{proposition}
+\begin{definition}[Taint-preventing branch]
+A branch is taint-preventing when it is abandoned or exits under the adequacy relation $L_p \le \lab(v)$.
+\end{definition}
+Returning a restrictive raw value is safe, but does not prevent parent taint and must pass the acquisition check again. Proof in Appendix~\ref{app:proofs} follows from locality of the child fold and the meet laws.
+
+\paragraph{The log monoid.}
+The log is the free monoid on events under concatenation: events are appended, never approved. World events are appended at dispatch at one point deliberately independent of a pre/post axis. A \texttt{no\_prior} predicate is fail-closed---the attempt is recorded even if the call fails---while \texttt{prior(k)} proves dispatch rather than success in the outer world. Outcome-sensitive events are future work, consistent with treating outer-system outages as out of scope. Governance events record rulings and the dispatches consuming them, boundaries (turn end, fork, and merge, which are punctuation rather than decisions), descent acceptances, sanitizer applications, and casts.
+
+The log is consulted only for history predicates, ruling validity, and audit. Cached views such as seen event kinds are monoid homomorphisms. The ``effects dimension'' of earlier designs is exactly such a projection and is therefore demoted from the label: an effect describes what a run \emph{did}, not what data \emph{is}. Although a product of monoids could fold events and labels into one notation, doing so is semantically destructive: per-value versus per-run merge, predicate polarity, and consumability would reappear as special cases inside the purportedly unified object.
+
+\paragraph{World events as the sanctioned pressure-release valve.}
+Bespoke gating rituals become event vocabulary plus a resolver-backed authority. For example, a \texttt{finance.spend} magnitude can be summed by a log view that decides between automatic approval and paging a human. This yields a named event in an auditable log rather than a distortion of the label algebra; ordered magnitudes in the checked algebra are deliberately out of scope.
+
+\paragraph{Contracts.}
+A contract declares one component for each monoid: \texttt{delta}, checked before application, and \texttt{emits}, applied but never checked. It also declares \texttt{requires}: a trust floor; an audience cover requirement $\readers(\fold) \supseteq \mathrm{recipients}$; a source bound $\subseteq C$, optionally \texttt{strict}; history predicates (persistent-negative, waivable \texttt{no\_prior}, and persistent-positive \texttt{prior}, whose remedy is to cause the event); and named per-call attention demands. Attention is never satisfied by history---the durable/per-call distinction is exactly the effects/attention split---but only by a ruling from an attending authority during atomic plan execution. Routing-only \texttt{tags} have no algebraic meaning and are the exclusive currency of authority scope (\S\ref{sec:rulings}).
+
+Placeholders and dynamic resolvers belong to the trusted base. Conventions such as requires-first presentation and source deltas derived from ACL resolvers affect only the surface, not the slots: a delta states what the run learns, whereas a requirement states what the run exposes.
+
+\paragraph{Unknown.}
+Unknown is not a carrier element: there is no ordering such as $\mathit{trusted} < \mathit{unknown} < \mathit{suspicious}$. An unresolved dimension remains outside the algebra, preserving total composition and the monoid laws, and checks identify the unresolved facts. Explicit casts are audited governance events. A cast is either constant or resolver-implemented under a declared ceiling of admissible targets: the constant selects a permissive or paranoid posture, while the ceiling prevents a dynamic classifier from becoming a laundering endpoint. This is the gradual-typing interpretation of Unknown \cite{disney2011gradual,fennell2013gradual}.
+
+\paragraph{Threat model.}
+\todo{consider moving the threat model ahead of the formal model} The actor is benign but confusable; malice enters only through suspicious or unknown content. Authorities, sanitizers, casts, their dynamic resolvers, and configuration form the trusted base. We assume a serialized durable log; crash atomicity and branch concurrency are enforcement-layer obligations, and every history predicate observes a serialized shared prefix under concurrency. Covert channels from a malicious model are out of scope.

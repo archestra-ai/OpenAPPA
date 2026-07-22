@@ -1,0 +1,34 @@
+\section{Enforcement: The Two Checks}\label{sec:enforcement}
+
+\paragraph{Check 1---tool-requirement compatibility.}
+The first check is classic sink-side IFC adequacy: trust must meet the required floor, and $\readers(\fold) \supseteq \mathrm{recipients}(\mathrm{args})$, with placeholders and resolvers deriving recipients. This is an inherited noninterference discipline, not a novel claim.
+
+\paragraph{Check 2---state acquisition.}
+Order $S$ by restrictiveness: $s' \le s$ iff its readers are a subset of those in $s$ and its trust is no greater. Every contribution is a meet, so it descends or stays fixed on both axes without exception. The checker soft-blocks exactly when $\fold(s,\texttt{delta(call)}) < s$; repeats at a fixed point pass. This realizes least privilege at trajectory granularity \cite{saltzer1975protection}.
+
+In a confining deployment, the preferred remedy is to fork before dispatch and retry in a child initialized at $s$, committing the descent only to that child. The child may later abandon the result or submit it through Proposition~\ref{prop:preservation}'s prospective merge check. Alternatively, the agent may freely and deliberately accept descent in the current trajectory. Because acceptance exercises no security authority, the deliberateness stop is simply selection of that plan. The two gates remain independent: a ruling cannot accept narrowing for the agent, and acceptance clears no tool requirement.
+
+The release frontier is a theorem about the system, not the checked object. Release-side requirements monotone in $s$ imply that descent can only shrink the ruling-free satisfiable set. By contrast, $\subseteq$ source bounds are antimonotone---descent can enable them---which is why they lie outside the frontier account.
+
+\paragraph{Sign rule.}
+Deltas never raise, the only sign invariant needed in v1. A call such as \texttt{search\_and\_share} may simultaneously have a restrictive delta and a release-side requirement gap. The agent must accept or fork the narrowing, while a ruling separately covers the gap. A tool whose action grants access, such as \texttt{share\_doc(doc, outsider)}, is modeled as fetch composed with grant-access so that each transition remains simple to rule upon.
+
+\paragraph{Two clocks.}
+Label requirements are checked against the prospective state $\fold(L,\texttt{delta(call)})$ that dispatch would commit. Otherwise, \texttt{search\_and\_share} with \texttt{requires: audience=public} and \texttt{delta: audience=internal} could pass on current state even though its own dispatch commits the internal bytes it shares. History predicates instead inspect the log as-is, by construction a pre-state: a call's \texttt{emits} cannot satisfy its own precondition.
+
+Source $\subseteq$ bounds are prospective by default. If a fetch narrows beyond a bound, readers removed by the meet provably receive no post-read content. The \texttt{strict} modifier additionally imposes the pre-state bound, requiring a clean room established by a separate, deliberately accepted prior narrowing. Channels that physically display every message to fixed readers regardless of the fold are out of scope; the model concerns agentic trajectories, not generic channel IFC. ``Eviction'' is reserved for the raise extension.
+
+\begin{theorem}[Scoped remedy completeness]\label{thm:remedy}
+Relative to the registry and resolver answers at check time, the remedy space is finite and enumerable. It consists of in-scope, tag-routed ruled covers whose mandate ceiling reaches the gap; input-sanitizer substitutions producing admissible derived arguments; output-sanitizer-backed composites in confining deployments; for failed \texttt{prior(k)}, registered tools whose \texttt{emits} contain $k$; declared waiver mandates and authorities attending demanded marks; and, for acquisition soft blocks, acceptance and, in confining deployments, fork-before-dispatch.
+\end{theorem}
+Acceptance and fork are registry-free because neither grants authority; hence acquisition blocks are never terminal, and emptiness as proof applies only to requirement-side failures. A taint-preventing fork that returns a value additionally needs a declared exit whose result-label bound preserves its parent; otherwise abandonment is its only parent-preserving exit. For release-side failures, monotonicity gives completeness: unruled steps only descend, and sanitizer or branch results merge by $\cap$ and minimum, so no unenumerated operation can cure the gap. Thus an empty set proves unremediability. The converse is intentionally weak: nonemptiness means that a plan exists relative to current registry and resolver answers. This depends on the no-empty-mandate rule: an authority whose mandate covers nothing is a loud load error (\S\ref{sec:implementation}). Proof in Appendix~\ref{app:proofs}.
+
+\begin{proposition}[Eviction soundness, extension only]\label{prop:eviction}
+Under the epoch-wide raise extension, a restricted read after widening intersects away every reader outside the new content's reader set. Every survivor is entitled by construction, and evicted readers receive no post-read content.
+\end{proposition}
+The proposition is vacuous in v1, where no widening exists to evict. Proof in Appendix~\ref{app:proofs}.
+
+\paragraph{Remedy-plan delivery.}
+Plans are executable objects identified behind one stable, run-start agent tool, \texttt{execute\_remedy\_plan(plan\_id)}; injecting tools mid-conversation would break prompt caches. The identifier and dispatch, and any ruling carried by the plan, are logged. Demanded but otherwise nonfailed predicates use the same block shape: an unmet attention demand is the failed predicate, and its remedy is an atomic ruling from an attending authority.
+
+\fixme{Open question---the shape of a \texttt{prior(k)} plan: plan execution spans two transitions (the event-minting call and then the original call); per-transition checking inside one plan execution remains unresolved.}

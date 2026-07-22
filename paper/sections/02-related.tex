@@ -1,0 +1,149 @@
+\section{Related Work}\label{sec:related}
+
+\paragraph{Closest comparison: Fides.}
+Fides is the main antecedent for \appa{}. It formalizes dynamic IFC for agent
+planners, tracks confidentiality and integrity labels through planner state
+and tool calls, and enforces deterministic trusted-action and permitted-flow
+policies~\cite{fides}. Its selective variable introduction avoids
+contaminating planner context with a result whose label would make the context
+more restrictive; quarantined, schema-constrained inspection then reveals
+bounded derivatives. \appa{} inherits the central premise---security decisions
+should be structural, label-based, and enforced outside the LLM. Its main
+delta is to make a disposable \emph{trajectory}, rather than a hidden
+variable, the unit of taint containment: the restrictive call and any
+dependent reasoning happen in a child whose whole future is checked under the
+descended label.
+
+The closest point of contact is label creep. Fides decides, after a tool
+returns, whether to hide restrictive result fields from planner context.
+\appa{} checks before dispatch and exposes four choices: taint the current
+trajectory deliberately, fork and confine the read, return a registered
+derivative, or do not fetch. Fork inherits the parent label, exit is checked
+as an explicit merge, and world history remains shared. Fides's combined
+policy permits a confidentiality gap when a call is generated in a
+high-integrity context; \appa{} represents discretionary exceptions as atomic
+rulings over exact rendered calls while leaving labels unchanged.
+Branching-as-taint-prevention and its fork/exit/history invariants are the
+primary claimed delta; deterministic IFC itself is not.
+Table~\ref{tab:systems} situates \appa{} among the closest systems.
+
+\begin{table*}[t]
+  \caption{Trajectory-taint strategies of the closest systems.}
+  \label{tab:systems}
+  \small
+  \begin{tabularx}{\textwidth}{@{}lXXXXX@{}}
+    \toprule
+    System & Role and timing & Flow basis & Trajectory-taint strategy &
+    Persistent lineage & Discretionary release \\
+    \midrule
+    Fides~\cite{fides} & Online prevention &
+    Dynamic conf./integ.\ labels &
+    Selectively hide restrictive fields after return &
+    Per execution & High-integrity policy or constrained reveal \\
+    NeuroTaint~\cite{caiGhostAgentRedefining2026} & Offline detection, audit &
+    Semantic evidence, causal analysis, provenance graph &
+    Detect propagation after execution &
+    Across memory and sessions & None (auditor) \\
+    MemLineage~\cite{ouyangMemLineageLineageGuidedEnforcement2026} &
+    Online memory-sensitive action gate &
+    Signed entries and derivation DAG &
+    Preserve and gate on ancestry &
+    Across memory and sessions & Deployment-configured deny/repair \\
+    \appa{} & Online prevention and remediation &
+    Declared contracts, label fold, shared event log &
+    Before acquisition: accept, fork, derive, or decline &
+    Per run; shared across branches &
+    Checked branch exit or atomic ruling over one rendered call \\
+    \bottomrule
+  \end{tabularx}
+\end{table*}
+
+\paragraph{Semantic and causal taint.}
+NeuroTaint reconstructs source-to-sink provenance offline from completed
+execution traces, using semantic evidence, causal reasoning, and persistent
+context to detect transformed, implicit, and cross-session
+influence~\cite{caiGhostAgentRedefining2026}. Its TaintBench comparison shows
+a real blind spot of source/sink label systems such as Fides: declared labels
+do not infer that a paraphrase or control decision was causally derived from a
+source. \appa{} deliberately does not solve that detection problem. It is an
+online enforcement algebra over trusted contracts and resolver outputs;
+NeuroTaint is a complementary post-hoc auditor for whether those declarations
+captured the actual semantic flow.
+
+\paragraph{Persistent memory lineage.}
+MemLineage signs memory entries, records an LLM-mediated derivation DAG,
+propagates untrusted ancestry across sessions, and gates sensitive calls on
+the active justification~\cite{ouyangMemLineageLineageGuidedEnforcement2026}.
+\appa{}'s trajectory label and event log instead govern one run: durability
+makes decisions replayable and auditable, but v1 does not attach lineage to
+memory entries or claim cross-session taint persistence. The systems are
+therefore complementary; MemLineage can supply persistent provenance at
+\appa{}'s memory boundary.
+
+\paragraph{Execution provenance.}
+The provenance survey of Wang et al.\ distinguishes typed execution graphs and
+evidence-support projections, and places runtime enforcement, tool-use
+provenance, and memory lineage in one taxonomy~\cite{wangAgentTracesTrust2026}.
+\appa{}'s free event monoid is intentionally the procedural subset of that
+space: it records dispatch and governance history for policy predicates and
+audit, but does not infer claim-support edges or semantic influence.
+
+\paragraph{Prompt-injection evaluation.}
+AgentDojo provides realistic user tasks, injection tasks, tools, and an
+extensible defense environment~\cite{debenedettiAgentDojoDynamicEnvironment2024}.
+It is both \appa{}'s evaluation setting and the basis for the primary
+comparison with Fides; TaintBench's propagation labels answer a different,
+post-hoc detection question.
+
+\paragraph{Classical IFC.}
+The lattice model~\cite{denning1976lattice} and
+noninterference~\cite{goguen1982security} supply the sink discipline \appa{}
+inherits; agentic workloads add a long-lived planner context whose future
+utility can be destroyed by label creep. Fork-before-read makes acquisition an
+isolation decision rather than an irreversible update to that context.
+
+\paragraph{Decentralized labels and reader sets.}
+Audience-as-reader-sets follows the decentralized label
+model~\cite{myers1997dlm}; rulings bind groups symbolically, with membership
+resolved fresh at every check.
+
+\paragraph{Declassification.}
+The what/who dimensions of Sabelfeld and
+Sands~\cite{sabelfeld2009declassification} map onto \appa{}'s sanitize (what)
+and approve/endorse (who) mechanisms. Robust
+declassification~\cite{zdancewic2001robust} is the property our ruling
+discipline targets; \S\ref{sec:rulings} states the agentic analogue.
+
+\paragraph{Least privilege.}
+The state-acquisition check is the trajectory-level form of least
+privilege~\cite{saltzer1975protection}.
+
+\paragraph{Graded and parametric effect structure.}
+The dimension interface (carrier, ordered action monoid, adequacy relation) is
+parametric in exactly the shape of graded monads~\cite{katsumata2014graded}.
+It is deliberately not exposed as a runtime API: a lawful fold can be
+property-tested, but the security meaning of a dimension cannot---new
+dimensions arrive by engineering review, not registration.
+
+\paragraph{Gradual typing for security.}
+Following gradual information-flow
+typing~\cite{disney2011gradual,fennell2013gradual}, \emph{Unknown} is treated
+as unadmitted rather than as a lattice element, and casts at the boundary play
+the role of \texttt{fillna}.
+
+\paragraph{Linearity.}
+A ruling is a consumable resource in an append-only
+world~\cite{wadler1990linear}, now spent in the same breath it is minted
+(atomic plan execution, \S\ref{sec:rulings}).
+
+\paragraph{Agent security.}
+The Dual LLM pattern~\cite{willison2023dual} and CaMeL~\cite{camel2025}
+already establish isolation and quarantined processing as defenses; algebraic
+datatypes and monads as a vehicle for agent security appear
+in~\cite{adts2026}. \appa{}'s narrower claim is to connect isolation to a
+prospective label descent and give it compositional fork, exit, and
+shared-history semantics, so branching prevents taint of the continuing
+trajectory rather than merely separating trusted and untrusted model roles.
+Guardrail and prompt-filter literature occupies the imperative pole;
+approval-fatigue critiques of human-in-the-loop schemes motivate the remedy
+design. \todo{add representative guardrail and approval-fatigue citations.}

@@ -1,0 +1,43 @@
+\section{Branching as Taint Prevention}\label{sec:branching}
+
+\paragraph{Observation model.}
+Once bytes enter an LLM context, no subsequent sanitizer can make that trajectory unsee them; clearing its label would therefore be a lie. APPA instead changes which trajectory observes the bytes. The long-lived parent stops before a restrictive acquisition, and a disposable child performs it. Throughout, ``taint prevention'' means preventing taint accumulation in the continuing parent, not denying that either the source or the child is tainted.
+
+\paragraph{Deployment requirement.}
+This construction requires a runtime that sees the full trajectory and controls execution, such as a harness, a proxy paired with a gateway, or an aggressive proxy; a pure MCP gateway is insufficient. A \emph{confining} runtime can prevent tool results and child-context bytes from reaching the parent. The label checks of \S\ref{sec:enforcement} remain applicable without confinement, but fork-before-read and output sanitization do not. Branching is consequently a capability-dependent contribution rather than a universal gateway feature.
+
+\subsection{Intercept before acquisition}
+For a proposed call $t$, the runtime computes the prospective state by folding $\mathit{delta}(t)$ into $L_p$. If that state strictly descends, the acquisition check suspends $t$ before dispatch and offers a \texttt{fork} plan alongside acceptance and refusal. The plan declares both the initial call and the permitted shape of the child's exit; it is not permission to run arbitrary code and inspect the result afterward.
+
+\subsection{Fork by inheritance}
+The child receives a copy of the parent's context and begins at the parent's current fold, so $L_c := L_p^{\mathrm{fork}}$. A fresh permissive label would launder everything inherited by the child: for example, it could place ``summarize what we know'' into a public context. The \texttt{fork} boundary also cancels pending rulings and plan executions. These are records bound to one rendered transition, not capabilities inherited by a child.
+
+\subsection{Descend locally}
+The suspended call dispatches in the child, and every dependent action is checked against the evolving $L_c$. Child deltas fold only into $L_c$, never into $L_p$. The parent may wait or continue independently, but receives neither child messages nor tool values before an explicit exit. This establishes the pre-merge part of Proposition~\ref{prop:preservation}, independently of what the benign-but-confusable child elects to do.
+
+\subsection{Exit explicitly}
+A branch has three outcomes: \texttt{abandon}; return a normally labeled value; or apply a registered sanitizer or quarantine-exit attestation and return its derivative. In every case APPA checks the actual result label before commit. A restrictive raw result triggers the parent's acquisition check again. The parent may deliberately accept the descent or reject the \texttt{merge}, but APPA does not call the former taint prevention. A declared exit bound can be checked before execution to support planning, while the actual label remains authoritative.
+
+\begin{theorem}[Branch taint prevention]\label{thm:branch}
+Let a parent fork at $L_p^{\mathrm{fork}}$, and let the child execute any admitted trace. If the branch is abandoned, child execution does not change the parent's independently evolved label. If the child returns $v$, merging yields
+\[
+  L_p' = L_p \wedge \mathit{label}(v).
+\]
+Hence no child can widen or silently taint its parent, and an exit satisfying $L_p \le \mathit{label}(v)$ preserves the parent exactly.
+\end{theorem}
+
+The result follows from trajectory-local label folds and the meet laws; it does not depend on the child's prompt, plan, or compliance. \todo{Formalize both suspended-parent and concurrent-parent statements; full statements in Appendix~\ref{app:proofs}.}
+
+\paragraph{History is shared, not merged.}
+Parent and child append to one serialized event log in real time. An egress or mutation performed by a child happened in the world even if that child is later abandoned; isolation can neither roll it back nor conceal it from a later \texttt{no\_prior(egress)} check. Fork and merge are governance events. A ruling issued in a child is consumed by its dispatch and leaves no token for the parent. Every branch finalizes by return, failure, or abandonment, and world history requires no reconciliation because it was never forked.
+
+\paragraph{Quarantine exits.}
+Following the Dual-LLM and CaMeL lineage~\cite{willison2023dual,camel2025}, quarantine exits combine a predeclared \texttt{submit\_result} schema with registered derivations. Schema validation alone never raises a label: structure is not provenance. Preserving a trusted parent can require an attestation-shaped transformer claim, such as ``the returned integer is a version number from the named source and carries none of its free text,'' rather than a parser alone. Registering the transformer places that claim in the trusted computing base; this attestation is APPA's only structured, unruled trust increase.
+
+\paragraph{Compiled fork plans.}
+A multi-step branch can compile into one synthesized invocation whose declared result-label bound is checked against the parent. Its body executes within the confining layer, with each step checked against the evolving child state and no intermediate exposed to the parent. If the body needs a ruling, the authority reviews its ordered steps as part of the rendered object. Execution is two-phase: APPA first checks the declared outer bound and then checks the actual result label before merge. On failure it discards the value but retains all world events already appended. The composite delta is the returned value's merge contribution, not the raw composition of the body's internal deltas.
+
+\paragraph{Worked pattern.}
+Suppose a public, trusted parent needs one invoice total from a suspicious, internal CRM record. Reading the record in place would narrow both audience and trust for all subsequent work. APPA forks before \texttt{read\_crm}, computes the total in the child, and permits \texttt{submit\_result(integer)} only through the registered ``invoice total'' attestation. The parent receives the bounded integer at its original label; the raw record and injected text remain confined to a branch that then terminates.
+
+\fixme{Cross-line \texttt{no\_prior(egress)} under the shared log remains open: a child's egress fails the parent's \texttt{no\_prior(egress)}. This conservative interpretation is required by honest world history, but some applications may additionally need a separately declared line-scoped predicate, analogous to the line-scoped \texttt{prior(k)} deferred in \S\ref{sec:limitations}.}

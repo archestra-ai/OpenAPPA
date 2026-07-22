@@ -1,2 +1,13 @@
 target/
 .env
+# LaTeX build artifacts (regenerate with `make`)
+appa.pdf
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.toc
