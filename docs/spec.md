@@ -17,10 +17,14 @@ against registered tool contracts and authorities — the only sources of truth
 for its decisions. Everything reduces to comparisons against exactly two
 pieces of state:
 
-- the **label** — travels with the data and is *checked*. It answers "what is
-  this information: who may read it, how trusted is it."
-- the **log** — travels with the run and is *informational*: an append-only
-  record of what happened — world events, rulings, acceptances.
+- the **label** — travels with the data. It answers "what is this
+  information: who may read it, how trusted is it." Every change to it is
+  checked before it commits.
+- the **log** — travels with the run: an append-only record of what
+  happened — world events, authority rulings, the agent's acceptances.
+  Checks consult it (history
+  requirements, ruling validity), but appends themselves are never gated:
+  history is recorded, not approved.
 
 Nothing else carries state. Anything imperative — an approval flow, an ML
 model that vets content, a lookup that resolves a recipient to a set of
@@ -150,9 +154,10 @@ A finite ordered chain of ranks. The default instance is
 
 An unreviewed read contributes the *minimum*: one suspicious value makes the
 whole trajectory suspicious. A tool requiring rank `r` accepts anything at
-or above `r`. A ruling may *cover* an unmet floor for one dispatch, up to
-the ruling authority's ceiling — the label itself never rises (see
-Rulings).
+or above `r`. A **ruling** — one recorded act of judgment by a registered
+authority, defined under Rulings — may *cover* an unmet floor for one
+dispatch, up to the ceiling the issuing authority's mandate declares; the
+label itself never rises.
 
 ### Audience
 
@@ -179,8 +184,9 @@ the reader set from either side:
 
 - a **cover** — the trajectory's readers must include the concrete
   recipients the call would expose the data to;
-- a **source-protecting bound** — the readers must stay *inside* the tool's
-  declared set: "do not fetch me into a context outsiders can read."
+- a **cap** (`audience ⊆ C`) — the reader set the dispatch would commit
+  must stay inside the tool's declared set: "do not fetch me into a context
+  outsiders can read."
 
 ### How the label moves
 
@@ -201,12 +207,6 @@ raise*, a ruling-carried permissive delta) was considered and rejected in
 favor of branching; the companion paper states the trade and the algebra
 it would drag back in.
 
-Any value the agent authors after observing restricted data carries the full
-trajectory label — the agent's output is an unbounded channel, and assuming
-anything narrower would be unsound. (A planned future extension: an argument
-passed provably by reference — byte-identical to a stored pre-exposure
-value, never retyped by the agent — may keep that value's own label. Not in
-v1.)
 
 ## The event log
 
@@ -239,9 +239,16 @@ state.
 
 The typical pattern — a convention, not a rule: integrity via trust floors
 on mutating tools, confidentiality via audience covers on publishing tools;
-any contract may combine any requirements. World events *record occurrence*
-and support history requirements; the gating itself is always the label's
-job.
+any contract may combine any requirements. History requirements gate a
+dispatch like any other predicate — the log is not advisory — but on a
+different question: the label answers *what the information is*, the log
+answers *what has already happened*. They stay separate pieces of state
+because their algebra differs — the label folds down and settles (minimum,
+intersection), the event set only grows — and because branching treats
+them differently: the log is one, shared across lines in realtime, while a
+label is copied at fork and comes back only through the returned value
+(see Branching). Folding events into the label would silently make
+history line-scoped.
 
 World events are also the model's sanctioned pressure-release valve —
 deliberately. A deployment can encode almost any bespoke gating ritual as
@@ -269,8 +276,7 @@ label, `emits` for the log — plus `requires` and routing-only `tags`:
   - **label requirements**, checked against the trajectory label: a trust
     floor (`trust: trusted`), an audience cover (`audience ⊇ recipients` —
     the recipient set derived from the actual arguments via placeholders, or
-    declared statically), a source-protecting bound (`audience ⊆ C`,
-    optionally `strict` — see check timing).
+    declared statically), a cap (`audience ⊆ C` — see check timing).
   - **history requirements**, checked against the log, in two species:
     - `no_prior(egress)` — no matching world event in the log. Not consumed
       by checking; waivable for one dispatch by a ruling whose issuer's
@@ -317,10 +323,10 @@ language leads with `requires` — a delta reads best as a stated consequence
 is the expert's view of the same fact. And source deltas are derivable: a
 dynamic resolver mapping a document to its ACL's reader set auto-generates
 `audience ∩ readers(doc)`, so humans hand-write the sinks they care about
-and inherit the sources for free. The two slots stay distinct underneath — a
-delta is what the run *learns*, a requirement is what the run *exposes*; a
-send changes nothing the trajectory holds, and a read must be allowed *and*
-taint. Unify the surface, never the slots.
+and inherit the sources for free. The two slots stay distinct underneath —
+the delta is what the dispatch *commits* to the label, the requirement is
+what the label must *satisfy* — and they are independent: a contract may
+carry either, both, or neither, and a call with both is checked on both.
 
 The concrete configuration surface is drafted in "The configuration
 surface" below; the examples in this document use the compact notation
@@ -375,35 +381,41 @@ reasoning left. Spelled out: a requirement that fails because the state is
 too *low* — an uncovered recipient, an unmet trust floor — is cured only by
 a ruling covering the gap; no sequence of unruled steps can ever cure
 it, because unruled steps only descend. A requirement that fails because the
-state is too *high* — a source bound with outsiders in the context — is
+state is too *high* — a cap with outsiders in the context — is
 cured by narrowing: free, modulo the deliberateness stop. ("Free" means no
 security power is exercised — not frictionless.)
 
 ### Check timing
 
-Two clocks for two questions:
+Ordered checks, each with its clock:
 
-- **Label requirements** evaluate on the state the dispatch would *commit* —
-  the current label with the call's own delta applied. Checking the current
-  state instead would let a call outrun its own consequences. The attack:
-  `search_and_share` with `requires: {audience: public}` and
-  `delta: {audience: internal}` — on the current state the label is still
-  public and the call passes, but the bytes it shares *are* the internal
-  data its own dispatch commits.
+- **The narrowing check** runs first, on the state the dispatch would
+  *commit* — the current label with the call's own `delta` applied. A
+  strict descent is the state-acquisition soft block (see The check), and
+  dispatch waits for the agent's acceptance of exactly that narrowing.
+- **Label requirements** then evaluate on the current state — which, with
+  an accepted narrowing in force, *is* the state the dispatch commits. The
+  order is load-bearing: checked before the narrowing, a call could outrun
+  its own consequences. The attack: `search_and_share` with
+  `requires: {audience: public}` and `delta: {audience: internal}` — on
+  the pre-narrowing label the call passes as public, but the bytes it
+  shares *are* the internal data its own dispatch commits; with the
+  narrowing in force the cover fails, and the release takes a ruling.
 - **History requirements** ask what has already happened: they evaluate on
   the log as it stands at check time — so a call's own `emits` can never
   trigger its own precondition.
 
-Source-protecting bounds (`audience ⊆ C`) default to the committed state: a
-read that itself narrows into the bound passes, surfacing as the standard
-state-acquisition soft block ("this fetch drops these readers"), and the
-dropped readers provably receive no post-read content. A requirement may
-declare `strict`, additionally bounding the *current* state: the clean room
-must already exist before the fetch — the narrowing that establishes it is a
-separate, deliberately accepted prior step, never smuggled in by the fetch
-itself. (Deployments whose channel physically shows every message to fixed
-readers regardless of the label are out of scope: APPA governs agentic
-trajectories, not generic channels.)
+Neither label check is a configuration entity: both derive from the
+contract's own `requires` and `delta`; the surface exposes no timing
+knobs.
+
+Caps (`audience ⊆ C`) follow the same clock as every label requirement —
+the call's own narrowing counts: a read that itself narrows into the cap
+passes, surfacing as the standard state-acquisition soft block ("this
+fetch drops these readers"), and the dropped readers provably receive no
+post-read content. (Deployments whose channel physically shows every
+message to fixed readers regardless of the label are out of scope: APPA
+governs agentic trajectories, not generic channels.)
 
 The delta commits and the events append only when the tool actually runs.
 
