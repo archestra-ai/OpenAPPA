@@ -1,8 +1,8 @@
 .PHONY: all clean watch
 
-all: main.pdf
+all: appa.pdf
 
-main.pdf: main.tex appa.bib $(wildcard sections/*.tex)
+appa.pdf: main.tex appa.bib $(wildcard sections/*.tex)
 	latexmk -pdf -interaction=nonstopmode main.tex
 
 watch:
