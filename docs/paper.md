@@ -97,13 +97,16 @@ check fails, the agent has already fetched the data, burned the turns, and
 narrowed its own future. APPA orders label states by restrictiveness and
 soft-blocks any call whose prospective state strictly descends: down is free
 *but deliberate*, up needs authority. The block carries remedy plans, and
-because raise-free steps only descend and every remedy is statically
-declared — an authority's mandate, a sanitizer's transition, a tool emitting
-the missing event — the remedy space is finite and enumerable from the
-registry: an empty remedy set is a *proof* that no unlock exists, which the
+because no unruled step raises the trajectory fold and every remedy is
+statically
+declared — an authority's mandate, a sanitizer's transition, a tool
+emitting the missing event or dropping the offending readers, a cast
+resolving an unknown — the remedy space is finite and enumerable from the
+registry: an empty remedy set is a *proof* that no unlock exists under
+the configuration and resolver answers at check time, which the
 agent can act on without wasting turns. (Acquisition blocks always carry
 one extra, registry-free remedy — the agent's own acceptance of the
-narrowing — so emptiness-as-proof concerns requirement-side gaps.) **Second, judgment is atomic and
+narrowing — so they are never terminal.) **Second, judgment is atomic and
 call-scoped.** Every discretionary act is an authority ruling
 delivered inside one indivisible step: the engine renders the pending call
 (tool plus resolved arguments, with provenance, never value bytes and never
@@ -227,9 +230,17 @@ Contributions:
   "effects dimension" of earlier designs is precisely such a projection,
   demoted from the label — an effect is about what the run *did*, not what
   the data *is*. Folding events into the label is possible as notation (a
-  product of monoids is a monoid) and destructive as semantics: per-value
-  vs per-run merge, predicate polarity, and consumability would all
-  re-emerge as special cases inside the "unified" object.
+  product of monoids is a monoid) and destructive as semantics: fork scope
+  (a label is copied per line, the log shared per run — an abandoned
+  branch's egress must survive returning no value), the pre-append check
+  clock (a call's own `emits` must not trigger its own precondition), the
+  sign rule (a union ascent is neither a restrictive delta nor exempt
+  from the narrowing stop by any existing rule), and multiplicity (the
+  free monoid counts; a semilattice cannot) would all re-emerge as
+  per-dimension special cases inside the "unified" object. (Predicate
+  polarity is *not* among them: audience already carries both polarities
+  as cover ⊇ and cap ⊆; `prior`/`no_prior` is the same pair on the dual
+  fold.)
 - **Effects as the sanctioned pressure-release valve**: bespoke gating
   rituals encode as effect vocabulary plus a resolver-implemented authority (a
   `finance.spend` magnitude summed as a log view deciding auto-approve vs
@@ -315,13 +326,21 @@ Contributions:
   input-sanitizer substitutions producing an admissible derived argument
   (any deployment); output-sanitizer-backed composites
   (confining only); for failed `prior(k)`, registered tools whose `emits`
-  include k; declared waiver mandates and attended attention marks; for an
+  include k; for a failed cap, registered tools whose restrictive delta
+  drops the offending readers (narrow first, then re-propose — caps are
+  anti-monotone, cured by descent); for an unresolved fact, registered
+  casts whose declared targets could resolve it; declared waiver mandates
+  and attended attention marks; for an
   acquisition soft block, the acceptance plan — always available from no
   registry entry, because it grants nothing (acquisition blocks are never
-  terminal; emptiness-as-proof is a requirement-side claim). For release-side
-  failures completeness follows from monotonicity: unruled steps only
-  descend, sanitizer/branch results merge by ∩/min ⇒ nothing outside the
-  enumeration can cure the gap. Empty ⇒ proof of unremediability. **Weak
+  terminal). For too-low
+  failures completeness follows from monotonicity: no unruled step raises
+  the trajectory fold — sanitizer/attestation raises live on derived
+  values and merge by ∩/min ⇒ nothing outside the
+  enumeration can cure the gap. Empty ⇒ proof of unremediability,
+  **relative to registry + resolver answers at check time — the same
+  clock as the weak direction** (a directory change may reopen a gap
+  unliftable today). **Weak
   direction stated honestly:** nonempty = a plan exists relative to
   registry + resolver answers at check time. (Depends on the
   no-empty-mandate rule — an authority whose mandate covers nothing is a

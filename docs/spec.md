@@ -244,12 +244,20 @@ any contract may combine any requirements. History requirements gate a
 dispatch like any other requirement — the log is not advisory — but on a
 different question: the label answers *what the information is*, the log
 answers *what has already happened*. They stay separate pieces of state
-because their algebra differs — the label folds down and settles (minimum,
-intersection), the event set only grows — and because branching treats
-them differently: the log is one, shared across branches in realtime, while a
-label is copied at fork and comes back only through the returned value
-(see Branching). Folding events into the label would silently make
-history branch-scoped.
+for structural reasons, not the fold's direction — a union of effect kinds
+would settle by the same finiteness argument that settles the label.
+Branching scopes them differently: a label is copied at fork and comes
+back only through the returned value, while the log is one, shared across
+branches in realtime — an abandoned branch returns no value, yet its
+`egress` must stay visible (see Branching). Their clocks differ: label
+requirements evaluate on the label the call would commit, history
+requirements on the log as it stands, so a call's own `emits` can never
+trigger its own precondition (see Check timing). And the log is ordered
+and counted where a label fold is idempotent: the seen-effect-kinds set is
+only a cached view, and views that need multiplicity — the summed
+`finance.spend` magnitude below — read the records, not the set. Folding
+events into the label would silently make history branch-scoped, checked
+on the wrong clock, and blind to how often anything happened.
 
 Effects are also the model's sanctioned pressure-release valve —
 deliberately. A deployment can encode almost any bespoke gating ritual as
@@ -379,8 +387,11 @@ agent to choose between preserving its release frontier and entering a
 restricted context *before* fetching the data. The soft block shifts the
 reasoning left. Spelled out: a requirement that fails because the label is
 too *low* — an unmet `includes`, an unmet trust floor — is cured only by
-a ruling covering the gap; no sequence of unruled steps can ever cure
-it, because unruled steps only narrow. A requirement that fails because the
+a ruling covering the gap or a registered sanitizer's derivation standing
+in for the offending contribution; no sequence of plain unruled steps can
+cure it, because no unruled step raises the trajectory label — a
+sanitizer's or attestation's raise lives on a derived value and enters a
+check only through its registered plan. A requirement that fails because the
 label is too *high* — a cap with outsiders in the context — is
 cured by narrowing: free, modulo the agent's acceptance. ("Free" means no
 security power is exercised — not frictionless.)
@@ -430,8 +441,9 @@ every engine-side plan, present from the start of the run** —
 `execute_remedy_plan(plan_id)` — so the tool set stays stable (injecting
 tools mid-conversation breaks prompt caches). On execution the id, the
 ruling where the plan carries one, and the dispatch all land in the log;
-for an acceptance plan the plan id *is* the record. A `prior(k)` plan has
-no engine-side step and no id-execution path (see below).
+for an acceptance plan the plan id *is* the record. A `prior(k)` or
+failed-cap plan has no engine-side step and no id-execution
+path (see below).
 
 ```ts
 type CheckOutcome =
@@ -456,25 +468,37 @@ Two facts about the list:
   registered configuration and, where dynamic resolvers contribute, their
   answers at check time; succeeding still takes the authority granting and
   the world cooperating.
-- **An empty list is a proof, not a shrug.** The remedy space is finite and
-  enumerable from the registry: the in-scope (tag-routed) ruled covers
+- **An empty list is a proof, not a shrug — on the same clock as the
+  nonempty direction.** The remedy space is finite and enumerable from the
+  registry: the in-scope (tag-routed) ruled covers
   whose declared mandate
   ceiling reaches the gap; the input-sanitizer substitutions that would
   produce an admissible derived argument (any deployment); the
   output-sanitizer-backed composites (confining deployments only); for a failed
   `prior(k)`, the registered tools whose `emits` include `k` — the plan is
-  to make the effect happen; for waivers and attention demands, the declared
+  to make the effect happen; for a failed cap, the registered tools whose
+  restrictive delta would drop the offending readers — the plan is to
+  narrow first, accept that narrowing, and re-propose; for an unresolved
+  fact, the registered casts whose declared targets could resolve it; for
+  waivers and attention demands, the declared
   mandates that cover them; for a narrowing soft block, the acceptance
   plan — always available, from no registry entry at all, because it
   grants nothing (so a narrowing block is never terminal; the
   empty-list proof concerns requirement gaps). For a gap the label is too
   *low* for — an unmet floor, an unmet `includes` — nothing outside
-  that enumeration can ever cure it, because unruled steps only narrow;
-  the history and attention cures — a `k`-emitting tool, a waiving or
-  attending mandate — are registry entries by definition. (A cap gap —
-  the label too *high* — is the one species cured by narrowing itself,
-  free modulo acceptance; see The check.) The
-  agent provably should not spend turns on an unliftable restriction.
+  that enumeration can cure it, because no unruled step raises the
+  trajectory label — a sanitizer's or attestation's raise lives on a
+  derived value and enters a check only through the enumerated
+  substitution and composite plans; the history and attention cures — a
+  `k`-emitting tool, a waiving or attending mandate — are registry
+  entries by definition. (A cap gap — the label too *high* — is the one
+  species cured by narrowing itself, free modulo acceptance, through the
+  narrow-first plans enumerated above; see The check.) The proof is
+  relative to the registered configuration and, where dynamic resolvers
+  contribute, their answers at check time — the same clock the nonempty
+  direction runs on; a directory change tomorrow may reopen a gap that is
+  unliftable today. Within that frame the agent provably should not
+  spend turns on an unliftable restriction.
 
 Plans divide by who executes them. A plan whose steps are engine-side
 acts — a ruling, a sanitizer application, an acceptance — executes
@@ -483,7 +507,10 @@ for a failed `prior(k)` carries no engine-side step: it names a
 registered tool whose `emits` include `k`; the agent dispatches that tool
 as an ordinary, separately-checked call, then re-proposes the original
 one — two calls, each under its own check, nothing atomic between
-them.
+them. A plan for a failed cap has the same shape: it names a registered
+tool whose restrictive delta drops the offending readers; the narrowing
+is accepted at that tool's own narrowing soft block, and the re-proposed
+call is checked afresh.
 
 ## Rulings
 
@@ -1025,10 +1052,11 @@ xor resolver-implemented**.
   clears no requirement; the plan id in the log is the record.
 - **Remedy plan** — an executable object with an id; every engine-side plan
   runs atomically via `execute_remedy_plan(plan_id)`: render, rule (when
-  the plan carries a ruling), dispatch, log. A plan for a failed `prior(k)` carries
-  no engine-side step: it names a registered tool whose `emits` include
-  `k`, for the agent to dispatch as an ordinary checked call before
-  re-proposing.
+  the plan carries a ruling), dispatch, log. A plan for a failed `prior(k)`
+  or a failed cap carries no engine-side step: it names a registered tool —
+  one whose `emits` include `k`, or one whose restrictive delta drops the
+  offending readers — for the agent to dispatch as an ordinary checked
+  call before re-proposing.
 - **Authority / mandate / scope / ruling** — a registered judge; the
   declaration of what its rulings may cover; the tags it has jurisdiction
   over; one act of judgment, appended to the log. Every ruling is
