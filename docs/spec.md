@@ -1004,11 +1004,10 @@ xor resolver-implemented**.
   review and authorities offer it, without naming each other.
 - **Tag** — a routing-only name with no algebraic life: never folded,
   checked, or logged. The exclusive currency of authority scope.
-- **Soft block** — a block carrying executable remedy plans; the narrowing
-  block is one instance.
 - **Narrowing** — a strict restriction of the label (fewer readers, lower
   trust) that a call's delta would commit, shrinking the release frontier.
-  Soft-blocked until the agent accepts it.
+  Soft-blocked until the agent accepts it; the block always carries the
+  acceptance plan, so it is never terminal.
 - **Acceptance** — the agent's own free plan step acknowledging a narrowing
   before dispatch: no authority involved, no security power exercised,
   clears no requirement; the plan id in the log is the record.
