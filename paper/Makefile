@@ -2,11 +2,11 @@
 
 all: appa.pdf
 
-appa.pdf: main.tex appa.bib $(wildcard sections/*.tex)
-	latexmk -pdf -interaction=nonstopmode main.tex
+appa.pdf: appa.tex appa.bib $(wildcard sections/*.tex)
+	latexmk -pdf -interaction=nonstopmode appa.tex
 
 watch:
-	latexmk -pdf -pvc -interaction=nonstopmode main.tex
+	latexmk -pdf -pvc -interaction=nonstopmode appa.tex
 
 clean:
-	latexmk -C main.tex
+	latexmk -C appa.tex
