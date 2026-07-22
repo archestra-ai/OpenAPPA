@@ -466,10 +466,13 @@ Two facts about the list:
   mandates that cover them; for a narrowing soft block, the acceptance
   plan — always available, from no registry entry at all, because it
   grants nothing (so a narrowing block is never terminal; the
-  empty-list proof concerns requirement gaps). Nothing outside that
-  enumeration can ever cure a requirement gap: unruled steps only narrow,
-  and the other cures — a `k`-emitting tool, a waiving or attending
-  mandate — are registry entries by definition. The
+  empty-list proof concerns requirement gaps). For a gap the state is too
+  *low* for — an unmet floor, an uncovered recipient — nothing outside
+  that enumeration can ever cure it, because unruled steps only narrow;
+  the history and attention cures — a `k`-emitting tool, a waiving or
+  attending mandate — are registry entries by definition. (A cap gap —
+  the state too *high* — is the one species cured by narrowing itself,
+  free modulo acceptance; see The check.) The
   agent provably should not spend turns on an unliftable restriction.
 
 Plans divide by who executes them. A plan whose steps are engine-side
@@ -1007,9 +1010,8 @@ xor resolver-implemented**.
   (checked against the log as it stands), and attention demands (per-call,
   never satisfied by history).
 - **Requirement gap** — an unmet entry of a contract's `requires` — a
-  label, history, or attention gap — reported in a block and cured only
-  from the enumerable remedy space. Distinct from a narrowing, which
-  fails no requirement.
+  label, history, or attention gap — reported in a block. Distinct from
+  a narrowing, which fails no requirement.
 - **Attention mark** — a named, per-call demand for a fresh ruling by an
   attending authority; the shared vocabulary through which tools demand
   review and authorities offer it, without naming each other.
