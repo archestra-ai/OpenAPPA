@@ -17,10 +17,14 @@ against registered tool contracts and authorities — the only sources of truth
 for its decisions. Everything reduces to comparisons against exactly two
 pieces of state:
 
-- the **label** — travels with the data and is *checked*. It answers "what is
-  this information: who may read it, how trusted is it."
-- the **log** — travels with the run and is *informational*: an append-only
-  record of what happened — world events, rulings, acceptances.
+- the **label** — travels with the data. It answers "what is this
+  information: who may read it, how trusted is it." Every change to it is
+  checked before it commits.
+- the **log** — travels with the run: an append-only record of what
+  happened — effects, authority rulings, the agent's acceptances.
+  Checks consult it (history
+  requirements, ruling validity), but appends themselves are never gated:
+  history is recorded, not approved.
 
 Nothing else carries state. Anything imperative — an approval flow, an ML
 model that vets content, a lookup that resolves a recipient to a set of
@@ -84,10 +88,10 @@ flowchart LR
 
 The mediation loop, on each round-trip: the run's turns accumulate into the
 trajectory; every tool call the model proposes is checked before dispatch; an
-allowed call runs and its declared contributions land (label delta and world
-events); a blocked call never runs — the model receives the exact failed
-predicates and the available remedy plans instead, and can execute a plan by
-id (see The check).
+allowed call runs and, on success, its declared contributions land (label
+delta and effects); a blocked call never runs — the model receives exactly what
+failed — requirement gaps or a narrowing — and the available remedy plans
+instead, and can execute an engine-side plan by id (see The check).
 
 ## What APPA protects against
 
@@ -106,10 +110,11 @@ id (see The check).
   (auto-approve authorities, a constant Unknown → trusted cast) is legitimate
   and voids the corresponding guarantees explicitly and auditably; that trade
   is the deployer's to make.
-- APPA assumes a **serialized, durable event log**. Crash-atomicity of event
-  recording and concurrency between branches are the host's obligations, not
-  the engine's; history checks are sound per-line, not globally, in the
-  presence of concurrent branches.
+- APPA assumes a **serialized, durable event log**. Serializing appends
+  across concurrent branches is the host's obligation, not the engine's: a
+  history check is only as sound as the log it has seen — an effect a
+  concurrent branch has not yet appended is invisible to it. The invoke/append
+  crash gap is accepted, not defended (see Implementation shape).
 - The core trajectory is **linear**. Branching is a host capability governed
   by the confinement profile (below); its guarantees hold only in confining
   deployments.
@@ -124,7 +129,7 @@ id (see The check).
 All data flows as a `LabeledValue`. Value and label are never separated and
 never operated on directly.
 
-- **value** — an agentic turn: tool call + result, a part of the trajectory.
+- **value** — one tool call plus its result, a part of the trajectory.
   The natural unit of existing agentic workflows.
 - **label** — who may read this information and how trusted it is: the
   product of the two label dimensions.
@@ -133,8 +138,8 @@ never operated on directly.
 - **label requirement** — what the trajectory label must satisfy before a
   tool may run. Contracts declare it as `requires`.
 
-Tool calls are transactional: once a tool runs, its delta is folded into the
-trajectory. Sanitizing after the fact cannot clear a trajectory.
+Tool calls are transactional: once a tool call succeeds, its delta is folded
+into the trajectory. Sanitizing after the fact cannot clear a trajectory.
 
 ## Labels
 
@@ -150,9 +155,10 @@ A finite ordered chain of ranks. The default instance is
 
 An unreviewed read contributes the *minimum*: one suspicious value makes the
 whole trajectory suspicious. A tool requiring rank `r` accepts anything at
-or above `r`. A ruling may *cover* an unmet floor for one dispatch, up to
-the ruling authority's ceiling — the label itself never rises (see
-Rulings).
+or above `r`. A **ruling** — one recorded act of judgment by a registered
+authority, defined under Rulings — may *cover* an unmet floor for one
+dispatch, up to the ceiling the issuing authority's mandate declares; the
+label itself never rises.
 
 ### Audience
 
@@ -173,21 +179,22 @@ engine's.
 
 Reading restricted data **shrinks** the reader set (intersection: only
 people cleared for every input may read the combination); the set never
-grows. An uncovered recipient is reached only through a ruling covering one
-dispatch, never by widening the label. A tool's requirement can constrain
+grows. A recipient outside the reader set is reached only through a ruling
+covering one dispatch, never by widening the label. A tool's requirement can constrain
 the reader set from either side:
 
-- a **cover** — the trajectory's readers must include the concrete
-  recipients the call would expose the data to;
-- a **source-protecting bound** — the readers must stay *inside* the tool's
-  declared set: "do not fetch me into a context outsiders can read."
+- an **`includes`** (`audience ⊇ recipients`) — the trajectory's readers
+  must include the concrete recipients the call would expose the data to;
+- a **cap** (`audience ⊆ C`) — the reader set the dispatch would commit
+  must stay inside the tool's declared set: "do not fetch me into a context
+  outsiders can read."
 
 ### How the label moves
 
-A contract's `delta` describes what dispatching the tool does to the
+A contract's `delta` describes what a successful call does to the
 trajectory label — and every delta is *restrictive*: intersect the
 audience, take the minimum trust. There is no permissive delta. A ruling
-covers a requirements gap for one dispatch while the label stays put (see
+covers a requirement gap for one dispatch while the label stays put (see
 Rulings), so the label only ever moves down, and settles — no oscillation,
 and no replay needed to compute it: the whole history collapses to a
 running intersection and minimum.
@@ -201,30 +208,23 @@ raise*, a ruling-carried permissive delta) was considered and rejected in
 favor of branching; the companion paper states the trade and the algebra
 it would drag back in.
 
-Any value the agent authors after observing restricted data carries the full
-trajectory label — the agent's output is an unbounded channel, and assuming
-anything narrower would be unsound. (A planned future extension: an argument
-passed provably by reference — byte-identical to a stored pre-exposure
-value, never retyped by the agent — may keep that value's own label. Not in
-v1.)
 
 ## The event log
 
 Everything historical lives in a single append-only log. Nothing about it is
 ever checked before appending: history is recorded, not approved. Two
-species of events share it:
+species of records share it:
 
-- **World events** — what the run did outside: `egress`, `mutation`, drawn
+- **Effects** — what the run did outside: `egress`, `mutation`, drawn
   from a configurable vocabulary. Declared by contracts as `emits` and
-  appended at dispatch — one append point, deliberately. Dispatch-append is
-  fail-closed where it matters: for `no_prior(egress)`, the *attempt* is on
-  the record even if the call then fails — the email may already be in
-  someone's inbox. The honest flip side: a positive `prior(k)` proves the
-  dispatch happened, not that the outer world succeeded — name events
-  accordingly (`backup_dispatched`, not `backup_succeeded`);
-  outcome-sensitive completion events are future work.
+  appended when the call succeeds — one append point, deliberately. A call
+  that dispatched but failed appends nothing; the window this opens for
+  `no_prior(egress)` — a failed send may still have reached an inbox — is
+  accepted for simplicity, as is the invoke/append crash gap (see
+  Implementation shape). A positive `prior(k)` proves the tool reported
+  success, nothing more about the outer world.
 - **Governance events** — what was decided: authority rulings and the
-  dispatches that consume them, the agent's descent acceptances, boundary
+  dispatches that consume them, the agent's narrowing acceptances, boundary
   events, sanitizer applications,
   casts. A **boundary event** is not a decision — it is punctuation:
   a mark in the log that pending plan executions — approval requests not
@@ -233,25 +233,33 @@ species of events share it:
 
 The log is consulted in exactly three ways: **history requirements** in
 contracts, **ruling validity** (rulings, their consumption, boundaries), and
-audit. Useful summaries — e.g. "the set of world-event kinds seen so far" —
+audit. Useful summaries — e.g. "the set of effect kinds seen so far" —
 are views computed from the log, cached by the engine, never independent
 state.
 
 The typical pattern — a convention, not a rule: integrity via trust floors
-on mutating tools, confidentiality via audience covers on publishing tools;
-any contract may combine any requirements. World events *record occurrence*
-and support history requirements; the gating itself is always the label's
-job.
+on mutating tools, confidentiality via audience `includes` on publishing
+tools;
+any contract may combine any requirements. History requirements gate a
+dispatch like any other requirement — the log is not advisory — but on a
+different question: the label answers *what the information is*, the log
+answers *what has already happened*. They stay separate pieces of state
+because their algebra differs — the label folds down and settles (minimum,
+intersection), the event set only grows — and because branching treats
+them differently: the log is one, shared across branches in realtime, while a
+label is copied at fork and comes back only through the returned value
+(see Branching). Folding events into the label would silently make
+history branch-scoped.
 
-World events are also the model's sanctioned pressure-release valve —
+Effects are also the model's sanctioned pressure-release valve —
 deliberately. A deployment can encode almost any bespoke gating ritual as
-event vocabulary plus a dynamic authority: a `finance.spend` event whose
+effect vocabulary plus a dynamic authority: a `finance.spend` effect whose
 accumulated magnitude — a log view, summed by a registered authority —
 decides between auto-approving and paging a human. That is better than the
-alternatives: the hack is a named event in an auditable log, not a
+alternatives: the hack is a named effect in an auditable log, not a
 distortion of the label rules, and the guarantees on everything else stand.
 (Budget as a label dimension is deliberately out of scope; a deployment
-whose event vocabulary sprawls is signaling it wants a workflow engine on
+whose effect vocabulary sprawls is signaling it wants a workflow engine on
 top, not a bigger policy engine.)
 
 ## Tool contracts
@@ -259,27 +267,26 @@ top, not a bigger policy engine.)
 A contract declares one contribution per piece of state — `delta` for the
 label, `emits` for the log — plus `requires` and routing-only `tags`:
 
-- **`delta`** — the label action. Checked *before* it is applied: the state
+- **`delta`** — the label action. Checked *before* it is applied: the label
   the call would commit must pass, so a delta can be blocked, remedied, or
   require a ruling.
-- **`emits`** — the world events the dispatch appends, an unordered batch
-  recorded as one step. Applied, never checked: you cannot fail an append;
-  history is not up for approval.
+- **`emits`** — the effects a successful call appends, an unordered
+  batch recorded as one step. Applied, never checked: you cannot fail an
+  append; history is not up for approval.
 - **`requires`** — in three kinds:
   - **label requirements**, checked against the trajectory label: a trust
-    floor (`trust: trusted`), an audience cover (`audience ⊇ recipients` —
+    floor (`trust = "trusted"`), an `includes` (`audience ⊇ recipients` —
     the recipient set derived from the actual arguments via placeholders, or
-    declared statically), a source-protecting bound (`audience ⊆ C`,
-    optionally `strict` — see check timing).
+    declared statically), a cap (`audience ⊆ C` — see check timing).
   - **history requirements**, checked against the log, in two species:
-    - `no_prior(egress)` — no matching world event in the log. Not consumed
+    - `no_prior(egress)` — no matching effect in the log. Not consumed
       by checking; waivable for one dispatch by a ruling whose issuer's
       mandate covers the waiver.
-    - `prior(backup_ran)` — a matching world event exists ("delete the
+    - `prior(backup_ran)` — a matching effect exists ("delete the
       database only after the backup ran"). Nothing to waive — the remedy is
-      to make the event happen. (With dispatch-append this proves the backup
-      was *dispatched*, not that it succeeded — name events accordingly.)
-  - **attention demands** — `attention: {finance_signoff}`: named marks
+      to make the effect happen. (The effect proves the backup tool reported
+      success, nothing more about the outer world.)
+  - **attention demands** — `attention = ["finance_signoff"]`: named marks
     drawn from a shared vocabulary. An attention demand is *per-call* and
     never satisfied by history — where an effect is a durable fact
     (`prior(k)` holds forever once the event lands), attention demands a
@@ -298,12 +305,11 @@ label, `emits` for the log — plus `requires` and routing-only `tags`:
 Contracts can be static, static with placeholders, or dynamic. A placeholder
 contract:
 
-```
-tool: send_email(to: $recipient)
-requires:
-  trust: trusted
-  audience: {$recipient}
-emits: {egress}
+```toml
+[[tool]]
+name     = "send_email"        # send_email(to: $recipient)
+requires = { trust = "trusted", audience = { includes = ["$recipient"] } }
+effects  = ["egress"]          # emits
 ```
 
 Naive placeholders do not solve real-world ACLs, so delegating resolution
@@ -317,49 +323,49 @@ language leads with `requires` — a delta reads best as a stated consequence
 is the expert's view of the same fact. And source deltas are derivable: a
 dynamic resolver mapping a document to its ACL's reader set auto-generates
 `audience ∩ readers(doc)`, so humans hand-write the sinks they care about
-and inherit the sources for free. The two slots stay distinct underneath — a
-delta is what the run *learns*, a requirement is what the run *exposes*; a
-send changes nothing the trajectory holds, and a read must be allowed *and*
-taint. Unify the surface, never the slots.
+and inherit the sources for free. The two slots stay distinct underneath —
+the delta is what a successful call *commits* to the label, the requirement is
+what the label must *satisfy* — and they are independent: a contract may
+carry either, both, or neither, and a call with both is checked on both.
 
 The concrete configuration surface is drafted in "The configuration
-surface" below; the examples in this document use the compact notation
-above.
+surface" below; examples throughout this document are written in that
+dialect.
 
 ## The check
 
 Before every tool call the contract is evaluated. The outcome is binary —
-allow, or block with the exact failed predicates. The check itself is
-two-fold:
+allow, or block with exactly what failed: requirement gaps, a narrowing,
+or both. The check itself is two-fold:
 
 **1. Tool requirement compatibility.** Never widen the audience, never act
 on worse trust than the tool requires: the trajectory label satisfies the
 contract or the call is blocked. Where the required audience comes from
 placeholders, it is derived from the actual arguments — the trajectory's
-readers must cover the concrete recipients of *this* call; a static contract
+readers must include the concrete recipients of *this* call; a static contract
 simply declares its recipients.
 
-**2. State acquisition.** Do not touch more secrets than the task really
+**2. Narrowing.** Do not touch more secrets than the task really
 needs. Every contribution moves the label down or leaves it in place — on
 both axes, no exceptions: v1 has no permissive deltas, and rulings cover
-gaps without touching the label. A call whose committed state would
-strictly descend is deliberately soft-blocked; a repeat that leaves the
-state unchanged is not. The point: committing to restricted data
+gaps without touching the label. A call whose committed label would
+strictly narrow is deliberately soft-blocked; a repeat that leaves the
+label unchanged is not. The point: committing to restricted data
 voluntarily shrinks the **release frontier** — what the agent may still
 release, and to whom, without a further ruling. APPA makes that a
 conscious, remediable choice *before* the data is fetched, instead of a
-silent ratchet discovered three steps later. Accepting the descent is the
+silent ratchet discovered three steps later. Accepting the narrowing is the
 *agent's own* plan step — free, on the record, and involving no authority:
-no security power is exercised, and the deliberateness stop is the agent
-choosing the plan (see Rulings for how this composes with rulings).
+no security power is exercised; what makes the stop deliberate is that the
+agent chooses the plan (see Rulings for how this composes with rulings).
 
 Deltas never raise — the only sign rule v1 needs. A call may carry a
-restrictive delta and a release-side requirement gap at once
+restrictive delta and a requirement gap at once
 (`search_and_share` is exactly that); then both gates apply: the agent
 accepts the narrowing, a ruling covers the gap, and neither substitutes
 for the other. A tool whose *action* is itself a grant of access
 (`share_doc(doc, outsider)`: fetch, then open the ACL) is still modeled
-as a composite of a fetch and a release, so each transition stays simple
+as a composite of a fetch and a release, so each stays simple
 to rule on.
 
 Together the two checks are a pragmatic middle ground between the two
@@ -371,64 +377,78 @@ ones a deliberate, remediable choice.
 The central thesis: **down is free, up needs authority** — and APPA asks the
 agent to choose between preserving its release frontier and entering a
 restricted context *before* fetching the data. The soft block shifts the
-reasoning left. Spelled out: a requirement that fails because the state is
-too *low* — an uncovered recipient, an unmet trust floor — is cured only by
+reasoning left. Spelled out: a requirement that fails because the label is
+too *low* — an unmet `includes`, an unmet trust floor — is cured only by
 a ruling covering the gap; no sequence of unruled steps can ever cure
-it, because unruled steps only descend. A requirement that fails because the
-state is too *high* — a source bound with outsiders in the context — is
-cured by narrowing: free, modulo the deliberateness stop. ("Free" means no
+it, because unruled steps only narrow. A requirement that fails because the
+label is too *high* — a cap with outsiders in the context — is
+cured by narrowing: free, modulo the agent's acceptance. ("Free" means no
 security power is exercised — not frictionless.)
 
 ### Check timing
 
-Two clocks for two questions:
+Ordered checks, each with its clock:
 
-- **Label requirements** evaluate on the state the dispatch would *commit* —
-  the current label with the call's own delta applied. Checking the current
-  state instead would let a call outrun its own consequences. The attack:
-  `search_and_share` with `requires: {audience: public}` and
-  `delta: {audience: internal}` — on the current state the label is still
-  public and the call passes, but the bytes it shares *are* the internal
-  data its own dispatch commits.
+- **The narrowing check** runs first, on the label the dispatch would
+  *commit* — the current label with the call's own `delta` applied. A
+  strict narrowing is soft-blocked (see The check), and
+  dispatch waits for the agent's acceptance of exactly that narrowing.
+- **Label requirements** then evaluate on the current label — which, with
+  an accepted narrowing in force, *is* the label the dispatch commits. The
+  order is load-bearing: checked before the narrowing, a call could outrun
+  its own consequences. The attack: `search_and_share` with
+  `requires = { audience = { includes = ["public"] } }` and
+  `delta = { audience = { exactly = ["internal"] } }` — on
+  the pre-narrowing label the call passes as public, but the bytes it
+  shares *are* the internal data its own dispatch commits; with the
+  narrowing in force the `includes` fails, and the release takes a ruling.
 - **History requirements** ask what has already happened: they evaluate on
   the log as it stands at check time — so a call's own `emits` can never
   trigger its own precondition.
 
-Source-protecting bounds (`audience ⊆ C`) default to the committed state: a
-read that itself narrows into the bound passes, surfacing as the standard
-state-acquisition soft block ("this fetch drops these readers"), and the
-dropped readers provably receive no post-read content. A requirement may
-declare `strict`, additionally bounding the *current* state: the clean room
-must already exist before the fetch — the narrowing that establishes it is a
-separate, deliberately accepted prior step, never smuggled in by the fetch
-itself. (Deployments whose channel physically shows every message to fixed
-readers regardless of the label are out of scope: APPA governs agentic
-trajectories, not generic channels.)
+Neither label check is a configuration entity: both derive from the
+contract's own `requires` and `delta`; the surface exposes no timing
+knobs.
 
-The delta commits and the events append only when the tool actually runs.
+Caps (`audience ⊆ C`) follow the same clock as every label requirement —
+the call's own narrowing counts: a read that itself narrows into the cap
+passes, surfacing as the standard narrowing soft block ("this
+fetch drops these readers"), and the dropped readers provably receive no
+post-read content. (Deployments whose channel physically shows every
+message to fixed readers regardless of the label are out of scope: APPA
+governs agentic trajectories, not generic channels.)
+
+The delta commits and the effects append only when the tool call succeeds.
 
 ### Remedy plans
 
 A block carries `remedy_plans`: the sound remedies available under the
 current configuration and deployment capability (a confinement plan exists
 only in a confining deployment). Plans are executable objects, not prose:
-each carries an id, and the engine exposes **one agent-facing tool for all
-of them, present from the start of the run** — `execute_remedy_plan(plan_id)`
-— so the tool set stays stable (injecting tools mid-conversation breaks
-prompt caches). The id, the ruling where the plan carries one, and the
-dispatch all land in the log; for an acceptance plan the plan id *is* the
-record.
+each carries an id, and the engine exposes **one agent-facing tool for
+every engine-side plan, present from the start of the run** —
+`execute_remedy_plan(plan_id)` — so the tool set stays stable (injecting
+tools mid-conversation breaks prompt caches). On execution the id, the
+ruling where the plan carries one, and the dispatch all land in the log;
+for an acceptance plan the plan id *is* the record. A `prior(k)` plan has
+no engine-side step and no id-execution path (see below).
 
 ```ts
 type CheckOutcome =
   | { outcome: "allow" }
-  | { outcome: "block"; failed_predicates: Predicate[]; remedy_plans: RemedyPlan[] };
+  | { outcome: "block";
+      requirement_gaps: RequirementGap[];  // unmet entries of `requires`
+      narrowing?: Narrowing;               // present when the call's own delta fired check 2
+      remedy_plans: RemedyPlan[] };
 ```
 
 An attention demand on an otherwise-passing call surfaces through this
-same block shape: the unmet demand is reported as the failed predicate,
-and the remedy plan is the atomic ruling by an attending authority —
-demanded and failed predicates share one wire.
+same block shape: the unmet demand is a requirement gap like any other —
+attention is the third kind of `requires` — and the remedy plan is the
+atomic ruling by an attending authority. A narrowing is reported in its
+own slot, never as a requirement gap: nothing in `requires` failed, and
+the acceptance plan, not a ruling, answers it. A call like
+`search_and_share` fills both.
 
 Two facts about the list:
 
@@ -443,18 +463,27 @@ Two facts about the list:
   produce an admissible derived argument (any deployment); the
   output-sanitizer-backed composites (confining deployments only); for a failed
   `prior(k)`, the registered tools whose `emits` include `k` — the plan is
-  to make the event happen; for waivers and attention demands, the declared
-  mandates that cover them; for an acquisition soft block, the acceptance
+  to make the effect happen; for waivers and attention demands, the declared
+  mandates that cover them; for a narrowing soft block, the acceptance
   plan — always available, from no registry entry at all, because it
-  grants nothing (so an acquisition block is never terminal; the
-  empty-list proof concerns requirement-side gaps). For release-side failures nothing outside that
-  enumeration can ever cure the gap, because unruled steps only descend. The
+  grants nothing (so a narrowing block is never terminal; the
+  empty-list proof concerns requirement gaps). For a gap the label is too
+  *low* for — an unmet floor, an unmet `includes` — nothing outside
+  that enumeration can ever cure it, because unruled steps only narrow;
+  the history and attention cures — a `k`-emitting tool, a waiving or
+  attending mandate — are registry entries by definition. (A cap gap —
+  the label too *high* — is the one species cured by narrowing itself,
+  free modulo acceptance; see The check.) The
   agent provably should not spend turns on an unliftable restriction.
 
-FixMe: open question — the shape of a `prior(k)` plan: making the missing
-event happen means dispatching a *different* tool, so the plan spans two
-transitions (the event-minting call, then the original one); whether both run
-inside one plan execution, each under its own check, is unresolved.
+Plans divide by who executes them. A plan whose steps are engine-side
+acts — a ruling, a sanitizer application, an acceptance — executes
+atomically via `execute_remedy_plan` (see Atomic plan execution). A plan
+for a failed `prior(k)` carries no engine-side step: it names a
+registered tool whose `emits` include `k`; the agent dispatches that tool
+as an ordinary, separately-checked call, then re-proposes the original
+one — two calls, each under its own check, nothing atomic between
+them.
 
 ## Rulings
 
@@ -462,12 +491,12 @@ Authorities are the single home of judgment in APPA — every act of human or
 policy discretion is an authority **ruling**, one format, appended to the
 log. Two halves of one principle bound what a ruling can do:
 
-- **A ruling admits a dispatch despite a requirements gap; it never edits
+- **A ruling admits a dispatch despite a requirement gap; it never edits
   the trajectory.** The trajectory changes only through what the admitted
   call itself commits — its `delta` and its `emits`. An authority never
-  rewrites the label directly; a ruling over a call with no delta and no
-  emits changes nothing but the log.
-- **A ruling cannot substitute for the deliberateness stop.** A dispatch
+  rewrites the label directly; a ruling over a call with no `delta` and no
+  `emits` changes nothing but the log.
+- **A ruling cannot substitute for the agent's acceptance.** A dispatch
   whose delta would shrink the release frontier needs the *agent's*
   explicit acceptance of that narrowing as a plan step (see The check) —
   no security power is exercised, so no authority is involved. The two
@@ -481,7 +510,7 @@ Every ruling is **call-scoped**: it admits a specific pending call and
 covers exactly the engine-rendered call it names — tool plus resolved
 arguments, never the agent's paraphrase — for one dispatch, and **the label
 does not change**. The release is recorded where run history belongs: the
-ruling and the world event land in the log, while the label keeps
+ruling and the effect land in the log, while the label keeps
 describing what the data *is*. A widening that genuinely should persist —
 an ongoing external thread, many sends under one review — is served by
 branching, never by the label: fork a child to carry the exchange; each
@@ -492,9 +521,10 @@ One review is one review.
 
 ### Atomic plan execution
 
-The mechanism is the remedy plan, and it is **atomic**. Executing a
+The mechanism is the remedy plan; every plan with an engine-side step is
+**atomic**. Executing a
 ruling-carrying plan is
-one indivisible step on a suspended line: the engine renders the call, puts
+one indivisible step on a suspended run: the engine renders the call, puts
 it to the authority — with provenance, never value bytes — and on approval
 dispatches it; the plan id, the ruling, and the dispatch land in the log
 together. (An acceptance plan is atomic trivially: accept and dispatch,
@@ -505,7 +535,7 @@ whole record.) Consequences, by construction rather than bookkeeping:
 - an approval cannot cover a swapped call — it names the rendered call;
 - an approval cannot be replayed — it is consumed by the dispatch it
   admitted; one review is one review, a repeat takes a fresh ruling;
-- everything stays reconstructible from the log alone.
+- the decision trail stays reconstructible from the log alone.
 
 No grant object appears in configuration or on any wire: the public
 vocabulary is **mandates**, **rulings**, and **log records**.
@@ -513,7 +543,7 @@ vocabulary is **mandates**, **rulings**, and **log records**.
 ### Mandates
 
 There are no ruling kinds at runtime. One engine rule instead: **a call
-dispatches iff every failed or demanded predicate is covered by the
+dispatches iff every requirement gap is covered by the
 rulings that admit it — each issuer's mandate covering what it admitted;
 the rulings bind the same rendered call and are consumed together in one
 atomic step.** (Usually that is one ruling; two-eyes configurations
@@ -523,26 +553,25 @@ the currency it acts on:
 
 - a **cover up to a ceiling** — admitting a dispatch over an unmet trust
   floor (endorsing up to a rank — e.g. a human reviewed the fetched page
-  and ruled the content safe) or over an uncovered recipient set (vouching
-  readers, up to a declared set). The label does not move; the ceiling
+  and ruled the content safe) or over an unmet `includes` (vouching
+  readers, up to a declared reader set). The label does not move; the ceiling
   bounds the gap one ruling may cover;
 - a **named waiver** — covering a failed `no_prior` for the admitted
   dispatch only, naming the event kinds it may waive;
 - **attends** — the attention marks whose demands this authority's ruling
   satisfies. Deliberate consequence: a single ruling by an attending
-  authority over a call satisfies both a failed requirement predicate and
-  an attention
+  authority over a call covers both a label or history gap and an attention
   demand on the same call — one review is one review; a deployer who wants
   two eyes declares two marks attended by different authorities. What no
-  ruling ever satisfies is the narrowing-acceptance gate.
+  ruling ever satisfies is the agent's acceptance of a narrowing.
 
-Accepting a frontier-narrowing descent is deliberately *not* a mandate
+Accepting a narrowing is deliberately *not* a mandate
 power: it is the agent's own free plan step (see the two-gate principle
 above). A deployer who wants a human on expensive narrowings anyway
 attaches an attention mark to the narrowing tools — opt-in, never a
 default authority.
 
-**Requirement failures route by tags, exclusively.** A mandate says what
+**Requirement gaps route by tags, exclusively.** A mandate says what
 an authority may
 grant; its **scope** — the tags it covers — says over which calls; the two
 questions never share a mechanism. An authority with no declared scope
@@ -551,7 +580,7 @@ exception, routed by their own currency: an attention demand reaches
 exactly the authorities that attend its mark, scope tags not consulted —
 the mark is both the demand and the route. Trust, audience, and effects are
 checked currencies and must not double as routing keys: coupling
-jurisdiction to the world-event vocabulary would let an accounting rename
+jurisdiction to the effect vocabulary would let an accounting rename
 silently move an authority's reach. Tags can afford to route precisely
 because they have no algebraic life. The consequence is a clean split:
 **soundness is tag-independent, only completeness is tag-dependent** — a
@@ -566,15 +595,15 @@ One structural bar concerns the assistant's own reply to the user (the
 response sink): when the trajectory is restricted enough that even showing
 content to the user is a release, that release takes a *distinct*
 authority's ruling — **no ruling issued by the end user may cover any
-predicate of a response-sink release**, whatever
+requirement gap of a response-sink release**, whatever
 mandate the user otherwise holds. The user cannot self-approve seeing
 restricted content: the approval request would arrive on the very channel
 being released, and an in-band self-confirmation is structurally not a check
 at all.
 
-FixMe: open question — the response sink's mechanics are otherwise
-unspecified: what contract governs the assistant's reply, and how it enters
-the same check pipeline.
+The response sink's remaining mechanics — the contract governing the
+assistant's reply and how it enters the check pipeline — are deliberately
+out of scope in this version; only the structural bar above is normative.
 
 Authorities can be automatic (up to auto-approve-everything) but stay
 explicit: ML model, LLM-as-judge, regex, human in the loop, oncall page —
@@ -630,7 +659,7 @@ verification of its output.
 ### Why remedies are safe to hand to the agent
 
 The engine soft-blocks anything that does not pass as-is and suggests remedy
-plans built from the registered configuration — and, for an acquisition
+plans built from the registered configuration — and, for a narrowing
 block, the always-available acceptance plan. Two invariants make that safe
 even when the agent may already be steered by injected content:
 
@@ -669,10 +698,10 @@ both gates are exercised knowingly, each by its own party.
   result; the actual result label is then checked against the bound, and the
   value commits only if it passes — otherwise it is discarded, while the
   executed steps' events stand.
-- `emits` append per step, as steps actually run: a mid-body failure halts
-  the composite with the executed prefix standing honestly in the log —
-  never events that did not happen. No undo is promised; compensating
-  stranded world effects is the deployer's affair, and plan-approving
+- `emits` append per step, as steps succeed: a mid-body failure halts
+  the composite with the successful prefix standing honestly in the log —
+  never effects that did not happen. No undo is promised; compensating
+  stranded effects is the deployer's affair, and plan-approving
   authorities rule knowing that.
 
 Approving a plan is thus an ordinary confirmation of one rendered
@@ -682,10 +711,11 @@ but it cannot withhold. That is its documented trade.
 
 ## The configuration surface (draft dialect)
 
-Illustrative, not final — but every convention it shows is normative (see
-the constraints under Implementation shape). Four top-level kinds mirror
-the config box in the architecture diagram: tools, authorities,
-sanitizers, casts.
+A draft, not final — but authoritative: every configuration example in
+this document is written in this dialect, and every convention it shows
+is normative (see the constraints under Implementation shape). Four
+top-level kinds mirror the config box in the architecture diagram: tools,
+authorities, sanitizers, casts.
 
 ```toml
 version = 1
@@ -772,18 +802,22 @@ Two similar tasks:
 - **Task B** — get a ticket from an internal CRM and file a ticket in a
   public issue tracker.
 
-```
-get_ticket_from_crm:
-  requires: { trust: trusted }
-  delta:    { audience: internal }
+```toml
+[[tool]]
+name     = "get_ticket_from_crm"
+requires = { trust = "trusted" }
+delta    = { audience = { exactly = ["internal"] } }
 
-send_email(body, to: $recipient):
-  requires: { trust: trusted, audience: {$recipient} }
-  emits:    { egress }
+[[tool]]
+name     = "send_email"        # send_email(body, to: $recipient)
+requires = { trust = "trusted", audience = { includes = ["$recipient"] } }
+effects  = ["egress"]
 
-file_github_ticket:
-  requires: { trust: trusted, audience: public }   // we never post things that are not public
-  emits:    { egress, mutation }
+[[tool]]
+name     = "file_github_ticket"
+# we never post things that are not public
+requires = { trust = "trusted", audience = { includes = ["public"] } }
+effects  = ["egress", "mutation"]
 ```
 
 Registered: `remove_pii` — a sanitizer with mandate audience
@@ -796,7 +830,8 @@ The trajectory starts at the neutral, least restrictive label
 `L0 = {audience: public, trust: trusted}` and an empty log (the default
 starting label is engine configuration).
 
-**The fetch.** `get_ticket_from_crm()` would fold in `audience: internal`.
+**The fetch.** `get_ticket_from_crm()` would fold in the `internal`
+audience.
 This leaks nothing — the stop is needed because committing to internal
 voluntarily shrinks the release frontier: what the agent may still release,
 and to whom, without a further ruling. The engine soft-blocks and suggests
@@ -812,17 +847,18 @@ Under plan 1 the raw ticket never joins the agent-visible trajectory: only
 the sanitizer's output crosses the boundary.
 
 **Task B** after plan 1: `file_github_ticket(ticket)` requires audience
-`public` — compatible; the dispatch appends `{egress, mutation}` to the log.
+`public` — compatible; the successful call appends `{egress, mutation}` to
+the log.
 
 **Task A** after plan 2: `send_email(ticket, auditor_email)` derives its
 required audience from the actual argument: the readers must include the
 auditor. Under `L1` they do not — so this is the **second, distinct
 gate**: accepting the restriction never implies permission to disclose.
 The ruling is call-scoped: the plan puts the rendered send to the approver
-and dispatches on approval — the `egress` event and the ruling land in the
-log, the label stays at `L1`, and disclosing a second ticket takes its own
+and dispatches on approval — the ruling lands in the log, the successful
+send appends `egress`, the label stays at `L1`, and disclosing a second ticket takes its own
 ruling. (A long auditor exchange belongs in a branch that carries it —
-see Branching; in the main line each send is its own review.)
+see Branching; in the parent each send is its own review.)
 
 A smart agent chooses the right remedy from the task as early as possible —
 the soft block shifts the reasoning left.
@@ -838,7 +874,7 @@ composites above are the engine-owned instance of the same semantics.
   neutral `L0`: a fresh-slate child could "summarize what we know" into a
   public label, a laundering primitive. The child appends to the same shared
   log; the parent's history is simply its prefix. A fork appends a boundary
-  event — which is why nothing pending survives into either line: an
+  event — which is why nothing pending survives into parent or child: an
   in-flight plan execution — an approval request not yet ruled — finds
   the boundary and dies; no special rule needed.
 - **Merge.** Two things come back, each in its native way:
@@ -848,7 +884,7 @@ composites above are the engine-owned instance of the same semantics.
     attestation-raised result values — and for the rejected raise
     extension, were it ever revisited.)
   - **History needs no merging at all**: there is one shared log, and every
-    line appends to it in realtime. An egress that happened in the child
+    branch appends to it in realtime. An egress that happened in the child
     happened in the world — the email is in someone's inbox the moment it is
     sent, not at merge time. A ruling issued in a branch is a record, not a
     token: it was consumed inside its own atomic plan execution, so its
@@ -861,10 +897,11 @@ composites above are the engine-owned instance of the same semantics.
     can be lost. "The branch died" means no *value* crossed; history was
     already shared.
 
-FixMe: open question — cross-line history predicates: with one shared
-realtime log, a child's `egress` fails a parent's `no_prior(egress)`; whether
-that conservatism is intended, or needs line scoping (cf. the parked
-line-scoped `prior(k)`), is unresolved.
+Cross-branch history is deliberately global: with one shared realtime log,
+a child's `egress` fails a parent's `no_prior(egress)`. That conservatism
+is intended — effects are facts about the world, not about a branch;
+the email is in someone's inbox regardless of which branch sent it. There
+is no branch-scoped `prior(k)`.
 
 The child's own label may end maximally poisoned; the parent absorbs only
 the returned value's label — *less restrictive* than the child's own fold
@@ -875,7 +912,7 @@ attestation) relabeled it.
 Example: an agent already working with internal data needs a one-off egress
 to an external recipient mid-task. A call-scoped ruling covers the
 rendered send and the label never contains the external recipient at
-all — in the main line and in a branch alike. For an *ongoing* exchange
+all — in the parent and in a child alike. For an *ongoing* exchange
 the branch is the construction: the child carries the thread, each send
 is ruled inside it, and nothing about the exchange can outlive the branch
 or widen the parent. This is APPA's answer to every "the widening should
@@ -889,7 +926,7 @@ main run. The child handles the suspicious content and returns through a
 e.g. `{format: {major_version: int}, sanitizers: [...]}`.
 
 Example: a sensitive task first needs a third-party software version from
-GitHub. Fetched directly, the page would fold `trust: suspicious` into the
+GitHub. Fetched directly, the page would fold `suspicious` trust into the
 main trajectory. In a quarantined branch, only the extracted version crosses
 back — entering the parent as trusted. Schema validation alone never raises
 a label — structure is not provenance; the raise is claimed by the mandated
@@ -919,65 +956,79 @@ still catch the obvious flows.
 ## Implementation shape
 
 The engine is two layers. The **inner layer is the pure decision core** —
-`check(state, transition) → verdict`, `apply(state, transition) → state'`,
+`check(state, call) → verdict`, `apply(state, call) → state'`,
 no IO, no clock: semantically a function of the full event log, so every
 decision is replayable from the log alone. In practice the wire contract
-passes the log's cached views — the label state, the seen-event-kinds set,
+passes the log's cached views — the label, the seen-effect-kinds set,
 pending-plan records, boundary positions — rather than the raw log; sound
 because every view is recomputable by replay. The **outer layer owns
 state**: durable append with pluggable destinations (a local file for a
 single-host harness; a database where the filesystem is ephemeral),
-serialization, and the dispatch-atomicity obligations of the threat model. A
+serialization, and the durability obligations of the threat model. A
 harness author implements neither — they embed the outer layer with whatever
 store they already run; the decision core never sees IO.
 
-FixMe: open ruling — the crash gap between invoking a tool and appending its
-events: a durable outbox (invocation plus events committed as one durable
-record before the invoke; the recommendation on record) versus polarity-split
-`attempted`/`done` events, which would reintroduce a pre/post axis into every
-contract.
+The invoke/append crash gap is deliberately out of scope in this version:
+effects append when the call succeeds, and a host that fails between a
+successful invoke and the append may lose effects — accepted for
+simplicity. Hardening (e.g. a durable outbox committing invocation and
+effects as one record) is future work for the outer layer.
 
-Transition invariants are enforced through the type system, under the
+Invariants on state changes are enforced through the type system, under the
 assumption that external labels and authority decisions are trusted inputs —
 they, together with sanitizers and dynamic resolvers, form the trusted base.
 A design guideline: the checker itself stays free of ad-hoc conditionals;
 every decision reduces to label arithmetic or a log query, and anything
 imperative belongs in a registered external.
 
-FixMe: the configuration surface is drafted ("The configuration surface"
-above) but not final; whatever surface ships must keep: **mandates only** — no
-grant objects in config or on any wire; the **no-empty-mandate rule** — an
-authority whose mandate covers nothing is a loud load error, not a no-op (the
-empty-`remedy_plans` proof depends on it); block messages that surface
-the applicable remedy plans, naming the eligible authorities where a plan
-carries a ruling; **explicit set relations** — a bare reader
-list is ambiguous between narrow and wide, so every audience mention
-carries its operator (includes / exactly / may-add); **scope routed by
-tags only**; and casts declared **constant xor resolver-implemented**.
+The configuration surface remains a draft — every configuration example
+in this document is written in it. Whatever surface ships must keep: **mandates only** — no grant objects in config or on any
+wire; the **no-empty-mandate rule** — an authority whose mandate covers
+nothing is a loud load error, not a no-op (the empty-`remedy_plans` proof
+depends on it); block messages that surface the applicable remedy plans,
+naming the eligible authorities where a plan carries a ruling; **explicit
+set relations** — a bare reader list is ambiguous between narrow and
+wide, so every audience mention carries its operator (includes / exactly
+/ may-add); **scope routed by tags only**; and casts declared **constant
+xor resolver-implemented**.
 
 ## Glossary
 
 - **Trajectory** — one agent run: its label plus its event log.
-- **LabeledValue** — the unit of data flow: a turn (tool call + result) with
-  its label, never separated.
+- **LabeledValue** — the type name for the unit of data flow: a value
+  (tool call + result) with its label, never separated.
 - **Label** — who may read the run's information (audience) and how trusted
   it is (trust).
-- **Delta** — a contract's declared label action, applied at dispatch.
-- **Emits** — a contract's declared world events, appended at dispatch.
+- **Delta** — a contract's declared label action, applied when the call
+  succeeds.
+- **Effect** — a recorded fact of what the run did outside (`egress`,
+  `mutation`): declared by a contract as `emits`, appended to the log when
+  the call succeeds, read back by history requirements.
 - **Requires** — a contract's conditions: label requirements (checked
-  against the state the call would commit), history requirements
+  against the label the call would commit), history requirements
   (checked against the log as it stands), and attention demands (per-call,
   never satisfied by history).
+- **Requirement gap** — an unmet entry of a contract's `requires` — a
+  label, history, or attention gap — reported in a block. Distinct from
+  a narrowing, which fails no requirement.
 - **Attention mark** — a named, per-call demand for a fresh ruling by an
   attending authority; the shared vocabulary through which tools demand
   review and authorities offer it, without naming each other.
 - **Tag** — a routing-only name with no algebraic life: never folded,
   checked, or logged. The exclusive currency of authority scope.
-- **Soft block** — a block carrying executable remedy plans; also the
-  deliberateness stop on calls that narrow the label.
-- **Remedy plan** — an executable object with an id, run via
-  `execute_remedy_plan(plan_id)`; atomic: render, rule (when the plan
-  carries a ruling), dispatch, log.
+- **Narrowing** — a strict restriction of the label (fewer readers, lower
+  trust) that a call's delta would commit, shrinking the release frontier.
+  Soft-blocked until the agent accepts it; the block always carries the
+  acceptance plan, so it is never terminal.
+- **Acceptance** — the agent's own free plan step acknowledging a narrowing
+  before dispatch: no authority involved, no security power exercised,
+  clears no requirement; the plan id in the log is the record.
+- **Remedy plan** — an executable object with an id; every engine-side plan
+  runs atomically via `execute_remedy_plan(plan_id)`: render, rule (when
+  the plan carries a ruling), dispatch, log. A plan for a failed `prior(k)` carries
+  no engine-side step: it names a registered tool whose `emits` include
+  `k`, for the agent to dispatch as an ordinary checked call before
+  re-proposing.
 - **Authority / mandate / scope / ruling** — a registered judge; the
   declaration of what its rulings may cover; the tags it has jurisdiction
   over; one act of judgment, appended to the log. Every ruling is
