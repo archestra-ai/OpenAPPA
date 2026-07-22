@@ -224,7 +224,7 @@ species of records share it:
   Implementation shape). A positive `prior(k)` proves the tool reported
   success, nothing more about the outer world.
 - **Governance events** — what was decided: authority rulings and the
-  dispatches that consume them, the agent's descent acceptances, boundary
+  dispatches that consume them, the agent's narrowing acceptances, boundary
   events, sanitizer applications,
   casts. A **boundary event** is not a decision — it is punctuation:
   a mark in the log that pending plan executions — approval requests not
@@ -344,19 +344,19 @@ placeholders, it is derived from the actual arguments — the trajectory's
 readers must cover the concrete recipients of *this* call; a static contract
 simply declares its recipients.
 
-**2. State acquisition.** Do not touch more secrets than the task really
+**2. Narrowing.** Do not touch more secrets than the task really
 needs. Every contribution moves the label down or leaves it in place — on
 both axes, no exceptions: v1 has no permissive deltas, and rulings cover
 gaps without touching the label. A call whose committed state would
-strictly descend is deliberately soft-blocked; a repeat that leaves the
+strictly narrow is deliberately soft-blocked; a repeat that leaves the
 state unchanged is not. The point: committing to restricted data
 voluntarily shrinks the **release frontier** — what the agent may still
 release, and to whom, without a further ruling. APPA makes that a
 conscious, remediable choice *before* the data is fetched, instead of a
-silent ratchet discovered three steps later. Accepting the descent is the
+silent ratchet discovered three steps later. Accepting the narrowing is the
 *agent's own* plan step — free, on the record, and involving no authority:
-no security power is exercised, and the deliberateness stop is the agent
-choosing the plan (see Rulings for how this composes with rulings).
+no security power is exercised; what makes the stop deliberate is that the
+agent chooses the plan (see Rulings for how this composes with rulings).
 
 Deltas never raise — the only sign rule v1 needs. A call may carry a
 restrictive delta and a release-side requirement gap at once
@@ -379,9 +379,9 @@ restricted context *before* fetching the data. The soft block shifts the
 reasoning left. Spelled out: a requirement that fails because the state is
 too *low* — an uncovered recipient, an unmet trust floor — is cured only by
 a ruling covering the gap; no sequence of unruled steps can ever cure
-it, because unruled steps only descend. A requirement that fails because the
+it, because unruled steps only narrow. A requirement that fails because the
 state is too *high* — a cap with outsiders in the context — is
-cured by narrowing: free, modulo the deliberateness stop. ("Free" means no
+cured by narrowing: free, modulo the agent's acceptance. ("Free" means no
 security power is exercised — not frictionless.)
 
 ### Check timing
@@ -390,7 +390,7 @@ Ordered checks, each with its clock:
 
 - **The narrowing check** runs first, on the state the dispatch would
   *commit* — the current label with the call's own `delta` applied. A
-  strict descent is the state-acquisition soft block (see The check), and
+  strict narrowing is soft-blocked (see The check), and
   dispatch waits for the agent's acceptance of exactly that narrowing.
 - **Label requirements** then evaluate on the current state — which, with
   an accepted narrowing in force, *is* the state the dispatch commits. The
@@ -411,7 +411,7 @@ knobs.
 
 Caps (`audience ⊆ C`) follow the same clock as every label requirement —
 the call's own narrowing counts: a read that itself narrows into the cap
-passes, surfacing as the standard state-acquisition soft block ("this
+passes, surfacing as the standard narrowing soft block ("this
 fetch drops these readers"), and the dropped readers provably receive no
 post-read content. (Deployments whose channel physically shows every
 message to fixed readers regardless of the label are out of scope: APPA
@@ -457,11 +457,11 @@ Two facts about the list:
   output-sanitizer-backed composites (confining deployments only); for a failed
   `prior(k)`, the registered tools whose `emits` include `k` — the plan is
   to make the effect happen; for waivers and attention demands, the declared
-  mandates that cover them; for an acquisition soft block, the acceptance
+  mandates that cover them; for a narrowing soft block, the acceptance
   plan — always available, from no registry entry at all, because it
-  grants nothing (so an acquisition block is never terminal; the
+  grants nothing (so a narrowing block is never terminal; the
   empty-list proof concerns requirement-side gaps). For release-side failures nothing outside that
-  enumeration can ever cure the gap, because unruled steps only descend. The
+  enumeration can ever cure the gap, because unruled steps only narrow. The
   agent provably should not spend turns on an unliftable restriction.
 
 Plans divide by who executes them. A plan whose steps are engine-side
@@ -484,7 +484,7 @@ log. Two halves of one principle bound what a ruling can do:
   call itself commits — its `delta` and its `emits`. An authority never
   rewrites the label directly; a ruling over a call with no delta and no
   emits changes nothing but the log.
-- **A ruling cannot substitute for the deliberateness stop.** A dispatch
+- **A ruling cannot substitute for the agent's acceptance.** A dispatch
   whose delta would shrink the release frontier needs the *agent's*
   explicit acceptance of that narrowing as a plan step (see The check) —
   no security power is exercised, so no authority is involved. The two
@@ -552,9 +552,9 @@ the currency it acts on:
   an attention
   demand on the same call — one review is one review; a deployer who wants
   two eyes declares two marks attended by different authorities. What no
-  ruling ever satisfies is the narrowing-acceptance gate.
+  ruling ever satisfies is the agent's acceptance of a narrowing.
 
-Accepting a frontier-narrowing descent is deliberately *not* a mandate
+Accepting a narrowing is deliberately *not* a mandate
 power: it is the agent's own free plan step (see the two-gate principle
 above). A deployer who wants a human on expensive narrowings anyway
 attaches an attention mark to the narrowing tools — opt-in, never a
@@ -648,7 +648,7 @@ verification of its output.
 ### Why remedies are safe to hand to the agent
 
 The engine soft-blocks anything that does not pass as-is and suggests remedy
-plans built from the registered configuration — and, for an acquisition
+plans built from the registered configuration — and, for a narrowing
 block, the always-available acceptance plan. Two invariants make that safe
 even when the agent may already be steered by injected content:
 
@@ -1004,8 +1004,13 @@ xor resolver-implemented**.
   review and authorities offer it, without naming each other.
 - **Tag** — a routing-only name with no algebraic life: never folded,
   checked, or logged. The exclusive currency of authority scope.
-- **Soft block** — a block carrying executable remedy plans; also the
-  deliberateness stop on calls that narrow the label.
+- **Narrowing** — a strict restriction of the label (fewer readers, lower
+  trust) that a call's delta would commit, shrinking the release frontier.
+  Soft-blocked until the agent accepts it; the block always carries the
+  acceptance plan, so it is never terminal.
+- **Acceptance** — the agent's own free plan step acknowledging a narrowing
+  before dispatch: no authority involved, no security power exercised,
+  clears no requirement; the plan id in the log is the record.
 - **Remedy plan** — an executable object with an id; every engine-side plan
   runs atomically via `execute_remedy_plan(plan_id)`: render, rule (when
   the plan carries a ruling), dispatch, log. A plan for a failed `prior(k)` carries
