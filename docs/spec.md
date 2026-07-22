@@ -113,7 +113,7 @@ instead, and can execute an engine-side plan by id (see The check).
 - APPA assumes a **serialized, durable event log**. Serializing appends
   across concurrent branches is the host's obligation, not the engine's: a
   history check is only as sound as the log it has seen — an effect a
-  concurrent line has not yet appended is invisible to it. The invoke/append
+  concurrent branch has not yet appended is invisible to it. The invoke/append
   crash gap is accepted, not defended (see Implementation shape).
 - The core trajectory is **linear**. Branching is a host capability governed
   by the confinement profile (below); its guarantees hold only in confining
@@ -246,10 +246,10 @@ different question: the label answers *what the information is*, the log
 answers *what has already happened*. They stay separate pieces of state
 because their algebra differs — the label folds down and settles (minimum,
 intersection), the event set only grows — and because branching treats
-them differently: the log is one, shared across lines in realtime, while a
+them differently: the log is one, shared across branches in realtime, while a
 label is copied at fork and comes back only through the returned value
 (see Branching). Folding events into the label would silently make
-history line-scoped.
+history branch-scoped.
 
 Effects are also the model's sanctioned pressure-release valve —
 deliberately. A deployment can encode almost any bespoke gating ritual as
@@ -524,7 +524,7 @@ One review is one review.
 The mechanism is the remedy plan; every plan with an engine-side step is
 **atomic**. Executing a
 ruling-carrying plan is
-one indivisible step on a suspended line: the engine renders the call, puts
+one indivisible step on a suspended run: the engine renders the call, puts
 it to the authority — with provenance, never value bytes — and on approval
 dispatches it; the plan id, the ruling, and the dispatch land in the log
 together. (An acceptance plan is atomic trivially: accept and dispatch,
@@ -858,7 +858,7 @@ The ruling is call-scoped: the plan puts the rendered send to the approver
 and dispatches on approval — the ruling lands in the log, the successful
 send appends `egress`, the label stays at `L1`, and disclosing a second ticket takes its own
 ruling. (A long auditor exchange belongs in a branch that carries it —
-see Branching; in the main line each send is its own review.)
+see Branching; in the parent each send is its own review.)
 
 A smart agent chooses the right remedy from the task as early as possible —
 the soft block shifts the reasoning left.
@@ -874,7 +874,7 @@ composites above are the engine-owned instance of the same semantics.
   neutral `L0`: a fresh-slate child could "summarize what we know" into a
   public label, a laundering primitive. The child appends to the same shared
   log; the parent's history is simply its prefix. A fork appends a boundary
-  event — which is why nothing pending survives into either line: an
+  event — which is why nothing pending survives into parent or child: an
   in-flight plan execution — an approval request not yet ruled — finds
   the boundary and dies; no special rule needed.
 - **Merge.** Two things come back, each in its native way:
@@ -884,7 +884,7 @@ composites above are the engine-owned instance of the same semantics.
     attestation-raised result values — and for the rejected raise
     extension, were it ever revisited.)
   - **History needs no merging at all**: there is one shared log, and every
-    line appends to it in realtime. An egress that happened in the child
+    branch appends to it in realtime. An egress that happened in the child
     happened in the world — the email is in someone's inbox the moment it is
     sent, not at merge time. A ruling issued in a branch is a record, not a
     token: it was consumed inside its own atomic plan execution, so its
@@ -897,11 +897,11 @@ composites above are the engine-owned instance of the same semantics.
     can be lost. "The branch died" means no *value* crossed; history was
     already shared.
 
-Cross-line history is deliberately global: with one shared realtime log,
+Cross-branch history is deliberately global: with one shared realtime log,
 a child's `egress` fails a parent's `no_prior(egress)`. That conservatism
-is intended — effects are facts about the world, not about a line;
-the email is in someone's inbox regardless of which line sent it. There
-is no line-scoped `prior(k)`.
+is intended — effects are facts about the world, not about a branch;
+the email is in someone's inbox regardless of which branch sent it. There
+is no branch-scoped `prior(k)`.
 
 The child's own label may end maximally poisoned; the parent absorbs only
 the returned value's label — *less restrictive* than the child's own fold
@@ -912,7 +912,7 @@ attestation) relabeled it.
 Example: an agent already working with internal data needs a one-off egress
 to an external recipient mid-task. A call-scoped ruling covers the
 rendered send and the label never contains the external recipient at
-all — in the main line and in a branch alike. For an *ongoing* exchange
+all — in the parent and in a child alike. For an *ongoing* exchange
 the branch is the construction: the child carries the thread, each send
 is ruled inside it, and nothing about the exchange can outlive the branch
 or widen the parent. This is APPA's answer to every "the widening should
