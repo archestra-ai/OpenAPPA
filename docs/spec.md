@@ -365,7 +365,7 @@ restrictive delta and a requirement gap at once
 accepts the narrowing, a ruling covers the gap, and neither substitutes
 for the other. A tool whose *action* is itself a grant of access
 (`share_doc(doc, outsider)`: fetch, then open the ACL) is still modeled
-as a composite of a fetch and a release, so each transition stays simple
+as a composite of a fetch and a release, so each step stays simple
 to rule on.
 
 Together the two checks are a pragmatic middle ground between the two
@@ -482,7 +482,7 @@ atomically via `execute_remedy_plan` (see Atomic plan execution). A plan
 for a failed `prior(k)` carries no engine-side step: it names a
 registered tool whose `emits` include `k`; the agent dispatches that tool
 as an ordinary, separately-checked call, then re-proposes the original
-one — two transitions, each under its own check, nothing atomic between
+one — two calls, each under its own check, nothing atomic between
 them.
 
 ## Rulings
@@ -956,7 +956,7 @@ still catch the obvious flows.
 ## Implementation shape
 
 The engine is two layers. The **inner layer is the pure decision core** —
-`check(state, transition) → verdict`, `apply(state, transition) → state'`,
+`check(state, call) → verdict`, `apply(state, call) → state'`,
 no IO, no clock: semantically a function of the full event log, so every
 decision is replayable from the log alone. In practice the wire contract
 passes the log's cached views — the label, the seen-effect-kinds set,
@@ -974,7 +974,7 @@ successful invoke and the append may lose effects — accepted for
 simplicity. Hardening (e.g. a durable outbox committing invocation and
 effects as one record) is future work for the outer layer.
 
-Transition invariants are enforced through the type system, under the
+Invariants are enforced through the type system, under the
 assumption that external labels and authority decisions are trusted inputs —
 they, together with sanitizers and dynamic resolvers, form the trusted base.
 A design guideline: the checker itself stays free of ad-hoc conditionals;
