@@ -1,7 +1,7 @@
 \section{Conclusion}\label{sec:conclusion}
 
-While traditional label-based enforcement prevents unsafe data releases, standard information flow tracking can overly restrict an agent's execution context, rendering it unable to complete subsequent benign tasks~\cite{}.
+While traditional label-based enforcement prevents unsafe data releases, standard information flow tracking can overly restrict an agent's execution context, rendering it unable to complete subsequent benign tasks~\cite{fides}.
 APPA demonstrates that this usability loss is not inevitable: acquisition decisions are evaluated prior to dispatch, restrictive reads are isolated into disposable child branches, and only policy-bounded results are merged back into the continuing trajectory.
 The parent context remains untainted through label-fold locality and meet operations, while a shared event log maintains a consistent state history across execution paths.
-By formalizing policy algebra, remedy enumeration, and atomic rulings, APPA establishes a structural branch lifecycle rather than relying on prompt-level mitigations~\cite{}.
+By formalizing policy algebra, remedy enumeration, and atomic rulings, APPA establishes a structural branch lifecycle rather than relying on prompt-level mitigations~\cite{camel2025,willison2023dual}.
 Ultimately, APPA avoids context contamination not by attempting post-hoc sanitization, but by ensuring that the primary execution trajectory never observes the restricted data.

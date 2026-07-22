@@ -1,7 +1,7 @@
 \section{Enforcement: The Two Checks}\label{sec:enforcement}
 
 \paragraph{Check 1---tool-requirement compatibility.}
-The first check enforces standard sink-side information flow control (IFC) adequacy~\cite{}: the trust level of the trajectory must satisfy the tool's required trust floor, and the reader set must cover all intended recipients, $\readers(\fold) \supseteq \mathrm{recipients}(\mathrm{args})$, with placeholders and resolvers determining the recipient set. This mechanism adapts standard noninterference principles to tool invocation.
+The first check enforces standard sink-side information flow control (IFC) adequacy~\cite{sabelfeld2003language}: the trust level of the trajectory must satisfy the tool's required trust floor, and the reader set must cover all intended recipients, $\readers(\fold) \supseteq \mathrm{recipients}(\mathrm{args})$, with placeholders and resolvers determining the recipient set. This mechanism adapts standard noninterference principles to tool invocation.
 
 \paragraph{Check 2---state acquisition.}
 We order $S$ by restrictiveness, where $s' \le s$ if and only if the readers of $s'$ are a subset of those in $s$ and the trust rank of $s'$ is less than or equal to that of $s$. Because every label update is a meet operation, trajectory state monotonically descends or remains fixed along both dimensions. The checker issues a soft block whenever a tool call strictly restricts the label state, i.e., $\fold(s,\texttt{delta(call)}) < s$, re-evaluating policies until reaching a fixed point. This mechanism enforces the principle of least privilege at trajectory granularity \cite{saltzer1975protection}.
@@ -29,6 +29,6 @@ Under the permissive extension, executing a restricted read following a state wi
 This proposition is vacuous in the primary model, where state widening operations are absent. Proof in Appendix~\ref{app:proofs}.
 
 \paragraph{Remedy-plan delivery.}
-Remediation plans are executable objects exposed through a static tool, \texttt{execute\_remedy\_plan(plan\_id)}, initialized at run start; dynamically modifying tool definitions mid-conversation would invalidate prompt caches~\cite{}. The plan identifier, tool dispatch, and associated policy rulings are logged upon execution. Unmet attention requirements use the same blocking interface: an attention demand is treated as a failed predicate whose remediation is an atomic ruling issued by an authorizing component.
+Remediation plans are executable objects exposed through a static tool, \texttt{execute\_remedy\_plan(plan\_id)}, initialized at run start; dynamically modifying tool definitions mid-conversation would invalidate prompt caches~\cite{kwon2023efficient}. The plan identifier, tool dispatch, and associated policy rulings are logged upon execution. Unmet attention requirements use the same blocking interface: an attention demand is treated as a failed predicate whose remediation is an atomic ruling issued by an authorizing component.
 
 \fixme{Open question---the structure of a \texttt{prior(k)} plan: plan execution spans two calls (the event-emitting call followed by the target call); per-call verification within a single plan execution remains unresolved.}
