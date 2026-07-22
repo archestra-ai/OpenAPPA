@@ -34,51 +34,9 @@ directly on this premise. Rather than claiming deterministic IFC enforcement or
 selective variable hiding as novelties, \appa{} asks whether a restrictive read
 can be explored without tainting the long-lived planner trajectory at all.
 
-Formally, \appa{} maintains execution state using two core abstractions.
-First, a \textbf{label}---defined as an audience (a reader set) $\times$ trust (a rank
-in a finite chain)---accompanies data and is verified at policy checks. Tool contracts
-declare label \emph{actions} (restrictive reads intersect reader sets and take minimum
-trust levels), and the overall trajectory label is the composition of actions from all
-dispatched calls. Second, an append-only \textbf{event log} records execution history
-without requiring separate approval. The log captures world events (such as external egress
-or state mutations) upon dispatch, as well as governance events (rulings, boundary markers,
-sanitizer invocations, and label casts). Every policy decision reduces to a label comparison,
-a log predicate, or a declared per-call attention requirement; imperative logic---such as approval
-workflows, sanitizers, and ACL resolution---resides in registered external components.
-Because label actions only restrict access, label updates are monotone and commutative,
-ensuring predictable, deterministic state aggregation.
+To resolve this tension, \appa{} introduces \emph{branching as taint prevention} alongside \emph{prospective enforcement}. Rather than waiting for sensitive data to reach an external sink or permanently degrading the primary planner context upon a restrictive read, \appa{} intercepts prospective label descents prior to tool execution. When an agent needs to acquire or inspect restrictive data, \appa{} can fork a temporary, disposable child trajectory that inherits the parent's context and carries the permission narrowing locally. The child branch inspects the data and executes intermediate reasoning or tool calls under its descended label, while the parent trajectory remains unaffected at its original permission level. If the branch terminates or is abandoned, the parent process retains its broader access rights without context taint.
 
-The central mechanism of \appa{} is \textbf{branching as taint prevention}. In classical
-IFC, read operations incur no immediate restriction, and enforcement occurs when sensitive
-data reaches an external sink. \appa{} instead intercepts a prospective label descent prior to
-the read operation and can fork a child trajectory. The child inherits the parent's label to
-prevent policy evasion, and only the child receives the restrictive result. The child can inspect
-the result and execute further tool calls under its descended label, while the parent trajectory
-remains unaffected at its pre-fork label. At exit, the branch is either abandoned or returns a single
-explicitly labeled value. Returning raw data propagates restrictions back to the parent via label
-intersection; preserving the parent's broader access therefore requires a registered sanitizer or a
-quarantine-exit attestation that bounds the derivative value. \appa{} never removes taint from an
-already exposed trajectory; instead, it prevents exposure by confining restrictive descents to disposable
-child branches.
-
-This design transforms data acquisition into an explicit policy event. \appa{} orders label states
-by restrictiveness and soft-blocks any tool call whose prospective state strictly descends in permission.
-The resulting execution options present clear choices: accept the label narrowing in the current
-trajectory, fork and confine the observation within a child branch, apply a registered sanitizer, or
-decline the read. Because non-elevating steps only descend in permission and all remedies are statically
-registered, the candidate plan space is finite and fully enumerable. Consequently, an empty candidate plan
-set serves as a formal proof that no registered remedy exists for a given action, rather than an incomplete
-search result.
-
-Two structural rules ensure that branching preserves security guarantees and execution integrity. First, a child trajectory inherits its parent's label at fork time and any merged result updates the parent label via set intersection and minimum trust rank, preventing unvalidated data elevation. Second, all branches append real-world side-effects (such as external egress) to a single, globally shared event log in real time; even if a child branch is later abandoned, its real-world side-effects remain recorded. Thus, branching isolates trajectory taint without concealing executed actions.
-
-Atomic, call-scoped judgment supports this architecture when discretionary release is required.
-The engine renders the pending tool call with its fully resolved arguments and provenance (rather than
-relying on agent paraphrases), submits the exact call to an authorizing policy component, and dispatches
-it in a single indivisible step upon approval. Because approval and dispatch coincide, no reusable grant
-tokens are created, preventing replay or misbinding attacks. Combined with the soundness of the candidate
-plan set---where every proposed plan is individually safe regardless of which option a potentially untrusted
-agent selects---this yields a robust declassification discipline for agentic workflows~\cite{zdancewic2001robust}.
+Data acquisition thus becomes an explicit, manageable policy event. For any tool call that would narrow trajectory permissions, \appa{} presents a finitely enumerable set of remediation plans: accepting the label restriction in the main trajectory, forking a confined child branch, applying a registered sanitizer, or declining the read. When discretionary release or external approval is required, \appa{} renders the canonical request and executes it via an atomic, call-scoped ruling, eliminating reusable grant tokens and preventing replay attacks while preserving robust declassification guarantees~\cite{zdancewic2001robust}. Crucially, all execution branches append real-world side-effects and governance events to a single, globally shared log in real time, ensuring that context isolation never conceals executed physical actions.
 
 Contributions, in order of importance:
 \begin{enumerate}
