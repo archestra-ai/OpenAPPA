@@ -365,7 +365,7 @@ restrictive delta and a requirement gap at once
 accepts the narrowing, a ruling covers the gap, and neither substitutes
 for the other. A tool whose *action* is itself a grant of access
 (`share_doc(doc, outsider)`: fetch, then open the ACL) is still modeled
-as a composite of a fetch and a release, so each step stays simple
+as a composite of a fetch and a release, so each stays simple
 to rule on.
 
 Together the two checks are a pragmatic middle ground between the two
@@ -974,7 +974,7 @@ successful invoke and the append may lose effects — accepted for
 simplicity. Hardening (e.g. a durable outbox committing invocation and
 effects as one record) is future work for the outer layer.
 
-Invariants are enforced through the type system, under the
+Invariants on state changes are enforced through the type system, under the
 assumption that external labels and authority decisions are trusted inputs —
 they, together with sanitizers and dynamic resolvers, form the trusted base.
 A design guideline: the checker itself stays free of ad-hoc conditionals;
