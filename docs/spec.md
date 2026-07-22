@@ -129,7 +129,7 @@ instead, and can execute an engine-side plan by id (see The check).
 All data flows as a `LabeledValue`. Value and label are never separated and
 never operated on directly.
 
-- **value** — an agentic turn: tool call + result, a part of the trajectory.
+- **value** — one tool call plus its result, a part of the trajectory.
   The natural unit of existing agentic workflows.
 - **label** — who may read this information and how trusted it is: the
   product of the two label dimensions.
@@ -995,8 +995,8 @@ xor resolver-implemented**.
 ## Glossary
 
 - **Trajectory** — one agent run: its label plus its event log.
-- **LabeledValue** — the unit of data flow: a turn (tool call + result) with
-  its label, never separated.
+- **LabeledValue** — the type name for the unit of data flow: a value
+  (tool call + result) with its label, never separated.
 - **Label** — who may read the run's information (audience) and how trusted
   it is (trust).
 - **Delta** — a contract's declared label action, applied when the call
