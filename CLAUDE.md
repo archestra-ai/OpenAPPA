@@ -32,6 +32,9 @@ external authorities and transformers, never in the engine.
   (Sabelfeld/Myers, taint, sink, label, noninterference, declassification) is
   the anchor readers map onto — cite it, but never let it displace the
   agentic term as the primary name for a concept that has one.
+- Do not invent new terms, especially when working with spec. Try to use 
+  existing definitions. If you want to introduce a new one - ask a user and 
+  explain why.
 
 ## Document precedence
 
