@@ -551,7 +551,7 @@ One review is one review.
 The mechanism is the remedy plan; every plan with an engine-side step is
 **atomic**. Executing a
 ruling-carrying plan is
-one indivisible step on a suspended run: the engine renders the call, puts
+one indivisible step on the suspended branch: the engine renders the call, puts
 it to the authority — with provenance, never value bytes — and on approval
 dispatches it; the plan id, the ruling, and the dispatch land in the log
 together. (An acceptance plan is atomic trivially: accept and dispatch,
@@ -896,6 +896,9 @@ The core trajectory is linear. A host that branches — subagents, quarantined
 fetches, metatools — must implement this profile, or must not let branch
 results cross back. It is the primary composition mechanism; the compiled
 composites above are the engine-owned instance of the same semantics.
+"Branch" covers parent and child alike — every concurrently executing
+thread of the run; "the parent" and "the child" name the two sides of a
+fork.
 
 - **Fork.** The child starts at the parent's *current* label — never at the
   neutral `L0`: a fresh-slate child could "summarize what we know" into a
@@ -1075,6 +1078,8 @@ xor resolver-implemented**.
   serves authority rulings, cast decisions, sanitizer derivations, and
   membership /
   argument-to-reader-set questions at decision time.
+- **Branch** — one concurrently executing thread of the run, the parent or
+  any child; all branches append to the one shared log in realtime.
 - **Boundary event** — punctuation in the log (turn end, fork, merge) that
   pending plan executions cannot outlive.
 - **Confining deployment** — one that can hold a raw tool result out of the
