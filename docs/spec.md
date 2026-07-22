@@ -179,12 +179,12 @@ engine's.
 
 Reading restricted data **shrinks** the reader set (intersection: only
 people cleared for every input may read the combination); the set never
-grows. An uncovered recipient is reached only through a ruling covering one
-dispatch, never by widening the label. A tool's requirement can constrain
+grows. A recipient outside the reader set is reached only through a ruling
+covering one dispatch, never by widening the label. A tool's requirement can constrain
 the reader set from either side:
 
-- a **cover** — the trajectory's readers must include the concrete
-  recipients the call would expose the data to;
+- an **`includes`** (`audience ⊇ recipients`) — the trajectory's readers
+  must include the concrete recipients the call would expose the data to;
 - a **cap** (`audience ⊆ C`) — the reader set the dispatch would commit
   must stay inside the tool's declared set: "do not fetch me into a context
   outsiders can read."
@@ -238,7 +238,8 @@ are views computed from the log, cached by the engine, never independent
 state.
 
 The typical pattern — a convention, not a rule: integrity via trust floors
-on mutating tools, confidentiality via audience covers on publishing tools;
+on mutating tools, confidentiality via audience `includes` on publishing
+tools;
 any contract may combine any requirements. History requirements gate a
 dispatch like any other requirement — the log is not advisory — but on a
 different question: the label answers *what the information is*, the log
@@ -274,7 +275,7 @@ label, `emits` for the log — plus `requires` and routing-only `tags`:
   append; history is not up for approval.
 - **`requires`** — in three kinds:
   - **label requirements**, checked against the trajectory label: a trust
-    floor (`trust = "trusted"`), an audience cover (`audience ⊇ recipients` —
+    floor (`trust = "trusted"`), an `includes` (`audience ⊇ recipients` —
     the recipient set derived from the actual arguments via placeholders, or
     declared statically), a cap (`audience ⊆ C` — see check timing).
   - **history requirements**, checked against the log, in two species:
@@ -341,7 +342,7 @@ or both. The check itself is two-fold:
 on worse trust than the tool requires: the trajectory label satisfies the
 contract or the call is blocked. Where the required audience comes from
 placeholders, it is derived from the actual arguments — the trajectory's
-readers must cover the concrete recipients of *this* call; a static contract
+readers must include the concrete recipients of *this* call; a static contract
 simply declares its recipients.
 
 **2. Narrowing.** Do not touch more secrets than the task really
@@ -377,7 +378,7 @@ The central thesis: **down is free, up needs authority** — and APPA asks the
 agent to choose between preserving its release frontier and entering a
 restricted context *before* fetching the data. The soft block shifts the
 reasoning left. Spelled out: a requirement that fails because the state is
-too *low* — an uncovered recipient, an unmet trust floor — is cured only by
+too *low* — an unmet `includes`, an unmet trust floor — is cured only by
 a ruling covering the gap; no sequence of unruled steps can ever cure
 it, because unruled steps only narrow. A requirement that fails because the
 state is too *high* — a cap with outsiders in the context — is
@@ -400,7 +401,7 @@ Ordered checks, each with its clock:
   `delta = { audience = { exactly = ["internal"] } }` — on
   the pre-narrowing label the call passes as public, but the bytes it
   shares *are* the internal data its own dispatch commits; with the
-  narrowing in force the cover fails, and the release takes a ruling.
+  narrowing in force the `includes` fails, and the release takes a ruling.
 - **History requirements** ask what has already happened: they evaluate on
   the log as it stands at check time — so a call's own `emits` can never
   trigger its own precondition.
@@ -467,7 +468,7 @@ Two facts about the list:
   plan — always available, from no registry entry at all, because it
   grants nothing (so a narrowing block is never terminal; the
   empty-list proof concerns requirement gaps). For a gap the state is too
-  *low* for — an unmet floor, an uncovered recipient — nothing outside
+  *low* for — an unmet floor, an unmet `includes` — nothing outside
   that enumeration can ever cure it, because unruled steps only narrow;
   the history and attention cures — a `k`-emitting tool, a waiving or
   attending mandate — are registry entries by definition. (A cap gap —
@@ -552,7 +553,7 @@ the currency it acts on:
 
 - a **cover up to a ceiling** — admitting a dispatch over an unmet trust
   floor (endorsing up to a rank — e.g. a human reviewed the fetched page
-  and ruled the content safe) or over an uncovered recipient set (vouching
+  and ruled the content safe) or over an unmet `includes` (vouching
   readers, up to a declared set). The label does not move; the ceiling
   bounds the gap one ruling may cover;
 - a **named waiver** — covering a failed `no_prior` for the admitted
