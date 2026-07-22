@@ -1,37 +1,7 @@
-LLM agents operate with significant authority over external tools and data,
-making them confused deputies whenever they consume unvetted inputs or process
-mixed-confidentiality context. In these environments, risks such as unauthorized
-data exfiltration or policy violations arise structurally---whether triggered by
-adversarial prompt injection, model hallucinations, or errant agent tool
-use---converting routine read access into security breaches. Content-based
-guardrails remain bypassable by rephrasing, while coarse hard restriction
-destroys utility. Fides establishes a stronger point in this design space: an
-agent planner can track confidentiality and integrity labels, enforce policies
-deterministically, and selectively hide or reveal data to preserve
-utility~\cite{fides}. \appa{} takes that result as its starting point and asks
-how to avoid tainting the planner's continuing trajectory in the first place.
+LLM agents operate with broad authority over external tools and data, rendering them vulnerable to confused deputy attacks when processing untrusted inputs or mixed-confidentiality context. In these environments, security risks such as unauthorized data exfiltration and policy violations arise structurally---whether driven by adversarial prompt injection, model hallucination, or errant tool usage---converting routine read access into security breaches. Content-based guardrails remain susceptible to bypass via prompt rephrasing, whereas static, coarse-grained access restrictions severely limit agent utility. Fides demonstrates a stronger approach in this design space by enabling an agent planner to track confidentiality and integrity labels, enforce deterministic policies, and selectively redact or reveal data to maintain utility~\cite{fides}. \appa{} builds upon this foundation, addressing how to prevent the planner's continuing execution trajectory from becoming tainted in the first place.
 
-We present \appa{}, whose main contribution is \emph{branching as taint
-prevention}. Before any call that would restrict the trajectory label, the
-runtime can fork a child at the parent's current label and dispatch the call
-only there. The child may descend and inspect the raw result; the parent never
-observes it and therefore does not descend. The child can be abandoned, or it
-can return only through a predeclared, policy-checked exit whose result label
-is merged into the parent. A raw or still-restrictive result narrows the
-parent on merge; a trusted sanitizer or quarantine-exit attestation may
-instead return a bounded derivative. This is prevention, not untainting: no
-operation clears a label from data already observed by a trajectory.
+We present \appa{}, introducing \emph{branching as taint prevention}. Prior to executing any tool call that would restrict the trajectory's security label, the runtime forks a child trajectory at the parent's current label and dispatches the call exclusively within the child context. The child may process and inspect the raw result, absorbing any label descent; the parent never observes the unvetted data and thus retains its unconstrained trajectory label. The child can subsequently be discarded or return through a predeclared, policy-checked exit point whose resulting label is merged back into the parent. Returning a raw or restrictive result restricts the parent label upon merge, whereas a trusted sanitizer or quarantine-exit attestation can return a bounded derivative without unnecessarily tainting the parent. This mechanism provides taint prevention rather than retrospective untainting, as no operation can strip security labels from data already observed by a trajectory.
 
-The construction is enforced by a declarative policy layer whose run state is
-two monoids: a \emph{label} (audience $\times$ trust) acted on by
-tool-declared deltas, and an append-only \emph{event log}. A prospective
-acquisition check turns every restrictive call into an explicit choice to
-accept, branch, sanitize, or decline. Branches share the world-event log, so
-isolation cannot erase an egress or satisfy history predicates on a fictitious
-fresh run. Atomic, call-scoped authority rulings permit exceptional dispatches
-without widening the parent or child. We prove monotone descent and
-settlement, parent preservation before merge, merge confinement, and remedy
-completeness; describe an implementation split into a pure decision core and a
-state-owning shell; and evaluate on
-AgentDojo~\cite{debenedettiAgentDojoDynamicEnvironment2024}.
+This framework is enforced by a declarative policy layer whose execution state comprises two monoids: a security \emph{label} (audience $\times$ trust) updated via tool-declared deltas, and an append-only \emph{event log}. A prospective acquisition check evaluates every label-restricting call, offering explicit options to accept, branch, sanitize, or decline. Because branches share a unified event log, process isolation cannot erase external actions or spoof history predicates. Call-scoped authority rulings allow controlled exceptions without permanently broadening access for the parent or child. We formally prove monotone label descent, settlement, parent label preservation prior to merge, merge confinement, and remedy completeness. Finally, we describe an architecture split into a pure decision core and a state-owning shell, evaluating \appa{} on AgentDojo~\cite{debenedettiAgentDojoDynamicEnvironment2024}.
 \todo{one sentence of results.}
+
