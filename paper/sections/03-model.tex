@@ -32,19 +32,56 @@ A branch is taint-confining when it is abandoned or exits under the adequacy rel
 Returning an un-sanitized restrictive raw value maintains safety but propagates restrictions back to the parent trajectory, requiring re-evaluation against the pre-read acquisition policy. Proof in Appendix~\ref{app:proofs} follows from locality of the child fold and the meet laws.
 
 \paragraph{The log monoid.}
-The log is modeled as the free monoid over events under concatenation~\cite{pierce2002types}, where events are appended at dispatch without separate approval phases. Events fall into two primary categories:
+The log is modeled as the free monoid over events under concatenation~\cite{pierce2002types}, where events are appended during execution lifecycle phases without separate approval phases. Events fall into two primary categories:
 \begin{itemize}
-  \item \textbf{World events} record external side-effects at dispatch time. History predicates evaluate over dispatch attempts: \texttt{no\_prior} operates fail-closed by recording execution attempts even on failure, while \texttt{prior(k)} verifies dispatch occurrence rather than completion.
+  \item \textbf{Dispatch lifecycle facts} record full audit information about tool execution attempts and outcomes, including opened dispatches, failures ($\mathrm{CloseFailure}$), and indeterminate outcomes ($\mathrm{CloseIndeterminate}$).
   \item \textbf{Governance events} record rulings, associated dispatches, trajectory boundaries (turn ends, forks, merges), accepted label descents, sanitizer applications, and label casts.
 \end{itemize}
 
-The engine queries the log solely to evaluate history predicates, verify ruling validity, and perform audits. Cached projections, such as tracking observed event types, correspond to monoid homomorphisms~\cite{pierce2002types}. Separate ``effects dimensions'' used in prior architectures are represented directly as log projections rather than label components: an effect tracks execution history rather than data confidentiality and integrity. Unifying events and labels into a single monoid product would blur essential semantic distinctions between per-value policy bounds and per-run execution logs.
+History predicates (\texttt{prior} and \texttt{no\_prior}) and Remedy planning evaluate over a narrower projection rather than raw lifecycle facts: the \emph{committed-effect projection} $\mathcal{E}(\ell)$, a family-wide projection incorporating a tool contract's \texttt{emits} sequence $K$ only when a dispatch closes with reported success ($\mathrm{CloseSuccess}(K)$). Formally:
+\[
+  \mathcal{E}(\ell \cdot \mathrm{CloseSuccess}(K)) = \mathcal{E}(\ell) \uplus K,
+\]
+whereas
+\[
+  \mathcal{E}(\ell \cdot \mathrm{CloseFailure}) = \mathcal{E}(\ell), \quad \mathcal{E}(\ell \cdot \mathrm{CloseIndeterminate}) = \mathcal{E}(\ell),
+\]
+and opening a dispatch (or recording its proposed effects) does not add effects to $\mathcal{E}$. History predicates are defined over $\mathcal{E}$:
+\[
+  \mathrm{prior}(k, \ell) \iff k \in \mathcal{E}(\ell), \qquad \mathrm{no\_prior}(k, \ell) \iff k \notin \mathcal{E}(\ell).
+\]
+
+Under reported-success semantics:
+\begin{itemize}
+  \item $\mathrm{prior}(k)$ proves that some dispatch reported success while committing effect $k$; it does not prove that the external world actually completed the intended operation.
+  \item $\mathrm{no\_prior}(k)$ proves only the absence of a successfully committed effect $k$; it does not prove that no failed or indeterminate attempt reached the external system.
+\end{itemize}
+
+Table~\ref{tab:dispatch_outcomes} summarizes these outcome semantics.
+
+\begin{table}[t]
+\centering
+\small
+\caption{Outcome semantics for the committed-effect projection $\mathcal{E}$.}
+\label{tab:dispatch_outcomes}
+\begin{tabular}{l@{~~}c@{~~}c@{~~}c}
+\toprule
+\textbf{Dispatch outcome} & \textbf{Committed?} & \textbf{Establishes $\mathrm{prior}(k)$?} & \textbf{Invalidates $\mathrm{no\_prior}(k)$?} \\
+\midrule
+Success with $k$ & Yes & Yes & Yes \\
+Failure & No & No & No \\
+Indeterminate & No & No & No \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The engine queries the log solely to evaluate history predicates over $\mathcal{E}$, verify ruling validity, and perform audits. Cached projections, such as tracking observed event types, correspond to monoid homomorphisms~\cite{pierce2002types}. Separate ``effects dimensions'' used in prior architectures are represented directly as log projections rather than label components: an effect tracks execution history rather than data confidentiality and integrity. Unifying events and labels into a single monoid product would blur essential semantic distinctions between per-value policy bounds and per-run execution logs.
 
 \paragraph{Integrating external policy logic through log views.}
 Custom execution policies and numerical thresholds are implemented via log projections coupled with external authority resolvers. For example, cumulative metrics such as financial spend limits (\texttt{finance.spend}) are computed by log views that determine whether an action requires human authorization. Recording these operations as named log events avoids introducing quantitative state into the label algebra, keeping scalar magnitudes outside the lattice model.
 
 \paragraph{Contracts.}
-A tool contract specifies policy declarations for both monoids: a \texttt{delta} action evaluated against the label, and an \texttt{emits} sequence appended to the log upon dispatch. Contracts also specify \texttt{requires} clauses:
+A tool contract specifies policy declarations for both monoids: a \texttt{delta} action evaluated against the label, and an \texttt{emits} sequence committed to the log projection $\mathcal{E}$ upon reported dispatch success. Contracts also specify \texttt{requires} clauses:
 \begin{itemize}
   \item minimum trust floors,
   \item audience cover constraints $\readers(\fold) \supseteq \mathrm{recipients}$,

@@ -12,13 +12,15 @@ Contract labels represent declared provenance rather than inferred semantic cont
 
 Approval fatigue represents a primary operational threat to any human-in-the-loop (HITL) system~\cite{akhawe2013alice} and remains an adoption concern outside the scope of our formal model: the security guarantees of the algebra remain bounded by the correctness of the authorities and contracts registered into it.
 
-\fixme{Dispatch atomicity concerns the vulnerability window between invoking an external tool and appending its events to the log:
-\begin{enumerate}
-  \item \textbf{Option (a)} uses a durable outbox~\cite{richardson2018microservices} where tool invocation and event entries commit atomically before execution. This storage-layer mechanism is transparent to contract authors and maintains a consistent log.
-  \item \textbf{Option (b)} splits events by polarity (\texttt{attempted} and \texttt{done}, where restrictive policies gate on attempted events and permissive policies gate on done events). While this fails closed under failure, it reintroduces a pre/post execution axis into every contract and leaves permanent conservative entries in the log.
-\end{enumerate}}
+\paragraph{Dispatch outcome tracking vs.\ physical effects.}
+Evaluating history predicates exclusively over the committed-effect projection $\mathcal{E}$ represents a deliberate simplicity tradeoff in the current design rather than fail-closed attempt tracking. This introduces an operational window under un-rollbackable external side effects:
+\begin{itemize}
+  \item a failed send dispatch may nevertheless have partially executed or reached an external inbox prior to failure;
+  \item an indeterminate dispatch (e.g., resulting from a network timeout or connection drop) may or may not have completed on the remote system;
+  \item under reported-success semantics, both outcomes leave $\mathcal{E}$ unchanged, so a subsequent \texttt{no\_prior(egress)} check remains satisfied unless a prior successful dispatch committed $k$.
+\end{itemize}
+While raw lifecycle facts retain these attempts for audit, the history predicate view does not treat failed or indeterminate attempts as committed effects. Future architectural designs could eliminate this window through durable outbox integration~\cite{richardson2018microservices} (committing events atomically before external invocation) or by separating effect polarities into explicit \texttt{attempted} and \texttt{done} predicate checks. However, these mechanisms remain candidate future enhancements rather than current system semantics.
 
-\fixme{Future extension topics include outcome-sensitive completion events and branch-scoped \texttt{prior(k)} semantics to prevent a quarantined child branch from generating parent-gating events through benign tool dispatches.}
 
 \paragraph{Epoch-wide authorization scope.}
 Ruling-carried persistent authority widenings could in principle be evicted by a subsequent narrowing. While algebraically coherent, this extension introduces non-commutative folds, eviction soundness constraints (\S\ref{sec:enforcement}), the generalized collapse property (Proposition~\ref{prop:collapse}), and additional request-channel design options.
