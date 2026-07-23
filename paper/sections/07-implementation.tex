@@ -15,14 +15,13 @@ Transcript construction projects the shared event log by trajectory identifier, 
 
 State transition invariants are enforced statically through the host language's type system~\cite{pierce2002types}. Unannotated tool parameters default to \texttt{Unknown} and must pass through boundary validators or cast resolvers before participating in label arithmetic. The policy checker restricts operations to label arithmetic and log predicates, delegating imperative execution to registered external components.
 
-Branch lifecycle operations---\texttt{fork}, \texttt{submit}, \texttt{abandon}, and \texttt{merge}---include stable parent and child identifiers. Property-based tests generate arbitrary child execution traces to verify Proposition~\ref{prop:preservation}:
+Branch lifecycle operations---\texttt{fork}, \texttt{submit}, \texttt{abandon}, and \texttt{merge}---include stable parent and child identifiers. Example-based unit tests exercise the implementation invariants underlying Proposition~\ref{prop:preservation}:
 \begin{itemize}
   \item child-only actions cannot mutate the parent fold,
   \item a merge operation consists of exactly one meet with the submitted value's label, and
   \item all successfully committed effects remain visible in the family-wide projection following abandonment, while failed and indeterminate dispatch facts remain available for audit.
 \end{itemize}
 
-\fixme{The configuration surface is deliberately undecided; constraints that every surface must preserve are listed below.}
-Configuration contains mandates exclusively, omitting grant objects entirely. It enforces a strict \emph{no-empty-mandate rule}: an authority with a mandate covering no permissions triggers an explicit configuration loading error, as the correctness proof for empty \texttt{remedy\_plans} relies on this invariant. Block messages expose applicable remedy plans and specify eligible authorities whenever a plan includes a ruling. Every audience specification explicitly declares its set relation---includes, exactly, or may-add---and scope routing is governed exclusively by tags. Type casts are restricted to constant definitions or resolver implementations.
+The versioned v1 configuration surface is parsed fail-closed and enforces its configuration invariants at load time. Configuration contains mandates exclusively, omitting grant objects entirely. It enforces a strict \emph{no-empty-mandate rule}: an authority with a mandate covering no permissions triggers an explicit configuration loading error, as the correctness proof for empty \texttt{remedy\_plans} relies on this invariant. Block messages expose applicable remedy plans and specify eligible authorities whenever a plan includes a ruling. Every audience specification explicitly declares its set relation---includes, exactly, or may-add---and scope routing is governed exclusively by tags. Type casts are restricted to constant definitions or resolver implementations.
 
 \todo{LoC, dependency count --- smallness as auditable-TCB argument}.

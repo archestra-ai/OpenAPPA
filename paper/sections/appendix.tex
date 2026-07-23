@@ -4,22 +4,30 @@ This appendix will give the full definitions and proofs for the policy algebra, 
 \stub{Complete definitions and formal proofs to be added.}
 
 \paragraph{Proof of Proposition~\ref{prop:collapse}.}
-\stub{Prove the keep-then-add collapse.}
+Let $L_0=(R_0,t_0)$ and let the $i$th action contribute the restrictive meet $(\cap A_i,\min r_i)$.  After $n$ actions,
+\[
+  \fold(a_1\cdots a_n)(L_0)
+  = \left(R_0 \cap \bigcap_{i=1}^{n} A_i,
+           \min\{t_0,r_1,\ldots,r_n\}\right).
+\]
+For $n=0$ this is the identity action.  The inductive step intersects the next reader set and takes the next minimum; associativity of intersection and minimum yields the displayed form.  Thus the fold is represented completely by the current intersection and minimum, i.e., by one running meet.
 
 \paragraph{Proof of Proposition~\ref{prop:descent}.}
 \stub{Prove label descent.}
 
-\paragraph{Proof of Proposition~\ref{prop:preservation}.}
-\stub{Prove preservation of the relevant policy invariant.}
+\paragraph{Proof of Proposition~\ref{prop:preservation} and Theorem~\ref{thm:branch}.}
+Let $D_1,\ldots,D_n\in S$ be the Label contributions admitted by a child after its fork.  Trajectory-local folding gives
+\[
+  L_c^n = L_p^{\mathrm{fork}} \meet D_1 \meet \cdots \meet D_n
+          \le L_p^{\mathrm{fork}}.
+\]
+Because these updates apply only to $L_c$, they leave $L_p$ unchanged, and abandonment performs no parent Label transition.  A return performs the sole parent transition $L_p'=L_p\meet\lab(v)$.  The meet is a lower bound, so $L_p'\le L_p$, and the absorption law gives $L_p'=L_p$ if and only if $L_p\le\lab(v)$.  These are exactly the abandonment and return cases of Theorem~\ref{thm:branch}, making it a branch-lifecycle corollary of parent preservation.
+
+\paragraph{Concurrency remark.}
+The Label argument does not require the parent to pause: parent and child folds are disjoint trajectory-local state, so interleaving their actions does not change the transitions above.  They do share the event log, whose appends must be serialized by the host under the threat model.  Concurrency can therefore affect event order and the history observed by predicates, but not the parent-preservation argument.
 
 \paragraph{Proof of Theorem~\ref{thm:remedy} (Implemented Remedy completeness).}
 \stub{Prove completeness over the finite implemented transition system consisting of atomic \texttt{Authorize}/\texttt{Accept} plans and separately checked \texttt{Redispatch} transitions through registered \texttt{prior(k)} emitters and cap-narrowing tools, omitting quantification over sanitizer substitutions, compiled composites, cast resolution, or forks.}
-
-\paragraph{Proof of Theorem~\ref{thm:branch}: host-orchestrated branch.}
-\stub{Prove branch taint confinement under host-orchestrated child execution.}
-
-\paragraph{Proof of Theorem~\ref{thm:branch}: concurrent parent.}
-\stub{Prove the concurrent-parent statement of branch taint confinement.}
 
 \section{Worked Example: Contracts, Folds, and Shared Log}\label{app:example}
 
