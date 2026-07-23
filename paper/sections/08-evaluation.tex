@@ -49,8 +49,3 @@ We will annotate $k$ risky tools, classify all remaining tools as \texttt{Unknow
 
 \paragraph{Non-goals.}
 We do not conduct a content-level detection benchmark because APPA does not inspect payload content. Measuring branch latency and token overhead is necessary rather than optional to quantify the cost of explicit child context setup and task handoff.
-
-\paragraph{Implementation scope.}
-The evaluation strictly reflects the current implemented scope of \appa{}:
-branch seeding, checked child returns, direct-parent merge, \texttt{prior(k)} predicates, boundary events, prospective policy checks, and atomic plan execution are implemented;
-automatic blocked-call migration, parent-transcript inheritance, input-sanitizer substitutions, and compiled sanitizer composites are not.

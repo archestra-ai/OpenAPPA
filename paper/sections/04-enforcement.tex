@@ -32,12 +32,7 @@ This is intentionally a one-sided negative result: returning no executable plan 
 
 The converse guarantee remains weak: an authority may decline to rule; the external world may fail; a fresh check may observe changed state; and pending-cast outputs are conservatively over-approximated during planning and may fail to cure the target after actual resolution. These possibilities do not invalidate the empty-result theorem: over-approximation can produce an unhelpful recommendation, but it cannot falsely declare a reachable state unreachable.
 
-The planner explicitly excludes input-sanitizer argument substitutions, sanitizer-backed compiled composites, cast resolution as a Remedy-planning transition, and trajectory forking as a cure. Contract-bound output sanitization and checked child returns remain implemented runtime mechanisms, but they are not planner-enumerated composite remedies for an arbitrary blocked call. Input substitutions and compiled composites are deferred to future work unless and until implemented. Proof in Appendix~\ref{app:proofs}.
-
-\begin{proposition}[Eviction soundness, extension only]\label{prop:eviction}
-Under the permissive extension, executing a restricted read following a state widening operation intersects away any reader not included in the new content's reader set. All remaining readers are entitled by construction, and evicted readers observe no post-read data.
-\end{proposition}
-This proposition is vacuous in the primary model, where state widening operations are absent. Proof in Appendix~\ref{app:proofs}.
+The planner restricts enumerated remedies to atomic \texttt{Authorize}/\texttt{Accept} plans and curative \texttt{Redispatch} sequences, excluding sanitizer substitutions and forking from candidate plan generation. Proof in Appendix~\ref{app:proofs}.
 
 \paragraph{Remedy-plan delivery.}
 The planner distinguishes atomic executable plans from prose or advisory recommendations. Executable plans---\texttt{Authorize} (issuing policy rulings), \texttt{Accept} (accepting state narrowing), or single-call compositions combining both---are executable objects exposed through a static tool, \texttt{execute\_remedy\_plan(plan\_id)}, initialized at run start to avoid invalidating prompt caches~\cite{kwon2023efficient}. The plan identifier, tool dispatch, and associated policy rulings are logged upon execution. Unmet attention requirements use the same interface: an attention demand is treated as a failed predicate whose remediation is an atomic ruling.

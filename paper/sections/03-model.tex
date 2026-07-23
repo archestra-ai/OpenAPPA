@@ -8,10 +8,10 @@ The checked monoid models policy actions on $S$, equipped with action compositio
 \[
   a_i = (\cap A_i, \min r_i).
 \]
-Rulings resolve execution policy requirements per call without modifying the label state directly. Because label aggregation ($\fold$) composes meets, it is commutative and monotone. The expressible extension (\S\ref{sec:limitations}) introduces permissive actions $(\cup B, \max r)$ up to a declared ceiling, rendering the fold non-commutative.
+Rulings resolve execution policy requirements per call without modifying the label state directly. Because label aggregation ($\fold$) composes meets, it is commutative and monotone.
 
 \begin{proposition}[Collapse]\label{prop:collapse}
-In the primary model, the fold collapses to a running meet consisting of a single reader set intersection and a minimum trust level, eliminating the need to re-evaluate trajectory history. Under the permissive extension, every composite audience action simplifies to the form $s \mapsto (s \cap A) \cup B$, representing a cumulative intersection-union pair over individual actions.
+In the primary model, the fold collapses to a running meet consisting of a single reader set intersection and a minimum trust level, eliminating the need to re-evaluate trajectory history.
 \end{proposition}
 Proof in Appendix~\ref{app:proofs}.
 

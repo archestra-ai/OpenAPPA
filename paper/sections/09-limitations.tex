@@ -13,39 +13,7 @@ Contract labels represent declared provenance rather than inferred semantic cont
 Approval fatigue represents a primary operational threat to any human-in-the-loop (HITL) system~\cite{akhawe2013alice} and remains an adoption concern outside the scope of our formal model: the security guarantees of the algebra remain bounded by the correctness of the authorities and contracts registered into it.
 
 \paragraph{Dispatch outcome tracking vs.\ physical effects.}
-Evaluating history predicates exclusively over the committed-effect projection $\mathcal{E}$ represents a deliberate simplicity tradeoff in the current design rather than fail-closed attempt tracking. This introduces an operational window under un-rollbackable external side effects:
-\begin{itemize}
-  \item a failed send dispatch may nevertheless have partially executed or reached an external inbox prior to failure;
-  \item an indeterminate dispatch (e.g., resulting from a network timeout or connection drop) may or may not have completed on the remote system;
-  \item under reported-success semantics, both outcomes leave $\mathcal{E}$ unchanged, so a subsequent \texttt{no\_prior(egress)} check remains satisfied unless a prior successful dispatch committed $k$.
-\end{itemize}
-While raw lifecycle facts retain these attempts for audit, the history predicate view does not treat failed or indeterminate attempts as committed effects. Future architectural designs could eliminate this window through durable outbox integration~\cite{richardson2018microservices} (committing events atomically before external invocation) or by separating effect polarities into explicit \texttt{attempted} and \texttt{done} predicate checks. However, these mechanisms remain candidate future enhancements rather than current system semantics.
+Evaluating history predicates exclusively over the committed-effect projection $\mathcal{E}$ means failed or indeterminate dispatches leave $\mathcal{E}$ unchanged, which introduces an operational window if external side effects occur prior to dispatch failure or network timeout. While raw lifecycle facts preserve these attempts for auditing, $\mathcal{E}$ does not treat unconfirmed dispatches as committed effects. Eliminating this window via durable outboxes~\cite{richardson2018microservices} or dual-polarity \texttt{attempted}/\texttt{done} predicates remains future work.
 
-
-\paragraph{Epoch-wide authorization scope.}
-Ruling-carried persistent authority widenings could in principle be evicted by a subsequent narrowing. While algebraically coherent, this extension introduces non-commutative folds, eviction soundness constraints (\S\ref{sec:enforcement}), the generalized collapse property (Proposition~\ref{prop:collapse}), and additional request-channel design options.
-
-For ongoing interactions with an external recipient, dynamic branching offers a cleaner and safer construction:
-\begin{itemize}
-  \item a child branch confines recipient-specific exchanges and restrictive observations,
-  \item call-scoped rulings admit only reviewed transmissions, and
-  \item the child context subsequently terminates.
-\end{itemize}
-Because \texttt{merge}-by-intersection prevents unauthorized context propagation back to the parent, APPA preserves strict monotone narrowing and avoids unnecessary implementation complexity.
-
-In practice, deployments may attempt to amortize human review using automated approval authorities~\cite{fides}. However, such an authority must compare each rendered invocation against the specific call it reviewed; failing to perform this comparison degrades security compared to explicit epoch-wide authorization~\cite{bishop1996checking}.
-
-Future work includes:
-\begin{itemize}
-  \item automatic conversion of a blocked restrictive call into a child dispatch;
-  \item mandate scoping by information type;
-  \item pass-by-reference labeling, where byte-identical unretyped arguments retain their original labels (a consequence of arguments being \texttt{LabeledValue} instances); and
-  \item full or selectively sanitized parent-transcript inheritance (partial-context handoff), in which a child branch is instantiated with a sanitized subset of the parent's model transcript while retaining access to full shared event history.
-\end{itemize}
-
-Policy dimensions must undergo engineering review prior to deployment: while algebraic lawfulness can be property-tested, security semantics cannot~\cite{claessen2000quickcheck}. Candidate dimensions include:
-\begin{itemize}
-  \item spending budgets as a canonical monoid (ordered, per-run, and accumulating monotonically---currently evaluated via log aggregation in a resolver-implemented authority),
-  \item independent attestations, and
-  \item value-specific purpose limitations.
-\end{itemize}
+\paragraph{Future work.}
+Future work includes automatic conversion of blocked calls into child dispatches, fine-grained mandate scoping by information type, pass-by-reference labeling, and partial transcript inheritance with sanitized preambles. Finally, while policy dimensions are algebraically lawful, their security semantics require careful deployment review~\cite{claessen2000quickcheck}, particularly for candidate extensions such as monotonic spend budgets, independent attestations, and purpose limitations.
