@@ -21,17 +21,17 @@ use std::time::{Duration, Instant};
 
 use appa_engine::admit::{AdmitError, CastAnswer, ResultAdmission};
 use appa_engine::authority::CastResolution;
-use appa_engine::branch::ChildReturn;
+use appa_engine::branch::{ReturnCheck, ReturnPlan, ReturnSubmission};
 use appa_engine::check::{CheckOutcome, UnresolvedFact};
 use appa_engine::execute::{Issuer, Ruling, Sink};
-use appa_engine::fact::{BoundaryKind, Fact, FactBatch, ProposedCall};
+use appa_engine::fact::{BoundaryKind, Fact, FactBatch, ProposedCall, ReturnPolicy};
 use appa_engine::label::{DimValue, Dimension};
 use appa_engine::names::{CastName, SanitizerName};
 use appa_engine::plan::PlanId;
 use appa_engine::projection::Projection;
 use appa_engine::value::{
-    CanonicalDigest, ChildReturnId, DispatchId, Provenance, RawResultDigest, ResolvedCall, ToolCallId, ToolName,
-    TrajectoryId, ValueBody, ValueId,
+    CanonicalDigest, DispatchId, Provenance, RawResultDigest, ResolvedCall, ToolCallId, ToolName, TrajectoryId,
+    ValueBody, ValueId,
 };
 
 use tokio_util::sync::CancellationToken;
@@ -97,6 +97,19 @@ struct PendingBlock {
     plan: PlanId,
 }
 
+/// A blocked child return awaiting the model's return-plan decision. A success consumes the whole
+/// pending offer (an executed plan's merge moves the parent, so the engine's value-matched
+/// re-derivation refuses the sibling handles), a stale refusal discards it, and end-of-turn
+/// destroys it with the drive. The confined raw submission lives only here — never in feedback or
+/// plan descriptions.
+struct PendingReturn {
+    parent: TrajectoryId,
+    body: String,
+    raw_digest: RawResultDigest,
+    /// Sibling offers: server-minted handle → the return plan it names.
+    offers: Vec<(String, ReturnPlan)>,
+}
+
 /// One model-proposed call, with a flag for arguments that failed to parse (never repaired into an
 /// executable call — RP3).
 struct Proposal {
@@ -137,7 +150,9 @@ pub async fn drive_turn(
         rounds: 0,
         invocations: 0,
         pending: Vec::new(),
+        pending_returns: Vec::new(),
         remedy_attempts: BTreeMap::new(),
+        return_derivation_attempts: BTreeMap::new(),
         next_handle: 0,
     };
     drive.run(user_turn).await
@@ -156,8 +171,13 @@ struct Drive<'a> {
     rounds: u32,
     invocations: u32,
     pending: Vec<PendingBlock>,
+    pending_returns: Vec<PendingReturn>,
     /// Remedy executions attempted per call this turn — bounds `max_remedy_attempts_per_gap`.
     remedy_attempts: BTreeMap<CanonicalDigest, u32>,
+    /// Return-derivation attempts this turn, keyed by (raw submission, sanitizer) — sanitizer A's
+    /// failures never starve sanitizer B or Accept, and resubmitting the same body mints no fresh
+    /// budget. Accept performs no fallible external work and is never charged.
+    return_derivation_attempts: BTreeMap<(RawResultDigest, SanitizerName), u32>,
     /// Monotonic source of turn-unique remedy handles (a model tool-call id is untrusted and may
     /// collide, so it is never used as the handle).
     next_handle: u32,
@@ -165,6 +185,33 @@ struct Drive<'a> {
 
 /// The turn's cancellation fired while an external await was in flight.
 struct TurnCancelled;
+
+/// How a raw `submit_result` proceeds after the narrowing check.
+enum RawReturnGo {
+    /// No narrowing (or no parent): the raw crossing merges silently.
+    Merge,
+    /// The call was already answered — a block with offered plans, an unresolved notice, or a
+    /// refusal. Nothing crosses now.
+    Answered,
+}
+
+/// The model-facing description of one offered return plan. Never includes the submitted bytes.
+fn describe_return_plan(plan: &ReturnPlan) -> String {
+    match plan {
+        ReturnPlan::Accept(_) => "accept the narrowing and return the result raw".to_string(),
+        ReturnPlan::Sanitize {
+            sanitizer,
+            residual: None,
+        } => format!("return the {} derivation instead", sanitizer.as_str()),
+        ReturnPlan::Sanitize {
+            sanitizer,
+            residual: Some(_),
+        } => format!(
+            "return the {} derivation, accepting the residual narrowing",
+            sanitizer.as_str()
+        ),
+    }
+}
 
 impl Drive<'_> {
     async fn run(&mut self, user_turn: UserTurn) -> Result<TurnOutcome, DriveError> {
@@ -367,6 +414,15 @@ impl Drive<'_> {
             self.feedback(call_id, "execute_remedy_plan requires a string plan_id")?;
             return Ok(CallGo);
         };
+        // A handle names either a blocked child return's offer or a blocked tool call's plan —
+        // both are minted from the same turn-unique counter, so a lookup is unambiguous.
+        if let Some(index) = self
+            .pending_returns
+            .iter()
+            .position(|p| p.offers.iter().any(|(h, _)| h == handle))
+        {
+            return self.handle_execute_return_remedy(call_id, index, handle).await;
+        }
         let Some(index) = self.pending.iter().position(|p| p.handle == handle) else {
             self.feedback(call_id, "no pending blocked call offers that plan_id")?;
             return Ok(CallGo);
@@ -463,82 +519,230 @@ impl Drive<'_> {
             self.feedback(call_id, "submit_result is available only to a child session")?;
             return Ok(CallGo);
         }
-        let body = arguments
-            .get("value")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .unwrap_or_default();
+        // Strict wire shape: exactly one key, `value` — a string result, or an explicit null to
+        // return nothing. Anything else (missing, wrongly typed, or extra fields) is rejected —
+        // the old lenient path coerced a missing/malformed value to "" and merged it carrying the
+        // full child fold, a silent taint crossing for an empty body.
+        let exact_shape = arguments
+            .as_object()
+            .filter(|object| object.len() == 1)
+            .and_then(|object| object.get("value"));
+        let body = match exact_shape {
+            Some(serde_json::Value::String(value)) => value.clone(),
+            Some(serde_json::Value::Null) => {
+                // Void return: the child ends its errand without returning a value. Nothing is
+                // recorded and nothing merges — no label propagates to the parent, exactly as if
+                // the branch had been abandoned; the child log alone carries the audit.
+                self.feedback(call_id, "no result returned to the parent")?;
+                return Ok(CallGo);
+            }
+            _ => {
+                self.feedback(
+                    call_id,
+                    "submit_result takes exactly one key, `value`: a string result, or null to return nothing",
+                )?;
+                return Ok(CallGo);
+            }
+        };
 
-        // Server policy decides how the value crosses (RP6): with a `[child] return_sanitizer`
-        // configured, only the sanitizer's derivation reaches the parent — at the sanitizer's exact
-        // declared label, engine-derived; the raw submitted text never leaves the child. The model
-        // never chooses the path. A failed derivation fails closed: nothing returns.
-        let returned = match self.rt.config().child_return_sanitizer() {
-            None => ChildReturn::Raw {
-                body: ValueBody::new(body.clone()),
-            },
-            Some(sanitizer) => match self.derive_sanitized(sanitizer, &body).await {
+        // Server policy decides how the value crosses (RP6): a `[child]` static sanitizer binding
+        // is the child's only return channel, at the binding's exact engine-derived label; the raw
+        // submitted text never leaves the child and the model never chooses the path. A failed
+        // derivation fails closed: nothing returns. With no binding, the narrowing check decides
+        // whether the raw crossing is silent — a narrowing return is blocked with return plans.
+        let returned = match self.rt.config().child_return_policy() {
+            ReturnPolicy::Sanitized(sanitizer) => match self.derive_sanitized(&sanitizer, &body).await {
                 // Cancelled before any return was recorded: nothing crossed, only the seal is owed.
                 Err(TurnCancelled) => return Ok(CallCancelled(None)),
-                Ok(Some(derived)) => ChildReturn::Sanitized {
+                Ok(Some(derived)) => ReturnSubmission::Derived {
                     body: ValueBody::new(derived),
-                    sanitizer: sanitizer.clone(),
+                    // The audit digest binds to the raw submission, not the derivation.
+                    raw_digest: RawResultDigest::of(body.as_bytes()),
                 },
                 Ok(None) => {
                     self.feedback(call_id, "the result could not be sanitized for return")?;
                     return Ok(CallGo);
                 }
             },
+            ReturnPolicy::Raw => match self.check_raw_return(call_id, &body)? {
+                RawReturnGo::Merge => ReturnSubmission::Raw {
+                    body: ValueBody::new(body.clone()),
+                },
+                RawReturnGo::Answered => return Ok(CallGo),
+            },
         };
 
-        // Record the child's return (server-derived label, trust never rises), capturing its id —
-        // through the serialized finalization (CC5), so a busy family cannot starve the record. The
-        // cancellation token is consulted **inside** the closure: the record is the commit point at
-        // which the value crosses, so a token that fired first suppresses it atomically under the
+        // The crossing: record, parent admission, and merge boundary land as ONE engine batch in
+        // ONE finalization (CC5) — no orphanable intermediate state. The cancellation token is
+        // consulted **inside** the closure: this is the single commit point at which the value
+        // crosses, so a token that fired first suppresses the whole crossing atomically under the
         // family lock (a token firing after the closure ran linearizes after the crossing).
-        let mut recorded = None;
+        let Some(parent) = self.rt.store().parent_of(self.tenant, self.session)? else {
+            self.feedback(call_id, "this session cannot submit a result")?;
+            return Ok(CallGo);
+        };
+        let mut crossed = false;
         self.rt.store().finalize(self.tenant, self.session, |facts, rev| {
             if self.cancel.is_cancelled() {
                 return None;
             }
             let projection = Projection::build(facts, rev);
-            let views = projection.view(self.session);
-            let occurrence = views.returns_by(self.session);
-            let batch = self.rt.engine().submit_child_return(&views, returned).ok()?;
-            recorded = Some(ChildReturnId::new(self.session.clone(), occurrence));
+            let views = projection.view(&parent);
+            let batch = self
+                .rt
+                .engine()
+                .submit_child_return(&views, self.session, returned)
+                .ok()?;
+            crossed = true;
             Some(batch)
         })?;
-        let Some(return_id) = recorded else {
+        if !crossed {
             if self.cancel.is_cancelled() {
                 return Ok(CallCancelled(None));
             }
             self.feedback(call_id, "this session cannot submit a result")?;
             return Ok(CallGo);
-        };
-
-        // Merge it into the direct parent so the parent actually receives the value (RP6). The engine
-        // derives the parent's new label (never widening) and enforces once-only; finalize keeps the
-        // merge bounded under the shared family lock. Like the record above, the merge is a
-        // crossing, so the token is consulted inside the closure: cancelled first, the recorded
-        // return stays unmerged (fail-closed — it never reaches the parent) and the call is sealed
-        // through the cancelled terminal.
-        let mut merged = true;
-        if let Some(parent) = self.rt.store().parent_of(self.tenant, self.session)? {
-            merged = false;
-            self.rt.store().finalize(self.tenant, self.session, |facts, rev| {
-                if self.cancel.is_cancelled() {
-                    return None;
-                }
-                let projection = Projection::build(facts, rev);
-                let batch = self.rt.engine().merge(&projection.view(&parent), &return_id).ok()?;
-                merged = true;
-                Some(batch)
-            })?;
-        }
-        if !merged {
-            return Ok(CallCancelled(None));
         }
         self.feedback(call_id, "result submitted to the parent")?;
+        Ok(CallGo)
+    }
+
+    /// Run the engine's return check for a raw submission and, on a block, stash the pending
+    /// attempt and answer the call with the offered plans. `Merge` means the raw crossing is
+    /// silent (no narrowing, or no parent at all); `Answered` means this call already got its
+    /// response (block feedback or an unresolved/refusal notice).
+    fn check_raw_return(&mut self, call_id: &ToolCallId, body: &str) -> Result<RawReturnGo, DriveError> {
+        let Some(parent) = self.rt.store().parent_of(self.tenant, self.session)? else {
+            return Ok(RawReturnGo::Merge);
+        };
+        let (log, rev) = self.rt.store().snapshot(self.tenant, self.session)?;
+        let projection = Projection::build(&log, rev);
+        let views = projection.view(&parent);
+        match self.rt.engine().check_child_return(&views, self.session) {
+            Ok(ReturnCheck::Allow) => Ok(RawReturnGo::Merge),
+            Ok(ReturnCheck::Unresolved(_)) => {
+                self.feedback(
+                    call_id,
+                    "the return cannot be decided: a label dimension is unresolved; resolve it first or return null",
+                )?;
+                Ok(RawReturnGo::Answered)
+            }
+            Ok(ReturnCheck::Block { plans, .. }) => {
+                let offers: Vec<(String, ReturnPlan)> = plans
+                    .into_iter()
+                    .map(|plan| {
+                        let handle = format!("remedy-{}", self.next_handle);
+                        self.next_handle += 1;
+                        (handle, plan)
+                    })
+                    .collect();
+                let menu: Vec<String> = offers
+                    .iter()
+                    .map(|(handle, plan)| format!("\"{handle}\" to {}", describe_return_plan(plan)))
+                    .collect();
+                let feedback = format!(
+                    "returning this raw would narrow the parent; call execute_remedy_plan with plan_id {}; or submit_result null to return nothing",
+                    menu.join(", ")
+                );
+                self.pending_returns.push(PendingReturn {
+                    parent,
+                    body: body.to_string(),
+                    raw_digest: RawResultDigest::of(body.as_bytes()),
+                    offers,
+                });
+                self.feedback(call_id, &feedback)?;
+                Ok(RawReturnGo::Answered)
+            }
+            Err(_) => {
+                self.feedback(call_id, "this session cannot submit a result")?;
+                Ok(RawReturnGo::Answered)
+            }
+        }
+    }
+
+    /// Execute one offered return plan: derive outside the family lock where the plan needs a
+    /// sanitizer, then land the engine's atomic crossing+acceptance+merge batch inside
+    /// finalization. A success consumes the whole pending offer (every sibling handle); a stale
+    /// refusal discards it (the child must submit afresh); a failed derivation restores the plan
+    /// to pending within its turn-wide (raw submission, sanitizer) budget.
+    async fn handle_execute_return_remedy(
+        &mut self,
+        call_id: &ToolCallId,
+        index: usize,
+        handle: &str,
+    ) -> Result<CallProgress, DriveError> {
+        let plan = self.pending_returns[index]
+            .offers
+            .iter()
+            .find(|(h, _)| h == handle)
+            .map(|(_, plan)| plan.clone())
+            .expect("caller located this handle in this pending return");
+
+        // Only externally-fallible work is budgeted: Accept is free, and charges key on the raw
+        // submission + sanitizer, so one sanitizer's failures never starve a sibling and
+        // resubmitting the same body mints no fresh budget.
+        let submission = match &plan {
+            ReturnPlan::Accept(_) => ReturnSubmission::Raw {
+                body: ValueBody::new(self.pending_returns[index].body.clone()),
+            },
+            ReturnPlan::Sanitize { sanitizer, .. } => {
+                let sanitizer = sanitizer.clone();
+                let key = (self.pending_returns[index].raw_digest, sanitizer.clone());
+                let charges = self.return_derivation_attempts.entry(key).or_insert(0);
+                *charges += 1;
+                if *charges > self.rt.budgets().max_remedy_attempts_per_gap {
+                    self.feedback(call_id, "the remedy attempt limit for this return was reached")?;
+                    return Ok(CallGo);
+                }
+                let body = self.pending_returns[index].body.clone();
+                match self.derive_sanitized(&sanitizer, &body).await {
+                    // Cancelled before any crossing: the pending attempt dies with the turn.
+                    Err(TurnCancelled) => return Ok(CallCancelled(None)),
+                    Ok(Some(derived)) => ReturnSubmission::Derived {
+                        body: ValueBody::new(derived),
+                        raw_digest: self.pending_returns[index].raw_digest,
+                    },
+                    // Fail closed and restore: the plan stays offered within its budget.
+                    Ok(None) => {
+                        self.feedback(call_id, "the derivation failed; the return offer remains available")?;
+                        return Ok(CallGo);
+                    }
+                }
+            }
+        };
+
+        // The commit point: cancellation and staleness are both decided under the family lock —
+        // the engine re-derives the block from the live views and refuses by value a chosen plan
+        // the fresh offers no longer contain, so nothing crosses on a stale offer.
+        let parent = self.pending_returns[index].parent.clone();
+        let mut executed = false;
+        self.rt.store().finalize(self.tenant, self.session, |facts, rev| {
+            if self.cancel.is_cancelled() {
+                return None;
+            }
+            let projection = Projection::build(facts, rev);
+            let views = projection.view(&parent);
+            let batch = self
+                .rt
+                .engine()
+                .execute_child_return_plan(&views, self.session, plan.clone(), submission)
+                .ok()?;
+            executed = true;
+            Some(batch)
+        })?;
+        if executed {
+            // The offer is consumed: every sibling handle dies with it.
+            self.pending_returns.remove(index);
+            self.feedback(call_id, "result submitted to the parent")?;
+            return Ok(CallGo);
+        }
+        if self.cancel.is_cancelled() {
+            return Ok(CallCancelled(None));
+        }
+        // Stale: the family state moved since the offer. Discard the whole attempt — the child
+        // must submit afresh against the new state, never retry an offer computed for an old one.
+        self.pending_returns.remove(index);
+        self.feedback(call_id, "the return offer is stale; submit the result again")?;
         Ok(CallGo)
     }
 
@@ -1106,6 +1310,8 @@ mod tests {
     use crate::inference::Inference;
     use crate::tool::{BuiltinTool, HttpClient};
     use crate::wire::{ChatCompletionResponse, WireFunctionCall, WireMessage, WireToolCall};
+    use appa_engine::fact::ReturnDerivation;
+    use appa_engine::value::LabeledValue;
     use std::collections::BTreeMap;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1439,11 +1645,15 @@ effects = ["read"]
         let rt = runtime_over(config, BTreeMap::new(), base).await;
         let tenant = TenantId::new("acme");
         let parent = rt.store().create_session(tenant.clone());
+        // The parent folds a boundary-label value of its own, so the child's user turn (same
+        // label) makes a non-narrowing return — the silent-merge path under test.
+        admit_at(&rt, &tenant, &parent, 1, &[]);
         let (child, _) = rt
             .store()
             .fork(&tenant, &parent, |child, facts, rev| {
                 let projection = Projection::build(facts, rev);
-                rt.engine().seed_child(&projection.view(&parent), child)
+                rt.engine()
+                    .seed_child(&projection.view(&parent), child, rt.config().child_return_policy())
             })
             .unwrap();
 
@@ -1480,6 +1690,424 @@ effects = ["read"]
             "the merged child value should appear in the parent transcript"
         );
         model.await.unwrap();
+    }
+
+    /// A void (`value: null`) or malformed `value` crosses nothing — structurally: no child-return
+    /// fact, no parent admission, no merge boundary, no parent transcript message. The old lenient
+    /// path coerced these to "" and merged the full child fold.
+    #[tokio::test]
+    async fn a_void_or_malformed_submit_result_crosses_nothing() {
+        for args in [
+            r#"{"value":null}"#,
+            r#"{}"#,
+            r#"{"value":42}"#,
+            r#"{"value":true}"#,
+            r#"{"value":{"k":"v"}}"#,
+            r#"{"value":["x"]}"#,
+        ] {
+            let config = Config::from_toml_str("version = 1\ntrust_chain = [\"suspicious\", \"trusted\"]\n").unwrap();
+            let (base, model) = spawn_scripted_model(vec![
+                tool_call_round("1", "submit_result", args),
+                final_round("2", "done"),
+            ])
+            .await;
+            let rt = runtime_over(config, BTreeMap::new(), base).await;
+            let tenant = TenantId::new("acme");
+            let parent = rt.store().create_session(tenant.clone());
+            let (child, _) = rt
+                .store()
+                .fork(&tenant, &parent, |child, facts, rev| {
+                    let projection = Projection::build(facts, rev);
+                    rt.engine()
+                        .seed_child(&projection.view(&parent), child, rt.config().child_return_policy())
+                })
+                .unwrap();
+
+            drive_turn(
+                &rt,
+                &tenant,
+                &child,
+                true,
+                user_turn("investigate"),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+            let (log, _) = rt.store().snapshot(&tenant, &parent).unwrap();
+            assert!(
+                !log.iter().any(|f| matches!(f, Fact::ChildReturn { .. })),
+                "no child return may be recorded for {args}"
+            );
+            assert!(
+                !log.iter().any(|f| matches!(
+                    f,
+                    Fact::ValueAdmitted {
+                        provenance: Provenance::ChildReturn { .. },
+                        ..
+                    }
+                )),
+                "nothing may be admitted to the parent for {args}"
+            );
+            assert!(
+                !log.iter().any(|f| matches!(
+                    f,
+                    Fact::Boundary {
+                        kind: BoundaryKind::Merge { .. },
+                        ..
+                    }
+                )),
+                "no merge boundary may land for {args}"
+            );
+            // The model got a response for the call (the child stays drivable) …
+            assert!(log.iter().any(|f| matches!(f, Fact::BlockFeedback { .. })));
+            // … and the parent transcript gained nothing.
+            assert!(crate::transcript::model_transcript(&[], &log, &parent).is_empty());
+            model.await.unwrap();
+        }
+    }
+
+    /// Config for blocked-return tests: a registered (unbound) `pii` output sanitizer only. Taint
+    /// is injected directly as an admitted child value (a quarantined read's fold), so no tool
+    /// soft-block competes for remedy handles.
+    fn blocked_return_config(sanitizer_impl: &str) -> Config {
+        Config::from_toml_str(&format!(
+            r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+
+[[sanitizer]]
+name = "pii"
+on   = ["tool_output"]
+[sanitizer.can_reduce]
+audience = {{ from = {{ includes = ["internal"] }}, to = {{ exactly = ["public"] }} }}
+[sanitizer.implementation]
+{sanitizer_impl}
+"#
+        ))
+        .unwrap()
+    }
+
+    /// Admit one value to `session` at the given label — a test stand-in for a read's fold.
+    fn admit_at(rt: &Runtime, tenant: &TenantId, session: &TrajectoryId, trust: u8, readers: &[&str]) {
+        use appa_engine::label::{Audience, Dim, Label, ReaderId, Trust};
+        let audience = if readers.is_empty() {
+            Audience::Public
+        } else {
+            Audience::restricted(readers.iter().map(|r| ReaderId::new(*r)))
+        };
+        let (_, rev) = rt.store().snapshot(tenant, session).unwrap();
+        let batch = FactBatch::new(
+            rev,
+            vec![Fact::ValueAdmitted {
+                trajectory: session.clone(),
+                value: LabeledValue::new(
+                    ValueBody::new("ingested"),
+                    Label::new(Dim::Known(Trust::new(trust)), Dim::Known(audience)),
+                ),
+                provenance: Provenance::UserInput,
+            }],
+        );
+        rt.store().conditional_append(tenant, session, batch).unwrap();
+    }
+
+    /// Drive one child turn over the scripted rounds and return the family log and parent id. The
+    /// parent holds a boundary-label value (as any driven parent would), so a clean child does not
+    /// narrow it; `taint_child` admits a suspicious+internal value to the child first.
+    async fn drive_child_rounds(config: Config, taint_child: bool, rounds: Vec<String>) -> (Vec<Fact>, TrajectoryId) {
+        drive_child_rounds_from(config, 1, taint_child, rounds).await
+    }
+
+    /// [`drive_child_rounds`] with the parent's own fold at `parent_trust` (public audience): a
+    /// suspicious parent makes a tainted child's narrowing audience-only, so a sanitizer can fully
+    /// clear it.
+    async fn drive_child_rounds_from(
+        config: Config,
+        parent_trust: u8,
+        taint_child: bool,
+        rounds: Vec<String>,
+    ) -> (Vec<Fact>, TrajectoryId) {
+        let (base, model) = spawn_scripted_model(rounds).await;
+        let rt = runtime_over(config, BTreeMap::new(), base).await;
+        let tenant = TenantId::new("acme");
+        let parent = rt.store().create_session(tenant.clone());
+        // The parent's own fold — a fresh top() parent would make every child user turn a
+        // narrowing, which is not the scenario under test.
+        admit_at(&rt, &tenant, &parent, parent_trust, &[]);
+        let (child, _) = rt
+            .store()
+            .fork(&tenant, &parent, |child, facts, rev| {
+                let projection = Projection::build(facts, rev);
+                rt.engine()
+                    .seed_child(&projection.view(&parent), child, rt.config().child_return_policy())
+            })
+            .unwrap();
+        if taint_child {
+            admit_at(&rt, &tenant, &child, 0, &["internal"]);
+        }
+        drive_turn(
+            &rt,
+            &tenant,
+            &child,
+            true,
+            user_turn("investigate"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (log, _) = rt.store().snapshot(&tenant, &parent).unwrap();
+        model.await.unwrap();
+        (log, parent)
+    }
+
+    fn merged_child_values(log: &[Fact], parent: &TrajectoryId) -> Vec<LabeledValue> {
+        log.iter()
+            .filter_map(|f| match f {
+                Fact::ValueAdmitted {
+                    trajectory,
+                    value,
+                    provenance: Provenance::ChildReturn { .. },
+                } if trajectory == parent => Some(value.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A narrowing raw return blocks; executing the Accept offer merges the raw value under a
+    /// return-scoped acceptance naming the full narrowing.
+    #[tokio::test]
+    async fn a_narrowing_raw_return_blocks_and_accept_merges_raw() {
+        let (log, parent) = drive_child_rounds(
+            blocked_return_config("builtin = \"redact-email\""),
+            true,
+            vec![
+                tool_call_round("1", "submit_result", r#"{"value":"report: ask eve@corp.com"}"#),
+                // Offers: remedy-0 Accept, remedy-1 Sanitize(pii, residual).
+                tool_call_round("2", "execute_remedy_plan", r#"{"plan_id":"remedy-0"}"#),
+                final_round("3", "done"),
+            ],
+        )
+        .await;
+        let merged = merged_child_values(&log, &parent);
+        assert_eq!(merged.len(), 1);
+        assert!(
+            merged[0].body.as_str().contains("eve@corp.com"),
+            "Accept crosses the raw value"
+        );
+        assert!(log.iter().any(|f| matches!(
+            f,
+            Fact::ChildReturn {
+                derivation: ReturnDerivation::Raw,
+                ..
+            }
+        )));
+        assert!(log.iter().any(|f| matches!(
+            f,
+            Fact::ChildReturnAcceptance { trajectory, .. } if trajectory == &parent
+        )));
+        // The parent narrowed to the accepted label.
+        assert_eq!(
+            merged[0].label.audience,
+            appa_engine::label::Dim::Known(appa_engine::label::Audience::restricted([
+                appa_engine::label::ReaderId::new("internal")
+            ]))
+        );
+    }
+
+    /// Executing the sanitize offer merges only the derivation: the raw text never reaches the
+    /// parent, the crossing audits the sanitizer against the raw digest, and the acceptance names
+    /// the residual (trust) — the parent keeps its audience.
+    #[tokio::test]
+    async fn a_blocked_return_sanitize_offer_merges_the_derivation() {
+        let raw = "report: ask eve@corp.com";
+        let (log, parent) = drive_child_rounds(
+            blocked_return_config("builtin = \"redact-email\""),
+            true,
+            vec![
+                tool_call_round("1", "submit_result", &format!(r#"{{"value":"{raw}"}}"#)),
+                tool_call_round("2", "execute_remedy_plan", r#"{"plan_id":"remedy-1"}"#),
+                final_round("3", "done"),
+            ],
+        )
+        .await;
+        let merged = merged_child_values(&log, &parent);
+        assert_eq!(merged.len(), 1);
+        assert!(!merged[0].body.as_str().contains("eve@corp.com"));
+        assert_eq!(
+            merged[0].label.audience,
+            appa_engine::label::Dim::Known(appa_engine::label::Audience::Public),
+            "the sanitized crossing keeps the parent public"
+        );
+        assert!(log.iter().any(|f| matches!(
+            f,
+            Fact::ChildReturn {
+                derivation: ReturnDerivation::Sanitized { sanitizer, raw_digest, .. },
+                ..
+            } if sanitizer.as_str() == "pii" && raw_digest == &RawResultDigest::of(raw.as_bytes())
+        )));
+        // The residual acceptance is trust-only: audience in the accepted label stays public.
+        assert!(log.iter().any(|f| matches!(
+            f,
+            Fact::ChildReturnAcceptance { narrowing, .. }
+                if narrowing.to.audience == appa_engine::label::Dim::Known(appa_engine::label::Audience::Public)
+        )));
+        // The raw text is nowhere in the parent's model transcript.
+        let transcript = crate::transcript::model_transcript(&[], &log, &parent);
+        assert!(
+            !transcript
+                .iter()
+                .any(|m| m.content.as_deref().is_some_and(|c| c.contains("eve@corp.com")))
+        );
+    }
+
+    /// Walking away from a blocked return merges nothing — fail-closed, like abandonment.
+    #[tokio::test]
+    async fn a_blocked_return_left_unremedied_merges_nothing() {
+        let (log, parent) = drive_child_rounds(
+            blocked_return_config("builtin = \"redact-email\""),
+            true,
+            vec![
+                tool_call_round("1", "submit_result", r#"{"value":"report: ask eve@corp.com"}"#),
+                final_round("2", "giving up"),
+            ],
+        )
+        .await;
+        assert!(merged_child_values(&log, &parent).is_empty());
+        assert!(!log.iter().any(|f| matches!(f, Fact::ChildReturn { .. })));
+        assert!(!log.iter().any(|f| matches!(
+            f,
+            Fact::Boundary {
+                kind: BoundaryKind::Merge { .. },
+                ..
+            }
+        )));
+    }
+
+    /// Two blocked submissions are independent pending offers with sibling-distinct handles;
+    /// after one merges and narrows the parent, the other's offers no longer match the moved
+    /// state (refused by value) and are discarded — exactly one value crosses.
+    #[tokio::test]
+    async fn a_pending_return_attempt_is_discarded_after_a_sibling_merge() {
+        let (log, parent) = drive_child_rounds(
+            blocked_return_config("builtin = \"redact-email\""),
+            true,
+            vec![
+                // Attempt A: offers remedy-0 (Accept) / remedy-1 (sanitize).
+                tool_call_round("1", "submit_result", r#"{"value":"first"}"#),
+                // Attempt B: offers remedy-2 (Accept) / remedy-3 (sanitize).
+                tool_call_round("2", "submit_result", r#"{"value":"second"}"#),
+                // Merge attempt B raw…
+                tool_call_round("3", "execute_remedy_plan", r#"{"plan_id":"remedy-2"}"#),
+                // …then replay attempt A: stale, discarded, nothing crosses.
+                tool_call_round("4", "execute_remedy_plan", r#"{"plan_id":"remedy-0"}"#),
+                final_round("5", "done"),
+            ],
+        )
+        .await;
+        let merged = merged_child_values(&log, &parent);
+        assert_eq!(merged.len(), 1, "exactly one crossing");
+        assert_eq!(merged[0].body.as_str(), "second");
+        assert_eq!(
+            log.iter()
+                .filter(|f| matches!(
+                    f,
+                    Fact::Boundary {
+                        kind: BoundaryKind::Merge { .. },
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+    }
+
+    /// The value-staleness counterpart: a suspicious parent makes the tainted child's narrowing
+    /// audience-only, so the sanitize offer is residual-free and its crossing leaves the parent's
+    /// label untouched — the sibling pending offer then still matches the live state and executes.
+    /// Two label-neutral crossings, no acceptance facts.
+    #[tokio::test]
+    async fn a_label_neutral_crossing_leaves_the_sibling_offer_executable() {
+        let (log, parent) = drive_child_rounds_from(
+            blocked_return_config("builtin = \"redact-email\""),
+            0,
+            true,
+            vec![
+                // Offers: remedy-0 (Accept) / remedy-1 (residual-free sanitize).
+                tool_call_round("1", "submit_result", r#"{"value":"ask eve@corp.com"}"#),
+                // Offers: remedy-2 (Accept) / remedy-3 (residual-free sanitize).
+                tool_call_round("2", "submit_result", r#"{"value":"ask bob@corp.com"}"#),
+                tool_call_round("3", "execute_remedy_plan", r#"{"plan_id":"remedy-1"}"#),
+                tool_call_round("4", "execute_remedy_plan", r#"{"plan_id":"remedy-3"}"#),
+                final_round("5", "done"),
+            ],
+        )
+        .await;
+        let merged = merged_child_values(&log, &parent);
+        assert_eq!(merged.len(), 2, "both derivations crossed");
+        for value in &merged {
+            assert!(!value.body.as_str().contains("corp.com"), "only derivations crossed");
+            assert_eq!(
+                value.label.audience,
+                appa_engine::label::Dim::Known(appa_engine::label::Audience::Public)
+            );
+        }
+        // Residual-free: no narrowing was accepted on either crossing.
+        assert!(!log.iter().any(|f| matches!(f, Fact::ChildReturnAcceptance { .. })));
+    }
+
+    /// A failed derivation fails closed and leaves the offer pending within its own budget;
+    /// exhausting one sanitize offer's budget never blocks Accept (charged never), which still
+    /// crosses the raw value.
+    #[tokio::test]
+    async fn a_failed_derivation_restores_the_offer_and_accept_is_never_charged() {
+        // Unreachable resolver: every derivation attempt fails closed quickly.
+        let (log, parent) = drive_child_rounds(
+            blocked_return_config("resolver = { url = \"http://127.0.0.1:1/derive\", timeout_ms = 200 }"),
+            true,
+            vec![
+                tool_call_round("1", "submit_result", r#"{"value":"report: ask eve@corp.com"}"#),
+                // Two failed derivations (budget max_remedy_attempts_per_gap = 2)…
+                tool_call_round("2", "execute_remedy_plan", r#"{"plan_id":"remedy-1"}"#),
+                tool_call_round("3", "execute_remedy_plan", r#"{"plan_id":"remedy-1"}"#),
+                // …a third is over budget…
+                tool_call_round("4", "execute_remedy_plan", r#"{"plan_id":"remedy-1"}"#),
+                // …and Accept still works.
+                tool_call_round("5", "execute_remedy_plan", r#"{"plan_id":"remedy-0"}"#),
+                final_round("6", "done"),
+            ],
+        )
+        .await;
+        let merged = merged_child_values(&log, &parent);
+        assert_eq!(merged.len(), 1);
+        assert!(
+            merged[0].body.as_str().contains("eve@corp.com"),
+            "Accept crossed the raw value"
+        );
+        // No sanitized crossing ever happened.
+        assert!(!log.iter().any(|f| matches!(
+            f,
+            Fact::ChildReturn {
+                derivation: ReturnDerivation::Sanitized { .. },
+                ..
+            }
+        )));
+    }
+
+    /// A non-narrowing raw return still merges silently — no block, no acceptance facts.
+    #[tokio::test]
+    async fn a_non_narrowing_raw_return_merges_without_a_block() {
+        let (log, parent) = drive_child_rounds(
+            blocked_return_config("builtin = \"redact-email\""),
+            false,
+            vec![
+                tool_call_round("1", "submit_result", r#"{"value":"nothing read, nothing tainted"}"#),
+                final_round("2", "done"),
+            ],
+        )
+        .await;
+        let merged = merged_child_values(&log, &parent);
+        assert_eq!(merged.len(), 1);
+        assert!(!log.iter().any(|f| matches!(f, Fact::ChildReturnAcceptance { .. })));
     }
 
     /// Two blocked calls in one round get distinct remedy handles; remedying one authorizes exactly
@@ -1850,7 +2478,8 @@ resolver = { url = "http://127.0.0.1:1/derive", timeout_ms = 200 }
             .store()
             .fork(&tenant, &parent, |child, facts, revision| {
                 let projection = Projection::build(facts, revision);
-                rt.engine().seed_child(&projection.view(&parent), child)
+                rt.engine()
+                    .seed_child(&projection.view(&parent), child, rt.config().child_return_policy())
             })
             .unwrap();
 
@@ -1883,6 +2512,23 @@ resolver = { url = "http://127.0.0.1:1/derive", timeout_ms = 200 }
         assert_eq!(
             merged[0].label.audience,
             appa_engine::label::Dim::Known(appa_engine::label::Audience::Public)
+        );
+        // The crossing is audited against the RAW submission's digest, not the derivation's.
+        let audited: Vec<_> = log
+            .iter()
+            .filter_map(|f| match f {
+                Fact::ChildReturn { derivation, .. } => Some(derivation),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            audited,
+            vec![&ReturnDerivation::Sanitized {
+                sanitizer: appa_engine::names::SanitizerName::new("pii"),
+                raw_digest: RawResultDigest::of(b"report: ask eve@corp.com"),
+                from: appa_engine::label::Audience::restricted([appa_engine::label::ReaderId::new("internal")]),
+                to: appa_engine::label::Audience::Public,
+            }]
         );
         model.await.unwrap();
     }

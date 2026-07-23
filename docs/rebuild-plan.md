@@ -236,7 +236,9 @@ boundary lands in the shared family log. Because the
 **trust-raise attestation is de-scoped**, a child that read suspicious content can only return
 suspicious-or-lower trust (audience-only derivations and discarded work are the useful cases) — this
 is *non-raising* isolation, not the spec's trusted-extraction quarantine (that needs the attestation,
-a follow-up). Family log: one shared revision + shared effect/history views; label folds are
+a follow-up). An unbound (raw-policy) child's narrowing return soft-blocks with return plans instead
+of merging silently, and an explicit void return (`value: null`) crosses nothing. Family log: one
+shared revision + shared effect/history views; label folds are
 branch-local (attributed facts). APPA only *recommends* forking (prose).
 
 **CC4 — Static registry vs dynamic abstention.** The engine owns the immutable `Registry` (static
@@ -318,12 +320,13 @@ resolved dimension + cast identity + `Revision` (anti-replay); deterministic cas
 **RP6 — Branch return/merge protocol + family-log views.** Child creation: harness opens a child via
 `X-APPA-Parent-Session`; the runtime mints the child id, records a `Fork` boundary with **immutable
 parent binding**, `seed_child` at the parent's current label. Return: the child model calls the
-reserved `submit_result(value)` tool → a `ChildReturn { child_id, value }` fact carrying **the returned
-value's own label** — a raw return carries the child fold; a value a **mandate-validated audience
-sanitizer** produced in the child carries the sanitizer's **exact declared output label** (audience
-relabeled, **not** re-intersected with the child fold — else the legitimate relabel is erased, spec
-§Branching). Trust **cannot rise** (the trust-raise attestation is de-scoped, so a return's trust ≤ the
-child fold's). The child's free final text is **not** propagated. Merge: the parent consumes a specific
+reserved `submit_result(value)` tool — a string, or an explicit `value: null` void that records and
+merges nothing — on the path the fork's immutable **return policy** binds: a raw return (narrowing
+soft-blocked with return plans; non-narrowing merges silently) carries the child fold; a value a
+**mandate-validated audience sanitizer** produced in the child carries the sanitizer's **exact
+declared output label** (audience relabeled, **not** re-intersected with the child fold — else the
+legitimate relabel is erased, spec §Branching). Trust **cannot rise** (the trust-raise attestation is
+de-scoped, so a return's trust ≤ the child fold's). The child's free final text is **not** propagated. Merge: the parent consumes a specific
 `ChildReturn` **by id, once, into the direct parent only** (reparenting / cross-family / double-merge
 rejected); the server admits it as `parent.combine(returned-value label)` → a parent `ValueAdmitted` +
 a `Merge` boundary. Family log: one shared append-only log + one
@@ -509,7 +512,9 @@ Escalate only if scope, an observable behavior, an API/data contract, or an acce
 change.
 
 ## Follow-up ledger (recorded, not built)
-- Atomic compiled composites; quarantine `submit_result` trust-raise attestation.
+- Atomic compiled composites; quarantine `submit_result` trust-raise attestation (deferred again
+  after landing once — see the tokenmaxxer follow-up ledger for the derived-cast design sketch and
+  the provenance-bound attestor-input requirement any future landing must meet).
 - MCP tool backend; truly-async human-authority queue (v1: bounded http timeout, fail closed).
 - Durable (non-mem) store behind the S11 boundary; invoke/append crash-gap outbox.
 - **`AudienceResolver`** — dynamic reader-group membership resolution (`john ∈ hr`), de-scoped from

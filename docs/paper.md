@@ -489,14 +489,23 @@ Contributions:
   was withheld, so nothing can be lost. Result label less restrictive
   than the
   child's fold only via a mandated sanitizer or the quarantine-exit
-  attestation.
+  attestation. A raw return that would *narrow* the parent soft-blocks
+  like a narrowing call, carrying return plans: acceptance (always); per
+  applicable output sanitizer, the sanitizer alone iff its relabel fully
+  clears, else composed with acceptance of exactly the residual (a relabel
+  that buys nothing over raw is not offered) — a trust
+  component always survives (audience-only sanitizers), so trust
+  narrowings cross only by acceptance. Unknown dimensions are
+  unresolved-first, never a narrowing; a non-narrowing raw return merges
+  without a block.
 - **Quarantined branches** (Dual-LLM/CaMeL lineage): pre-declared
-  `submit_result` schema + sanitizers; schema validation never raises —
-  structure is not provenance; the raise is the mandated sanitizer's
+  `submit_result` schema + a mandated transformer; schema validation never
+  raises — structure is not provenance; the raise is the transformer's
   attestation-shaped claim ("the returned integer is a version number from
   the named source, carrying none of its free text" — not a mere parser).
-  This attestation is the system's only unruled trust up-move (§5) and is
-  registered accordingly.
+  This attestation is the system's only unruled trust up-move (§5), design
+  direction: the implemented dialect's sanitizers are audience-only and
+  its returns never raise trust.
 - **Compiled composites**: plan → one synthesized invocation (`requires` =
   entry conditions + an attention demand attended by the plan's
   authority); the ordered

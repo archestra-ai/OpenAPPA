@@ -245,13 +245,24 @@ fn is_reserved(name: &str) -> bool {
 }
 
 /// Advertise a tool by name with a permissive parameter object. The engine checks labels, not argument
-/// schemas, so v1 advertises the name only; a per-tool JSON Schema is a follow-up.
+/// schemas, so v1 advertises the name only; a per-tool JSON Schema is a follow-up. The reserved
+/// `submit_result` carries a server-owned description of its two wire forms (string result, or
+/// null to finish returning nothing) — the description is model-facing documentation, never a
+/// validation surface.
 fn reserved_schema(name: &str) -> WireTool {
+    let description = match name {
+        SUBMIT_RESULT => Some(
+            "Return your result to the parent session. `value` is a string result, or null to \
+             finish without returning anything."
+                .to_string(),
+        ),
+        _ => None,
+    };
     WireTool {
         kind: "function".to_string(),
         function: WireToolSchema {
             name: name.to_string(),
-            description: None,
+            description,
             parameters: None,
         },
     }

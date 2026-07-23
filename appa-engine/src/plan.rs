@@ -36,6 +36,12 @@
 //! sanitizer-backed compiled composites and input-sanitizer argument substitution (a remedy step
 //! in the spec, a multi-acquisition composite here) and cast resolution of an Unknown (a runtime
 //! admission path, not a redispatch). The empty-proof is complete over exactly this subset.
+//!
+//! Blocked **child returns** are planned separately with their own closed vocabulary
+//! ([`crate::branch::ReturnPlan`]: accept, or sanitize with an optional accepted residual) — a
+//! return crossing
+//! has no dispatch, no gaps, and no authorities, so none of this module's tool-block machinery
+//! applies to it, and its sanitizer remedies do not move the de-scope bound above.
 
 use std::collections::BTreeSet;
 
