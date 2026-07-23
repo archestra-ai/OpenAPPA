@@ -3,37 +3,37 @@
 //! The spec's first deployment home ("the harness itself"): the harness keeps its own agent loop —
 //! it calls the model, it executes tools — and embeds this SDK as the policy layer between the two.
 //! The SDK is the spec's *outer layer* packaged as a library: it owns the trajectory (the append-only
-//! Fact log), renders the model-visible transcript from it, checks every proposed tool call through
-//! the pure [`appa_engine`] before the harness may execute it, and admits or seals every tool result
-//! before anything enters model context. All decisions are the engine's; all IO except tool
-//! execution and inference stays inside the SDK (authority backends for remedy rulings).
+//! Fact log), checks every proposed tool call through the pure [`appa_engine`] before the harness may
+//! execute it, and admits or seals every tool result before anything enters model context. All
+//! decisions are the engine's; the only IO the SDK performs is consulting authority backends for
+//! remedy rulings.
 //!
-//! The host's contract is three commitments, serially:
-//! 1. build the model's context **only** from [`AppaSession::transcript`];
-//! 2. execute **only** the one call [`Step::Execute`] surfaces, then report it through
-//!    [`AppaSession::report_outcome`] before anything else;
-//! 3. advertise to the model **exactly** the tool surface [`AppaSession::bind_tools`] returns.
+//! Two facades sit over the same engine/store core ([`crate::common`]), for the two ways a harness
+//! can be shaped:
 //!
-//! Mediation is serial by construction — one surfaced call at a time, each checked against a
-//! projection that already contains the previous call's admitted result — which is the same
-//! discipline `appa-runtime`'s internal turn-drive enforces, expressed in-process. Blocked calls
-//! never surface: their feedback (with remedy-plan handles) lands in the log and reaches the model
-//! through the next transcript; `execute_remedy_plan` is handled inside [`AppaSession::mediate`]
-//! (authorities consulted, the atomic authorize+dispatch batch landed) and only the now-authorized
-//! call surfaces.
+//! - [`AppaSession`] — **the host owns the loop.** Turn-shaped: the host asks for the transcript
+//!   (rebuilt from the log, so the log *is* the context), sends it to the model, and feeds the
+//!   completion back; the SDK surfaces one allowed call at a time. The strong deployment — the log
+//!   and the context cannot diverge, and the final answer is reachable as a checkable emission.
+//! - [`CallSession`] — **a framework owns the loop.** Per-call: a framework (e.g. rig) runs the loop
+//!   and mediates each call through a hook that calls `check_call` before it runs and
+//!   `report_outcome` after. The framework owns the transcript, so the SDK log is label-only and
+//!   must be trusted to agree with the model's context; the response sink is out of reach. The
+//!   trusted-harness deployment — the natural fit for dropping APPA into an existing agent framework.
 //!
-//! This deployment protects against the *injected model*, not the harness: the harness is a trusted
-//! host, and enforcement is by integration discipline, not mechanical refusal.
+//! Both protect against the *injected model*, not the harness: the harness is a trusted host.
 
 mod assemble;
+mod call;
+mod common;
 mod session;
+mod types;
 
-pub use session::{
-    AdmittedResult, AppaSession, DispatchHandle, MediateError, OpenError, Outcome, ReportError, SdkOptions,
-    SessionBusy, Step, ToolSurfaceError,
-};
+pub use call::{CallDecision, CallError, CallSession, RemedyDecision};
+pub use session::{AppaSession, MediateError, Outcome, Step};
+pub use types::{AdmittedResult, DispatchHandle, OpenError, ReportError, SdkOptions, SessionBusy, ToolSurfaceError};
 
-// The wire and outcome types a host needs to drive the session, re-exported so a harness depends
+// The wire and outcome types a harness needs to drive a session, re-exported so a harness depends
 // only on this crate for the mediation loop itself.
 pub use appa_engine::label::Label;
 pub use appa_runtime::config::Config;

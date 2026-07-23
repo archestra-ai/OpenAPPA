@@ -14,7 +14,8 @@
 //! tools with no constraints, reproducing the original unmediated leak — same
 //! binary, same loop, `--policy` selects.
 
-pub mod appa_loop;
+pub mod appa_hook;
+pub mod mcp;
 pub mod server;
 pub mod systems;
 

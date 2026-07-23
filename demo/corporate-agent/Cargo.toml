@@ -15,6 +15,10 @@ autobins = false
 [dependencies]
 appa-sdk = { path = "../../appa-sdk" }
 appa-runtime = { path = "../../appa-runtime" }
+appa-engine = { path = "../../appa-engine" }
+# `rig` is the dep-rename of `rig-core`; it owns the agent loop and mediates tool
+# calls through the APPA hook. Pinned to 0.40 with `rmcp`.
+rig = { package = "rig-core", version = "0.40", features = ["rmcp"] }
 # rmcp 1.8: `transport-io` is the stdio server; `transport-child-process` is the
 # agent spawning the server as a subprocess.
 rmcp = { version = "1.8", features = [

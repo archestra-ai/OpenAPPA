@@ -1,14 +1,17 @@
 # corporate-agent
 
 A **corporate assistant agent** and a mock **internal-systems MCP server**,
-built to exercise [OpenAPPA](../../). The agent talks to **OpenRouter**'s
-OpenAI-compatible endpoint and drives its own tool loop — but every model
-completion and every tool result passes through the embedded
-**[`appa-sdk`](../../appa-sdk)** first: proposed calls are policy-checked
-before they execute, results are admitted or sealed before they enter model
-context. The server exposes fake company systems — `hr`, `finance`,
-`task_tracker`, and a `public_forum` — as folders on disk, plus a mocked
-`send_email`.
+built to exercise [OpenAPPA](../../). The agent is a normal
+[rig](https://docs.rs/rig-core) agent on **OpenRouter** — rig owns the loop and
+the conversation — with **[`appa-sdk`](../../appa-sdk)** dropped in as a
+mediation hook: every proposed tool call is policy-checked before it runs, and
+every result is admitted or sealed before the model sees it. The server exposes
+fake company systems — `hr`, `finance`, `task_tracker`, and a `public_forum` —
+as folders on disk, plus a mocked `send_email`.
+
+The hook drives the SDK's per-call facade (`CallSession`), the deployment shape
+for "a framework owns the loop". (The SDK's other facade, `AppaSession`, is for
+a host that writes its own loop; the demo doesn't use it.)
 
 **The policy file is the demo.** With the guarded default
 (`appa-policy.toml`), the injection scenario below is blocked and nothing
@@ -34,12 +37,13 @@ data/
 src/
   systems.rs     the search/read/create/send_email primitives (semantics live here)
   server.rs      13 #[tool] methods wrapping them  ->  the MCP server
-  appa_loop.rs   the mediated agent loop: the host side of the appa-sdk contract
+  appa_hook.rs   the rig AgentHook mediating each call through appa-sdk (+ the reserved remedy tool)
+  mcp.rs         MCP plumbing: spawn, tool-schema conversion, result classification
   bin/corp_systems.rs   the stdio MCP server binary  (corp-systems-mcp)
-  bin/corp_agent.rs     the mediated agent binary    (corp-agent)
+  bin/corp_agent.rs     the mediated rig agent       (corp-agent)
 tests/
   server_tools.rs   drives the real server over MCP; no API key needed
-  appa_loop.rs      e2e: real loop + real server + real policies, scripted model; no key needed
+  appa_hook.rs      e2e: the real hook path + real server + real policies; no key needed
 ```
 
 ### Tools (13)
@@ -94,9 +98,9 @@ From `demo/corporate-agent/` (each builds, loads `.env`, runs a fixed prompt):
 cargo run --bin corp-agent -- "Find Alice Chen's HR record and summarise it"
 ```
 
-The run log shows each proposed call, APPA's verdict (allowed / blocked with a
-remedy offer / sealed), the executed calls with the label their results were
-admitted at, and the assistant's text — then a final `=== answer ===`.
+The `appa:` log lines show each proposed call and APPA's verdict — allowed and
+executing, blocked with a remedy offer, a remedy authorized, or a result sealed
+— then a final `=== answer ===`.
 
 Useful flags:
 

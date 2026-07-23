@@ -1,9 +1,9 @@
-//! `corp-agent`: the corporate assistant, mediated in-process by the embedded `appa-sdk`.
+//! `corp-agent`: the corporate assistant as a normal [`rig`](https://docs.rs/rig-core) agent, with
+//! OpenAPPA dropped in via a mediation hook.
 //!
-//! The binary owns inference (OpenRouter's OpenAI-compatible endpoint) and tool execution (it
-//! spawns `corp-systems-mcp` over stdio) — but every model completion passes through the SDK's
-//! `mediate` before any tool runs, and every tool result passes through `report_outcome` before it
-//! enters model context. The system preamble is pinned by the policy file, not by this binary.
+//! rig owns the loop, the model conversation, and the tool schemas; the embedded `appa-sdk`
+//! [`CallSession`], driven by [`AppaHook`], mediates every proposed tool call before it runs and
+//! admits or seals every result. The system preamble is pinned by the policy file, not this binary.
 //!
 //! ```sh
 //! corp-agent "Summarise Alice Chen's HR record"          # guarded appa-policy.toml
@@ -11,25 +11,26 @@
 //! corp-agent --chat
 //! ```
 //!
-//! Needs an OpenRouter key: `--api-key`, `OPENROUTER_API_KEY`, or a `.env` file
-//! (crate-local `.env`, then the repository root — see `.env.example`).
+//! Needs an OpenRouter key: `--api-key`, `OPENROUTER_API_KEY`, or a `.env` file.
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::Arc;
 
 use anyhow::Context;
-use appa_runtime::inference::Inference;
-use appa_runtime::tool::HttpClient;
-use appa_sdk::{AppaSession, Config, SdkOptions};
+use appa_sdk::{CallSession, Config, SdkOptions, WireMessage};
 use clap::Parser;
-use corporate_agent_demo::appa_loop::{self, mcp_tool_schema, resolve_policy, resolve_server_bin, spawn_corp_systems};
+use corporate_agent_demo::appa_hook::{AppaHook, RemedyTool};
+use corporate_agent_demo::mcp::{self, BODY_CAP_BYTES, mcp_tool_schema, resolve_policy, resolve_server_bin};
 use corporate_agent_demo::{clean_key, load_dotenv, resolve_data_root};
-
-const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1";
+use rig::client::CompletionClient;
+use rig::completion::Prompt;
+use rig::message::Message;
+use rig::providers::openrouter;
+use tokio::sync::Mutex;
 
 #[derive(Parser)]
-#[command(about = "The corporate assistant over the mock corporate systems (MCP), mediated by the embedded appa-sdk")]
+#[command(about = "The corporate assistant (rig agent) over the mock corporate systems (MCP), mediated by appa-sdk")]
 struct Args {
     /// The task for the agent. Omit to fall back to an interactive prompt (or use --chat).
     prompt: Option<String>,
@@ -46,9 +47,9 @@ struct Args {
     #[arg(long, env = "OPENROUTER_API_KEY")]
     api_key: Option<String>,
 
-    /// Maximum inference rounds per turn.
+    /// Maximum model turns per request (the tool loop bound).
     #[arg(long, default_value_t = 12)]
-    max_rounds: u32,
+    max_turns: usize,
 
     /// Path to the `corp-systems-mcp` binary. Defaults to a sibling of this executable.
     #[arg(long)]
@@ -62,14 +63,13 @@ struct Args {
     #[arg(long)]
     policy: Option<PathBuf>,
 
-    /// Suppress the run log; print only the final answer.
+    /// Suppress the mediation log; print only the final answer.
     #[arg(long)]
     quiet: bool,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Load `.env` before parsing so the `env = "…"` clap fields pick up its values.
     let dotenv = load_dotenv();
     let args = Args::parse();
     if !args.quiet
@@ -93,65 +93,59 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("reading the policy file {}", policy_path.display()))?;
     let config =
         Config::from_toml_str(&policy_text).with_context(|| format!("loading the policy {}", policy_path.display()))?;
-    let mut session =
-        AppaSession::open(config, SdkOptions::default()).context("opening the APPA session on this policy")?;
+    let preamble = preamble_text(config.preamble());
+    // The demo uses the per-call facade (a framework owns the loop); the turn facade `AppaSession`
+    // is the sibling for host-owned loops. Opening validates the policy is SDK-supported.
+    let mut session = CallSession::open(config, SdkOptions::default()).context("opening the APPA session")?;
 
     let server_bin = resolve_server_bin(args.server_bin)?;
     let data_root = resolve_data_root(args.data_root);
-    let server = spawn_corp_systems(&server_bin, &data_root).await?;
+    let server = mcp::spawn_corp_systems(&server_bin, &data_root).await?;
 
     let mcp_tools = server.peer().list_all_tools().await.context("listing MCP tools")?;
     let schemas: Vec<_> = mcp_tools.iter().map(mcp_tool_schema).collect();
-    let tools = session
+    session
         .bind_tools(schemas)
-        .context("binding the MCP tool surface against the policy registry")?
-        .to_vec();
+        .context("binding the MCP tool surface against the policy registry")?;
     if !args.quiet {
-        let names: Vec<&str> = tools.iter().map(|t| t.function.name.as_str()).collect();
+        let names: Vec<&str> = mcp_tools.iter().map(|t| t.name.as_ref()).collect();
         eprintln!(
-            "connected to corp-systems-mcp — policy {} — {} tools: {}",
+            "connected to corp-systems-mcp — policy {} — {} tools (+ execute_remedy_plan): {}",
             policy_path.display(),
             names.len(),
             names.join(", ")
         );
     }
 
-    let inference = Inference::new(
-        OPENROUTER_BASE,
-        api_key,
-        args.model.clone(),
-        Duration::from_secs(120),
-        HttpClient::new(),
-    );
+    let session = Arc::new(Mutex::new(session));
+    let sink = server.peer().clone();
+    let hook = AppaHook::new(session.clone(), server.peer().clone(), BODY_CAP_BYTES, args.quiet);
+
+    let client = openrouter::Client::new(&api_key).context("building OpenRouter client")?;
+    // Tool concurrency stays at rig's default of 1 (sequential) — the SDK's serial
+    // check-against-prior-result invariant depends on it; do not raise it.
+    let agent = client
+        .agent(args.model.clone())
+        .preamble(&preamble)
+        .default_max_turns(args.max_turns)
+        .add_hook(hook)
+        .tool(RemedyTool)
+        .rmcp_tools(mcp_tools, sink)
+        .build();
 
     let result = if args.chat {
-        run_chat(&mut session, &inference, &server, &tools, args.max_rounds, args.quiet).await
+        run_chat(&agent, &session).await
     } else {
-        run_once(
-            &mut session,
-            &inference,
-            &server,
-            &tools,
-            args.max_rounds,
-            args.quiet,
-            args.prompt,
-        )
-        .await
+        run_once(&agent, &session, args.prompt).await
     };
 
-    // Reap the child regardless of how the run went.
     let _ = server.cancel().await;
     result
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_once(
-    session: &mut AppaSession,
-    inference: &Inference,
-    server: &appa_loop::CorpSystemsClient,
-    tools: &[appa_sdk::WireTool],
-    max_rounds: u32,
-    quiet: bool,
+    agent: &rig::agent::Agent<impl rig::completion::CompletionModel + 'static>,
+    session: &Arc<Mutex<CallSession>>,
     prompt: Option<String>,
 ) -> anyhow::Result<()> {
     let prompt = match prompt {
@@ -161,20 +155,17 @@ async fn run_once(
     if prompt.trim().is_empty() {
         anyhow::bail!("no task given: pass a prompt argument or use --chat");
     }
-    let answer = appa_loop::run_turn(session, inference, server, tools, max_rounds, quiet, &prompt).await?;
-    println!("\n=== answer ===\n{answer}");
+    let answer = drive_turn(agent, session, &prompt, None).await?;
+    println!("\n=== answer ===\n{}", answer.0);
     Ok(())
 }
 
 async fn run_chat(
-    session: &mut AppaSession,
-    inference: &Inference,
-    server: &appa_loop::CorpSystemsClient,
-    tools: &[appa_sdk::WireTool],
-    max_rounds: u32,
-    quiet: bool,
+    agent: &rig::agent::Agent<impl rig::completion::CompletionModel + 'static>,
+    session: &Arc<Mutex<CallSession>>,
 ) -> anyhow::Result<()> {
     eprintln!("chat mode — type a message, or 'exit' to quit.");
+    let mut history: Vec<Message> = Vec::new();
     loop {
         let Some(line) = prompt_line("\nyou> ")? else {
             break;
@@ -186,11 +177,56 @@ async fn run_chat(
         if matches!(line, "exit" | "quit") {
             break;
         }
-        // History lives in the SDK's log: each turn extends the same session.
-        let answer = appa_loop::run_turn(session, inference, server, tools, max_rounds, quiet, line).await?;
+        let (answer, messages) = drive_turn(agent, session, line, Some(history.clone())).await?;
         println!("\n=== answer ===\n{answer}");
+        if let Some(messages) = messages {
+            history = messages;
+        }
     }
     Ok(())
+}
+
+/// Drive one turn: admit the user turn into APPA, run rig's loop (the hook mediates), close the
+/// APPA turn. Returns the answer and, for chat, the updated rig history.
+async fn drive_turn(
+    agent: &rig::agent::Agent<impl rig::completion::CompletionModel + 'static>,
+    session: &Arc<Mutex<CallSession>>,
+    prompt: &str,
+    history: Option<Vec<Message>>,
+) -> anyhow::Result<(String, Option<Vec<Message>>)> {
+    session
+        .lock()
+        .await
+        .begin_turn(prompt)
+        .context("admitting the user turn")?;
+    let outcome = match history {
+        Some(history) => {
+            let resp = agent
+                .prompt(prompt)
+                .history(history)
+                .extended_details()
+                .await
+                .context("agent run failed");
+            resp.map(|r| (r.output, r.messages))
+        }
+        None => agent
+            .prompt(prompt)
+            .await
+            .map(|o| (o, None))
+            .context("agent run failed"),
+    };
+    // Close the APPA turn whether the run succeeded or not, so the trajectory is punctuated.
+    session.lock().await.end_turn().context("closing the APPA turn")?;
+    outcome
+}
+
+/// The rig `.preamble` string from the policy's pinned `[[preamble]]` messages (single source).
+fn preamble_text(messages: &[WireMessage]) -> String {
+    messages
+        .iter()
+        .filter_map(|m| m.content.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// Read one line from stdin with a prompt; `None` on EOF.
