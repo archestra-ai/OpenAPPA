@@ -4,7 +4,7 @@
 The first check enforces standard sink-side information flow control (IFC) adequacy~\cite{sabelfeld2003language}: the trust level of the trajectory must satisfy the tool's required trust floor, and the reader set must cover all intended recipients, $\readers(\fold) \supseteq \mathrm{recipients}(\mathrm{args})$, with placeholders and resolvers determining the recipient set. This mechanism adapts standard noninterference principles to tool invocation.
 
 \paragraph{Check 2---state acquisition.}
-We order $S$ by restrictiveness, where $s' \le s$ if and only if the readers of $s'$ are a subset of those in $s$ and the trust rank of $s'$ is less than or equal to that of $s$. Because every label update is a meet operation, trajectory state monotonically descends or remains fixed along both dimensions. The checker enforces the principle of least privilege at trajectory granularity~\cite{saltzer1975protection} through a prospective evaluation protocol:
+We order $S$ by restrictiveness, where $s' \le s$ if and only if the readers of $s'$ are a subset of those in $s$ and the trust level of $s'$ is less than or equal to that of $s$. Because every label update is a meet operation, trajectory state monotonically descends or remains fixed along both dimensions. The checker enforces the principle of least privilege at trajectory granularity~\cite{saltzer1975protection} through a prospective evaluation protocol:
 \begin{enumerate}
   \item \textbf{Prospective evaluation:} The engine computes the prospective label state $s_{\mathrm{prosp}} = \fold(s, \texttt{delta(call)})$ that tool dispatch would produce.
   \item \textbf{Narrowing block:} If the call strictly restricts trajectory permissions ($s_{\mathrm{prosp}} < s$), the engine blocks execution prior to dispatch.
