@@ -71,7 +71,7 @@ The dimensions of declassification outlined by Sabelfeld and Sands~\cite{sabelfe
 The state dimension interface (carrier, ordered action monoid, and adequacy relation) is structured after graded monads~\cite{katsumata2014graded}. However, this interface is deliberately excluded from runtime extension: while policy folds can be property-tested, the security semantics of new dimensions require static engineering review rather than dynamic registration.
 
 \paragraph{Gradual typing for security.}
-Following gradual information-flow typing~\cite{disney2011gradual,fennell2013gradual}, unclassified types (\emph{Unknown}) are treated as unadmitted states rather than lattice elements, and boundary casts handle unclassified inputs explicitly.
+Following gradual information-flow typing~\cite{disney2011gradual,fennell2013gradual}, unclassified types (\emph{Unknown}) are treated as unadmitted states rather than lattice elements, and boundary casts handle unclassified inputs explicitly. This parallels type checking in partially annotated Python (e.g., \texttt{mypy}, \texttt{pyright}) and TypeScript codebases, where unannotated boundaries yield \texttt{Unknown} (or \texttt{unknown}) values that cannot implicitly flow into typed contexts without explicit runtime narrowing or boundary casts.
 
 \paragraph{Linearity.}
 In \appa{}, rulings function as single-use resources in line with linear logic principles~\cite{wadler1990linear}: an authorization ruling is consumed immediately upon the dispatch of its corresponding action (\S\ref{sec:rulings}).
