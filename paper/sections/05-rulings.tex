@@ -25,7 +25,7 @@ Authorities evaluate the engine's canonical representation of a tool call, elimi
 \paragraph{Sanitizers.}
 Registered sanitizers transform values according to authorized state transitions without altering execution trajectories~\cite{caiGhostAgentRedefining2026}. At output boundaries, a derivative is released while the raw output remains confined; at input boundaries, the derived value replaces the raw argument in the canonical tool call. Sanitization adjusts audience scope exclusively and never elevates trust levels without an explicit ruling, type cast, or verified exit transformation (\S\ref{sec:branching}).
 
-\fixme{Open question---response-sink mechanics: what contract governs the assistant's reply and how it enters the check pipeline; only the no-self-approval bar is specified.}
+\fixme{Open question: How are final assistant replies inspected? We forbid self-approval, but we haven't defined the exact pipeline or rules for how the assistant's text output gets checked before reaching the user.}
 
-\fixme{The precise formal statement of robust declassification under call-scoped release remains open. The sink relation becomes ``holds, or is covered by a mandated ruling,'' so the label truthfully describes the data rather than upper-bounding releases; this is harder to state than noninterference modulo declassification. It is load-bearing for ruled egresses from a branch, but separate from the parent-preservation theorem.}
+\fixme{Open question: We need a formal mathematical proof for single-call data overrides. Because security labels stay attached to data even when an authorized override permits a specific call, proving mathematically that data cannot leak without an explicit ruling is harder than standard security proofs. This proof is needed for showing safe data export from sub-branches, though it is separate from proving parent state protection.}
 
