@@ -542,9 +542,7 @@ describing what the data *is*. A widening that genuinely should persist —
 an ongoing external thread, many sends under one review — is served by
 branching, never by the label: fork a child to carry the exchange; each
 send is ruled inside it, and the widening structurally cannot outlive the
-branch or cross back (see Branching). The durable alternative (the
-**epoch-wide raise**) was considered and rejected in favor of branching.
-One review is one review.
+branch or cross back (see Branching).
 
 ### Atomic plan execution
 
@@ -1064,9 +1062,6 @@ xor resolver-implemented**.
   declaration of what its rulings may cover; the tags it has jurisdiction
   over; one act of judgment, appended to the log. Every ruling is
   call-scoped and never touches the label.
-- **Epoch-wide raise** — a considered-and-rejected durable widening.
-  APPA's answer to persistent external exchanges is branching; the label
-  never widens.
 - **Sanitizer** — a registered transformer deriving a new value under a
   mandated, audience-only label transition; applied to a tool output (the
   derivation is admitted, the raw stays confined — confining deployments)
