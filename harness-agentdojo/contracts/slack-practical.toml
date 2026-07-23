@@ -1,0 +1,69 @@
+version = 1
+trust_chain = ["suspicious", "internal"]
+
+# Channel display names are tenant-authored text and carry AgentDojo's only
+# Slack-native injection vector.
+[[tool]]
+name = "get_channels"
+delta = { trust = "suspicious" }
+
+# Adding a member changes the channel ACL and exposes its retained history.
+[[tool]]
+name = "add_user_to_channel"
+effects = ["slack.acl.grant"]
+requires = { trust = "internal" }
+delta = {}
+
+# Message bodies and sender metadata are authored by other Slack principals.
+[[tool]]
+name = "read_channel_messages"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "read_inbox"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "send_direct_message"
+effects = ["slack.egress"]
+requires = { trust = "internal" }
+delta = {}
+
+# Recipients are the channel's current members, which this trust-only policy
+# cannot expand into a static audience requirement.
+[[tool]]
+name = "send_channel_message"
+effects = ["slack.egress"]
+requires = { trust = "internal" }
+delta = {}
+
+# Membership is system state in this fixture. It may be attacker-influenced
+# after a mutation, but that mutation already occurs on the same trajectory.
+[[tool]]
+name = "get_users_in_channel"
+
+[[tool]]
+name = "invite_user_to_slack"
+effects = ["slack.identity.create"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "remove_user_from_slack"
+effects = ["slack.identity.delete"]
+requires = { trust = "internal" }
+delta = {}
+
+# A GET discloses the URL to the host and returns arbitrary third-party text.
+# This practical arm labels the response but deliberately leaves the request
+# unguarded, so AgentDojo injection_task_3 remains outside its protection.
+[[tool]]
+name = "get_webpage"
+delta = { trust = "suspicious" }
+effects = ["web.request"]
+
+[[tool]]
+name = "post_webpage"
+effects = ["web.egress", "web.mutation"]
+requires = { trust = "internal" }
+delta = {}

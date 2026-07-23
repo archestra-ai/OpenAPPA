@@ -1,0 +1,25 @@
+version = 1
+trust_chain = ["suspicious", "internal"]
+
+[[tool]]
+name = "get_channels"
+[[tool]]
+name = "add_user_to_channel"
+[[tool]]
+name = "read_channel_messages"
+[[tool]]
+name = "read_inbox"
+[[tool]]
+name = "send_direct_message"
+[[tool]]
+name = "send_channel_message"
+[[tool]]
+name = "get_users_in_channel"
+[[tool]]
+name = "invite_user_to_slack"
+[[tool]]
+name = "remove_user_from_slack"
+[[tool]]
+name = "get_webpage"
+[[tool]]
+name = "post_webpage"
