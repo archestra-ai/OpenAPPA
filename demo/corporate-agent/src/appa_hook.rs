@@ -94,7 +94,7 @@ impl AppaHook {
                 .and_then(|v| v.get("plan_id").and_then(|p| p.as_str()).map(str::to_string));
             match session.resolve_remedy(plan_id.as_deref()).await {
                 Ok(RemedyDecision::Declined { feedback }) => {
-                    self.log(format!("blocked: {feedback}"));
+                    self.log(format!("remedy declined: {feedback}"));
                     return feedback;
                 }
                 Ok(RemedyDecision::Authorized { handle, call }) => {
@@ -123,7 +123,9 @@ impl AppaHook {
         };
         match session.check_call(call.clone()) {
             Ok(CallDecision::Block { feedback }) => {
-                self.log(format!("blocked {tool_name}: {feedback}"));
+                // The feedback self-labels the kind — a narrowing "to accept" vs a block "to
+                // authorize" — so the log leads with the tool and lets the feedback name it.
+                self.log(format!("{tool_name}: {feedback}"));
                 feedback
             }
             Ok(CallDecision::Allow { handle }) => {
