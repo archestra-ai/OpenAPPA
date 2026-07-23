@@ -16,7 +16,13 @@ The child process inherits a copy of the parent's context and initializes its la
 The suspended call is dispatched within the child context, where all subsequent actions are enforced against the evolving child label $L_c$. Updates to $L_c$ affect only the child label and never update $L_p$. The parent process may pause or proceed concurrently, but it remains isolated from child messages and tool outputs until an explicit exit occurs. This isolation guarantees the pre-merge properties of Proposition~\ref{prop:preservation}, regardless of the child's internal behavior.
 
 \subsection{Exit explicitly}
-An execution branch yields one of three outcomes: an \texttt{abandon} signal; the return of a standard labeled value; or the application of a registered sanitizer or quarantine-exit attestation that produces a derived value. In all cases, APPA validates the actual result label prior to committing the merge. If the raw result would restrict permissions, it triggers the acquisition check in the parent context. The parent may explicitly accept the label reduction or reject the \texttt{merge}; however, accepting lower permissions does not constitute taint prevention. A declared exit bound can be verified prior to execution to enable planning, though the actual result label remains authoritative.
+An execution branch yields one of three outcomes:
+\begin{enumerate}
+  \item an \texttt{abandon} signal;
+  \item the return of a standard labeled value; or
+  \item the application of a registered sanitizer or quarantine-exit attestation that produces a derived value.
+\end{enumerate}
+In all cases, APPA validates the actual result label prior to committing the merge. If the raw result would restrict permissions, it triggers the acquisition check in the parent context. The parent may explicitly accept the label reduction or reject the \texttt{merge}; however, accepting lower permissions does not constitute taint prevention. A declared exit bound can be verified prior to execution to enable planning, though the actual result label remains authoritative.
 
 \begin{theorem}[Branch taint prevention]\label{thm:branch}
 Let a parent fork at $L_p^{\mathrm{fork}}$, and let the child execute any admitted trace. If the branch is abandoned, child execution does not change the parent's independently evolved label. If the child returns $v$, merging yields

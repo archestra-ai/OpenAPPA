@@ -44,7 +44,15 @@ The engine queries the log solely to evaluate history predicates, verify ruling 
 Custom execution policies and numerical thresholds are implemented via log projections coupled with external authority resolvers. For example, cumulative metrics such as financial spend limits (\texttt{finance.spend}) are computed by log views that determine whether an action requires human authorization. Recording these operations as named log events avoids introducing quantitative state into the label algebra, keeping scalar magnitudes outside the lattice model.
 
 \paragraph{Contracts.}
-A tool contract specifies policy declarations for both monoids: a \texttt{delta} action evaluated against the label, and an \texttt{emits} sequence appended to the log upon dispatch. Contracts also specify \texttt{requires} clauses: minimum trust floors, audience cover constraints $\readers(\fold) \supseteq \mathrm{recipients}$, source context bounds ($\subseteq C$, optionally \texttt{strict}), history predicates (persistent-negative \texttt{no\_prior} and persistent-positive \texttt{prior}), and call-scoped attention requirements. Unlike historical event constraints, attention demands cannot be satisfied by past actions; they require an explicit ruling from an authorizing component during atomic plan execution. Routing \texttt{tags} convey no algebraic weight and serve solely to route requests to appropriate policy authorities (\S\ref{sec:rulings}).
+A tool contract specifies policy declarations for both monoids: a \texttt{delta} action evaluated against the label, and an \texttt{emits} sequence appended to the log upon dispatch. Contracts also specify \texttt{requires} clauses:
+\begin{itemize}
+  \item minimum trust floors,
+  \item audience cover constraints $\readers(\fold) \supseteq \mathrm{recipients}$,
+  \item source context bounds ($\subseteq C$, optionally \texttt{strict}),
+  \item history predicates (persistent-negative \texttt{no\_prior} and persistent-positive \texttt{prior}), and
+  \item call-scoped attention requirements.
+\end{itemize}
+Unlike historical event constraints, attention demands cannot be satisfied by past actions; they require an explicit ruling from an authorizing component during atomic plan execution. Routing \texttt{tags} convey no algebraic weight and serve solely to route requests to appropriate policy authorities (\S\ref{sec:rulings}).
 
 Dynamic resolvers and variable placeholders belong to the trusted computing base. Surface conventions, such as automatic source deltas derived from access control lists, simplify policy specification without altering underlying contract semantics.
 

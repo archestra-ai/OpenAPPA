@@ -36,7 +36,14 @@ can be explored without tainting the long-lived planner trajectory at all.
 
 To resolve this tension, \appa{} introduces \emph{branching as taint prevention} alongside \emph{prospective enforcement}. Rather than waiting for sensitive data to reach an external sink or permanently degrading the primary planner context upon a restrictive read, \appa{} intercepts prospective label descents prior to tool execution. When an agent needs to acquire or inspect restrictive data, \appa{} can fork a temporary, disposable child trajectory that inherits the parent's context and carries the permission narrowing locally. The child branch inspects the data and executes intermediate reasoning or tool calls under its descended label, while the parent trajectory remains unaffected at its original permission level. If the branch terminates or is abandoned, the parent process retains its broader access rights without context taint.
 
-Data acquisition thus becomes an explicit, manageable policy event. For any tool call that would narrow trajectory permissions, \appa{} presents a finitely enumerable set of remediation plans: accepting the label restriction in the main trajectory, forking a confined child branch, applying a registered sanitizer, or declining the read. When discretionary release or external approval is required, \appa{} renders the canonical request and executes it via an atomic, call-scoped ruling, eliminating reusable grant tokens and preventing replay attacks while preserving robust declassification guarantees~\cite{zdancewic2001robust}. Crucially, all execution branches append real-world side-effects and governance events to a single, globally shared log in real time, ensuring that context isolation never conceals executed physical actions.
+Data acquisition thus becomes an explicit, manageable policy event. For any tool call that would narrow trajectory permissions, \appa{} presents a finitely enumerable set of remediation plans:
+\begin{itemize}
+  \item accepting the label restriction in the main trajectory,
+  \item forking a confined child branch,
+  \item applying a registered sanitizer, or
+  \item declining the read.
+\end{itemize}
+When discretionary release or external approval is required, \appa{} renders the canonical request and executes it via an atomic, call-scoped ruling, eliminating reusable grant tokens and preventing replay attacks while preserving robust declassification guarantees~\cite{zdancewic2001robust}. Crucially, all execution branches append real-world side-effects and governance events to a single, globally shared log in real time, ensuring that context isolation never conceals executed physical actions.
 
 Contributions, in order of importance:
 \begin{enumerate}

@@ -6,13 +6,34 @@
 Does \texttt{fork}-before-read preserve the security of label-based enforcement while eliminating the post-read utility loss caused by tainting a long-lived planner context? The evaluation must measure this directly; a generic defended-versus-undefended benchmark does not isolate the paper's core contribution~\cite{debenedettiAgentDojoDynamicEnvironment2024}.
 
 \paragraph{Paired trajectory benchmark.}
-We will construct AgentDojo episodes~\cite{debenedettiAgentDojoDynamicEnvironment2024} in which an agent (i) performs a task requiring inspection of restrictive or attacker-controlled data, and (ii) subsequently executes an independent benign action whose sink would be disabled by the descended label. Task variants will cover a first task requiring no return value, a schema-bounded derivative, and a return value that cannot be safely derived. We will report second-task completion rates, strict descents of the \emph{parent} label, preservation of the parent's ruling-free release frontier, and branch outcomes (\texttt{abandon}, bounded return, or rejected vs. accepted raw \texttt{merge}).
+We will construct AgentDojo episodes~\cite{debenedettiAgentDojoDynamicEnvironment2024} in which an agent:
+\begin{enumerate}
+  \item performs a task requiring inspection of restrictive or attacker-controlled data, and
+  \item subsequently executes an independent benign action whose sink would be disabled by the descended label.
+\end{enumerate}
+Task variants will cover a first task requiring no return value, a schema-bounded derivative, and a return value that cannot be safely derived. We will report second-task completion rates, strict descents of the \emph{parent} label, preservation of the parent's ruling-free release frontier, and branch outcomes (\texttt{abandon}, bounded return, or rejected vs. accepted raw \texttt{merge}).
 
 \paragraph{Security question.}
-We will execute AgentDojo injection tasks where the attacker controls child-visible content and attempts (a) direct child egress, (b) raw-data return through \texttt{submit\_result}, (c) schema-conforming semantic data exfiltration, and (d) history erasure via abandonment. We will report attack success rates and the specific structural check that blocked each attempt. Branching is designed to increase utility without weakening sink enforcement; schema-only exits are expected by design to fail against semantic data exfiltration unless supported by a trusted attestation~\cite{sabelfeld2009declassification}.
+We will execute AgentDojo injection tasks where the attacker controls child-visible content and attempts:
+\begin{enumerate}
+  \item direct child egress,
+  \item raw-data return through \texttt{submit\_result},
+  \item schema-conforming semantic data exfiltration, and
+  \item history erasure via abandonment.
+\end{enumerate}
+We will report attack success rates and the specific structural check that blocked each attempt. Branching is designed to increase utility without weakening sink enforcement; schema-only exits are expected by design to fail against semantic data exfiltration unless supported by a trusted attestation~\cite{sabelfeld2009declassification}.
 
 \paragraph{Baselines and ablations.}
-We will compare an undefended agent; sink-only IFC that unconditionally accepts acquisition taints; hard decline of restrictive reads; Fides's basic and selective-hiding planners~\cite{fides}; APPA with branching disabled; and full APPA. An abandon-only bounded-exit ablation will isolate the utility of execution isolation from that of the trusted derivative mechanism. We will not evaluate copied or discardable branch logs as functional ablations because they violate the threat model; these configurations will be evaluated strictly as negative invariant test cases.
+We will compare:
+\begin{itemize}
+  \item an undefended agent;
+  \item sink-only IFC that unconditionally accepts acquisition taints;
+  \item hard decline of restrictive reads;
+  \item Fides's basic and selective-hiding planners~\cite{fides};
+  \item APPA with branching disabled; and
+  \item full APPA.
+\end{itemize}
+An abandon-only bounded-exit ablation will isolate the utility of execution isolation from that of the trusted derivative mechanism. We will not evaluate copied or discardable branch logs as functional ablations because they violate the threat model; these configurations will be evaluated strictly as negative invariant test cases.
 
 \paragraph{Main metrics.}
 Alongside standard task utility and injection attack success rates, we will measure parent-label descents avoided, post-acquisition benign actions completed, branches created, abandoned, and merged, exit rejections, authority interventions, and token and latency overhead per branch. Both security and utility metrics must be reported, as preventing label creep represents a primary utility benefit under strict enforcement.
