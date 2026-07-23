@@ -1,7 +1,7 @@
 \section{Branching for Taint Confinement}\label{sec:branching}
 
 \paragraph{Observation model.}
-Once data enters an LLM context, subsequent sanitization cannot retroactively remove that information from the model's trajectory~\cite{caiGhostAgentRedefining2026}; modifying its security label would incorrectly represent its state. \appa{} never removes taint from an already exposed trajectory; instead, it avoids parent context degradation by confining restrictive descents to disposable child branches. A host environment can isolate a restrictive data acquisition by delegating the operation to a temporary child context. By confining label descent to the child branch, \appa{} prevents taint accumulation in the primary parent process, without asserting that the child process or source data is untainted.
+\appa{} prevents parent context degradation by confining restrictive descents to disposable child branches, respecting the non-reversibility of trajectory taint once data enters an LLM context~\cite{caiGhostAgentRedefining2026}. Delegating restrictive data acquisitions to a child branch isolates label descents locally, leaving the primary parent trajectory untainted without asserting that the child process itself is untainted.
 
 \paragraph{Deployment requirement.}
 Branching requires an execution environment capable of isolating context trajectories (e.g., an application harness or proxy gateway). While baseline label enforcement (\S\ref{sec:enforcement}) operates in standard gateways, features such as host-managed context branching and output sanitization rely on runtime context confinement.
