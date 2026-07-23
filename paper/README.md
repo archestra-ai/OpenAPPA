@@ -32,6 +32,7 @@ Requires TeX Live with `acmart`.
 
 ## Status
 
-Draft with visible TODO/FIXME/STUB notes. Notably outstanding: evaluation
-numbers (§8 is a protocol, not results), the two open FixMe questions in
-§4–§5, the GenAI declaration wording, and CCS concepts regeneration.
+Draft with visible TODO/FIXME/STUB notes. Proofs are complete (Appendix A).
+Notably outstanding: evaluation numbers (§8 is a protocol, not results), the
+worked-example and rendered-call appendices, the GenAI declaration wording,
+and CCS concepts regeneration.

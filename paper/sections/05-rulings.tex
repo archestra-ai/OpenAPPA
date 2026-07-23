@@ -9,6 +9,11 @@ For a plan requiring authorization on a blocked step, a single indivisible opera
 \paragraph{Call-scoped release.}
 A ruling applies strictly to a single dispatch without altering the trajectory state (the accumulated security label). The ruling and resulting external event record the authorized release, while the security label continues to accurately reflect the underlying classification of the data. This single-command scope isolation ensures an authorized exception or exit cannot persistently relax labels for subsequent attacker-influenced calls~\cite{saltzer1975protection}. Trajectory labels are never persistently widened.
 
+\begin{theorem}[Call-scoped release]\label{thm:release}
+In every trajectory: (i)~a call dispatches despite requirement gaps only by atomically consuming, for each gap, a covering ruling over its exact rendered call, and no ruling is consumed by more than one dispatch; (ii)~ruling and acceptance events are the identity on every trajectory Label and on the committed-effect projection $\mathcal{E}$; hence (iii)~every dispatch with an unmet release-side Label requirement is matched to explicit rulings in the log, and an authorized override widens no later Label and confers no authorization on any other dispatch.
+\end{theorem}
+Proof in Appendix~\ref{app:proofs}. Corollary~\ref{cor:export} extends the guarantee to child-value export: because labels stay attached to data through merges (Proposition~\ref{prop:preservation}), a later parent release whose trust floor or resolved recipients fail against the child value's Label requires its own fresh ruling---the formal counterpart of safe data export from child branches, separate from parent-state protection (Theorem~\ref{thm:branch}).
+
 \paragraph{Mandate typology.}
 Authority is bound to declarative mandates rather than dynamic runtime objects. Mandates encompass:
 (1)~\textbf{Cover mandates}, permitting trust-level deficits up to a specified rank or audience restrictions up to a defined ceiling;
@@ -27,6 +32,4 @@ Registered sanitizers transform values according to authorized state transitions
 
 \paragraph{User-assistant trust boundary.}
 The primary user-assistant conversation trajectory is treated as fully trusted by the engine harness. Because the primary user holds root authority over the agent context, direct conversational replies delivered to the user do not undergo egress declassification filtering. If an interaction involves a recipient who is not trusted with the accumulated security label of the context, that communication must be encapsulated within a tool call (e.g., an outbound messaging API or data export tool). This subjects the payload and action to standard canonical rendering, policy validation, and authorization rulings.
-
-\fixme{Open question: We need a formal mathematical proof for single-call data overrides. Because security labels stay attached to data even when an authorized override permits a specific call, proving mathematically that data cannot leak without an explicit ruling is harder than standard security proofs. This proof is needed for showing safe data export from sub-branches, though it is separate from proving parent state protection.}
 
