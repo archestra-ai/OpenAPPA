@@ -105,7 +105,7 @@ pub(crate) fn execute_plan(
         .tool(call.tool())
         .ok_or_else(|| PlanError::UnknownTool(call.tool().as_str().to_string()))?;
 
-    let block = match check::evaluate(contract, views, call) {
+    let block = match check::evaluate(registry, contract, views, call) {
         CheckOutcome::Block(block) => block,
         CheckOutcome::Allow => return Err(PlanError::NotBlocked),
         CheckOutcome::Unresolved(_) => return Err(PlanError::Unresolved),
@@ -121,7 +121,7 @@ pub(crate) fn execute_plan(
     // The exact dispatch this execution will open — including its occurrence. Every ruling must be
     // bound to it, so a ruling gathered for a different call, or for a prior occurrence of this one,
     // cannot admit it.
-    let (dispatch, dispatch_opened) = opened_dispatch(contract, views, call);
+    let (dispatch, dispatch_opened) = opened_dispatch(registry, contract, views, call);
 
     // Each ruling must be scoped to this exact dispatch, claim only gaps the block carries, stay
     // within its authority's mandate, and — the one response-sink bar — an end-user issuer may never
@@ -236,6 +236,7 @@ mod tests {
                 },
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let officer = Authority {
             name: AuthorityName::new("officer"),
@@ -443,6 +444,7 @@ mod tests {
                 },
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let registry = Registry::build(crate::registry::RegistryConfig {
             trust_chain: chain(),
@@ -504,6 +506,7 @@ mod tests {
                 attention: vec![MarkName::new("m1"), MarkName::new("m2")],
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let a1 = Authority {
             name: AuthorityName::new("a1"),
@@ -557,10 +560,11 @@ mod tests {
             tags: vec![],
             delta: Delta {
                 trust: None,
-                audience: Some(Audience::restricted([ReaderId::new("internal")])),
+                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")]))),
             },
             emits: vec![],
             requires: Requires::default(),
+            output_sanitizer: None,
         };
         let registry = Registry::build(crate::registry::RegistryConfig {
             trust_chain: chain(),

@@ -63,10 +63,14 @@ pub enum BoundaryKind {
 
 /// How a dispatch closed. Effects commit **only** on success — a call that dispatched but failed
 /// appends nothing. A success that admits no value (e.g. an oversized body) still commits effects.
+/// `Indeterminate` records a dispatch whose south outcome was never observed (a timeout or a
+/// cancelled turn): like a failure it commits nothing, but the audit distinguishes "the tool said
+/// no" from "no one knows whether the tool ran".
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CloseOutcome {
     Success { effects: Vec<EffectKind> },
     Failure,
+    Indeterminate,
 }
 
 /// One record in the log. New variants are added by the slice that both emits and consumes them
@@ -149,6 +153,18 @@ pub enum Fact {
         resolved: DimValue,
         cast: CastName,
     },
+    /// A cast resolved a **pending-cast output dimension** at admission (RP5): the confined raw
+    /// result's label was established before any value entered the trajectory. Audit of the
+    /// resolution, bound to the raw result's digest; the resolved label rides the `ValueAdmitted`
+    /// appended with it, so the projection folds nothing from this record.
+    OutputCastApplied {
+        trajectory: TrajectoryId,
+        dispatch: DispatchId,
+        cast: CastName,
+        dimension: Dimension,
+        resolved: DimValue,
+        raw_digest: RawResultDigest,
+    },
     /// A child branch returned a value through `submit_result`. The label is the returned value's
     /// own (the child fold for a raw return, or a mandate-validated sanitizer's output); trust never
     /// rises. Only this crosses to the parent — the child's free final text does not.
@@ -176,6 +192,7 @@ impl Fact {
             | Fact::Acceptance { trajectory, .. }
             | Fact::SanitizerApplied { trajectory, .. }
             | Fact::CastApplied { trajectory, .. }
+            | Fact::OutputCastApplied { trajectory, .. }
             | Fact::ChildReturn { trajectory, .. }
             | Fact::Boundary { trajectory, .. } => trajectory,
         }

@@ -115,8 +115,9 @@ impl Projection {
                 // Transcript memory (CC2/RP1): inert in the algebra — the runtime's transcript builder
                 // reads these; the fold and effect views never do.
                 Fact::AssistantMessage { .. } | Fact::BlockFeedback { .. } => {}
-                // Sanitizer application is audit only — the admitted value carries its own label.
-                Fact::SanitizerApplied { .. } => {}
+                // Transformer applications are audit only — the labels they establish ride the
+                // ValueAdmitted appended beside them, so the fold reads nothing here.
+                Fact::SanitizerApplied { .. } | Fact::OutputCastApplied { .. } => {}
                 Fact::ChildReturn { id, value, .. } => child_returns.push(ReturnedChild {
                     id: id.clone(),
                     value: value.clone(),
