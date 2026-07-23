@@ -1,0 +1,46 @@
+[package]
+name = "corporate-agent-demo"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "A rig-based corporate assistant agent over mock internal systems (MCP), used to exercise OpenAPPA"
+autobins = false
+
+# Standalone on purpose, like the sibling OpenAPPA crates — and deliberately out
+# of the root workspace, to keep the heavy demo deps (a full agent framework and
+# an LLM client) out of the workspace build. Test it separately from the root
+# `cargo test --workspace`.
+[workspace]
+
+[dependencies]
+# `rig` is the dep-rename of `rig-core` (its lib target is `rig_core`), matching
+# upstream examples so `use rig::…` resolves. Pinned to 0.40 with `rmcp` for MCP.
+rig = { package = "rig-core", version = "0.40", features = ["rmcp"] }
+# rig 0.40 requires rmcp ^1.7 — do NOT bump to rmcp 2.x (a future rig release
+# moves to it and rewrites the hook trait). `transport-io` is the stdio server;
+# `transport-child-process` is the agent spawning the server as a subprocess.
+rmcp = { version = "1.8", features = [
+    "server",
+    "macros",
+    "transport-io",
+    "client",
+    "transport-child-process",
+] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Must stay 1.x to match rmcp 1.8's `#[tool]` schema derive.
+schemars = "1"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[bin]]
+name = "corp-systems-mcp"
+path = "src/bin/corp_systems.rs"
+
+[[bin]]
+name = "corp-agent"
+path = "src/bin/corp_agent.rs"
