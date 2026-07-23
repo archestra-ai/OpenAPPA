@@ -17,7 +17,7 @@ pub mod logview;
 pub mod server;
 pub mod systems;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Resolve the data root: an explicit override, else `CORP_DATA_ROOT`, else the
 /// `data/` folder next to this crate's manifest.
@@ -42,19 +42,50 @@ pub fn clean_key(raw: &str) -> String {
     t.to_string()
 }
 
-/// Read `OPENROUTER_API_KEY` from the repository-root `.env` (two levels up from
-/// this crate), the same file the rest of the repo uses. Returns `None` if absent.
-pub fn key_from_env_file() -> Option<String> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env");
-    let text = std::fs::read_to_string(path).ok()?;
-    for line in text.lines() {
-        let line = line.trim().strip_prefix("export ").unwrap_or(line.trim());
-        if let Some(value) = line.strip_prefix("OPENROUTER_API_KEY=") {
-            let key = clean_key(value);
-            if !key.is_empty() {
-                return Some(key);
-            }
+/// Load `KEY=VALUE` lines from a `.env` file into the process environment,
+/// without overwriting variables already set — a real environment variable
+/// always wins. Looks crate-local first (`<crate>/.env`), then the repository
+/// root (`<crate>/../../.env`); when both exist their variables are merged, with
+/// the crate-local file winning on overlap. Returns the first file found, for a
+/// status line.
+///
+/// Call this once at the very start of `main`, before any threads spawn and
+/// before parsing args (so `clap`'s `env = "…"` fields see the loaded values).
+/// That ordering is what makes the `set_var` calls sound under the Rust 2024
+/// rules.
+pub fn load_dotenv() -> Option<PathBuf> {
+    let mut first_found = None;
+    for candidate in [
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".env"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.env"),
+    ] {
+        if let Ok(text) = std::fs::read_to_string(&candidate) {
+            apply_env_file(&text);
+            first_found.get_or_insert(candidate);
         }
     }
-    None
+    first_found
+}
+
+fn apply_env_file(text: &str) {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        // A real environment variable (or an earlier .env) always wins.
+        if key.is_empty() || std::env::var_os(key).is_some() {
+            continue;
+        }
+        // SAFETY: `load_dotenv` is called at the start of `main`, before any
+        // other thread exists, so there is no concurrent environment access.
+        unsafe {
+            std::env::set_var(key, clean_key(value));
+        }
+    }
 }

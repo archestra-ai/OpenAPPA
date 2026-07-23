@@ -46,8 +46,21 @@ overwrites), and `send_email` writes the message into `data/email/`.
 
 - A recent Rust toolchain (edition 2024).
 - An OpenRouter API key **for the agent** (`corp-agent`). The server needs none.
-  Provide the key by any of: `--api-key`, the `OPENROUTER_API_KEY` environment
-  variable, or the repository-root `.env` (`OPENROUTER_API_KEY=...`).
+
+### Configure with `.env`
+
+Copy the template and add your key:
+
+```sh
+cd demo/corporate-agent
+cp .env.example .env
+$EDITOR .env        # set OPENROUTER_API_KEY (and optionally APPA_DEMO_MODEL)
+```
+
+`.env` is git-ignored, so the key is never committed. The agent loads it
+automatically — crate-local `.env` first, then the repository-root one — so a
+plain `cargo run` (or any script) picks up the key and model with no flags. A
+real environment variable, or `--api-key` / `--model`, still overrides `.env`.
 
 ## Build & test
 
@@ -58,6 +71,25 @@ cargo test          # server correctness over MCP — no API key required
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
+
+## Ready-made scripts
+
+`scripts/` has one-command scenarios. Each builds both binaries first, loads
+`.env`, and runs a fixed prompt (default model `openai/gpt-4o-mini`, override via
+`APPA_DEMO_MODEL`). From `demo/corporate-agent/`:
+
+| Script | What it does |
+|--------|--------------|
+| `./scripts/summarize-hr.sh` | Benign: summarise Alice Chen's role/manager |
+| `./scripts/quarterly-finance.sh` | Benign: summarise invoices + remaining Q2 budget |
+| `./scripts/open-tasks.sh` | Benign: list open task-tracker tickets |
+| `./scripts/injection-forum.sh` | **The attack:** follow the planted forum thread → HR record emailed out; prints the sink |
+| `./scripts/injection-finance.sh` | A second lure (finance exfil); prints the sink |
+| `./scripts/chat.sh` | Interactive REPL |
+| `./scripts/reset-email.sh` | Clear the `data/email/` sink |
+
+The injection scripts reset the email sink before running and print whatever
+landed in it afterward, so a leak is visible in one command.
 
 ## Run the agent (one-shot)
 

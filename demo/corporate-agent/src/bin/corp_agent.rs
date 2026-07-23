@@ -12,8 +12,8 @@
 //! corp-agent --chat
 //! ```
 //!
-//! Needs an OpenRouter key: `--api-key`, `OPENROUTER_API_KEY`, or the
-//! repository-root `.env`.
+//! Needs an OpenRouter key: `--api-key`, `OPENROUTER_API_KEY`, or a `.env` file
+//! (crate-local `.env`, then the repository root — see `.env.example`).
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::Parser;
 use corporate_agent_demo::logview::PrettyLog;
-use corporate_agent_demo::{clean_key, key_from_env_file, resolve_data_root};
+use corporate_agent_demo::{clean_key, load_dotenv, resolve_data_root};
 use rig::client::CompletionClient;
 use rig::completion::Prompt;
 use rig::message::Message;
@@ -48,7 +48,7 @@ struct Args {
     #[arg(long, env = "APPA_DEMO_MODEL", default_value = "anthropic/claude-sonnet-5")]
     model: String,
 
-    /// OpenRouter API key. Falls back to $OPENROUTER_API_KEY, then the repository-root `.env`.
+    /// OpenRouter API key. Falls back to $OPENROUTER_API_KEY or a `.env` file.
     #[arg(long, env = "OPENROUTER_API_KEY")]
     api_key: Option<String>,
 
@@ -71,16 +71,24 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load `.env` before parsing so the `env = "…"` clap fields pick up its
+    // values (crate-local `.env`, then the repository-root one).
+    let dotenv = load_dotenv();
     let args = Args::parse();
+    if !args.quiet
+        && let Some(path) = &dotenv
+    {
+        eprintln!("loaded env from {}", path.display());
+    }
 
     let api_key = args
         .api_key
         .as_deref()
         .map(clean_key)
         .filter(|k| !k.is_empty())
-        .or_else(key_from_env_file)
         .context(
-            "no OpenRouter API key: pass --api-key, set OPENROUTER_API_KEY, or add it to the repository-root .env",
+            "no OpenRouter API key: pass --api-key, set OPENROUTER_API_KEY, or add it to a .env file \
+             (see .env.example)",
         )?;
 
     let server_bin = resolve_server_bin(args.server_bin)?;
