@@ -1,9 +1,9 @@
-//! Shared engine/store operations behind both session facades.
+//! Shared engine/store operations behind the session facade.
 
 use std::collections::BTreeMap;
 
 use appa_engine::admit::{AdmitError, ResultAdmission};
-use appa_engine::check::CheckOutcome;
+use appa_engine::check::{CheckOutcome, Narrowing};
 use appa_engine::engine::Engine;
 use appa_engine::execute::{Issuer, Ruling, Sink};
 use appa_engine::fact::{BoundaryKind, Fact, FactBatch};
@@ -173,6 +173,7 @@ impl Core {
                     .plan(&views, &call, &raw)
                     .expect("checked tool is registered");
                 let gaps = raw.requirement_gaps.len();
+                let narrowed = raw.narrowing.as_ref().map(narrowed_dims);
                 let curative: Vec<String> = planned
                     .recommendations
                     .iter()
@@ -190,9 +191,17 @@ impl Core {
                             call,
                             plan: plan.id,
                         });
-                        format!(
-                            "blocked by policy ({gaps} requirement gap(s)); call execute_remedy_plan with plan_id \"{handle}\" to authorize"
-                        )
+                        match (gaps, narrowed.as_deref()) {
+                            (0, Some(dims)) => format!(
+                                "narrowing: this call restricts the trajectory's {dims} label; call execute_remedy_plan with plan_id \"{handle}\" to accept and proceed"
+                            ),
+                            (n, Some(dims)) => format!(
+                                "blocked by policy ({n} requirement gap(s), and narrows {dims}); call execute_remedy_plan with plan_id \"{handle}\" to authorize"
+                            ),
+                            (n, None) => format!(
+                                "blocked by policy ({n} requirement gap(s)); call execute_remedy_plan with plan_id \"{handle}\" to authorize"
+                            ),
+                        }
                     }
                     None if !curative.is_empty() => format!(
                         "blocked by policy; run {} first, then re-propose this call",
@@ -423,6 +432,21 @@ pub(crate) fn outcome_to_admission(outcome: &ToolOutcome) -> ResultAdmission {
         } => ResultAdmission::SuccessNoValue,
         ToolOutcome::Failure => ResultAdmission::Failure,
         ToolOutcome::Indeterminate => ResultAdmission::Indeterminate,
+    }
+}
+
+fn narrowed_dims(narrowing: &Narrowing) -> String {
+    let mut dims = Vec::new();
+    if narrowing.from.trust != narrowing.to.trust {
+        dims.push("trust");
+    }
+    if narrowing.from.audience != narrowing.to.audience {
+        dims.push("audience");
+    }
+    if dims.is_empty() {
+        "label".to_string()
+    } else {
+        dims.join(" and ")
     }
 }
 
