@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "appa-dojo-sidecar"
+version = "0.0.0"
+dependencies = [
+ "appa-engine",
+ "appa-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "appa-engine"
 version = "0.0.0"
 dependencies = [
