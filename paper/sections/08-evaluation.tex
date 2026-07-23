@@ -41,6 +41,9 @@ Alongside standard task utility and injection attack success rates, we will meas
 \paragraph{Case study.}
 We will evaluate the CRM/invoice scenario from \S\ref{sec:branching} end-to-end using the engine implementation and publish its policy contracts, parent/child label traces, shared event log, injected payload, exit assertion, and post-merge benign execution trace. The case study will additionally include failure and timeout traces demonstrating that while the append-only log distinguishes opened, failed, and indeterminate dispatch outcomes for audit purposes, the committed-effect projection $\mathcal{E}$ remains unchanged. All reported \texttt{prior} and \texttt{no\_prior} results will be evaluated strictly according to reported-success semantics.
 
+\paragraph{Planner completeness evaluation.}
+Evaluation of planner completeness will compare the production search with an independent reference reachability closure over the exact same implemented subset (atomic \texttt{Authorize}/\texttt{Accept} plans and curative \texttt{Redispatch} transitions). Excluded categories (such as input-sanitizer argument substitutions, compiled sanitizer composites, cast resolution as a Remedy-planning transition, or forks) will not be counted as false negatives or presented as implemented coverage.
+
 \paragraph{Secondary study.}
 We will annotate $k$ risky tools, classify all remaining tools as \texttt{Unknown}, and perform a parameter sweep over the cast policy space. This study remains secondary to the branch evaluation: incremental tool annotation provides supporting machinery rather than the core contribution.
 

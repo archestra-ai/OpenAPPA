@@ -1,6 +1,6 @@
 \section{Definitions and Proofs}\label{app:proofs}
 
-This appendix will give the full definitions and proofs for the policy algebra, remedy completeness, branch taint confinement, and eviction soundness under the optional raise extension.
+This appendix will give the full definitions and proofs for the policy algebra, implemented remedy completeness, branch taint confinement, and eviction soundness under the optional raise extension.
 \stub{Complete definitions and formal proofs to be added.}
 
 \paragraph{Proof of Proposition~\ref{prop:collapse}.}
@@ -12,8 +12,8 @@ This appendix will give the full definitions and proofs for the policy algebra, 
 \paragraph{Proof of Proposition~\ref{prop:preservation}.}
 \stub{Prove preservation of the relevant policy invariant.}
 
-\paragraph{Proof of Theorem~\ref{thm:remedy}.}
-\stub{Prove remedy completeness.}
+\paragraph{Proof of Theorem~\ref{thm:remedy} (Implemented Remedy completeness).}
+\stub{Prove completeness over the finite implemented transition system consisting of atomic \texttt{Authorize}/\texttt{Accept} plans and separately checked \texttt{Redispatch} transitions through registered \texttt{prior(k)} emitters and cap-narrowing tools, omitting quantification over sanitizer substitutions, compiled composites, cast resolution, or forks.}
 
 \paragraph{Proof of Theorem~\ref{thm:branch}: host-orchestrated branch.}
 \stub{Prove branch taint confinement under host-orchestrated child execution.}

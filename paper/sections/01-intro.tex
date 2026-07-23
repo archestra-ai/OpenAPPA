@@ -16,7 +16,7 @@ To resolve this tension, \appa{} introduces \emph{branching for taint confinemen
 Data acquisition thus becomes an explicit, manageable policy event. When a prospective tool call is blocked or would narrow trajectory permissions, \appa{} distinguishes between executable in-session remedy plans, advisory recommendations, refusal, and host-level orchestration:
 \begin{itemize}
   \item executable in-session plans: \texttt{Authorize} (issuing an atomic policy ruling) and \texttt{Accept} (accepting the Label restriction within the main trajectory);
-  \item separately checked \texttt{Redispatch} recommendations proposing sanitized or modified parameters;
+  \item separately checked \texttt{Redispatch} recommendations proposing tool dispatches that satisfy missing prerequisites or narrow restrictive caps;
   \item ordinary refusal, where the agent declines the read by not reproposing the call; and
   \item host-managed branching, an orchestration option outside the blocked call's executable Remedy plan.
 \end{itemize}
