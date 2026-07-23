@@ -5,7 +5,7 @@
 //! calls [`CallSession::check_call`] before the tool runs and [`CallSession::report_outcome`] with
 //! its outcome. The SDK log is **label-only** — it records the admitted values and effects that move
 //! labels, not the transcript (the framework holds that). This is sound for labels (assistant/
-//! feedback facts are algebraically inert) but weaker than [`crate::AppaSession`]: the SDK log and
+//! feedback facts are algebraically inert), under the trusted-harness assumption: the SDK log and
 //! the framework's context are two constructions that must agree, and the model's final answer never
 //! crosses the SDK, so the response sink is out of reach.
 //!
@@ -18,7 +18,7 @@
 
 use thiserror::Error;
 
-use appa_engine::value::{ResolvedCall, ToolCallId};
+use appa_engine::value::ResolvedCall;
 
 use appa_runtime::store::StoreError;
 use appa_runtime::tool::{RenderedCall, ToolOutcome};
@@ -108,14 +108,13 @@ impl CallSession {
                 let resolved = ResolvedCall::new(call.tool.clone(), call.arguments.clone(), Vec::new());
                 let id = self.core.next_handle_id();
                 self.in_flight = Some(id);
+                // The framework attributes the tool result to the invoking call itself, so the SDK
+                // authors no keyed response fact — the handle carries only the dispatch and call.
                 Ok(CallDecision::Allow {
                     handle: DispatchHandle::new(HandleInner {
                         id,
                         dispatch,
                         call: resolved,
-                        // The framework attributes the tool result to the invoking call itself, so the
-                        // SDK never authors a keyed response fact here.
-                        response_call_id: ToolCallId::new(String::new()),
                     }),
                 })
             }
@@ -133,12 +132,7 @@ impl CallSession {
                 let id = self.core.next_handle_id();
                 self.in_flight = Some(id);
                 Ok(RemedyDecision::Authorized {
-                    handle: DispatchHandle::new(HandleInner {
-                        id,
-                        dispatch,
-                        call,
-                        response_call_id: ToolCallId::new(String::new()),
-                    }),
+                    handle: DispatchHandle::new(HandleInner { id, dispatch, call }),
                     call: rendered,
                 })
             }
@@ -147,8 +141,8 @@ impl CallSession {
 
     /// Report the outcome of the outstanding surfaced call: admit or seal it, returning the
     /// model-visible face (the admitted content or a sealed token) for the framework to deliver.
-    /// Unlike the turn facade this authors no `BlockFeedback` fact — the framework owns the
-    /// transcript; only the label-moving `ValueAdmitted`/`DispatchClosed` enter the log.
+    /// Authors no `BlockFeedback` fact — the framework owns the transcript; only the label-moving
+    /// `ValueAdmitted`/`DispatchClosed` enter the log.
     pub fn report_outcome(
         &mut self,
         handle: DispatchHandle,
@@ -224,7 +218,7 @@ impl CallSession {
         if self.in_flight.is_some() {
             return Err(CallError::CallOutstanding);
         }
-        self.core.end_turn(Vec::new())?;
+        self.core.end_turn()?;
         self.turn_active = false;
         Ok(())
     }

@@ -13,13 +13,13 @@ use appa_engine::admit::{AdmitError, ResultAdmission};
 use appa_engine::check::CheckOutcome;
 use appa_engine::engine::Engine;
 use appa_engine::execute::{Issuer, Ruling, Sink};
-use appa_engine::fact::{BoundaryKind, Fact, FactBatch, ProposedCall};
+use appa_engine::fact::{BoundaryKind, Fact, FactBatch};
 use appa_engine::label::Label;
 use appa_engine::names::AuthorityName;
 use appa_engine::plan::PlanId;
 use appa_engine::projection::Projection;
 use appa_engine::value::{
-    CanonicalDigest, DispatchId, LabeledValue, Provenance, ResolvedCall, ToolCallId, ToolName, TrajectoryId, ValueBody,
+    CanonicalDigest, DispatchId, LabeledValue, Provenance, ResolvedCall, ToolName, TrajectoryId, ValueBody,
 };
 
 use appa_runtime::config::Config;
@@ -27,7 +27,7 @@ use appa_runtime::external::{AuthorityAnswer, AuthorityBackend, AuthorityRequest
 use appa_runtime::runtime::{EXECUTE_REMEDY_PLAN, SUBMIT_RESULT};
 use appa_runtime::store::{SessionStore, StoreError, TenantId};
 use appa_runtime::tool::{BodyDisposition, ToolOutcome};
-use appa_runtime::wire::{WireTool, WireToolCall, WireToolSchema};
+use appa_runtime::wire::{WireTool, WireToolSchema};
 
 use crate::assemble;
 use crate::types::{OpenError, SdkOptions, ToolSurfaceError};
@@ -36,8 +36,6 @@ use crate::types::{OpenError, SdkOptions, ToolSurfaceError};
 pub(crate) const SEALED_WITHHELD: &str = "[tool result withheld: exceeds the size the policy admits]";
 pub(crate) const SEALED_FAILED: &str = "[tool call failed]";
 pub(crate) const SEALED_INDETERMINATE: &str = "[tool call outcome unknown — it may or may not have run]";
-pub(crate) const TURN_CANCELLED: &str = "This turn was cancelled.";
-pub(crate) const MALFORMED_ARGUMENTS: &str = "the tool call had malformed arguments and was not executed";
 
 /// A blocked call awaiting the model's remedy decision, keyed by an SDK-minted turn-unique handle
 /// (the engine's `PlanId` is block-local and never exposed to the model).
@@ -408,20 +406,10 @@ impl Core {
         Ok(Ok(verdict))
     }
 
-    pub(crate) fn feedback(&self, call_id: &ToolCallId, content: &str) -> Result<(), StoreError> {
-        self.append(vec![Fact::BlockFeedback {
-            trajectory: self.session.clone(),
-            call_id: call_id.clone(),
-            content: content.to_string(),
-        }])
-    }
-
     /// Close the active turn: append the `TurnEnd` boundary and clear pending remedies (spec: a
-    /// boundary bounds pending-plan lifetime). `extra` are terminal facts that precede the boundary.
-    pub(crate) fn end_turn(&mut self, extra: Vec<Fact>) -> Result<(), StoreError> {
-        let mut facts = extra;
-        facts.push(turn_end(&self.session));
-        self.append(facts)?;
+    /// boundary bounds pending-plan lifetime).
+    pub(crate) fn end_turn(&mut self) -> Result<(), StoreError> {
+        self.append(vec![turn_end(&self.session)])?;
         self.pending_blocks.clear();
         self.remedy_attempts.clear();
         Ok(())
@@ -497,29 +485,6 @@ fn validate_policy(config: &Config) -> Result<(), OpenError> {
         }
     }
     Ok(())
-}
-
-/// Parse one wire tool call, preserving the malformed-arguments distinction: an empty argument
-/// string is the no-argument call `{}`; non-empty invalid JSON is recorded as `{}` but flagged, so
-/// it is sealed rather than repaired into a call the model did not encode.
-pub(crate) fn proposal_of(call: &WireToolCall) -> (ProposedCall, bool) {
-    let trimmed = call.function.arguments.trim();
-    let (arguments, malformed) = if trimmed.is_empty() {
-        (serde_json::json!({}), false)
-    } else {
-        match serde_json::from_str(trimmed) {
-            Ok(value) => (value, false),
-            Err(_) => (serde_json::json!({}), true),
-        }
-    };
-    (
-        ProposedCall {
-            id: ToolCallId::new(call.id.clone()),
-            tool: ToolName::new(call.function.name.clone()),
-            arguments,
-        },
-        malformed,
-    )
 }
 
 pub(crate) fn turn_end(session: &TrajectoryId) -> Fact {

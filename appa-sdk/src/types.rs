@@ -3,7 +3,7 @@
 use thiserror::Error;
 
 use appa_engine::label::Label;
-use appa_engine::value::{DispatchId, ResolvedCall, ToolCallId, ToolName};
+use appa_engine::value::{DispatchId, ResolvedCall, ToolName};
 
 use appa_runtime::store::StoreError;
 
@@ -88,9 +88,6 @@ pub(crate) struct HandleInner {
     pub(crate) id: u64,
     pub(crate) dispatch: DispatchId,
     pub(crate) call: ResolvedCall,
-    /// The model tool-call this dispatch's terminal response answers — for a remedied call, the
-    /// `execute_remedy_plan` proposal's id, not the originally blocked proposal's.
-    pub(crate) response_call_id: ToolCallId,
 }
 
 impl DispatchHandle {

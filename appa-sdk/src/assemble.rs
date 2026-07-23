@@ -3,7 +3,7 @@
 //! A deliberate, small duplication of the assembly in `appa-runtime`'s `Runtime::with_options`
 //! (which is `pub(crate)` there): the descriptors are public config, the backends are public
 //! `external` types, only the wiring between them is re-stated here. Sanitizer and cast backends
-//! are not assembled — [`crate::session::AppaSession::open`] rejects policies that declare them.
+//! are not assembled — [`crate::CallSession::open`] rejects policies that declare them.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
