@@ -25,7 +25,8 @@ Authorities evaluate the engine's canonical representation of a tool call, elimi
 \paragraph{Sanitizers.}
 Registered sanitizers transform values according to authorized state transitions without altering execution trajectories~\cite{caiGhostAgentRedefining2026}. At output boundaries, a derivative is released while the raw output remains confined; at input boundaries, the derived value replaces the raw argument in the canonical tool call. Sanitization adjusts audience scope exclusively and never elevates trust levels without an explicit ruling, type cast, or verified exit transformation (\S\ref{sec:branching}).
 
-\fixme{Open question: How are final assistant replies inspected? We forbid self-approval, but we haven't defined the exact pipeline or rules for how the assistant's text output gets checked before reaching the user.}
+\paragraph{User-assistant trust boundary.}
+The primary user-assistant conversation trajectory is treated as fully trusted by the engine harness. Because the primary user holds root authority over the agent context, direct conversational replies delivered to the user do not undergo egress declassification filtering. If an interaction involves a recipient who is not trusted with the accumulated security label of the context, that communication must be encapsulated within a tool call (e.g., an outbound messaging API or data export tool). This subjects the payload and action to standard canonical rendering, policy validation, and authorization rulings.
 
 \fixme{Open question: We need a formal mathematical proof for single-call data overrides. Because security labels stay attached to data even when an authorized override permits a specific call, proving mathematically that data cannot leak without an explicit ruling is harder than standard security proofs. This proof is needed for showing safe data export from sub-branches, though it is separate from proving parent state protection.}
 
