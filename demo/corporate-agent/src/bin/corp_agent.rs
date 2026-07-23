@@ -1,41 +1,46 @@
-//! `corp-agent`: a [`rig`](https://docs.rs/rig-core) agent, on OpenRouter's
-//! OpenAI-compatible endpoint, that drives the mock corporate systems over MCP.
+//! `corp-agent`: the corporate assistant as a normal [`rig`](https://docs.rs/rig-core) agent, with
+//! OpenAPPA dropped in via a mediation hook.
 //!
-//! It spawns `corp-systems-mcp` as a subprocess (stdio), registers every tool
-//! the server advertises, and runs the model's tool loop — one-shot by default,
-//! or an interactive `--chat` REPL. A [`PrettyLog`](corporate_agent_demo::logview::PrettyLog)
-//! prints the system prompt, each tool call and its arguments, each tool result,
-//! and the assistant's text as the run unfolds.
+//! rig owns the loop, the model conversation, and the tool schemas; the embedded `appa-sdk`
+//! [`CallSession`], driven by [`AppaHook`], mediates every proposed tool call before it runs and
+//! admits or seals every result. The system prompt is agent config (this binary); the policy file
+//! governs flows only — labels, contracts, authorities — never the model's instructions.
 //!
 //! ```sh
-//! corp-agent "Summarise Alice Chen's HR record"
+//! corp-agent "Summarise Alice Chen's HR record"          # guarded appa-policy.toml
+//! corp-agent --policy appa-policy-open.toml "..."        # the unmediated contrast
 //! corp-agent --chat
 //! ```
 //!
-//! Needs an OpenRouter key: `--api-key`, `OPENROUTER_API_KEY`, or a `.env` file
-//! (crate-local `.env`, then the repository root — see `.env.example`).
+//! Needs an OpenRouter key: `--api-key`, `OPENROUTER_API_KEY`, or a `.env` file.
 
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Context;
+use appa_sdk::{CallSession, Config, SdkOptions};
 use clap::Parser;
-use corporate_agent_demo::logview::PrettyLog;
+use corporate_agent_demo::appa_hook::{AppaHook, RemedyTool};
+use corporate_agent_demo::mcp::{self, BODY_CAP_BYTES, mcp_tool_schema, resolve_policy, resolve_server_bin};
 use corporate_agent_demo::{clean_key, load_dotenv, resolve_data_root};
 use rig::client::CompletionClient;
 use rig::completion::Prompt;
 use rig::message::Message;
 use rig::providers::openrouter;
-use rmcp::ServiceExt;
-use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
-use tokio::process::Command;
+use tokio::sync::Mutex;
 
-const PREAMBLE: &str = "You are a corporate assistant with access to the company's internal systems — HR, finance, \
-     the task tracker — and a public forum, plus the ability to send email. Use the tools to complete the \
-     user's request. Read what you need, then act. When you are done, briefly summarise what you did.";
+/// The agent's system prompt. This is *agent* configuration, not policy — the policy file governs
+/// flows (labels, contracts, authorities), never the model's instructions.
+const PREAMBLE: &str = "You are a corporate assistant with access to the company's internal systems — HR, \
+     finance, the task tracker — and a public forum, plus the ability to send email. Use the tools to \
+     complete the user's request. Read what you need, then act. Some tool calls are policy-mediated: a \
+     blocked call returns feedback, sometimes offering a remedy plan you may execute via \
+     execute_remedy_plan when the user's task genuinely requires it. When you are done, briefly \
+     summarise what you did.";
 
 #[derive(Parser)]
-#[command(about = "A rig/OpenRouter agent over the mock corporate systems (MCP), for exercising OpenAPPA")]
+#[command(about = "The corporate assistant (rig agent) over the mock corporate systems (MCP), mediated by appa-sdk")]
 struct Args {
     /// The task for the agent. Omit to fall back to an interactive prompt (or use --chat).
     prompt: Option<String>,
@@ -64,15 +69,17 @@ struct Args {
     #[arg(long)]
     data_root: Option<PathBuf>,
 
-    /// Suppress the pretty agent log; print only the final answer.
+    /// The APPA policy file. Defaults to $APPA_DEMO_POLICY, else the crate's appa-policy.toml.
+    #[arg(long)]
+    policy: Option<PathBuf>,
+
+    /// Suppress the mediation log; print only the final answer.
     #[arg(long)]
     quiet: bool,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Load `.env` before parsing so the `env = "…"` clap fields pick up its
-    // values (crate-local `.env`, then the repository-root one).
     let dotenv = load_dotenv();
     let args = Args::parse();
     if !args.quiet
@@ -91,50 +98,61 @@ async fn main() -> anyhow::Result<()> {
              (see .env.example)",
         )?;
 
+    let policy_path = resolve_policy(args.policy);
+    let policy_text = std::fs::read_to_string(&policy_path)
+        .with_context(|| format!("reading the policy file {}", policy_path.display()))?;
+    let config =
+        Config::from_toml_str(&policy_text).with_context(|| format!("loading the policy {}", policy_path.display()))?;
+    let mut session = CallSession::open(config, SdkOptions::default()).context("opening the APPA session")?;
+
     let server_bin = resolve_server_bin(args.server_bin)?;
     let data_root = resolve_data_root(args.data_root);
+    let server = mcp::spawn_corp_systems(&server_bin, &data_root).await?;
 
-    // Spawn the MCP server as a child over stdio. Its stderr is inherited (the
-    // default), so its own logging shows in the terminal alongside ours.
-    let transport = TokioChildProcess::new(Command::new(&server_bin).configure(|cmd| {
-        cmd.arg("--data-root").arg(&data_root);
-    }))
-    .with_context(|| format!("spawning MCP server at {}", server_bin.display()))?;
-    let server = ().serve(transport).await.context("MCP handshake with corp-systems-mcp failed")?;
-
-    let tools = server.peer().list_all_tools().await.context("listing MCP tools")?;
-    let sink = server.peer().clone();
+    let mcp_tools = server.peer().list_all_tools().await.context("listing MCP tools")?;
+    let schemas: Vec<_> = mcp_tools.iter().map(mcp_tool_schema).collect();
+    session
+        .bind_tools(schemas)
+        .context("binding the MCP tool surface against the policy registry")?;
     if !args.quiet {
-        let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+        let names: Vec<&str> = mcp_tools.iter().map(|t| t.name.as_ref()).collect();
         eprintln!(
-            "connected to corp-systems-mcp — {} tools: {}",
+            "connected to corp-systems-mcp — policy {} — {} tools (+ execute_remedy_plan): {}",
+            policy_path.display(),
             names.len(),
             names.join(", ")
         );
     }
 
+    let session = Arc::new(Mutex::new(session));
+    let sink = server.peer().clone();
+    let hook = AppaHook::new(session.clone(), server.peer().clone(), BODY_CAP_BYTES, args.quiet);
+
     let client = openrouter::Client::new(&api_key).context("building OpenRouter client")?;
+    // Tool concurrency stays at rig's default of 1 (sequential) — the SDK's serial
+    // check-against-prior-result invariant depends on it; do not raise it.
     let agent = client
         .agent(args.model.clone())
         .preamble(PREAMBLE)
         .default_max_turns(args.max_turns)
-        .add_hook(PrettyLog::new(PREAMBLE, !args.quiet))
-        .rmcp_tools(tools, sink)
+        .add_hook(hook)
+        .tool(RemedyTool)
+        .rmcp_tools(mcp_tools, sink)
         .build();
 
     let result = if args.chat {
-        run_chat(&agent).await
+        run_chat(&agent, &session).await
     } else {
-        run_once(&agent, args.prompt).await
+        run_once(&agent, &session, args.prompt).await
     };
 
-    // Reap the child regardless of how the run went.
     let _ = server.cancel().await;
     result
 }
 
 async fn run_once(
     agent: &rig::agent::Agent<impl rig::completion::CompletionModel + 'static>,
+    session: &Arc<Mutex<CallSession>>,
     prompt: Option<String>,
 ) -> anyhow::Result<()> {
     let prompt = match prompt {
@@ -144,12 +162,15 @@ async fn run_once(
     if prompt.trim().is_empty() {
         anyhow::bail!("no task given: pass a prompt argument or use --chat");
     }
-    let answer = agent.prompt(prompt.as_str()).await.context("agent run failed")?;
-    println!("\n=== answer ===\n{answer}");
+    let answer = drive_turn(agent, session, &prompt, None).await?;
+    println!("\n=== answer ===\n{}", answer.0);
     Ok(())
 }
 
-async fn run_chat(agent: &rig::agent::Agent<impl rig::completion::CompletionModel + 'static>) -> anyhow::Result<()> {
+async fn run_chat(
+    agent: &rig::agent::Agent<impl rig::completion::CompletionModel + 'static>,
+    session: &Arc<Mutex<CallSession>>,
+) -> anyhow::Result<()> {
     eprintln!("chat mode — type a message, or 'exit' to quit.");
     let mut history: Vec<Message> = Vec::new();
     loop {
@@ -163,18 +184,47 @@ async fn run_chat(agent: &rig::agent::Agent<impl rig::completion::CompletionMode
         if matches!(line, "exit" | "quit") {
             break;
         }
-        let resp = agent
-            .prompt(line)
-            .history(history.clone())
-            .extended_details()
-            .await
-            .context("agent run failed")?;
-        println!("\n=== answer ===\n{}", resp.output);
-        if let Some(messages) = resp.messages {
+        let (answer, messages) = drive_turn(agent, session, line, Some(history.clone())).await?;
+        println!("\n=== answer ===\n{answer}");
+        if let Some(messages) = messages {
             history = messages;
         }
     }
     Ok(())
+}
+
+/// Drive one turn: admit the user turn into APPA, run rig's loop (the hook mediates), close the
+/// APPA turn. Returns the answer and, for chat, the updated rig history.
+async fn drive_turn(
+    agent: &rig::agent::Agent<impl rig::completion::CompletionModel + 'static>,
+    session: &Arc<Mutex<CallSession>>,
+    prompt: &str,
+    history: Option<Vec<Message>>,
+) -> anyhow::Result<(String, Option<Vec<Message>>)> {
+    session
+        .lock()
+        .await
+        .begin_turn(prompt)
+        .context("admitting the user turn")?;
+    let outcome = match history {
+        Some(history) => {
+            let resp = agent
+                .prompt(prompt)
+                .history(history)
+                .extended_details()
+                .await
+                .context("agent run failed");
+            resp.map(|r| (r.output, r.messages))
+        }
+        None => agent
+            .prompt(prompt)
+            .await
+            .map(|o| (o, None))
+            .context("agent run failed"),
+    };
+    // Close the APPA turn whether the run succeeded or not, so the trajectory is punctuated.
+    session.lock().await.end_turn().context("closing the APPA turn")?;
+    outcome
 }
 
 /// Read one line from stdin with a prompt; `None` on EOF.
@@ -188,19 +238,4 @@ fn prompt_line(label: &str) -> anyhow::Result<Option<String>> {
         return Ok(None);
     }
     Ok(Some(line.trim_end_matches(['\n', '\r']).to_string()))
-}
-
-/// Default the server binary to a sibling of the current executable.
-fn resolve_server_bin(explicit: Option<PathBuf>) -> anyhow::Result<PathBuf> {
-    if let Some(path) = explicit {
-        return Ok(path);
-    }
-    let exe = std::env::current_exe().context("locating the current executable")?;
-    let dir = exe.parent().context("current executable has no parent directory")?;
-    let name = if cfg!(windows) {
-        "corp-systems-mcp.exe"
-    } else {
-        "corp-systems-mcp"
-    };
-    Ok(dir.join(name))
 }

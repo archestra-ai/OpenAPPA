@@ -31,6 +31,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "appa-sdk"
+version = "0.0.0"
+dependencies = [
+ "appa-engine",
+ "appa-runtime",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
