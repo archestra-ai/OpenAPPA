@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use crate::authority::{Authority, Cast, CastResolution, CastTarget, Sanitizer};
 use crate::contract::ToolContract;
-use crate::label::Trust;
+use crate::label::{Adequacy, Dim, Dimension, Trust};
 use crate::names::{AuthorityName, CastName, SanitizerName};
 use crate::value::ToolName;
 
@@ -97,6 +97,20 @@ pub enum LoadError {
     EmptyCastCeiling(String),
     #[error("trust rank {rank} out of the chain (length {len}) in {context}")]
     RankOutOfChain { rank: u8, len: usize, context: String },
+    #[error("tool {0} declares both output dimensions pending-cast (a cast resolves exactly one)")]
+    DualPendingCast(String),
+    #[error("tool {tool} declares a pending-cast {dimension:?} output and a `requires` on that dimension")]
+    PendingCastWithRequirement { tool: String, dimension: Dimension },
+    #[error("tool {tool} binds output sanitizer {sanitizer}, which is not registered")]
+    UnknownOutputSanitizer { tool: String, sanitizer: String },
+    #[error("tool {tool} binds {sanitizer}, which is not registered for tool output")]
+    OutputSanitizerNotOutput { tool: String, sanitizer: String },
+    #[error(
+        "tool {0} binds an output sanitizer and declares a pending-cast output (the two Phase-2 disciplines do not compose)"
+    )]
+    OutputSanitizerWithPendingCast(String),
+    #[error("tool {tool}'s declared raw output does not satisfy sanitizer {sanitizer}'s `from` precondition")]
+    OutputSanitizerSourceUnmet { tool: String, sanitizer: String },
 }
 
 #[derive(Clone, Debug)]
@@ -112,14 +126,28 @@ impl Registry {
     pub fn build(config: RegistryConfig) -> Result<Registry, LoadError> {
         config.trust_chain.validate()?;
 
+        // Sanitizers index first: tool output-sanitizer bindings validate against them.
+        let mut sanitizers = BTreeMap::new();
+        for sanitizer in config.sanitizers {
+            if sanitizers.insert(sanitizer.name.clone(), sanitizer.clone()).is_some() {
+                return Err(LoadError::DuplicateSanitizer(sanitizer.name.as_str().to_string()));
+            }
+        }
+
         let mut tools = BTreeMap::new();
         for tool in config.tools {
-            check_rank(&config.trust_chain, tool.delta.trust, || {
+            let declared_trust = match &tool.delta.trust {
+                Some(Dim::Known(t)) => Some(*t),
+                Some(Dim::Unknown) | None => None,
+            };
+            check_rank(&config.trust_chain, declared_trust, || {
                 format!("tool {} delta", tool.name.as_str())
             })?;
             check_rank(&config.trust_chain, tool.requires.label.trust_floor, || {
                 format!("tool {} trust floor", tool.name.as_str())
             })?;
+            validate_pending_cast(&tool)?;
+            validate_output_binding(&tool, &sanitizers)?;
             if tools.insert(tool.name.clone(), tool.clone()).is_some() {
                 return Err(LoadError::DuplicateTool(tool.name.as_str().to_string()));
             }
@@ -135,13 +163,6 @@ impl Registry {
             })?;
             if seen_authorities.insert(authority.name.clone(), ()).is_some() {
                 return Err(LoadError::DuplicateAuthority(authority.name.as_str().to_string()));
-            }
-        }
-
-        let mut sanitizers = BTreeMap::new();
-        for sanitizer in config.sanitizers {
-            if sanitizers.insert(sanitizer.name.clone(), sanitizer.clone()).is_some() {
-                return Err(LoadError::DuplicateSanitizer(sanitizer.name.as_str().to_string()));
             }
         }
 
@@ -208,6 +229,59 @@ impl Registry {
     }
 }
 
+fn validate_pending_cast(tool: &ToolContract) -> Result<(), LoadError> {
+    if matches!(tool.delta.trust, Some(Dim::Unknown)) && matches!(tool.delta.audience, Some(Dim::Unknown)) {
+        return Err(LoadError::DualPendingCast(tool.name.as_str().to_string()));
+    }
+    match tool.delta.pending_cast_dim() {
+        Some(Dimension::Trust) if tool.requires.label.trust_floor.is_some() => {
+            Err(LoadError::PendingCastWithRequirement {
+                tool: tool.name.as_str().to_string(),
+                dimension: Dimension::Trust,
+            })
+        }
+        Some(Dimension::Audience) if !tool.requires.label.audience.is_empty() => {
+            Err(LoadError::PendingCastWithRequirement {
+                tool: tool.name.as_str().to_string(),
+                dimension: Dimension::Audience,
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_output_binding(
+    tool: &ToolContract,
+    sanitizers: &BTreeMap<SanitizerName, Sanitizer>,
+) -> Result<(), LoadError> {
+    let Some(name) = &tool.output_sanitizer else {
+        return Ok(());
+    };
+    let sanitizer = sanitizers.get(name).ok_or_else(|| LoadError::UnknownOutputSanitizer {
+        tool: tool.name.as_str().to_string(),
+        sanitizer: name.as_str().to_string(),
+    })?;
+    if !sanitizer.on.output {
+        return Err(LoadError::OutputSanitizerNotOutput {
+            tool: tool.name.as_str().to_string(),
+            sanitizer: name.as_str().to_string(),
+        });
+    }
+    if tool.delta.pending_cast_dim().is_some() {
+        return Err(LoadError::OutputSanitizerWithPendingCast(
+            tool.name.as_str().to_string(),
+        ));
+    }
+    let raw = tool.delta.output_label();
+    if raw.audience.covers(&sanitizer.can_reduce.from_includes) != Adequacy::Holds {
+        return Err(LoadError::OutputSanitizerSourceUnmet {
+            tool: tool.name.as_str().to_string(),
+            sanitizer: name.as_str().to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn check_rank(chain: &TrustChain, rank: Option<Trust>, context: impl Fn() -> String) -> Result<(), LoadError> {
     match rank {
         Some(t) if !chain.contains_rank(t) => Err(LoadError::RankOutOfChain {
@@ -247,6 +321,7 @@ mod tests {
             delta: Delta::NONE,
             emits: vec![],
             requires: Requires::default(),
+            output_sanitizer: None,
         }
     }
 
@@ -309,9 +384,10 @@ mod tests {
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
             delta: Delta {
-                trust: Some(Trust::new(9)),
+                trust: Some(Dim::Known(Trust::new(9))),
                 audience: None,
             },
+            output_sanitizer: None,
             ..tool("over")
         }];
         assert!(matches!(
@@ -353,6 +429,165 @@ mod tests {
             Registry::build(cfg),
             Err(LoadError::DuplicateRank(name)) if name == "low"
         ));
+    }
+
+    #[test]
+    fn refuses_dual_pending_cast_output() {
+        let mut cfg = base();
+        cfg.tools = vec![ToolContract {
+            delta: Delta {
+                trust: Some(Dim::Unknown),
+                audience: Some(Dim::Unknown),
+            },
+            output_sanitizer: None,
+            ..tool("scan")
+        }];
+        assert!(matches!(
+            Registry::build(cfg),
+            Err(LoadError::DualPendingCast(name)) if name == "scan"
+        ));
+    }
+
+    #[test]
+    fn refuses_a_requirement_on_a_pending_cast_dimension() {
+        use crate::contract::{AudienceRequirement, LabelRequirements, Requires};
+        use crate::label::Audience;
+
+        let mut cfg = base();
+        cfg.tools = vec![ToolContract {
+            delta: Delta {
+                trust: Some(Dim::Unknown),
+                audience: None,
+            },
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(Trust::new(1)),
+                    audience: vec![],
+                },
+                ..Requires::default()
+            },
+            output_sanitizer: None,
+            ..tool("scan")
+        }];
+        assert!(matches!(
+            Registry::build(cfg),
+            Err(LoadError::PendingCastWithRequirement {
+                dimension: Dimension::Trust,
+                ..
+            })
+        ));
+
+        let mut cfg = base();
+        cfg.tools = vec![ToolContract {
+            delta: Delta {
+                trust: None,
+                audience: Some(Dim::Unknown),
+            },
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![AudienceRequirement::Cap(Audience::Public)],
+                },
+                ..Requires::default()
+            },
+            output_sanitizer: None,
+            ..tool("scan")
+        }];
+        assert!(matches!(
+            Registry::build(cfg),
+            Err(LoadError::PendingCastWithRequirement {
+                dimension: Dimension::Audience,
+                ..
+            })
+        ));
+
+        let mut cfg = base();
+        cfg.tools = vec![ToolContract {
+            delta: Delta {
+                trust: Some(Dim::Unknown),
+                audience: None,
+            },
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![AudienceRequirement::Cap(Audience::Public)],
+                },
+                ..Requires::default()
+            },
+            output_sanitizer: None,
+            ..tool("scan")
+        }];
+        assert!(Registry::build(cfg).is_ok());
+    }
+
+    #[test]
+    fn validates_the_output_sanitizer_binding() {
+        use crate::authority::{AudienceTransition, SanitizerPoints};
+        use crate::label::{Audience, ReaderId};
+
+        let sanitizer = |name: &str, output: bool, from: Audience| Sanitizer {
+            name: SanitizerName::new(name),
+            on: SanitizerPoints { input: !output, output },
+            can_reduce: AudienceTransition {
+                from_includes: from,
+                to: Audience::Public,
+            },
+        };
+        let internal = || Audience::restricted([ReaderId::new("internal")]);
+        let bound_tool = |sanitizer: &str| ToolContract {
+            delta: Delta {
+                trust: None,
+                audience: Some(Dim::Known(internal())),
+            },
+            output_sanitizer: Some(SanitizerName::new(sanitizer)),
+            ..tool("export")
+        };
+
+        let mut cfg = base();
+        cfg.tools = vec![bound_tool("ghost")];
+        assert!(matches!(
+            Registry::build(cfg),
+            Err(LoadError::UnknownOutputSanitizer { .. })
+        ));
+
+        let mut cfg = base();
+        cfg.sanitizers = vec![sanitizer("input-only", false, internal())];
+        cfg.tools = vec![bound_tool("input-only")];
+        assert!(matches!(
+            Registry::build(cfg),
+            Err(LoadError::OutputSanitizerNotOutput { .. })
+        ));
+
+        let mut cfg = base();
+        cfg.sanitizers = vec![sanitizer(
+            "finance-only",
+            true,
+            Audience::restricted([ReaderId::new("finance")]),
+        )];
+        cfg.tools = vec![bound_tool("finance-only")];
+        assert!(matches!(
+            Registry::build(cfg),
+            Err(LoadError::OutputSanitizerSourceUnmet { .. })
+        ));
+
+        let mut cfg = base();
+        cfg.sanitizers = vec![sanitizer("declassify", true, internal())];
+        cfg.tools = vec![ToolContract {
+            delta: Delta {
+                trust: Some(Dim::Unknown),
+                audience: Some(Dim::Known(internal())),
+            },
+            ..bound_tool("declassify")
+        }];
+        assert!(matches!(
+            Registry::build(cfg),
+            Err(LoadError::OutputSanitizerWithPendingCast(name)) if name == "export"
+        ));
+
+        let mut cfg = base();
+        cfg.sanitizers = vec![sanitizer("declassify", true, internal())];
+        cfg.tools = vec![bound_tool("declassify")];
+        assert!(Registry::build(cfg).is_ok());
     }
 
     #[test]

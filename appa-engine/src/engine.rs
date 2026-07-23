@@ -39,7 +39,7 @@ impl Engine {
     /// facts to resolve first.
     pub fn check(&self, views: &Views, call: &ResolvedCall) -> Result<CheckOutcome, EngineError> {
         let contract = self.contract(call)?;
-        Ok(check::evaluate(contract, views, call))
+        Ok(check::evaluate(&self.registry, contract, views, call))
     }
 
     /// Open a dispatch for a call that **passes the check as-is**. Re-checks and refuses anything
@@ -48,9 +48,9 @@ impl Engine {
     /// the label folds only when the result value is admitted.
     pub fn open_dispatch(&self, views: &Views, call: &ResolvedCall) -> Result<FactBatch, EngineError> {
         let contract = self.contract(call)?;
-        match check::evaluate(contract, views, call) {
+        match check::evaluate(&self.registry, contract, views, call) {
             CheckOutcome::Allow => {
-                let (_, fact) = opened_dispatch(contract, views, call);
+                let (_, fact) = opened_dispatch(&self.registry, contract, views, call);
                 Ok(FactBatch::new(views.revision(), vec![fact]))
             }
             _ => Err(EngineError::NotAllowed),
@@ -100,7 +100,7 @@ impl Engine {
         call: &ResolvedCall,
     ) -> Result<Vec<plan::RequiredRuling>, EngineError> {
         let contract = self.contract(call)?;
-        match check::evaluate(contract, views, call) {
+        match check::evaluate(&self.registry, contract, views, call) {
             CheckOutcome::Block(block) => Ok(plan::required_rulings(&self.registry, &block, &contract.tags)),
             _ => Ok(Vec::new()),
         }
@@ -141,7 +141,12 @@ impl Engine {
 /// Build the `DispatchOpened` fact for a call: its proposed committed label, the effects it would
 /// commit on success, and its occurrence (a repeat identical call is a new dispatch). Shared by the
 /// clean-allow path ([`Engine::open_dispatch`]) and atomic plan execution ([`crate::execute`]).
-pub(crate) fn opened_dispatch(contract: &ToolContract, views: &Views, call: &ResolvedCall) -> (DispatchId, Fact) {
+pub(crate) fn opened_dispatch(
+    registry: &Registry,
+    contract: &ToolContract,
+    views: &Views,
+    call: &ResolvedCall,
+) -> (DispatchId, Fact) {
     let dispatch = DispatchId::new(
         views.trajectory().clone(),
         call.digest(),
@@ -150,7 +155,7 @@ pub(crate) fn opened_dispatch(contract: &ToolContract, views: &Views, call: &Res
     let fact = Fact::DispatchOpened {
         trajectory: views.trajectory().clone(),
         dispatch: dispatch.clone(),
-        proposed_label: contract.delta.apply(&views.current_label()),
+        proposed_label: check::effective_delta(registry, contract).apply(&views.current_label()),
         proposed_effects: contract.emits.clone(),
     };
     (dispatch, fact)
@@ -217,7 +222,7 @@ mod tests {
             tags: vec![],
             delta: Delta {
                 trust: None,
-                audience: Some(Audience::restricted([ReaderId::new("internal")])),
+                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")]))),
             },
             emits: vec![],
             requires: Requires {
@@ -227,6 +232,7 @@ mod tests {
                 },
                 ..Requires::default()
             },
+            output_sanitizer: None,
         }
     }
 
@@ -249,6 +255,63 @@ mod tests {
         let internal = Audience::restricted([ReaderId::new("internal")]);
         let log = vec![user_value(known(TRUSTED, internal))];
         assert_eq!(check(&e, &log, &call("get_ticket", json!({}))), CheckOutcome::Allow);
+    }
+
+    #[test]
+    fn a_bound_tool_folds_its_derivation_not_its_raw_delta() {
+        use crate::authority::{AudienceTransition, Sanitizer, SanitizerPoints};
+        use crate::names::SanitizerName;
+
+        let internal = Audience::restricted([ReaderId::new("internal")]);
+        let export = ToolContract {
+            name: ToolName::new("export"),
+            tags: vec![],
+            delta: Delta {
+                trust: None,
+                audience: Some(Dim::Known(internal.clone())),
+            },
+            emits: vec![],
+            requires: Requires::default(),
+            output_sanitizer: Some(SanitizerName::new("declassify")),
+        };
+        let cfg = RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: vec![export],
+            authorities: vec![],
+            sanitizers: vec![Sanitizer {
+                name: SanitizerName::new("declassify"),
+                on: SanitizerPoints {
+                    input: false,
+                    output: true,
+                },
+                can_reduce: AudienceTransition {
+                    from_includes: internal,
+                    to: Audience::Public,
+                },
+            }],
+            casts: vec![],
+        };
+        let e = Engine::new(Registry::build(cfg).unwrap());
+        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        assert_eq!(check(&e, &log, &call("export", json!({}))), CheckOutcome::Allow);
+    }
+
+    #[test]
+    fn pending_cast_output_dispatches_before_resolution() {
+        let scan = ToolContract {
+            name: ToolName::new("scan_inbox"),
+            tags: vec![],
+            delta: Delta {
+                trust: Some(Dim::Unknown),
+                audience: None,
+            },
+            emits: vec![],
+            requires: Requires::default(),
+            output_sanitizer: None,
+        };
+        let e = engine(vec![scan]);
+        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        assert_eq!(check(&e, &log, &call("scan_inbox", json!({}))), CheckOutcome::Allow);
     }
 
     #[test]
@@ -279,6 +342,7 @@ mod tests {
                 },
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let e = engine(vec![send]);
         let internal = Audience::restricted([ReaderId::new("auditor")]);
@@ -310,6 +374,7 @@ mod tests {
                 ],
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let e = engine(vec![del]);
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
@@ -332,6 +397,7 @@ mod tests {
                 attention: vec![MarkName::new("signoff")],
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let e = engine(vec![tool]);
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
@@ -394,6 +460,7 @@ mod tests {
                 },
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let e = engine(vec![send]);
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
@@ -420,6 +487,7 @@ mod tests {
                 },
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let officer = Authority {
             name: AuthorityName::new("officer"),

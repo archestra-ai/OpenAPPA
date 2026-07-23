@@ -13,12 +13,18 @@ use crate::value::{DispatchId, LabeledValue, Provenance, RawResultDigest, Resolv
 
 pub enum ResultAdmission {
     Failure,
+    Indeterminate,
     SuccessNoValue,
     SuccessRaw { body: ValueBody },
     SuccessSanitized {
         body: ValueBody,
         sanitizer: SanitizerName,
         raw_digest: RawResultDigest,
+    },
+    SuccessCast {
+        body: ValueBody,
+        cast: CastName,
+        resolved: DimValue,
     },
 }
 
@@ -38,6 +44,20 @@ pub enum AdmitError {
     SanitizerNotOutput(String),
     #[error("raw result does not satisfy the sanitizer's `from` precondition")]
     TransitionSourceUnmet,
+    #[error("the contract declares a pending-cast output: only a cast-resolved admission may carry a value")]
+    OutputPendingCast,
+    #[error("the contract binds an output sanitizer: a raw value may not enter")]
+    OutputSanitizerBound,
+    #[error("the sanitizer is not the contract's bound output sanitizer")]
+    NotBoundSanitizer,
+    #[error("the contract declares no pending-cast output on the resolved dimension")]
+    NotPendingCast,
+    #[error("no cast registered as {0}")]
+    UnknownCast(String),
+    #[error("cast answer does not match the constant cast's declared target")]
+    ConstantMismatch,
+    #[error("cast answer exceeds the resolver's may_cast ceiling")]
+    CeilingExceeded,
 }
 
 pub struct CastAnswer {
@@ -105,15 +125,71 @@ pub(crate) fn admit_result(
             dispatch: dispatch.clone(),
             outcome: CloseOutcome::Failure,
         }],
+        ResultAdmission::Indeterminate => vec![Fact::DispatchClosed {
+            trajectory: trajectory.clone(),
+            dispatch: dispatch.clone(),
+            outcome: CloseOutcome::Indeterminate,
+        }],
         ResultAdmission::SuccessNoValue => vec![close_success()],
         ResultAdmission::SuccessRaw { body } => {
+            if contract.delta.pending_cast_dim().is_some() {
+                return Err(AdmitError::OutputPendingCast);
+            }
+            if contract.output_sanitizer.is_some() {
+                return Err(AdmitError::OutputSanitizerBound);
+            }
             vec![close_success(), admit_value(contract.delta.output_label(), body)]
+        }
+        ResultAdmission::SuccessCast { body, cast, resolved } => {
+            let raw_digest = RawResultDigest::of(body.as_str().as_bytes());
+            if contract.delta.pending_cast_dim() != Some(resolved.dimension()) {
+                return Err(AdmitError::NotPendingCast);
+            }
+            let registered = registry
+                .cast(&cast)
+                .ok_or_else(|| AdmitError::UnknownCast(cast.as_str().to_string()))?;
+            match &registered.resolution {
+                CastResolution::Constant(declared) => {
+                    if &resolved != declared {
+                        return Err(AdmitError::ConstantMismatch);
+                    }
+                }
+                CastResolution::Resolver { may_cast } => {
+                    if !may_cast.admits(&resolved) {
+                        return Err(AdmitError::CeilingExceeded);
+                    }
+                }
+            }
+            let output = contract.delta.output_label();
+            // Fill exactly the pending dimension; the established one is preserved untouched.
+            let label = match &resolved {
+                DimValue::Trust(t) => Label::new(Dim::Known(*t), output.audience),
+                DimValue::Audience(a) => Label::new(output.trust, Dim::Known(a.clone())),
+            };
+            vec![
+                close_success(),
+                Fact::OutputCastApplied {
+                    trajectory: trajectory.clone(),
+                    dispatch: dispatch.clone(),
+                    cast,
+                    dimension: resolved.dimension(),
+                    resolved,
+                    raw_digest,
+                },
+                admit_value(label, body),
+            ]
         }
         ResultAdmission::SuccessSanitized {
             body,
             sanitizer,
             raw_digest,
         } => {
+            if contract.delta.pending_cast_dim().is_some() {
+                return Err(AdmitError::OutputPendingCast);
+            }
+            if contract.output_sanitizer.as_ref() != Some(&sanitizer) {
+                return Err(AdmitError::NotBoundSanitizer);
+            }
             let san = registry
                 .sanitizer(&sanitizer)
                 .ok_or_else(|| AdmitError::UnknownSanitizer(sanitizer.as_str().to_string()))?;
@@ -121,7 +197,6 @@ pub(crate) fn admit_result(
                 return Err(AdmitError::SanitizerNotOutput(sanitizer.as_str().to_string()));
             }
             let raw = contract.delta.output_label();
-            // The raw source must satisfy the transition's `from` before the `to` may apply.
             if raw.audience.covers(&san.can_reduce.from_includes) != Adequacy::Holds {
                 return Err(AdmitError::TransitionSourceUnmet);
             }
@@ -219,11 +294,12 @@ mod tests {
             name: ToolName::new("get_ticket"),
             tags: vec![],
             delta: Delta {
-                trust: Some(SUSPICIOUS),
-                audience: Some(internal()),
+                trust: Some(Dim::Known(SUSPICIOUS)),
+                audience: Some(Dim::Known(internal())),
             },
             emits: vec![EffectKind::new("read")],
             requires: Default::default(),
+            output_sanitizer: None,
         };
         let out_san = Sanitizer {
             name: crate::names::SanitizerName::new("declassify"),
@@ -260,14 +336,44 @@ mod tests {
                 },
             },
         };
+        let scan = ToolContract {
+            name: ToolName::new("scan_inbox"),
+            tags: vec![],
+            delta: Delta {
+                trust: Some(Dim::Unknown),
+                audience: Some(Dim::Known(internal())),
+            },
+            emits: vec![EffectKind::new("read")],
+            requires: Default::default(),
+            output_sanitizer: None,
+        };
+        let export = ToolContract {
+            name: ToolName::new("export_ticket"),
+            tags: vec![],
+            delta: Delta {
+                trust: Some(Dim::Known(SUSPICIOUS)),
+                audience: Some(Dim::Known(internal())),
+            },
+            emits: vec![EffectKind::new("read")],
+            requires: Default::default(),
+            output_sanitizer: Some(crate::names::SanitizerName::new("declassify")),
+        };
         Registry::build(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![get],
+            tools: vec![get, scan, export],
             authorities: vec![],
             sanitizers: vec![out_san, finance_san],
             casts: vec![const_cast, resolver_cast],
         })
         .unwrap()
+    }
+
+    fn export_call() -> ResolvedCall {
+        ResolvedCall::new(ToolName::new("export_ticket"), json!({}), vec![])
+    }
+
+    fn scan_call() -> ResolvedCall {
+        ResolvedCall::new(ToolName::new("scan_inbox"), json!({}), vec![])
     }
 
     fn get_call() -> ResolvedCall {
@@ -376,7 +482,7 @@ mod tests {
     #[test]
     fn sanitized_preserves_trust_relabels_audience() {
         let reg = registry();
-        let call = get_call();
+        let call = export_call();
         let (log, dispatch) = open_log(&call);
         let p = views_of(&log);
         let t = traj();
@@ -402,24 +508,56 @@ mod tests {
     }
 
     #[test]
-    fn sanitizer_from_unmet_rejected() {
+    fn a_bound_tool_confines_raw_and_refuses_an_unbound_transformer() {
         let reg = registry();
-        let call = get_call();
+        let t = traj();
+        let call = export_call();
         let (log, dispatch) = open_log(&call);
         let p = views_of(&log);
-        let t = traj();
-        let err = admit_result(
-            &reg,
-            &p.view(&t),
-            &dispatch,
-            &call,
-            ResultAdmission::SuccessSanitized {
-                body: ValueBody::new("x"),
-                sanitizer: SanitizerName::new("finance-only"),
-                raw_digest: RawResultDigest::of(b"x"),
-            },
+        assert_eq!(
+            admit_result(
+                &reg,
+                &p.view(&t),
+                &dispatch,
+                &call,
+                ResultAdmission::SuccessRaw {
+                    body: ValueBody::new("ticket #7"),
+                },
+            ),
+            Err(AdmitError::OutputSanitizerBound)
         );
-        assert_eq!(err, Err(AdmitError::TransitionSourceUnmet));
+        let p = views_of(&log);
+        assert_eq!(
+            admit_result(
+                &reg,
+                &p.view(&t),
+                &dispatch,
+                &call,
+                ResultAdmission::SuccessSanitized {
+                    body: ValueBody::new("redacted"),
+                    sanitizer: SanitizerName::new("finance-only"),
+                    raw_digest: RawResultDigest::of(b"ticket #7"),
+                },
+            ),
+            Err(AdmitError::NotBoundSanitizer)
+        );
+        let plain = get_call();
+        let (plain_log, plain_dispatch) = open_log(&plain);
+        let p = views_of(&plain_log);
+        assert_eq!(
+            admit_result(
+                &reg,
+                &p.view(&t),
+                &plain_dispatch,
+                &plain,
+                ResultAdmission::SuccessSanitized {
+                    body: ValueBody::new("redacted"),
+                    sanitizer: SanitizerName::new("declassify"),
+                    raw_digest: RawResultDigest::of(b"ticket #7"),
+                },
+            ),
+            Err(AdmitError::NotBoundSanitizer)
+        );
     }
 
     #[test]
@@ -537,6 +675,128 @@ mod tests {
                 }
             ),
             Err(CastError::NotUnknown)
+        );
+    }
+
+    #[test]
+    fn pending_cast_confines_raw_and_sanitized_admission() {
+        let reg = registry();
+        let call = scan_call();
+        let (log, dispatch) = open_log(&call);
+        let p = views_of(&log);
+        let t = traj();
+        assert_eq!(
+            admit_result(
+                &reg,
+                &p.view(&t),
+                &dispatch,
+                &call,
+                ResultAdmission::SuccessRaw {
+                    body: ValueBody::new("raw bytes"),
+                },
+            ),
+            Err(AdmitError::OutputPendingCast)
+        );
+        let p = views_of(&log);
+        assert_eq!(
+            admit_result(
+                &reg,
+                &p.view(&t),
+                &dispatch,
+                &call,
+                ResultAdmission::SuccessSanitized {
+                    body: ValueBody::new("redacted"),
+                    sanitizer: SanitizerName::new("declassify"),
+                    raw_digest: RawResultDigest::of(b"raw bytes"),
+                },
+            ),
+            Err(AdmitError::OutputPendingCast)
+        );
+    }
+
+    #[test]
+    fn pending_cast_admits_at_the_resolved_label() {
+        let reg = registry();
+        let call = scan_call();
+        let (log, dispatch) = open_log(&call);
+        let p = views_of(&log);
+        let t = traj();
+        let batch = admit_result(
+            &reg,
+            &p.view(&t),
+            &dispatch,
+            &call,
+            ResultAdmission::SuccessCast {
+                body: ValueBody::new("inbox contents"),
+                cast: CastName::new("paranoid"),
+                resolved: DimValue::Trust(SUSPICIOUS),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            &batch.facts[0],
+            Fact::DispatchClosed { outcome: CloseOutcome::Success { effects }, .. } if effects == &[EffectKind::new("read")]
+        ));
+        assert!(matches!(
+            &batch.facts[1],
+            Fact::OutputCastApplied { dimension: Dimension::Trust, resolved: DimValue::Trust(t), .. } if *t == SUSPICIOUS
+        ));
+        match &batch.facts[2] {
+            Fact::ValueAdmitted { value, .. } => {
+                assert_eq!(value.label.trust, Dim::Known(SUSPICIOUS));
+                assert_eq!(value.label.audience, Dim::Known(internal()));
+            }
+            other => panic!("expected ValueAdmitted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pending_cast_admission_validates_the_resolution() {
+        let reg = registry();
+        let call = scan_call();
+        let (log, dispatch) = open_log(&call);
+        let t = traj();
+        let admission = |cast: &str, resolved: DimValue| ResultAdmission::SuccessCast {
+            body: ValueBody::new("inbox contents"),
+            cast: CastName::new(cast),
+            resolved,
+        };
+        let attempt = |adm: ResultAdmission| {
+            let p = views_of(&log);
+            admit_result(&reg, &p.view(&t), &dispatch, &call, adm)
+        };
+        assert_eq!(
+            attempt(admission("classifier", DimValue::Trust(Trust::new(1)))),
+            Err(AdmitError::CeilingExceeded)
+        );
+        assert_eq!(
+            attempt(admission("paranoid", DimValue::Trust(Trust::new(1)))),
+            Err(AdmitError::ConstantMismatch)
+        );
+        assert_eq!(
+            attempt(admission("classifier", DimValue::Audience(Audience::Public))),
+            Err(AdmitError::NotPendingCast)
+        );
+        assert_eq!(
+            attempt(admission("bogus", DimValue::Trust(SUSPICIOUS))),
+            Err(AdmitError::UnknownCast("bogus".to_string()))
+        );
+        let plain = get_call();
+        let (plain_log, plain_dispatch) = open_log(&plain);
+        let p = views_of(&plain_log);
+        assert_eq!(
+            admit_result(
+                &reg,
+                &p.view(&t),
+                &plain_dispatch,
+                &plain,
+                ResultAdmission::SuccessCast {
+                    body: ValueBody::new("x"),
+                    cast: CastName::new("paranoid"),
+                    resolved: DimValue::Trust(SUSPICIOUS),
+                },
+            ),
+            Err(AdmitError::NotPendingCast)
         );
     }
 }

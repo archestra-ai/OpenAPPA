@@ -55,10 +55,14 @@ pub enum BoundaryKind {
 
 /// How a dispatch closed. Effects commit **only** on success — a call that dispatched but failed
 /// appends nothing. A success that admits no value (e.g. an oversized body) still commits effects.
+/// `Indeterminate` records a dispatch whose south outcome was never observed (a timeout or a
+/// cancelled turn): like a failure it commits nothing, but the audit distinguishes "the tool said
+/// no" from "no one knows whether the tool ran".
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CloseOutcome {
     Success { effects: Vec<EffectKind> },
     Failure,
+    Indeterminate,
 }
 
 /// One record in the log. New variants are added by the slice that both emits and consumes them
@@ -120,6 +124,14 @@ pub enum Fact {
         resolved: DimValue,
         cast: CastName,
     },
+    OutputCastApplied {
+        trajectory: TrajectoryId,
+        dispatch: DispatchId,
+        cast: CastName,
+        dimension: Dimension,
+        resolved: DimValue,
+        raw_digest: RawResultDigest,
+    },
     ChildReturn {
         trajectory: TrajectoryId,
         id: ChildReturnId,
@@ -143,6 +155,7 @@ impl Fact {
             | Fact::Acceptance { trajectory, .. }
             | Fact::SanitizerApplied { trajectory, .. }
             | Fact::CastApplied { trajectory, .. }
+            | Fact::OutputCastApplied { trajectory, .. }
             | Fact::ChildReturn { trajectory, .. }
             | Fact::Boundary { trajectory, .. } => trajectory,
         }

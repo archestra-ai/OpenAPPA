@@ -80,7 +80,7 @@ pub(crate) fn execute_plan(
         .tool(call.tool())
         .ok_or_else(|| PlanError::UnknownTool(call.tool().as_str().to_string()))?;
 
-    let block = match check::evaluate(contract, views, call) {
+    let block = match check::evaluate(registry, contract, views, call) {
         CheckOutcome::Block(block) => block,
         CheckOutcome::Allow => return Err(PlanError::NotBlocked),
         CheckOutcome::Unresolved(_) => return Err(PlanError::Unresolved),
@@ -91,7 +91,7 @@ pub(crate) fn execute_plan(
         return Err(PlanError::UnknownPlan(plan.value()));
     }
 
-    let (dispatch, dispatch_opened) = opened_dispatch(contract, views, call);
+    let (dispatch, dispatch_opened) = opened_dispatch(registry, contract, views, call);
 
     for ruling in rulings {
         if ruling.dispatch != dispatch {
@@ -202,6 +202,7 @@ mod tests {
                 },
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let officer = Authority {
             name: AuthorityName::new("officer"),
@@ -399,6 +400,7 @@ mod tests {
                 },
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let registry = Registry::build(crate::registry::RegistryConfig {
             trust_chain: chain(),
@@ -458,6 +460,7 @@ mod tests {
                 attention: vec![MarkName::new("m1"), MarkName::new("m2")],
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let a1 = Authority {
             name: AuthorityName::new("a1"),
@@ -510,10 +513,11 @@ mod tests {
             tags: vec![],
             delta: Delta {
                 trust: None,
-                audience: Some(Audience::restricted([ReaderId::new("internal")])),
+                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")]))),
             },
             emits: vec![],
             requires: Requires::default(),
+            output_sanitizer: None,
         };
         let registry = Registry::build(crate::registry::RegistryConfig {
             trust_chain: chain(),

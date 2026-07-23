@@ -10,6 +10,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
+use tokio_util::sync::CancellationToken;
 
 use appa_engine::branch::BranchError;
 use appa_engine::projection::Projection;
@@ -74,9 +75,17 @@ async fn handle_completions(
         Err(SessionError::Store) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
-    match drive_turn(&rt, &tenant, &session, is_child, user_turn).await {
-        Ok(outcome) => completion_response(&session, is_child, outcome),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let token = CancellationToken::new();
+    let _disconnect_guard = token.clone().drop_guard();
+    let turn = {
+        let rt = rt.clone();
+        let tenant = tenant.clone();
+        let session = session.clone();
+        tokio::spawn(async move { drive_turn(&rt, &tenant, &session, is_child, user_turn, token).await })
+    };
+    match turn.await {
+        Ok(Ok(outcome)) => completion_response(&session, is_child, outcome),
+        Ok(Err(_)) | Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 

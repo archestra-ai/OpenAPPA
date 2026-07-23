@@ -76,12 +76,13 @@ impl Runtime {
         inference: Inference,
         builtin_tools: BTreeMap<ToolName, BuiltinTool>,
     ) -> Result<Runtime, InitError> {
-        Self::with_options(config, inference, builtin_tools, Vec::new(), Budgets::default())
+        let preamble = config.preamble().to_vec();
+        Self::with_options(config, inference, builtin_tools, preamble, Budgets::default())
     }
 
-    /// Assemble with an explicit server preamble and budgets — the wiring the north handler and tests
-    /// drive through.
-    pub fn with_options(
+    /// Assemble with an explicit preamble and budgets override — test wiring; production reads both
+    /// from config/defaults through [`Runtime::new`].
+    pub(crate) fn with_options(
         config: Config,
         inference: Inference,
         mut builtin_tools: BTreeMap<ToolName, BuiltinTool>,

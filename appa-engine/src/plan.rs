@@ -115,7 +115,7 @@ pub(crate) fn plan(registry: &Registry, views: &Views, call: &ResolvedCall, raw:
 fn directly_clearable(registry: &Registry, state: &State, call: &ResolvedCall) -> Option<Vec<RemedyStep>> {
     let contract = registry.tool(call.tool())?;
     let has_effect = |kind: &EffectKind| state.effects.contains(kind);
-    match check::evaluate_state(contract, &state.label, &has_effect, call) {
+    match check::evaluate_state(registry, contract, &state.label, &has_effect, call) {
         CheckOutcome::Allow => Some(Vec::new()),
         CheckOutcome::Unresolved(_) => None,
         CheckOutcome::Block(block) => {
@@ -138,7 +138,7 @@ fn directly_clearable(registry: &Registry, state: &State, call: &ResolvedCall) -
 fn prerequisite_runnable(registry: &Registry, state: &State, tool: &ToolContract) -> bool {
     let call = synthetic_call(tool);
     let has_effect = |kind: &EffectKind| state.effects.contains(kind);
-    match check::evaluate_state(tool, &state.label, &has_effect, &call) {
+    match check::evaluate_state(registry, tool, &state.label, &has_effect, &call) {
         CheckOutcome::Allow => true,
         CheckOutcome::Unresolved(_) => false,
         CheckOutcome::Block(block) => block
@@ -204,11 +204,11 @@ pub(crate) fn covers_gap(authority: &Authority, gap: &Gap, tags: &[TagName]) -> 
     }
 }
 
-fn transition(state: &State, tool: &ToolContract) -> State {
+fn transition(registry: &Registry, state: &State, tool: &ToolContract) -> State {
     let mut effects = state.effects.clone();
     effects.extend(tool.emits.iter().cloned());
     State {
-        label: tool.delta.apply(&state.label),
+        label: check::effective_delta(registry, tool).apply(&state.label),
         effects,
     }
 }
@@ -232,7 +232,7 @@ fn curable(registry: &Registry, state: &State, call: &ResolvedCall, visiting: &m
         if !prerequisite_runnable(registry, state, tool) {
             return false;
         }
-        let next = transition(state, tool);
+        let next = transition(registry, state, tool);
         next != *state && curable(registry, &next, call, visiting)
     });
     visiting.pop();
@@ -245,7 +245,7 @@ fn is_unresolved(registry: &Registry, state: &State, call: &ResolvedCall) -> boo
         Some(contract) => {
             let has_effect = |kind: &EffectKind| state.effects.contains(kind);
             matches!(
-                check::evaluate_state(contract, &state.label, &has_effect, call),
+                check::evaluate_state(registry, contract, &state.label, &has_effect, call),
                 CheckOutcome::Unresolved(_)
             )
         }
@@ -262,7 +262,7 @@ fn curative_redispatch(
         if !prerequisite_runnable(registry, start, tool) {
             continue;
         }
-        let next = transition(start, tool);
+        let next = transition(registry, start, tool);
         if next == *start {
             continue;
         }
@@ -281,7 +281,7 @@ fn redispatch_reason(tool: &ToolContract, raw: &RawBlock) -> String {
             Gap::Prior(kind) if tool.emits.contains(kind) => {
                 return format!("run {name} first to satisfy prior({})", kind.as_str());
             }
-            Gap::Cap { .. } if tool.delta.audience.is_some() => {
+            Gap::Cap { .. } if matches!(tool.delta.audience, Some(Dim::Known(_))) => {
                 return format!("run {name} first to narrow the audience within the cap");
             }
             _ => {}
@@ -338,7 +338,7 @@ mod tests {
         let trajectory = traj();
         let views = projection.view(&trajectory);
         let contract = registry.tool(call.tool()).unwrap();
-        let raw = match check::evaluate(contract, &views, call) {
+        let raw = match check::evaluate(registry, contract, &views, call) {
             CheckOutcome::Block(raw) => raw,
             other => panic!("expected a block, got {other:?}"),
         };
@@ -363,6 +363,7 @@ mod tests {
                 },
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let officer = Authority {
             name: AuthorityName::new("officer"),
@@ -402,6 +403,7 @@ mod tests {
                 },
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let registry = build(RegistryConfig {
             trust_chain: chain(),
@@ -424,10 +426,11 @@ mod tests {
             tags: vec![],
             delta: Delta {
                 trust: None,
-                audience: Some(Audience::restricted([ReaderId::new("internal")])),
+                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")]))),
             },
             emits: vec![],
             requires: Requires::default(),
+            output_sanitizer: None,
         };
         let registry = build(RegistryConfig {
             trust_chain: chain(),
@@ -453,6 +456,7 @@ mod tests {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let backup = ToolContract {
             name: ToolName::new("backup"),
@@ -460,6 +464,7 @@ mod tests {
             delta: Delta::NONE,
             emits: vec![EffectKind::new("backup.done")],
             requires: Requires::default(),
+            output_sanitizer: None,
         };
         let registry = build(RegistryConfig {
             trust_chain: chain(),
@@ -489,6 +494,7 @@ mod tests {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let registry = build(RegistryConfig {
             trust_chain: chain(),
@@ -513,6 +519,7 @@ mod tests {
                 attention: vec![MarkName::new("signoff")],
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let officer = Authority {
             name: AuthorityName::new("officer"),
@@ -550,6 +557,7 @@ mod tests {
                 attention: vec![MarkName::new("signoff")],
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let officer = Authority {
             name: AuthorityName::new("officer"),
@@ -582,6 +590,7 @@ mod tests {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("kb"))],
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let b = ToolContract {
             name: ToolName::new("b"),
@@ -592,6 +601,7 @@ mod tests {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("ka"))],
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let registry = build(RegistryConfig {
             trust_chain: chain(),
@@ -615,7 +625,7 @@ mod tests {
                 for state in states.clone() {
                     for tool in registry.tools() {
                         if prerequisite_runnable(registry, &state, tool) {
-                            let next = transition(&state, tool);
+                            let next = transition(registry, &state, tool);
                             if !states.contains(&next) {
                                 states.push(next);
                                 grew = true;
@@ -655,8 +665,8 @@ mod tests {
 
     fn a_delta() -> impl Strategy<Value = Delta> {
         (
-            prop::option::of((0u8..2).prop_map(Trust::new)),
-            prop::option::of(small_audience()),
+            prop::option::of((0u8..2).prop_map(|t| Dim::Known(Trust::new(t)))),
+            prop::option::of(small_audience().prop_map(Dim::Known)),
         )
             .prop_map(|(trust, audience)| Delta { trust, audience })
     }
@@ -710,6 +720,7 @@ mod tests {
                 delta,
                 emits,
                 requires,
+                output_sanitizer: None,
             },
         )
     }
@@ -763,23 +774,22 @@ mod tests {
                 if a.mandate.is_empty() { None } else { Some(a) }
             }).collect();
 
-            let registry = match Registry::build(RegistryConfig {
+            let built = Registry::build(RegistryConfig {
                 trust_chain: chain(),
                 tools,
                 authorities,
                 sanitizers: vec![],
                 casts: vec![],
-            }) {
-                Ok(registry) => registry,
-                Err(_) => return Ok(()), // skip configs that don't load
-            };
+            });
+            prop_assert!(built.is_ok(), "generated config must load: {:?}", built.err());
+            let registry = built.unwrap();
 
             let target = ToolName::new(format!("t{}", target % registry.tools().count().max(1)));
-            let Some(contract) = registry.tool(&target) else { return Ok(()); };
+            let contract = registry.tool(&target).expect("target is modulo the re-keyed tool count");
             let call = synthetic_call(contract);
 
             let has_effect = |kind: &EffectKind| state.effects.contains(kind);
-            let raw = match check::evaluate_state(contract, &state.label, &has_effect, &call) {
+            let raw = match check::evaluate_state(&registry, contract, &state.label, &has_effect, &call) {
                 CheckOutcome::Block(raw) => raw,
                 _ => return Ok(()),
             };

@@ -2,11 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::contract::Delta;
 use crate::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec, ToolContract};
 use crate::fact::EffectKind;
 use crate::label::{Adequacy, Audience, Dim, Dimension, Label, ReaderId, Trust};
 use crate::names::MarkName;
 use crate::projection::Views;
+use crate::registry::Registry;
 use crate::value::{ResolvedCall, ValueId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,18 +46,41 @@ pub enum CheckOutcome {
     Unresolved(Vec<UnresolvedFact>),
 }
 
-/// Evaluate one call against the branch views. Pure: a function of the contract, the views, and the
-/// resolved arguments.
-pub(crate) fn evaluate(contract: &ToolContract, views: &Views, call: &ResolvedCall) -> CheckOutcome {
+/// The contribution a successful call would actually fold. For an unbound tool that is its raw
+/// `delta`; a sanitizer-bound tool (RP4) folds the **bound derivation** instead, so its audience
+/// contribution is the sanitizer's declared `to` (trust untouched — never sanitizer territory).
+pub(crate) fn effective_delta(registry: &Registry, contract: &ToolContract) -> Delta {
+    match &contract.output_sanitizer {
+        None => contract.delta.clone(),
+        Some(name) => {
+            let sanitizer = registry
+                .sanitizer(name)
+                .expect("load validation: bound output sanitizer is registered");
+            Delta {
+                trust: contract.delta.trust.clone(),
+                audience: Some(Dim::Known(sanitizer.can_reduce.to.clone())),
+            }
+        }
+    }
+}
+
+/// Evaluate one call against the branch views. Pure: a function of the registry, the contract, the
+/// views, and the resolved arguments.
+pub(crate) fn evaluate(
+    registry: &Registry,
+    contract: &ToolContract,
+    views: &Views,
+    call: &ResolvedCall,
+) -> CheckOutcome {
     let current = views.current_label();
-    let committed = contract.delta.apply(&current);
+    let committed = effective_delta(registry, contract).apply(&current);
 
     let unresolved = unresolved_facts(views, &committed);
     if !unresolved.is_empty() {
         return CheckOutcome::Unresolved(unresolved);
     }
 
-    evaluate_state(contract, &current, &|kind| views.has_effect(kind), call)
+    evaluate_state(registry, contract, &current, &|kind| views.has_effect(kind), call)
 }
 
 /// The gap logic on an abstract `(current label, effect predicate)` state — the one place the two
@@ -64,12 +89,13 @@ pub(crate) fn evaluate(contract: &ToolContract, views: &Views, call: &ResolvedCa
 /// caller that has the values (the view path) details them; the state-only search treats it as a
 /// dead end (unresolved resolution is a cast path, outside the reachability subset).
 pub(crate) fn evaluate_state(
+    registry: &Registry,
     contract: &ToolContract,
     current: &Label,
     has_effect: &impl Fn(&EffectKind) -> bool,
     call: &ResolvedCall,
 ) -> CheckOutcome {
-    let committed = contract.delta.apply(current);
+    let committed = effective_delta(registry, contract).apply(current);
     if matches!(committed.trust, Dim::Unknown) || matches!(committed.audience, Dim::Unknown) {
         return CheckOutcome::Unresolved(Vec::new());
     }

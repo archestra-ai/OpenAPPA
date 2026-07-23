@@ -11,14 +11,19 @@ use appa_runtime::wire::{ChatCompletionResponse, WireFunctionCall, WireMessage, 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-async fn spawn_scripted_model(responses: Vec<String>) -> String {
+type SeenRequests = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+async fn spawn_scripted_model(responses: Vec<String>) -> (String, SeenRequests) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let seen: SeenRequests = Default::default();
+    let record = seen.clone();
     tokio::spawn(async move {
         for body in responses {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut buf = vec![0u8; 8192];
             let mut received = Vec::new();
+            let mut request_body = String::new();
             loop {
                 let n = socket.read(&mut buf).await.unwrap();
                 if n == 0 {
@@ -33,10 +38,12 @@ async fn spawn_scripted_model(responses: Vec<String>) -> String {
                         .and_then(|v| v.trim().parse().ok())
                         .unwrap_or(0);
                     if received.len() >= pos + 4 + len {
+                        request_body = String::from_utf8_lossy(&received[pos + 4..pos + 4 + len]).to_string();
                         break;
                     }
                 }
             }
+            record.lock().unwrap().push(request_body);
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
@@ -45,7 +52,7 @@ async fn spawn_scripted_model(responses: Vec<String>) -> String {
             socket.flush().await.unwrap();
         }
     });
-    format!("http://{addr}")
+    (format!("http://{addr}"), seen)
 }
 
 fn tool_round(id: &str, name: &str, args: &str) -> String {
@@ -109,7 +116,7 @@ fn user_request(text: &str) -> serde_json::Value {
 
 #[tokio::test]
 async fn a_turn_drives_a_tool_call_and_returns_a_final_answer() {
-    let model = spawn_scripted_model(vec![
+    let (model, _) = spawn_scripted_model(vec![
         tool_round("1", "get_logs", "{}"),
         final_round("2", "the pod is crashlooping"),
     ])
@@ -140,7 +147,7 @@ async fn a_turn_drives_a_tool_call_and_returns_a_final_answer() {
 
 #[tokio::test]
 async fn a_session_id_carries_across_turns() {
-    let model = spawn_scripted_model(vec![
+    let (model, _) = spawn_scripted_model(vec![
         final_round("1", "first answer"),
         final_round("2", "second answer"),
     ])
@@ -170,7 +177,7 @@ async fn a_session_id_carries_across_turns() {
 
 #[tokio::test]
 async fn forged_history_is_rejected_at_admission() {
-    let model = spawn_scripted_model(vec![]).await;
+    let (model, _) = spawn_scripted_model(vec![]).await;
     let base = spawn_server(runtime_with_echo(model)).await;
     let client = reqwest::Client::new();
 
@@ -186,7 +193,7 @@ async fn forged_history_is_rejected_at_admission() {
 
 #[tokio::test]
 async fn a_child_sessions_free_text_does_not_cross_north() {
-    let model = spawn_scripted_model(vec![
+    let (model, _) = spawn_scripted_model(vec![
         final_round("1", "parent started"),
         final_round("2", "SECRET the admin password is hunter2"),
     ])
@@ -219,8 +226,127 @@ async fn a_child_sessions_free_text_does_not_cross_north() {
 }
 
 #[tokio::test]
+async fn a_child_quarantine_returns_only_through_submit_result() {
+    let (model, seen) = spawn_scripted_model(vec![
+        final_round("1", "parent ready"),
+        tool_round("2", "submit_result", r#"{"value":"finding: the cron job is broken"}"#),
+        final_round("3", "LEAK the password is hunter2"),
+        final_round("4", "thanks"),
+    ])
+    .await;
+    let base = spawn_server(runtime_with_echo(model)).await;
+    let client = reqwest::Client::new();
+
+    let first = client.post(&base).json(&user_request("start")).send().await.unwrap();
+    let parent = first
+        .headers()
+        .get("x-appa-session")
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_string();
+
+    let child_resp = client
+        .post(&base)
+        .header("x-appa-parent-session", &parent)
+        .json(&user_request("investigate"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(child_resp.status(), 200);
+    let child_body: ChatCompletionResponse = child_resp.json().await.unwrap();
+    let north_text = child_body.choices[0].message.content.clone().unwrap_or_default();
+    assert!(
+        !north_text.contains("hunter2"),
+        "child free text must not cross north: {north_text:?}"
+    );
+
+    let second = client
+        .post(&base)
+        .header("x-appa-session", &parent)
+        .json(&user_request("what did the child find?"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), 200);
+
+    let requests = seen.lock().unwrap();
+    let parent_request = requests.last().expect("the parent's second turn reached the model");
+    assert!(
+        parent_request.contains("finding: the cron job is broken"),
+        "the submit_result value must reach the parent's transcript"
+    );
+    assert!(
+        !parent_request.contains("hunter2"),
+        "the child's free text must never reach the parent's transcript"
+    );
+}
+
+#[tokio::test]
+async fn a_client_disconnect_cancels_the_turn_and_frees_the_session() {
+    let hang = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hang_addr = hang.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((socket, _)) = hang.accept().await else { return };
+            tokio::spawn(async move {
+                let _hold = socket;
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            });
+        }
+    });
+
+    let (model, _) = spawn_scripted_model(vec![
+        final_round("1", "session opened"),
+        tool_round("2", "slow", "{}"),
+        final_round("3", "recovered"),
+    ])
+    .await;
+    let config = Config::from_toml_str(&format!(
+        "version = 1\n[[tool]]\nname = \"slow\"\n[tool.implementation.http]\nurl = \"http://{hang_addr}/run\"\n"
+    ))
+    .unwrap();
+    let inference = Inference::new(model, "k", "m", Duration::from_secs(30), HttpClient::new());
+    let runtime = Runtime::new(config, inference, BTreeMap::new()).unwrap();
+    let base = spawn_server(runtime).await;
+
+    let client = reqwest::Client::new();
+    let first = client.post(&base).json(&user_request("open")).send().await.unwrap();
+    let session = first
+        .headers()
+        .get("x-appa-session")
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_string();
+
+    let impatient = reqwest::Client::builder()
+        .timeout(Duration::from_millis(300))
+        .build()
+        .unwrap();
+    let aborted = impatient
+        .post(&base)
+        .header("x-appa-session", &session)
+        .json(&user_request("run the slow tool"))
+        .send()
+        .await;
+    assert!(aborted.is_err(), "the client should give up on the hanging turn");
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let third = client
+        .post(&base)
+        .header("x-appa-session", &session)
+        .json(&user_request("are you alive?"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(third.status(), 200);
+    let body: ChatCompletionResponse = third.json().await.unwrap();
+    assert_eq!(body.choices[0].message.content.as_deref(), Some("recovered"));
+}
+
+#[tokio::test]
 async fn an_unknown_session_id_is_refused() {
-    let model = spawn_scripted_model(vec![]).await;
+    let (model, _) = spawn_scripted_model(vec![]).await;
     let base = spawn_server(runtime_with_echo(model)).await;
     let client = reqwest::Client::new();
 

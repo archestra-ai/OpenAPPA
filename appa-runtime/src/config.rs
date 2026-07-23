@@ -32,6 +32,7 @@ use appa_engine::registry::{LoadError, Registry, RegistryConfig, TrustChain};
 use appa_engine::value::ToolName;
 
 use crate::external::{BuiltinAuthority, BuiltinSanitizer};
+use crate::wire::WireMessage;
 
 const SUPPORTED_VERSION: u32 = 1;
 const DEFAULT_TRUST_CHAIN: [&str; 2] = ["suspicious", "trusted"];
@@ -48,6 +49,8 @@ pub enum ConfigError {
     UnsupportedVersion { found: u32 },
     #[error("unknown trust rank {name:?} in {context} (not in the trust chain)")]
     UnknownTrustRank { name: String, context: String },
+    #[error("trust rank name \"unknown\" is reserved: it declares a pending-cast delta dimension")]
+    ReservedRankName,
     #[error("bad reader set in {context}: {reason}")]
     BadAudience { context: String, reason: String },
     #[error("bad sanitizer point {token:?}: expected \"tool_input\" or \"tool_output\"")]
@@ -64,6 +67,8 @@ pub enum ConfigError {
     TimeoutOutOfRange { found: u64, context: String },
     #[error("unknown {kind} builtin {name:?} (not a compiled-in implementation)")]
     UnknownBuiltin { kind: &'static str, name: String },
+    #[error("bad preamble role {found:?}: only \"system\" and \"developer\" may head the transcript")]
+    BadPreambleRole { found: String },
     #[error("registry rejected: {0}")]
     Registry(#[from] LoadError),
 }
@@ -110,6 +115,8 @@ pub struct Config {
     sanitizer_impls: BTreeMap<SanitizerName, SanitizerImpl>,
     cast_impls: BTreeMap<CastName, CastImpl>,
     tool_impls: BTreeMap<ToolName, ToolImpl>,
+    child_return_sanitizer: Option<SanitizerName>,
+    preamble: Vec<WireMessage>,
 }
 
 impl Config {
@@ -125,6 +132,10 @@ impl Config {
         };
         // Validate the chain up front so `parse_trust` never truncates a rank index into a u8.
         trust_chain.validate()?;
+        // "unknown" in a trust position is the pending-cast token, never a rank name.
+        if trust_chain.rank_of(UNKNOWN_TOKEN).is_some() {
+            return Err(ConfigError::ReservedRankName);
+        }
 
         let boundary_label = match raw.boundary {
             Some(b) => b.convert(&trust_chain)?,
@@ -177,6 +188,37 @@ impl Config {
         // Run the engine's algebraic load lints now, so a returned Config is always loadable.
         let registry = Registry::build(registry_config.clone())?;
 
+        // The child return sanitizer binds like a tool's output sanitizer: registered, output-point.
+        let child_return_sanitizer = match raw.child {
+            None => None,
+            Some(child) => {
+                let name = SanitizerName::new(child.return_sanitizer);
+                match registry.sanitizer(&name) {
+                    Some(s) if s.on.output => Some(name),
+                    Some(_) => {
+                        return Err(ConfigError::BadImplementation {
+                            kind: "child return_sanitizer",
+                            name: name.as_str().to_string(),
+                            reason: "not registered for tool output".to_string(),
+                        });
+                    }
+                    None => {
+                        return Err(ConfigError::BadImplementation {
+                            kind: "child return_sanitizer",
+                            name: name.as_str().to_string(),
+                            reason: "no such sanitizer".to_string(),
+                        });
+                    }
+                }
+            }
+        };
+
+        let preamble = raw
+            .preamble
+            .into_iter()
+            .map(RawPreamble::convert)
+            .collect::<Result<Vec<_>, _>>()?;
+
         Ok(Config {
             registry,
             registry_config,
@@ -185,6 +227,8 @@ impl Config {
             sanitizer_impls,
             cast_impls,
             tool_impls,
+            child_return_sanitizer,
+            preamble,
         })
     }
 
@@ -210,6 +254,14 @@ impl Config {
         self.sanitizer_impls.get(name)
     }
 
+    pub fn child_return_sanitizer(&self) -> Option<&SanitizerName> {
+        self.child_return_sanitizer.as_ref()
+    }
+
+    pub fn preamble(&self) -> &[WireMessage] {
+        &self.preamble
+    }
+
     pub fn cast_impl(&self, name: &CastName) -> Option<&CastImpl> {
         self.cast_impls.get(name)
     }
@@ -233,6 +285,34 @@ struct RawConfig {
     sanitizer: Vec<RawSanitizer>,
     #[serde(default)]
     cast: Vec<RawCast>,
+    child: Option<RawChild>,
+    #[serde(default)]
+    preamble: Vec<RawPreamble>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPreamble {
+    role: String,
+    content: String,
+}
+
+impl RawPreamble {
+    fn convert(self) -> Result<WireMessage, ConfigError> {
+        match self.role.as_str() {
+            "system" => Ok(WireMessage::system(self.content)),
+            "developer" => Ok(WireMessage::developer(self.content)),
+            other => Err(ConfigError::BadPreambleRole {
+                found: other.to_string(),
+            }),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawChild {
+    return_sanitizer: String,
 }
 
 #[derive(Deserialize)]
@@ -275,6 +355,7 @@ struct RawTool {
     #[serde(default)]
     effects: Vec<String>,
     implementation: Option<RawToolImpl>,
+    output_sanitizer: Option<String>,
 }
 
 impl RawTool {
@@ -296,6 +377,7 @@ impl RawTool {
                 delta,
                 emits: self.effects.into_iter().map(EffectKind::new).collect(),
                 requires,
+                output_sanitizer: self.output_sanitizer.map(SanitizerName::new),
             },
             imp,
         ))
@@ -328,18 +410,40 @@ struct RawHttp {
 #[serde(deny_unknown_fields)]
 struct RawDelta {
     trust: Option<String>,
-    audience: Option<RawExactly>,
+    audience: Option<RawDeltaAudience>,
 }
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawDeltaAudience {
+    Token(String),
+    Exactly(RawExactly),
+}
+
+const UNKNOWN_TOKEN: &str = "unknown";
 
 impl RawDelta {
     fn convert(self, chain: &TrustChain, ctx: &str) -> Result<Delta, ConfigError> {
-        Ok(Delta {
-            trust: self.trust.map(|t| parse_trust(&t, chain, ctx)).transpose()?,
-            audience: self
-                .audience
-                .map(|a| parse_audience(&a.exactly, &format!("{ctx} delta audience")))
-                .transpose()?,
-        })
+        let trust = match self.trust.as_deref() {
+            Some(UNKNOWN_TOKEN) => Some(Dim::Unknown),
+            Some(name) => Some(Dim::Known(parse_trust(name, chain, ctx)?)),
+            None => None,
+        };
+        let audience = match self.audience {
+            Some(RawDeltaAudience::Token(token)) if token == UNKNOWN_TOKEN => Some(Dim::Unknown),
+            Some(RawDeltaAudience::Token(token)) => {
+                return Err(ConfigError::BadAudience {
+                    context: format!("{ctx} delta audience"),
+                    reason: format!("expected {{ exactly = [...] }} or \"unknown\", found {token:?}"),
+                });
+            }
+            Some(RawDeltaAudience::Exactly(a)) => Some(Dim::Known(parse_audience(
+                &a.exactly,
+                &format!("{ctx} delta audience"),
+            )?)),
+            None => None,
+        };
+        Ok(Delta { trust, audience })
     }
 }
 
@@ -867,7 +971,7 @@ resolver = { channel = "hitl" }
         let get = reg.tool(&ToolName::new("get_ticket_from_crm")).expect("tool present");
         assert_eq!(
             get.delta.audience,
-            Some(Audience::restricted([ReaderId::new("internal")]))
+            Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])))
         );
         assert_eq!(get.requires.label.trust_floor, Some(Trust::new(1)));
 
@@ -1018,6 +1122,96 @@ resolver = { url = "https://c/resolve", timeout_ms = 10000, may_cast = { trust =
         assert!(matches!(
             err("version = 1\n[[tool]]\nname = \"t\"\nrequires = { trust = \"godmode\" }\n"),
             ConfigError::UnknownTrustRank { name, .. } if name == "godmode"
+        ));
+    }
+
+    #[test]
+    fn unknown_token_declares_a_pending_cast_dimension() {
+        let cfg = Config::from_toml_str(
+            "version = 1\n[[tool]]\nname = \"scan\"\ndelta = { trust = \"unknown\" }\n\
+             [[tool]]\nname = \"probe\"\ndelta = { audience = \"unknown\" }\n",
+        )
+        .unwrap();
+        let reg = cfg.registry();
+        let scan = reg.tool(&ToolName::new("scan")).unwrap();
+        assert_eq!(scan.delta.trust, Some(Dim::Unknown));
+        let probe = reg.tool(&ToolName::new("probe")).unwrap();
+        assert_eq!(probe.delta.audience, Some(Dim::Unknown));
+    }
+
+    const PII: &str = r#"
+[[sanitizer]]
+name = "pii"
+on   = ["tool_output"]
+[sanitizer.can_reduce]
+audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+[sanitizer.implementation]
+builtin = "redact-email"
+"#;
+
+    #[test]
+    fn tool_output_sanitizer_binding_parses_and_validates() {
+        let cfg = Config::from_toml_str(&format!(
+            "version = 1\n[[tool]]\nname = \"export\"\ndelta = {{ audience = {{ exactly = [\"internal\"] }} }}\noutput_sanitizer = \"pii\"\n{PII}"
+        ))
+        .unwrap();
+        let export = cfg.registry().tool(&ToolName::new("export")).unwrap();
+        assert_eq!(export.output_sanitizer, Some(SanitizerName::new("pii")));
+
+        assert!(matches!(
+            err("version = 1\n[[tool]]\nname = \"export\"\noutput_sanitizer = \"ghost\"\n"),
+            ConfigError::Registry(LoadError::UnknownOutputSanitizer { .. })
+        ));
+    }
+
+    #[test]
+    fn child_return_sanitizer_must_be_a_registered_output_sanitizer() {
+        let cfg = Config::from_toml_str(&format!("version = 1\n[child]\nreturn_sanitizer = \"pii\"\n{PII}")).unwrap();
+        assert_eq!(cfg.child_return_sanitizer(), Some(&SanitizerName::new("pii")));
+
+        assert!(matches!(
+            err("version = 1\n[child]\nreturn_sanitizer = \"ghost\"\n"),
+            ConfigError::BadImplementation {
+                kind: "child return_sanitizer",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn preamble_parses_ordered_system_and_developer_messages() {
+        let cfg = Config::from_toml_str(
+            "version = 1\n[[preamble]]\nrole = \"system\"\ncontent = \"you are confined\"\n\
+             [[preamble]]\nrole = \"developer\"\ncontent = \"cite sources\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.preamble(),
+            &[
+                WireMessage::system("you are confined"),
+                WireMessage::developer("cite sources")
+            ]
+        );
+
+        assert!(matches!(
+            err("version = 1\n[[preamble]]\nrole = \"user\"\ncontent = \"hi\"\n"),
+            ConfigError::BadPreambleRole { found } if found == "user"
+        ));
+    }
+
+    #[test]
+    fn a_trust_rank_named_unknown_is_reserved() {
+        assert!(matches!(
+            err("version = 1\ntrust_chain = [\"unknown\", \"trusted\"]\n"),
+            ConfigError::ReservedRankName
+        ));
+    }
+
+    #[test]
+    fn a_bare_delta_audience_string_other_than_unknown_is_rejected() {
+        assert!(matches!(
+            err("version = 1\n[[tool]]\nname = \"t\"\ndelta = { audience = \"internal\" }\n"),
+            ConfigError::BadAudience { .. }
         ));
     }
 

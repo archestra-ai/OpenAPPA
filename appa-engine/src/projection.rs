@@ -89,8 +89,7 @@ impl Projection {
                 }
                 Fact::Ruling { .. } | Fact::Acceptance { .. } => {}
                 Fact::AssistantMessage { .. } | Fact::BlockFeedback { .. } => {}
-                // Sanitizer application is audit only — the admitted value carries its own label.
-                Fact::SanitizerApplied { .. } => {}
+                Fact::SanitizerApplied { .. } | Fact::OutputCastApplied { .. } => {}
                 Fact::ChildReturn { id, value, .. } => child_returns.push(ReturnedChild {
                     id: id.clone(),
                     value: value.clone(),

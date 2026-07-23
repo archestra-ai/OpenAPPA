@@ -9,6 +9,7 @@ use crate::projection::Views;
 use crate::registry::Registry;
 use crate::value::{ChildReturnId, LabeledValue, Provenance, TrajectoryId, ValueBody};
 
+#[derive(Clone)]
 pub enum ChildReturn {
     Raw { body: ValueBody },
     Sanitized { body: ValueBody, sanitizer: SanitizerName },

@@ -53,6 +53,15 @@ impl WireMessage {
         }
     }
 
+    pub fn developer(content: impl Into<String>) -> Self {
+        WireMessage {
+            role: "developer".to_string(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
     pub fn assistant(content: impl Into<String>) -> Self {
         WireMessage {
             role: "assistant".to_string(),
