@@ -21,7 +21,7 @@ We will execute AgentDojo injection tasks where the attacker controls child-visi
   \item schema-conforming semantic data exfiltration, and
   \item history erasure via abandonment.
 \end{enumerate}
-We will report attack success rates and the specific structural check that blocked each attempt. Branching is designed to increase utility without weakening sink enforcement; schema-only exits are expected by design to fail against semantic data exfiltration unless supported by a trusted attestation~\cite{sabelfeld2009declassification}.
+We will report attack success rates and the specific structural check that blocked each attempt. Branching is designed to increase utility without weakening sink enforcement; schema-only exits are expected by design to fail against semantic data exfiltration unless supported by a trusted exit assertion~\cite{sabelfeld2009declassification}.
 
 \paragraph{Baselines and ablations.}
 We will compare:
@@ -39,7 +39,7 @@ An abandon-only bounded-exit ablation will isolate the utility of execution isol
 Alongside standard task utility and injection attack success rates, we will measure parent-label descents avoided, post-acquisition benign actions completed, branches created, abandoned, and merged, exit rejections, authority interventions, and token and latency overhead per branch. Both security and utility metrics must be reported, as preventing label creep represents a primary utility benefit under strict enforcement.
 
 \paragraph{Case study.}
-We will evaluate the CRM/invoice scenario from \S\ref{sec:branching} end-to-end using the engine implementation and publish its policy contracts, parent/child label traces, shared event log, injected payload, exit attestation, and post-merge benign execution trace.
+We will evaluate the CRM/invoice scenario from \S\ref{sec:branching} end-to-end using the engine implementation and publish its policy contracts, parent/child label traces, shared event log, injected payload, exit assertion, and post-merge benign execution trace.
 
 \paragraph{Secondary study.}
 We will annotate $k$ risky tools, classify all remaining tools as \texttt{Unknown}, and perform a parameter sweep over the cast policy space. This study remains secondary to the branch evaluation: incremental tool annotation provides supporting machinery rather than the core contribution.

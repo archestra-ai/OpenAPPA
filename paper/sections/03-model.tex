@@ -29,7 +29,7 @@ For every child trace beginning at a fork, $L_c \le L_p^{\mathrm{fork}}$, and ev
 \begin{definition}[Taint-preventing branch]
 A branch is taint-preventing when it is abandoned or exits under the adequacy relation $L_p \le \lab(v)$.
 \end{definition}
-Returning an un-sanitized restrictive raw value maintains safety but propagates restrictions back to the parent trajectory, requiring re-evaluation against the prospective acquisition policy. Proof in Appendix~\ref{app:proofs} follows from locality of the child fold and the meet laws.
+Returning an un-sanitized restrictive raw value maintains safety but propagates restrictions back to the parent trajectory, requiring re-evaluation against the pre-read acquisition policy. Proof in Appendix~\ref{app:proofs} follows from locality of the child fold and the meet laws.
 
 \paragraph{The log monoid.}
 The log is modeled as the free monoid over events under concatenation~\cite{pierce2002types}, where events are appended at dispatch without separate approval phases. Events fall into two primary categories:
