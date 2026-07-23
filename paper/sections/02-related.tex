@@ -49,26 +49,9 @@ The provenance taxonomy by Wang et al.\ categorizes typed execution graphs, runt
 \paragraph{Security and prompt-injection benchmarks.}
 AgentDojo provides realistic user tasks, injection benchmarks, tool suites, and an extensible defense framework~\cite{debenedettiAgentDojoDynamicEnvironment2024}. It serves as both the evaluation environment for \appa{} and the foundation for comparative evaluation against Fides. Benchmarks like TaintBench focus on post-hoc propagation detection~\cite{caiGhostAgentRedefining2026}, addressing a distinct problem from real-time policy enforcement.
 
-\paragraph{Classical IFC.}
-Lattice models~\cite{denning1976lattice} and noninterference semantics~\cite{goguen1982security} establish the information-flow principles inherited by \appa{}. In agentic environments, long-lived planner contexts are vulnerable to label creep, which can permanently degrade agent capabilities~\cite{fides,sabelfeld2003language}. Establishing an explicit child trajectory prior to a restrictive read isolates data acquisition in a disposable context, avoiding irreversible restriction of the main planner context.
+\paragraph{Theoretical foundations.}
+\appa{} inherits foundational information-flow control (IFC) principles, including lattice models~\cite{denning1976lattice}, noninterference semantics~\cite{goguen1982security}, least privilege at the trajectory level~\cite{saltzer1975protection}, and decentralized label reader sets~\cite{myers1997dlm}. Its sanitization and endorsement mechanisms mirror the dimensions of robust declassification~\cite{sabelfeld2009declassification,zdancewic2001robust}. The underlying state dimensions draw structure from graded monads~\cite{katsumata2014graded}, authorization rulings act as single-use resources following linear logic principles~\cite{wadler1990linear}, and unclassified types (\emph{Unknown}) are treated via gradual information-flow typing~\cite{disney2011gradual,fennell2013gradual} akin to type narrowing in partially annotated Python (\texttt{mypy}) or TypeScript.
 
-\paragraph{Decentralized labels and reader sets.}
-Structuring audiences as reader sets draws from the decentralized label model~\cite{myers1997dlm}, where security rulings symbolically bind principal groups and resolve membership dynamically during policy evaluation.
-
-\paragraph{Declassification.}
-The dimensions of declassification outlined by Sabelfeld and Sands~\cite{sabelfeld2009declassification} correspond to \appa{}'s sanitization (what) and approval/endorsement (who) mechanisms. The ruling discipline targets robust declassification~\cite{zdancewic2001robust}, adapted to agentic execution flows (\S\ref{sec:rulings}).
-
-\paragraph{Least privilege.}
-\appa{}'s state-acquisition check applies the principle of least privilege~\cite{saltzer1975protection} at the trajectory level.
-
-\paragraph{Graded and parametric effect structure.}
-The state dimension interface (carrier, ordered action monoid, and adequacy relation) is structured after graded monads~\cite{katsumata2014graded}. However, this interface is deliberately excluded from runtime extension: while policy folds can be property-tested, the security semantics of new dimensions require static engineering review rather than dynamic registration.
-
-\paragraph{Gradual typing for security.}
-Following gradual information-flow typing~\cite{disney2011gradual,fennell2013gradual}, unclassified types (\emph{Unknown}) are treated as unadmitted states rather than lattice elements, and boundary casts handle unclassified inputs explicitly. This parallels type checking in partially annotated Python (e.g., \texttt{mypy}, \texttt{pyright}) and TypeScript codebases, where unannotated boundaries yield \texttt{Unknown} (or \texttt{unknown}) values that cannot implicitly flow into typed contexts without explicit runtime narrowing or boundary casts.
-
-\paragraph{Linearity.}
-In \appa{}, rulings function as single-use resources in line with linear logic principles~\cite{wadler1990linear}: an authorization ruling is consumed immediately upon the dispatch of its corresponding action (\S\ref{sec:rulings}).
 
 \paragraph{Agent security and structural isolation.}
 Architecture patterns such as Dual LLMs~\cite{willison2023dual} and CaMeL~\cite{camel2025} establish structural isolation and prompt sandboxing for agent security. A key practical limitation of CaMeL and related structural approaches is that they require fully reworking the execution harness to enforce advance planning, multi-role agent decomposition, and custom control-data pipelines. In contrast, \appa{} integrates with standard execution harnesses by requiring the host application to explicitly establish and drive child sessions when executing isolated trajectories, alongside tool dispatch hooks for policy checks and sanitizer execution. By combining prospective label checks with formal fork, exit, and shared-history invariants for host-driven child trajectories, \appa{} prevents taint accumulation in the main execution path while remaining embeddable in standard real-world agent deployments without altering the core planner. Imperative guardrails and prompt filters focus primarily on content filtering~\cite{inan2023llama,zou2023universal}, whereas concerns regarding approval fatigue in human-in-the-loop systems~\cite{akhawe2013alice} motivate \appa{}'s automated candidate plan generation.
