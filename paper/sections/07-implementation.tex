@@ -1,18 +1,9 @@
 \section{Implementation}\label{sec:implementation}
 
-APPA is divided into two distinct layers. The inner layer is a pure algebra that exposes \texttt{check(state, call)} $\mathbin{\to}$ \texttt{verdict} and \texttt{apply(state, call)} $\mathbin{\to}$ \texttt{state'}, performing no I/O operations and remaining independent of system time. Semantically, it evaluates decisions as a pure function of the complete event log, rendering every decision fully deterministic and replayable~\cite{schneider2000enforceable,wangAgentTracesTrust2026}. For state transmission, the implementation passes homomorphic views:
-\begin{itemize}
-  \item the folded state,
-  \item seen event kinds,
-  \item pending-plan records, and
-  \item boundary positions---
-\end{itemize}
-which remains sound because each view is itself constructed as a fold~\cite{pierce2002types}.
-
-The outer layer manages state persistence and system context. It handles durable append operations via pluggable storage backends (such as local files or databases), serialization, trajectory tree maintenance, and the dispatch-atomicity obligations assumed by the threat model. It creates child contexts, maintains their state isolated from the parent context, folds security labels independently across trajectories, and validates the return label prior to executing a \texttt{merge}. These guarantees are core security obligations enforced directly by the branch manager, rather than optional checks left to test harness authors.
+\appa{} is implemented in two decoupled layers: an inner pure algebraic core that evaluates policy decisions deterministically over event log folds~\cite{schneider2000enforceable,wangAgentTracesTrust2026}, and an outer runtime that manages state persistence, context isolation, and dispatch hooks. State views (such as folded labels and pending plans) are passed homomorphically as log folds~\cite{pierce2002types}. The outer layer creates disposable child contexts, maintains trajectory isolation, and enforces return-label validation prior to merges.
 
 \paragraph{Harness embeddability.}
-Whereas structural frameworks like CaMeL demand a full architectural rewrite of the agent harness to enforce advance planning or multi-role pipelines~\cite{camel2025}, and capability-safe language harnesses require agents to generate statically checked code (e.g., TACIT~\cite{odersky2026tracking}), \appa{} is designed for surgical embedding into standard single- or multi-agent runtimes. The integration surface requires only two pre-dispatch interceptor hooks: (1) branch lifecycle hooks to fork disposable contexts or merge/abandon results, and (2) sanitizer hooks to apply registered derivative functions. Because the underlying agent planner loop remains unmodified, \appa{} operates as a lightweight, embeddable middleware in existing real-world deployments.
+Unlike frameworks requiring full harness rewrites~\cite{camel2025} or static capture checking~\cite{odersky2026tracking}, \appa{} embeds surgically into standard runtimes via two pre-dispatch interceptor hooks: (1)~branch lifecycle hooks (\texttt{fork}, \texttt{merge}, \texttt{abandon}), and (2)~sanitizer hooks for output transformations. Operating as a lightweight middleware, \appa{} leaves the underlying agent planning loop unmodified.
 
 The implementation prioritizes type invariants: invariants governing state transitions are enforced statically through the host language's type system~\cite{pierce2002types}, while external labels and authority decisions are treated as trusted inputs. When interfacing with partially annotated tool suites or host environments in Python or TypeScript, unannotated tool parameters default to \texttt{Unknown} and must pass through explicit boundary validators or cast resolvers before participating in label arithmetic. As an architectural design principle rather than a formal model claim, the policy checker avoids ad-hoc conditional logic; it restricts operations to label arithmetic and log predicates, delegating imperative execution to registered external components.
 
