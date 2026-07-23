@@ -4,7 +4,7 @@
 \appa{} prevents parent context degradation by confining restrictive descents to disposable child branches, respecting the non-reversibility of trajectory taint once data enters an LLM context~\cite{caiGhostAgentRedefining2026}. Delegating restrictive data acquisitions to a child branch isolates label descents locally, leaving the primary parent trajectory untainted without asserting that the child process itself is untainted.
 
 \paragraph{Deployment requirement.}
-Branching requires an execution environment capable of isolating context trajectories (e.g., an application harness or proxy gateway). While baseline label enforcement (\S\ref{sec:enforcement}) operates in standard gateways, features such as host-managed context branching and output sanitization rely on runtime context confinement.
+While context branching and sub-agent orchestration are common operational capabilities in modern agent harnesses, \appa{} introduces a governance protocol that repurposes context branching specifically for label-based taint confinement. Branching requires an execution environment capable of isolating context trajectories (e.g., an application harness or proxy gateway). While baseline label enforcement (\S\ref{sec:enforcement}) operates in standard gateways, features such as host-managed context branching and output sanitization rely on runtime context confinement.
 
 \subsection{Host branching protocol}
 \appa{} models branching as a host-managed protocol surrounding engine enforcement:
