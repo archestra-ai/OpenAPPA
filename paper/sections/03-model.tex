@@ -26,8 +26,8 @@ Labels are trajectory-local, whereas the event log is globally shared. A \texttt
 \begin{proposition}[Parent preservation]\label{prop:preservation}
 For every child trace beginning at a fork, $L_c \le L_p^{\mathrm{fork}}$, and every child action leaves the parent's label unchanged. Trajectory abandonment therefore preserves the parent state exactly. A merge computes $L_p' = L_p \meet \lab(v)$, which cannot widen the parent label and preserves it exactly if and only if $L_p \le \lab(v)$.
 \end{proposition}
-\begin{definition}[Taint-preventing branch]
-A branch is taint-preventing when it is abandoned or exits under the adequacy relation $L_p \le \lab(v)$.
+\begin{definition}[Taint-confining branch]
+A branch is taint-confining when it is abandoned or exits under the adequacy relation $L_p \le \lab(v)$.
 \end{definition}
 Returning an un-sanitized restrictive raw value maintains safety but propagates restrictions back to the parent trajectory, requiring re-evaluation against the pre-read acquisition policy. Proof in Appendix~\ref{app:proofs} follows from locality of the child fold and the meet laws.
 

@@ -10,7 +10,7 @@ The primary point of comparison between the two systems is how they mitigate lab
   \item returning a registered derivative value, or
   \item declining the execution.
 \end{itemize}
-A child branch inherits the parent label, exit conditions undergo explicit merge checks, and the real-world execution log remains shared. Furthermore, while Fides's policy model permits potential confidentiality gaps when calls originate from high-integrity contexts~\cite{fides}, \appa{} models discretionary exceptions through atomic authorization rulings over explicitly rendered tool calls while preserving underlying labels. The primary contribution of \appa{} lies in its branching-as-taint-prevention mechanism and its associated fork, exit, and shared-history invariants, rather than in deterministic IFC itself. Table~\ref{tab:systems} compares \appa{} with closely related systems.
+A child branch inherits the parent label, exit conditions undergo explicit merge checks, and the real-world execution log remains shared. Furthermore, while Fides's policy model permits potential confidentiality gaps when calls originate from high-integrity contexts~\cite{fides}, \appa{} models discretionary exceptions through atomic authorization rulings over explicitly rendered tool calls while preserving underlying labels. The primary contribution of \appa{} lies in its branching-based taint confinement mechanism and its associated fork, exit, and shared-history invariants, rather than in deterministic IFC itself. Table~\ref{tab:systems} compares \appa{} with closely related systems.
 
 \begin{table*}[t]
   \caption{Trajectory-taint strategies of the closest systems.}

@@ -24,7 +24,7 @@ directly on this premise. Rather than claiming deterministic IFC enforcement or
 selective variable hiding as novelties, \appa{} asks whether a restrictive read
 can be explored without tainting the long-lived planner trajectory at all.
 
-To resolve this tension, \appa{} introduces \emph{branching as taint prevention} alongside \emph{prospective enforcement}. Rather than waiting for sensitive data to reach an external sink or permanently degrading the primary planner context upon a restrictive read, \appa{} intercepts prospective label descents prior to tool execution. When an agent needs to acquire or inspect restrictive data, \appa{} can fork a temporary, disposable child trajectory that inherits the parent's context and carries the permission narrowing locally. The child branch inspects the data and executes intermediate reasoning or tool calls under its descended label, while the parent trajectory remains unaffected at its original permission level. If the branch terminates or is abandoned, the parent process retains its broader access rights without context taint.
+To resolve this tension, \appa{} introduces \emph{branching for taint confinement} alongside \emph{prospective enforcement}. Rather than waiting for sensitive data to reach an external sink or permanently degrading the primary planner context upon a restrictive read, \appa{} intercepts prospective label descents prior to tool execution. When an agent needs to acquire or inspect restrictive data, \appa{} can fork a temporary, disposable child trajectory that inherits the parent's context and carries the permission narrowing locally. The child branch inspects the data and executes intermediate reasoning or tool calls under its descended label, while the parent trajectory remains unaffected at its original permission level. If the branch terminates or is abandoned, the parent process retains its broader access rights without context taint.
 
 Data acquisition thus becomes an explicit, manageable policy event. For any tool call that would narrow trajectory permissions, \appa{} presents a finitely enumerable set of remediation plans:
 \begin{itemize}
@@ -37,7 +37,7 @@ When discretionary release or external approval is required, \appa{} renders the
 
 Contributions, in order of importance:
 \begin{enumerate}
-  \item \textbf{Branching as taint prevention:} fork-before-read semantics
+  \item \textbf{Branching for taint confinement:} fork-before-read semantics
     that confine restrictive observations to a child, preserve the parent
     before merge, permit only policy-bounded exits, and retain honest world
     history in a shared log (\S\ref{sec:branching}).

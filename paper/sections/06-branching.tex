@@ -1,7 +1,7 @@
-\section{Branching as Taint Prevention}\label{sec:branching}
+\section{Branching for Taint Confinement}\label{sec:branching}
 
 \paragraph{Observation model.}
-Once data enters an LLM context, subsequent sanitization cannot retroactively remove that information from the model's trajectory~\cite{caiGhostAgentRedefining2026}; modifying its security label would incorrectly represent its state. \appa{} never removes taint from an already exposed trajectory; instead, it prevents exposure by confining restrictive descents to disposable child branches. The long-lived parent process pauses prior to a restrictive data acquisition, delegating the operation to a temporary child context. Here, ``taint prevention'' refers specifically to preventing label degradation in the primary parent process, rather than asserting that the child process or source data is untainted.
+Once data enters an LLM context, subsequent sanitization cannot retroactively remove that information from the model's trajectory~\cite{caiGhostAgentRedefining2026}; modifying its security label would incorrectly represent its state. \appa{} never removes taint from an already exposed trajectory; instead, it avoids parent context degradation by confining restrictive descents to disposable child branches. The long-lived parent process pauses prior to a restrictive data acquisition, delegating the operation to a temporary child context. By confining label descent to the child branch, \appa{} prevents taint accumulation in the primary parent process, without asserting that the child process or source data is untainted.
 
 \paragraph{Deployment requirement.}
 This design requires an execution environment capable of monitoring the complete interaction trajectory and controlling execution flow, such as an application harness or an integrated proxy gateway; a standalone MCP gateway is insufficient~\cite{mcp2024spec}. A \emph{confining} runtime prevents tool outputs and child context data from reaching the parent. While the label enforcement mechanisms of \S\ref{sec:enforcement} function without confinement, features such as fork-before-read and output sanitization rely on it. Branching is therefore a capability-dependent contribution rather than a baseline gateway feature.
@@ -22,9 +22,9 @@ An execution branch yields one of three outcomes:
   \item the return of a standard labeled value; or
   \item the application of a registered sanitizer or verified exit transformation that produces a derived value.
 \end{enumerate}
-In all cases, APPA validates the actual result label prior to committing the merge. If the raw result would restrict permissions, it triggers the acquisition check in the parent context. The parent may explicitly accept the label reduction or reject the \texttt{merge}; however, accepting lower permissions does not constitute taint prevention. A declared exit bound can be verified prior to execution to enable planning, though the actual result label remains authoritative.
+In all cases, APPA validates the actual result label prior to committing the merge. If the raw result would restrict permissions, it triggers the acquisition check in the parent context. The parent may explicitly accept the label reduction or reject the \texttt{merge}; however, accepting lower permissions does not achieve taint confinement. A declared exit bound can be verified prior to execution to enable planning, though the actual result label remains authoritative.
 
-\begin{theorem}[Branch taint prevention]\label{thm:branch}
+\begin{theorem}[Branch taint confinement]\label{thm:branch}
 Let a parent fork at $L_p^{\mathrm{fork}}$, and let the child execute any admitted trace. If the branch is abandoned, child execution does not change the parent's independently evolved label. If the child returns $v$, merging yields
 \[
   L_p' = L_p \wedge \mathit{label}(v).
