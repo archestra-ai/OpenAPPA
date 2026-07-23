@@ -102,6 +102,8 @@ async fn the_guarded_policy_keeps_the_email_sink_empty() {
         "the accepted hr read should surface the record: {hr}"
     );
 
+    // The recipient is outside the hr audience and no authority may widen it, so the
+    // send hard-blocks: no remedy plan is offered at all.
     let email_block = hook
         .decide(
             "send_email",
@@ -109,13 +111,8 @@ async fn the_guarded_policy_keeps_the_email_sink_empty() {
         )
         .await;
     assert!(
-        email_block.contains("remedy-2"),
-        "send_email should soft-block: {email_block}"
-    );
-    let declined = hook.decide("execute_remedy_plan", r#"{"plan_id":"remedy-2"}"#).await;
-    assert!(
-        declined.contains("declined"),
-        "the email remedy must be declined: {declined}"
+        email_block.contains("no remedy"),
+        "send_email should hard-block with no remedy: {email_block}"
     );
 
     assert!(
