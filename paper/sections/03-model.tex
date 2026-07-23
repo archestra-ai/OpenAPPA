@@ -44,20 +44,13 @@ History predicates (\texttt{prior} and \texttt{no\_prior}) and Remedy planning e
 \]
 whereas
 \[
-  \mathcal{E}(\ell \cdot \mathrm{CloseFailure}) = \mathcal{E}(\ell), \quad \mathcal{E}(\ell \cdot \mathrm{CloseIndeterminate}) = \mathcal{E}(\ell),
+  \mathcal{E}(\ell \cdot \mathrm{CloseFailure}) = \mathcal{E}(\ell), \quad \mathcal{E}(\ell \cdot \mathrm{CloseIndeterminate}) = \mathcal{E}(\ell).
 \]
-and opening a dispatch (or recording its proposed effects) does not add effects to $\mathcal{E}$. History predicates are defined over $\mathcal{E}$:
+History predicates are defined over $\mathcal{E}$:
 \[
   \mathrm{prior}(k, \ell) \iff k \in \mathcal{E}(\ell), \qquad \mathrm{no\_prior}(k, \ell) \iff k \notin \mathcal{E}(\ell).
 \]
-
-Under reported-success semantics:
-\begin{itemize}
-  \item $\mathrm{prior}(k)$ proves that some dispatch reported success while committing effect $k$; it does not prove that the external world actually completed the intended operation.
-  \item $\mathrm{no\_prior}(k)$ proves only the absence of a successfully committed effect $k$; it does not prove that no failed or indeterminate attempt reached the external system.
-\end{itemize}
-
-Table~\ref{tab:dispatch_outcomes} summarizes these outcome semantics.
+Table~\ref{tab:dispatch_outcomes} summarizes these outcome semantics. Under reported-success semantics, $\mathrm{prior}(k)$ proves a reported-success dispatch committed effect $k$, while $\mathrm{no\_prior}(k)$ proves only the absence of a committed effect—not the absence of un-committed attempts.
 
 \begin{table}[t]
 \centering
