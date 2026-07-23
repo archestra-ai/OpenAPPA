@@ -18,8 +18,11 @@ delta = { trust = "suspicious" }
 name = "read_public_forum"
 delta = { trust = "suspicious" }
 
+# `delta = {}` is the deliberate neutral annotation: a creation receipt carries nothing.
+# (A tool with no delta at all is unannotated — its results would fold Unknown, fail-closed.)
 [[tool]]
 name = "create_public_forum"
+delta = {}
 
 # --- hr: records are hr-audience-only ----------------------------------------
 
@@ -33,26 +36,33 @@ delta = { audience = { exactly = ["hr"] } }
 
 [[tool]]
 name = "create_hr"
+delta = {}
 
 # --- finance / task tracker: internal, unconstrained in this demo ------------
 
 [[tool]]
 name = "search_finance"
+delta = {}
 
 [[tool]]
 name = "read_finance"
+delta = {}
 
 [[tool]]
 name = "create_finance"
+delta = {}
 
 [[tool]]
 name = "search_task_tracker"
+delta = {}
 
 [[tool]]
 name = "read_task_tracker"
+delta = {}
 
 [[tool]]
 name = "create_task_tracker"
+delta = {}
 
 # --- the outbound sink -------------------------------------------------------
 
@@ -60,6 +70,7 @@ name = "create_task_tracker"
 name = "send_email"
 effects = ["egress"]
 requires = { trust = "internal", audience = { includes = ["$to"] } }
+delta = {}
 
 # The only authority in the policy covers send_email's trust gap alone. No authority may
 # widen the audience, so any send whose recipient falls outside the flow's audience blocks

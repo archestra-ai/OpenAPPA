@@ -160,7 +160,7 @@ pub(crate) fn admit_result(
         ResultAdmission::SuccessRaw { body } => {
             // A pending-cast output confines the raw result: no value may carry an unestablished
             // label into the trajectory (the model would see the body before its label exists).
-            if contract.delta.pending_cast_dim().is_some() {
+            if contract.pending_cast_dim().is_some() {
                 return Err(AdmitError::OutputPendingCast);
             }
             // A sanitizer-bound tool's raw result is likewise confined: only the bound derivation
@@ -168,11 +168,11 @@ pub(crate) fn admit_result(
             if contract.output_sanitizer.is_some() {
                 return Err(AdmitError::OutputSanitizerBound);
             }
-            vec![close_success(), admit_value(contract.delta.output_label(), body)]
+            vec![close_success(), admit_value(contract.output_label(), body)]
         }
         ResultAdmission::SuccessCast { body, cast, resolved } => {
             let raw_digest = RawResultDigest::of(body.as_str().as_bytes());
-            if contract.delta.pending_cast_dim() != Some(resolved.dimension()) {
+            if contract.pending_cast_dim() != Some(resolved.dimension()) {
                 return Err(AdmitError::NotPendingCast);
             }
             let registered = registry
@@ -192,7 +192,7 @@ pub(crate) fn admit_result(
                     }
                 }
             }
-            let output = contract.delta.output_label();
+            let output = contract.output_label();
             // Fill exactly the pending dimension; the established one is preserved untouched.
             let label = match &resolved {
                 DimValue::Trust(t) => Label::new(Dim::Known(*t), output.audience),
@@ -216,7 +216,7 @@ pub(crate) fn admit_result(
             sanitizer,
             raw_digest,
         } => {
-            if contract.delta.pending_cast_dim().is_some() {
+            if contract.pending_cast_dim().is_some() {
                 return Err(AdmitError::OutputPendingCast);
             }
             // Only the contract's own bound sanitizer may relabel this tool's output — a sanitized
@@ -231,7 +231,7 @@ pub(crate) fn admit_result(
             if !san.on.output {
                 return Err(AdmitError::SanitizerNotOutput(sanitizer.as_str().to_string()));
             }
-            let raw = contract.delta.output_label();
+            let raw = contract.output_label();
             // The raw source must satisfy the transition's `from` before the `to` may apply.
             // (Load validation already refuses an inapplicable binding, so this cannot fire for a
             // built registry; kept so the function stays total over its inputs.)
@@ -332,10 +332,10 @@ mod tests {
         let get = ToolContract {
             name: ToolName::new("get_ticket"),
             tags: vec![],
-            delta: Delta {
+            delta: Some(Delta {
                 trust: Some(Dim::Known(SUSPICIOUS)),
                 audience: Some(Dim::Known(internal())),
-            },
+            }),
             emits: vec![EffectKind::new("read")],
             requires: Default::default(),
             output_sanitizer: None,
@@ -380,10 +380,10 @@ mod tests {
         let scan = ToolContract {
             name: ToolName::new("scan_inbox"),
             tags: vec![],
-            delta: Delta {
+            delta: Some(Delta {
                 trust: Some(Dim::Unknown),
                 audience: Some(Dim::Known(internal())),
-            },
+            }),
             emits: vec![EffectKind::new("read")],
             requires: Default::default(),
             output_sanitizer: None,
@@ -393,10 +393,10 @@ mod tests {
         let export = ToolContract {
             name: ToolName::new("export_ticket"),
             tags: vec![],
-            delta: Delta {
+            delta: Some(Delta {
                 trust: Some(Dim::Known(SUSPICIOUS)),
                 audience: Some(Dim::Known(internal())),
-            },
+            }),
             emits: vec![EffectKind::new("read")],
             requires: Default::default(),
             output_sanitizer: Some(crate::names::SanitizerName::new("declassify")),

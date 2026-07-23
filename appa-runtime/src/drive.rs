@@ -373,6 +373,9 @@ impl Drive<'_> {
                     let feedback = match planned.plans.first() {
                         Some(plan) => {
                             let id = plan.id;
+                            // The eligible authorities, named in the block message (the spec's
+                            // config-surface obligation): the plan's Authorize steps carry them.
+                            let via = authorize_via(plan);
                             drop(projection);
                             // A server-minted, turn-unique handle — never the model's tool-call id.
                             let handle = format!("remedy-{}", self.next_handle);
@@ -383,7 +386,7 @@ impl Drive<'_> {
                                 plan: id,
                             });
                             format!(
-                                "blocked by policy ({gaps} requirement gap(s)); call execute_remedy_plan with plan_id \"{handle}\" to authorize"
+                                "blocked by policy ({gaps} requirement gap(s)); call execute_remedy_plan with plan_id \"{handle}\" to authorize{via}"
                             )
                         }
                         // No atomic plan, but a curative redispatch may unblock it — say "no remedy"
@@ -545,6 +548,20 @@ impl Drive<'_> {
             }
         };
 
+        // One errand, one result (engine law — the crossing itself re-refuses under the family
+        // lock): answer a second return precisely, before any derivation work is spent on it.
+        if let Some(parent) = self.rt.store().parent_of(self.tenant, self.session)? {
+            let (log, rev) = self.rt.store().snapshot(self.tenant, self.session)?;
+            let projection = Projection::build(&log, rev);
+            if projection.view(&parent).returns_by(self.session) > 0 {
+                self.feedback(
+                    call_id,
+                    "this session already returned its result — a child returns at most once",
+                )?;
+                return Ok(CallGo);
+            }
+        }
+
         // Server policy decides how the value crosses (RP6): a `[child]` static sanitizer binding
         // is the child's only return channel, at the binding's exact engine-derived label; the raw
         // submitted text never leaves the child and the model never chooses the path. A failed
@@ -662,9 +679,10 @@ impl Drive<'_> {
 
     /// Execute one offered return plan: derive outside the family lock where the plan needs a
     /// sanitizer, then land the engine's atomic crossing+acceptance+merge batch inside
-    /// finalization. A success consumes the whole pending offer (every sibling handle); a stale
-    /// refusal discards it (the child must submit afresh); a failed derivation restores the plan
-    /// to pending within its turn-wide (raw submission, sanitizer) budget.
+    /// finalization. A success consumes **every** pending return attempt (the crossing was the
+    /// child's one return); a stale refusal discards the attempt (the child must submit afresh);
+    /// a failed derivation restores the plan to pending within its turn-wide (raw submission,
+    /// sanitizer) budget.
     async fn handle_execute_return_remedy(
         &mut self,
         call_id: &ToolCallId,
@@ -677,6 +695,23 @@ impl Drive<'_> {
             .find(|(h, _)| h == handle)
             .map(|(_, plan)| plan.clone())
             .expect("caller located this handle in this pending return");
+
+        // One errand, one result: if a crossing already consumed the channel, every surviving
+        // offer is dead — answer precisely and spend no derivation work (the engine re-refuses
+        // under the family lock either way, so this is a courtesy, not the guard).
+        let parent = self.pending_returns[index].parent.clone();
+        {
+            let (log, rev) = self.rt.store().snapshot(self.tenant, self.session)?;
+            let projection = Projection::build(&log, rev);
+            if projection.view(&parent).returns_by(self.session) > 0 {
+                self.pending_returns.clear();
+                self.feedback(
+                    call_id,
+                    "this session already returned its result — a child returns at most once",
+                )?;
+                return Ok(CallGo);
+            }
+        }
 
         // Only externally-fallible work is budgeted: Accept is free, and charges key on the raw
         // submission + sanitizer, so one sanitizer's failures never starve a sibling and
@@ -714,7 +749,6 @@ impl Drive<'_> {
         // The commit point: cancellation and staleness are both decided under the family lock —
         // the engine re-derives the block from the live views and refuses by value a chosen plan
         // the fresh offers no longer contain, so nothing crosses on a stale offer.
-        let parent = self.pending_returns[index].parent.clone();
         let mut executed = false;
         self.rt.store().finalize(self.tenant, self.session, |facts, rev| {
             if self.cancel.is_cancelled() {
@@ -731,8 +765,9 @@ impl Drive<'_> {
             Some(batch)
         })?;
         if executed {
-            // The offer is consumed: every sibling handle dies with it.
-            self.pending_returns.remove(index);
+            // The crossing consumed the child's one return: every pending attempt dies with it,
+            // not just this offer's sibling handles.
+            self.pending_returns.clear();
             self.feedback(call_id, "result submitted to the parent")?;
             return Ok(CallGo);
         }
@@ -952,7 +987,7 @@ impl Drive<'_> {
         // label (RP5); a bound output sanitizer confines it and admits only the derivation (RP4).
         // Either failing withholds the value while the successful call's effects stand.
         let contract = self.rt.engine().registry().tool(call.tool());
-        let pending_cast = contract.and_then(|c| c.delta.pending_cast_dim());
+        let pending_cast = contract.and_then(|c| c.pending_cast_dim());
         let bound_sanitizer = contract.and_then(|c| c.output_sanitizer.clone());
         let mut withheld: Option<&str> = None;
         let admission = match &outcome {
@@ -1285,6 +1320,25 @@ fn proposal_of(call: &WireToolCall) -> Proposal {
     }
 }
 
+/// The eligible authorities a plan's rulings route to, as a feedback suffix (" via a, b"), empty
+/// for an authority-free plan (e.g. acceptance only). Block messages name them per the spec's
+/// config-surface obligation.
+fn authorize_via(plan: &appa_engine::plan::RemedyPlan) -> String {
+    let authorities: Vec<&str> = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            appa_engine::plan::RemedyStep::Authorize(name) => Some(name.as_str()),
+            appa_engine::plan::RemedyStep::Accept => None,
+        })
+        .collect();
+    if authorities.is_empty() {
+        String::new()
+    } else {
+        format!(" via {}", authorities.join(", "))
+    }
+}
+
 /// The tool a curative `Redispatch` recommendation names, for safe model-visible feedback.
 fn redispatch_hint(recommendation: &appa_engine::plan::Recommendation) -> Option<String> {
     match recommendation {
@@ -1492,6 +1546,14 @@ implementation = { builtin = "approve" }
         assert_eq!(outcome, TurnOutcome::Final("the transfer is done".to_string()));
 
         let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
+        // The block message names the eligible authority (the spec's config-surface obligation).
+        assert!(
+            log.iter().any(|f| matches!(
+                f,
+                Fact::BlockFeedback { content, .. } if content.contains("officer")
+            )),
+            "the block feedback should name the eligible authority"
+        );
         // A ruling landed and the finance effect committed — the authorized dispatch actually ran.
         assert!(
             log.iter().any(|f| matches!(f, Fact::Ruling { .. })),
@@ -2021,12 +2083,11 @@ audience = {{ from = {{ includes = ["internal"] }}, to = {{ exactly = ["public"]
         );
     }
 
-    /// The value-staleness counterpart: a suspicious parent makes the tainted child's narrowing
-    /// audience-only, so the sanitize offer is residual-free and its crossing leaves the parent's
-    /// label untouched — the sibling pending offer then still matches the live state and executes.
-    /// Two label-neutral crossings, no acceptance facts.
+    /// One errand, one result: even a label-neutral (residual-free sanitize) crossing consumes
+    /// the child's return channel, so the sibling submission's offer is refused afterwards —
+    /// exactly one crossing lands, with no acceptance facts.
     #[tokio::test]
-    async fn a_label_neutral_crossing_leaves_the_sibling_offer_executable() {
+    async fn a_crossing_consumes_the_childs_return_channel() {
         let (log, parent) = drive_child_rounds_from(
             blocked_return_config("builtin = \"redact-email\""),
             0,
@@ -2037,21 +2098,23 @@ audience = {{ from = {{ includes = ["internal"] }}, to = {{ exactly = ["public"]
                 // Offers: remedy-2 (Accept) / remedy-3 (residual-free sanitize).
                 tool_call_round("2", "submit_result", r#"{"value":"ask bob@corp.com"}"#),
                 tool_call_round("3", "execute_remedy_plan", r#"{"plan_id":"remedy-1"}"#),
+                // The child has returned: this sibling offer is dead, nothing more crosses.
                 tool_call_round("4", "execute_remedy_plan", r#"{"plan_id":"remedy-3"}"#),
                 final_round("5", "done"),
             ],
         )
         .await;
         let merged = merged_child_values(&log, &parent);
-        assert_eq!(merged.len(), 2, "both derivations crossed");
-        for value in &merged {
-            assert!(!value.body.as_str().contains("corp.com"), "only derivations crossed");
-            assert_eq!(
-                value.label.audience,
-                appa_engine::label::Dim::Known(appa_engine::label::Audience::Public)
-            );
-        }
-        // Residual-free: no narrowing was accepted on either crossing.
+        assert_eq!(merged.len(), 1, "exactly one crossing");
+        assert!(
+            !merged[0].body.as_str().contains("corp.com"),
+            "only the derivation crossed"
+        );
+        assert_eq!(
+            merged[0].label.audience,
+            appa_engine::label::Dim::Known(appa_engine::label::Audience::Public)
+        );
+        // Residual-free: no narrowing was accepted on the crossing.
         assert!(!log.iter().any(|f| matches!(f, Fact::ChildReturnAcceptance { .. })));
     }
 

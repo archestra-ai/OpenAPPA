@@ -109,6 +109,10 @@ pub enum LoadError {
     DualPendingCast(String),
     #[error("tool {tool} declares a pending-cast {dimension:?} output and a `requires` on that dimension")]
     PendingCastWithRequirement { tool: String, dimension: Dimension },
+    #[error(
+        "tool {0} is unannotated (no delta) but declares label requirements: declare its delta (`delta = {{}}` for a deliberately neutral output) so the committed label the requirements check is established"
+    )]
+    UnannotatedWithLabelRequirement(String),
     #[error("tool {tool} binds output sanitizer {sanitizer}, which is not registered")]
     UnknownOutputSanitizer { tool: String, sanitizer: String },
     #[error("tool {tool} binds {sanitizer}, which is not registered for tool output")]
@@ -146,7 +150,7 @@ impl Registry {
 
         let mut tools = BTreeMap::new();
         for tool in config.tools {
-            let declared_trust = match &tool.delta.trust {
+            let declared_trust = match tool.delta.as_ref().and_then(|d| d.trust.as_ref()) {
                 Some(Dim::Known(t)) => Some(*t),
                 Some(Dim::Unknown) | None => None,
             };
@@ -250,11 +254,27 @@ impl Registry {
 /// exactly one. And never a `requires` on a pending-cast dimension: the check evaluates that
 /// dimension as identity (the contribution folds only at admission, resolved), so a requirement on
 /// it could be outrun by the call's own unestablished consequences — refused at load instead.
+/// An unannotated tool (no delta at all) declares nothing pending, but the same outrun concern
+/// applies to **both** dimensions at once: the check evaluates its unestablished contribution as
+/// identity while the admitted result folds Unknown, so a label requirement on an unannotated
+/// tool could pass on a state its own consequence invalidates. Refused at load, like the
+/// pending-cast case — the author declares the delta (`delta = {}` for neutral) first. History
+/// and attention requirements are fine: no label dimension is consumed.
 fn validate_pending_cast(tool: &ToolContract) -> Result<(), LoadError> {
-    if matches!(tool.delta.trust, Some(Dim::Unknown)) && matches!(tool.delta.audience, Some(Dim::Unknown)) {
+    let Some(delta) = &tool.delta else {
+        let requires_label = tool.requires.label.trust_floor.is_some() || !tool.requires.label.audience.is_empty();
+        return if requires_label {
+            Err(LoadError::UnannotatedWithLabelRequirement(
+                tool.name.as_str().to_string(),
+            ))
+        } else {
+            Ok(())
+        };
+    };
+    if matches!(delta.trust, Some(Dim::Unknown)) && matches!(delta.audience, Some(Dim::Unknown)) {
         return Err(LoadError::DualPendingCast(tool.name.as_str().to_string()));
     }
-    match tool.delta.pending_cast_dim() {
+    match delta.pending_cast_dim() {
         Some(Dimension::Trust) if tool.requires.label.trust_floor.is_some() => {
             Err(LoadError::PendingCastWithRequirement {
                 tool: tool.name.as_str().to_string(),
@@ -275,6 +295,8 @@ fn validate_pending_cast(tool: &ToolContract) -> Result<(), LoadError> {
 /// `tool_output` sanitizer; the tool's declared raw output must satisfy the transition's `from`
 /// (both sides are static, so an inapplicable transition is refused here, never at admission); and
 /// the binding cannot pair with a pending-cast output (the two Phase-2 disciplines don't compose).
+/// An unannotated tool cannot bind a sanitizer either: its raw output label is Unknown, which
+/// never satisfies the `from` — the source-unmet arm below refuses it.
 fn validate_output_binding(
     tool: &ToolContract,
     sanitizers: &BTreeMap<SanitizerName, Sanitizer>,
@@ -292,12 +314,12 @@ fn validate_output_binding(
             sanitizer: name.as_str().to_string(),
         });
     }
-    if tool.delta.pending_cast_dim().is_some() {
+    if tool.pending_cast_dim().is_some() {
         return Err(LoadError::OutputSanitizerWithPendingCast(
             tool.name.as_str().to_string(),
         ));
     }
-    let raw = tool.delta.output_label();
+    let raw = tool.output_label();
     if raw.audience.covers(&sanitizer.can_reduce.from_includes) != Adequacy::Holds {
         return Err(LoadError::OutputSanitizerSourceUnmet {
             tool: tool.name.as_str().to_string(),
@@ -343,7 +365,7 @@ mod tests {
         ToolContract {
             name: ToolName::new(name),
             tags: vec![],
-            delta: Delta::NONE,
+            delta: Some(Delta::NONE),
             emits: vec![],
             requires: Requires::default(),
             output_sanitizer: None,
@@ -408,10 +430,10 @@ mod tests {
     fn refuses_rank_out_of_chain() {
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
-            delta: Delta {
+            delta: Some(Delta {
                 trust: Some(Dim::Known(Trust::new(9))),
                 audience: None,
-            },
+            }),
             output_sanitizer: None,
             ..tool("over")
         }];
@@ -460,10 +482,10 @@ mod tests {
     fn refuses_dual_pending_cast_output() {
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
-            delta: Delta {
+            delta: Some(Delta {
                 trust: Some(Dim::Unknown),
                 audience: Some(Dim::Unknown),
-            },
+            }),
             output_sanitizer: None,
             ..tool("scan")
         }];
@@ -480,10 +502,10 @@ mod tests {
 
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
-            delta: Delta {
+            delta: Some(Delta {
                 trust: Some(Dim::Unknown),
                 audience: None,
-            },
+            }),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(Trust::new(1)),
@@ -504,10 +526,10 @@ mod tests {
 
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
-            delta: Delta {
+            delta: Some(Delta {
                 trust: None,
                 audience: Some(Dim::Unknown),
-            },
+            }),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
@@ -529,10 +551,10 @@ mod tests {
         // The other dimension's requirement composes fine with a pending-cast one.
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
-            delta: Delta {
+            delta: Some(Delta {
                 trust: Some(Dim::Unknown),
                 audience: None,
-            },
+            }),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
@@ -542,6 +564,60 @@ mod tests {
             },
             output_sanitizer: None,
             ..tool("scan")
+        }];
+        assert!(Registry::build(cfg).is_ok());
+    }
+
+    #[test]
+    fn refuses_label_requirements_on_an_unannotated_tool() {
+        use crate::contract::{LabelRequirements, Requires};
+
+        // An unannotated tool's own result folds Unknown after the check ran on identity — a
+        // label requirement could be outrun by the call's own consequence, so it is refused at
+        // load (the pending-cast rule, applied to the wholly-unestablished case).
+        let mut cfg = base();
+        cfg.tools = vec![ToolContract {
+            delta: None,
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(Trust::new(1)),
+                    audience: vec![],
+                },
+                ..Requires::default()
+            },
+            ..tool("send")
+        }];
+        assert!(matches!(
+            Registry::build(cfg),
+            Err(LoadError::UnannotatedWithLabelRequirement(name)) if name == "send"
+        ));
+
+        // History/attention requirements consume no label dimension: fine without a delta.
+        let mut cfg = base();
+        cfg.tools = vec![ToolContract {
+            delta: None,
+            requires: Requires {
+                history: vec![crate::contract::HistoryRequirement::Prior(
+                    crate::fact::EffectKind::new("backup"),
+                )],
+                ..Requires::default()
+            },
+            ..tool("send")
+        }];
+        assert!(Registry::build(cfg).is_ok());
+
+        // The explicit neutral delta composes with any requirement.
+        let mut cfg = base();
+        cfg.tools = vec![ToolContract {
+            delta: Some(Delta::NONE),
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(Trust::new(1)),
+                    audience: vec![],
+                },
+                ..Requires::default()
+            },
+            ..tool("send")
         }];
         assert!(Registry::build(cfg).is_ok());
     }
@@ -561,10 +637,10 @@ mod tests {
         };
         let internal = || Audience::restricted([ReaderId::new("internal")]);
         let bound_tool = |sanitizer: &str| ToolContract {
-            delta: Delta {
+            delta: Some(Delta {
                 trust: None,
                 audience: Some(Dim::Known(internal())),
-            },
+            }),
             output_sanitizer: Some(SanitizerName::new(sanitizer)),
             ..tool("export")
         };
@@ -604,10 +680,10 @@ mod tests {
         let mut cfg = base();
         cfg.sanitizers = vec![sanitizer("declassify", true, internal())];
         cfg.tools = vec![ToolContract {
-            delta: Delta {
+            delta: Some(Delta {
                 trust: Some(Dim::Unknown),
                 audience: Some(Dim::Known(internal())),
-            },
+            }),
             ..bound_tool("declassify")
         }];
         assert!(matches!(

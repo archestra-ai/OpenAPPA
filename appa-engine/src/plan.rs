@@ -25,7 +25,8 @@
 //! the search may advertise a redispatch whose actual resolution turns out too narrow. Following
 //! such a hint is never an unchecked flow — the redispatched call and the retried block are both
 //! checked for real — but it is more than wasted turns: the prerequisite's *effects commit* even
-//! when its resolution then fails to cure the target. Those effects are ones the policy allows
+//! when its resolution then fails to cure the target. (An unannotated tool transitions as identity
+//! for the same reason — its Unknown contribution folds only at admission — with the same caveat.) Those effects are ones the policy allows
 //! that call to commit on its own terms, so soundness holds; a deployment for which such a
 //! permitted-but-unhelpful side effect is unacceptable should not declare a pending-cast emitter
 //! for a `prior(k)` currency (the hint picks the first qualifying emitter in name order, so a
@@ -274,12 +275,13 @@ pub(crate) fn covers_gap(authority: &Authority, gap: &Gap, tags: &[TagName]) -> 
 
 /// The state a tool's success would produce: its effects added, its **effective** contribution
 /// folded in (a sanitizer-bound tool folds its bound derivation's label, matching the check; a
-/// pending-cast dimension folds identity — the module-doc over-approximation).
+/// pending-cast dimension or an unannotated tool folds identity — the module-doc
+/// over-approximation).
 fn transition(registry: &Registry, state: &State, tool: &ToolContract) -> State {
     let mut effects = state.effects.clone();
     effects.extend(tool.emits.iter().cloned());
     State {
-        label: check::effective_delta(registry, tool).apply(&state.label),
+        label: check::committed_label(registry, tool, &state.label),
         effects,
     }
 }
@@ -363,8 +365,13 @@ fn redispatch_reason(tool: &ToolContract, raw: &RawBlock) -> String {
                 return format!("run {name} first to satisfy prior({})", kind.as_str());
             }
             // Only an established audience delta is a narrowing the redispatch can promise; a
-            // pending-cast one contributes nothing until its cast resolves.
-            Gap::Cap { .. } if matches!(tool.delta.audience, Some(Dim::Known(_))) => {
+            // pending-cast or unannotated one contributes nothing until resolved.
+            Gap::Cap { .. }
+                if tool
+                    .delta
+                    .as_ref()
+                    .is_some_and(|d| matches!(d.audience, Some(Dim::Known(_)))) =>
+            {
                 return format!("run {name} first to narrow the audience within the cap");
             }
             _ => {}
@@ -438,7 +445,7 @@ mod tests {
         let tool = ToolContract {
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Delta::NONE,
+            delta: Some(Delta::NONE),
             emits: vec![],
             requires: Requires {
                 label: LabelRequirements {
@@ -479,7 +486,7 @@ mod tests {
         let tool = ToolContract {
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Delta::NONE,
+            delta: Some(Delta::NONE),
             emits: vec![],
             requires: Requires {
                 label: LabelRequirements {
@@ -510,10 +517,10 @@ mod tests {
         let tool = ToolContract {
             name: ToolName::new("get"),
             tags: vec![],
-            delta: Delta {
+            delta: Some(Delta {
                 trust: None,
                 audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")]))),
-            },
+            }),
             emits: vec![],
             requires: Requires::default(),
             output_sanitizer: None,
@@ -538,7 +545,7 @@ mod tests {
         let delete = ToolContract {
             name: ToolName::new("delete_db"),
             tags: vec![],
-            delta: Delta::NONE,
+            delta: Some(Delta::NONE),
             emits: vec![EffectKind::new("db.deleted")],
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
@@ -549,7 +556,7 @@ mod tests {
         let backup = ToolContract {
             name: ToolName::new("backup"),
             tags: vec![],
-            delta: Delta::NONE,
+            delta: Some(Delta::NONE),
             emits: vec![EffectKind::new("backup.done")],
             requires: Requires::default(),
             output_sanitizer: None,
@@ -576,7 +583,7 @@ mod tests {
         let delete = ToolContract {
             name: ToolName::new("delete_db"),
             tags: vec![],
-            delta: Delta::NONE,
+            delta: Some(Delta::NONE),
             emits: vec![],
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
@@ -602,7 +609,7 @@ mod tests {
         let tool = ToolContract {
             name: ToolName::new("wire"),
             tags: vec![TagName::new("payments")],
-            delta: Delta::NONE,
+            delta: Some(Delta::NONE),
             emits: vec![],
             requires: Requires {
                 attention: vec![MarkName::new("signoff")],
@@ -640,7 +647,7 @@ mod tests {
         let tool = ToolContract {
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Delta::NONE,
+            delta: Some(Delta::NONE),
             emits: vec![],
             requires: Requires {
                 attention: vec![MarkName::new("signoff")],
@@ -675,7 +682,7 @@ mod tests {
         let a = ToolContract {
             name: ToolName::new("a"),
             tags: vec![],
-            delta: Delta::NONE,
+            delta: Some(Delta::NONE),
             emits: vec![EffectKind::new("ka")],
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("kb"))],
@@ -686,7 +693,7 @@ mod tests {
         let b = ToolContract {
             name: ToolName::new("b"),
             tags: vec![],
-            delta: Delta::NONE,
+            delta: Some(Delta::NONE),
             emits: vec![EffectKind::new("kb")],
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("ka"))],
@@ -760,12 +767,17 @@ mod tests {
         ]
     }
 
-    fn a_delta() -> impl Strategy<Value = Delta> {
-        (
-            prop::option::of((0u8..2).prop_map(|t| Dim::Known(Trust::new(t)))),
-            prop::option::of(small_audience().prop_map(Dim::Known)),
-        )
-            .prop_map(|(trust, audience)| Delta { trust, audience })
+    /// Declared deltas (possibly partial or neutral) and the unannotated tool alike — the
+    /// planner-vs-oracle law must hold over both.
+    fn a_delta() -> impl Strategy<Value = Option<Delta>> {
+        prop_oneof![
+            Just(None),
+            (
+                prop::option::of((0u8..2).prop_map(|t| Dim::Known(Trust::new(t)))),
+                prop::option::of(small_audience().prop_map(Dim::Known)),
+            )
+                .prop_map(|(trust, audience)| Some(Delta { trust, audience })),
+        ]
     }
 
     fn an_includes() -> impl Strategy<Value = Option<AudienceRequirement>> {
@@ -811,13 +823,20 @@ mod tests {
     fn a_tool(index: usize) -> impl Strategy<Value = ToolContract> {
         let name = ToolName::new(format!("t{index}"));
         (a_delta(), prop::collection::vec(small_effect(), 0..2), a_requires()).prop_map(
-            move |(delta, emits, requires)| ToolContract {
-                name: name.clone(),
-                tags: vec![],
-                delta,
-                emits,
-                requires,
-                output_sanitizer: None,
+            move |(delta, emits, mut requires)| {
+                // The load lint refuses label requirements on an unannotated tool; generated
+                // configs must load, so an undrawn delta strips them.
+                if delta.is_none() {
+                    requires.label = LabelRequirements::default();
+                }
+                ToolContract {
+                    name: name.clone(),
+                    tags: vec![],
+                    delta,
+                    emits,
+                    requires,
+                    output_sanitizer: None,
+                }
             },
         )
     }

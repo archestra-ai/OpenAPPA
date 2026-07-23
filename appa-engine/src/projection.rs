@@ -51,7 +51,7 @@ pub struct Projection {
     revision: Revision,
     /// Indexed by [`ValueId`]: admitted values in log order.
     values: Vec<AdmittedValue>,
-    /// Family-wide committed effects, ordered and counted (multiplicity kept for magnitude views).
+    /// Family-wide committed effects in log order; checks consume only kind-containment.
     effects: Vec<EffectKind>,
     /// Family-wide dispatches currently open (opened, not yet closed).
     open: BTreeSet<DispatchId>,
@@ -61,10 +61,10 @@ pub struct Projection {
     boundaries: Vec<TrajectoryId>,
     /// Fork structure: each child's immutable parent binding and seed label.
     forks: Vec<Fork>,
-    /// Values children have returned, keyed by their return id.
+    /// Values children have returned, keyed by their return id. A child's crossing lands its
+    /// `Merge` boundary in the same batch, so one record here means the child has returned
+    /// (the at-most-once guard reads this).
     child_returns: Vec<ReturnedChild>,
-    /// Child returns a merge has already consumed (double-merge protection).
-    merged: Vec<ChildReturnId>,
 }
 
 impl Projection {
@@ -78,7 +78,6 @@ impl Projection {
         let mut boundaries = Vec::new();
         let mut forks = Vec::new();
         let mut child_returns = Vec::new();
-        let mut merged = Vec::new();
 
         for fact in log {
             match fact {
@@ -137,7 +136,9 @@ impl Projection {
                             seed: seed.clone(),
                             return_policy: return_policy.clone(),
                         }),
-                        BoundaryKind::Merge { child_return } => merged.push(child_return.clone()),
+                        // The merge is audit punctuation here: the crossing's ChildReturn record
+                        // (same batch) is what the read models key on.
+                        BoundaryKind::Merge { .. } => {}
                     }
                 }
             }
@@ -152,7 +153,6 @@ impl Projection {
             boundaries,
             forks,
             child_returns,
-            merged,
         }
     }
 
@@ -260,12 +260,8 @@ impl Views<'_> {
             .map(|returned| &returned.value)
     }
 
-    /// Has a merge already consumed this child return? (Double-merge protection.)
-    pub fn is_merged(&self, id: &ChildReturnId) -> bool {
-        self.projection.merged.contains(id)
-    }
-
-    /// How many values `child` has already returned — the occurrence of its next return.
+    /// How many values `child` has already returned. Nonzero refuses a further return (a child
+    /// returns at most once); the count also mints the crossing's occurrence.
     pub fn returns_by(&self, child: &TrajectoryId) -> u32 {
         self.projection
             .child_returns
@@ -312,11 +308,6 @@ impl Views<'_> {
     /// The set of effect kinds the family has committed — the history half of a remedy-planning state.
     pub fn present_effects(&self) -> BTreeSet<EffectKind> {
         self.projection.effects.iter().cloned().collect()
-    }
-
-    /// How many matching effects the family has committed (for magnitude views).
-    pub fn effect_count(&self, kind: &EffectKind) -> usize {
-        self.projection.effects.iter().filter(|e| *e == kind).count()
     }
 
     /// Is this dispatch currently open (opened, not yet closed) anywhere in the family?

@@ -162,20 +162,24 @@ label itself never rises.
 
 ### Audience
 
-A set of readers drawn from a fixed per-deployment universe, with named,
-possibly nested groups; `public` means the whole universe. A customer's
-secrecy taxonomy embeds as nested groups
-(`level-3-readers ⊂ level-2-readers ⊂ everyone`) — classification schemes
-are audience *configuration*, not a new dimension.
+A set of readers drawn from a fixed per-deployment universe; `public` means
+the whole universe.
 
-Reader sets are symbolic — domains, named groups, explicit id-lists.
-Containments among named groups are configuration the engine decides as
-data; membership of a raw id (`john ∈ hr`) is a dispatch-time question for a
-registered **resolver**. A ruling naming a group binds the group
-symbolically: every check resolves membership fresh at decision time — a
-removed member is excluded from all later checks, but nothing looks back
-between checks; mid-flight revocation is the directory's concern, not the
-engine's.
+Reader sets in the current dialect are **explicit id-lists**: every audience
+that reaches the algebra is a concrete set of reader ids, so intersection and
+subset are exact. A customer's secrecy taxonomy embeds by writing each tier
+out as its member readers — classification schemes are audience
+*configuration*, not a new dimension.
+
+Named, possibly nested groups
+(`level-3-readers ⊂ level-2-readers ⊂ everyone`) with membership resolved by
+a registered **resolver** (`john ∈ hr` as a dispatch-time question, resolved
+fresh at every check, so a removed member is excluded from all later checks
+while nothing looks back between checks) are the design direction for
+directory-backed deployments — deliberately not in the current dialect,
+which trades revocation freshness for exactness of the set operations. Until
+a resolver exists, a directory change reaches the engine only by reloading
+the configuration's id-lists.
 
 Reading restricted data **shrinks** the reader set (intersection: only
 people cleared for every input may read the combination); the set never
@@ -252,23 +256,27 @@ branches in realtime — an abandoned branch returns no value, yet its
 `egress` must stay visible (see Branching). Their clocks differ: label
 requirements evaluate on the label the call would commit, history
 requirements on the log as it stands, so a call's own `emits` can never
-trigger its own precondition (see Check timing). And the log is ordered
-and counted where a label fold is idempotent: the seen-effect-kinds set is
-only a cached view, and views that need multiplicity — the summed
-`finance.spend` magnitude below — read the records, not the set. Folding
-events into the label would silently make history branch-scoped, checked
-on the wrong clock, and blind to how often anything happened.
+trigger its own precondition (see Check timing). And the log stays ordered
+where a label fold is idempotent — but every history check consumes it as
+**kind-containment only**: `prior(k)` / `no_prior(k)` ask whether a matching
+effect exists, never how many times or how large. The engine keeps no
+magnitude view and feeds none to any authority; counting and summing are
+deliberately outside the model. Folding events into the label would
+silently make history branch-scoped and checked on the wrong clock.
 
 Effects are also the model's sanctioned pressure-release valve —
 deliberately. A deployment can encode almost any bespoke gating ritual as
-effect vocabulary plus a dynamic authority: a `finance.spend` effect whose
-accumulated magnitude — a log view, summed by a registered authority —
-decides between auto-approving and paging a human. That is better than the
-alternatives: the hack is a named effect in an auditable log, not a
-distortion of the label rules, and the guarantees on everything else stand.
-(Budget as a label dimension is deliberately out of scope; a deployment
-whose effect vocabulary sprawls is signaling it wants a workflow engine on
-top, not a bigger policy engine.)
+effect vocabulary plus a dynamic authority: a `finance.spend` effect routed
+to an authority that decides between auto-approving and paging a human.
+The engine hands that authority the call's identity and the gaps its ruling
+would cover — not an accumulated magnitude: if its decision needs "how much
+was spent so far", the authority keeps that account in its own systems,
+out-of-band. That is better than the alternatives: the hack is a named
+effect in an auditable log, not a distortion of the label rules, and the
+guarantees on everything else stand. (Budget as a label dimension is
+deliberately out of scope, and so are engine-side magnitude views; a
+deployment whose effect vocabulary sprawls is signaling it wants a workflow
+engine on top, not a bigger policy engine.)
 
 ## Tool contracts
 
@@ -318,6 +326,9 @@ contract:
 name     = "send_email"        # send_email(to: $recipient)
 requires = { trust = "trusted", audience = { includes = ["$recipient"] } }
 effects  = ["egress"]          # emits
+delta    = {}                  # deliberately neutral: a delivery receipt
+                               # carries nothing (no delta at all = unannotated
+                               # → results admitted at Unknown, fail-closed)
 ```
 
 Naive placeholders do not solve real-world ACLs, so delegating resolution
@@ -473,7 +484,9 @@ Two facts about the list:
   registry: the in-scope (tag-routed) ruled covers
   whose declared mandate
   ceiling reaches the gap; the input-sanitizer substitutions that would
-  produce an admissible derived argument (any deployment); the
+  produce an admissible derived argument (design direction — no
+  implementation applies them yet, and the loader refuses a `tool_input`
+  registration rather than carry an inert one); the
   output-sanitizer-backed composites (confining deployments only); for a failed
   `prior(k)`, the registered tools whose `emits` include `k` — the plan is
   to make the effect happen; for a failed cap, the registered tools whose
@@ -801,7 +814,8 @@ resolver = { url = "https://approver.corp/rule", timeout_ms = 30000 }
 
 [[sanitizer]]
 name = "pii-redactor"
-on   = ["tool_input", "tool_output"]
+on   = ["tool_output"]   # the only live point; "tool_input" (argument
+                         # substitution) is design direction and refused at load
 
 [sanitizer.can_reduce]
 # audience only, by construction: trust is never sanitizer territory
@@ -858,12 +872,14 @@ delta    = { audience = { exactly = ["internal"] } }
 name     = "send_email"        # send_email(body, to: $recipient)
 requires = { trust = "trusted", audience = { includes = ["$recipient"] } }
 effects  = ["egress"]
+delta    = {}                  # neutral by declaration, not by omission
 
 [[tool]]
 name     = "file_github_ticket"
 # we never post things that are not public
 requires = { trust = "trusted", audience = { includes = ["public"] } }
 effects  = ["egress", "mutation"]
+delta    = {}
 ```
 
 Registered: `remove_pii` — a sanitizer with mandate audience
@@ -944,13 +960,22 @@ fork.
   - Finalization is thereby trivial for every started branch, whatever its
     fate — return, failure, abandonment: nothing was withheld, so nothing
     can be lost. "The branch died" means no *value* crossed; history was
-    already shared. A child may also end its errand *explicitly* with a
+    already shared. A child returns **at most once**: the fork's mandate
+    covers one errand and one result, so the first crossing consumes the
+    return channel and a later `submit_result` is refused — a child is not
+    a standing pipe into its parent. A child may also end its errand
+    *explicitly* with a
     **void return** — `submit_result` with no value: a deliberate,
     cleanly-acknowledged "nothing to report" that crosses nothing and
     propagates no label. To the parent it is indistinguishable from
     abandonment (that indistinguishability is the point — a void carries
     zero bits of child-derived content); the child's own log carries the
-    audit that the errand ended by choice rather than by death.
+    audit that the errand ended by choice rather than by death. A void
+    return leaves no family-visible record precisely to preserve that
+    indistinguishability — in particular it does **not** consume the
+    return channel: at-most-once binds value crossings, not endings, so a
+    child that voided (or was abandoned) may still later cross its one
+    value.
 
 Cross-branch history is deliberately global: with one shared realtime log,
 a child's `egress` fails a parent's `no_prior(egress)`. That conservatism
@@ -1018,18 +1043,37 @@ not a mere parser.
 Real-world deployments are messy; APPA does not assume every tool is
 annotated. Both label dimensions support **Unknown** — and it is not another
 point on the scale: `trusted < unknown < suspicious` does not exist. It
-means "this label has not been established yet": a value with an Unknown
-dimension cannot be folded or checked at all until a registered cast fills
-it in. A check that runs into Unknown inputs reports *which*
-facts are unresolved, never a blanket Unknown result.
+means "this label has not been established yet". Unknown is absorbing under
+the fold (one Unknown value makes the trajectory's dimension Unknown), and a
+requirement that **consumes** an Unknown dimension cannot pass: the check
+reports *which* values are unresolved — never a blanket Unknown result, and
+never a failure verdict, because an unresolved dimension is a missing fact,
+not a violation. A call whose requirements consume no Unknown dimension
+proceeds: an Unknown trajectory does not brick unannotated flows, it fails
+closed exactly at the sinks that care.
+
+The default is pinned fail-closed at the configuration surface: a tool
+listed with **no `delta` at all is unannotated** — its results are admitted
+at Unknown in both dimensions. Declaring is different from omitting: within
+a *declared* delta an omitted dimension contributes the fold identity (the
+author annotated the tool and owns the shorthand), and the deliberate
+"this result carries nothing" annotation is the explicit empty delta,
+`delta = {}`. An unannotated tool may not itself declare **label**
+requirements: the check evaluates its unestablished contribution as
+identity (the Unknown folds only at admission), so its own consequence
+could outrun the requirement — the same outrun the pending-cast load rule
+refuses, applied to the wholly-unestablished case. Declaring the delta,
+even the empty one, comes first; refused at load. History and attention
+requirements consume no label dimension and compose fine.
 
 A registered cast fills the dimension in: **constant** (`unknown →
 trusted` for YOLO deployments, `→ suspicious` for paranoid ones) or
 **resolver-implemented** per value, under its declared ceiling of
 admissible targets. Richer schemes — human in the loop on first use,
 cached afterwards — live behind the resolver. This is fail-closed by
-construction: annotate five high-risk tools, leave the rest Unknown, and
-still catch the obvious flows.
+construction: annotate five high-risk tools, leave the rest unannotated,
+and still catch the obvious flows — anything Unknown-tainted blocks at an
+annotated sink until a cast resolves it.
 
 ## Implementation shape
 
