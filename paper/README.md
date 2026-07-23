@@ -18,8 +18,7 @@ Artificial Intelligence and Security, co-located with ACM CCS).
   `\stub` render in color.
 - `sections/*.tex` — one file per section; `sections/appendix.tex` holds the
   appendix stubs.
-- `appa.bib` — bibliography (Zotero exports plus hand-added classics; the
-  `adts2026` entry is a placeholder to resolve).
+- `appa.bib` — bibliography (Zotero exports, hand-added classics, and resolved citations including Odersky et al. 2026).
 
 ## Build
 
