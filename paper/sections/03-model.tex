@@ -61,18 +61,19 @@ Table~\ref{tab:dispatch_outcomes} summarizes these outcome semantics.
 
 \begin{table}[t]
 \centering
-\small
 \caption{Outcome semantics for the committed-effect projection $\mathcal{E}$.}
 \label{tab:dispatch_outcomes}
-\begin{tabular}{l@{~~}c@{~~}c@{~~}c}
+\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\columnwidth}{@{}l *{3}{>{\centering\arraybackslash}X} @{}}
 \toprule
-\textbf{Dispatch outcome} & \textbf{Committed?} & \textbf{Establishes $\mathrm{prior}(k)$?} & \textbf{Invalidates $\mathrm{no\_prior}(k)$?} \\
+\textbf{Dispatch outcome} & \makecell[c]{\textbf{Committed}\\\textbf{to $\mathcal{E}$?}} & \makecell[c]{\textbf{Establishes}\\\textbf{$\mathrm{prior}(k)$?}} & \makecell[c]{\textbf{Invalidates}\\\textbf{$\mathrm{no\_prior}(k)$?}} \\
 \midrule
-Success with $k$ & Yes & Yes & Yes \\
-Failure & No & No & No \\
-Indeterminate & No & No & No \\
+Success with $k$ & $\checkmark$ & $\checkmark$ & $\checkmark$ \\
+Failure          & $\times$     & $\times$     & $\times$     \\
+Indeterminate    & $\times$     & $\times$     & $\times$     \\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \end{table}
 
 The engine queries the log solely to evaluate history predicates over $\mathcal{E}$, verify ruling validity, and perform audits. Cached projections, such as tracking observed event types, correspond to monoid homomorphisms~\cite{pierce2002types}. Separate ``effects dimensions'' used in prior architectures are represented directly as log projections rather than label components: an effect tracks execution history rather than data confidentiality and integrity. Unifying events and labels into a single monoid product would blur essential semantic distinctions between per-value policy bounds and per-run execution logs.
