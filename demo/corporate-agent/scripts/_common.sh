@@ -18,7 +18,7 @@ if [[ -f .env ]]; then
 fi
 
 # Default model — any valid OpenRouter id; override via APPA_DEMO_MODEL or .env.
-MODEL="${APPA_DEMO_MODEL:-openai/gpt-4o-mini}"
+MODEL="${APPA_DEMO_MODEL:-openai/gpt-5.6-luna}"
 
 if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
   echo "warning: OPENROUTER_API_KEY is not set — copy .env.example to .env and add your key." >&2

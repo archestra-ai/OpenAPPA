@@ -11,7 +11,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::fact::{BoundaryKind, CloseOutcome, EffectKind, Fact, Revision};
+use crate::fact::{BoundaryKind, CloseOutcome, EffectKind, Fact, ReturnPolicy, Revision};
 use crate::label::{Dim, DimValue, Label};
 use crate::value::{CanonicalDigest, ChildReturnId, DispatchId, LabeledValue, TrajectoryId, ValueId};
 
@@ -35,6 +35,7 @@ struct Fork {
     child: TrajectoryId,
     parent: TrajectoryId,
     seed: Label,
+    return_policy: ReturnPolicy,
 }
 
 /// One value a child returned through `submit_result`, awaiting (or having undergone) a merge.
@@ -56,7 +57,7 @@ pub struct Projection {
     open: BTreeSet<DispatchId>,
     /// Every dispatch ever opened, for per-digest occurrence counting.
     opened: Vec<OpenedDispatch>,
-    /// Boundary count per trajectory (a boundary bounds pending-plan lifetime; consumed later).
+    /// Boundaries per trajectory, in log order (punctuation, counted for audit views).
     boundaries: Vec<TrajectoryId>,
     /// Fork structure: each child's immutable parent binding and seed label.
     forks: Vec<Fork>,
@@ -111,7 +112,7 @@ impl Projection {
                 }
                 // Rulings and acceptances are audit only — a ruling never edits the label, and a
                 // narrowing's fold happens through the admitted value, not the acceptance record.
-                Fact::Ruling { .. } | Fact::Acceptance { .. } => {}
+                Fact::Ruling { .. } | Fact::Acceptance { .. } | Fact::ChildReturnAcceptance { .. } => {}
                 // Transcript memory (CC2/RP1): inert in the algebra — the runtime's transcript builder
                 // reads these; the fold and effect views never do.
                 Fact::AssistantMessage { .. } | Fact::BlockFeedback { .. } => {}
@@ -126,10 +127,15 @@ impl Projection {
                     boundaries.push(trajectory.clone());
                     match kind {
                         BoundaryKind::TurnEnd => {}
-                        BoundaryKind::Fork { parent, seed } => forks.push(Fork {
+                        BoundaryKind::Fork {
+                            parent,
+                            seed,
+                            return_policy,
+                        } => forks.push(Fork {
                             child: trajectory.clone(),
                             parent: parent.clone(),
                             seed: seed.clone(),
+                            return_policy: return_policy.clone(),
                         }),
                         BoundaryKind::Merge { child_return } => merged.push(child_return.clone()),
                     }
@@ -235,6 +241,16 @@ impl Views<'_> {
             .map(|fork| &fork.parent)
     }
 
+    /// The child's immutable fork return policy — the binding every `submit_result` crossing is
+    /// derived from. `None` for a trajectory that was never forked.
+    pub fn return_policy_of(&self, child: &TrajectoryId) -> Option<&ReturnPolicy> {
+        self.projection
+            .forks
+            .iter()
+            .find(|fork| &fork.child == child)
+            .map(|fork| &fork.return_policy)
+    }
+
     /// The child and value a return id names, if it exists in the family log.
     pub fn child_return(&self, id: &ChildReturnId) -> Option<&LabeledValue> {
         self.projection
@@ -261,11 +277,20 @@ impl Views<'_> {
     /// The values admitted to this branch, with their ids and labels — for finding the Unknown
     /// dimensions a cast must resolve.
     pub fn branch_values(&self) -> impl Iterator<Item = (ValueId, &Label)> {
+        self.branch_values_of(self.trajectory)
+    }
+
+    /// The values admitted to an arbitrary family trajectory — the return check names a child's
+    /// (or the parent's own) unresolved values from this one snapshot.
+    pub(crate) fn branch_values_of<'a>(
+        &'a self,
+        trajectory: &'a TrajectoryId,
+    ) -> impl Iterator<Item = (ValueId, &'a Label)> {
         self.projection
             .values
             .iter()
             .enumerate()
-            .filter(|(_, v)| &v.trajectory == self.trajectory)
+            .filter(move |(_, v)| &v.trajectory == trajectory)
             .map(|(i, v)| (ValueId::new(i as u64), &v.label))
     }
 

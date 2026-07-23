@@ -283,6 +283,7 @@ mod tests {
                     kind: BoundaryKind::Fork {
                         parent,
                         seed: Label::top(),
+                        return_policy: appa_engine::fact::ReturnPolicy::Raw,
                     },
                 }],
             ))

@@ -1,9 +1,10 @@
-//! External decision backends: authorities, sanitizers, and casts — the runtime's trusted base of
-//! dynamic judgment, invoked south of the engine.
+//! External decision backends: authorities, sanitizers, and casts — the runtime's
+//! trusted base of dynamic judgment, invoked south of the engine.
 //!
 //! Three closed backend families (enum dispatch, no `dyn`). Each **fails closed** by default: an
 //! external that times out, returns a non-2xx, or answers malformed contributes *no* decision —
-//! [`AuthorityAnswer::Abstain`], [`SanitizerAnswer::Failed`], [`CastAnswer::Unresolved`] — leaving
+//! [`AuthorityAnswer::Abstain`], [`SanitizerAnswer::Failed`],
+//! [`CastAnswer::Unresolved`] — leaving
 //! the block or the Unknown standing. Static absence is the engine's concern (CC4: a statically
 //! absent authority yields no plan); dynamic decline is *this* layer, at execution time.
 //!

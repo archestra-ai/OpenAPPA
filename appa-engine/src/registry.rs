@@ -236,6 +236,11 @@ impl Registry {
         self.sanitizers.get(name)
     }
 
+    /// Every registered sanitizer, in name order (deterministic plan enumeration relies on this).
+    pub fn sanitizers(&self) -> impl Iterator<Item = &Sanitizer> {
+        self.sanitizers.values()
+    }
+
     pub fn cast(&self, name: &CastName) -> Option<&Cast> {
         self.casts.get(name)
     }

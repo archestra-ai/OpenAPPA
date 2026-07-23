@@ -17,6 +17,34 @@ use crate::value::{
     ChildReturnId, DispatchId, LabeledValue, Provenance, RawResultDigest, ToolCallId, ToolName, TrajectoryId, ValueId,
 };
 
+/// How a child bound at fork may return: the immutable policy recorded on the `Fork` boundary.
+/// The submission path is **derived from this binding**, never selected by the caller, so no
+/// engine client can route a return through a transformer the fork did not declare — that would
+/// be a trust-laundering selector.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReturnPolicy {
+    /// Raw returns, subject to the narrowing check (blocked-return plans may apply).
+    Raw,
+    /// Every return crosses only as this output sanitizer's derivation (the model never chooses).
+    Sanitized(SanitizerName),
+}
+
+/// How a child's returned value crossed to the parent — the audit half of [`Fact::ChildReturn`]. A
+/// sanitized crossing records the declared transition and the raw submission's digest; the raw
+/// text itself stays confined in the child.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReturnDerivation {
+    /// The raw submission crossed at the child fold.
+    Raw,
+    /// A registered output sanitizer's derivation crossed; the raw submission stayed confined.
+    Sanitized {
+        sanitizer: SanitizerName,
+        raw_digest: RawResultDigest,
+        from: Audience,
+        to: Audience,
+    },
+}
+
 /// One tool call the model proposed in an assistant turn, recorded verbatim so the model-transcript
 /// view replays from the log alone (CC2/RP1). Algebraically inert: the engine never checks this record
 /// — the runtime resolves the call into a [`ResolvedCall`](crate::value::ResolvedCall) for the check
@@ -43,17 +71,20 @@ impl EffectKind {
     }
 }
 
-/// A boundary is punctuation, not a decision: a mark pending plan executions cannot outlive. The
-/// engine appends one at the end of each assistant turn, at fork, and at merge. `Fork` and `Merge`
-/// carry the branch structure — the fork's parent binding and seed label, the merge's consumed
-/// child return.
+/// A boundary is punctuation, not a decision: it marks the log, never gates it (pending offers
+/// die with their turn, and execution is always re-validated against the live state). The engine
+/// appends one at the end of each assistant turn, at fork, and at merge. `Fork` and `Merge` carry
+/// the branch structure — the fork's parent binding and seed label, the merge's consumed child
+/// return.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BoundaryKind {
     TurnEnd,
-    /// The child was seeded from `parent` at `seed` (the parent's current label). Immutable binding.
+    /// The child was seeded from `parent` at `seed` (the parent's current label), bound to
+    /// `return_policy` for every one of its returns. Immutable binding.
     Fork {
         parent: TrajectoryId,
         seed: Label,
+        return_policy: ReturnPolicy,
     },
     /// The parent consumed this child return, once, into itself.
     Merge {
@@ -134,6 +165,14 @@ pub enum Fact {
         plan: PlanId,
         narrowing: Narrowing,
     },
+    /// The agent accepted a child return's narrowing of the parent — recorded beside the merge it
+    /// admitted. Return-scoped: names the crossing it accepted, never a dispatch. Like
+    /// [`Fact::Acceptance`], audit only — the fold moves through the admitted value.
+    ChildReturnAcceptance {
+        trajectory: TrajectoryId,
+        child_return: ChildReturnId,
+        narrowing: Narrowing,
+    },
     /// An output sanitizer relabeled a confined tool result before admission — audit of the
     /// declared transition, bound to the raw result's digest.
     SanitizerApplied {
@@ -167,11 +206,13 @@ pub enum Fact {
     },
     /// A child branch returned a value through `submit_result`. The label is the returned value's
     /// own (the child fold for a raw return, or a mandate-validated sanitizer's output); trust never
-    /// rises. Only this crosses to the parent — the child's free final text does not.
+    /// rises. Only this crosses to the parent — the child's free final text does not. `derivation`
+    /// audits how the value crossed, mirroring [`Fact::SanitizerApplied`] for tool results.
     ChildReturn {
         trajectory: TrajectoryId,
         id: ChildReturnId,
         value: LabeledValue,
+        derivation: ReturnDerivation,
     },
     /// Turn/fork/merge punctuation.
     Boundary {
@@ -190,6 +231,7 @@ impl Fact {
             | Fact::DispatchClosed { trajectory, .. }
             | Fact::Ruling { trajectory, .. }
             | Fact::Acceptance { trajectory, .. }
+            | Fact::ChildReturnAcceptance { trajectory, .. }
             | Fact::SanitizerApplied { trajectory, .. }
             | Fact::CastApplied { trajectory, .. }
             | Fact::OutputCastApplied { trajectory, .. }

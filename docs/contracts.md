@@ -158,8 +158,10 @@ Audit records "admitted under the transition declared by sanitizer X", never
 "verified clean".
 
 A sanitizer applies where policy binds it: on a tool's output via the tool's
-`output_sanitizer` key (above), or on every child session's returned value via
-the top-level child policy (RP6):
+`output_sanitizer` key (above), on every child session's returned value via
+the top-level child policy (RP6), or — with no child binding at all — as a
+**return plan** the model may choose when a raw child return would narrow the
+parent (below).
 
 ```toml
 [child]
@@ -170,6 +172,21 @@ With it set, a child's `submit_result` crosses to the parent only as the
 sanitizer's derivation, at the sanitizer's exact declared output label — the
 raw submitted text stays in the child, and the model never chooses the path. A
 failed derivation returns nothing.
+
+## Child returns without a binding
+
+With no `[child]` binding, a child's raw `submit_result` runs the narrowing
+check against its parent. A non-narrowing return merges silently. A narrowing
+one soft-blocks with **return plans** the model executes through
+`execute_remedy_plan`: accept the narrowing and cross raw; or cross any
+registered `tool_output` sanitizer's derivation whose `from` the child fold
+satisfies — alone when its relabel fully clears the narrowing, composed with
+acceptance of exactly the residual otherwise. A trust narrowing survives every
+sanitizer (audience is the only sanitizer territory), so it crosses only by
+acceptance — or not at all. The child may always end its errand with
+`submit_result` `value: null`: an explicit void that records nothing, merges
+nothing, and propagates no label — indistinguishable from abandonment in the
+parent, by design.
 
 ## Casts
 

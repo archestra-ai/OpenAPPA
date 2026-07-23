@@ -944,7 +944,13 @@ fork.
   - Finalization is thereby trivial for every started branch, whatever its
     fate — return, failure, abandonment: nothing was withheld, so nothing
     can be lost. "The branch died" means no *value* crossed; history was
-    already shared.
+    already shared. A child may also end its errand *explicitly* with a
+    **void return** — `submit_result` with no value: a deliberate,
+    cleanly-acknowledged "nothing to report" that crosses nothing and
+    propagates no label. To the parent it is indistinguishable from
+    abandonment (that indistinguishability is the point — a void carries
+    zero bits of child-derived content); the child's own log carries the
+    audit that the errand ended by choice rather than by death.
 
 Cross-branch history is deliberately global: with one shared realtime log,
 a child's `egress` fails a parent's `no_prior(egress)`. That conservatism
@@ -954,9 +960,29 @@ is no branch-scoped `prior(k)`.
 
 The child's own label may end maximally poisoned; the parent absorbs only
 the returned value's label — *less restrictive* than the child's own fold
-for exactly one
-legitimate reason: a mandated sanitizer (including the quarantine-exit
-attestation) relabeled it.
+for exactly one legitimate reason: a mandated transformer relabeled it. In
+the current dialect that is an audience sanitizer (trust is structurally
+preserved — it never rises); the quarantine-exit attestation below is the
+design direction for the trust-bearing case.
+
+A raw return that would *narrow* the parent is not merged silently: the
+merge soft-blocks exactly like a narrowing call, and the block carries the
+**return plans** — the acceptance plan (always, as for every narrowing);
+per applicable registered output sanitizer, either the sanitizer alone
+(offered only when its relabel fully clears the narrowing) or the
+sanitizer composed with acceptance of exactly the residual narrowing that
+remains after its relabel. A sanitizer whose relabel changes nothing about
+the merged outcome over the raw crossing is not offered at all — a plan
+must buy something. A trust component always survives sanitization
+— audience is the only sanitizer territory — so a trust narrowing crosses
+only by acceptance. A return whose label has an Unknown dimension is
+unresolved,
+not narrowing: Unknown absorbs under the fold but is not an ordered
+restriction, so the check names the values to cast and offers no plans
+until they resolve. A policy-bound return sanitizer (the static binding)
+is not part of this choice: it crosses every return unconditionally, and
+the model never chooses the path. A raw return that narrows nothing
+merges as before, with no block.
 
 Example: an agent already working with internal data needs a one-off egress
 to an external recipient mid-task. A call-scoped ruling covers the
@@ -970,17 +996,20 @@ persist" request — persistence lives in a branch, never in the label.
 ### Structured quarantined branches
 
 The recommended way to work with untrusted sources without poisoning the
-main run. The child handles the suspicious content and returns through a
-`submit_result` tool with a pre-declared structured output and sanitizers,
-e.g. `{format: {major_version: int}, sanitizers: [...]}`.
+main run — design direction: the trust-bearing transformer it needs (the
+quarantine-exit **attestation**) is deliberately not in the current
+four-kind dialect, whose sanitizers are audience-only. The child handles
+the suspicious content and returns through a `submit_result` tool with a
+pre-declared structured output, e.g. `{format: {major_version: int},
+claims_trust: trusted}`.
 
 Example: a sensitive task first needs a third-party software version from
 GitHub. Fetched directly, the page would fold `suspicious` trust into the
 main trajectory. In a quarantined branch, only the extracted version crosses
 back — entering the parent as trusted. Schema validation alone never raises
 a label — structure is not provenance; the raise is claimed by the mandated
-sanitizer, and only within its mandate: here, a transformer whose mandate
-covers exactly this attestation — "the returned integer is a version number
+transformer, and only within its mandate: here, one whose mandate covers
+exactly this attestation — "the returned integer is a version number
 extracted from the named source, carrying none of the source's free text" —
 not a mere parser.
 
@@ -1066,19 +1095,24 @@ xor resolver-implemented**.
 - **Tag** — a routing-only name with no algebraic life: never folded,
   checked, or logged. The exclusive currency of authority scope.
 - **Narrowing** — a strict restriction of the label (fewer readers, lower
-  trust) that a call's delta would commit, shrinking the release frontier.
+  trust) that a proposed flow would commit — a call's delta, or a child
+  return's merge into the parent — shrinking the release frontier.
   Soft-blocked until the agent accepts it; the block always carries the
   acceptance plan, so it is never terminal.
 - **Acceptance** — the agent's own free plan step acknowledging a narrowing
-  before dispatch: no authority involved, no security power exercised,
-  clears no requirement; the plan id in the log is the record.
+  before the flow proceeds (a call's dispatch, a child return's merge): no
+  authority involved, no security power exercised, clears no requirement;
+  the plan id in the log is the record.
 - **Remedy plan** — an executable object with an id; every engine-side plan
   runs atomically via `execute_remedy_plan(plan_id)`: render, rule (when
   the plan carries a ruling), dispatch, log. A plan for a failed `prior(k)`
   or a failed cap carries no engine-side step: it names a registered tool —
   one whose `emits` include `k`, or one whose restrictive delta drops the
   offending readers — for the agent to dispatch as an ordinary checked
-  call before re-proposing.
+  call before re-proposing. A blocked child return carries **return
+  plans** through the same tool: acceptance, a mandated output sanitizer
+  whose relabel fully clears the narrowing, or that sanitizer composed
+  with acceptance of exactly the residual (see Branching).
 - **Authority / mandate / scope / ruling** — a registered judge; the
   declaration of what its rulings may cover; the tags it has jurisdiction
   over; one act of judgment, appended to the log. Every ruling is
@@ -1096,8 +1130,9 @@ xor resolver-implemented**.
   argument-to-reader-set questions at decision time.
 - **Branch** — one concurrently executing thread of the run, the parent or
   any child; all branches append to the one shared log in realtime.
-- **Boundary event** — punctuation in the log (turn end, fork, merge) that
-  pending plan executions cannot outlive.
+- **Boundary event** — punctuation in the log (turn end, fork, merge). It
+  marks, never gates: pending plan offers die with their turn, and
+  execution is always re-validated against the live state.
 - **Confining deployment** — one that can hold a raw tool result out of the
   model's context. Required for quarantined branches and compiled
   composites.
