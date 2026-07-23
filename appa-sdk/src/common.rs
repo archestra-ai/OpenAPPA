@@ -6,7 +6,7 @@ use appa_engine::admit::{AdmitError, ResultAdmission};
 use appa_engine::check::{CheckOutcome, Narrowing};
 use appa_engine::engine::Engine;
 use appa_engine::execute::{Issuer, Ruling, Sink};
-use appa_engine::fact::{BoundaryKind, Fact, FactBatch};
+use appa_engine::fact::{BoundaryKind, Fact, FactBatch, ReturnPolicy};
 use appa_engine::label::Label;
 use appa_engine::names::AuthorityName;
 use appa_engine::plan::PlanId;
@@ -471,7 +471,7 @@ fn validate_policy(config: &Config) -> Result<(), OpenError> {
     if !rc.casts.is_empty() {
         return Err(OpenError::UnsupportedPolicy("[[cast]] declarations".into()));
     }
-    if config.child_return_sanitizer().is_some() {
+    if config.child_return_policy() != ReturnPolicy::Raw {
         return Err(OpenError::UnsupportedPolicy("[child] return_sanitizer".into()));
     }
     for tool in &rc.tools {

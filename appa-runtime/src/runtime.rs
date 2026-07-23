@@ -232,11 +232,19 @@ fn is_reserved(name: &str) -> bool {
 }
 
 fn reserved_schema(name: &str) -> WireTool {
+    let description = match name {
+        SUBMIT_RESULT => Some(
+            "Return your result to the parent session. `value` is a string result, or null to \
+             finish without returning anything."
+                .to_string(),
+        ),
+        _ => None,
+    };
     WireTool {
         kind: "function".to_string(),
         function: WireToolSchema {
             name: name.to_string(),
-            description: None,
+            description,
             parameters: None,
         },
     }

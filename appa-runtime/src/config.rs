@@ -26,6 +26,7 @@ use appa_engine::contract::{
     AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, RecipientSpec, Requires, ToolContract,
 };
 use appa_engine::fact::EffectKind;
+use appa_engine::fact::ReturnPolicy;
 use appa_engine::label::{Audience, Dim, DimValue, Label, ReaderId, Trust};
 use appa_engine::names::{AuthorityName, CastName, MarkName, SanitizerName, TagName};
 use appa_engine::registry::{LoadError, Registry, RegistryConfig, TrustChain};
@@ -115,7 +116,7 @@ pub struct Config {
     sanitizer_impls: BTreeMap<SanitizerName, SanitizerImpl>,
     cast_impls: BTreeMap<CastName, CastImpl>,
     tool_impls: BTreeMap<ToolName, ToolImpl>,
-    child_return_sanitizer: Option<SanitizerName>,
+    child_return: ReturnPolicy,
     preamble: Vec<WireMessage>,
 }
 
@@ -188,13 +189,21 @@ impl Config {
         // Run the engine's algebraic load lints now, so a returned Config is always loadable.
         let registry = Registry::build(registry_config.clone())?;
 
-        // The child return sanitizer binds like a tool's output sanitizer: registered, output-point.
-        let child_return_sanitizer = match raw.child {
-            None => None,
-            Some(child) => {
-                let name = SanitizerName::new(child.return_sanitizer);
+        let child_return = match raw.child {
+            None => ReturnPolicy::Raw,
+            Some(RawChild { return_sanitizer: None }) => {
+                return Err(ConfigError::BadImplementation {
+                    kind: "child",
+                    name: "return binding".to_string(),
+                    reason: "an empty [child] table binds nothing — configure return_sanitizer".to_string(),
+                });
+            }
+            Some(RawChild {
+                return_sanitizer: Some(sanitizer),
+            }) => {
+                let name = SanitizerName::new(sanitizer);
                 match registry.sanitizer(&name) {
-                    Some(s) if s.on.output => Some(name),
+                    Some(s) if s.on.output => ReturnPolicy::Sanitized(name),
                     Some(_) => {
                         return Err(ConfigError::BadImplementation {
                             kind: "child return_sanitizer",
@@ -227,7 +236,7 @@ impl Config {
             sanitizer_impls,
             cast_impls,
             tool_impls,
-            child_return_sanitizer,
+            child_return,
             preamble,
         })
     }
@@ -254,8 +263,10 @@ impl Config {
         self.sanitizer_impls.get(name)
     }
 
-    pub fn child_return_sanitizer(&self) -> Option<&SanitizerName> {
-        self.child_return_sanitizer.as_ref()
+    /// The fork return policy this configuration binds to every child (RP6): the `[child]` static
+    /// binding when one is declared, else raw returns under the narrowing check.
+    pub fn child_return_policy(&self) -> ReturnPolicy {
+        self.child_return.clone()
     }
 
     pub fn preamble(&self) -> &[WireMessage] {
@@ -312,7 +323,7 @@ impl RawPreamble {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawChild {
-    return_sanitizer: String,
+    return_sanitizer: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1167,7 +1178,10 @@ builtin = "redact-email"
     #[test]
     fn child_return_sanitizer_must_be_a_registered_output_sanitizer() {
         let cfg = Config::from_toml_str(&format!("version = 1\n[child]\nreturn_sanitizer = \"pii\"\n{PII}")).unwrap();
-        assert_eq!(cfg.child_return_sanitizer(), Some(&SanitizerName::new("pii")));
+        assert!(matches!(
+            cfg.child_return_policy(),
+            ReturnPolicy::Sanitized(name) if name == SanitizerName::new("pii")
+        ));
 
         assert!(matches!(
             err("version = 1\n[child]\nreturn_sanitizer = \"ghost\"\n"),
@@ -1176,6 +1190,17 @@ builtin = "redact-email"
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn child_return_binding_is_declared_or_absent_never_empty() {
+        assert!(matches!(
+            err("version = 1\n[child]\n"),
+            ConfigError::BadImplementation { kind: "child", .. }
+        ));
+
+        let cfg = Config::from_toml_str("version = 1\n").unwrap();
+        assert!(matches!(cfg.child_return_policy(), ReturnPolicy::Raw));
     }
 
     #[test]

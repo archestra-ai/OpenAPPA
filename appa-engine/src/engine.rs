@@ -3,15 +3,15 @@
 use thiserror::Error;
 
 use crate::admit::{self, AdmitError, CastAnswer, CastError, ResultAdmission};
-use crate::branch::{self, BranchError, ChildReturn};
+use crate::branch::{self, BranchError, ReturnSubmission};
 use crate::check::{self, CheckOutcome, RawBlock, UnresolvedFact};
 use crate::contract::ToolContract;
 use crate::execute::{self, PlanError, Ruling, Sink};
-use crate::fact::{Fact, FactBatch};
+use crate::fact::{Fact, FactBatch, ReturnPolicy};
 use crate::plan::{self, PlanId, PlannedBlock};
 use crate::projection::Views;
 use crate::registry::Registry;
-use crate::value::{ChildReturnId, DispatchId, ResolvedCall, TrajectoryId};
+use crate::value::{DispatchId, ResolvedCall, TrajectoryId};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum EngineError {
@@ -115,20 +115,48 @@ impl Engine {
         admit::admit_cast(&self.registry, views, target, answer)
     }
 
-    /// Seed a child branch at the parent's current label with an immutable fork binding.
+    /// Seed a child branch at the parent's current label with an immutable fork binding carrying
+    /// its return policy. See [`crate::branch`].
+    pub fn seed_child(
+        &self,
+        parent: &Views,
+        child: &TrajectoryId,
+        return_policy: ReturnPolicy,
+    ) -> Result<FactBatch, BranchError> {
+        branch::seed_child(&self.registry, parent, child, return_policy)
+    }
+
+    /// Record a child's returned value at an engine-derived label AND merge it into the direct
+    /// parent — one atomic batch, no orphanable intermediate state. A raw crossing that would
+    /// narrow the parent is refused (`ReturnNarrowsParent`): it exists only through an executed
+    /// return plan. See [`crate::branch`].
+    pub fn submit_child_return(
+        &self,
+        parent: &Views,
+        child: &TrajectoryId,
+        ret: ReturnSubmission,
+    ) -> Result<FactBatch, BranchError> {
+        branch::submit_child_return(&self.registry, parent, child, ret)
+    }
+
+    /// Decide whether a raw return by `child` may merge silently, and if not, which return plans
+    /// could cross it. Both folds and the linkage come from the parent's one projection snapshot.
     /// See [`crate::branch`].
-    pub fn seed_child(&self, parent: &Views, child: &TrajectoryId) -> Result<FactBatch, BranchError> {
-        branch::seed_child(parent, child)
+    pub fn check_child_return(&self, parent: &Views, child: &TrajectoryId) -> Result<branch::ReturnCheck, BranchError> {
+        branch::check_child_return(&self.registry, parent, child)
     }
 
-    /// Record a child's returned value at an engine-derived label (raw fold or validated sanitizer);
-    /// trust never rises. See [`crate::branch`].
-    pub fn submit_child_return(&self, child: &Views, ret: ChildReturn) -> Result<FactBatch, BranchError> {
-        branch::submit_child_return(&self.registry, child, ret)
-    }
-
-    pub fn merge(&self, parent: &Views, child_return: &ChildReturnId) -> Result<FactBatch, BranchError> {
-        branch::merge(parent, child_return)
+    /// Execute one offered return plan as a single atomic batch: crossing, acceptance where the
+    /// plan carries one, and merge. Re-derives the block from the live views and refuses a chosen
+    /// plan the fresh offers no longer contain. See [`crate::branch`].
+    pub fn execute_child_return_plan(
+        &self,
+        parent: &Views,
+        child: &TrajectoryId,
+        chosen: branch::ReturnPlan,
+        submission: ReturnSubmission,
+    ) -> Result<FactBatch, BranchError> {
+        branch::execute_child_return_plan(&self.registry, parent, child, chosen, submission)
     }
 
     fn contract(&self, call: &ResolvedCall) -> Result<&ToolContract, EngineError> {

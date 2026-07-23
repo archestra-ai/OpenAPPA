@@ -281,6 +281,136 @@ async fn a_child_quarantine_returns_only_through_submit_result() {
     );
 }
 
+fn runtime_with_taint_and_pii(model_base: String) -> Runtime {
+    let config = Config::from_toml_str(
+        r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+
+[[tool]]
+name = "get_secret"
+delta = { trust = "suspicious", audience = { exactly = ["internal"] } }
+
+[[sanitizer]]
+name = "pii"
+on   = ["tool_output"]
+[sanitizer.can_reduce]
+audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+[sanitizer.implementation]
+builtin = "redact-email"
+"#,
+    )
+    .unwrap();
+    let mut builtins = BTreeMap::new();
+    builtins.insert(
+        ToolName::new("get_secret"),
+        BuiltinTool::Echo("contact eve@corp.com".to_string()),
+    );
+    let inference = Inference::new(model_base, "k", "m", Duration::from_secs(5), HttpClient::new());
+    Runtime::new(config, inference, builtins).unwrap()
+}
+
+#[tokio::test]
+async fn a_blocked_return_crosses_only_the_chosen_derivation() {
+    let (model, seen) = spawn_scripted_model(vec![
+        final_round("1", "parent ready"),
+        tool_round("2", "get_secret", "{}"),
+        tool_round("3", "execute_remedy_plan", r#"{"plan_id":"remedy-0"}"#),
+        tool_round("4", "submit_result", r#"{"value":"report: contact eve@corp.com"}"#),
+        tool_round("5", "execute_remedy_plan", r#"{"plan_id":"remedy-2"}"#),
+        final_round("6", "returned"),
+        final_round("7", "thanks"),
+    ])
+    .await;
+    let base = spawn_server(runtime_with_taint_and_pii(model)).await;
+    let client = reqwest::Client::new();
+
+    let first = client.post(&base).json(&user_request("start")).send().await.unwrap();
+    let parent = first
+        .headers()
+        .get("x-appa-session")
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_string();
+
+    let child_resp = client
+        .post(&base)
+        .header("x-appa-parent-session", &parent)
+        .json(&user_request("investigate"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(child_resp.status(), 200);
+
+    let second = client
+        .post(&base)
+        .header("x-appa-session", &parent)
+        .json(&user_request("what did the child find?"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), 200);
+
+    let requests = seen.lock().unwrap();
+    let parent_request = requests.last().expect("the parent's second turn reached the model");
+    assert!(
+        parent_request.contains("report: contact"),
+        "the sanitized derivation must reach the parent's transcript"
+    );
+    assert!(
+        !parent_request.contains("eve@corp.com"),
+        "the raw submission must never reach the parent's transcript"
+    );
+}
+
+#[tokio::test]
+async fn a_void_submit_result_crosses_nothing_to_the_parent() {
+    let (model, seen) = spawn_scripted_model(vec![
+        final_round("1", "parent ready"),
+        tool_round("2", "get_secret", "{}"),
+        tool_round("3", "execute_remedy_plan", r#"{"plan_id":"remedy-0"}"#),
+        tool_round("4", "submit_result", r#"{"value":null}"#),
+        final_round("5", "nothing to report"),
+        final_round("6", "ok"),
+    ])
+    .await;
+    let base = spawn_server(runtime_with_taint_and_pii(model)).await;
+    let client = reqwest::Client::new();
+
+    let first = client.post(&base).json(&user_request("start")).send().await.unwrap();
+    let parent = first
+        .headers()
+        .get("x-appa-session")
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_string();
+
+    let child_resp = client
+        .post(&base)
+        .header("x-appa-parent-session", &parent)
+        .json(&user_request("investigate"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(child_resp.status(), 200);
+
+    let second = client
+        .post(&base)
+        .header("x-appa-session", &parent)
+        .json(&user_request("anything?"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), 200);
+
+    let requests = seen.lock().unwrap();
+    let parent_request = requests.last().expect("the parent's second turn reached the model");
+    assert!(
+        !parent_request.contains("eve@corp.com") && !parent_request.contains("nothing to report"),
+        "a void return crosses nothing — no value, no child free text"
+    );
+}
+
 #[tokio::test]
 async fn a_client_disconnect_cancels_the_turn_and_frees_the_session() {
     let hang = TcpListener::bind("127.0.0.1:0").await.unwrap();

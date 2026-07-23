@@ -1,5 +1,5 @@
-//! External decision backends: authorities, sanitizers, and casts — the runtime's trusted base of
-//! dynamic judgment, invoked south of the engine.
+//! External decision backends: authorities, sanitizers, and casts — the runtime's
+//! trusted base of dynamic judgment, invoked south of the engine.
 
 use std::time::Duration;
 

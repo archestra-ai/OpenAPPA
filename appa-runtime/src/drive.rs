@@ -7,17 +7,17 @@ use std::time::{Duration, Instant};
 
 use appa_engine::admit::{AdmitError, CastAnswer, ResultAdmission};
 use appa_engine::authority::CastResolution;
-use appa_engine::branch::ChildReturn;
+use appa_engine::branch::{ReturnCheck, ReturnPlan, ReturnSubmission};
 use appa_engine::check::{CheckOutcome, UnresolvedFact};
 use appa_engine::execute::{Issuer, Ruling, Sink};
-use appa_engine::fact::{BoundaryKind, Fact, FactBatch, ProposedCall};
+use appa_engine::fact::{BoundaryKind, Fact, FactBatch, ProposedCall, ReturnPolicy};
 use appa_engine::label::{DimValue, Dimension};
 use appa_engine::names::{CastName, SanitizerName};
 use appa_engine::plan::PlanId;
 use appa_engine::projection::Projection;
 use appa_engine::value::{
-    CanonicalDigest, ChildReturnId, DispatchId, Provenance, RawResultDigest, ResolvedCall, ToolCallId, ToolName,
-    TrajectoryId, ValueBody, ValueId,
+    CanonicalDigest, DispatchId, Provenance, RawResultDigest, ResolvedCall, ToolCallId, ToolName, TrajectoryId,
+    ValueBody, ValueId,
 };
 
 use tokio_util::sync::CancellationToken;
@@ -72,6 +72,13 @@ struct PendingBlock {
     plan: PlanId,
 }
 
+struct PendingReturn {
+    parent: TrajectoryId,
+    body: String,
+    raw_digest: RawResultDigest,
+    offers: Vec<(String, ReturnPlan)>,
+}
+
 struct Proposal {
     call: ProposedCall,
     malformed: bool,
@@ -106,7 +113,9 @@ pub async fn drive_turn(
         rounds: 0,
         invocations: 0,
         pending: Vec::new(),
+        pending_returns: Vec::new(),
         remedy_attempts: BTreeMap::new(),
+        return_derivation_attempts: BTreeMap::new(),
         next_handle: 0,
     };
     drive.run(user_turn).await
@@ -122,11 +131,35 @@ struct Drive<'a> {
     rounds: u32,
     invocations: u32,
     pending: Vec<PendingBlock>,
+    pending_returns: Vec<PendingReturn>,
     remedy_attempts: BTreeMap<CanonicalDigest, u32>,
+    return_derivation_attempts: BTreeMap<(RawResultDigest, SanitizerName), u32>,
     next_handle: u32,
 }
 
 struct TurnCancelled;
+
+enum RawReturnGo {
+    Merge,
+    Answered,
+}
+
+fn describe_return_plan(plan: &ReturnPlan) -> String {
+    match plan {
+        ReturnPlan::Accept(_) => "accept the narrowing and return the result raw".to_string(),
+        ReturnPlan::Sanitize {
+            sanitizer,
+            residual: None,
+        } => format!("return the {} derivation instead", sanitizer.as_str()),
+        ReturnPlan::Sanitize {
+            sanitizer,
+            residual: Some(_),
+        } => format!(
+            "return the {} derivation, accepting the residual narrowing",
+            sanitizer.as_str()
+        ),
+    }
+}
 
 impl Drive<'_> {
     async fn run(&mut self, user_turn: UserTurn) -> Result<TurnOutcome, DriveError> {
@@ -304,6 +337,13 @@ impl Drive<'_> {
             self.feedback(call_id, "execute_remedy_plan requires a string plan_id")?;
             return Ok(CallGo);
         };
+        if let Some(index) = self
+            .pending_returns
+            .iter()
+            .position(|p| p.offers.iter().any(|(h, _)| h == handle))
+        {
+            return self.handle_execute_return_remedy(call_id, index, handle).await;
+        }
         let Some(index) = self.pending.iter().position(|p| p.handle == handle) else {
             self.feedback(call_id, "no pending blocked call offers that plan_id")?;
             return Ok(CallGo);
@@ -394,67 +434,196 @@ impl Drive<'_> {
             self.feedback(call_id, "submit_result is available only to a child session")?;
             return Ok(CallGo);
         }
-        let body = arguments
-            .get("value")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .unwrap_or_default();
+        let exact_shape = arguments
+            .as_object()
+            .filter(|object| object.len() == 1)
+            .and_then(|object| object.get("value"));
+        let body = match exact_shape {
+            Some(serde_json::Value::String(value)) => value.clone(),
+            Some(serde_json::Value::Null) => {
+                self.feedback(call_id, "no result returned to the parent")?;
+                return Ok(CallGo);
+            }
+            _ => {
+                self.feedback(
+                    call_id,
+                    "submit_result takes exactly one key, `value`: a string result, or null to return nothing",
+                )?;
+                return Ok(CallGo);
+            }
+        };
 
-        let returned = match self.rt.config().child_return_sanitizer() {
-            None => ChildReturn::Raw {
-                body: ValueBody::new(body.clone()),
-            },
-            Some(sanitizer) => match self.derive_sanitized(sanitizer, &body).await {
+        let returned = match self.rt.config().child_return_policy() {
+            ReturnPolicy::Sanitized(sanitizer) => match self.derive_sanitized(&sanitizer, &body).await {
                 // Cancelled before any return was recorded: nothing crossed, only the seal is owed.
                 Err(TurnCancelled) => return Ok(CallCancelled(None)),
-                Ok(Some(derived)) => ChildReturn::Sanitized {
+                Ok(Some(derived)) => ReturnSubmission::Derived {
                     body: ValueBody::new(derived),
-                    sanitizer: sanitizer.clone(),
+                    // The audit digest binds to the raw submission, not the derivation.
+                    raw_digest: RawResultDigest::of(body.as_bytes()),
                 },
                 Ok(None) => {
                     self.feedback(call_id, "the result could not be sanitized for return")?;
                     return Ok(CallGo);
                 }
             },
+            ReturnPolicy::Raw => match self.check_raw_return(call_id, &body)? {
+                RawReturnGo::Merge => ReturnSubmission::Raw {
+                    body: ValueBody::new(body.clone()),
+                },
+                RawReturnGo::Answered => return Ok(CallGo),
+            },
         };
 
-        let mut recorded = None;
+        let Some(parent) = self.rt.store().parent_of(self.tenant, self.session)? else {
+            self.feedback(call_id, "this session cannot submit a result")?;
+            return Ok(CallGo);
+        };
+        let mut crossed = false;
         self.rt.store().finalize(self.tenant, self.session, |facts, rev| {
             if self.cancel.is_cancelled() {
                 return None;
             }
             let projection = Projection::build(facts, rev);
-            let views = projection.view(self.session);
-            let occurrence = views.returns_by(self.session);
-            let batch = self.rt.engine().submit_child_return(&views, returned).ok()?;
-            recorded = Some(ChildReturnId::new(self.session.clone(), occurrence));
+            let views = projection.view(&parent);
+            let batch = self
+                .rt
+                .engine()
+                .submit_child_return(&views, self.session, returned)
+                .ok()?;
+            crossed = true;
             Some(batch)
         })?;
-        let Some(return_id) = recorded else {
+        if !crossed {
             if self.cancel.is_cancelled() {
                 return Ok(CallCancelled(None));
             }
             self.feedback(call_id, "this session cannot submit a result")?;
             return Ok(CallGo);
-        };
-
-        let mut merged = true;
-        if let Some(parent) = self.rt.store().parent_of(self.tenant, self.session)? {
-            merged = false;
-            self.rt.store().finalize(self.tenant, self.session, |facts, rev| {
-                if self.cancel.is_cancelled() {
-                    return None;
-                }
-                let projection = Projection::build(facts, rev);
-                let batch = self.rt.engine().merge(&projection.view(&parent), &return_id).ok()?;
-                merged = true;
-                Some(batch)
-            })?;
-        }
-        if !merged {
-            return Ok(CallCancelled(None));
         }
         self.feedback(call_id, "result submitted to the parent")?;
+        Ok(CallGo)
+    }
+
+    fn check_raw_return(&mut self, call_id: &ToolCallId, body: &str) -> Result<RawReturnGo, DriveError> {
+        let Some(parent) = self.rt.store().parent_of(self.tenant, self.session)? else {
+            return Ok(RawReturnGo::Merge);
+        };
+        let (log, rev) = self.rt.store().snapshot(self.tenant, self.session)?;
+        let projection = Projection::build(&log, rev);
+        let views = projection.view(&parent);
+        match self.rt.engine().check_child_return(&views, self.session) {
+            Ok(ReturnCheck::Allow) => Ok(RawReturnGo::Merge),
+            Ok(ReturnCheck::Unresolved(_)) => {
+                self.feedback(
+                    call_id,
+                    "the return cannot be decided: a label dimension is unresolved; resolve it first or return null",
+                )?;
+                Ok(RawReturnGo::Answered)
+            }
+            Ok(ReturnCheck::Block { plans, .. }) => {
+                let offers: Vec<(String, ReturnPlan)> = plans
+                    .into_iter()
+                    .map(|plan| {
+                        let handle = format!("remedy-{}", self.next_handle);
+                        self.next_handle += 1;
+                        (handle, plan)
+                    })
+                    .collect();
+                let menu: Vec<String> = offers
+                    .iter()
+                    .map(|(handle, plan)| format!("\"{handle}\" to {}", describe_return_plan(plan)))
+                    .collect();
+                let feedback = format!(
+                    "returning this raw would narrow the parent; call execute_remedy_plan with plan_id {}; or submit_result null to return nothing",
+                    menu.join(", ")
+                );
+                self.pending_returns.push(PendingReturn {
+                    parent,
+                    body: body.to_string(),
+                    raw_digest: RawResultDigest::of(body.as_bytes()),
+                    offers,
+                });
+                self.feedback(call_id, &feedback)?;
+                Ok(RawReturnGo::Answered)
+            }
+            Err(_) => {
+                self.feedback(call_id, "this session cannot submit a result")?;
+                Ok(RawReturnGo::Answered)
+            }
+        }
+    }
+
+    async fn handle_execute_return_remedy(
+        &mut self,
+        call_id: &ToolCallId,
+        index: usize,
+        handle: &str,
+    ) -> Result<CallProgress, DriveError> {
+        let plan = self.pending_returns[index]
+            .offers
+            .iter()
+            .find(|(h, _)| h == handle)
+            .map(|(_, plan)| plan.clone())
+            .expect("caller located this handle in this pending return");
+
+        let submission = match &plan {
+            ReturnPlan::Accept(_) => ReturnSubmission::Raw {
+                body: ValueBody::new(self.pending_returns[index].body.clone()),
+            },
+            ReturnPlan::Sanitize { sanitizer, .. } => {
+                let sanitizer = sanitizer.clone();
+                let key = (self.pending_returns[index].raw_digest, sanitizer.clone());
+                let charges = self.return_derivation_attempts.entry(key).or_insert(0);
+                *charges += 1;
+                if *charges > self.rt.budgets().max_remedy_attempts_per_gap {
+                    self.feedback(call_id, "the remedy attempt limit for this return was reached")?;
+                    return Ok(CallGo);
+                }
+                let body = self.pending_returns[index].body.clone();
+                match self.derive_sanitized(&sanitizer, &body).await {
+                    // Cancelled before any crossing: the pending attempt dies with the turn.
+                    Err(TurnCancelled) => return Ok(CallCancelled(None)),
+                    Ok(Some(derived)) => ReturnSubmission::Derived {
+                        body: ValueBody::new(derived),
+                        raw_digest: self.pending_returns[index].raw_digest,
+                    },
+                    // Fail closed and restore: the plan stays offered within its budget.
+                    Ok(None) => {
+                        self.feedback(call_id, "the derivation failed; the return offer remains available")?;
+                        return Ok(CallGo);
+                    }
+                }
+            }
+        };
+
+        let parent = self.pending_returns[index].parent.clone();
+        let mut executed = false;
+        self.rt.store().finalize(self.tenant, self.session, |facts, rev| {
+            if self.cancel.is_cancelled() {
+                return None;
+            }
+            let projection = Projection::build(facts, rev);
+            let views = projection.view(&parent);
+            let batch = self
+                .rt
+                .engine()
+                .execute_child_return_plan(&views, self.session, plan.clone(), submission)
+                .ok()?;
+            executed = true;
+            Some(batch)
+        })?;
+        if executed {
+            // The offer is consumed: every sibling handle dies with it.
+            self.pending_returns.remove(index);
+            self.feedback(call_id, "result submitted to the parent")?;
+            return Ok(CallGo);
+        }
+        if self.cancel.is_cancelled() {
+            return Ok(CallCancelled(None));
+        }
+        self.pending_returns.remove(index);
+        self.feedback(call_id, "the return offer is stale; submit the result again")?;
         Ok(CallGo)
     }
 
@@ -929,6 +1098,8 @@ mod tests {
     use crate::inference::Inference;
     use crate::tool::{BuiltinTool, HttpClient};
     use crate::wire::{ChatCompletionResponse, WireFunctionCall, WireMessage, WireToolCall};
+    use appa_engine::fact::ReturnDerivation;
+    use appa_engine::value::LabeledValue;
     use std::collections::BTreeMap;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1247,11 +1418,13 @@ effects = ["read"]
         let rt = runtime_over(config, BTreeMap::new(), base).await;
         let tenant = TenantId::new("acme");
         let parent = rt.store().create_session(tenant.clone());
+        admit_at(&rt, &tenant, &parent, 1, &[]);
         let (child, _) = rt
             .store()
             .fork(&tenant, &parent, |child, facts, rev| {
                 let projection = Projection::build(facts, rev);
-                rt.engine().seed_child(&projection.view(&parent), child)
+                rt.engine()
+                    .seed_child(&projection.view(&parent), child, rt.config().child_return_policy())
             })
             .unwrap();
 
@@ -1286,6 +1459,374 @@ effects = ["read"]
             "the merged child value should appear in the parent transcript"
         );
         model.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_void_or_malformed_submit_result_crosses_nothing() {
+        for args in [
+            r#"{"value":null}"#,
+            r#"{}"#,
+            r#"{"value":42}"#,
+            r#"{"value":true}"#,
+            r#"{"value":{"k":"v"}}"#,
+            r#"{"value":["x"]}"#,
+        ] {
+            let config = Config::from_toml_str("version = 1\ntrust_chain = [\"suspicious\", \"trusted\"]\n").unwrap();
+            let (base, model) = spawn_scripted_model(vec![
+                tool_call_round("1", "submit_result", args),
+                final_round("2", "done"),
+            ])
+            .await;
+            let rt = runtime_over(config, BTreeMap::new(), base).await;
+            let tenant = TenantId::new("acme");
+            let parent = rt.store().create_session(tenant.clone());
+            let (child, _) = rt
+                .store()
+                .fork(&tenant, &parent, |child, facts, rev| {
+                    let projection = Projection::build(facts, rev);
+                    rt.engine()
+                        .seed_child(&projection.view(&parent), child, rt.config().child_return_policy())
+                })
+                .unwrap();
+
+            drive_turn(
+                &rt,
+                &tenant,
+                &child,
+                true,
+                user_turn("investigate"),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+            let (log, _) = rt.store().snapshot(&tenant, &parent).unwrap();
+            assert!(
+                !log.iter().any(|f| matches!(f, Fact::ChildReturn { .. })),
+                "no child return may be recorded for {args}"
+            );
+            assert!(
+                !log.iter().any(|f| matches!(
+                    f,
+                    Fact::ValueAdmitted {
+                        provenance: Provenance::ChildReturn { .. },
+                        ..
+                    }
+                )),
+                "nothing may be admitted to the parent for {args}"
+            );
+            assert!(
+                !log.iter().any(|f| matches!(
+                    f,
+                    Fact::Boundary {
+                        kind: BoundaryKind::Merge { .. },
+                        ..
+                    }
+                )),
+                "no merge boundary may land for {args}"
+            );
+            assert!(log.iter().any(|f| matches!(f, Fact::BlockFeedback { .. })));
+            assert!(crate::transcript::model_transcript(&[], &log, &parent).is_empty());
+            model.await.unwrap();
+        }
+    }
+
+    fn blocked_return_config(sanitizer_impl: &str) -> Config {
+        Config::from_toml_str(&format!(
+            r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+
+[[sanitizer]]
+name = "pii"
+on   = ["tool_output"]
+[sanitizer.can_reduce]
+audience = {{ from = {{ includes = ["internal"] }}, to = {{ exactly = ["public"] }} }}
+[sanitizer.implementation]
+{sanitizer_impl}
+"#
+        ))
+        .unwrap()
+    }
+
+    fn admit_at(rt: &Runtime, tenant: &TenantId, session: &TrajectoryId, trust: u8, readers: &[&str]) {
+        use appa_engine::label::{Audience, Dim, Label, ReaderId, Trust};
+        let audience = if readers.is_empty() {
+            Audience::Public
+        } else {
+            Audience::restricted(readers.iter().map(|r| ReaderId::new(*r)))
+        };
+        let (_, rev) = rt.store().snapshot(tenant, session).unwrap();
+        let batch = FactBatch::new(
+            rev,
+            vec![Fact::ValueAdmitted {
+                trajectory: session.clone(),
+                value: LabeledValue::new(
+                    ValueBody::new("ingested"),
+                    Label::new(Dim::Known(Trust::new(trust)), Dim::Known(audience)),
+                ),
+                provenance: Provenance::UserInput,
+            }],
+        );
+        rt.store().conditional_append(tenant, session, batch).unwrap();
+    }
+
+    async fn drive_child_rounds(config: Config, taint_child: bool, rounds: Vec<String>) -> (Vec<Fact>, TrajectoryId) {
+        drive_child_rounds_from(config, 1, taint_child, rounds).await
+    }
+
+    async fn drive_child_rounds_from(
+        config: Config,
+        parent_trust: u8,
+        taint_child: bool,
+        rounds: Vec<String>,
+    ) -> (Vec<Fact>, TrajectoryId) {
+        let (base, model) = spawn_scripted_model(rounds).await;
+        let rt = runtime_over(config, BTreeMap::new(), base).await;
+        let tenant = TenantId::new("acme");
+        let parent = rt.store().create_session(tenant.clone());
+        admit_at(&rt, &tenant, &parent, parent_trust, &[]);
+        let (child, _) = rt
+            .store()
+            .fork(&tenant, &parent, |child, facts, rev| {
+                let projection = Projection::build(facts, rev);
+                rt.engine()
+                    .seed_child(&projection.view(&parent), child, rt.config().child_return_policy())
+            })
+            .unwrap();
+        if taint_child {
+            admit_at(&rt, &tenant, &child, 0, &["internal"]);
+        }
+        drive_turn(
+            &rt,
+            &tenant,
+            &child,
+            true,
+            user_turn("investigate"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (log, _) = rt.store().snapshot(&tenant, &parent).unwrap();
+        model.await.unwrap();
+        (log, parent)
+    }
+
+    fn merged_child_values(log: &[Fact], parent: &TrajectoryId) -> Vec<LabeledValue> {
+        log.iter()
+            .filter_map(|f| match f {
+                Fact::ValueAdmitted {
+                    trajectory,
+                    value,
+                    provenance: Provenance::ChildReturn { .. },
+                } if trajectory == parent => Some(value.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_narrowing_raw_return_blocks_and_accept_merges_raw() {
+        let (log, parent) = drive_child_rounds(
+            blocked_return_config("builtin = \"redact-email\""),
+            true,
+            vec![
+                tool_call_round("1", "submit_result", r#"{"value":"report: ask eve@corp.com"}"#),
+                tool_call_round("2", "execute_remedy_plan", r#"{"plan_id":"remedy-0"}"#),
+                final_round("3", "done"),
+            ],
+        )
+        .await;
+        let merged = merged_child_values(&log, &parent);
+        assert_eq!(merged.len(), 1);
+        assert!(
+            merged[0].body.as_str().contains("eve@corp.com"),
+            "Accept crosses the raw value"
+        );
+        assert!(log.iter().any(|f| matches!(
+            f,
+            Fact::ChildReturn {
+                derivation: ReturnDerivation::Raw,
+                ..
+            }
+        )));
+        assert!(log.iter().any(|f| matches!(
+            f,
+            Fact::ChildReturnAcceptance { trajectory, .. } if trajectory == &parent
+        )));
+        assert_eq!(
+            merged[0].label.audience,
+            appa_engine::label::Dim::Known(appa_engine::label::Audience::restricted([
+                appa_engine::label::ReaderId::new("internal")
+            ]))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blocked_return_sanitize_offer_merges_the_derivation() {
+        let raw = "report: ask eve@corp.com";
+        let (log, parent) = drive_child_rounds(
+            blocked_return_config("builtin = \"redact-email\""),
+            true,
+            vec![
+                tool_call_round("1", "submit_result", &format!(r#"{{"value":"{raw}"}}"#)),
+                tool_call_round("2", "execute_remedy_plan", r#"{"plan_id":"remedy-1"}"#),
+                final_round("3", "done"),
+            ],
+        )
+        .await;
+        let merged = merged_child_values(&log, &parent);
+        assert_eq!(merged.len(), 1);
+        assert!(!merged[0].body.as_str().contains("eve@corp.com"));
+        assert_eq!(
+            merged[0].label.audience,
+            appa_engine::label::Dim::Known(appa_engine::label::Audience::Public),
+            "the sanitized crossing keeps the parent public"
+        );
+        assert!(log.iter().any(|f| matches!(
+            f,
+            Fact::ChildReturn {
+                derivation: ReturnDerivation::Sanitized { sanitizer, raw_digest, .. },
+                ..
+            } if sanitizer.as_str() == "pii" && raw_digest == &RawResultDigest::of(raw.as_bytes())
+        )));
+        assert!(log.iter().any(|f| matches!(
+            f,
+            Fact::ChildReturnAcceptance { narrowing, .. }
+                if narrowing.to.audience == appa_engine::label::Dim::Known(appa_engine::label::Audience::Public)
+        )));
+        let transcript = crate::transcript::model_transcript(&[], &log, &parent);
+        assert!(
+            !transcript
+                .iter()
+                .any(|m| m.content.as_deref().is_some_and(|c| c.contains("eve@corp.com")))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blocked_return_left_unremedied_merges_nothing() {
+        let (log, parent) = drive_child_rounds(
+            blocked_return_config("builtin = \"redact-email\""),
+            true,
+            vec![
+                tool_call_round("1", "submit_result", r#"{"value":"report: ask eve@corp.com"}"#),
+                final_round("2", "giving up"),
+            ],
+        )
+        .await;
+        assert!(merged_child_values(&log, &parent).is_empty());
+        assert!(!log.iter().any(|f| matches!(f, Fact::ChildReturn { .. })));
+        assert!(!log.iter().any(|f| matches!(
+            f,
+            Fact::Boundary {
+                kind: BoundaryKind::Merge { .. },
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn a_pending_return_attempt_is_discarded_after_a_sibling_merge() {
+        let (log, parent) = drive_child_rounds(
+            blocked_return_config("builtin = \"redact-email\""),
+            true,
+            vec![
+                tool_call_round("1", "submit_result", r#"{"value":"first"}"#),
+                tool_call_round("2", "submit_result", r#"{"value":"second"}"#),
+                tool_call_round("3", "execute_remedy_plan", r#"{"plan_id":"remedy-2"}"#),
+                tool_call_round("4", "execute_remedy_plan", r#"{"plan_id":"remedy-0"}"#),
+                final_round("5", "done"),
+            ],
+        )
+        .await;
+        let merged = merged_child_values(&log, &parent);
+        assert_eq!(merged.len(), 1, "exactly one crossing");
+        assert_eq!(merged[0].body.as_str(), "second");
+        assert_eq!(
+            log.iter()
+                .filter(|f| matches!(
+                    f,
+                    Fact::Boundary {
+                        kind: BoundaryKind::Merge { .. },
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_label_neutral_crossing_leaves_the_sibling_offer_executable() {
+        let (log, parent) = drive_child_rounds_from(
+            blocked_return_config("builtin = \"redact-email\""),
+            0,
+            true,
+            vec![
+                tool_call_round("1", "submit_result", r#"{"value":"ask eve@corp.com"}"#),
+                tool_call_round("2", "submit_result", r#"{"value":"ask bob@corp.com"}"#),
+                tool_call_round("3", "execute_remedy_plan", r#"{"plan_id":"remedy-1"}"#),
+                tool_call_round("4", "execute_remedy_plan", r#"{"plan_id":"remedy-3"}"#),
+                final_round("5", "done"),
+            ],
+        )
+        .await;
+        let merged = merged_child_values(&log, &parent);
+        assert_eq!(merged.len(), 2, "both derivations crossed");
+        for value in &merged {
+            assert!(!value.body.as_str().contains("corp.com"), "only derivations crossed");
+            assert_eq!(
+                value.label.audience,
+                appa_engine::label::Dim::Known(appa_engine::label::Audience::Public)
+            );
+        }
+        assert!(!log.iter().any(|f| matches!(f, Fact::ChildReturnAcceptance { .. })));
+    }
+
+    #[tokio::test]
+    async fn a_failed_derivation_restores_the_offer_and_accept_is_never_charged() {
+        let (log, parent) = drive_child_rounds(
+            blocked_return_config("resolver = { url = \"http://127.0.0.1:1/derive\", timeout_ms = 200 }"),
+            true,
+            vec![
+                tool_call_round("1", "submit_result", r#"{"value":"report: ask eve@corp.com"}"#),
+                tool_call_round("2", "execute_remedy_plan", r#"{"plan_id":"remedy-1"}"#),
+                tool_call_round("3", "execute_remedy_plan", r#"{"plan_id":"remedy-1"}"#),
+                tool_call_round("4", "execute_remedy_plan", r#"{"plan_id":"remedy-1"}"#),
+                tool_call_round("5", "execute_remedy_plan", r#"{"plan_id":"remedy-0"}"#),
+                final_round("6", "done"),
+            ],
+        )
+        .await;
+        let merged = merged_child_values(&log, &parent);
+        assert_eq!(merged.len(), 1);
+        assert!(
+            merged[0].body.as_str().contains("eve@corp.com"),
+            "Accept crossed the raw value"
+        );
+        assert!(!log.iter().any(|f| matches!(
+            f,
+            Fact::ChildReturn {
+                derivation: ReturnDerivation::Sanitized { .. },
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn a_non_narrowing_raw_return_merges_without_a_block() {
+        let (log, parent) = drive_child_rounds(
+            blocked_return_config("builtin = \"redact-email\""),
+            false,
+            vec![
+                tool_call_round("1", "submit_result", r#"{"value":"nothing read, nothing tainted"}"#),
+                final_round("2", "done"),
+            ],
+        )
+        .await;
+        let merged = merged_child_values(&log, &parent);
+        assert_eq!(merged.len(), 1);
+        assert!(!log.iter().any(|f| matches!(f, Fact::ChildReturnAcceptance { .. })));
     }
 
     #[tokio::test]
@@ -1637,7 +2178,8 @@ resolver = { url = "http://127.0.0.1:1/derive", timeout_ms = 200 }
             .store()
             .fork(&tenant, &parent, |child, facts, revision| {
                 let projection = Projection::build(facts, revision);
-                rt.engine().seed_child(&projection.view(&parent), child)
+                rt.engine()
+                    .seed_child(&projection.view(&parent), child, rt.config().child_return_policy())
             })
             .unwrap();
 
@@ -1668,6 +2210,22 @@ resolver = { url = "http://127.0.0.1:1/derive", timeout_ms = 200 }
         assert_eq!(
             merged[0].label.audience,
             appa_engine::label::Dim::Known(appa_engine::label::Audience::Public)
+        );
+        let audited: Vec<_> = log
+            .iter()
+            .filter_map(|f| match f {
+                Fact::ChildReturn { derivation, .. } => Some(derivation),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            audited,
+            vec![&ReturnDerivation::Sanitized {
+                sanitizer: appa_engine::names::SanitizerName::new("pii"),
+                raw_digest: RawResultDigest::of(b"report: ask eve@corp.com"),
+                from: appa_engine::label::Audience::restricted([appa_engine::label::ReaderId::new("internal")]),
+                to: appa_engine::label::Audience::Public,
+            }]
         );
         model.await.unwrap();
     }

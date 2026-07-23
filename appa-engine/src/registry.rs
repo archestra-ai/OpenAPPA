@@ -224,6 +224,10 @@ impl Registry {
         self.sanitizers.get(name)
     }
 
+    pub fn sanitizers(&self) -> impl Iterator<Item = &Sanitizer> {
+        self.sanitizers.values()
+    }
+
     pub fn cast(&self, name: &CastName) -> Option<&Cast> {
         self.casts.get(name)
     }

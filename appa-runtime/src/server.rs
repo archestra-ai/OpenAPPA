@@ -105,7 +105,8 @@ fn resolve_session(
             .store()
             .fork(tenant, &parent, |child, facts, revision| {
                 let projection = Projection::build(facts, revision);
-                rt.engine().seed_child(&projection.view(&parent), child)
+                rt.engine()
+                    .seed_child(&projection.view(&parent), child, rt.config().child_return_policy())
             })
             .map_err(session_error)?;
         return Ok((child, true));

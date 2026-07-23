@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::fact::{BoundaryKind, CloseOutcome, EffectKind, Fact, Revision};
+use crate::fact::{BoundaryKind, CloseOutcome, EffectKind, Fact, ReturnPolicy, Revision};
 use crate::label::{Dim, DimValue, Label};
 use crate::value::{CanonicalDigest, ChildReturnId, DispatchId, LabeledValue, TrajectoryId, ValueId};
 
@@ -23,6 +23,7 @@ struct Fork {
     child: TrajectoryId,
     parent: TrajectoryId,
     seed: Label,
+    return_policy: ReturnPolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,7 +88,7 @@ impl Projection {
                         }
                     }
                 }
-                Fact::Ruling { .. } | Fact::Acceptance { .. } => {}
+                Fact::Ruling { .. } | Fact::Acceptance { .. } | Fact::ChildReturnAcceptance { .. } => {}
                 Fact::AssistantMessage { .. } | Fact::BlockFeedback { .. } => {}
                 Fact::SanitizerApplied { .. } | Fact::OutputCastApplied { .. } => {}
                 Fact::ChildReturn { id, value, .. } => child_returns.push(ReturnedChild {
@@ -98,10 +99,15 @@ impl Projection {
                     boundaries.push(trajectory.clone());
                     match kind {
                         BoundaryKind::TurnEnd => {}
-                        BoundaryKind::Fork { parent, seed } => forks.push(Fork {
+                        BoundaryKind::Fork {
+                            parent,
+                            seed,
+                            return_policy,
+                        } => forks.push(Fork {
                             child: trajectory.clone(),
                             parent: parent.clone(),
                             seed: seed.clone(),
+                            return_policy: return_policy.clone(),
                         }),
                         BoundaryKind::Merge { child_return } => merged.push(child_return.clone()),
                     }
@@ -199,6 +205,16 @@ impl Views<'_> {
             .map(|fork| &fork.parent)
     }
 
+    /// The child's immutable fork return policy — the binding every `submit_result` crossing is
+    /// derived from. `None` for a trajectory that was never forked.
+    pub fn return_policy_of(&self, child: &TrajectoryId) -> Option<&ReturnPolicy> {
+        self.projection
+            .forks
+            .iter()
+            .find(|fork| &fork.child == child)
+            .map(|fork| &fork.return_policy)
+    }
+
     pub fn child_return(&self, id: &ChildReturnId) -> Option<&LabeledValue> {
         self.projection
             .child_returns
@@ -222,11 +238,20 @@ impl Views<'_> {
     /// The values admitted to this branch, with their ids and labels — for finding the Unknown
     /// dimensions a cast must resolve.
     pub fn branch_values(&self) -> impl Iterator<Item = (ValueId, &Label)> {
+        self.branch_values_of(self.trajectory)
+    }
+
+    /// The values admitted to an arbitrary family trajectory — the return check names a child's
+    /// (or the parent's own) unresolved values from this one snapshot.
+    pub(crate) fn branch_values_of<'a>(
+        &'a self,
+        trajectory: &'a TrajectoryId,
+    ) -> impl Iterator<Item = (ValueId, &'a Label)> {
         self.projection
             .values
             .iter()
             .enumerate()
-            .filter(|(_, v)| &v.trajectory == self.trajectory)
+            .filter(move |(_, v)| &v.trajectory == trajectory)
             .map(|(i, v)| (ValueId::new(i as u64), &v.label))
     }
 
