@@ -98,10 +98,15 @@ impl AppaHook {
                     return feedback;
                 }
                 Ok(RemedyDecision::Authorized { handle, call }) => {
-                    self.log(format!("remedy authorized {} — executing", call.tool.as_str()));
+                    let tool = call.tool.as_str().to_string();
+                    self.log(format!("remedy authorized {tool} — executing"));
                     let outcome = self.execute(&call).await;
                     match session.report_outcome(handle, outcome) {
-                        Ok(result) => return deliver(result),
+                        Ok(result) => {
+                            let text = deliver(result);
+                            self.log(format!("{tool} result: {}", preview(&text)));
+                            return text;
+                        }
                         Err(e) => return format!("[internal policy error: {e}]"),
                     }
                 }
@@ -125,7 +130,11 @@ impl AppaHook {
                 self.log(format!("allowed {tool_name} — executing"));
                 let outcome = self.execute(&call).await;
                 match session.report_outcome(handle, outcome) {
-                    Ok(result) => deliver(result),
+                    Ok(result) => {
+                        let text = deliver(result);
+                        self.log(format!("{tool_name} result: {}", preview(&text)));
+                        text
+                    }
                     Err(e) => format!("[internal policy error: {e}]"),
                 }
             }
@@ -174,6 +183,22 @@ fn deliver(result: AdmittedResult) -> String {
     match result {
         AdmittedResult::Admitted { content, .. } => content,
         AdmittedResult::Sealed { token } => token,
+    }
+}
+
+/// A one-line, length-capped preview of the exact text handed back to the model — so the mediation
+/// log shows the tool call's result, not just the decision. Whitespace is collapsed to a single
+/// line and the text is truncated; a trailing count keeps the elision honest. A sealed result
+/// previews only its token (the withheld body never reaches this string).
+fn preview(text: &str) -> String {
+    const MAX: usize = 200;
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let n = one_line.chars().count();
+    if n > MAX {
+        let head: String = one_line.chars().take(MAX).collect();
+        format!("{head}… (+{} more chars)", n - MAX)
+    } else {
+        one_line
     }
 }
 
