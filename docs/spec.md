@@ -542,16 +542,14 @@ describing what the data *is*. A widening that genuinely should persist —
 an ongoing external thread, many sends under one review — is served by
 branching, never by the label: fork a child to carry the exchange; each
 send is ruled inside it, and the widening structurally cannot outlive the
-branch or cross back (see Branching). The durable alternative (the
-**epoch-wide raise**) was considered and rejected in favor of branching.
-One review is one review.
+branch or cross back (see Branching).
 
 ### Atomic plan execution
 
 The mechanism is the remedy plan; every plan with an engine-side step is
 **atomic**. Executing a
 ruling-carrying plan is
-one indivisible step on a suspended run: the engine renders the call, puts
+one indivisible step on the suspended branch: the engine renders the call, puts
 it to the authority — with provenance, never value bytes — and on approval
 dispatches it; the plan id, the ruling, and the dispatch land in the log
 together. (An acceptance plan is atomic trivially: accept and dispatch,
@@ -896,6 +894,9 @@ The core trajectory is linear. A host that branches — subagents, quarantined
 fetches, metatools — must implement this profile, or must not let branch
 results cross back. It is the primary composition mechanism; the compiled
 composites above are the engine-owned instance of the same semantics.
+"Branch" covers parent and child alike — every concurrently executing
+thread of the run; "the parent" and "the child" name the two sides of a
+fork.
 
 - **Fork.** The child starts at the parent's *current* label — never at the
   neutral `L0`: a fresh-slate child could "summarize what we know" into a
@@ -1061,9 +1062,6 @@ xor resolver-implemented**.
   declaration of what its rulings may cover; the tags it has jurisdiction
   over; one act of judgment, appended to the log. Every ruling is
   call-scoped and never touches the label.
-- **Epoch-wide raise** — a considered-and-rejected durable widening.
-  APPA's answer to persistent external exchanges is branching; the label
-  never widens.
 - **Sanitizer** — a registered transformer deriving a new value under a
   mandated, audience-only label transition; applied to a tool output (the
   derivation is admitted, the raw stays confined — confining deployments)
@@ -1075,6 +1073,8 @@ xor resolver-implemented**.
   serves authority rulings, cast decisions, sanitizer derivations, and
   membership /
   argument-to-reader-set questions at decision time.
+- **Branch** — one concurrently executing thread of the run, the parent or
+  any child; all branches append to the one shared log in realtime.
 - **Boundary event** — punctuation in the log (turn end, fork, merge) that
   pending plan executions cannot outlive.
 - **Confining deployment** — one that can hold a raw tool result out of the
