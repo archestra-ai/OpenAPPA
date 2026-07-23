@@ -1,0 +1,19 @@
+[package]
+name = "appa-sdk"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+appa-engine = { workspace = true }
+appa-runtime = { path = "../appa-runtime" }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+toml = { workspace = true }
+
+[lints]
+workspace = true

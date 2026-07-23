@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["appa-engine", "appa-runtime"]
+members = ["appa-engine", "appa-runtime", "appa-sdk"]
 
 [workspace.package]
 edition = "2024"
