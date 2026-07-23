@@ -11,7 +11,7 @@ Table~\ref{tab:systems} compares \appa{} with closely related agent safety and t
     System & Role and timing & Flow basis & Trajectory-taint strategy &
     Persistent lineage & Discretionary release \\
     \midrule
-    Fides~\cite{fides} & Online prevention &
+    \textsc{Fides}~\cite{fides} & Online prevention &
     Dynamic conf./integ.\ labels &
     Selectively hide restrictive fields after return &
     Per execution & High-integrity policy or constrained reveal \\
@@ -33,8 +33,8 @@ Table~\ref{tab:systems} compares \appa{} with closely related agent safety and t
   \end{tabularx}
 \end{table*}
 
-\paragraph{Closest comparison: Fides.}
-Fides is the main antecedent for \appa{}, formalizing dynamic information-flow control (IFC) for agent planners~\cite{fides}. While both systems share the core premise of structural, label-based enforcement decoupled from the LLM, they differ fundamentally in scope and timing. Fides mitigates label creep by evaluating tool outputs post-execution and selectively hiding restrictive fields in planner variables. In contrast, \appa{} operates at the trajectory level: prospective policy checks prevent restrictive acquisitions on the active path, while host-managed child branches isolate sensitive sub-computations under inherited label states. Furthermore, whereas Fides's policy model permits confidentiality gaps when calls originate from high-integrity contexts~\cite{fides}, \appa{} manages discretionary exceptions via atomic authorization rulings over explicitly rendered tool calls while preserving underlying labels.
+\paragraph{Closest comparison: \textsc{Fides}.}
+\textsc{Fides} is the main antecedent for \appa{}, formalizing dynamic information-flow control (IFC) for agent planners~\cite{fides}. While both systems share the core premise of structural, label-based enforcement decoupled from the LLM, they differ fundamentally in scope and timing. \textsc{Fides} mitigates label creep by evaluating tool outputs post-execution and selectively hiding restrictive fields in planner variables. In contrast, \appa{} operates at the trajectory level: prospective policy checks prevent restrictive acquisitions on the active path, while host-managed child branches isolate sensitive sub-computations under inherited label states. Furthermore, whereas \textsc{Fides}'s policy model permits confidentiality gaps when calls originate from high-integrity contexts~\cite{fides}, \appa{} manages discretionary exceptions via atomic authorization rulings over explicitly rendered tool calls while preserving underlying labels.
 
 \paragraph{Semantic, memory, and provenance systems.}
 As summarized in Table~\ref{tab:systems}, related frameworks address distinct operational scopes. NeuroTaint~\cite{caiGhostAgentRedefining2026} performs post-hoc causal analysis to reconstruct source-to-sink provenance offline across sessions, serving as a complementary auditor for semantic propagation. MemLineage~\cite{ouyangMemLineageLineageGuidedEnforcement2026} gates sensitive actions on signed memory entry derivation graphs across sessions. In contrast, \appa{}'s trajectory labels and append-only event log govern single execution runs, allowing MemLineage to provide persistent provenance at \appa{}'s boundary. Execution provenance taxonomies~\cite{wangAgentTracesTrust2026} model typed execution graphs; \appa{} captures the procedural subset via its append-only event log for auditing and policy checks without inferring claim-support dependencies. Benchmarks like AgentDojo~\cite{debenedettiAgentDojoDynamicEnvironment2024} provide injection suites for evaluation, whereas post-hoc benchmarks like TaintBench focus on detection rather than online prevention.
