@@ -71,10 +71,10 @@ impl Trust {
     }
 }
 
-/// A symbolic reader identity: an id, a domain, or a named group — an opaque atom to the pure
-/// algebra. Named-group containment (`level-3 ⊂ level-2`) is realized by expanding groups to
-/// their members at the configuration boundary, so every audience that reaches the algebra is
-/// already a concrete set and intersection/subset are exact.
+/// A symbolic reader identity — an opaque atom to the pure algebra. The current dialect's
+/// audiences are explicit id-lists: every audience that reaches the algebra is a concrete set, so
+/// intersection/subset are exact. Named groups with resolver-backed membership (`john ∈ hr`
+/// resolved fresh at every check) are design direction, not implemented (spec §Audience).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ReaderId(String);
 

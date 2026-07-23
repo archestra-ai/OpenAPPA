@@ -184,6 +184,7 @@ impl Core {
                     .collect();
                 let feedback = match planned.plans.first() {
                     Some(plan) => {
+                        let via = authorize_via(plan);
                         let handle = format!("remedy-{}", self.next_remedy_handle);
                         self.next_remedy_handle += 1;
                         self.pending_blocks.push(PendingBlock {
@@ -196,10 +197,10 @@ impl Core {
                                 "narrowing: this call restricts the trajectory's {dims} label; call execute_remedy_plan with plan_id \"{handle}\" to accept and proceed"
                             ),
                             (n, Some(dims)) => format!(
-                                "blocked by policy ({n} requirement gap(s), and narrows {dims}); call execute_remedy_plan with plan_id \"{handle}\" to authorize"
+                                "blocked by policy ({n} requirement gap(s), and narrows {dims}); call execute_remedy_plan with plan_id \"{handle}\" to authorize{via}"
                             ),
                             (n, None) => format!(
-                                "blocked by policy ({n} requirement gap(s)); call execute_remedy_plan with plan_id \"{handle}\" to authorize"
+                                "blocked by policy ({n} requirement gap(s)); call execute_remedy_plan with plan_id \"{handle}\" to authorize{via}"
                             ),
                         }
                     }
@@ -450,6 +451,22 @@ fn narrowed_dims(narrowing: &Narrowing) -> String {
     }
 }
 
+fn authorize_via(plan: &appa_engine::plan::RemedyPlan) -> String {
+    let authorities: Vec<&str> = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            appa_engine::plan::RemedyStep::Authorize(name) => Some(name.as_str()),
+            appa_engine::plan::RemedyStep::Accept => None,
+        })
+        .collect();
+    if authorities.is_empty() {
+        String::new()
+    } else {
+        format!(" via {}", authorities.join(", "))
+    }
+}
+
 pub(crate) fn sealed_token(outcome: &ToolOutcome, admitted: bool) -> Option<&'static str> {
     match outcome {
         ToolOutcome::Success {
@@ -482,7 +499,7 @@ fn validate_policy(config: &Config) -> Result<(), OpenError> {
         if tool.output_sanitizer.is_some() {
             return Err(OpenError::UnsupportedPolicy(format!("tool {name} output_sanitizer")));
         }
-        if tool.delta.pending_cast_dim().is_some() {
+        if tool.pending_cast_dim().is_some() {
             return Err(OpenError::UnsupportedPolicy(format!(
                 "tool {name} pending-cast (\"unknown\") delta"
             )));

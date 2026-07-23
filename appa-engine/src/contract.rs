@@ -7,10 +7,18 @@ use crate::label::{Audience, Dim, Dimension, Label, Trust};
 use crate::names::{MarkName, SanitizerName, TagName};
 use crate::value::ToolName;
 
-/// A restrictive label contribution: what a successful call folds into the trajectory. Every delta
-/// only ever narrows — minimum trust, intersect audience — so a permissive delta is unrepresentable.
-/// A dimension may also be declared [`Dim::Unknown`]: **pending-cast** — the result's actual state
-/// is established by a registered cast at admission (RP5), so the raw result is confined until then.
+/// A **declared** restrictive label contribution: what a successful call folds into the trajectory.
+/// Every delta only ever narrows — minimum trust, intersect audience — so a permissive delta is
+/// unrepresentable. A dimension may also be declared [`Dim::Unknown`]: **pending-cast** — the
+/// result's actual state is established by a registered cast at admission (RP5), so the raw result
+/// is confined until then.
+///
+/// A contract may carry no delta at all ([`ToolContract::delta`] is `None`): the tool is
+/// **unannotated** — the deployment never described its output, which is not the same as declaring
+/// it neutral. An unannotated tool's result is admitted at `Unknown` in both dimensions
+/// (fail-closed: the fold absorbs Unknown, and any later check whose requirement consumes the
+/// dimension names the values a cast must resolve). The deliberate "this result carries nothing"
+/// annotation is the empty declared delta ([`Delta::NONE`], `delta = {}` on the config surface).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Delta {
     pub trust: Option<Dim<Trust>>,
@@ -104,7 +112,11 @@ pub struct Requires {
 pub struct ToolContract {
     pub name: ToolName,
     pub tags: Vec<TagName>,
-    pub delta: Delta,
+    /// The declared output contribution, or `None`: **unannotated** — results are admitted at
+    /// `Unknown` in both dimensions (see [`Delta`]). `Some(Delta::NONE)` is the deliberate neutral
+    /// annotation; the two are not interchangeable.
+    #[serde(default)]
+    pub delta: Option<Delta>,
     pub emits: Vec<EffectKind>,
     pub requires: Requires,
     /// The policy-bound output sanitizer (RP4): every successful result of this tool is confined
@@ -114,4 +126,21 @@ pub struct ToolContract {
     /// value for a bound tool, so the binding is engine-enforced, not runtime courtesy.
     #[serde(default)]
     pub output_sanitizer: Option<SanitizerName>,
+}
+
+impl ToolContract {
+    /// The label a raw admitted result of this tool carries: the declared delta as a label, or —
+    /// unannotated — `Unknown` in both dimensions.
+    pub fn output_label(&self) -> Label {
+        match &self.delta {
+            Some(delta) => delta.output_label(),
+            None => Label::new(Dim::Unknown, Dim::Unknown),
+        }
+    }
+
+    /// The single dimension this contract declares pending-cast, if any. An unannotated tool
+    /// declares none: its Unknown output is admitted as-is, not confined awaiting a cast.
+    pub fn pending_cast_dim(&self) -> Option<Dimension> {
+        self.delta.as_ref().and_then(Delta::pending_cast_dim)
+    }
 }

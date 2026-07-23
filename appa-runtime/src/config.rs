@@ -54,8 +54,12 @@ pub enum ConfigError {
     ReservedRankName,
     #[error("bad reader set in {context}: {reason}")]
     BadAudience { context: String, reason: String },
-    #[error("bad sanitizer point {token:?}: expected \"tool_input\" or \"tool_output\"")]
+    #[error("bad sanitizer point {token:?}: expected \"tool_output\"")]
     UnknownSanitizerPoint { token: String },
+    #[error(
+        "sanitizer {name} registers on \"tool_input\": input-argument substitution is not implemented — an input sanitizer would sit inert, so it is refused, not accepted silently"
+    )]
+    InputSanitizerPoint { name: String },
     #[error("sanitizer {name} declares no application point (`on` is empty)")]
     NoSanitizerPoint { name: String },
     #[error("{kind} {name}: {reason}")]
@@ -372,10 +376,10 @@ struct RawTool {
 impl RawTool {
     fn convert(self, chain: &TrustChain) -> Result<(ToolContract, Option<ToolImpl>), ConfigError> {
         let ctx = || format!("tool {}", self.name);
-        let delta = match self.delta {
-            Some(d) => d.convert(chain, &ctx())?,
-            None => Delta::NONE,
-        };
+        // No `delta` key at all = unannotated (results admitted at Unknown/Unknown, fail-closed);
+        // `delta = {}` = the deliberate neutral annotation. The distinction is the whole point —
+        // never collapse an omitted delta into the neutral one.
+        let delta = self.delta.map(|d| d.convert(chain, &ctx())).transpose()?;
         let requires = match self.requires {
             Some(r) => r.convert(chain, &ctx())?,
             None => Requires::default(),
@@ -917,7 +921,9 @@ fn parse_points(tokens: &[String], name: &str) -> Result<SanitizerPoints, Config
     };
     for token in tokens {
         match token.as_str() {
-            "tool_input" => points.input = true,
+            "tool_input" => {
+                return Err(ConfigError::InputSanitizerPoint { name: name.to_string() });
+            }
             "tool_output" => points.output = true,
             other => {
                 return Err(ConfigError::UnknownSanitizerPoint {
@@ -926,7 +932,7 @@ fn parse_points(tokens: &[String], name: &str) -> Result<SanitizerPoints, Config
             }
         }
     }
-    if !points.input && !points.output {
+    if !points.output {
         return Err(ConfigError::NoSanitizerPoint { name: name.to_string() });
     }
     Ok(points)
@@ -948,15 +954,17 @@ delta    = { audience = { exactly = ["internal"] } }
 name     = "send_email"
 requires = { trust = "trusted", audience = { includes = ["$recipient"] } }
 effects  = ["egress"]
+delta    = {}   # deliberately neutral: a delivery receipt carries nothing
 
 [[tool]]
 name     = "file_github_ticket"
 requires = { trust = "trusted", audience = { includes = ["public"] } }
 effects  = ["egress", "mutation"]
+delta    = {}
 
 [[sanitizer]]
 name = "remove_pii"
-on   = ["tool_input", "tool_output"]
+on   = ["tool_output"]
 [sanitizer.can_reduce]
 audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
 [sanitizer.implementation]
@@ -981,7 +989,7 @@ resolver = { channel = "hitl" }
 
         let get = reg.tool(&ToolName::new("get_ticket_from_crm")).expect("tool present");
         assert_eq!(
-            get.delta.audience,
+            get.delta.as_ref().expect("declared delta").audience,
             Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])))
         );
         assert_eq!(get.requires.label.trust_floor, Some(Trust::new(1)));
@@ -1003,18 +1011,30 @@ resolver = { channel = "hitl" }
     }
 
     #[test]
-    fn input_and_output_sanitizer_parses_both_points() {
+    fn a_sanitizer_registers_on_tool_output_only() {
         let cfg = config(WORKED);
         let reg = cfg.registry();
         let san = reg
             .sanitizer(&SanitizerName::new("remove_pii"))
             .expect("sanitizer present");
-        assert!(san.on.input && san.on.output);
+        assert!(!san.on.input && san.on.output);
         assert_eq!(san.can_reduce.to, Audience::Public);
         assert_eq!(
             cfg.sanitizer_impl(&SanitizerName::new("remove_pii")),
             Some(&SanitizerImpl::Builtin(BuiltinSanitizer::RedactEmail))
         );
+    }
+
+    #[test]
+    fn a_tool_input_sanitizer_point_is_refused_not_inert() {
+        assert!(matches!(
+            err(
+                "version = 1\n[[sanitizer]]\nname = \"pii\"\non = [\"tool_input\", \"tool_output\"]\n\
+                 [sanitizer.can_reduce]\naudience = { from = { includes = [\"internal\"] }, to = { exactly = [\"public\"] } }\n\
+                 [sanitizer.implementation]\nbuiltin = \"redact-email\"\n"
+            ),
+            ConfigError::InputSanitizerPoint { name } if name == "pii"
+        ));
     }
 
     #[test]
@@ -1030,7 +1050,7 @@ resolver = { channel = "hitl" }
     }
 
     #[test]
-    fn omitted_delta_and_absent_requires_are_neutral() {
+    fn omitted_delta_is_unannotated_and_empty_delta_is_neutral() {
         let cfg = config(
             r#"
 version = 1
@@ -1042,6 +1062,18 @@ name = "ping"
         let ping = reg.tool(&ToolName::new("ping")).unwrap();
         assert!(ping.delta.is_none());
         assert_eq!(ping.requires, Requires::default());
+
+        let cfg = config(
+            r#"
+version = 1
+[[tool]]
+name = "ping"
+delta = {}
+"#,
+        );
+        let reg = cfg.registry();
+        let ping = reg.tool(&ToolName::new("ping")).unwrap();
+        assert_eq!(ping.delta, Some(Delta::NONE));
     }
 
     #[test]
@@ -1061,6 +1093,7 @@ trust_chain = ["unvetted", "vendor", "internal"]
 [[tool]]
 name = "t"
 requires = { trust = "internal" }
+delta = {}
 "#,
         );
         let reg = cfg.registry();
@@ -1145,9 +1178,12 @@ resolver = { url = "https://c/resolve", timeout_ms = 10000, may_cast = { trust =
         .unwrap();
         let reg = cfg.registry();
         let scan = reg.tool(&ToolName::new("scan")).unwrap();
-        assert_eq!(scan.delta.trust, Some(Dim::Unknown));
+        assert_eq!(scan.delta.as_ref().expect("declared delta").trust, Some(Dim::Unknown));
         let probe = reg.tool(&ToolName::new("probe")).unwrap();
-        assert_eq!(probe.delta.audience, Some(Dim::Unknown));
+        assert_eq!(
+            probe.delta.as_ref().expect("declared delta").audience,
+            Some(Dim::Unknown)
+        );
     }
 
     const PII: &str = r#"
@@ -1406,6 +1442,7 @@ version = 1
 [[tool]]
 name = "fetch"
 requires = { trust = "trusted" }
+delta = {}
 [tool.implementation]
 http = { url = "https://tools/fetch", timeout_ms = 5000 }
 "#,

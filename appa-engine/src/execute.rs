@@ -193,7 +193,7 @@ mod tests {
         let wire = ToolContract {
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Delta::NONE,
+            delta: Some(Delta::NONE),
             emits: vec![],
             requires: Requires {
                 label: LabelRequirements {
@@ -391,7 +391,7 @@ mod tests {
         let wire = ToolContract {
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Delta::NONE,
+            delta: Some(Delta::NONE),
             emits: vec![],
             requires: Requires {
                 label: LabelRequirements {
@@ -454,7 +454,7 @@ mod tests {
         let wire = ToolContract {
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Delta::NONE,
+            delta: Some(Delta::NONE),
             emits: vec![],
             requires: Requires {
                 attention: vec![MarkName::new("m1"), MarkName::new("m2")],
@@ -511,10 +511,10 @@ mod tests {
         let get = ToolContract {
             name: ToolName::new("get"),
             tags: vec![],
-            delta: Delta {
+            delta: Some(Delta {
                 trust: None,
                 audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")]))),
-            },
+            }),
             emits: vec![],
             requires: Requires::default(),
             output_sanitizer: None,

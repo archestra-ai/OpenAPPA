@@ -42,7 +42,6 @@ pub struct Projection {
     boundaries: Vec<TrajectoryId>,
     forks: Vec<Fork>,
     child_returns: Vec<ReturnedChild>,
-    merged: Vec<ChildReturnId>,
 }
 
 impl Projection {
@@ -56,7 +55,6 @@ impl Projection {
         let mut boundaries = Vec::new();
         let mut forks = Vec::new();
         let mut child_returns = Vec::new();
-        let mut merged = Vec::new();
 
         for fact in log {
             match fact {
@@ -109,7 +107,7 @@ impl Projection {
                             seed: seed.clone(),
                             return_policy: return_policy.clone(),
                         }),
-                        BoundaryKind::Merge { child_return } => merged.push(child_return.clone()),
+                        BoundaryKind::Merge { .. } => {}
                     }
                 }
             }
@@ -124,7 +122,6 @@ impl Projection {
             boundaries,
             forks,
             child_returns,
-            merged,
         }
     }
 
@@ -223,10 +220,8 @@ impl Views<'_> {
             .map(|returned| &returned.value)
     }
 
-    pub fn is_merged(&self, id: &ChildReturnId) -> bool {
-        self.projection.merged.contains(id)
-    }
-
+    /// How many values `child` has already returned. Nonzero refuses a further return (a child
+    /// returns at most once); the count also mints the crossing's occurrence.
     pub fn returns_by(&self, child: &TrajectoryId) -> u32 {
         self.projection
             .child_returns
@@ -271,10 +266,6 @@ impl Views<'_> {
 
     pub fn present_effects(&self) -> BTreeSet<EffectKind> {
         self.projection.effects.iter().cloned().collect()
-    }
-
-    pub fn effect_count(&self, kind: &EffectKind) -> usize {
-        self.projection.effects.iter().filter(|e| *e == kind).count()
     }
 
     pub fn is_open(&self, dispatch: &DispatchId) -> bool {

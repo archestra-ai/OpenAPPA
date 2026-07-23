@@ -132,17 +132,17 @@ pub(crate) fn admit_result(
         }],
         ResultAdmission::SuccessNoValue => vec![close_success()],
         ResultAdmission::SuccessRaw { body } => {
-            if contract.delta.pending_cast_dim().is_some() {
+            if contract.pending_cast_dim().is_some() {
                 return Err(AdmitError::OutputPendingCast);
             }
             if contract.output_sanitizer.is_some() {
                 return Err(AdmitError::OutputSanitizerBound);
             }
-            vec![close_success(), admit_value(contract.delta.output_label(), body)]
+            vec![close_success(), admit_value(contract.output_label(), body)]
         }
         ResultAdmission::SuccessCast { body, cast, resolved } => {
             let raw_digest = RawResultDigest::of(body.as_str().as_bytes());
-            if contract.delta.pending_cast_dim() != Some(resolved.dimension()) {
+            if contract.pending_cast_dim() != Some(resolved.dimension()) {
                 return Err(AdmitError::NotPendingCast);
             }
             let registered = registry
@@ -160,7 +160,7 @@ pub(crate) fn admit_result(
                     }
                 }
             }
-            let output = contract.delta.output_label();
+            let output = contract.output_label();
             // Fill exactly the pending dimension; the established one is preserved untouched.
             let label = match &resolved {
                 DimValue::Trust(t) => Label::new(Dim::Known(*t), output.audience),
@@ -184,7 +184,7 @@ pub(crate) fn admit_result(
             sanitizer,
             raw_digest,
         } => {
-            if contract.delta.pending_cast_dim().is_some() {
+            if contract.pending_cast_dim().is_some() {
                 return Err(AdmitError::OutputPendingCast);
             }
             if contract.output_sanitizer.as_ref() != Some(&sanitizer) {
@@ -196,7 +196,7 @@ pub(crate) fn admit_result(
             if !san.on.output {
                 return Err(AdmitError::SanitizerNotOutput(sanitizer.as_str().to_string()));
             }
-            let raw = contract.delta.output_label();
+            let raw = contract.output_label();
             if raw.audience.covers(&san.can_reduce.from_includes) != Adequacy::Holds {
                 return Err(AdmitError::TransitionSourceUnmet);
             }
@@ -293,10 +293,10 @@ mod tests {
         let get = ToolContract {
             name: ToolName::new("get_ticket"),
             tags: vec![],
-            delta: Delta {
+            delta: Some(Delta {
                 trust: Some(Dim::Known(SUSPICIOUS)),
                 audience: Some(Dim::Known(internal())),
-            },
+            }),
             emits: vec![EffectKind::new("read")],
             requires: Default::default(),
             output_sanitizer: None,
@@ -339,10 +339,10 @@ mod tests {
         let scan = ToolContract {
             name: ToolName::new("scan_inbox"),
             tags: vec![],
-            delta: Delta {
+            delta: Some(Delta {
                 trust: Some(Dim::Unknown),
                 audience: Some(Dim::Known(internal())),
-            },
+            }),
             emits: vec![EffectKind::new("read")],
             requires: Default::default(),
             output_sanitizer: None,
@@ -350,10 +350,10 @@ mod tests {
         let export = ToolContract {
             name: ToolName::new("export_ticket"),
             tags: vec![],
-            delta: Delta {
+            delta: Some(Delta {
                 trust: Some(Dim::Known(SUSPICIOUS)),
                 audience: Some(Dim::Known(internal())),
-            },
+            }),
             emits: vec![EffectKind::new("read")],
             requires: Default::default(),
             output_sanitizer: Some(crate::names::SanitizerName::new("declassify")),

@@ -18,10 +18,8 @@ pub enum BranchError {
     AlreadyForked,
     #[error("the parent's current label has an unresolved dimension — resolve it before forking")]
     ParentUnresolved,
-    #[error("no child return registered for the given id")]
-    UnknownChildReturn,
-    #[error("this child return was already merged")]
-    AlreadyMerged,
+    #[error("the child has already returned — a child returns at most once")]
+    AlreadyReturned,
     #[error("the child was not forked from this parent (reparenting/cross-family merge refused)")]
     NotDirectParent,
     #[error("no sanitizer registered as {0}")]
@@ -98,6 +96,9 @@ pub(crate) fn submit_child_return(
     match parent.parent_of(child) {
         Some(direct) if direct == parent.trajectory() => {}
         _ => return Err(BranchError::NotDirectParent),
+    }
+    if parent.returns_by(child) > 0 {
+        return Err(BranchError::AlreadyReturned);
     }
     let policy = parent.return_policy_of(child).ok_or(BranchError::NotForked)?.clone();
     let fold = parent.branch_label(child);
@@ -198,6 +199,9 @@ pub(crate) fn check_child_return(
     match parent.parent_of(child) {
         Some(direct) if direct == parent.trajectory() => {}
         _ => return Err(BranchError::NotDirectParent),
+    }
+    if parent.returns_by(child) > 0 {
+        return Err(BranchError::AlreadyReturned);
     }
     match parent.return_policy_of(child) {
         Some(ReturnPolicy::Raw) => {}
@@ -996,7 +1000,7 @@ mod tests {
     }
 
     #[test]
-    fn an_executed_plan_kills_its_siblings_by_value() {
+    fn an_executed_plan_consumes_the_childs_return_channel() {
         let mut log = blocked_family();
         let batch = execute(
             &registry(),
@@ -1024,7 +1028,7 @@ mod tests {
                     raw_digest: RawResultDigest::of(b"findings"),
                 },
             ),
-            Err(BranchError::ReturnOfferStale)
+            Err(BranchError::AlreadyReturned)
         );
 
         let mut log = blocked_family();
@@ -1054,7 +1058,24 @@ mod tests {
                     body: ValueBody::new("findings"),
                 },
             ),
-            Err(BranchError::ReturnPlanNotOffered)
+            Err(BranchError::AlreadyReturned)
+        );
+    }
+
+    #[test]
+    fn a_second_return_from_one_child_is_refused() {
+        let mut log = forked(known(SUSPICIOUS, internal()));
+        let projection = build(&log);
+        let ret = submit_child_return(&registry(), &projection.view(&parent()), &child(), raw("first")).unwrap();
+        log.extend(ret.facts);
+        let projection = build(&log);
+        assert_eq!(
+            submit_child_return(&registry(), &projection.view(&parent()), &child(), raw("second")),
+            Err(BranchError::AlreadyReturned)
+        );
+        assert_eq!(
+            check_child_return(&registry(), &projection.view(&parent()), &child()),
+            Err(BranchError::AlreadyReturned)
         );
     }
 

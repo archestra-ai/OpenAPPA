@@ -46,21 +46,28 @@ pub enum CheckOutcome {
     Unresolved(Vec<UnresolvedFact>),
 }
 
-/// The contribution a successful call would actually fold. For an unbound tool that is its raw
-/// `delta`; a sanitizer-bound tool (RP4) folds the **bound derivation** instead, so its audience
-/// contribution is the sanitizer's declared `to` (trust untouched — never sanitizer territory).
-pub(crate) fn effective_delta(registry: &Registry, contract: &ToolContract) -> Delta {
-    match &contract.output_sanitizer {
-        None => contract.delta.clone(),
-        Some(name) => {
+pub(crate) fn effective_delta(registry: &Registry, contract: &ToolContract) -> Option<Delta> {
+    match (&contract.delta, &contract.output_sanitizer) {
+        (delta, None) => delta.clone(),
+        (Some(delta), Some(name)) => {
             let sanitizer = registry
                 .sanitizer(name)
                 .expect("load validation: bound output sanitizer is registered");
-            Delta {
-                trust: contract.delta.trust.clone(),
+            Some(Delta {
+                trust: delta.trust.clone(),
                 audience: Some(Dim::Known(sanitizer.can_reduce.to.clone())),
-            }
+            })
         }
+        (None, Some(_)) => unreachable!("load validation: a sanitizer-bound tool declares a delta"),
+    }
+}
+
+/// The label the trajectory would hold after this call commits, on the check's clock (see
+/// [`effective_delta`] — an unannotated tool contributes identity here, Unknown at admission).
+pub(crate) fn committed_label(registry: &Registry, contract: &ToolContract, current: &Label) -> Label {
+    match effective_delta(registry, contract) {
+        Some(delta) => delta.apply(current),
+        None => current.clone(),
     }
 }
 
@@ -73,21 +80,22 @@ pub(crate) fn evaluate(
     call: &ResolvedCall,
 ) -> CheckOutcome {
     let current = views.current_label();
-    let committed = effective_delta(registry, contract).apply(&current);
-
-    let unresolved = unresolved_facts(views, &committed);
-    if !unresolved.is_empty() {
-        return CheckOutcome::Unresolved(unresolved);
+    match evaluate_state(registry, contract, &current, &|kind| views.has_effect(kind), call) {
+        CheckOutcome::Unresolved(_) => {
+            let committed = committed_label(registry, contract, &current);
+            let dims = consumed_unresolved(contract, &committed, call);
+            CheckOutcome::Unresolved(unresolved_facts(views, &dims))
+        }
+        outcome => outcome,
     }
-
-    evaluate_state(registry, contract, &current, &|kind| views.has_effect(kind), call)
 }
 
 /// The gap logic on an abstract `(current label, effect predicate)` state — the one place the two
-/// clocks live, shared by [`evaluate`] and the remedy reachability search (`plan`). A committed
-/// label that is still `Unknown` yields [`CheckOutcome::Unresolved`] with no listed facts: the
-/// caller that has the values (the view path) details them; the state-only search treats it as a
-/// dead end (unresolved resolution is a cast path, outside the reachability subset).
+/// clocks live, shared by [`evaluate`] and the remedy reachability search (`plan`). A label
+/// requirement that consumes an `Unknown` dimension yields [`CheckOutcome::Unresolved`] with no
+/// listed facts: the caller that has the values (the view path) details them; the state-only
+/// search treats it as a dead end (unresolved resolution is a cast path, outside the reachability
+/// subset). An Unknown dimension nothing requires blocks nothing.
 pub(crate) fn evaluate_state(
     registry: &Registry,
     contract: &ToolContract,
@@ -95,8 +103,8 @@ pub(crate) fn evaluate_state(
     has_effect: &impl Fn(&EffectKind) -> bool,
     call: &ResolvedCall,
 ) -> CheckOutcome {
-    let committed = effective_delta(registry, contract).apply(current);
-    if matches!(committed.trust, Dim::Unknown) || matches!(committed.audience, Dim::Unknown) {
+    let committed = committed_label(registry, contract, current);
+    if !consumed_unresolved(contract, &committed, call).is_empty() {
         return CheckOutcome::Unresolved(Vec::new());
     }
 
@@ -124,10 +132,35 @@ pub(crate) fn evaluate_state(
     }
 }
 
-fn unresolved_facts(views: &Views, committed: &Label) -> Vec<UnresolvedFact> {
+fn consumed_unresolved(contract: &ToolContract, committed: &Label, call: &ResolvedCall) -> Vec<Dimension> {
+    let mut dims = Vec::new();
+    if let Some(floor) = contract.requires.label.trust_floor
+        && committed.trust.meets_floor(floor) == Adequacy::Unresolved
+    {
+        dims.push(Dimension::Trust);
+    }
+    let audience_unresolved = contract
+        .requires
+        .label
+        .audience
+        .iter()
+        .any(|requirement| match requirement {
+            AudienceRequirement::Includes(spec) => match resolve_recipients(spec, call) {
+                Some(recipients) => committed.audience.covers(&recipients) == Adequacy::Unresolved,
+                None => matches!(committed.audience, Dim::Unknown),
+            },
+            AudienceRequirement::Cap(cap) => committed.audience.within_cap(cap) == Adequacy::Unresolved,
+        });
+    if audience_unresolved {
+        dims.push(Dimension::Audience);
+    }
+    dims
+}
+
+fn unresolved_facts(views: &Views, dims: &[Dimension]) -> Vec<UnresolvedFact> {
     let mut facts = Vec::new();
-    let trust_unknown = matches!(committed.trust, Dim::Unknown);
-    let audience_unknown = matches!(committed.audience, Dim::Unknown);
+    let trust_unknown = dims.contains(&Dimension::Trust);
+    let audience_unknown = dims.contains(&Dimension::Audience);
     if !trust_unknown && !audience_unknown {
         return facts;
     }

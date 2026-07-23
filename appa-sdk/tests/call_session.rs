@@ -50,6 +50,7 @@ delta = {{ audience = {{ exactly = ["hr"] }} }}
 name = "send_email"
 effects = ["egress"]
 requires = {{ trust = "internal" }}
+delta = {{}}
 [[authority]]
 name = "security-officer"
 mandate = {{ can_raise_trust_to = "internal" }}

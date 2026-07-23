@@ -300,6 +300,7 @@ impl Drive<'_> {
                     let feedback = match planned.plans.first() {
                         Some(plan) => {
                             let id = plan.id;
+                            let via = authorize_via(plan);
                             drop(projection);
                             // A server-minted, turn-unique handle — never the model's tool-call id.
                             let handle = format!("remedy-{}", self.next_handle);
@@ -310,7 +311,7 @@ impl Drive<'_> {
                                 plan: id,
                             });
                             format!(
-                                "blocked by policy ({gaps} requirement gap(s)); call execute_remedy_plan with plan_id \"{handle}\" to authorize"
+                                "blocked by policy ({gaps} requirement gap(s)); call execute_remedy_plan with plan_id \"{handle}\" to authorize{via}"
                             )
                         }
                         None if !curative.is_empty() => {
@@ -453,6 +454,18 @@ impl Drive<'_> {
             }
         };
 
+        if let Some(parent) = self.rt.store().parent_of(self.tenant, self.session)? {
+            let (log, rev) = self.rt.store().snapshot(self.tenant, self.session)?;
+            let projection = Projection::build(&log, rev);
+            if projection.view(&parent).returns_by(self.session) > 0 {
+                self.feedback(
+                    call_id,
+                    "this session already returned its result — a child returns at most once",
+                )?;
+                return Ok(CallGo);
+            }
+        }
+
         let returned = match self.rt.config().child_return_policy() {
             ReturnPolicy::Sanitized(sanitizer) => match self.derive_sanitized(&sanitizer, &body).await {
                 // Cancelled before any return was recorded: nothing crossed, only the seal is owed.
@@ -567,6 +580,20 @@ impl Drive<'_> {
             .map(|(_, plan)| plan.clone())
             .expect("caller located this handle in this pending return");
 
+        let parent = self.pending_returns[index].parent.clone();
+        {
+            let (log, rev) = self.rt.store().snapshot(self.tenant, self.session)?;
+            let projection = Projection::build(&log, rev);
+            if projection.view(&parent).returns_by(self.session) > 0 {
+                self.pending_returns.clear();
+                self.feedback(
+                    call_id,
+                    "this session already returned its result — a child returns at most once",
+                )?;
+                return Ok(CallGo);
+            }
+        }
+
         let submission = match &plan {
             ReturnPlan::Accept(_) => ReturnSubmission::Raw {
                 body: ValueBody::new(self.pending_returns[index].body.clone()),
@@ -597,7 +624,6 @@ impl Drive<'_> {
             }
         };
 
-        let parent = self.pending_returns[index].parent.clone();
         let mut executed = false;
         self.rt.store().finalize(self.tenant, self.session, |facts, rev| {
             if self.cancel.is_cancelled() {
@@ -614,8 +640,7 @@ impl Drive<'_> {
             Some(batch)
         })?;
         if executed {
-            // The offer is consumed: every sibling handle dies with it.
-            self.pending_returns.remove(index);
+            self.pending_returns.clear();
             self.feedback(call_id, "result submitted to the parent")?;
             return Ok(CallGo);
         }
@@ -791,7 +816,7 @@ impl Drive<'_> {
             })));
         }
         let contract = self.rt.engine().registry().tool(call.tool());
-        let pending_cast = contract.and_then(|c| c.delta.pending_cast_dim());
+        let pending_cast = contract.and_then(|c| c.pending_cast_dim());
         let bound_sanitizer = contract.and_then(|c| c.output_sanitizer.clone());
         let mut withheld: Option<&str> = None;
         let admission = match &outcome {
@@ -1075,6 +1100,22 @@ fn proposal_of(call: &WireToolCall) -> Proposal {
     }
 }
 
+fn authorize_via(plan: &appa_engine::plan::RemedyPlan) -> String {
+    let authorities: Vec<&str> = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            appa_engine::plan::RemedyStep::Authorize(name) => Some(name.as_str()),
+            appa_engine::plan::RemedyStep::Accept => None,
+        })
+        .collect();
+    if authorities.is_empty() {
+        String::new()
+    } else {
+        format!(" via {}", authorities.join(", "))
+    }
+}
+
 fn redispatch_hint(recommendation: &appa_engine::plan::Recommendation) -> Option<String> {
     match recommendation {
         appa_engine::plan::Recommendation::Redispatch { tool, .. } => Some(tool.as_str().to_string()),
@@ -1274,6 +1315,13 @@ implementation = { builtin = "approve" }
         assert_eq!(outcome, TurnOutcome::Final("the transfer is done".to_string()));
 
         let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
+        assert!(
+            log.iter().any(|f| matches!(
+                f,
+                Fact::BlockFeedback { content, .. } if content.contains("officer")
+            )),
+            "the block feedback should name the eligible authority"
+        );
         assert!(
             log.iter().any(|f| matches!(f, Fact::Ruling { .. })),
             "a ruling should land"
@@ -1757,7 +1805,7 @@ audience = {{ from = {{ includes = ["internal"] }}, to = {{ exactly = ["public"]
     }
 
     #[tokio::test]
-    async fn a_label_neutral_crossing_leaves_the_sibling_offer_executable() {
+    async fn a_crossing_consumes_the_childs_return_channel() {
         let (log, parent) = drive_child_rounds_from(
             blocked_return_config("builtin = \"redact-email\""),
             0,
@@ -1772,14 +1820,15 @@ audience = {{ from = {{ includes = ["internal"] }}, to = {{ exactly = ["public"]
         )
         .await;
         let merged = merged_child_values(&log, &parent);
-        assert_eq!(merged.len(), 2, "both derivations crossed");
-        for value in &merged {
-            assert!(!value.body.as_str().contains("corp.com"), "only derivations crossed");
-            assert_eq!(
-                value.label.audience,
-                appa_engine::label::Dim::Known(appa_engine::label::Audience::Public)
-            );
-        }
+        assert_eq!(merged.len(), 1, "exactly one crossing");
+        assert!(
+            !merged[0].body.as_str().contains("corp.com"),
+            "only the derivation crossed"
+        );
+        assert_eq!(
+            merged[0].label.audience,
+            appa_engine::label::Dim::Known(appa_engine::label::Audience::Public)
+        );
         assert!(!log.iter().any(|f| matches!(f, Fact::ChildReturnAcceptance { .. })));
     }
 

@@ -183,7 +183,7 @@ pub(crate) fn opened_dispatch(
     let fact = Fact::DispatchOpened {
         trajectory: views.trajectory().clone(),
         dispatch: dispatch.clone(),
-        proposed_label: check::effective_delta(registry, contract).apply(&views.current_label()),
+        proposed_label: check::committed_label(registry, contract, &views.current_label()),
         proposed_effects: contract.emits.clone(),
     };
     (dispatch, fact)
@@ -248,10 +248,10 @@ mod tests {
         ToolContract {
             name: ToolName::new("get_ticket"),
             tags: vec![],
-            delta: Delta {
+            delta: Some(Delta {
                 trust: None,
                 audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")]))),
-            },
+            }),
             emits: vec![],
             requires: Requires {
                 label: LabelRequirements {
@@ -294,10 +294,10 @@ mod tests {
         let export = ToolContract {
             name: ToolName::new("export"),
             tags: vec![],
-            delta: Delta {
+            delta: Some(Delta {
                 trust: None,
                 audience: Some(Dim::Known(internal.clone())),
-            },
+            }),
             emits: vec![],
             requires: Requires::default(),
             output_sanitizer: Some(SanitizerName::new("declassify")),
@@ -329,10 +329,10 @@ mod tests {
         let scan = ToolContract {
             name: ToolName::new("scan_inbox"),
             tags: vec![],
-            delta: Delta {
+            delta: Some(Delta {
                 trust: Some(Dim::Unknown),
                 audience: None,
-            },
+            }),
             emits: vec![],
             requires: Requires::default(),
             output_sanitizer: None,
@@ -361,7 +361,7 @@ mod tests {
         let send = ToolContract {
             name: ToolName::new("send_email"),
             tags: vec![],
-            delta: Delta::NONE,
+            delta: Some(Delta::NONE),
             emits: vec![EffectKind::new("egress")],
             requires: Requires {
                 label: LabelRequirements {
@@ -393,7 +393,7 @@ mod tests {
         let del = ToolContract {
             name: ToolName::new("delete_db"),
             tags: vec![],
-            delta: Delta::NONE,
+            delta: Some(Delta::NONE),
             emits: vec![],
             requires: Requires {
                 history: vec![
@@ -419,7 +419,7 @@ mod tests {
         let tool = ToolContract {
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Delta::NONE,
+            delta: Some(Delta::NONE),
             emits: vec![],
             requires: Requires {
                 attention: vec![MarkName::new("signoff")],
@@ -441,6 +441,61 @@ mod tests {
     fn unknown_label_is_unresolved() {
         let e = engine(vec![crm_tool()]);
         let log = vec![user_value(Label::new(Dim::Unknown, Dim::Known(Audience::Public)))];
+        match check(&e, &log, &call("get_ticket", json!({}))) {
+            CheckOutcome::Unresolved(facts) => {
+                assert_eq!(facts.len(), 1);
+                assert_eq!(facts[0].dimension, Dimension::Trust);
+            }
+            other => panic!("expected unresolved, got {other:?}"),
+        }
+    }
+
+    fn unannotated_tool(name: &str) -> ToolContract {
+        ToolContract {
+            name: ToolName::new(name),
+            tags: vec![],
+            delta: None,
+            emits: vec![],
+            requires: Requires::default(),
+            output_sanitizer: None,
+        }
+    }
+
+    #[test]
+    fn an_unannotated_tool_dispatches_and_its_result_admits_unknown() {
+        let e = engine(vec![unannotated_tool("probe")]);
+        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let proposed = call("probe", json!({}));
+        assert_eq!(check(&e, &log, &proposed), CheckOutcome::Allow);
+
+        let t = traj();
+        let p = Projection::build(&log, Revision::new(log.len() as u64));
+        let batch = e.open_dispatch(&p.view(&t), &proposed).unwrap();
+        log.extend(batch.facts);
+        let p = Projection::build(&log, Revision::new(log.len() as u64));
+        let dispatch = DispatchId::new(t.clone(), proposed.digest(), 0);
+        let batch = e
+            .admit_result(
+                &p.view(&t),
+                &dispatch,
+                &proposed,
+                ResultAdmission::SuccessRaw {
+                    body: ValueBody::new("raw"),
+                },
+            )
+            .unwrap();
+        log.extend(batch.facts);
+        let p = Projection::build(&log, Revision::new(log.len() as u64));
+        let current = p.view(&t).current_label();
+        assert_eq!(current.trust, Dim::Unknown);
+        assert_eq!(current.audience, Dim::Unknown);
+    }
+
+    #[test]
+    fn an_unknown_trajectory_blocks_only_requirement_consuming_calls() {
+        let e = engine(vec![unannotated_tool("noop"), crm_tool()]);
+        let log = vec![user_value(Label::new(Dim::Unknown, Dim::Unknown))];
+        assert_eq!(check(&e, &log, &call("noop", json!({}))), CheckOutcome::Allow);
         match check(&e, &log, &call("get_ticket", json!({}))) {
             CheckOutcome::Unresolved(facts) => {
                 assert_eq!(facts.len(), 1);
@@ -479,7 +534,7 @@ mod tests {
         let send = ToolContract {
             name: ToolName::new("send_email"),
             tags: vec![],
-            delta: Delta::NONE,
+            delta: Some(Delta::NONE),
             emits: vec![],
             requires: Requires {
                 label: LabelRequirements {
@@ -496,6 +551,15 @@ mod tests {
             CheckOutcome::Block(b) => assert!(matches!(b.requirement_gaps.as_slice(), [Gap::Includes { .. }])),
             other => panic!("expected includes gap on a malformed call, got {other:?}"),
         }
+
+        let log = vec![user_value(Label::new(Dim::Known(TRUSTED), Dim::Unknown))];
+        match check(&e, &log, &call("send_email", json!({}))) {
+            CheckOutcome::Unresolved(facts) => {
+                assert_eq!(facts.len(), 1);
+                assert_eq!(facts[0].dimension, Dimension::Audience);
+            }
+            other => panic!("expected unresolved on an Unknown audience, got {other:?}"),
+        }
     }
 
     #[test]
@@ -506,7 +570,7 @@ mod tests {
         let wire = ToolContract {
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Delta::NONE,
+            delta: Some(Delta::NONE),
             emits: vec![],
             requires: Requires {
                 label: LabelRequirements {
