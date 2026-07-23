@@ -1,19 +1,28 @@
 \section{Branching for Taint Confinement}\label{sec:branching}
 
 \paragraph{Observation model.}
-Once data enters an LLM context, subsequent sanitization cannot retroactively remove that information from the model's trajectory~\cite{caiGhostAgentRedefining2026}; modifying its security label would incorrectly represent its state. \appa{} never removes taint from an already exposed trajectory; instead, it avoids parent context degradation by confining restrictive descents to disposable child branches. The long-lived parent process pauses prior to a restrictive data acquisition, delegating the operation to a temporary child context. By confining label descent to the child branch, \appa{} prevents taint accumulation in the primary parent process, without asserting that the child process or source data is untainted.
+Once data enters an LLM context, subsequent sanitization cannot retroactively remove that information from the model's trajectory~\cite{caiGhostAgentRedefining2026}; modifying its security label would incorrectly represent its state. \appa{} never removes taint from an already exposed trajectory; instead, it avoids parent context degradation by confining restrictive descents to disposable child branches. A host environment can isolate a restrictive data acquisition by delegating the operation to a temporary child context. By confining label descent to the child branch, \appa{} prevents taint accumulation in the primary parent process, without asserting that the child process or source data is untainted.
 
 \paragraph{Deployment requirement.}
 Branching requires an execution environment capable of isolating context trajectories (e.g., an application harness or proxy gateway). While baseline label enforcement (\S\ref{sec:enforcement}) operates in standard gateways, features such as fork-before-read and output sanitization rely on runtime context confinement.
 
-\subsection{Intercept before acquisition}
-For a proposed call $t$, the runtime evaluates the prospective state by folding $\mathit{delta}(t)$ into the parent label $L_p$. If this update strictly reduces label permissions (i.e., causes a descent), the enforcement layer suspends $t$ prior to dispatch and presents a \texttt{fork} plan alongside options for acceptance or refusal. The plan specifies the initial call and defines the permitted structure of the child's eventual exit, rather than granting unrestricted execution.
+\subsection{Host branching protocol}
+Rather than automatically transforming and transferring engine calls, \appa{} models branching as a host-managed protocol surrounding engine enforcement:
+\begin{enumerate}
+  \item the host decides to create a child context;
+  \item the host identifies the active parent trajectory;
+  \item the \appa{} engine records a fork boundary and seeds the child from the parent's current label;
+  \item the host submits child-local work;
+  \item the child's calls are independently evaluated by the engine; and
+  \item any returned value crosses through the checked child-return and direct-parent merge path.
+\end{enumerate}
+The current \appa{} runtime neither suspends a blocked parent call for automatic transfer nor resumes that call in the child. Instead, the host application explicitly orchestrates child context creation and lifecycle management.
 
 \subsection{Fork by inheritance}
 The child process inherits a copy of the parent's context and initializes its label from the parent's state at the fork point, setting $L_c := L_p^{\mathrm{fork}}$. Assigning an unconstrained initial label to the child would bypass the security controls of inherited context data—for instance, allowing internal context to be released to a public output. The \texttt{fork} boundary also invalidates pending rulings and plan executions, as these records are bound to specific invocations in the parent context and cannot be transferred to a child.
 
 \subsection{Descend locally}
-The suspended call is dispatched within the child context, where all subsequent actions are enforced against the evolving child label $L_c$. Updates to $L_c$ affect only the child label and never update $L_p$. The parent process may pause or proceed concurrently, but it remains isolated from child messages and tool outputs until an explicit exit occurs. This isolation guarantees the pre-merge properties of Proposition~\ref{prop:preservation}, regardless of the child's internal behavior.
+Child-local work is dispatched within the child context, where all subsequent actions are enforced against the evolving child label $L_c$. Updates to $L_c$ affect only the child label and never update $L_p$. The parent process may pause or proceed concurrently, but it remains isolated from child messages and tool outputs until an explicit exit occurs. This isolation guarantees the pre-merge properties of Proposition~\ref{prop:preservation}, regardless of the child's internal behavior.
 
 \subsection{Exit explicitly}
 An execution branch yields one of three outcomes:
@@ -25,14 +34,14 @@ An execution branch yields one of three outcomes:
 In all cases, APPA validates the actual result label prior to committing the merge. If the raw result would restrict permissions, it triggers the acquisition check in the parent context. The parent may explicitly accept the label reduction or reject the \texttt{merge}; however, accepting lower permissions does not achieve taint confinement. A declared exit bound can be verified prior to execution to enable planning, though the actual result label remains authoritative.
 
 \begin{theorem}[Branch taint confinement]\label{thm:branch}
-Let a parent fork at $L_p^{\mathrm{fork}}$, and let the child execute any admitted trace. If the branch is abandoned, child execution does not change the parent's independently evolved label. If the child returns $v$, merging yields
+Given an explicitly created child seeded from a parent state $L_p^{\mathrm{fork}}$, admitted child actions do not modify the parent label $L_p$. If the child branch is abandoned, child execution does not change the parent's label. If the child returns a value $v$, merging combines the parent label with the engine-derived return label:
 \[
   L_p' = L_p \wedge \mathit{label}(v).
 \]
-Hence no child can widen or silently degrade its parent's label, and an exit satisfying $L_p \le \mathit{label}(v)$ preserves the parent label exactly.
+Hence no child action can widen or silently degrade its parent's label, and an exit satisfying $L_p \le \mathit{label}(v)$ preserves the parent label exactly.
 \end{theorem}
 
-This result follows directly from trajectory-local label folding and the algebraic properties of the meet operator; it holds independently of the child's prompt, execution plan, or behavior. \todo{Formalize both suspended-parent and concurrent-parent statements; full statements in Appendix~\ref{app:proofs}.}
+This result establishes the correctness of the branch lifecycle once invoked, rather than asserting automatic invocation before every restrictive read. It follows directly from trajectory-local label folding and the algebraic properties of the meet operator; it holds independently of the child's prompt, execution plan, or behavior. \todo{Formalize both suspended-parent and concurrent-parent statements; full statements in Appendix~\ref{app:proofs}.}
 
 \paragraph{History is shared, not merged.}
 The parent and child process append to a single, real-time serialized event log. Any egress operation or side effect executed by a child remains recorded in external history even if the child branch is subsequently abandoned; context isolation cannot undo these actions nor clear them from future \texttt{no\_prior(egress)} policy checks~\cite{wangAgentTracesTrust2026}. Forking and merging function as governance operations. A policy ruling granted to a child is consumed during its execution and does not grant authorization to the parent. Each branch terminates via return, failure, or abandonment, requiring no log reconciliation because physical event history is never branched.
@@ -44,6 +53,6 @@ Following the Dual-LLM and CaMeL architectures~\cite{willison2023dual,camel2025}
 A multi-step execution branch can compile into a single synthesized invocation with a declared result-label bound that is validated against the parent. The plan body executes entirely within the confining environment; each intermediate step is checked against the evolving child state without exposing intermediate data to the parent. If an operation within the plan requires a policy ruling, the authorizing component evaluates the ordered steps as part of the rendered request object. Execution proceeds in two phases: APPA first verifies the declared outer bound, then validates the actual result label prior to the merge. If validation fails, the returned value is discarded, though recorded side effects persist in the event log. The effective state delta applied during merge reflects only the returned value, rather than the cumulative internal deltas of the child steps.
 
 \paragraph{Worked pattern.}
-Consider a scenario where a high-trust parent process requires an invoice total from an untrusted internal CRM record. Inspecting the record directly within the parent context would restrict the security label for all subsequent operations. APPA forks the execution prior to issuing \texttt{read\_crm}, computes the required total within the child context, and restricts output via \texttt{submit\_result(integer)} using a registered output sanitizer for invoice totals. The parent receives the resulting integer while preserving its original label, whereas the raw record and any untrusted text remain confined to the child branch prior to its termination.
+Consider a scenario where a high-trust parent process requires an invoice total from an untrusted internal CRM record. Inspecting the record directly within the parent context would restrict the security label for all subsequent operations. The host forks the execution prior to issuing \texttt{read\_crm}, computes the required total within the child context, and restricts output via \texttt{submit\_result(integer)} using a registered output sanitizer for invoice totals. The parent receives the resulting integer while preserving its original label, whereas the raw record and any untrusted text remain confined to the child branch prior to its termination.
 
 \fixme{Cross-branch \texttt{no\_prior(egress)} enforcement under a shared log remains an open consideration: an egress event executed by a child triggers a failure for a subsequent \texttt{no\_prior(egress)} check in the parent. This conservative enforcement is necessary for consistent event tracking, but certain applications may require a branch-scoped predicate, analogous to the branch-scoped \texttt{prior(k)} discussed in \S\ref{sec:limitations}.}

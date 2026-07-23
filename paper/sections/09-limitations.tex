@@ -35,6 +35,7 @@ In practice, deployments may attempt to amortize human review using automated ap
 
 Future work includes:
 \begin{itemize}
+  \item automatic conversion of a blocked restrictive call into a child dispatch;
   \item mandate scoping by information type;
   \item pass-by-reference labeling, where byte-identical unretyped arguments retain their original labels (a consequence of arguments being \texttt{LabeledValue} instances); and
   \item partial-context handoff, in which a child branch is instantiated with a sanitized subset of the parent's context while retaining access to full shared event history.

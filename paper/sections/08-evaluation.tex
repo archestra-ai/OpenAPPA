@@ -3,7 +3,7 @@
 \stub{Evaluation is designed but not yet run; this section states the protocol and metrics. Numbers TODO.}
 
 \paragraph{Primary question.}
-Does \texttt{fork}-before-read preserve the security of label-based enforcement while eliminating the post-read utility loss caused by tainting a long-lived planner context? The evaluation must measure this directly; a generic defended-versus-undefended benchmark does not isolate the paper's core contribution~\cite{debenedettiAgentDojoDynamicEnvironment2024}.
+When a host explicitly establishes a child before restrictive work, do Label seeding, trajectory-local enforcement, and checked return preserve the parent Label compared with accepting the same narrowing in the parent? The evaluation must measure this directly; a generic defended-versus-undefended benchmark does not isolate the paper's core contribution~\cite{debenedettiAgentDojoDynamicEnvironment2024}.
 
 \paragraph{Paired trajectory benchmark.}
 We will construct AgentDojo episodes~\cite{debenedettiAgentDojoDynamicEnvironment2024} in which an agent:
@@ -36,7 +36,7 @@ We will compare:
 An abandon-only bounded-exit ablation will isolate the utility of execution isolation from that of the trusted derivative mechanism. We will not evaluate copied or discardable branch logs as functional ablations because they violate the threat model; these configurations will be evaluated strictly as negative invariant test cases.
 
 \paragraph{Main metrics.}
-Alongside standard task utility and injection attack success rates, we will measure parent-label descents avoided, post-acquisition benign actions completed, branches created, abandoned, and merged, exit rejections, authority interventions, and token and latency overhead per branch. Both security and utility metrics must be reported, as preventing label creep represents a primary utility benefit under strict enforcement.
+Alongside standard task utility and injection attack success rates, we will measure parent-label descents avoided, post-acquisition benign actions completed, branches created, abandoned, and merged, exit rejections, authority interventions, and token and latency overhead per branch. Both security and utility metrics must be reported, as preventing label creep represents a primary utility benefit under strict enforcement. All branches counted in the evaluation must be explicit host-created child sessions; the evaluation does not count automatic forks, suspended calls, or fork plans, as none exists in the implementation.
 
 \paragraph{Case study.}
 We will evaluate the CRM/invoice scenario from \S\ref{sec:branching} end-to-end using the engine implementation and publish its policy contracts, parent/child label traces, shared event log, injected payload, exit assertion, and post-merge benign execution trace.
