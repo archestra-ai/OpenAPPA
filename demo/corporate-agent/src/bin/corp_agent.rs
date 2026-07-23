@@ -3,7 +3,8 @@
 //!
 //! rig owns the loop, the model conversation, and the tool schemas; the embedded `appa-sdk`
 //! [`CallSession`], driven by [`AppaHook`], mediates every proposed tool call before it runs and
-//! admits or seals every result. The system preamble is pinned by the policy file, not this binary.
+//! admits or seals every result. The system prompt is agent config (this binary); the policy file
+//! governs flows only — labels, contracts, authorities — never the model's instructions.
 //!
 //! ```sh
 //! corp-agent "Summarise Alice Chen's HR record"          # guarded appa-policy.toml
@@ -18,7 +19,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
-use appa_sdk::{CallSession, Config, SdkOptions, WireMessage};
+use appa_sdk::{CallSession, Config, SdkOptions};
 use clap::Parser;
 use corporate_agent_demo::appa_hook::{AppaHook, RemedyTool};
 use corporate_agent_demo::mcp::{self, BODY_CAP_BYTES, mcp_tool_schema, resolve_policy, resolve_server_bin};
@@ -28,6 +29,15 @@ use rig::completion::Prompt;
 use rig::message::Message;
 use rig::providers::openrouter;
 use tokio::sync::Mutex;
+
+/// The agent's system prompt. This is *agent* configuration, not policy — the policy file governs
+/// flows (labels, contracts, authorities), never the model's instructions.
+const PREAMBLE: &str = "You are a corporate assistant with access to the company's internal systems — HR, \
+     finance, the task tracker — and a public forum, plus the ability to send email. Use the tools to \
+     complete the user's request. Read what you need, then act. Some tool calls are policy-mediated: a \
+     blocked call returns feedback, sometimes offering a remedy plan you may execute via \
+     execute_remedy_plan when the user's task genuinely requires it. When you are done, briefly \
+     summarise what you did.";
 
 #[derive(Parser)]
 #[command(about = "The corporate assistant (rig agent) over the mock corporate systems (MCP), mediated by appa-sdk")]
@@ -93,9 +103,6 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("reading the policy file {}", policy_path.display()))?;
     let config =
         Config::from_toml_str(&policy_text).with_context(|| format!("loading the policy {}", policy_path.display()))?;
-    let preamble = preamble_text(config.preamble());
-    // The demo uses the per-call facade (a framework owns the loop); the turn facade `AppaSession`
-    // is the sibling for host-owned loops. Opening validates the policy is SDK-supported.
     let mut session = CallSession::open(config, SdkOptions::default()).context("opening the APPA session")?;
 
     let server_bin = resolve_server_bin(args.server_bin)?;
@@ -126,7 +133,7 @@ async fn main() -> anyhow::Result<()> {
     // check-against-prior-result invariant depends on it; do not raise it.
     let agent = client
         .agent(args.model.clone())
-        .preamble(&preamble)
+        .preamble(PREAMBLE)
         .default_max_turns(args.max_turns)
         .add_hook(hook)
         .tool(RemedyTool)
@@ -218,15 +225,6 @@ async fn drive_turn(
     // Close the APPA turn whether the run succeeded or not, so the trajectory is punctuated.
     session.lock().await.end_turn().context("closing the APPA turn")?;
     outcome
-}
-
-/// The rig `.preamble` string from the policy's pinned `[[preamble]]` messages (single source).
-fn preamble_text(messages: &[WireMessage]) -> String {
-    messages
-        .iter()
-        .filter_map(|m| m.content.as_deref())
-        .collect::<Vec<_>>()
-        .join("\n\n")
 }
 
 /// Read one line from stdin with a prompt; `None` on EOF.
