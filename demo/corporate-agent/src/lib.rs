@@ -4,16 +4,17 @@
 //! - `corp-systems-mcp` ([`server`]) — a stdio MCP server exposing mock
 //!   internal systems (`hr`, `finance`, `task_tracker`, `public_forum`) as
 //!   folders, with `search_`/`read_`/`create_` tools per system plus `send_email`.
-//! - `corp-agent` — a [`rig`](https://docs.rs/rig-core) agent on OpenRouter that
-//!   spawns the server, registers its tools, and drives a one-shot (or `--chat`)
-//!   loop, printing a [`logview::PrettyLog`] of everything it sends and calls.
+//! - `corp-agent` — an agent on OpenRouter that spawns the server and drives its
+//!   own tool loop **mediated by the embedded `appa-sdk`** ([`appa_loop`]): every
+//!   proposed call is policy-checked before it executes, every result is admitted
+//!   or sealed before it enters model context.
 //!
-//! There is deliberately no policy engine in the loop: an unmediated run of the
-//! injection scenario will happily read HR secrets and exfiltrate them via
-//! `send_email`. Putting OpenAPPA between the agent and these tools is the point
-//! of the demo.
+//! The policy is the demo's payload. `appa-policy.toml` (the default) blocks the
+//! injection scenario's exfiltration; `appa-policy-open.toml` registers the same
+//! tools with no constraints, reproducing the original unmediated leak — same
+//! binary, same loop, `--policy` selects.
 
-pub mod logview;
+pub mod appa_loop;
 pub mod server;
 pub mod systems;
 
