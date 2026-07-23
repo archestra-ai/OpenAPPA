@@ -32,12 +32,8 @@ use tokio::sync::Mutex;
 
 /// The agent's system prompt. This is *agent* configuration, not policy — the policy file governs
 /// flows (labels, contracts, authorities), never the model's instructions.
-const PREAMBLE: &str = "You are a corporate assistant with access to the company's internal systems — HR, \
-     finance, the task tracker — and a public forum, plus the ability to send email. Use the tools to \
-     complete the user's request. Read what you need, then act. Some tool calls are policy-mediated: a \
-     blocked call returns feedback, sometimes offering a remedy plan you may execute via \
-     execute_remedy_plan when the user's task genuinely requires it. When you are done, briefly \
-     summarise what you did.";
+const PREAMBLE: &str = "You are a corporate assistant. Use the available tools to complete the user's \
+     request. Read what you need, then act. When you are done, briefly summarise what you did.";
 
 #[derive(Parser)]
 #[command(about = "The corporate assistant (rig agent) over the mock corporate systems (MCP), mediated by appa-sdk")]
@@ -50,7 +46,7 @@ struct Args {
     chat: bool,
 
     /// OpenRouter model id.
-    #[arg(long, env = "APPA_DEMO_MODEL", default_value = "anthropic/claude-sonnet-5")]
+    #[arg(long, env = "APPA_DEMO_MODEL", default_value = "openai/gpt-5.6-luna")]
     model: String,
 
     /// OpenRouter API key. Falls back to $OPENROUTER_API_KEY or a `.env` file.
