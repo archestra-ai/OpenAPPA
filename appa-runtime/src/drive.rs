@@ -16,24 +16,30 @@
 //! backend's error body (RP3).
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::time::{Duration, Instant};
 
-use appa_engine::admit::{CastAnswer, ResultAdmission};
+use appa_engine::admit::{AdmitError, CastAnswer, ResultAdmission};
 use appa_engine::authority::CastResolution;
 use appa_engine::branch::ChildReturn;
 use appa_engine::check::{CheckOutcome, UnresolvedFact};
 use appa_engine::execute::{Issuer, Ruling, Sink};
 use appa_engine::fact::{BoundaryKind, Fact, FactBatch, ProposedCall};
-use appa_engine::label::DimValue;
+use appa_engine::label::{DimValue, Dimension};
+use appa_engine::names::{CastName, SanitizerName};
 use appa_engine::plan::PlanId;
 use appa_engine::projection::Projection;
 use appa_engine::value::{
-    CanonicalDigest, ChildReturnId, DispatchId, Provenance, ResolvedCall, ToolCallId, ToolName, TrajectoryId,
-    ValueBody, ValueId,
+    CanonicalDigest, ChildReturnId, DispatchId, Provenance, RawResultDigest, ResolvedCall, ToolCallId, ToolName,
+    TrajectoryId, ValueBody, ValueId,
 };
 
+use tokio_util::sync::CancellationToken;
+
 use crate::admission::UserTurn;
-use crate::external::{AuthorityAnswer, AuthorityRequest, CastAnswer as BackendCast, CastInput};
+use crate::external::{
+    AuthorityAnswer, AuthorityRequest, CastAnswer as BackendCast, CastInput, SanitizerAnswer, SanitizerInput,
+};
 use crate::runtime::{EXECUTE_REMEDY_PLAN, Runtime, SUBMIT_RESULT};
 use crate::store::{StoreError, TenantId};
 use crate::tool::{BodyDisposition, RenderedCall, ToolOutcome};
@@ -42,10 +48,13 @@ use crate::wire::{ChatCompletionRequest, WireToolCall};
 
 /// The fixed, model-visible terminals the drive seals in place of a raw result (RP3).
 const SEALED_WITHHELD: &str = "[tool result withheld: exceeds the size the policy admits]";
+const SEALED_UNRESOLVED: &str = "[tool result withheld: its label could not be established]";
+const SEALED_UNSANITIZED: &str = "[tool result withheld: the bound sanitizer produced no derivation]";
 const SEALED_FAILED: &str = "[tool call failed]";
 const SEALED_INDETERMINATE: &str = "[tool call outcome unknown — it may or may not have run]";
 const POLICY_STOP_BUDGET: &str = "This turn reached its resource budget and was stopped.";
 const POLICY_STOP_INFERENCE: &str = "This turn could not continue: upstream inference was unavailable.";
+const POLICY_STOP_CANCELLED: &str = "This turn was cancelled.";
 
 /// How a turn ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,12 +65,25 @@ pub enum TurnOutcome {
     PolicyStop(String),
 }
 
-/// A genuine infrastructure failure the drive cannot resolve (an unrecoverable store fault). Policy
-/// outcomes — blocks, denials, budget stops, inference faults — are *not* errors; they are turn facts.
+/// A genuine infrastructure failure the drive cannot resolve (an unrecoverable store fault, a
+/// dispatch that stopped matching its own call). Policy outcomes — blocks, denials, budget stops,
+/// inference faults — are *not* errors; they are turn facts.
 #[derive(Debug, thiserror::Error)]
 pub enum DriveError {
     #[error("session store fault: {0}")]
     Store(#[from] StoreError),
+    #[error("dispatch identity no longer matches its call/branch — a drive invariant was breached")]
+    DispatchIdentity,
+}
+
+/// How a result admission landed, causes kept distinct (see [`Drive::admit_result`]).
+enum Admission {
+    Admitted,
+    AlreadyClosed,
+    Refused,
+    InvariantBreach,
+    /// A value-carrying admission suppressed because the turn's cancellation had already fired.
+    CancelSuppressed,
 }
 
 /// A blocked call awaiting the model's remedy decision. Held in-turn (CC2 — no cross-request state):
@@ -93,14 +115,24 @@ pub async fn drive_turn(
     session: &TrajectoryId,
     is_child: bool,
     user_turn: UserTurn,
+    cancel: CancellationToken,
 ) -> Result<TurnOutcome, DriveError> {
     let lease = rt.store().turn_lock(tenant, session)?;
-    let _turn = lease.lock().await;
+    // Waiting for the lease is itself a cancellable state (RP2). Cancelled here the turn never
+    // began: no fact of it exists, so the trajectory replays identically without it — a TurnEnd for
+    // a turn that admitted nothing would be a spurious boundary, not added auditability. Biased so
+    // a pre-cancelled token wins even over an immediately free lease.
+    let _turn = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Ok(TurnOutcome::PolicyStop(POLICY_STOP_CANCELLED.to_string())),
+        guard = lease.lock() => guard,
+    };
     let mut drive = Drive {
         rt,
         tenant,
         session,
         is_child,
+        cancel,
         deadline: Instant::now() + rt.budgets().turn_deadline,
         rounds: 0,
         invocations: 0,
@@ -116,6 +148,10 @@ struct Drive<'a> {
     tenant: &'a TenantId,
     session: &'a TrajectoryId,
     is_child: bool,
+    /// The turn's cancellation signal (RP2): raced at every external await. The holder of the drive
+    /// future must never abort it — cancellation transitions through [`Drive::finish_cancelled`],
+    /// which lands the close/seal/terminal facts before the future completes.
+    cancel: CancellationToken,
     deadline: Instant,
     rounds: u32,
     invocations: u32,
@@ -126,6 +162,9 @@ struct Drive<'a> {
     /// collide, so it is never used as the handle).
     next_handle: u32,
 }
+
+/// The turn's cancellation fired while an external await was in flight.
+struct TurnCancelled;
 
 impl Drive<'_> {
     async fn run(&mut self, user_turn: UserTurn) -> Result<TurnOutcome, DriveError> {
@@ -149,12 +188,24 @@ impl Drive<'_> {
             // Bound inference by the remaining turn time too, so a slow (or long-configured-timeout)
             // model cannot overrun the whole-turn wall-clock ceiling.
             let remaining = self.deadline.saturating_duration_since(Instant::now());
-            let completion = match tokio::time::timeout(remaining, self.rt.inference().complete(request)).await {
-                Ok(Ok(completion)) => completion,
-                Ok(Err(_)) => return self.finish_policy_stop(POLICY_STOP_INFERENCE),
-                Err(_) => return self.finish_policy_stop(POLICY_STOP_BUDGET),
+            let completion = tokio::select! {
+                biased;
+                // Between rounds no dispatch is open and every prior call is answered, so a
+                // cancelled inference needs only the terminal.
+                _ = self.cancel.cancelled() => return self.finish_cancelled(None, &[]),
+                out = tokio::time::timeout(remaining, self.rt.inference().complete(request)) => match out {
+                    Ok(Ok(completion)) => completion,
+                    Ok(Err(_)) => return self.finish_policy_stop(POLICY_STOP_INFERENCE),
+                    Err(_) => return self.finish_policy_stop(POLICY_STOP_BUDGET),
+                },
             };
 
+            // Cancellation decided before the round is recorded: a token that fired while
+            // inference was completing discards the whole round (nothing of it exists to replay)
+            // rather than recording calls the turn will never answer outside the terminal.
+            if self.cancel.is_cancelled() {
+                return self.finish_cancelled(None, &[]);
+            }
             let proposals: Vec<Proposal> = completion.tool_calls.iter().map(proposal_of).collect();
             let calls: Vec<ProposedCall> = proposals.iter().map(|p| p.call.clone()).collect();
             self.append(vec![Fact::AssistantMessage {
@@ -172,7 +223,16 @@ impl Drive<'_> {
             // one fixed feedback each and nothing more — no execution, cast, authorization, or return
             // after the turn has entered its policy-stop condition.
             let mut budget_hit = false;
-            for proposal in &proposals {
+            for index in 0..proposals.len() {
+                let proposal = &proposals[index];
+                // Cancellation first — before budget/malformed feedback and before the call runs.
+                // Checked per proposal, not only inside await races: a synchronous path (a builtin
+                // tool, a raw submit_result) would otherwise run and cross data after the
+                // disconnect that cancelled the turn.
+                if self.cancel.is_cancelled() {
+                    let unanswered: Vec<ToolCallId> = proposals[index..].iter().map(|p| p.call.id.clone()).collect();
+                    return self.finish_cancelled(None, &unanswered);
+                }
                 if budget_hit {
                     self.feedback(&proposal.call.id, POLICY_STOP_BUDGET)?;
                     continue;
@@ -184,8 +244,16 @@ impl Drive<'_> {
                     )?;
                     continue;
                 }
-                if self.handle_call(&proposal.call).await? == CallStop {
-                    budget_hit = true;
+                match self.handle_call(&proposal.call).await? {
+                    CallGo => {}
+                    CallStop => budget_hit = true,
+                    // Cancelled mid-round: this call and every remaining one in the round still get
+                    // their one sealed response, inside the terminal batch.
+                    CallCancelled(open) => {
+                        let unanswered: Vec<ToolCallId> =
+                            proposals[index..].iter().map(|p| p.call.id.clone()).collect();
+                        return self.finish_cancelled(open, &unanswered);
+                    }
                 }
             }
             if budget_hit {
@@ -227,7 +295,7 @@ impl Drive<'_> {
                     // Open returns the exact dispatch it appended, or None if the state raced to
                     // not-allowed — in which case we seal (one terminal response) and never invoke.
                     match self.open_dispatch(&call)? {
-                        Some(dispatch) => self.invoke_and_admit(dispatch, &call, call_id).await?,
+                        Some(dispatch) => return self.invoke_and_admit(dispatch, &call, call_id).await,
                         None => {
                             self.feedback(call_id, "the call could not be dispatched (the policy state changed)")?
                         }
@@ -236,8 +304,13 @@ impl Drive<'_> {
                 }
                 Ok(CheckOutcome::Unresolved(facts)) => {
                     drop(projection);
-                    if self.resolve_unknown(&log, &facts).await? {
-                        continue; // a dimension was cast — re-check on the new revision
+                    match self.resolve_unknown(&log, &facts).await {
+                        Err(TurnCancelled) => return Ok(CallCancelled(None)),
+                        Ok(resolved) => {
+                            if resolved? {
+                                continue; // a dimension was cast — re-check on the new revision
+                            }
+                        }
                     }
                     self.feedback(call_id, "the call has an unresolved label that no cast could resolve")?;
                     return Ok(CallGo);
@@ -337,10 +410,12 @@ impl Drive<'_> {
             };
             let request = AuthorityRequest::new(req.authority.clone(), &call, req.covers.clone());
             // Bound the authority wait by the remaining turn time — a slow authority cannot overrun
-            // the turn deadline; a timeout fails closed (Abstain).
-            let answer = tokio::time::timeout(self.external_budget(), backend.rule(&request))
-                .await
-                .unwrap_or(AuthorityAnswer::Abstain);
+            // the turn deadline; a timeout fails closed (Abstain). No dispatch is open yet, so a
+            // cancellation here owes only the seal and terminal.
+            let answer = match self.wait(backend.rule(&request)).await {
+                Err(TurnCancelled) => return Ok(CallCancelled(None)),
+                Ok(answer) => answer.unwrap_or(AuthorityAnswer::Abstain),
+            };
             match answer {
                 AuthorityAnswer::Approve => rulings.push(Ruling {
                     dispatch: dispatch.clone(),
@@ -373,13 +448,12 @@ impl Drive<'_> {
             }
             Err(e) => return Err(DriveError::Store(e)),
         }
-        self.invoke_and_admit(dispatch, &call, call_id).await?;
-        Ok(CallGo)
+        self.invoke_and_admit(dispatch, &call, call_id).await
     }
 
-    /// The reserved `submit_result(value)` tool (RP6): return one raw value to the parent at the child
-    /// fold. A sanitized (audience-relabeled) return needs a policy-declared sanitizer binding — a
-    /// follow-up; v1 returns raw only.
+    /// The reserved `submit_result(value)` tool (RP6): return one value to the parent — raw at the
+    /// child fold, or, with `[child] return_sanitizer` configured, only as that sanitizer's
+    /// derivation at its exact declared label.
     async fn handle_submit_result(
         &mut self,
         call_id: &ToolCallId,
@@ -395,40 +469,74 @@ impl Drive<'_> {
             .map(str::to_string)
             .unwrap_or_default();
 
-        // Record the child's return (server-derived label, trust never rises), capturing its id.
-        let return_id = loop {
-            let (log, rev) = self.rt.store().snapshot(self.tenant, self.session)?;
-            let projection = Projection::build(&log, rev);
-            let views = projection.view(self.session);
-            let occurrence = views.returns_by(self.session);
-            let batch = match self.rt.engine().submit_child_return(
-                &views,
-                ChildReturn::Raw {
-                    body: ValueBody::new(body.clone()),
+        // Server policy decides how the value crosses (RP6): with a `[child] return_sanitizer`
+        // configured, only the sanitizer's derivation reaches the parent — at the sanitizer's exact
+        // declared label, engine-derived; the raw submitted text never leaves the child. The model
+        // never chooses the path. A failed derivation fails closed: nothing returns.
+        let returned = match self.rt.config().child_return_sanitizer() {
+            None => ChildReturn::Raw {
+                body: ValueBody::new(body.clone()),
+            },
+            Some(sanitizer) => match self.derive_sanitized(sanitizer, &body).await {
+                // Cancelled before any return was recorded: nothing crossed, only the seal is owed.
+                Err(TurnCancelled) => return Ok(CallCancelled(None)),
+                Ok(Some(derived)) => ChildReturn::Sanitized {
+                    body: ValueBody::new(derived),
+                    sanitizer: sanitizer.clone(),
                 },
-            ) {
-                Ok(batch) => batch,
-                Err(_) => {
-                    self.feedback(call_id, "this session cannot submit a result")?;
+                Ok(None) => {
+                    self.feedback(call_id, "the result could not be sanitized for return")?;
                     return Ok(CallGo);
                 }
-            };
-            drop(projection);
-            match self.rt.store().conditional_append(self.tenant, self.session, batch) {
-                Ok(_) => break ChildReturnId::new(self.session.clone(), occurrence),
-                Err(StoreError::Stale { .. }) => continue,
-                Err(e) => return Err(DriveError::Store(e)),
+            },
+        };
+
+        // Record the child's return (server-derived label, trust never rises), capturing its id —
+        // through the serialized finalization (CC5), so a busy family cannot starve the record. The
+        // cancellation token is consulted **inside** the closure: the record is the commit point at
+        // which the value crosses, so a token that fired first suppresses it atomically under the
+        // family lock (a token firing after the closure ran linearizes after the crossing).
+        let mut recorded = None;
+        self.rt.store().finalize(self.tenant, self.session, |facts, rev| {
+            if self.cancel.is_cancelled() {
+                return None;
             }
+            let projection = Projection::build(facts, rev);
+            let views = projection.view(self.session);
+            let occurrence = views.returns_by(self.session);
+            let batch = self.rt.engine().submit_child_return(&views, returned).ok()?;
+            recorded = Some(ChildReturnId::new(self.session.clone(), occurrence));
+            Some(batch)
+        })?;
+        let Some(return_id) = recorded else {
+            if self.cancel.is_cancelled() {
+                return Ok(CallCancelled(None));
+            }
+            self.feedback(call_id, "this session cannot submit a result")?;
+            return Ok(CallGo);
         };
 
         // Merge it into the direct parent so the parent actually receives the value (RP6). The engine
         // derives the parent's new label (never widening) and enforces once-only; finalize keeps the
-        // merge bounded under the shared family lock.
+        // merge bounded under the shared family lock. Like the record above, the merge is a
+        // crossing, so the token is consulted inside the closure: cancelled first, the recorded
+        // return stays unmerged (fail-closed — it never reaches the parent) and the call is sealed
+        // through the cancelled terminal.
+        let mut merged = true;
         if let Some(parent) = self.rt.store().parent_of(self.tenant, self.session)? {
+            merged = false;
             self.rt.store().finalize(self.tenant, self.session, |facts, rev| {
+                if self.cancel.is_cancelled() {
+                    return None;
+                }
                 let projection = Projection::build(facts, rev);
-                self.rt.engine().merge(&projection.view(&parent), &return_id).ok()
+                let batch = self.rt.engine().merge(&projection.view(&parent), &return_id).ok()?;
+                merged = true;
+                Some(batch)
             })?;
+        }
+        if !merged {
+            return Ok(CallCancelled(None));
         }
         self.feedback(call_id, "result submitted to the parent")?;
         Ok(CallGo)
@@ -436,11 +544,23 @@ impl Drive<'_> {
 
     /// Try to resolve the first unresolved dimension by a registered cast (registration order): a
     /// constant cast applies its declared value; a resolver cast asks its backend, bounded by the
-    /// engine's `may_cast`. Returns `true` if a cast was admitted (the caller re-checks). The engine
-    /// re-validates every proposal against `may_cast`, so a misbehaving resolver cannot widen a label.
-    async fn resolve_unknown(&self, log: &[Fact], facts: &[UnresolvedFact]) -> Result<bool, DriveError> {
+    /// engine's `may_cast`.
+    ///
+    /// Reachability: no admission path of the in-memory runtime currently mints a value with an
+    /// Unknown dimension (boundary labels are Known, and a pending-cast output admits only
+    /// resolved), so this check-time path is engine-generality held for future Unknown sources —
+    /// e.g. a rehydrated/persisted log — not an active turn state today.
+    /// `Ok(Some(true))` means a cast was admitted (the caller re-checks);
+    /// `Err(TurnCancelled)` surfaces a cancellation during a resolver await (no dispatch is open on
+    /// this path). The engine re-validates every proposal against `may_cast`, so a misbehaving
+    /// resolver cannot widen a label.
+    async fn resolve_unknown(
+        &self,
+        log: &[Fact],
+        facts: &[UnresolvedFact],
+    ) -> Result<Result<bool, DriveError>, TurnCancelled> {
         let Some(target) = facts.first() else {
-            return Ok(false);
+            return Ok(Ok(false));
         };
         let body = value_body(log, target.value).unwrap_or_default().to_string();
 
@@ -454,8 +574,8 @@ impl Drive<'_> {
                     Some(backend) => {
                         let input = CastInput { body: body.clone() };
                         let resolve = backend.resolve(&input, self.rt.engine().registry().trust_chain());
-                        match tokio::time::timeout(self.external_budget(), resolve).await {
-                            Ok(BackendCast::Resolved(dim)) if dim.dimension() == target.dimension => Some(dim),
+                        match self.wait(resolve).await? {
+                            Some(BackendCast::Resolved(dim)) if dim.dimension() == target.dimension => Some(dim),
                             _ => None, // unresolved, wrong dimension, or timed out → fail closed
                         }
                     }
@@ -466,7 +586,10 @@ impl Drive<'_> {
                 continue;
             };
 
-            let (fresh, rev) = self.rt.store().snapshot(self.tenant, self.session)?;
+            let (fresh, rev) = match self.rt.store().snapshot(self.tenant, self.session) {
+                Ok(snapshot) => snapshot,
+                Err(e) => return Ok(Err(DriveError::Store(e))),
+            };
             let projection = Projection::build(&fresh, rev);
             let views = projection.view(self.session);
             let answer = CastAnswer {
@@ -476,13 +599,68 @@ impl Drive<'_> {
             if let Ok(batch) = self.rt.engine().admit_cast(&views, target, answer) {
                 drop(projection);
                 match self.rt.store().conditional_append(self.tenant, self.session, batch) {
-                    Ok(_) => return Ok(true),
-                    Err(StoreError::Stale { .. }) => return Ok(true), // the re-check re-derives on the new revision
-                    Err(e) => return Err(DriveError::Store(e)),
+                    Ok(_) => return Ok(Ok(true)),
+                    Err(StoreError::Stale { .. }) => return Ok(Ok(true)), // the re-check re-derives on the new revision
+                    Err(e) => return Ok(Err(DriveError::Store(e))),
                 }
             }
         }
-        Ok(false)
+        Ok(Ok(false))
+    }
+
+    /// Derive the bound sanitizer's output from a confined raw body, deadline-bounded. `Ok(None)`
+    /// fails closed (no backend, a failed derivation, or a timeout): the caller withholds the
+    /// value. The derived bytes carry the sanitizer's declared label — the engine computes it at
+    /// admission.
+    async fn derive_sanitized(&self, sanitizer: &SanitizerName, body: &str) -> Result<Option<String>, TurnCancelled> {
+        let Some(backend) = self.rt.sanitizer_backend(sanitizer) else {
+            return Ok(None);
+        };
+        let input = SanitizerInput { body: body.to_string() };
+        match self.wait(backend.derive(&input)).await? {
+            Some(SanitizerAnswer::Derived(derived)) => Ok(Some(derived)),
+            Some(SanitizerAnswer::Failed) | None => Ok(None),
+        }
+    }
+
+    /// Resolve a pending-cast output dimension over the registered casts (registration order): a
+    /// constant cast answers its declared value; a resolver cast is asked with the confined raw
+    /// body, deadline-bounded. The engine re-validates the winning answer at admission, so a
+    /// misbehaving resolver cannot widen the label past its declared ceiling.
+    async fn resolve_output_cast(
+        &self,
+        body: &str,
+        dimension: Dimension,
+    ) -> Result<Option<(CastName, DimValue)>, TurnCancelled> {
+        for cast in &self.rt.config().registry_config().casts {
+            let resolved = match &cast.resolution {
+                CastResolution::Constant(declared) if declared.dimension() == dimension => Some(declared.clone()),
+                CastResolution::Constant(_) => None,
+                CastResolution::Resolver { may_cast } => match self.rt.cast_backend(&cast.name) {
+                    Some(backend) => {
+                        let input = CastInput { body: body.to_string() };
+                        let resolve = backend.resolve(&input, self.rt.engine().registry().trust_chain());
+                        match self.wait(resolve).await? {
+                            // An answer outside the declared may_cast ceiling is discarded here like
+                            // any other non-answer (the engine re-validates at admission either
+                            // way): a hostile resolver must not be able to poison the admission of
+                            // an otherwise-successful dispatch.
+                            Some(BackendCast::Resolved(dim))
+                                if dim.dimension() == dimension && may_cast.admits(&dim) =>
+                            {
+                                Some(dim)
+                            }
+                            _ => None, // unresolved, wrong dimension, out of ceiling, or timed out
+                        }
+                    }
+                    None => None,
+                },
+            };
+            if let Some(resolved) = resolved {
+                return Ok(Some((cast.name.clone(), resolved)));
+            }
+        }
+        Ok(None)
     }
 
     // --- appends -------------------------------------------------------------
@@ -499,32 +677,27 @@ impl Drive<'_> {
         }])
     }
 
-    /// Open the dispatch for a clean-allow call, returning the **exact** [`DispatchId`] appended (so the
-    /// admit path closes that dispatch, not a raced sibling). Returns `None` if the state raced to
-    /// not-allowed — the caller then seals instead of invoking. Retries only on a concurrent-branch CAS
-    /// loss.
+    /// Open the dispatch for a clean-allow call, returning the **exact** [`DispatchId`] appended (so
+    /// the admit path closes that dispatch, not a raced sibling). Returns `None` if the current state
+    /// no longer allows the call — the caller then seals instead of invoking. Runs through the
+    /// store's serialized finalization (CC5): the engine decides under the family lock at the live
+    /// revision, one acquisition, no CAS retry to be starved by sibling appends.
     fn open_dispatch(&self, call: &ResolvedCall) -> Result<Option<DispatchId>, DriveError> {
-        loop {
-            let (log, rev) = self.rt.store().snapshot(self.tenant, self.session)?;
-            let projection = Projection::build(&log, rev);
+        let mut dispatch = None;
+        self.rt.store().finalize(self.tenant, self.session, |facts, rev| {
+            let projection = Projection::build(facts, rev);
             let views = projection.view(self.session);
-            let Ok(batch) = self.rt.engine().open_dispatch(&views, call) else {
-                return Ok(None); // no longer allowed under a raced revision
-            };
+            let batch = self.rt.engine().open_dispatch(&views, call).ok()?;
             // The occurrence is computed from the same views the batch was built against, so this id
             // is exactly the dispatch these facts open.
-            let dispatch = DispatchId::new(
+            dispatch = Some(DispatchId::new(
                 self.session.clone(),
                 call.digest(),
                 views.dispatch_count(&call.digest()),
-            );
-            drop(projection);
-            match self.rt.store().conditional_append(self.tenant, self.session, batch) {
-                Ok(_) => return Ok(Some(dispatch)),
-                Err(StoreError::Stale { .. }) => continue,
-                Err(e) => return Err(DriveError::Store(e)),
-            }
-        }
+            ));
+            Some(batch)
+        })?;
+        Ok(dispatch)
     }
 
     async fn invoke_and_admit(
@@ -532,32 +705,130 @@ impl Drive<'_> {
         dispatch: DispatchId,
         call: &ResolvedCall,
         call_id: &ToolCallId,
-    ) -> Result<(), DriveError> {
+    ) -> Result<CallProgress, DriveError> {
         self.invocations += 1;
         let rendered = RenderedCall::from_call(call);
         // Bound the south invocation by the remaining turn time — a slow tool cannot overrun the turn
-        // deadline; an outer timeout drops the request and is treated as indeterminate.
+        // deadline; a timeout drops the request and is treated as indeterminate. A cancellation here
+        // finds the dispatch open with its outcome unobserved: the terminal batch closes it
+        // `Indeterminate` (the tool may or may not have run).
         let outcome = match self.rt.tool_backend(call.tool()) {
             Some(backend) => {
                 let invoke = backend.invoke(&rendered, self.rt.budgets().body_cap_bytes);
-                tokio::time::timeout(self.external_budget(), invoke)
-                    .await
-                    .unwrap_or(ToolOutcome::Indeterminate)
+                match self.wait(invoke).await {
+                    Err(TurnCancelled) => {
+                        return Ok(CallCancelled(Some(OpenClose {
+                            dispatch,
+                            call: call.clone(),
+                            close: CancelClose::Unobserved,
+                        })));
+                    }
+                    Ok(outcome) => outcome.unwrap_or(ToolOutcome::Indeterminate),
+                }
             }
             None => ToolOutcome::Failure,
         };
+        // Cancellation decided again now that the outcome is observed, before any admission
+        // commits: a token that fired while the tool was finishing keeps its result out of the
+        // trajectory, and the terminal closes the dispatch honestly for what was observed.
+        if self.cancel.is_cancelled() {
+            let close = match &outcome {
+                ToolOutcome::Success { .. } => CancelClose::EffectsStand,
+                ToolOutcome::Failure => CancelClose::Failed,
+                ToolOutcome::Indeterminate => CancelClose::Unobserved,
+            };
+            return Ok(CallCancelled(Some(OpenClose {
+                dispatch,
+                call: call.clone(),
+                close,
+            })));
+        }
+        // The contract's Phase-2 discipline for an available raw body (mutually exclusive by load
+        // validation): a pending-cast output confines it until a registered cast establishes its
+        // label (RP5); a bound output sanitizer confines it and admits only the derivation (RP4).
+        // Either failing withholds the value while the successful call's effects stand.
+        let contract = self.rt.engine().registry().tool(call.tool());
+        let pending_cast = contract.and_then(|c| c.delta.pending_cast_dim());
+        let bound_sanitizer = contract.and_then(|c| c.output_sanitizer.clone());
+        let mut withheld: Option<&str> = None;
         let admission = match &outcome {
             ToolOutcome::Success {
                 body: BodyDisposition::Available(body),
-            } => ResultAdmission::SuccessRaw {
-                body: ValueBody::new(body.clone()),
+            } => match (pending_cast, bound_sanitizer) {
+                (None, None) => ResultAdmission::SuccessRaw {
+                    body: ValueBody::new(body.clone()),
+                },
+                // Cancellation during a derivation finds success already observed: the terminal
+                // batch closes success-with-no-value, so the committed effects stand (RP4/RP5).
+                (Some(dimension), _) => match self.resolve_output_cast(body, dimension).await {
+                    Err(TurnCancelled) => {
+                        return Ok(CallCancelled(Some(OpenClose {
+                            dispatch,
+                            call: call.clone(),
+                            close: CancelClose::EffectsStand,
+                        })));
+                    }
+                    Ok(Some((cast, resolved))) => ResultAdmission::SuccessCast {
+                        body: ValueBody::new(body.clone()),
+                        cast,
+                        resolved,
+                    },
+                    Ok(None) => {
+                        withheld = Some(SEALED_UNRESOLVED);
+                        ResultAdmission::SuccessNoValue
+                    }
+                },
+                (None, Some(sanitizer)) => match self.derive_sanitized(&sanitizer, body).await {
+                    Err(TurnCancelled) => {
+                        return Ok(CallCancelled(Some(OpenClose {
+                            dispatch,
+                            call: call.clone(),
+                            close: CancelClose::EffectsStand,
+                        })));
+                    }
+                    Ok(Some(derived)) => ResultAdmission::SuccessSanitized {
+                        body: ValueBody::new(derived),
+                        sanitizer,
+                        raw_digest: RawResultDigest::of(body.as_bytes()),
+                    },
+                    Ok(None) => {
+                        withheld = Some(SEALED_UNSANITIZED);
+                        ResultAdmission::SuccessNoValue
+                    }
+                },
             },
             ToolOutcome::Success {
                 body: BodyDisposition::RejectedTooLarge,
             } => ResultAdmission::SuccessNoValue,
-            ToolOutcome::Failure | ToolOutcome::Indeterminate => ResultAdmission::Failure,
+            ToolOutcome::Failure => ResultAdmission::Failure,
+            ToolOutcome::Indeterminate => ResultAdmission::Indeterminate,
         };
-        let admitted = self.admit_result(&dispatch, call, admission)?;
+        let admitted = match self.admit_result(&dispatch, call, admission)? {
+            Admission::Admitted => true,
+            // A refused value admission (a resolution the engine rejects) leaves the dispatch open:
+            // close it success-with-no-value so effects stand and nothing is orphaned. An
+            // already-closed dispatch needs no retry.
+            Admission::Refused => {
+                self.admit_result(&dispatch, call, ResultAdmission::SuccessNoValue)?;
+                false
+            }
+            Admission::AlreadyClosed => false,
+            // The token fired before the value could cross: the cancelled terminal closes the
+            // still-open dispatch for what was actually observed.
+            Admission::CancelSuppressed => {
+                let close = match &outcome {
+                    ToolOutcome::Success { .. } => CancelClose::EffectsStand,
+                    ToolOutcome::Failure => CancelClose::Failed,
+                    ToolOutcome::Indeterminate => CancelClose::Unobserved,
+                };
+                return Ok(CallCancelled(Some(OpenClose {
+                    dispatch,
+                    call: call.clone(),
+                    close,
+                })));
+            }
+            Admission::InvariantBreach => unreachable!("admit_result surfaces an identity breach as DriveError"),
+        };
 
         match &outcome {
             // An available result IS the model-visible response — read from its ValueAdmitted. But if
@@ -566,49 +837,88 @@ impl Drive<'_> {
             ToolOutcome::Success {
                 body: BodyDisposition::Available(_),
             } => {
-                if admitted {
-                    Ok(())
-                } else {
-                    self.feedback(call_id, SEALED_FAILED)
+                if let Some(sealed) = withheld {
+                    self.feedback(call_id, sealed)?;
+                } else if !admitted {
+                    self.feedback(call_id, SEALED_FAILED)?;
                 }
             }
             ToolOutcome::Success {
                 body: BodyDisposition::RejectedTooLarge,
-            } => self.feedback(call_id, SEALED_WITHHELD),
-            ToolOutcome::Failure => self.feedback(call_id, SEALED_FAILED),
-            ToolOutcome::Indeterminate => self.feedback(call_id, SEALED_INDETERMINATE),
+            } => self.feedback(call_id, SEALED_WITHHELD)?,
+            ToolOutcome::Failure => self.feedback(call_id, SEALED_FAILED)?,
+            ToolOutcome::Indeterminate => self.feedback(call_id, SEALED_INDETERMINATE)?,
         }
+        Ok(CallGo)
     }
 
     /// Close the dispatch and admit (or seal) its result through the store's **shielded finalization**
     /// (CC5/RP2): one lock acquisition, no CAS-loop, so the close lands in bounded steps even under
     /// continuous sibling appends — it cannot livelock or orphan an open dispatch. The engine derives
-    /// the admission facts under the lock at the current revision; a dispatch already closed by a prior
-    /// attempt is an idempotent no-op.
-    /// Returns whether the engine's admission actually landed this call (a batch was appended). `false`
-    /// means the dispatch was already closed or the admission hit a would-be-invariant engine error —
-    /// the caller then guarantees a terminal response itself rather than assuming the value landed.
+    /// the admission facts under the lock at the current revision. The refusal causes are kept
+    /// distinct: an already-closed dispatch is an idempotent no-op, a value-policy rejection leaves
+    /// the dispatch open for the caller to close another way, and an identity mismatch (a dispatch
+    /// that does not belong to this call/branch) is a drive invariant breach surfaced loudly, never
+    /// absorbed.
     fn admit_result(
         &self,
         dispatch: &DispatchId,
         call: &ResolvedCall,
         admission: ResultAdmission,
-    ) -> Result<bool, DriveError> {
+    ) -> Result<Admission, DriveError> {
+        let value_carrying = matches!(
+            admission,
+            ResultAdmission::SuccessRaw { .. }
+                | ResultAdmission::SuccessSanitized { .. }
+                | ResultAdmission::SuccessCast { .. }
+        );
         let mut admission = Some(admission);
-        let mut admitted = false;
+        let mut result = Admission::AlreadyClosed;
         self.rt.store().finalize(self.tenant, self.session, |facts, rev| {
+            // The value admission is the confinement commit point, so the cancellation token is
+            // consulted here, atomically under the family lock: a token that fired first keeps the
+            // value out of the trajectory (the caller closes the dispatch through the cancelled
+            // terminal instead). Value-less closes are owed regardless and never suppressed.
+            if value_carrying && self.cancel.is_cancelled() {
+                result = Admission::CancelSuppressed;
+                return None;
+            }
             let projection = Projection::build(facts, rev);
             let views = projection.view(self.session);
             let admission = admission.take()?;
             match self.rt.engine().admit_result(&views, dispatch, call, admission) {
                 Ok(batch) => {
-                    admitted = true;
+                    result = Admission::Admitted;
                     Some(batch)
                 }
-                Err(_) => None,
+                Err(AdmitError::NotOpen) => None,
+                Err(AdmitError::UnknownTool(_) | AdmitError::DigestMismatch | AdmitError::ForeignDispatch) => {
+                    result = Admission::InvariantBreach;
+                    None
+                }
+                // Value-policy refusals, exhaustively — a future identity-class error must be
+                // classified here deliberately, not absorbed by a wildcard.
+                Err(
+                    AdmitError::UnknownSanitizer(_)
+                    | AdmitError::SanitizerNotOutput(_)
+                    | AdmitError::TransitionSourceUnmet
+                    | AdmitError::OutputPendingCast
+                    | AdmitError::OutputSanitizerBound
+                    | AdmitError::NotBoundSanitizer
+                    | AdmitError::NotPendingCast
+                    | AdmitError::UnknownCast(_)
+                    | AdmitError::ConstantMismatch
+                    | AdmitError::CeilingExceeded,
+                ) => {
+                    result = Admission::Refused;
+                    None
+                }
             }
         })?;
-        Ok(admitted)
+        if matches!(result, Admission::InvariantBreach) {
+            return Err(DriveError::DispatchIdentity);
+        }
+        Ok(result)
     }
 
     fn feedback(&self, call_id: &ToolCallId, content: &str) -> Result<(), DriveError> {
@@ -635,21 +945,74 @@ impl Drive<'_> {
         Ok(TurnOutcome::PolicyStop(message.to_string()))
     }
 
-    /// Append revision-independent facts under CAS, retrying on a concurrent-branch loss.
+    /// Append revision-independent facts through the store's serialized finalization (CC5): one
+    /// family-lock acquisition, no CAS retry — bounded even under continuous sibling appends, so a
+    /// terminal (or any turn fact) can never be starved out by a busy child branch.
     fn append(&self, facts: Vec<Fact>) -> Result<(), DriveError> {
-        loop {
-            let (_, rev) = self.rt.store().snapshot(self.tenant, self.session)?;
-            let batch = FactBatch::new(rev, facts.clone());
-            match self.rt.store().conditional_append(self.tenant, self.session, batch) {
-                Ok(_) => return Ok(()),
-                Err(StoreError::Stale { .. }) => continue,
-                Err(e) => return Err(DriveError::Store(e)),
-            }
-        }
+        self.rt
+            .store()
+            .finalize(self.tenant, self.session, |_, rev| Some(FactBatch::new(rev, facts)))?;
+        Ok(())
     }
 
     fn past_deadline(&self) -> bool {
         Instant::now() >= self.deadline
+    }
+
+    /// Race one external await against the turn's cancellation and the per-external deadline:
+    /// `Err(TurnCancelled)` on cancellation, `Ok(None)` on timeout (each site fails closed its own
+    /// way), `Ok(Some(_))` on completion.
+    async fn wait<F: Future>(&self, fut: F) -> Result<Option<F::Output>, TurnCancelled> {
+        // Biased: a fired cancellation wins even against a future that is already ready, so an
+        // instantly-completing backend cannot slip a result past a cancelled turn.
+        tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => Err(TurnCancelled),
+            out = tokio::time::timeout(self.external_budget(), fut) => Ok(out.ok()),
+        }
+    }
+
+    /// The one serialized finalization a cancelled turn lands (RP2/CC5): the open dispatch's close
+    /// (if any), one sealed response per still-unanswered proposed call, the fixed policy-stop
+    /// message, and the `TurnEnd` — a single batch, so cancellation can never orphan a dispatch or
+    /// leave a call without its terminal response.
+    fn finish_cancelled(&self, open: Option<OpenClose>, unanswered: &[ToolCallId]) -> Result<TurnOutcome, DriveError> {
+        self.rt.store().finalize(self.tenant, self.session, |facts, rev| {
+            let projection = Projection::build(facts, rev);
+            let views = projection.view(self.session);
+            let mut terminal = Vec::new();
+            if let Some(open) = &open {
+                let admission = match open.close {
+                    CancelClose::Unobserved => ResultAdmission::Indeterminate,
+                    CancelClose::EffectsStand => ResultAdmission::SuccessNoValue,
+                    CancelClose::Failed => ResultAdmission::Failure,
+                };
+                // A close that no longer applies (the dispatch raced closed) is skipped, never fatal:
+                // the terminal still lands.
+                if let Ok(batch) = self
+                    .rt
+                    .engine()
+                    .admit_result(&views, &open.dispatch, &open.call, admission)
+                {
+                    terminal = batch.facts;
+                }
+            }
+            for call_id in unanswered {
+                terminal.push(Fact::BlockFeedback {
+                    trajectory: self.session.clone(),
+                    call_id: call_id.clone(),
+                    content: POLICY_STOP_CANCELLED.to_string(),
+                });
+            }
+            terminal.push(Fact::AssistantMessage {
+                trajectory: self.session.clone(),
+                content: Some(POLICY_STOP_CANCELLED.to_string()),
+                calls: Vec::new(),
+            });
+            terminal.push(turn_end(self.session));
+            Some(FactBatch::new(rev, terminal))
+        })?;
+        Ok(TurnOutcome::PolicyStop(POLICY_STOP_CANCELLED.to_string()))
     }
 
     /// The time budget for one external await: the smaller of the remaining turn time and the
@@ -661,13 +1024,31 @@ impl Drive<'_> {
     }
 }
 
-/// The progress of one handled call: whether the turn may continue or must stop after this round.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The progress of one handled call: continue, stop after this round (a budget), or the turn was
+/// cancelled — carrying the open dispatch the terminal batch must still close, if any.
 enum CallProgress {
     Go,
     Stop,
+    Cancelled(Option<OpenClose>),
 }
-use CallProgress::{Go as CallGo, Stop as CallStop};
+use CallProgress::{Cancelled as CallCancelled, Go as CallGo, Stop as CallStop};
+
+/// An open dispatch a cancelled turn closes inside its serialized terminal batch.
+struct OpenClose {
+    dispatch: DispatchId,
+    call: ResolvedCall,
+    close: CancelClose,
+}
+
+/// What the cancelled turn knows about the open dispatch: the south outcome was never observed
+/// (close `Indeterminate`); success was already observed and only the value derivation was cut
+/// short (close success-with-no-value — effects stand, RP4/RP5); or a failure was already observed
+/// (close `Failure` — audit-honest, not collapsed into indeterminate).
+enum CancelClose {
+    Unobserved,
+    EffectsStand,
+    Failed,
+}
 
 fn turn_end(session: &TrajectoryId) -> Fact {
     Fact::Boundary {
@@ -835,9 +1216,16 @@ name = "get_logs"
         let tenant = TenantId::new("acme");
         let session = rt.store().create_session(tenant.clone());
 
-        let outcome = drive_turn(&rt, &tenant, &session, false, user_turn("what is wrong?"))
-            .await
-            .unwrap();
+        let outcome = drive_turn(
+            &rt,
+            &tenant,
+            &session,
+            false,
+            user_turn("what is wrong?"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(outcome, TurnOutcome::Final("the pod is crashlooping".to_string()));
 
         let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
@@ -885,9 +1273,16 @@ implementation = { builtin = "approve" }
         let tenant = TenantId::new("acme");
         let session = rt.store().create_session(tenant.clone());
 
-        let outcome = drive_turn(&rt, &tenant, &session, false, user_turn("wire the invoice"))
-            .await
-            .unwrap();
+        let outcome = drive_turn(
+            &rt,
+            &tenant,
+            &session,
+            false,
+            user_turn("wire the invoice"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(outcome, TurnOutcome::Final("the transfer is done".to_string()));
 
         let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
@@ -930,9 +1325,16 @@ effects = ["read"]
         let tenant = TenantId::new("acme");
         let session = rt.store().create_session(tenant.clone());
 
-        drive_turn(&rt, &tenant, &session, false, user_turn("dump the file"))
-            .await
-            .unwrap();
+        drive_turn(
+            &rt,
+            &tenant,
+            &session,
+            false,
+            user_turn("dump the file"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
         // The success committed its effect...
         assert!(log.iter().any(|f| matches!(
@@ -978,9 +1380,16 @@ effects = ["read"]
         let tenant = TenantId::new("acme");
         let session = rt.store().create_session(tenant.clone());
 
-        drive_turn(&rt, &tenant, &session, false, user_turn("try it"))
-            .await
-            .unwrap();
+        drive_turn(
+            &rt,
+            &tenant,
+            &session,
+            false,
+            user_turn("try it"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
         assert!(!log.iter().any(|f| matches!(
             f,
@@ -1038,9 +1447,16 @@ effects = ["read"]
             })
             .unwrap();
 
-        drive_turn(&rt, &tenant, &child, true, user_turn("investigate"))
-            .await
-            .unwrap();
+        drive_turn(
+            &rt,
+            &tenant,
+            &child,
+            true,
+            user_turn("investigate"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
 
         let (log, _) = rt.store().snapshot(&tenant, &parent).unwrap();
         // The parent received the returned value and a merge boundary landed.
@@ -1108,9 +1524,16 @@ implementation = { builtin = "approve" }
         let tenant = TenantId::new("acme");
         let session = rt.store().create_session(tenant.clone());
 
-        drive_turn(&rt, &tenant, &session, false, user_turn("do both"))
-            .await
-            .unwrap();
+        drive_turn(
+            &rt,
+            &tenant,
+            &session,
+            false,
+            user_turn("do both"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
         let committed = |effect: &str| {
             log.iter().any(|f| {
@@ -1148,9 +1571,16 @@ name = "get_logs"
         let tenant = TenantId::new("acme");
         let session = rt.store().create_session(tenant.clone());
 
-        drive_turn(&rt, &tenant, &session, false, user_turn("read"))
-            .await
-            .unwrap();
+        drive_turn(
+            &rt,
+            &tenant,
+            &session,
+            false,
+            user_turn("read"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
         // Never dispatched, but the proposed call still got exactly one terminal response.
         assert!(!log.iter().any(|f| matches!(f, Fact::DispatchOpened { .. })));
@@ -1162,6 +1592,593 @@ name = "get_logs"
     }
 
     #[tokio::test]
+    async fn pending_cast_output_resolves_and_admits_at_the_cast_label() {
+        // `scan` declares its output trust pending-cast; the constant cast establishes it as
+        // suspicious, so the body is admitted (model-visible) at the resolved label.
+        let config = Config::from_toml_str(
+            r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+
+[[tool]]
+name = "scan"
+delta = { trust = "unknown" }
+
+[[cast]]
+name = "paranoid"
+constant = { trust = "suspicious" }
+"#,
+        )
+        .unwrap();
+        let mut builtins = BTreeMap::new();
+        builtins.insert(ToolName::new("scan"), BuiltinTool::Echo("mail body".to_string()));
+        let (base, model) =
+            spawn_scripted_model(vec![tool_call_round("1", "scan", "{}"), final_round("2", "scanned")]).await;
+        let rt = runtime_over(config, builtins, base).await;
+        let tenant = TenantId::new("acme");
+        let session = rt.store().create_session(tenant.clone());
+
+        drive_turn(
+            &rt,
+            &tenant,
+            &session,
+            false,
+            user_turn("scan the inbox"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
+        assert!(log.iter().any(|f| matches!(
+            f,
+            Fact::OutputCastApplied {
+                dimension: Dimension::Trust,
+                ..
+            }
+        )));
+        let admitted = log.iter().any(|f| {
+            matches!(f, Fact::ValueAdmitted { value, provenance: Provenance::ToolResult { .. }, .. }
+                if value.body.as_str() == "mail body"
+                    && value.label.trust == appa_engine::label::Dim::Known(appa_engine::label::Trust::new(0)))
+        });
+        assert!(
+            admitted,
+            "the cast-resolved value should be admitted at the resolved label"
+        );
+        model.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_cast_without_a_matching_cast_seals_but_commits_effects() {
+        // No registered cast can establish `scan`'s output trust: the raw body stays confined
+        // (never admitted, sealed to the model) while the successful call's effects stand.
+        let config = Config::from_toml_str(
+            r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+
+[[tool]]
+name = "scan"
+effects = ["read"]
+delta = { trust = "unknown" }
+"#,
+        )
+        .unwrap();
+        let mut builtins = BTreeMap::new();
+        builtins.insert(ToolName::new("scan"), BuiltinTool::Echo("secret mail".to_string()));
+        let (base, model) =
+            spawn_scripted_model(vec![tool_call_round("1", "scan", "{}"), final_round("2", "done")]).await;
+        let rt = runtime_over(config, builtins, base).await;
+        let tenant = TenantId::new("acme");
+        let session = rt.store().create_session(tenant.clone());
+
+        drive_turn(
+            &rt,
+            &tenant,
+            &session,
+            false,
+            user_turn("scan the inbox"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
+        // Effects committed (the tool ran) …
+        assert!(log.iter().any(|f| matches!(
+            f,
+            Fact::DispatchClosed { outcome: appa_engine::fact::CloseOutcome::Success { effects }, .. }
+                if effects == &[appa_engine::fact::EffectKind::new("read")]
+        )));
+        // … but no value entered, and the call's one terminal response is the unresolved seal.
+        assert!(!log.iter().any(|f| matches!(
+            f,
+            Fact::ValueAdmitted {
+                provenance: Provenance::ToolResult { .. },
+                ..
+            }
+        )));
+        assert!(log.iter().any(|f| matches!(
+            f,
+            Fact::BlockFeedback { content, .. } if content == SEALED_UNRESOLVED
+        )));
+        model.await.unwrap();
+    }
+
+    const PII: &str = r#"
+[[sanitizer]]
+name = "pii"
+on   = ["tool_output"]
+[sanitizer.can_reduce]
+audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+[sanitizer.implementation]
+builtin = "redact-email"
+"#;
+
+    #[tokio::test]
+    async fn a_bound_tool_admits_the_derivation_never_the_raw() {
+        let config = Config::from_toml_str(&format!(
+            "version = 1\n[[tool]]\nname = \"export\"\ndelta = {{ audience = {{ exactly = [\"internal\"] }} }}\noutput_sanitizer = \"pii\"\n{PII}"
+        ))
+        .unwrap();
+        let mut builtins = BTreeMap::new();
+        builtins.insert(
+            ToolName::new("export"),
+            BuiltinTool::Echo("contact bob@corp.com for access".to_string()),
+        );
+        let (base, model) =
+            spawn_scripted_model(vec![tool_call_round("1", "export", "{}"), final_round("2", "exported")]).await;
+        let rt = runtime_over(config, builtins, base).await;
+        let tenant = TenantId::new("acme");
+        let session = rt.store().create_session(tenant.clone());
+
+        drive_turn(
+            &rt,
+            &tenant,
+            &session,
+            false,
+            user_turn("export the ticket"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
+        // The admitted value is the derivation — the raw address never enters the trajectory —
+        // and it carries the sanitizer's declared audience (public), not the raw delta's.
+        let admitted: Vec<_> = log
+            .iter()
+            .filter_map(|f| match f {
+                Fact::ValueAdmitted {
+                    value,
+                    provenance: Provenance::ToolResult { .. },
+                    ..
+                } => Some(value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(admitted.len(), 1);
+        assert!(!admitted[0].body.as_str().contains("bob@corp.com"));
+        assert_eq!(
+            admitted[0].label.audience,
+            appa_engine::label::Dim::Known(appa_engine::label::Audience::Public)
+        );
+        // The application is audited against the raw result's digest.
+        assert!(log.iter().any(|f| matches!(
+            f,
+            Fact::SanitizerApplied { raw_digest, .. }
+                if raw_digest == &appa_engine::value::RawResultDigest::of(b"contact bob@corp.com for access")
+        )));
+        model.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_sanitizer_derivation_seals_but_commits_effects() {
+        // The bound sanitizer's backend is an unreachable HTTP resolver: derivation fails closed —
+        // effects stand, no value enters, the model sees the sealed token.
+        let config = Config::from_toml_str(
+            r#"
+version = 1
+
+[[tool]]
+name = "export"
+effects = ["read"]
+delta = { audience = { exactly = ["internal"] } }
+output_sanitizer = "pii"
+
+[[sanitizer]]
+name = "pii"
+on   = ["tool_output"]
+[sanitizer.can_reduce]
+audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+[sanitizer.implementation]
+resolver = { url = "http://127.0.0.1:1/derive", timeout_ms = 200 }
+"#,
+        )
+        .unwrap();
+        let mut builtins = BTreeMap::new();
+        builtins.insert(ToolName::new("export"), BuiltinTool::Echo("secret ticket".to_string()));
+        let (base, model) =
+            spawn_scripted_model(vec![tool_call_round("1", "export", "{}"), final_round("2", "done")]).await;
+        let rt = runtime_over(config, builtins, base).await;
+        let tenant = TenantId::new("acme");
+        let session = rt.store().create_session(tenant.clone());
+
+        drive_turn(
+            &rt,
+            &tenant,
+            &session,
+            false,
+            user_turn("export"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
+        assert!(log.iter().any(|f| matches!(
+            f,
+            Fact::DispatchClosed { outcome: appa_engine::fact::CloseOutcome::Success { effects }, .. }
+                if effects == &[appa_engine::fact::EffectKind::new("read")]
+        )));
+        assert!(!log.iter().any(|f| matches!(
+            f,
+            Fact::ValueAdmitted {
+                provenance: Provenance::ToolResult { .. },
+                ..
+            }
+        )));
+        assert!(log.iter().any(|f| matches!(
+            f,
+            Fact::BlockFeedback { content, .. } if content == SEALED_UNSANITIZED
+        )));
+        model.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_child_return_passes_the_configured_sanitizer() {
+        // With `[child] return_sanitizer` set, the parent receives the derivation at the
+        // sanitizer's declared label — the raw submitted text never crosses.
+        let config =
+            Config::from_toml_str(&format!("version = 1\n[child]\nreturn_sanitizer = \"pii\"\n{PII}")).unwrap();
+        let (base, model) = spawn_scripted_model(vec![
+            tool_call_round("1", "submit_result", r#"{"value":"report: ask eve@corp.com"}"#),
+            final_round("2", "submitted"),
+        ])
+        .await;
+        let rt = runtime_over(config, BTreeMap::new(), base).await;
+        let tenant = TenantId::new("acme");
+        let parent = rt.store().create_session(tenant.clone());
+        let (child, _) = rt
+            .store()
+            .fork(&tenant, &parent, |child, facts, revision| {
+                let projection = Projection::build(facts, revision);
+                rt.engine().seed_child(&projection.view(&parent), child)
+            })
+            .unwrap();
+
+        drive_turn(
+            &rt,
+            &tenant,
+            &child,
+            true,
+            user_turn("investigate"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (log, _) = rt.store().snapshot(&tenant, &parent).unwrap();
+        let merged: Vec<_> = log
+            .iter()
+            .filter_map(|f| match f {
+                Fact::ValueAdmitted {
+                    trajectory,
+                    value,
+                    provenance: Provenance::ChildReturn { .. },
+                } if trajectory == &parent => Some(value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(merged.len(), 1);
+        assert!(!merged[0].body.as_str().contains("eve@corp.com"));
+        // The merged label is parent.combine(sanitizer's declared output) — public here on both
+        // sides, so the parent stays public rather than narrowing to the child's raw fold.
+        assert_eq!(
+            merged[0].label.audience,
+            appa_engine::label::Dim::Known(appa_engine::label::Audience::Public)
+        );
+        model.await.unwrap();
+    }
+
+    /// An HTTP endpoint that accepts connections and never answers — a hanging backend.
+    async fn spawn_hanging_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (socket, _) = match listener.accept().await {
+                    Ok(accepted) => accepted,
+                    Err(_) => return,
+                };
+                tokio::spawn(async move {
+                    let _hold = socket;
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_a_south_invoke_closes_indeterminate_and_ends_the_turn() {
+        let south = spawn_hanging_server().await;
+        let config = Config::from_toml_str(&format!(
+            "version = 1\n[[tool]]\nname = \"slow\"\n[tool.implementation.http]\nurl = \"{south}/run\"\n"
+        ))
+        .unwrap();
+        let (base, _model) = spawn_scripted_model(vec![
+            tool_call_round("1", "slow", "{}"),
+            final_round("2", "next turn works"),
+        ])
+        .await;
+        let rt = runtime_over(config, BTreeMap::new(), base).await;
+        let tenant = TenantId::new("acme");
+        let session = rt.store().create_session(tenant.clone());
+
+        let token = CancellationToken::new();
+        let cancel = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            cancel.cancel();
+        });
+        let outcome = drive_turn(&rt, &tenant, &session, false, user_turn("run it"), token)
+            .await
+            .unwrap();
+        assert_eq!(outcome, TurnOutcome::PolicyStop(POLICY_STOP_CANCELLED.to_string()));
+
+        // The serialized terminal: the open dispatch closed Indeterminate, the proposed call got its
+        // sealed response, and the turn ended — nothing orphaned.
+        let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
+        let tail: Vec<&Fact> = log.iter().rev().take(4).collect();
+        assert!(matches!(
+            tail[3],
+            Fact::DispatchClosed {
+                outcome: appa_engine::fact::CloseOutcome::Indeterminate,
+                ..
+            }
+        ));
+        assert!(matches!(
+            tail[2],
+            Fact::BlockFeedback { content, .. } if content == POLICY_STOP_CANCELLED
+        ));
+        assert!(matches!(tail[1], Fact::AssistantMessage { calls, .. } if calls.is_empty()));
+        assert!(matches!(
+            tail[0],
+            Fact::Boundary {
+                kind: BoundaryKind::TurnEnd,
+                ..
+            }
+        ));
+
+        // The lease was released and the session is usable: the next turn completes normally.
+        let outcome = drive_turn(
+            &rt,
+            &tenant,
+            &session,
+            false,
+            user_turn("again"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, TurnOutcome::Final("next turn works".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_hostile_resolver_answer_is_discarded_and_the_dispatch_still_closes() {
+        // The resolver answers an in-chain rank ABOVE its declared may_cast ceiling. The answer is
+        // discarded (drive prefilter; the engine would refuse it at admission anyway), the value is
+        // withheld, and the successful dispatch still closes with its effects — never orphaned.
+        let (resolver, _r) = spawn_scripted_model(vec![r#"{"trust":"trusted"}"#.to_string()]).await;
+        let config = Config::from_toml_str(&format!(
+            r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+
+[[tool]]
+name = "scan"
+effects = ["read"]
+delta = {{ trust = "unknown" }}
+
+[[cast]]
+name     = "classifier"
+resolver = {{ url = "{resolver}/resolve", may_cast = {{ trust = ["suspicious"] }} }}
+"#
+        ))
+        .unwrap();
+        let mut builtins = BTreeMap::new();
+        builtins.insert(ToolName::new("scan"), BuiltinTool::Echo("mailbox".to_string()));
+        let (base, _model) =
+            spawn_scripted_model(vec![tool_call_round("1", "scan", "{}"), final_round("2", "done")]).await;
+        let rt = runtime_over(config, builtins, base).await;
+        let tenant = TenantId::new("acme");
+        let session = rt.store().create_session(tenant.clone());
+
+        drive_turn(
+            &rt,
+            &tenant,
+            &session,
+            false,
+            user_turn("scan"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
+        // Closed with effects standing, no value admitted, the call sealed.
+        assert!(log.iter().any(|f| matches!(
+            f,
+            Fact::DispatchClosed { outcome: appa_engine::fact::CloseOutcome::Success { effects }, .. }
+                if effects == &[appa_engine::fact::EffectKind::new("read")]
+        )));
+        assert!(!log.iter().any(|f| matches!(
+            f,
+            Fact::ValueAdmitted {
+                provenance: Provenance::ToolResult { .. },
+                ..
+            }
+        )));
+        assert!(log.iter().any(|f| matches!(
+            f,
+            Fact::BlockFeedback { content, .. } if content == SEALED_UNRESOLVED
+        )));
+        // No dispatch is left open: every open has its close.
+        assert_eq!(
+            log.iter().filter(|f| matches!(f, Fact::DispatchOpened { .. })).count(),
+            log.iter().filter(|f| matches!(f, Fact::DispatchClosed { .. })).count(),
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_mid_round_seals_the_remaining_calls_without_dispatching_them() {
+        // One round proposes two calls; cancellation fires while the first hangs south. The second
+        // call must never dispatch (a ready builtin would otherwise run after the disconnect) and
+        // both calls get their one sealed response in the terminal.
+        let south = spawn_hanging_server().await;
+        let config = Config::from_toml_str(&format!(
+            "version = 1\n[[tool]]\nname = \"slow\"\n[tool.implementation.http]\nurl = \"{south}/run\"\n\n[[tool]]\nname = \"fast\"\n"
+        ))
+        .unwrap();
+        let mut builtins = BTreeMap::new();
+        builtins.insert(ToolName::new("fast"), BuiltinTool::Echo("instant".to_string()));
+        let round = serde_json::to_string(&ChatCompletionResponse::single(
+            "1",
+            WireMessage::assistant_tool_calls(vec![
+                WireToolCall {
+                    id: "call_a".to_string(),
+                    kind: "function".to_string(),
+                    function: WireFunctionCall {
+                        name: "slow".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                },
+                WireToolCall {
+                    id: "call_b".to_string(),
+                    kind: "function".to_string(),
+                    function: WireFunctionCall {
+                        name: "fast".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                },
+            ]),
+            "tool_calls",
+        ))
+        .unwrap();
+        let (base, _model) = spawn_scripted_model(vec![round]).await;
+        let rt = runtime_over(config, builtins, base).await;
+        let tenant = TenantId::new("acme");
+        let session = rt.store().create_session(tenant.clone());
+
+        let token = CancellationToken::new();
+        let cancel = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            cancel.cancel();
+        });
+        let outcome = drive_turn(&rt, &tenant, &session, false, user_turn("both"), token)
+            .await
+            .unwrap();
+        assert_eq!(outcome, TurnOutcome::PolicyStop(POLICY_STOP_CANCELLED.to_string()));
+
+        let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
+        // Only the hanging call ever dispatched; the ready builtin never ran after the cancel.
+        assert_eq!(
+            log.iter().filter(|f| matches!(f, Fact::DispatchOpened { .. })).count(),
+            1
+        );
+        assert!(!log.iter().any(|f| matches!(
+            f,
+            Fact::ValueAdmitted {
+                provenance: Provenance::ToolResult { .. },
+                ..
+            }
+        )));
+        // Both proposed calls got exactly one sealed response.
+        let sealed: Vec<&str> = log
+            .iter()
+            .filter_map(|f| match f {
+                Fact::BlockFeedback { call_id, content, .. } if content == POLICY_STOP_CANCELLED => {
+                    Some(call_id.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sealed, vec!["call_a", "call_b"]);
+    }
+
+    #[tokio::test]
+    async fn a_pre_cancelled_token_never_starts_the_turn() {
+        let config = Config::from_toml_str("version = 1\n").unwrap();
+        let (base, _model) = spawn_scripted_model(vec![]).await;
+        let rt = runtime_over(config, BTreeMap::new(), base).await;
+        let tenant = TenantId::new("acme");
+        let session = rt.store().create_session(tenant.clone());
+
+        let token = CancellationToken::new();
+        token.cancel();
+        let outcome = drive_turn(&rt, &tenant, &session, false, user_turn("hi"), token)
+            .await
+            .unwrap();
+        assert_eq!(outcome, TurnOutcome::PolicyStop(POLICY_STOP_CANCELLED.to_string()));
+        // The turn never began: no fact of it exists, so the trajectory replays identically.
+        let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
+        assert!(log.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_inference_ends_the_turn_with_no_dispatch() {
+        // The upstream model hangs; cancellation lands the terminal without any dispatch opened.
+        let base = spawn_hanging_server().await;
+        let config = Config::from_toml_str(
+            "version = 1\n[[tool]]\nname = \"noop\"\n[tool.implementation.http]\nurl = \"http://127.0.0.1:1/x\"\n",
+        )
+        .unwrap();
+        let rt = runtime_over(config, BTreeMap::new(), base).await;
+        let tenant = TenantId::new("acme");
+        let session = rt.store().create_session(tenant.clone());
+
+        let token = CancellationToken::new();
+        let cancel = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            cancel.cancel();
+        });
+        let outcome = drive_turn(&rt, &tenant, &session, false, user_turn("hi"), token)
+            .await
+            .unwrap();
+        assert_eq!(outcome, TurnOutcome::PolicyStop(POLICY_STOP_CANCELLED.to_string()));
+
+        let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
+        assert!(!log.iter().any(|f| matches!(f, Fact::DispatchOpened { .. })));
+        assert!(log.iter().any(|f| matches!(
+            f,
+            Fact::Boundary {
+                kind: BoundaryKind::TurnEnd,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn the_configured_preamble_pins_the_runtime() {
+        let config =
+            Config::from_toml_str("version = 1\n[[preamble]]\nrole = \"system\"\ncontent = \"you are confined\"\n")
+                .unwrap();
+        let (base, _model) = spawn_scripted_model(vec![]).await;
+        let rt = runtime_over(config, BTreeMap::new(), base).await;
+        // Runtime::new sources the pinned preamble from config (the transcript tests pin that the
+        // preamble heads every rebuilt model request).
+        assert_eq!(rt.preamble(), &[WireMessage::system("you are confined")]);
+    }
+
+    #[tokio::test]
     async fn a_final_answer_with_no_tools_ends_the_turn() {
         let config = Config::from_toml_str("version = 1\ntrust_chain = [\"suspicious\", \"trusted\"]\n").unwrap();
         let (base, model) = spawn_scripted_model(vec![final_round("1", "hello, I need no tools")]).await;
@@ -1169,7 +2186,7 @@ name = "get_logs"
         let tenant = TenantId::new("acme");
         let session = rt.store().create_session(tenant.clone());
 
-        let outcome = drive_turn(&rt, &tenant, &session, false, user_turn("hi"))
+        let outcome = drive_turn(&rt, &tenant, &session, false, user_turn("hi"), CancellationToken::new())
             .await
             .unwrap();
         assert_eq!(outcome, TurnOutcome::Final("hello, I need no tools".to_string()));

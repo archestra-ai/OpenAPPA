@@ -20,10 +20,22 @@
 //! (narrowing), and `Redispatch` over `prior(k)` emitters and cap-narrowing tools. A redispatched
 //! prerequisite's own `includes($recipient)` is treated as satisfiable (the agent supplies a valid
 //! recipient when it actually runs the tool) — an over-approximation, the safe direction for the
-//! proof (it never falsely marks a curable block terminal). **De-scoped:** sanitizer-backed compiled
-//! composites and input-sanitizer argument substitution (a remedy step in the spec, a
-//! multi-acquisition composite here) and cast resolution of an Unknown (a runtime admission path, not
-//! a redispatch). The empty-proof is complete over exactly this subset.
+//! proof (it never falsely marks a curable block terminal). A **pending-cast** output dimension
+//! transitions as identity, the same direction: the resolved label is unknowable statically, so
+//! the search may advertise a redispatch whose actual resolution turns out too narrow. Following
+//! such a hint is never an unchecked flow — the redispatched call and the retried block are both
+//! checked for real — but it is more than wasted turns: the prerequisite's *effects commit* even
+//! when its resolution then fails to cure the target. Those effects are ones the policy allows
+//! that call to commit on its own terms, so soundness holds; a deployment for which such a
+//! permitted-but-unhelpful side effect is unacceptable should not declare a pending-cast emitter
+//! for a `prior(k)` currency (the hint picks the first qualifying emitter in name order, so a
+//! safer alternative emitter is not guaranteed to be the one recommended). The pending-cast
+//! post-resolution *narrowing* is
+//! conversely never counted as a cap cure, which is covered by the cast de-scope below, not a
+//! completeness hole. **De-scoped:**
+//! sanitizer-backed compiled composites and input-sanitizer argument substitution (a remedy step
+//! in the spec, a multi-acquisition composite here) and cast resolution of an Unknown (a runtime
+//! admission path, not a redispatch). The empty-proof is complete over exactly this subset.
 
 use std::collections::BTreeSet;
 
@@ -156,7 +168,7 @@ pub(crate) fn plan(registry: &Registry, views: &Views, call: &ResolvedCall, raw:
 fn directly_clearable(registry: &Registry, state: &State, call: &ResolvedCall) -> Option<Vec<RemedyStep>> {
     let contract = registry.tool(call.tool())?;
     let has_effect = |kind: &EffectKind| state.effects.contains(kind);
-    match check::evaluate_state(contract, &state.label, &has_effect, call) {
+    match check::evaluate_state(registry, contract, &state.label, &has_effect, call) {
         CheckOutcome::Allow => Some(Vec::new()),
         CheckOutcome::Unresolved(_) => None,
         CheckOutcome::Block(block) => {
@@ -184,7 +196,7 @@ fn directly_clearable(registry: &Registry, state: &State, call: &ResolvedCall) -
 fn prerequisite_runnable(registry: &Registry, state: &State, tool: &ToolContract) -> bool {
     let call = synthetic_call(tool);
     let has_effect = |kind: &EffectKind| state.effects.contains(kind);
-    match check::evaluate_state(tool, &state.label, &has_effect, &call) {
+    match check::evaluate_state(registry, tool, &state.label, &has_effect, &call) {
         CheckOutcome::Allow => true,
         CheckOutcome::Unresolved(_) => false,
         CheckOutcome::Block(block) => block
@@ -254,12 +266,14 @@ pub(crate) fn covers_gap(authority: &Authority, gap: &Gap, tags: &[TagName]) -> 
     }
 }
 
-/// The state a tool's success would produce: its effects added, its restrictive delta folded in.
-fn transition(state: &State, tool: &ToolContract) -> State {
+/// The state a tool's success would produce: its effects added, its **effective** contribution
+/// folded in (a sanitizer-bound tool folds its bound derivation's label, matching the check; a
+/// pending-cast dimension folds identity — the module-doc over-approximation).
+fn transition(registry: &Registry, state: &State, tool: &ToolContract) -> State {
     let mut effects = state.effects.clone();
     effects.extend(tool.emits.iter().cloned());
     State {
-        label: tool.delta.apply(&state.label),
+        label: check::effective_delta(registry, tool).apply(&state.label),
         effects,
     }
 }
@@ -291,7 +305,7 @@ fn curable(registry: &Registry, state: &State, call: &ResolvedCall, visiting: &m
         if !prerequisite_runnable(registry, state, tool) {
             return false;
         }
-        let next = transition(state, tool);
+        let next = transition(registry, state, tool);
         next != *state && curable(registry, &next, call, visiting)
     });
     visiting.pop();
@@ -304,7 +318,7 @@ fn is_unresolved(registry: &Registry, state: &State, call: &ResolvedCall) -> boo
         Some(contract) => {
             let has_effect = |kind: &EffectKind| state.effects.contains(kind);
             matches!(
-                check::evaluate_state(contract, &state.label, &has_effect, call),
+                check::evaluate_state(registry, contract, &state.label, &has_effect, call),
                 CheckOutcome::Unresolved(_)
             )
         }
@@ -323,7 +337,7 @@ fn curative_redispatch(
         if !prerequisite_runnable(registry, start, tool) {
             continue;
         }
-        let next = transition(start, tool);
+        let next = transition(registry, start, tool);
         if next == *start {
             continue;
         }
@@ -342,7 +356,9 @@ fn redispatch_reason(tool: &ToolContract, raw: &RawBlock) -> String {
             Gap::Prior(kind) if tool.emits.contains(kind) => {
                 return format!("run {name} first to satisfy prior({})", kind.as_str());
             }
-            Gap::Cap { .. } if tool.delta.audience.is_some() => {
+            // Only an established audience delta is a narrowing the redispatch can promise; a
+            // pending-cast one contributes nothing until its cast resolves.
+            Gap::Cap { .. } if matches!(tool.delta.audience, Some(Dim::Known(_))) => {
                 return format!("run {name} first to narrow the audience within the cap");
             }
             _ => {}
@@ -400,7 +416,7 @@ mod tests {
         let trajectory = traj();
         let views = projection.view(&trajectory);
         let contract = registry.tool(call.tool()).unwrap();
-        let raw = match check::evaluate(contract, &views, call) {
+        let raw = match check::evaluate(registry, contract, &views, call) {
             CheckOutcome::Block(raw) => raw,
             other => panic!("expected a block, got {other:?}"),
         };
@@ -425,6 +441,7 @@ mod tests {
                 },
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let officer = Authority {
             name: AuthorityName::new("officer"),
@@ -465,6 +482,7 @@ mod tests {
                 },
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let registry = build(RegistryConfig {
             trust_chain: chain(),
@@ -488,10 +506,11 @@ mod tests {
             tags: vec![],
             delta: Delta {
                 trust: None,
-                audience: Some(Audience::restricted([ReaderId::new("internal")])),
+                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")]))),
             },
             emits: vec![],
             requires: Requires::default(),
+            output_sanitizer: None,
         };
         let registry = build(RegistryConfig {
             trust_chain: chain(),
@@ -519,6 +538,7 @@ mod tests {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let backup = ToolContract {
             name: ToolName::new("backup"),
@@ -526,6 +546,7 @@ mod tests {
             delta: Delta::NONE,
             emits: vec![EffectKind::new("backup.done")],
             requires: Requires::default(),
+            output_sanitizer: None,
         };
         let registry = build(RegistryConfig {
             trust_chain: chain(),
@@ -555,6 +576,7 @@ mod tests {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let registry = build(RegistryConfig {
             trust_chain: chain(),
@@ -580,6 +602,7 @@ mod tests {
                 attention: vec![MarkName::new("signoff")],
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let officer = Authority {
             name: AuthorityName::new("officer"),
@@ -617,6 +640,7 @@ mod tests {
                 attention: vec![MarkName::new("signoff")],
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let officer = Authority {
             name: AuthorityName::new("officer"),
@@ -651,6 +675,7 @@ mod tests {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("kb"))],
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let b = ToolContract {
             name: ToolName::new("b"),
@@ -661,6 +686,7 @@ mod tests {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("ka"))],
                 ..Requires::default()
             },
+            output_sanitizer: None,
         };
         let registry = build(RegistryConfig {
             trust_chain: chain(),
@@ -687,7 +713,7 @@ mod tests {
                 for state in states.clone() {
                     for tool in registry.tools() {
                         if prerequisite_runnable(registry, &state, tool) {
-                            let next = transition(&state, tool);
+                            let next = transition(registry, &state, tool);
                             if !states.contains(&next) {
                                 states.push(next);
                                 grew = true;
@@ -730,8 +756,8 @@ mod tests {
 
     fn a_delta() -> impl Strategy<Value = Delta> {
         (
-            prop::option::of((0u8..2).prop_map(Trust::new)),
-            prop::option::of(small_audience()),
+            prop::option::of((0u8..2).prop_map(|t| Dim::Known(Trust::new(t)))),
+            prop::option::of(small_audience().prop_map(Dim::Known)),
         )
             .prop_map(|(trust, audience)| Delta { trust, audience })
     }
@@ -785,6 +811,7 @@ mod tests {
                 delta,
                 emits,
                 requires,
+                output_sanitizer: None,
             },
         )
     }
@@ -842,24 +869,28 @@ mod tests {
                 if a.mandate.is_empty() { None } else { Some(a) }
             }).collect();
 
-            let registry = match Registry::build(RegistryConfig {
+            // The generators produce valid-by-construction configs (ranks within the chain,
+            // re-keyed names, empty mandates dropped), so a build failure is a broken generator or
+            // a validation change that silently shrank this property's coverage — fail loudly,
+            // never skip.
+            let built = Registry::build(RegistryConfig {
                 trust_chain: chain(),
                 tools,
                 authorities,
                 sanitizers: vec![],
                 casts: vec![],
-            }) {
-                Ok(registry) => registry,
-                Err(_) => return Ok(()), // skip configs that don't load
-            };
+            });
+            prop_assert!(built.is_ok(), "generated config must load: {:?}", built.err());
+            let registry = built.unwrap();
 
             let target = ToolName::new(format!("t{}", target % registry.tools().count().max(1)));
-            let Some(contract) = registry.tool(&target) else { return Ok(()); };
+            let contract = registry.tool(&target).expect("target is modulo the re-keyed tool count");
             let call = synthetic_call(contract);
 
-            // Only blocks carry a planned remedy set; passing/unresolved calls are out of scope here.
+            // Only blocks carry a planned remedy set; passing/unresolved calls are a genuine scope
+            // filter for this property, not lost coverage (their behavior is pinned elsewhere).
             let has_effect = |kind: &EffectKind| state.effects.contains(kind);
-            let raw = match check::evaluate_state(contract, &state.label, &has_effect, &call) {
+            let raw = match check::evaluate_state(&registry, contract, &state.label, &has_effect, &call) {
                 CheckOutcome::Block(raw) => raw,
                 _ => return Ok(()),
             };

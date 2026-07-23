@@ -19,6 +19,15 @@ Every set mention carries its **operator** — `exactly`, `includes`, `cap`,
 `may_add` — because a bare list is ambiguous between "these readers exactly"
 and "at least these readers". A list without its operator is a load error.
 
+The server-pinned preamble — the messages heading every rebuilt model request —
+is configuration too, never client input:
+
+```toml
+[[preamble]]
+role    = "system"          # only "system" and "developer" are legal here
+content = "You are a confined incident-response agent."
+```
+
 ## Tools
 
 A `[[tool]]` declares one tool's contract: what a successful call folds into
@@ -49,6 +58,23 @@ effects  = ["email.sent", "finance.spend"]              # emits
   `finance`; there is no permissive delta. A `delta` never inherits a default —
   an omitted dimension folds the identity (top trust, public audience), so it
   neither narrows the trajectory nor lowers the value's own label.
+- **`output_sanitizer = "name"`** binds the tool's output to a registered
+  `tool_output` sanitizer (RP4): every successful result is confined raw and
+  only the sanitizer's derivation is admitted, at its declared transition label
+  (audience relabeled, trust preserved). The binding is engine-enforced — a raw
+  or differently-sanitized admission is refused — and validated at load: the
+  sanitizer must exist, carry the `tool_output` point, and its `from` must be
+  satisfied by the tool's declared raw output. A failed derivation withholds
+  the value (sealed token) while the call's effects stand. The binding cannot
+  combine with a pending-cast output dimension.
+- **`delta = { trust = "unknown" }`** (or `audience = "unknown"`) declares the
+  dimension **pending-cast**: the tool's result carries no established state
+  there until a registered cast resolves it at admission. The raw result is
+  confined — never shown to the model — until then; if no cast resolves it, the
+  call's effects stand but no value enters (the model sees a sealed token). At
+  most one dimension may be pending-cast, and a `requires` on that same
+  dimension is a load error. `"unknown"` is a reserved token: a trust rank of
+  that name is refused.
 - **`requires.audience`** constrains the reader set from either side: an
   `includes` (`audience ⊇ recipients`) or a `cap` (`audience ⊆ C`). A recipient
   may be a literal reader, `public`, or an argument **placeholder** `$arg` —
@@ -131,6 +157,20 @@ declared `to` audience — it does not, and cannot, verify the content is clean.
 Audit records "admitted under the transition declared by sanitizer X", never
 "verified clean".
 
+A sanitizer applies where policy binds it: on a tool's output via the tool's
+`output_sanitizer` key (above), or on every child session's returned value via
+the top-level child policy (RP6):
+
+```toml
+[child]
+return_sanitizer = "pii-redactor"   # must be a registered tool_output sanitizer
+```
+
+With it set, a child's `submit_result` crosses to the parent only as the
+sanitizer's derivation, at the sanitizer's exact declared output label — the
+raw submitted text stays in the child, and the model never chooses the path. A
+failed derivation returns nothing.
+
 ## Casts
 
 A `[[cast]]` resolves an `Unknown` label dimension — trust **or** audience,
@@ -138,6 +178,13 @@ never both. It is **constant xor resolver-implemented**, never both. A constant
 cast resolves every Unknown on its dimension to one declared state (the
 YOLO/paranoid knob) and needs no runtime endpoint; a resolver decides per value,
 bounded by its `may_cast` ceiling.
+
+Casts fire where a tool contract declares a pending-cast output dimension
+(`delta = { trust = "unknown" }`): on a successful call the runtime consults the
+registered casts in registration order — a constant answers immediately, a
+resolver is asked with the confined raw body — and the engine re-validates the
+winning answer against the cast's declaration before any value is admitted, so
+a misbehaving resolver can never widen a label past its ceiling.
 
 ```toml
 [[cast]]

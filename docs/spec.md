@@ -745,10 +745,31 @@ authorities, sanitizers, casts.
 ```toml
 version = 1
 
+[[preamble]]                 # the server-pinned transcript head; never client input
+role    = "system"           # only "system"/"developer"
+content = "You are a confined agent."
+
 [[tool]]
 name  = "fetch_ticket"
 tags  = ["finance"]
 delta = { trust = "suspicious", audience = { exactly = ["finance"] } }
+
+[[tool]]
+name  = "scan_inbox"
+delta = { trust = "unknown" }   # pending-cast: a registered cast resolves the
+                                # dimension at admission; the raw result stays
+                                # confined until it does ("unknown" is reserved —
+                                # never a rank name; at most one dimension)
+
+[[tool]]
+name             = "export_ticket"
+delta            = { audience = { exactly = ["finance"] } }
+output_sanitizer = "pii-redactor"   # RP4 binding: raw confined, only the bound
+                                    # derivation admits, at its declared label
+
+[child]
+return_sanitizer = "pii-redactor"   # RP6: every child return crosses only as
+                                    # this sanitizer's derivation
 
 [[tool]]
 name     = "send_report"

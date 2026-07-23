@@ -24,6 +24,7 @@ use crate::registry::Registry;
 use crate::value::{ChildReturnId, LabeledValue, Provenance, TrajectoryId, ValueBody};
 
 /// How a child returns a value: the engine derives the label — the caller never asserts it.
+#[derive(Clone)]
 pub enum ChildReturn {
     /// Return the raw value at the child's current fold.
     Raw { body: ValueBody },
