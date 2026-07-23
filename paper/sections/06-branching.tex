@@ -7,7 +7,7 @@ Once data enters an LLM context, subsequent sanitization cannot retroactively re
 Branching requires an execution environment capable of isolating context trajectories (e.g., an application harness or proxy gateway). While baseline label enforcement (\S\ref{sec:enforcement}) operates in standard gateways, features such as host-managed context branching and output sanitization rely on runtime context confinement.
 
 \subsection{Host branching protocol}
-Rather than automatically transforming and transferring engine calls, \appa{} models branching as a host-managed protocol surrounding engine enforcement:
+\appa{} models branching as a host-managed protocol surrounding engine enforcement:
 \begin{enumerate}
   \item the host decides to create a child context;
   \item the host identifies the active parent trajectory;
@@ -16,19 +16,17 @@ Rather than automatically transforming and transferring engine calls, \appa{} mo
   \item the child's calls are independently evaluated by the engine; and
   \item any returned value crosses through the checked child-return and direct-parent merge path.
 \end{enumerate}
-The current \appa{} runtime neither suspends a blocked parent call for automatic transfer nor resumes that call in the child. Instead, the host application explicitly orchestrates child context creation and lifecycle management.
 
 \subsection{Fork by inheritance}
-When creating a child trajectory, \appa{} distinguishes between two independent inheritance properties:
+When creating a child trajectory, \appa{} combines security-critical label inheritance with transcript isolation:
 \begin{itemize}
-  \item \textbf{Label inheritance} (implemented and security-critical): The child inherits the parent's current Label state at the fork point, setting $L_c^0 := L_p^{\mathrm{fork}}$.
-  \item \textbf{Transcript inheritance} (not implemented): The child begins with a fresh, branch-local model transcript containing only the server-controlled system preamble and facts belonging directly to that child trajectory. Parent user turns, assistant reasoning, and tool results are not copied automatically.
+  \item \textbf{Label inheritance}: The child inherits the parent's current Label state at the fork point, setting $L_c^0 := L_p^{\mathrm{fork}}$.
+  \item \textbf{Transcript isolation}: The child begins with a fresh, branch-local model transcript containing only the server-controlled system preamble and child-local facts; parent user turns, assistant reasoning, and prior tool results are not copied.
 \end{itemize}
-The child inherits the parent's current Label but begins with a branch-local model transcript. Parent messages and tool results are not copied automatically.
 
 Preserving Label inheritance ($L_c^0 := L_p^{\mathrm{fork}}$) is security-essential: starting a fresh child context with an unconstrained initial label would establish a laundering path for sensitive information already reflected in the parent's Label---for instance, allowing internal context to be released to a public output. The \texttt{fork} boundary also invalidates pending rulings and plan executions, as these records are bound to specific invocations in the parent context and cannot be transferred to a child.
 
-However, transcript non-inheritance introduces an operational utility limitation. Because the child receives a fresh model context rather than a continuation of the parent's conversation, it does not transparently resume a suspended parent task. Instead, the host application must supply the child's task instructions and inputs explicitly. While conservative for confidentiality, this design requires host-level prompt construction and task orchestration.
+However, transcript isolation introduces an operational utility limitation. Because the child receives a fresh model context rather than a continuation of the parent's conversation, the host application must supply the child's task instructions and inputs explicitly. While conservative for confidentiality, this design requires host-level prompt construction and task orchestration.
 
 \subsection{Descend locally}
 Child-local work is dispatched within the child context, where all subsequent actions are enforced against the evolving child label $L_c$. Updates to $L_c$ affect only the child label and never update $L_p$. The parent process may pause or proceed concurrently, but it remains isolated from child messages and tool outputs until an explicit exit occurs. This isolation guarantees the pre-merge properties of Proposition~\ref{prop:preservation}, regardless of the child's internal behavior.
@@ -50,7 +48,7 @@ Given an explicitly created child seeded from a parent state $L_p^{\mathrm{fork}
 Hence no child action can widen or silently degrade its parent's label, and an exit satisfying $L_p \le \mathit{label}(v)$ preserves the parent label exactly.
 \end{theorem}
 
-This result establishes the correctness of the branch lifecycle once invoked, rather than asserting automatic invocation before every restrictive read. It follows directly from trajectory-local label folding and the algebraic properties of the meet operator; it holds independently of the child's prompt, execution plan, or behavior. Proof in Appendix~\ref{app:proofs}.
+This result establishes the correctness of the branch lifecycle once invoked. It follows directly from trajectory-local label folding and the algebraic properties of the meet operator, holding independently of the child's prompt, execution plan, or behavior. Proof in Appendix~\ref{app:proofs}.
 
 \paragraph{History is shared, not merged.}
 The parent and child process append to a single, real-time serialized event log. Any effect committed by a successfully closed child dispatch remains visible family-wide after abandonment; context isolation cannot undo these actions nor clear them from future \texttt{no\_prior(egress)} policy checks~\cite{wangAgentTracesTrust2026}. A successful child egress therefore affects a parent's \texttt{no\_prior(egress)} check, whereas a failed or indeterminate child dispatch does not add committed effects to the shared projection. Forking and merging function as governance operations. A policy ruling granted to a child is consumed during its execution and does not grant authorization to the parent. Each branch terminates via return, failure, or abandonment, requiring no log reconciliation because physical event history is never branched.
