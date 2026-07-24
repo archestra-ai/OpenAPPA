@@ -10,14 +10,17 @@
 //! so every entry point runs them through [`validate_file_name`] before
 //! touching disk.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// One mock internal system, backed by a subdirectory of the data root.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum System {
     Hr,
     Finance,
@@ -26,7 +29,24 @@ pub enum System {
     Email,
 }
 
+/// A `--systems` enable list could not be parsed.
+#[derive(Debug, thiserror::Error)]
+pub enum SystemListError {
+    #[error("unknown system {0:?}; valid systems: hr, finance, task_tracker, public_forum, email")]
+    Unknown(String),
+    #[error("empty system list: enable at least one of hr, finance, task_tracker, public_forum, email")]
+    Empty,
+}
+
 impl System {
+    pub const ALL: [System; 5] = [
+        System::Hr,
+        System::Finance,
+        System::TaskTracker,
+        System::PublicForum,
+        System::Email,
+    ];
+
     /// The subdirectory name under the data root.
     pub fn dir_name(self) -> &'static str {
         match self {
@@ -36,6 +56,29 @@ impl System {
             System::PublicForum => "public_forum",
             System::Email => "email",
         }
+    }
+
+    /// Parse one system name (the `dir_name` vocabulary).
+    pub fn parse(name: &str) -> Result<System, SystemListError> {
+        System::ALL
+            .into_iter()
+            .find(|s| s.dir_name() == name)
+            .ok_or_else(|| SystemListError::Unknown(name.to_string()))
+    }
+
+    /// Parse a comma-separated enable list, e.g. `"hr, public_forum,email"`.
+    /// Whitespace around tokens is trimmed and duplicates are idempotent; an
+    /// empty token or a blank list is an error — a server with no systems is a
+    /// misconfiguration, not a degenerate success.
+    pub fn parse_list(list: &str) -> Result<BTreeSet<System>, SystemListError> {
+        if list.trim().is_empty() {
+            return Err(SystemListError::Empty);
+        }
+        let mut enabled = BTreeSet::new();
+        for token in list.split(',') {
+            enabled.insert(System::parse(token.trim())?);
+        }
+        Ok(enabled)
     }
 
     fn dir(self, root: &Path) -> PathBuf {
@@ -240,16 +283,34 @@ pub fn create(root: &Path, system: System, file: &str, content: &str) -> Result<
 /// counterpart — the folder is purely an observable side-effect the injection
 /// demo inspects.
 pub fn send_email(root: &Path, to: &str, subject: &str, body: &str) -> io::Result<String> {
+    // Second-resolution stamps collide for rapid same-subject sends, and an
+    // overwrite would silently swallow an email — corrupting anything that
+    // scores the sink by its files. A process-wide sequence plus `create_new`
+    // (retried on a cross-process collision) makes every send its own file.
+    static EMAIL_SEQ: AtomicU64 = AtomicU64::new(0);
     let dir = System::Email.dir(root);
     fs::create_dir_all(&dir)?;
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let file = format!("{stamp}-{}.md", slug(subject));
     let contents = format!("To: {to}\nSubject: {subject}\n\n{body}\n");
-    fs::write(dir.join(&file), contents)?;
-    Ok(file)
+    loop {
+        let seq = EMAIL_SEQ.fetch_add(1, Ordering::Relaxed);
+        let file = format!("{stamp}-{seq:03}-{}.md", slug(subject));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dir.join(&file))
+        {
+            Ok(mut out) => {
+                out.write_all(contents.as_bytes())?;
+                return Ok(file);
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 fn first_line(body: &str) -> String {

@@ -200,3 +200,83 @@ async fn rejects_path_traversal() {
     );
     server.cancel().await.ok();
 }
+
+/// Spawn the server with a `--systems` enable list.
+async fn spawn_server_systems(
+    root: &PathBuf,
+    systems: &'static str,
+) -> rmcp::service::RunningService<rmcp::RoleClient, ()> {
+    let bin = env!("CARGO_BIN_EXE_corp-systems-mcp");
+    let transport = TokioChildProcess::new(Command::new(bin).configure(|cmd| {
+        cmd.arg("--data-root").arg(root);
+        cmd.arg("--sink-root").arg(root);
+        cmd.arg("--systems").arg(systems);
+    }))
+    .expect("spawn corp-systems-mcp");
+    ().serve(transport).await.expect("mcp handshake")
+}
+
+#[tokio::test]
+async fn systems_flag_narrows_the_tool_surface() {
+    let data = TempData::new("narrow");
+    let server = spawn_server_systems(data.path(), "hr, email").await;
+    let tools = server.peer().list_all_tools().await.expect("list tools");
+    let mut names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec!["create_hr", "read_hr", "search_hr", "send_email"],
+        "only hr + email tools should be listed"
+    );
+    server.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn disabled_tool_is_refused_and_touches_nothing() {
+    let data = TempData::new("disabled");
+    let server = spawn_server_systems(data.path(), "hr").await;
+    let mut params = CallToolRequestParams::new("create_task_tracker");
+    params.arguments = serde_json::json!({ "file": "TASK-999.md", "content": "x" })
+        .as_object()
+        .cloned();
+    let result = server.peer().call_tool(params).await;
+    assert!(result.is_err(), "calling a disabled tool must fail, got: {result:?}");
+    assert!(
+        !data.path().join("task_tracker/TASK-999.md").exists(),
+        "disabled create_task_tracker must not write"
+    );
+    server.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn bad_systems_value_fails_startup() {
+    let bin = env!("CARGO_BIN_EXE_corp-systems-mcp");
+    let out = std::process::Command::new(bin)
+        .arg("--systems")
+        .arg("hr,internet")
+        .output()
+        .expect("run corp-systems-mcp");
+    assert!(!out.status.success(), "unknown system must exit nonzero");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("internet"), "error should name the bad token: {stderr}");
+}
+
+#[tokio::test]
+async fn rapid_same_subject_emails_land_as_separate_files() {
+    let data = TempData::new("email-seq");
+    let server = spawn_server(data.path()).await;
+    for _ in 0..2 {
+        call(
+            &server,
+            "send_email",
+            serde_json::json!({ "to": "a@b.example", "subject": "same subject", "body": "x" }),
+        )
+        .await;
+    }
+    let emails: Vec<_> = std::fs::read_dir(data.path().join("email"))
+        .expect("email dir")
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(emails.len(), 2, "same-second same-subject sends must not overwrite");
+    server.cancel().await.ok();
+}

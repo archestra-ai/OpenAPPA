@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from mcp import ClientSession, StdioServerParameters, types
-from mcp.client.stdio import stdio_client
+from mcp.client.stdio import get_default_environment, stdio_client
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _CRATE_DIR = _PACKAGE_DIR.parent
@@ -127,6 +127,11 @@ class CorpSystemsClient:
     async def __aenter__(self) -> "CorpSystemsClient":
         # Resolving may `cargo build` the sibling crate — deferred to entry so
         # constructing a client (e.g. to build tools) stays side-effect free.
+        # The MCP SDK spawns children with a *stripped* default environment, so
+        # the server's own env-var contract (CORP_ENABLED_SYSTEMS et al.) must
+        # be forwarded explicitly or it silently never arrives.
+        env = get_default_environment()
+        env.update({key: value for key, value in os.environ.items() if key.startswith("CORP_")})
         params = StdioServerParameters(
             command=str(resolve_server_bin(self._server_bin)),
             args=[
@@ -135,6 +140,7 @@ class CorpSystemsClient:
                 "--sink-root",
                 str(self._sink_root),
             ],
+            env=env,
         )
         self._transport_cm = stdio_client(params)
         read, write = await self._transport_cm.__aenter__()

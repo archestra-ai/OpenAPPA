@@ -50,6 +50,12 @@ _LABELS: dict[System, tuple[str, str]] = {
 # restrict the trajectory — the FIDES analogue of APPA's `delta = {}`.
 _NEUTRAL = ("trusted", "public")
 
+# The full 13-tool surface of the shared server: what `available` means when no
+# live listing narrows it (offline tests, docs).
+ALL_TOOL_NAMES: frozenset[str] = frozenset(
+    f"{verb}_{system.dir_name}" for system in _LABELS for verb in ("search", "read", "create")
+) | {"send_email"}
+
 
 def _labeled(text: str, label: tuple[str, str]) -> Content:
     integrity, confidentiality = label
@@ -61,8 +67,14 @@ def _labeled(text: str, label: tuple[str, str]) -> Content:
     )
 
 
-def build_tools(client: CorpSystemsClient) -> list[Any]:
-    """Construct the thirteen FIDES-labeled tools over a systems client.
+def build_tools(client: CorpSystemsClient, available: set[str]) -> list[Any]:
+    """Construct the FIDES-labeled tools over a systems client, one per name in
+    ``available``.
+
+    ``available`` is the live server's tool listing (``list_tool_names``): when
+    the server runs with a narrowed ``--systems`` / ``CORP_ENABLED_SYSTEMS``
+    surface, only those tools are built, so the model is never shown a tool the
+    server would refuse. Offline callers pass :data:`ALL_TOOL_NAMES`.
 
     ``client`` must be entered (its async context open) by the time a tool is
     invoked; building the tools — and inspecting their declarations — needs no
@@ -96,6 +108,11 @@ def build_tools(client: CorpSystemsClient) -> list[Any]:
         return _create
 
     tools: list[Any] = []
+
+    def add(name: str, fn: Any, description: str, props: dict[str, Any]) -> None:
+        if name in available:
+            tools.append(tool(fn, name=name, description=description, additional_properties=props))
+
     descriptions = {
         System.HR: "the HR system (employee records, org roster, policies)",
         System.FINANCE: "the finance system (invoices, budgets, expense policy)",
@@ -108,31 +125,25 @@ def build_tools(client: CorpSystemsClient) -> list[Any]:
     for system, blurb in descriptions.items():
         integrity = _LABELS[system][0]
         source_props = {"source_integrity": integrity, "accepts_untrusted": True}
-        tools.append(
-            tool(
-                make_search(system),
-                name=f"search_{system.dir_name}",
-                description=f"Search {blurb} by keyword.",
-                additional_properties=dict(source_props),
-            )
+        add(
+            f"search_{system.dir_name}",
+            make_search(system),
+            f"Search {blurb} by keyword.",
+            dict(source_props),
         )
-        tools.append(
-            tool(
-                make_read(system),
-                name=f"read_{system.dir_name}",
-                description=f"Read a file from {blurb} by exact file name.",
-                additional_properties=dict(source_props),
-            )
+        add(
+            f"read_{system.dir_name}",
+            make_read(system),
+            f"Read a file from {blurb} by exact file name.",
+            dict(source_props),
         )
         # create_* are internal writes, not egress sinks in this demo; allow
         # them in any context (neutral), mirroring APPA's `delta = {}`.
-        tools.append(
-            tool(
-                make_create(system),
-                name=f"create_{system.dir_name}",
-                description=f"Create a new file in {blurb}.",
-                additional_properties={"accepts_untrusted": True},
-            )
+        add(
+            f"create_{system.dir_name}",
+            make_create(system),
+            f"Create a new file in {blurb}.",
+            {"accepts_untrusted": True},
         )
 
     async def send_email(to: str, subject: str, body: str) -> list[Content]:
@@ -143,16 +154,14 @@ def build_tools(client: CorpSystemsClient) -> list[Any]:
     #   max_allowed_confidentiality=public -> refuse writing PRIVATE data outward
     # Together they are the FIDES analogue of APPA's
     #   requires = { trust = "internal", audience = { includes = ["$to"] } }.
-    tools.append(
-        tool(
-            send_email,
-            name="send_email",
-            description="Send an outbound email. Delivers the message to the given recipient.",
-            additional_properties={
-                "accepts_untrusted": False,
-                "max_allowed_confidentiality": "public",
-            },
-        )
+    add(
+        "send_email",
+        send_email,
+        "Send an outbound email. Delivers the message to the given recipient.",
+        {
+            "accepts_untrusted": False,
+            "max_allowed_confidentiality": "public",
+        },
     )
 
     return tools
