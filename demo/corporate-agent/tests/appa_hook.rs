@@ -53,7 +53,9 @@ impl Drop for TempData {
 
 async fn spawn(root: &PathBuf) -> mcp::CorpSystemsClient {
     let bin = env!("CARGO_BIN_EXE_corp-systems-mcp");
-    mcp::spawn_corp_systems(&PathBuf::from(bin), root).await.expect("spawn")
+    mcp::spawn_corp_systems(&PathBuf::from(bin), root, root)
+        .await
+        .expect("spawn")
 }
 
 /// Build a hook on `policy` behind the running server, with the user turn already admitted.

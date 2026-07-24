@@ -19,9 +19,15 @@ pub type CorpSystemsClient = RunningService<RoleClient, ()>;
 pub const BODY_CAP_BYTES: usize = appa_runtime::tool::DEFAULT_BODY_CAP_BYTES;
 
 /// Spawn `corp-systems-mcp` as a stdio child and complete the MCP handshake.
-pub async fn spawn_corp_systems(server_bin: &PathBuf, data_root: &PathBuf) -> anyhow::Result<CorpSystemsClient> {
+/// `data_root` is the read-only corpus; `sink_root` is where `send_email` writes.
+pub async fn spawn_corp_systems(
+    server_bin: &PathBuf,
+    data_root: &PathBuf,
+    sink_root: &PathBuf,
+) -> anyhow::Result<CorpSystemsClient> {
     let transport = TokioChildProcess::new(Command::new(server_bin).configure(|cmd| {
         cmd.arg("--data-root").arg(data_root);
+        cmd.arg("--sink-root").arg(sink_root);
     }))
     .with_context(|| format!("spawning MCP server at {}", server_bin.display()))?;
     ().serve(transport)

@@ -65,6 +65,11 @@ struct Args {
     #[arg(long)]
     data_root: Option<PathBuf>,
 
+    /// Where the spawned server's `send_email` writes its `email/` folder.
+    /// Defaults to `CORP_SINK_ROOT`, else the data root.
+    #[arg(long, env = "CORP_SINK_ROOT")]
+    sink_root: Option<PathBuf>,
+
     /// The APPA policy file. Defaults to $APPA_DEMO_POLICY, else the crate's appa-policy.toml.
     #[arg(long)]
     policy: Option<PathBuf>,
@@ -103,7 +108,8 @@ async fn main() -> anyhow::Result<()> {
 
     let server_bin = resolve_server_bin(args.server_bin)?;
     let data_root = resolve_data_root(args.data_root);
-    let server = mcp::spawn_corp_systems(&server_bin, &data_root).await?;
+    let sink_root = args.sink_root.unwrap_or_else(|| data_root.clone());
+    let server = mcp::spawn_corp_systems(&server_bin, &data_root, &sink_root).await?;
 
     let mcp_tools = server.peer().list_all_tools().await.context("listing MCP tools")?;
     let schemas: Vec<_> = mcp_tools.iter().map(mcp_tool_schema).collect();

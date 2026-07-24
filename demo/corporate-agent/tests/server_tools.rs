@@ -37,11 +37,17 @@ impl Drop for TempData {
     }
 }
 
-/// Spawn the built `corp-systems-mcp` binary pointed at `root`.
+/// Spawn the built `corp-systems-mcp` binary pointed at `root` (corpus and sink alike).
 async fn spawn_server(root: &PathBuf) -> rmcp::service::RunningService<rmcp::RoleClient, ()> {
+    spawn_server_split(root, root).await
+}
+
+/// Spawn the server with a corpus root and a separate `send_email` sink root.
+async fn spawn_server_split(corpus: &PathBuf, sink: &PathBuf) -> rmcp::service::RunningService<rmcp::RoleClient, ()> {
     let bin = env!("CARGO_BIN_EXE_corp-systems-mcp");
     let transport = TokioChildProcess::new(Command::new(bin).configure(|cmd| {
-        cmd.arg("--data-root").arg(root);
+        cmd.arg("--data-root").arg(corpus);
+        cmd.arg("--sink-root").arg(sink);
     }))
     .expect("spawn corp-systems-mcp");
     ().serve(transport).await.expect("mcp handshake")
@@ -134,6 +140,31 @@ async fn search_read_create_and_email() {
         .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
         .collect();
     assert_eq!(emails.len(), 1, "expected exactly one email file");
+
+    server.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn send_email_writes_to_the_sink_root_not_the_corpus() {
+    let data = TempData::new("split-corpus");
+    let sink = TempData::new("split-sink");
+    let server = spawn_server_split(data.path(), sink.path()).await;
+
+    call(
+        &server,
+        "send_email",
+        serde_json::json!({ "to": "a@b.example", "subject": "split", "body": "x" }),
+    )
+    .await;
+    assert!(
+        !data.path().join("email").exists(),
+        "corpus root must stay untouched by send_email"
+    );
+    let emails: Vec<_> = std::fs::read_dir(sink.path().join("email"))
+        .expect("sink email dir")
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(emails.len(), 1, "expected the email under the sink root");
 
     server.cancel().await.ok();
 }
