@@ -9,16 +9,21 @@
 //! engine state, so no fact shape changes here — and it carries no argument or value bytes, only
 //! labels, names, and gap values the check already surfaced.
 //!
-//! A block whose call **narrows** — purely or alongside requirement gaps — additionally carries
-//! the branch fact the trajectory needs to decide consciously, per its [`FeedbackSurface`]: a
-//! root that can fork is told the fork alternative (the branch confines the label loss; any
-//! requirement gaps follow the child and are remedied there) and the payload carries the engine's
-//! `Fork` recommendation; a child is told the restriction stays in its branch — the parent is
-//! unaffected — so the delegated work is accepted where it was sent, not re-delegated; a surface
-//! that cannot fork (exhausted fork budget, the SDK's `CallSession`) gets neither. On a gap-only
-//! block fork advice always stays out — a child begins at the same label, so a fork cures no gap
-//! — and so does an unliftable block with no executable plan: the child would face the same
-//! gaps, and a narrowing that never lands needs no confining. A child's unliftable block instead
+//! A block whose call **narrows** — purely or alongside requirement gaps — carries two independent
+//! facts, and they must not be bundled. The **acceptance cost** is a property of narrowing, so
+//! every [`FeedbackSurface`] states it: a root's acceptance is permanent for the session, a
+//! child's for its branch alone (the parent is unaffected, so delegated work is accepted where it
+//! was sent, not re-delegated). Because acceptance is one-way, the cost is stated with the move
+//! that avoids it — run the steps that still need the current label *before* accepting. The
+//! **branch alternative** is a property of the surface, so it is conditional: a root that can fork
+//! is told to confine the label loss in a child (requirement gaps follow the child and are remedied
+//! there) and the payload carries the engine's `Fork` recommendation; a surface that cannot fork
+//! (exhausted fork budget, the SDK's `CallSession`) hears the cost without the alternative it has
+//! no way to take. Prose and payload are driven from one [`fork_advice`] call so they cannot
+//! disagree. On a gap-only block fork advice always stays out — a child begins at the same label,
+//! so a fork cures no gap — and so does an unliftable block with no executable plan: the child
+//! would face the same gaps, and a narrowing that never lands needs no confining. A child's
+//! unliftable block instead
 //! carries the branch's own terminal fact: the block is decided for this branch, whose remaining
 //! moves are its still-legal work and a `submit_result` finish — the return crossing stays
 //! checked, so the lead names mechanism, never permission.
@@ -27,9 +32,9 @@ use appa_engine::check::{Gap, Narrowing, RawBlock};
 use appa_engine::plan::{PlannedBlock, Recommendation, RemedyPlan};
 use serde::Serialize;
 
-/// The trajectory a block's feedback addresses — what branching fact its narrowing lead may
-/// honestly carry. A `Root` that can fork hears the fork alternative; a `Child` hears that its
-/// restriction is branch-confined; anything else hears the acceptance alone.
+/// The trajectory a block's feedback addresses. It fixes two things: how far an acceptance reaches
+/// (a `Root`'s over the session, a `Child`'s over its branch alone) and whether a branch
+/// alternative may honestly be advised — only a `Root` that can fork.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FeedbackSurface {
     Root { can_fork: bool },
@@ -93,30 +98,32 @@ fn wire_plans(offers: &[(String, RemedyPlan)]) -> Vec<WirePlan<'_>> {
         .collect()
 }
 
-fn payload(
+/// The branch alternative this block may honestly advise, computed **once** and used for both the
+/// prose lead and the payload's `fork` field so the two cannot drift. It is actionable exactly when
+/// the call narrows, an offered plan could run it, and the surface is a root that can fork: the
+/// branch confines the label loss, while requirement gaps follow the child and are remedied there.
+/// On a gap-only block it stays out (a fork cures no gap), likewise on an unliftable block (nothing
+/// would run in the child either); a child already is the confining branch, so it hears acceptance,
+/// not further delegation.
+fn fork_advice<'a>(
     raw: &RawBlock,
-    planned: &PlannedBlock,
+    planned: &'a PlannedBlock,
     offers: &[(String, RemedyPlan)],
     surface: FeedbackSurface,
-) -> String {
-    // Fork advice is actionable exactly when the call narrows, an offered plan could run it, and
-    // the surface is a root that can fork: the branch confines the label loss, while requirement
-    // gaps follow the child and are remedied there. On a gap-only block it stays out (a fork
-    // cures no gap), likewise on an unliftable block (nothing would run in the child either); a
-    // child already is the confining branch, so it hears acceptance, not further delegation.
-    let advises_fork =
-        matches!(surface, FeedbackSurface::Root { can_fork: true }) && raw.narrowing.is_some() && !offers.is_empty();
-    let fork = if advises_fork {
-        planned
-            .recommendations
-            .iter()
-            .find_map(|recommendation| match recommendation {
-                Recommendation::Fork { reason } => Some(reason.as_str()),
-                Recommendation::Redispatch { .. } => None,
-            })
-    } else {
-        None
-    };
+) -> Option<&'a str> {
+    if !matches!(surface, FeedbackSurface::Root { can_fork: true }) || raw.narrowing.is_none() || offers.is_empty() {
+        return None;
+    }
+    planned
+        .recommendations
+        .iter()
+        .find_map(|recommendation| match recommendation {
+            Recommendation::Fork { reason } => Some(reason.as_str()),
+            Recommendation::Redispatch { .. } => None,
+        })
+}
+
+fn payload(raw: &RawBlock, planned: &PlannedBlock, offers: &[(String, RemedyPlan)], fork: Option<&str>) -> String {
     let block = WireBlock {
         requirement_gaps: &raw.requirement_gaps,
         narrowing: raw.narrowing.as_ref(),
@@ -140,14 +147,15 @@ fn payload(
 /// Render a block's model-facing feedback: the fixed prose lead for its decision kind, then the
 /// exact typed payload. A pure narrowing (no requirement gap) presents as an acceptance — the
 /// agent's own step, no authority involved. Anything with gaps presents as a block to remedy.
-/// Whenever the call narrows, the surface's branch fact rides along: a forking root is told the
-/// branching alternative that keeps its label, a child that the restriction stays in its branch.
+/// Whenever the call narrows, the lead states what the acceptance costs on this surface, and adds
+/// the branch alternative only where [`fork_advice`] finds one to give.
 pub fn block_feedback(
     raw: &RawBlock,
     planned: &PlannedBlock,
     offers: &[(String, RemedyPlan)],
     surface: FeedbackSurface,
 ) -> String {
+    let fork = fork_advice(raw, planned, offers, surface);
     let lead = if offers.is_empty() {
         if planned.recommendations.iter().any(Recommendation::is_curative) {
             "blocked by policy; run a redispatch prerequisite first, then re-propose this call"
@@ -164,44 +172,61 @@ pub fn block_feedback(
         }
     } else if raw.requirement_gaps.is_empty() {
         // A pure narrowing. Acceptance is informed — it executes only in a round after this offer
-        // ("in your next response") — and the surface's branch fact rides along.
-        match surface {
+        // ("in your next response"). Every surface hears what the acceptance costs and how far the
+        // cost reaches; only the branch alternative is conditional on being actionable, because a
+        // surface that cannot fork can still reorder its own work.
+        match fork {
             // Fork leads: it is the reversible choice. Accepting folds the restriction into this
             // trajectory for good — no authority widens an audience, and trust never rises — so
             // an acceptance taken for one step can strand every later step that needed the label.
-            FeedbackSurface::Root { can_fork: true } => {
-                "narrowing: this call restricts the trajectory label. Fork the restricting work into a child session to keep this session's label, or, if every later step can live with the restriction, accept it with execute_remedy_plan in your next response — acceptance is permanent for this session"
+            Some(_) => {
+                "narrowing: this call restricts the trajectory label. Fork the restricting work into a child session to keep this session's label, or accept it with execute_remedy_plan in your next response — acceptance is permanent for this session, so run any later step that needs the current label before you accept"
             }
-            FeedbackSurface::Root { can_fork: false } => {
-                "narrowing: this call restricts the trajectory label; accept it with execute_remedy_plan in your next response"
-            }
-            FeedbackSurface::Child => {
-                "narrowing: this call restricts this branch's label only — the parent session is unaffected; accept it with execute_remedy_plan in your next response"
-            }
+            None => match surface {
+                FeedbackSurface::Root { .. } => {
+                    "narrowing: this call restricts the trajectory label; accept it with execute_remedy_plan in your next response — acceptance is permanent for this session, so run any later step that needs the current label before you accept"
+                }
+                FeedbackSurface::Child => {
+                    "narrowing: this call restricts this branch's label only — the parent session is unaffected; accept it with execute_remedy_plan in your next response — acceptance is permanent for this branch, so run any later step of this branch that needs the current label before you accept"
+                }
+            },
         }
     } else if raw.narrowing.is_some() {
         // Mixed block: every offered plan both covers the gaps and accepts the narrowing, so it is
-        // round-gated (next response) and the branch fact rides along as on a pure narrowing.
-        match surface {
-            FeedbackSurface::Root { can_fork: true } => {
-                "blocked by policy; execute one offered plan with execute_remedy_plan in your next response — it also accepts this call's narrowing — or fork the restricting work into a child session to keep this session's label"
+        // round-gated (next response) and carries the same acceptance cost as a pure narrowing.
+        match fork {
+            Some(_) => {
+                "blocked by policy; execute one offered plan with execute_remedy_plan in your next response — it also accepts this call's narrowing, permanently for this session — or fork the restricting work into a child session to keep this session's label"
             }
-            FeedbackSurface::Root { can_fork: false } => {
-                "blocked by policy; execute one offered plan with execute_remedy_plan in your next response"
-            }
-            FeedbackSurface::Child => {
-                "blocked by policy; execute one offered plan with execute_remedy_plan in your next response; its narrowing restricts this branch's label only — the parent session is unaffected"
-            }
+            None => match surface {
+                FeedbackSurface::Root { .. } => {
+                    "blocked by policy; execute one offered plan with execute_remedy_plan in your next response — it also accepts this call's narrowing, permanently for this session, so run any later step that needs the current label first"
+                }
+                FeedbackSurface::Child => {
+                    "blocked by policy; execute one offered plan with execute_remedy_plan in your next response; its narrowing restricts this branch's label only — the parent session is unaffected — and accepting it is permanent for this branch"
+                }
+            },
         }
     } else {
         "blocked by policy; execute one offered plan with execute_remedy_plan"
     };
-    format!("{lead}\n{}", payload(raw, planned, offers, surface))
+    format!("{lead}\n{}", payload(raw, planned, offers, fork))
+}
+
+/// The cost an acceptance carries, per the surface it lands on: a root folds the restriction into
+/// the session for good, a child only into its branch. Stated wherever an acceptance is offered —
+/// it is a fact about narrowing, not about forkability, so no surface may be left to infer it.
+fn acceptance_cost(surface: FeedbackSurface) -> &'static str {
+    match surface {
+        FeedbackSurface::Root { .. } => "permanent for this session",
+        FeedbackSurface::Child => "permanent for this branch; the parent session is unaffected",
+    }
 }
 
 /// Render the feedback after an authority declined one offer: the denial, then the remaining
-/// sibling plans as the same typed payload shape (no gaps re-listed — the block is unchanged).
-pub fn denial_feedback(remaining: &[(String, RemedyPlan)]) -> String {
+/// sibling plans as the same typed payload shape (no gaps re-listed — the block is unchanged). A
+/// sibling that carries an acceptance re-offers the narrowing, so its cost is named again here.
+pub fn denial_feedback(remaining: &[(String, RemedyPlan)], surface: FeedbackSurface) -> String {
     if remaining.is_empty() {
         return "the authority declined to authorize this call; no alternative plan remains".to_string();
     }
@@ -209,15 +234,23 @@ pub fn denial_feedback(remaining: &[(String, RemedyPlan)]) -> String {
     struct WireRemaining<'a> {
         plans: Vec<WirePlan<'a>>,
     }
-    let payload = serde_json::to_string(&WireRemaining {
-        plans: wire_plans(remaining),
-    })
-    .expect("the plan payload serializes: engine types are Serialize");
-    format!("the authority declined to authorize this call; alternatives remain\n{payload}")
+    let plans = wire_plans(remaining);
+    let accepts = plans.iter().any(|plan| plan.accepts_narrowing);
+    let payload = serde_json::to_string(&WireRemaining { plans })
+        .expect("the plan payload serializes: engine types are Serialize");
+    let cost = if accepts {
+        format!(
+            " — a plan marked accepts_narrowing restricts the label when executed, {}",
+            acceptance_cost(surface)
+        )
+    } else {
+        String::new()
+    };
+    format!("the authority declined to authorize this call; alternatives remain{cost}\n{payload}")
 }
 
 /// Render a pending-cast acceptance offer (D2): the withheld result's exact narrowing, typed.
-pub fn cast_offer_feedback(handle: &str, narrowing: &Narrowing) -> String {
+pub fn cast_offer_feedback(handle: &str, narrowing: &Narrowing, surface: FeedbackSurface) -> String {
     #[derive(Serialize)]
     struct WireOffer<'a> {
         plan_id: &'a str,
@@ -229,7 +262,8 @@ pub fn cast_offer_feedback(handle: &str, narrowing: &Narrowing) -> String {
     })
     .expect("the narrowing payload serializes");
     format!(
-        "result withheld: admitting it narrows the trajectory label; accept with execute_remedy_plan in your next response\n{payload}"
+        "result withheld: admitting it narrows the trajectory label; accept with execute_remedy_plan in your next response — acceptance is {}\n{payload}",
+        acceptance_cost(surface)
     )
 }
 
@@ -504,16 +538,20 @@ mod tests {
             actual: Trust::new(0),
         };
         let remaining = vec![("remedy-1".to_string(), plan_with("officer-b", vec![floor]))];
-        let payload = parsed(&denial_feedback(&remaining));
+        let payload = parsed(&denial_feedback(&remaining, FeedbackSurface::Root { can_fork: false }));
         assert_eq!(payload["plans"].as_array().unwrap().len(), 1);
         assert_eq!(payload["plans"][0]["plan_id"], "remedy-1");
         // An exhausted cohort renders no payload line at all.
-        assert!(!denial_feedback(&[]).contains('\n'));
+        assert!(!denial_feedback(&[], FeedbackSurface::Root { can_fork: false }).contains('\n'));
     }
 
     #[test]
     fn a_cast_offer_carries_the_exact_narrowing_and_handle() {
-        let payload = parsed(&cast_offer_feedback("remedy-3", &narrowing()));
+        let payload = parsed(&cast_offer_feedback(
+            "remedy-3",
+            &narrowing(),
+            FeedbackSurface::Root { can_fork: false },
+        ));
         assert_eq!(payload["plan_id"], "remedy-3");
         assert_eq!(payload["narrowing"]["from"]["trust"]["Known"], 1);
         assert_eq!(

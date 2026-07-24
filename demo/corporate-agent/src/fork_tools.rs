@@ -61,10 +61,8 @@ fn split_tool(name: &str) -> Option<(Verb, System)> {
         (Verb::Search, rest)
     } else if let Some(rest) = name.strip_prefix("read_") {
         (Verb::Read, rest)
-    } else if let Some(rest) = name.strip_prefix("create_") {
-        (Verb::Create, rest)
     } else {
-        return None;
+        (Verb::Create, name.strip_prefix("create_")?)
     };
     System::parse(system).ok().map(|system| (verb, system))
 }

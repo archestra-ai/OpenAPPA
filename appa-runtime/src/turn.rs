@@ -879,10 +879,11 @@ impl Turn {
                     reviewed: request.review(),
                 }),
                 AuthorityAnswer::Deny | AuthorityAnswer::Abstain => {
+                    let surface = self.acceptance_surface();
                     let cohort = &mut self.pending[cohort_index];
                     cohort.offers.retain(|(offer, _)| offer != handle);
                     let exhausted = cohort.offers.is_empty();
-                    let feedback = crate::feedback::denial_feedback(&cohort.offers);
+                    let feedback = crate::feedback::denial_feedback(&cohort.offers, surface);
                     if exhausted {
                         self.pending.remove(cohort_index);
                     }
@@ -1068,7 +1069,7 @@ impl Turn {
                     })
                     .collect();
                 let feedback = format!(
-                    "returning this raw would narrow the parent; call execute_remedy_plan with plan_id {}; or submit_result null when the child has completed its side effects and the parent needs no value",
+                    "returning this raw would narrow the parent, permanently for the parent session; call execute_remedy_plan with plan_id {}; or submit_result null when the child has completed its side effects and the parent needs no value",
                     menu.join(", ")
                 );
                 self.pending_returns.push(PendingReturn {
@@ -1367,7 +1368,7 @@ impl Turn {
             })?;
         let handle = format!("remedy-{}", self.next_handle);
         self.next_handle += 1;
-        let feedback = crate::feedback::cast_offer_feedback(&handle, &narrowing);
+        let feedback = crate::feedback::cast_offer_feedback(&handle, &narrowing, self.acceptance_surface());
         self.pending_casts.push(PendingCast {
             handle,
             dispatch,
@@ -1484,7 +1485,7 @@ impl Turn {
             )?;
             return Ok(CallProgress::Go);
         };
-        let feedback = crate::feedback::cast_offer_feedback(&pending.handle, &narrowing);
+        let feedback = crate::feedback::cast_offer_feedback(&pending.handle, &narrowing, self.acceptance_surface());
         self.pending_casts.push(PendingCast {
             narrowing,
             offered_round: self.rounds,
@@ -1781,6 +1782,17 @@ impl Turn {
     fn mark_answered(&mut self, call_id: &ToolCallId) {
         if let Some(position) = self.unanswered.iter().position(|id| id == call_id) {
             self.unanswered.remove(position);
+        }
+    }
+
+    /// The surface for an offer that carries no branch alternative: a pending cast's acceptance and
+    /// an authority's denial re-listing both name only the acceptance's reach (session or branch),
+    /// and the fork budget gates the branch alternative alone — so it does not enter here.
+    fn acceptance_surface(&self) -> crate::feedback::FeedbackSurface {
+        if self.is_child {
+            crate::feedback::FeedbackSurface::Child
+        } else {
+            crate::feedback::FeedbackSurface::Root { can_fork: false }
         }
     }
 
