@@ -133,11 +133,15 @@ required — an authority that cannot rule is inert. The in-process
 one competence a policy may grant itself is clearing what it can fully see, not
 vouching trust or readers it cannot. HITL is a resolver *channel*, not a
 different kind of authority. A `resolver` HTTP endpoint is a privileged sink: it
-receives the call's identity (tool name, canonical digest, the argument value
-ids) and the requirement gaps it would clear — including the recipients of the
-proposed release, the subject it authorizes — but never the tool result body or
-the non-recipient argument payload. Its answer is authorization data, so point it
-only at a service the operator trusts, over a trusted network.
+receives the call's identity (tool name, canonical digest) and the typed review
+context — the trajectory label fold at review time and, per referenced argument
+value, its label and provenance — plus the requirement gaps it would clear,
+including the recipients of the proposed release, the subject it authorizes. It
+never receives the tool result body or the non-recipient argument payload. The
+context put to the authority is persisted verbatim on the `Ruling` fact it
+produces (`reviewed`), so the log replays the review itself. Its answer is
+authorization data, so point it only at a service the operator trusts, over a
+trusted network.
 
 ## Sanitizers
 

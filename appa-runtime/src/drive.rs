@@ -22,12 +22,11 @@ use std::time::{Duration, Instant};
 use appa_engine::admit::{AdmitError, CastAnswer, ResultAdmission};
 use appa_engine::authority::CastResolution;
 use appa_engine::branch::{ReturnCheck, ReturnPlan, ReturnSubmission};
-use appa_engine::check::{CheckOutcome, UnresolvedFact};
+use appa_engine::check::{CheckOutcome, Narrowing, UnresolvedFact};
 use appa_engine::execute::{Issuer, Ruling, Sink};
 use appa_engine::fact::{BoundaryKind, Fact, FactBatch, ProposedCall, ReturnPolicy};
 use appa_engine::label::{DimValue, Dimension};
 use appa_engine::names::{CastName, SanitizerName};
-use appa_engine::plan::PlanId;
 use appa_engine::projection::Projection;
 use appa_engine::value::{
     CanonicalDigest, DispatchId, Provenance, RawResultDigest, ResolvedCall, ToolCallId, ToolName, TrajectoryId,
@@ -76,25 +75,28 @@ pub enum DriveError {
     DispatchIdentity,
 }
 
-/// How a result admission landed, causes kept distinct (see [`Drive::admit_result`]).
+/// How a result admission landed, causes kept distinct (see [`Drive::admit_result`]). A refusal
+/// carries the engine's error so the caller can distinguish a cast narrowing that needs the
+/// agent's acceptance (D2 — re-offered, never silently closed) from any other value-policy refusal.
 enum Admission {
     Admitted,
     AlreadyClosed,
-    Refused,
+    Refused(AdmitError),
     InvariantBreach,
     /// A value-carrying admission suppressed because the turn's cancellation had already fired.
     CancelSuppressed,
 }
 
-/// A blocked call awaiting the model's remedy decision. Held in-turn (CC2 — no cross-request state):
-/// when the model calls `execute_remedy_plan(handle)`, the drive finds the pending block with that
-/// **server-minted, turn-unique handle** and lands its atomic authorize+dispatch. The handle
-/// disambiguates two blocks in one round, which the engine's per-block `PlanId` (always 0) cannot, and
-/// is never the model's own tool-call id (untrusted, may collide).
+/// A blocked call's **cohort**: every offered plan for one blocked proposal, each under its own
+/// **server-minted, turn-unique handle**. Held in-turn (CC2 — no cross-request state). Cohort
+/// identity is this entry itself, never the call digest — two simultaneous identical proposals are
+/// distinct cohorts, and a success kills only its own siblings (an executed plan's dispatch moves
+/// the state, so the engine's value-matched re-derivation refuses them anyway; the cohort removal
+/// makes it structural). A denial or abstention consumes only the denied offer.
 struct PendingBlock {
-    handle: String,
     call: ResolvedCall,
-    plan: PlanId,
+    /// Sibling offers: handle → the full plan value it names (the plan *is* its assignment).
+    offers: Vec<(String, appa_engine::plan::RemedyPlan)>,
 }
 
 /// A blocked child return awaiting the model's return-plan decision. A success consumes the whole
@@ -108,6 +110,28 @@ struct PendingReturn {
     raw_digest: RawResultDigest,
     /// Sibling offers: server-minted handle → the return plan it names.
     offers: Vec<(String, ReturnPlan)>,
+}
+
+/// A successful pending-cast dispatch whose resolution strictly narrows the trajectory label,
+/// awaiting the agent's acceptance (D2). The dispatch stays open for the remainder of the turn; the
+/// confined raw body lives only here — never in feedback. Several calls in one round can be pending
+/// simultaneously; every exit path finalizes all of them exactly once through the terminal drain.
+struct PendingCast {
+    handle: String,
+    dispatch: DispatchId,
+    call: ResolvedCall,
+    /// The confined raw body, retained to admit on acceptance (`ValueAdmitted` carries it).
+    body: String,
+    cast: CastName,
+    resolved: DimValue,
+    /// The exact narrowing the offer surfaced; admission re-derives the live one and refuses on
+    /// mismatch, so this is the whole staleness story — no offer epoch to track.
+    narrowing: Narrowing,
+    /// The inference round the offer (or its latest re-derivation) was surfaced in. An acceptance
+    /// from the same round was generated *before* the model could read the offer — a response
+    /// proposing `[scan(), execute_remedy_plan("remedy-0")]` mints the handle and consumes it in
+    /// one breath — so acceptance requires a later round: informed consent, not a guessed handle.
+    offered_round: u32,
 }
 
 /// One model-proposed call, with a flag for arguments that failed to parse (never repaired into an
@@ -151,11 +175,21 @@ pub async fn drive_turn(
         invocations: 0,
         pending: Vec::new(),
         pending_returns: Vec::new(),
+        pending_casts: Vec::new(),
         remedy_attempts: BTreeMap::new(),
         return_derivation_attempts: BTreeMap::new(),
         next_handle: 0,
     };
-    drive.run(user_turn).await
+    let outcome = drive.run(user_turn).await;
+    if outcome.is_err() {
+        // A later call's error must not leave earlier pending-cast dispatches open past the turn
+        // (D2): best-effort drain — a store fault makes the drain impossible too, and the original
+        // error stands either way.
+        if let Err(error) = drive.drain_on_error() {
+            tracing::warn!(%error, "error-path drain could not land its closes");
+        }
+    }
+    outcome
 }
 
 struct Drive<'a> {
@@ -172,7 +206,9 @@ struct Drive<'a> {
     invocations: u32,
     pending: Vec<PendingBlock>,
     pending_returns: Vec<PendingReturn>,
-    /// Remedy executions attempted per call this turn — bounds `max_remedy_attempts_per_gap`.
+    pending_casts: Vec<PendingCast>,
+    /// Blocked-proposal rounds opened per call (by digest) this turn — charged when a cohort's
+    /// offers are minted, never on execution or denial; bounds `max_remedy_attempts_per_gap`.
     remedy_attempts: BTreeMap<CanonicalDigest, u32>,
     /// Return-derivation attempts this turn, keyed by (raw submission, sanitizer) — sanitizer A's
     /// failures never starve sanitizer B or Accept, and resubmitting the same body mints no fresh
@@ -237,8 +273,8 @@ impl Drive<'_> {
             let remaining = self.deadline.saturating_duration_since(Instant::now());
             let completion = tokio::select! {
                 biased;
-                // Between rounds no dispatch is open and every prior call is answered, so a
-                // cancelled inference needs only the terminal.
+                // Between rounds every prior call is answered; the only dispatches that can still
+                // be open are pending-cast offers, and the cancelled terminal drains those.
                 _ = self.cancel.cancelled() => return self.finish_cancelled(None, &[]),
                 out = tokio::time::timeout(remaining, self.rt.inference().complete(request)) => match out {
                     Ok(Ok(completion)) => completion,
@@ -368,36 +404,35 @@ impl Drive<'_> {
                         .engine()
                         .plan(&views, &call, &raw)
                         .expect("checked tool is registered");
-                    let gaps = raw.requirement_gaps.len();
-                    let curative: Vec<String> = planned.recommendations.iter().filter_map(redispatch_hint).collect();
-                    let feedback = match planned.plans.first() {
-                        Some(plan) => {
-                            let id = plan.id;
-                            // The eligible authorities, named in the block message (the spec's
-                            // config-surface obligation): the plan's Authorize steps carry them.
-                            let via = authorize_via(plan);
-                            drop(projection);
-                            // A server-minted, turn-unique handle — never the model's tool-call id.
-                            let handle = format!("remedy-{}", self.next_handle);
-                            self.next_handle += 1;
-                            self.pending.push(PendingBlock {
-                                handle: handle.clone(),
-                                call,
-                                plan: id,
-                            });
-                            format!(
-                                "blocked by policy ({gaps} requirement gap(s)); call execute_remedy_plan with plan_id \"{handle}\" to authorize{via}"
-                            )
+                    let feedback = if planned.plans.is_empty() {
+                        crate::feedback::block_feedback(&raw, &planned, &[])
+                    } else {
+                        drop(projection);
+                        // Blocked-proposal rounds per digest are what the remedy budget bounds:
+                        // each re-proposal of the same blocked call opens one cohort of offers,
+                        // within which every plan is consultable once — denials never starve an
+                        // advertised alternative.
+                        let attempts = self.remedy_attempts.entry(call.digest()).or_insert(0);
+                        *attempts += 1;
+                        if *attempts > self.rt.budgets().max_remedy_attempts_per_gap {
+                            self.feedback(call_id, "the remedy attempt limit for this call was reached")?;
+                            return Ok(CallGo);
                         }
-                        // No atomic plan, but a curative redispatch may unblock it — say "no remedy"
-                        // only when the block is genuinely uncurable over the remedy subset.
-                        None if !curative.is_empty() => {
-                            format!(
-                                "blocked by policy; run {} first, then re-propose this call",
-                                curative.join(" or ")
-                            )
-                        }
-                        None => "blocked by policy; no remedy is available for this call".to_string(),
+                        // One cohort per blocked proposal, holding every offered plan under its own
+                        // server-minted, turn-unique handle — never the model's tool-call id. A
+                        // success consumes the whole cohort; a denial only its offer.
+                        let offers: Vec<(String, appa_engine::plan::RemedyPlan)> = planned
+                            .plans
+                            .iter()
+                            .map(|plan| {
+                                let handle = format!("remedy-{}", self.next_handle);
+                                self.next_handle += 1;
+                                (handle, plan.clone())
+                            })
+                            .collect();
+                        let feedback = crate::feedback::block_feedback(&raw, &planned, &offers);
+                        self.pending.push(PendingBlock { call, offers });
+                        feedback
                     };
                     self.feedback(call_id, &feedback)?;
                     return Ok(CallGo);
@@ -417,8 +452,9 @@ impl Drive<'_> {
             self.feedback(call_id, "execute_remedy_plan requires a string plan_id")?;
             return Ok(CallGo);
         };
-        // A handle names either a blocked child return's offer or a blocked tool call's plan —
-        // both are minted from the same turn-unique counter, so a lookup is unambiguous.
+        // A handle names a blocked child return's offer, a pending-cast acceptance, or a blocked
+        // tool call's plan — all minted from the same turn-unique counter, so a lookup is
+        // unambiguous.
         if let Some(index) = self
             .pending_returns
             .iter()
@@ -426,7 +462,14 @@ impl Drive<'_> {
         {
             return self.handle_execute_return_remedy(call_id, index, handle).await;
         }
-        let Some(index) = self.pending.iter().position(|p| p.handle == handle) else {
+        if let Some(index) = self.pending_casts.iter().position(|p| p.handle == handle) {
+            return self.handle_execute_cast_accept(call_id, index);
+        }
+        let Some(cohort_index) = self
+            .pending
+            .iter()
+            .position(|p| p.offers.iter().any(|(h, _)| h == handle))
+        else {
             self.feedback(call_id, "no pending blocked call offers that plan_id")?;
             return Ok(CallGo);
         };
@@ -434,40 +477,61 @@ impl Drive<'_> {
             self.feedback(call_id, POLICY_STOP_BUDGET)?;
             return Ok(CallStop);
         }
-        let block = self.pending.remove(index);
-        let plan = block.plan;
-        let handle = block.handle;
-        let call = block.call;
-
-        // Bound remedy retries per call — a model cannot loop authorize-attempts unboundedly.
-        let attempts = self.remedy_attempts.entry(call.digest()).or_insert(0);
-        *attempts += 1;
-        if *attempts > self.rt.budgets().max_remedy_attempts_per_gap {
-            self.feedback(call_id, "the remedy attempt limit for this call was reached")?;
-            return Ok(CallGo);
-        }
+        let call = self.pending[cohort_index].call.clone();
+        let chosen = self.pending[cohort_index]
+            .offers
+            .iter()
+            .find(|(h, _)| h == handle)
+            .map(|(_, plan)| plan.clone())
+            .expect("the cohort was found by this handle");
 
         let (log, rev) = self.rt.store().snapshot(self.tenant, self.session)?;
         let projection = Projection::build(&log, rev);
         let views = projection.view(self.session);
-        let required = self
-            .rt
-            .engine()
-            .required_rulings(&views, &call)
-            .expect("pending call is registered");
+        // Validate the chosen plan against the live offers BEFORE consulting anyone: a cohort the
+        // state has moved past is consumed here, so a stale menu can never prompt an authority —
+        // let alone repeatedly. (Engine execution re-validates under the lock regardless.)
+        let still_offered = match self.rt.engine().check(&views, &call) {
+            Ok(CheckOutcome::Block(raw)) => self
+                .rt
+                .engine()
+                .plan(&views, &call, &raw)
+                .expect("pending call is registered")
+                .plans
+                .contains(&chosen),
+            _ => false,
+        };
+        if !still_offered {
+            self.pending.remove(cohort_index);
+            self.feedback(
+                call_id,
+                "the state changed and this offer no longer applies; re-propose the call",
+            )?;
+            return Ok(CallGo);
+        }
         let dispatch = DispatchId::new(
             self.session.clone(),
             call.digest(),
             views.dispatch_count(&call.digest()),
         );
 
+        // The rulings realize exactly the chosen plan's grouped assignment — its `required` is the
+        // routing, no first-match recomputation.
         let mut rulings = Vec::new();
-        for req in &required {
+        for req in &chosen.required {
             let Some(backend) = self.rt.authority_backend(&req.authority) else {
                 self.feedback(call_id, "an authority for this plan is not configured")?;
                 return Ok(CallGo);
             };
-            let request = AuthorityRequest::new(req.authority.clone(), &call, req.covers.clone());
+            // Fail-closed on an unresolvable argument reference — no request with a dangling ref
+            // is ever put to an authority. Unreachable while production calls carry no refs.
+            let request = match AuthorityRequest::new(req.authority.clone(), &call, req.covers.clone(), &views) {
+                Ok(request) => request,
+                Err(_) => {
+                    self.feedback(call_id, "the call's argument references no longer resolve")?;
+                    return Ok(CallGo);
+                }
+            };
             // Bound the authority wait by the remaining turn time — a slow authority cannot overrun
             // the turn deadline; a timeout fails closed (Abstain). No dispatch is open yet, so a
             // cancellation here owes only the seal and terminal.
@@ -476,20 +540,34 @@ impl Drive<'_> {
                 Ok(answer) => answer.unwrap_or(AuthorityAnswer::Abstain),
             };
             match answer {
+                // The ruling records the review context put to the authority, verbatim.
                 AuthorityAnswer::Approve => rulings.push(Ruling {
                     dispatch: dispatch.clone(),
                     authority: req.authority.clone(),
                     issuer: Issuer::Authority,
                     covers: req.covers.clone(),
+                    reviewed: request.review(),
                 }),
                 AuthorityAnswer::Deny | AuthorityAnswer::Abstain => {
-                    self.feedback(call_id, "the authority declined to authorize this call")?;
+                    // The denial consumes only this offer; the cohort's siblings stay live and are
+                    // re-listed so the model can try an alternative authority assignment.
+                    let cohort = &mut self.pending[cohort_index];
+                    cohort.offers.retain(|(h, _)| h != handle);
+                    let feedback = crate::feedback::denial_feedback(&cohort.offers);
+                    if cohort.offers.is_empty() {
+                        self.pending.remove(cohort_index);
+                    }
+                    self.feedback(call_id, &feedback)?;
                     return Ok(CallGo);
                 }
             }
         }
 
-        let batch = match self.rt.engine().execute_plan(&views, plan, &call, &rulings, Sink::Tool) {
+        let batch = match self
+            .rt
+            .engine()
+            .execute_plan(&views, &chosen, &call, &rulings, Sink::Tool)
+        {
             Ok(batch) => batch,
             Err(_) => {
                 self.feedback(call_id, "the remedy plan could not be executed on the current state")?;
@@ -500,13 +578,16 @@ impl Drive<'_> {
         match self.rt.store().conditional_append(self.tenant, self.session, batch) {
             Ok(_) => {}
             Err(StoreError::Stale { .. }) => {
-                // A concurrent branch advanced the revision; the model may retry the remedy.
-                self.pending.push(PendingBlock { handle, call, plan });
-                self.feedback(call_id, "the state changed; re-propose the call and remedy")?;
+                // A concurrent branch advanced the revision; the cohort is untouched — the model
+                // may retry the same offer against the fresh state.
+                self.feedback(call_id, "the state changed; retry the remedy")?;
                 return Ok(CallGo);
             }
             Err(e) => return Err(DriveError::Store(e)),
         }
+        // The executed plan's dispatch consumes the whole cohort: its siblings offered the same
+        // proposal, which is no longer pending.
+        self.pending.remove(cohort_index);
         self.invoke_and_admit(dispatch, &call, call_id).await
     }
 
@@ -902,6 +983,216 @@ impl Drive<'_> {
         Ok(None)
     }
 
+    /// Withhold a strictly-narrowing cast resolution and offer its acceptance (D2): the dispatch
+    /// stays open, the confined body is retained, and the model is told what accepting folds.
+    /// Acceptance performs no fallible external work, so — like a return Accept — it is never
+    /// charged against the remedy or invocation budgets.
+    #[allow(clippy::too_many_arguments)]
+    fn offer_pending_cast(
+        &mut self,
+        call_id: &ToolCallId,
+        dispatch: DispatchId,
+        call: ResolvedCall,
+        body: String,
+        cast: CastName,
+        resolved: DimValue,
+        narrowing: Narrowing,
+    ) -> Result<(), DriveError> {
+        let handle = format!("remedy-{}", self.next_handle);
+        self.next_handle += 1;
+        let feedback = crate::feedback::cast_offer_feedback(&handle, &narrowing);
+        self.pending_casts.push(PendingCast {
+            handle,
+            dispatch,
+            call,
+            body,
+            cast,
+            resolved,
+            narrowing,
+            offered_round: self.rounds,
+        });
+        self.feedback(call_id, &feedback)
+    }
+
+    /// The model accepted a pending-cast narrowing: land the atomic accept+admit. The admitted
+    /// value is this call's paired transcript response; a stale acceptance (the label moved) is
+    /// re-derived and re-offered, never folded.
+    fn handle_execute_cast_accept(&mut self, call_id: &ToolCallId, index: usize) -> Result<CallProgress, DriveError> {
+        // An acceptance generated in the offer's own round was authored before the model could
+        // read the offer (the whole assistant response predates its processing) — refused: the
+        // acceptance must follow the round that surfaced the exact narrowing.
+        if self.pending_casts[index].offered_round == self.rounds {
+            let handle = self.pending_casts[index].handle.clone();
+            self.feedback(
+                call_id,
+                &format!(
+                    "this acceptance predates the offer it names; read the offer, then call execute_remedy_plan with plan_id \"{handle}\" in your next response"
+                ),
+            )?;
+            return Ok(CallGo);
+        }
+        let pending = self.pending_casts.remove(index);
+        let admission = ResultAdmission::SuccessCastAccepted {
+            body: ValueBody::new(pending.body.clone()),
+            cast: pending.cast.clone(),
+            resolved: pending.resolved.clone(),
+            accepted: pending.narrowing.clone(),
+        };
+        match self.admit_result(&pending.dispatch, &pending.call, admission)? {
+            Admission::Admitted => Ok(CallGo),
+            Admission::Refused(AdmitError::AcceptanceMismatch) => {
+                // The label moved between offer and acceptance. Re-derive against the live state:
+                // either nothing narrows any more (admit plain) or the narrowing changed (re-offer).
+                let narrowing = {
+                    let (log, rev) = self.rt.store().snapshot(self.tenant, self.session)?;
+                    let projection = Projection::build(&log, rev);
+                    self.rt
+                        .engine()
+                        .cast_narrowing(&projection.view(self.session), &pending.call, &pending.resolved)
+                        .expect("dispatched call is registered")
+                };
+                match narrowing {
+                    None => {
+                        let plain = ResultAdmission::SuccessCast {
+                            body: ValueBody::new(pending.body.clone()),
+                            cast: pending.cast.clone(),
+                            resolved: pending.resolved.clone(),
+                        };
+                        match self.admit_result(&pending.dispatch, &pending.call, plain)? {
+                            Admission::Admitted => Ok(CallGo),
+                            // Raced strictly-narrowing again: hold the offer with the freshly
+                            // re-derived narrowing rather than looping admissions.
+                            Admission::Refused(AdmitError::NarrowingUnaccepted) => {
+                                self.re_offer_pending_cast(call_id, pending)
+                            }
+                            Admission::Refused(_) => {
+                                self.admit_result(&pending.dispatch, &pending.call, ResultAdmission::SuccessNoValue)?;
+                                self.feedback(call_id, SEALED_FAILED)?;
+                                Ok(CallGo)
+                            }
+                            Admission::AlreadyClosed => {
+                                self.feedback(call_id, "no pending result awaits acceptance for that plan_id")?;
+                                Ok(CallGo)
+                            }
+                            Admission::CancelSuppressed => {
+                                self.pending_casts.push(pending);
+                                Ok(CallCancelled(None))
+                            }
+                            Admission::InvariantBreach => {
+                                unreachable!("admit_result surfaces an identity breach as DriveError")
+                            }
+                        }
+                    }
+                    Some(_) => self.re_offer_pending_cast(call_id, pending),
+                }
+            }
+            Admission::Refused(_) => {
+                // The stored offer no longer validates (not a staleness case): close it out so the
+                // successful call's effects stand and nothing is orphaned.
+                self.admit_result(&pending.dispatch, &pending.call, ResultAdmission::SuccessNoValue)?;
+                self.feedback(call_id, SEALED_FAILED)?;
+                Ok(CallGo)
+            }
+            Admission::AlreadyClosed => {
+                self.feedback(call_id, "no pending result awaits acceptance for that plan_id")?;
+                Ok(CallGo)
+            }
+            // The token fired before the acceptance could land: keep the offer for the terminal
+            // drain, which closes it with its lapse audit.
+            Admission::CancelSuppressed => {
+                self.pending_casts.push(pending);
+                Ok(CallCancelled(None))
+            }
+            Admission::InvariantBreach => unreachable!("admit_result surfaces an identity breach as DriveError"),
+        }
+    }
+
+    /// Re-derive a moved offer's narrowing from the live state and hold it under the same handle.
+    fn re_offer_pending_cast(
+        &mut self,
+        call_id: &ToolCallId,
+        pending: PendingCast,
+    ) -> Result<CallProgress, DriveError> {
+        let narrowing = {
+            let (log, rev) = self.rt.store().snapshot(self.tenant, self.session)?;
+            let projection = Projection::build(&log, rev);
+            self.rt
+                .engine()
+                .cast_narrowing(&projection.view(self.session), &pending.call, &pending.resolved)
+                .expect("dispatched call is registered")
+        };
+        let Some(narrowing) = narrowing else {
+            // Raced back to non-narrowing between refusal and re-derivation: tell the model to
+            // accept again rather than admitting from a state this handler no longer holds.
+            let handle = pending.handle.clone();
+            self.pending_casts.push(pending);
+            self.feedback(
+                call_id,
+                &format!("the trajectory state changed; call execute_remedy_plan with plan_id \"{handle}\" again"),
+            )?;
+            return Ok(CallGo);
+        };
+        let handle = pending.handle.clone();
+        let feedback = crate::feedback::cast_offer_feedback(&handle, &narrowing);
+        // The re-derived narrowing is new information: acceptance again requires a later round.
+        self.pending_casts.push(PendingCast {
+            narrowing,
+            offered_round: self.rounds,
+            ..pending
+        });
+        self.feedback(call_id, &feedback)?;
+        Ok(CallGo)
+    }
+
+    /// The terminal drain (D2): close every still-pending cast dispatch success-without-value, each
+    /// with its lapse audit fact. Runs inside an exit path's serialized finalization; a dispatch
+    /// that raced closed is skipped (idempotent), so the risk drained here is zero finalizations,
+    /// never double.
+    fn drain_facts(&self, views: &appa_engine::projection::Views) -> Vec<Fact> {
+        let mut facts = Vec::new();
+        for pending in &self.pending_casts {
+            let admission = ResultAdmission::SuccessCastLapsed {
+                body: ValueBody::new(pending.body.clone()),
+                cast: pending.cast.clone(),
+                resolved: pending.resolved.clone(),
+            };
+            match self
+                .rt
+                .engine()
+                .admit_result(views, &pending.dispatch, &pending.call, admission)
+            {
+                Ok(batch) => facts.extend(batch.facts),
+                // The intended skip: the dispatch raced closed and owes nothing.
+                Err(AdmitError::NotOpen) => {}
+                // Anything else is a lost lapse audit — never fatal in a terminal, never silent.
+                Err(error) => {
+                    tracing::warn!(%error, tool = pending.call.tool().as_str(), "pending-cast drain lost a lapse");
+                }
+            }
+        }
+        facts
+    }
+
+    /// Drain pending casts when the turn ends in an error instead of a terminal (best-effort): the
+    /// errored turn appends no `TurnEnd` today, and this slice does not invent one — only the owed
+    /// dispatch closes land.
+    fn drain_on_error(&self) -> Result<(), DriveError> {
+        if self.pending_casts.is_empty() {
+            return Ok(());
+        }
+        self.rt.store().finalize(self.tenant, self.session, |facts, rev| {
+            let projection = Projection::build(facts, rev);
+            let views = projection.view(self.session);
+            let drained = self.drain_facts(&views);
+            if drained.is_empty() {
+                None
+            } else {
+                Some(FactBatch::new(rev, drained))
+            }
+        })?;
+        Ok(())
+    }
+
     // --- appends -------------------------------------------------------------
 
     fn admit_user_turn(&self, user_turn: UserTurn) -> Result<(), DriveError> {
@@ -990,6 +1281,8 @@ impl Drive<'_> {
         let pending_cast = contract.and_then(|c| c.pending_cast_dim());
         let bound_sanitizer = contract.and_then(|c| c.output_sanitizer.clone());
         let mut withheld: Option<&str> = None;
+        // Set on a cast admission so a raced `NarrowingUnaccepted` refusal can re-offer (D2).
+        let mut cast_offer: Option<(CastName, DimValue, String)> = None;
         let admission = match &outcome {
             ToolOutcome::Success {
                 body: BodyDisposition::Available(body),
@@ -1007,11 +1300,38 @@ impl Drive<'_> {
                             close: CancelClose::EffectsStand,
                         })));
                     }
-                    Ok(Some((cast, resolved))) => ResultAdmission::SuccessCast {
-                        body: ValueBody::new(body.clone()),
-                        cast,
-                        resolved,
-                    },
+                    Ok(Some((cast, resolved))) => {
+                        // A resolution that strictly narrows the live label is not admitted: the
+                        // dispatch stays open and the agent is offered the acceptance (D2). The
+                        // engine re-derives the narrowing at admission, so this pre-check going
+                        // stale refuses there, never folds silently.
+                        let narrowing = {
+                            let (log, rev) = self.rt.store().snapshot(self.tenant, self.session)?;
+                            let projection = Projection::build(&log, rev);
+                            self.rt
+                                .engine()
+                                .cast_narrowing(&projection.view(self.session), call, &resolved)
+                                .expect("dispatched call is registered")
+                        };
+                        if let Some(narrowing) = narrowing {
+                            self.offer_pending_cast(
+                                call_id,
+                                dispatch,
+                                call.clone(),
+                                body.clone(),
+                                cast,
+                                resolved,
+                                narrowing,
+                            )?;
+                            return Ok(CallGo);
+                        }
+                        cast_offer = Some((cast.clone(), resolved.clone(), body.clone()));
+                        ResultAdmission::SuccessCast {
+                            body: ValueBody::new(body.clone()),
+                            cast,
+                            resolved,
+                        }
+                    }
                     Ok(None) => {
                         withheld = Some(SEALED_UNRESOLVED);
                         ResultAdmission::SuccessNoValue
@@ -1044,10 +1364,36 @@ impl Drive<'_> {
         };
         let admitted = match self.admit_result(&dispatch, call, admission)? {
             Admission::Admitted => true,
+            // The cast admission raced a label move that made the resolution strictly narrowing:
+            // the value now needs the agent's acceptance — re-derive the narrowing and offer it,
+            // never close silently (D2).
+            Admission::Refused(AdmitError::NarrowingUnaccepted) => {
+                let (cast, resolved, body) = cast_offer.expect("NarrowingUnaccepted arises only from a cast admission");
+                let narrowing = {
+                    let (log, rev) = self.rt.store().snapshot(self.tenant, self.session)?;
+                    let projection = Projection::build(&log, rev);
+                    self.rt
+                        .engine()
+                        .cast_narrowing(&projection.view(self.session), call, &resolved)
+                        .expect("dispatched call is registered")
+                };
+                match narrowing {
+                    Some(narrowing) => {
+                        self.offer_pending_cast(call_id, dispatch, call.clone(), body, cast, resolved, narrowing)?;
+                        return Ok(CallGo);
+                    }
+                    // Raced back to non-narrowing before the re-offer: close success-with-no-value
+                    // (the rare double race); the effects stand and the model sees the sealed token.
+                    None => {
+                        self.admit_result(&dispatch, call, ResultAdmission::SuccessNoValue)?;
+                        false
+                    }
+                }
+            }
             // A refused value admission (a resolution the engine rejects) leaves the dispatch open:
             // close it success-with-no-value so effects stand and nothing is orphaned. An
             // already-closed dispatch needs no retry.
-            Admission::Refused => {
+            Admission::Refused(_) => {
                 self.admit_result(&dispatch, call, ResultAdmission::SuccessNoValue)?;
                 false
             }
@@ -1110,6 +1456,7 @@ impl Drive<'_> {
             ResultAdmission::SuccessRaw { .. }
                 | ResultAdmission::SuccessSanitized { .. }
                 | ResultAdmission::SuccessCast { .. }
+                | ResultAdmission::SuccessCastAccepted { .. }
         );
         let mut admission = Some(admission);
         let mut result = Admission::AlreadyClosed;
@@ -1138,7 +1485,7 @@ impl Drive<'_> {
                 // Value-policy refusals, exhaustively — a future identity-class error must be
                 // classified here deliberately, not absorbed by a wildcard.
                 Err(
-                    AdmitError::UnknownSanitizer(_)
+                    error @ (AdmitError::UnknownSanitizer(_)
                     | AdmitError::SanitizerNotOutput(_)
                     | AdmitError::TransitionSourceUnmet
                     | AdmitError::OutputPendingCast
@@ -1147,9 +1494,11 @@ impl Drive<'_> {
                     | AdmitError::NotPendingCast
                     | AdmitError::UnknownCast(_)
                     | AdmitError::ConstantMismatch
-                    | AdmitError::CeilingExceeded,
+                    | AdmitError::CeilingExceeded
+                    | AdmitError::NarrowingUnaccepted
+                    | AdmitError::AcceptanceMismatch),
                 ) => {
-                    result = Admission::Refused;
+                    result = Admission::Refused(error);
                     None
                 }
             }
@@ -1168,19 +1517,33 @@ impl Drive<'_> {
         }])
     }
 
+    /// End the turn normally: drain pending casts (D2), then the boundary — one serialized batch.
     fn finish_turn_end(&self) -> Result<(), DriveError> {
-        self.append(vec![turn_end(self.session)])
+        self.rt.store().finalize(self.tenant, self.session, |facts, rev| {
+            let projection = Projection::build(facts, rev);
+            let views = projection.view(self.session);
+            let mut terminal = self.drain_facts(&views);
+            terminal.push(turn_end(self.session));
+            Some(FactBatch::new(rev, terminal))
+        })?;
+        Ok(())
     }
 
+    /// End the turn in a policy stop: drain pending casts (D2), the fixed message, the boundary —
+    /// one serialized batch.
     fn finish_policy_stop(&self, message: &str) -> Result<TurnOutcome, DriveError> {
-        self.append(vec![
-            Fact::AssistantMessage {
+        self.rt.store().finalize(self.tenant, self.session, |facts, rev| {
+            let projection = Projection::build(facts, rev);
+            let views = projection.view(self.session);
+            let mut terminal = self.drain_facts(&views);
+            terminal.push(Fact::AssistantMessage {
                 trajectory: self.session.clone(),
                 content: Some(message.to_string()),
                 calls: Vec::new(),
-            },
-            turn_end(self.session),
-        ])?;
+            });
+            terminal.push(turn_end(self.session));
+            Some(FactBatch::new(rev, terminal))
+        })?;
         Ok(TurnOutcome::PolicyStop(message.to_string()))
     }
 
@@ -1236,6 +1599,9 @@ impl Drive<'_> {
                     terminal = batch.facts;
                 }
             }
+            // Pending-cast offers die with the cancelled turn like any other (D2): their
+            // dispatches close inside this same terminal batch, lapse audit included.
+            terminal.extend(self.drain_facts(&views));
             for call_id in unanswered {
                 terminal.push(Fact::BlockFeedback {
                     trajectory: self.session.clone(),
@@ -1320,33 +1686,6 @@ fn proposal_of(call: &WireToolCall) -> Proposal {
     }
 }
 
-/// The eligible authorities a plan's rulings route to, as a feedback suffix (" via a, b"), empty
-/// for an authority-free plan (e.g. acceptance only). Block messages name them per the spec's
-/// config-surface obligation.
-fn authorize_via(plan: &appa_engine::plan::RemedyPlan) -> String {
-    let authorities: Vec<&str> = plan
-        .steps
-        .iter()
-        .filter_map(|step| match step {
-            appa_engine::plan::RemedyStep::Authorize(name) => Some(name.as_str()),
-            appa_engine::plan::RemedyStep::Accept => None,
-        })
-        .collect();
-    if authorities.is_empty() {
-        String::new()
-    } else {
-        format!(" via {}", authorities.join(", "))
-    }
-}
-
-/// The tool a curative `Redispatch` recommendation names, for safe model-visible feedback.
-fn redispatch_hint(recommendation: &appa_engine::plan::Recommendation) -> Option<String> {
-    match recommendation {
-        appa_engine::plan::Recommendation::Redispatch { tool, .. } => Some(tool.as_str().to_string()),
-        appa_engine::plan::Recommendation::Fork { .. } => None,
-    }
-}
-
 /// The body of the `id`-th admitted value in log order (a `ValueId` indexes the value sequence).
 fn value_body(log: &[Fact], id: ValueId) -> Option<&str> {
     log.iter()
@@ -1362,9 +1701,10 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::inference::Inference;
+    use crate::runtime::Budgets;
     use crate::tool::{BuiltinTool, HttpClient};
     use crate::wire::{ChatCompletionResponse, WireFunctionCall, WireMessage, WireToolCall};
-    use appa_engine::fact::ReturnDerivation;
+    use appa_engine::fact::{CloseOutcome, ReturnDerivation};
     use appa_engine::value::LabeledValue;
     use std::collections::BTreeMap;
     use std::time::Duration;
@@ -1564,6 +1904,290 @@ implementation = { builtin = "approve" }
                 if effects.iter().any(|e| e.as_str() == "finance.spend"))
         });
         assert!(committed, "the authorized dispatch should commit its effect");
+        model.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_http_authority_approval_lands_a_ruling_with_its_review() {
+        // The production authority path end to end: block → execute_remedy_plan → HTTP authority
+        // approves → atomic ruling+dispatch → invoke → admit. The landed Ruling records the review
+        // context the authority was put — the trajectory fold and (empty, production) references.
+        let (auth_base, auth_server) = spawn_scripted_model(vec![r#"{"ruling":"approve"}"#.to_string()]).await;
+        let config = Config::from_toml_str(&format!(
+            r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+
+[[tool]]
+name = "wire"
+effects = ["finance.spend"]
+[tool.requires]
+attention = ["signoff"]
+
+[[authority]]
+name = "officer"
+mandate = {{ attends = ["signoff"] }}
+implementation = {{ resolver = {{ url = "{auth_base}/rule" }} }}
+"#,
+        ))
+        .unwrap();
+        let mut builtins = BTreeMap::new();
+        builtins.insert(ToolName::new("wire"), BuiltinTool::Echo("transferred".to_string()));
+        let (base, model) = spawn_scripted_model(vec![
+            tool_call_round("1", "wire", r#"{"amount":100}"#),
+            tool_call_round("2", "execute_remedy_plan", r#"{"plan_id":"remedy-0"}"#),
+            final_round("3", "done"),
+        ])
+        .await;
+        let rt = runtime_over(config, builtins, base).await;
+        let tenant = TenantId::new("acme");
+        let session = rt.store().create_session(tenant.clone());
+
+        let outcome = drive_turn(
+            &rt,
+            &tenant,
+            &session,
+            false,
+            user_turn("wire the invoice"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, TurnOutcome::Final("done".to_string()));
+
+        let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
+        let reviewed = log.iter().find_map(|f| match f {
+            Fact::Ruling {
+                authority, reviewed, ..
+            } if authority.as_str() == "officer" => Some(reviewed.clone()),
+            _ => None,
+        });
+        let review = reviewed.expect("the HTTP approval lands a ruling");
+        // The review carries the reviewed tool and the fold the authority saw — the user turn
+        // admitted at the boundary label (the chain's top rank, public); production calls
+        // reference no values.
+        assert_eq!(review.tool, ToolName::new("wire"));
+        assert_eq!(
+            review.trajectory_label,
+            appa_engine::label::Label::new(
+                appa_engine::label::Dim::Known(appa_engine::label::Trust::new(1)),
+                appa_engine::label::Dim::Known(appa_engine::label::Audience::Public),
+            )
+        );
+        assert!(review.arg_refs.is_empty());
+        let committed = log.iter().any(|f| {
+            matches!(f, Fact::DispatchClosed { outcome: appa_engine::fact::CloseOutcome::Success { effects }, .. }
+                if effects.iter().any(|e| e.as_str() == "finance.spend"))
+        });
+        assert!(committed, "the authorized dispatch should commit its effect");
+        assert!(log.iter().any(|f| matches!(
+            f,
+            Fact::ValueAdmitted {
+                provenance: Provenance::ToolResult { .. },
+                ..
+            }
+        )));
+        auth_server.await.unwrap();
+        model.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_denied_authority_leaves_the_sibling_offer_live() {
+        // Two authorities attend the mark → two alternative plans. The first (an HTTP denier)
+        // consumes only its own offer; the sibling assignment stays live and executes.
+        let (deny_base, deny_server) = spawn_scripted_model(vec![r#"{"ruling":"deny"}"#.to_string()]).await;
+        let config = Config::from_toml_str(&format!(
+            r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+
+[[tool]]
+name = "wire"
+effects = ["finance.spend"]
+[tool.requires]
+attention = ["signoff"]
+
+[[authority]]
+name = "no-officer"
+mandate = {{ attends = ["signoff"] }}
+implementation = {{ resolver = {{ url = "{deny_base}/rule" }} }}
+
+[[authority]]
+name = "yes-officer"
+mandate = {{ attends = ["signoff"] }}
+implementation = {{ builtin = "approve" }}
+"#,
+        ))
+        .unwrap();
+        let mut builtins = BTreeMap::new();
+        builtins.insert(ToolName::new("wire"), BuiltinTool::Echo("transferred".to_string()));
+        let (base, model) = spawn_scripted_model(vec![
+            tool_call_round("1", "wire", r#"{"amount":100}"#),
+            tool_call_round("2", "execute_remedy_plan", r#"{"plan_id":"remedy-0"}"#),
+            tool_call_round("3", "execute_remedy_plan", r#"{"plan_id":"remedy-1"}"#),
+            final_round("4", "done"),
+        ])
+        .await;
+        let rt = runtime_over(config, builtins, base).await;
+        let tenant = TenantId::new("acme");
+        let session = rt.store().create_session(tenant.clone());
+
+        let outcome = drive_turn(
+            &rt,
+            &tenant,
+            &session,
+            false,
+            user_turn("wire the invoice"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, TurnOutcome::Final("done".to_string()));
+        let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
+        // Exactly one ruling landed — the sibling's, after the denial consumed only its offer.
+        let rulings: Vec<_> = log
+            .iter()
+            .filter_map(|f| match f {
+                Fact::Ruling { authority, .. } => Some(authority.as_str().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rulings, vec!["yes-officer".to_string()]);
+        assert!(log.iter().any(|f| matches!(
+            f,
+            Fact::DispatchClosed {
+                outcome: CloseOutcome::Success { .. },
+                ..
+            }
+        )));
+        deny_server.await.unwrap();
+        model.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_success_consumes_only_its_own_cohort() {
+        // Two proposals of the identical call are distinct cohorts: executing one leaves the other
+        // executable as its own occurrence with its own fresh ruling.
+        let config = Config::from_toml_str(
+            r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+
+[[tool]]
+name = "wire"
+effects = ["finance.spend"]
+[tool.requires]
+attention = ["signoff"]
+
+[[authority]]
+name = "officer"
+mandate = { attends = ["signoff"] }
+implementation = { builtin = "approve" }
+"#,
+        )
+        .unwrap();
+        let mut builtins = BTreeMap::new();
+        builtins.insert(ToolName::new("wire"), BuiltinTool::Echo("transferred".to_string()));
+        let (base, model) = spawn_scripted_model(vec![
+            tool_call_round("1", "wire", r#"{"amount":100}"#),
+            tool_call_round("2", "wire", r#"{"amount":100}"#),
+            tool_call_round("3", "execute_remedy_plan", r#"{"plan_id":"remedy-0"}"#),
+            tool_call_round("4", "execute_remedy_plan", r#"{"plan_id":"remedy-1"}"#),
+            final_round("5", "both done"),
+        ])
+        .await;
+        let rt = runtime_over(config, builtins, base).await;
+        let tenant = TenantId::new("acme");
+        let session = rt.store().create_session(tenant.clone());
+
+        let outcome = drive_turn(
+            &rt,
+            &tenant,
+            &session,
+            false,
+            user_turn("wire twice"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, TurnOutcome::Final("both done".to_string()));
+        let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
+        assert_eq!(log.iter().filter(|f| matches!(f, Fact::Ruling { .. })).count(), 2);
+        assert_eq!(
+            log.iter().filter(|f| matches!(f, Fact::DispatchOpened { .. })).count(),
+            2
+        );
+        model.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_third_blocked_proposal_of_one_call_mints_no_offers() {
+        // The remedy budget (default 2) bounds blocked-proposal rounds per digest, not authority
+        // consultations: the first two proposals each open a cohort; the third is refused with no
+        // handles minted.
+        let config = Config::from_toml_str(
+            r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+
+[[tool]]
+name = "wire"
+[tool.requires]
+attention = ["signoff"]
+
+[[authority]]
+name = "officer"
+mandate = { attends = ["signoff"] }
+implementation = { builtin = "approve" }
+"#,
+        )
+        .unwrap();
+        let mut builtins = BTreeMap::new();
+        builtins.insert(ToolName::new("wire"), BuiltinTool::Echo("t".to_string()));
+        let (base, model) = spawn_scripted_model(vec![
+            tool_call_round("1", "wire", "{}"),
+            tool_call_round("2", "wire", "{}"),
+            tool_call_round("3", "wire", "{}"),
+            final_round("4", "stopped"),
+        ])
+        .await;
+        let rt = runtime_over(config, builtins, base).await;
+        let tenant = TenantId::new("acme");
+        let session = rt.store().create_session(tenant.clone());
+
+        drive_turn(
+            &rt,
+            &tenant,
+            &session,
+            false,
+            user_turn("wire it"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
+        let feedbacks: Vec<&str> = log
+            .iter()
+            .filter_map(|f| match f {
+                Fact::BlockFeedback { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(feedbacks.len(), 3);
+        // Structural, not prose: the first two responses carry a typed payload line whose plans
+        // array is non-empty (offers minted); the budget-refused third carries no payload at all.
+        let plans_offered = |feedback: &str| -> usize {
+            feedback
+                .split_once('\n')
+                .and_then(|(_, json)| serde_json::from_str::<serde_json::Value>(json).ok())
+                .and_then(|payload| payload["plans"].as_array().map(Vec::len))
+                .unwrap_or(0)
+        };
+        assert_eq!(plans_offered(feedbacks[0]), 1);
+        assert_eq!(plans_offered(feedbacks[1]), 1);
+        assert_eq!(plans_offered(feedbacks[2]), 0);
+        assert!(!feedbacks[2].contains('\n'));
+        assert!(!log.iter().any(|f| matches!(f, Fact::DispatchOpened { .. })));
         model.await.unwrap();
     }
 
@@ -2282,30 +2906,171 @@ name = "get_logs"
         model.await.unwrap();
     }
 
-    #[tokio::test]
-    async fn pending_cast_output_resolves_and_admits_at_the_cast_label() {
-        // `scan` declares its output trust pending-cast; the constant cast establishes it as
-        // suspicious, so the body is admitted (model-visible) at the resolved label.
-        let config = Config::from_toml_str(
+    /// The pending-cast fixture: `scan` declares its output trust pending-cast; the constant cast
+    /// establishes it as suspicious. With no `[boundary]` override the fold starts at top trust, so
+    /// the resolution strictly narrows and admission needs the agent's acceptance (D2).
+    fn pending_cast_config(extra: &str) -> Config {
+        Config::from_toml_str(&format!(
             r#"
 version = 1
 trust_chain = ["suspicious", "trusted"]
 
 [[tool]]
 name = "scan"
-delta = { trust = "unknown" }
+effects = ["read"]
+delta = {{ trust = "unknown" }}
 
 [[cast]]
 name = "paranoid"
-constant = { trust = "suspicious" }
-"#,
-        )
-        .unwrap();
+constant = {{ trust = "suspicious" }}
+{extra}"#,
+        ))
+        .unwrap()
+    }
+
+    fn scan_builtins() -> BTreeMap<ToolName, BuiltinTool> {
         let mut builtins = BTreeMap::new();
         builtins.insert(ToolName::new("scan"), BuiltinTool::Echo("mail body".to_string()));
+        builtins
+    }
+
+    fn admitted_scan_body(log: &[Fact]) -> bool {
+        log.iter().any(|f| {
+            matches!(f, Fact::ValueAdmitted { value, provenance: Provenance::ToolResult { .. }, .. }
+                if value.body.as_str() == "mail body"
+                    && value.label.trust == appa_engine::label::Dim::Known(appa_engine::label::Trust::new(0)))
+        })
+    }
+
+    #[tokio::test]
+    async fn a_narrowing_pending_cast_offers_acceptance_and_admits_on_it() {
+        let (base, model) = spawn_scripted_model(vec![
+            tool_call_round("1", "scan", "{}"),
+            tool_call_round("2", EXECUTE_REMEDY_PLAN, r#"{"plan_id": "remedy-0"}"#),
+            final_round("3", "scanned"),
+        ])
+        .await;
+        let rt = runtime_over(pending_cast_config(""), scan_builtins(), base).await;
+        let tenant = TenantId::new("acme");
+        let session = rt.store().create_session(tenant.clone());
+
+        let outcome = drive_turn(
+            &rt,
+            &tenant,
+            &session,
+            false,
+            user_turn("scan the inbox"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, TurnOutcome::Final("scanned".to_string()));
+        let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
+        // Accept+admit is one batch: OutputCastApplied, the acceptance, the value at the resolved
+        // label — and the dispatch closed exactly once.
+        assert!(log.iter().any(|f| matches!(
+            f,
+            Fact::OutputCastApplied {
+                dimension: Dimension::Trust,
+                ..
+            }
+        )));
+        assert!(log.iter().any(|f| matches!(f, Fact::OutputCastAccepted { .. })));
+        assert!(admitted_scan_body(&log));
+        assert_eq!(
+            log.iter().filter(|f| matches!(f, Fact::DispatchClosed { .. })).count(),
+            1
+        );
+        // The scan call's one terminal response is the offer, addressed to it by call id; the
+        // accept call's response is the admitted value.
+        assert!(log.iter().any(|f| matches!(
+            f,
+            Fact::BlockFeedback { call_id, .. } if call_id.as_str() == "call_1"
+        )));
+        assert_eq!(
+            log.iter().filter(|f| matches!(f, Fact::BlockFeedback { .. })).count(),
+            1
+        );
+        // The model-visible transcript pins pairing and confinement: the confined body appears
+        // exactly once, as the acceptance call's tool response — never as the scan call's.
+        let transcript = model_transcript(&[], &log, &session);
+        let scan_response = transcript
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("call_1"))
+            .expect("the scan call has a response");
+        assert!(!scan_response.content.as_deref().unwrap_or("").contains("mail body"));
+        let accept_response = transcript
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("call_2"))
+            .expect("the accept call has a response");
+        assert_eq!(accept_response.content.as_deref(), Some("mail body"));
+        assert_eq!(
+            transcript
+                .iter()
+                .filter(|m| m.content.as_deref().is_some_and(|c| c.contains("mail body")))
+                .count(),
+            1
+        );
+        model.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_same_round_acceptance_predating_the_offer_is_refused() {
+        // One assistant response proposes the scan AND its acceptance: the second call was authored
+        // before the offer existed, so it cannot consume it — the acceptance must follow the round
+        // that surfaced the exact narrowing. The next round's acceptance lands.
+        let (base, model) = spawn_scripted_model(vec![
+            two_call_round(
+                "1",
+                &[
+                    ("c1", "scan", "{}"),
+                    ("c2", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-0"}"#),
+                ],
+            ),
+            tool_call_round("2", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-0"}"#),
+            final_round("3", "done"),
+        ])
+        .await;
+        let rt = runtime_over(pending_cast_config(""), scan_builtins(), base).await;
+        let tenant = TenantId::new("acme");
+        let session = rt.store().create_session(tenant.clone());
+
+        let outcome = drive_turn(
+            &rt,
+            &tenant,
+            &session,
+            false,
+            user_turn("scan the inbox"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, TurnOutcome::Final("done".to_string()));
+        let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
+        // Exactly one acceptance landed — the later round's; the same-round attempt got a refusal
+        // response and consumed nothing.
+        assert_eq!(
+            log.iter()
+                .filter(|f| matches!(f, Fact::OutputCastAccepted { .. }))
+                .count(),
+            1
+        );
+        assert!(admitted_scan_body(&log));
+        assert!(log.iter().any(|f| matches!(
+            f,
+            Fact::BlockFeedback { call_id, .. } if call_id.as_str() == "c2"
+        )));
+        model.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_non_narrowing_pending_cast_admits_directly() {
+        // The boundary label already sits at suspicious trust: resolving to suspicious moves
+        // nothing, so the value admits without any acceptance round.
+        let config = pending_cast_config("\n[boundary]\ntrust = \"suspicious\"\n");
         let (base, model) =
             spawn_scripted_model(vec![tool_call_round("1", "scan", "{}"), final_round("2", "scanned")]).await;
-        let rt = runtime_over(config, builtins, base).await;
+        let rt = runtime_over(config, scan_builtins(), base).await;
         let tenant = TenantId::new("acme");
         let session = rt.store().create_session(tenant.clone());
 
@@ -2320,22 +3085,226 @@ constant = { trust = "suspicious" }
         .await
         .unwrap();
         let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
+        assert!(log.iter().any(|f| matches!(f, Fact::OutputCastApplied { .. })));
+        assert!(!log.iter().any(|f| matches!(f, Fact::OutputCastAccepted { .. })));
+        assert!(admitted_scan_body(&log));
+        assert!(!log.iter().any(|f| matches!(f, Fact::BlockFeedback { .. })));
+        model.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unaccepted_pending_cast_lapses_at_turn_end() {
+        // The model never accepts: the terminal drain closes the dispatch success-without-value —
+        // effects stand, the unaccepted resolution is durable audit, nothing is admitted.
+        let (base, model) =
+            spawn_scripted_model(vec![tool_call_round("1", "scan", "{}"), final_round("2", "done")]).await;
+        let rt = runtime_over(pending_cast_config(""), scan_builtins(), base).await;
+        let tenant = TenantId::new("acme");
+        let session = rt.store().create_session(tenant.clone());
+
+        drive_turn(
+            &rt,
+            &tenant,
+            &session,
+            false,
+            user_turn("scan the inbox"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
+        let lapse = log
+            .iter()
+            .position(|f| matches!(f, Fact::OutputCastLapsed { .. }))
+            .expect("the unaccepted offer lapses");
+        let close = log
+            .iter()
+            .position(|f| {
+                matches!(
+                    f,
+                    Fact::DispatchClosed { outcome: CloseOutcome::Success { effects }, .. }
+                        if effects == &[appa_engine::fact::EffectKind::new("read")]
+                )
+            })
+            .expect("the dispatch closes successfully with its effects");
+        let turn_end = log
+            .iter()
+            .position(|f| {
+                matches!(
+                    f,
+                    Fact::Boundary {
+                        kind: BoundaryKind::TurnEnd,
+                        ..
+                    }
+                )
+            })
+            .expect("the turn ends");
+        // One terminal batch: close and lapse land before the boundary.
+        assert!(close < turn_end && lapse < turn_end);
+        assert_eq!(
+            log.iter().filter(|f| matches!(f, Fact::DispatchClosed { .. })).count(),
+            1
+        );
+        assert!(!admitted_scan_body(&log));
+        model.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_casts_lapse_when_the_turn_policy_stops() {
+        // One inference round only: the offer is made, then the budget ends the turn — the
+        // policy-stop terminal drains the pending cast like the normal turn end does.
+        let (base, model) = spawn_scripted_model(vec![tool_call_round("1", "scan", "{}")]).await;
+        let inference = Inference::new(base, "k", "m", Duration::from_secs(5), HttpClient::new());
+        let rt = Runtime::with_options(
+            pending_cast_config(""),
+            inference,
+            scan_builtins(),
+            Vec::new(),
+            Budgets {
+                max_inference_rounds: 1,
+                ..Budgets::default()
+            },
+        )
+        .unwrap();
+        let tenant = TenantId::new("acme");
+        let session = rt.store().create_session(tenant.clone());
+
+        let outcome = drive_turn(
+            &rt,
+            &tenant,
+            &session,
+            false,
+            user_turn("scan the inbox"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, TurnOutcome::PolicyStop(POLICY_STOP_BUDGET.to_string()));
+        let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
+        assert!(log.iter().any(|f| matches!(f, Fact::OutputCastLapsed { .. })));
         assert!(log.iter().any(|f| matches!(
             f,
-            Fact::OutputCastApplied {
-                dimension: Dimension::Trust,
+            Fact::DispatchClosed {
+                outcome: CloseOutcome::Success { .. },
                 ..
             }
         )));
-        let admitted = log.iter().any(|f| {
-            matches!(f, Fact::ValueAdmitted { value, provenance: Provenance::ToolResult { .. }, .. }
-                if value.body.as_str() == "mail body"
-                    && value.label.trust == appa_engine::label::Dim::Known(appa_engine::label::Trust::new(0)))
-        });
-        assert!(
-            admitted,
-            "the cast-resolved value should be admitted at the resolved label"
+        assert!(!admitted_scan_body(&log));
+        model.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn two_pending_casts_lapse_independently() {
+        // Two pending offers in one turn, neither accepted: each dispatch is finalized exactly once.
+        let (base, model) = spawn_scripted_model(vec![
+            tool_call_round("1", "scan", "{}"),
+            tool_call_round("2", "scan", r#"{"again": true}"#),
+            final_round("3", "done"),
+        ])
+        .await;
+        let rt = runtime_over(pending_cast_config(""), scan_builtins(), base).await;
+        let tenant = TenantId::new("acme");
+        let session = rt.store().create_session(tenant.clone());
+
+        drive_turn(
+            &rt,
+            &tenant,
+            &session,
+            false,
+            user_turn("scan twice"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
+        assert_eq!(
+            log.iter()
+                .filter(|f| matches!(f, Fact::OutputCastLapsed { .. }))
+                .count(),
+            2
         );
+        assert_eq!(
+            log.iter()
+                .filter(|f| matches!(
+                    f,
+                    Fact::DispatchClosed {
+                        outcome: CloseOutcome::Success { .. },
+                        ..
+                    }
+                ))
+                .count(),
+            2
+        );
+        assert!(!admitted_scan_body(&log));
+        model.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_moved_offer_is_rederived_and_accepted_live() {
+        // Between the offer and the acceptance another call narrows the fold's audience: the stored
+        // narrowing mismatches, the offer is re-derived under the same handle, and the second
+        // acceptance lands the live narrowing.
+        let config = Config::from_toml_str(
+            r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+
+[[tool]]
+name = "scan"
+delta = { trust = "unknown" }
+
+[[tool]]
+name = "read_note"
+delta = { audience = { exactly = ["internal"] } }
+
+[[cast]]
+name = "paranoid"
+constant = { trust = "suspicious" }
+"#,
+        )
+        .unwrap();
+        let mut builtins = scan_builtins();
+        builtins.insert(ToolName::new("read_note"), BuiltinTool::Echo("note".to_string()));
+        let (base, model) = spawn_scripted_model(vec![
+            tool_call_round("1", "scan", "{}"),
+            // read_note's own restrictive delta is a narrowing soft block: accepting it (its plan
+            // handle) dispatches it and folds the audience down to internal.
+            tool_call_round("2", "read_note", "{}"),
+            tool_call_round("3", EXECUTE_REMEDY_PLAN, r#"{"plan_id": "remedy-1"}"#),
+            tool_call_round("4", EXECUTE_REMEDY_PLAN, r#"{"plan_id": "remedy-0"}"#),
+            tool_call_round("5", EXECUTE_REMEDY_PLAN, r#"{"plan_id": "remedy-0"}"#),
+            final_round("6", "done"),
+        ])
+        .await;
+        let rt = runtime_over(config, builtins, base).await;
+        let tenant = TenantId::new("acme");
+        let session = rt.store().create_session(tenant.clone());
+
+        let outcome = drive_turn(
+            &rt,
+            &tenant,
+            &session,
+            false,
+            user_turn("scan then read"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, TurnOutcome::Final("done".to_string()));
+        let (log, _) = rt.store().snapshot(&tenant, &session).unwrap();
+        // The accepted narrowing is the live one: its `from` carries the audience read_note folded.
+        let accepted = log.iter().find_map(|f| match f {
+            Fact::OutputCastAccepted { narrowing, .. } => Some(narrowing.clone()),
+            _ => None,
+        });
+        let narrowing = accepted.expect("the second acceptance lands");
+        assert_eq!(
+            narrowing.from.audience,
+            appa_engine::label::Dim::Known(appa_engine::label::Audience::restricted([
+                appa_engine::label::ReaderId::new("internal")
+            ]))
+        );
+        assert!(admitted_scan_body(&log));
         model.await.unwrap();
     }
 

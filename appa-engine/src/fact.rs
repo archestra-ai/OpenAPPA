@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::check::{Gap, Narrowing};
-use crate::execute::Issuer;
+use crate::execute::{AuthorityReview, Issuer};
 use crate::label::{Audience, DimValue, Dimension, Label};
 use crate::names::{AuthorityName, CastName, SanitizerName};
 use crate::plan::PlanId;
@@ -149,7 +149,9 @@ pub enum Fact {
     },
     /// A ruling admitted a dispatch over one or more requirement gaps. The label does not move — a
     /// ruling records a release, it never edits the trajectory. Call-scoped: bound to the dispatch's
-    /// digest, consumed by that dispatch, one review one review.
+    /// digest, consumed by that dispatch, one review one review. `reviewed` persists the context the
+    /// authority actually ruled over (label fold, per-reference label and provenance), so replay
+    /// carries the review itself, not a digest of hidden state.
     Ruling {
         trajectory: TrajectoryId,
         dispatch: DispatchId,
@@ -157,6 +159,7 @@ pub enum Fact {
         authority: AuthorityName,
         issuer: Issuer,
         covers: Vec<Gap>,
+        reviewed: AuthorityReview,
     },
     /// The agent accepted a call's narrowing — its own free plan step, never an authority's to make.
     Acceptance {
@@ -204,6 +207,25 @@ pub enum Fact {
         resolved: DimValue,
         raw_digest: RawResultDigest,
     },
+    /// The agent accepted the narrowing a pending-cast resolution folds (D2) — recorded beside the
+    /// `OutputCastApplied` and `ValueAdmitted` it admitted. Like [`Fact::Acceptance`], audit only —
+    /// the fold moves through the admitted value.
+    OutputCastAccepted {
+        trajectory: TrajectoryId,
+        dispatch: DispatchId,
+        narrowing: Narrowing,
+    },
+    /// A pending-cast offer the turn ended without accepting: the dispatch closed successfully
+    /// (effects stand, nothing admitted) and the unaccepted resolution is recorded. Audit only —
+    /// the projection folds nothing from this record.
+    OutputCastLapsed {
+        trajectory: TrajectoryId,
+        dispatch: DispatchId,
+        cast: CastName,
+        dimension: Dimension,
+        resolved: DimValue,
+        raw_digest: RawResultDigest,
+    },
     /// A child branch returned a value through `submit_result`. The label is the returned value's
     /// own (the child fold for a raw return, or a mandate-validated sanitizer's output); trust never
     /// rises. Only this crosses to the parent — the child's free final text does not. `derivation`
@@ -235,6 +257,8 @@ impl Fact {
             | Fact::SanitizerApplied { trajectory, .. }
             | Fact::CastApplied { trajectory, .. }
             | Fact::OutputCastApplied { trajectory, .. }
+            | Fact::OutputCastAccepted { trajectory, .. }
+            | Fact::OutputCastLapsed { trajectory, .. }
             | Fact::ChildReturn { trajectory, .. }
             | Fact::Boundary { trajectory, .. } => trajectory,
         }

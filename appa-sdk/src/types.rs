@@ -10,7 +10,9 @@ use appa_runtime::store::StoreError;
 /// Session tuning. The remedy bound mirrors the runtime's default budget.
 #[derive(Clone, Copy, Debug)]
 pub struct SdkOptions {
-    /// How many `execute_remedy_plan` attempts one call (by digest) may consume per turn.
+    /// How many **blocked-proposal rounds** one call (by digest) may open per turn — each round is
+    /// one cohort of offered plans, every plan in it consultable once; a denial consumes only its
+    /// own offer, never this budget. Mirrors the runtime's semantics.
     pub max_remedy_attempts_per_gap: u32,
     /// The most one authority consultation may take; a timeout fails closed (Abstain).
     pub per_external_timeout: std::time::Duration,

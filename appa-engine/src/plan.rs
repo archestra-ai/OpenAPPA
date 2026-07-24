@@ -15,6 +15,14 @@
 //! terminates. The production planner is a gap-guarded depth-first search; the completeness proof
 //! (tests) checks it against an independently-implemented forward-closure reference planner.
 //!
+//! **Alternatives.** A clearable block offers **every sound alternative**: one plan per unique
+//! grouped authority assignment (per-gap choice among competent authorities), enumeration made
+//! total by the registry's load-time bound ([`crate::registry`]'s `MAX_PLAN_ALTERNATIVES`) — no
+//! runtime truncation. Curability itself is assignment-independent (any competent authority
+//! suffices), so the reachability search and its reference oracle stay on the cheap first-choice
+//! form; a separate assignment-set property checks the enumeration set-equal against an
+//! independent reference enumerator.
+//!
 //! **Implemented remedy subset (the honest bound).** `Authorize` (trust floor via `trust_ceiling`,
 //! `includes` via `reader_ceiling`, `no_prior` via `waivers`, attention via `attends`), `Accept`
 //! (narrowing), and `Redispatch` over `prior(k)` emitters and cap-narrowing tools. A redispatched
@@ -33,10 +41,11 @@
 //! safer alternative emitter is not guaranteed to be the one recommended). The pending-cast
 //! post-resolution *narrowing* is
 //! conversely never counted as a cap cure, which is covered by the cast de-scope below, not a
-//! completeness hole. **De-scoped:**
-//! sanitizer-backed compiled composites and input-sanitizer argument substitution (a remedy step
-//! in the spec, a multi-acquisition composite here) and cast resolution of an Unknown (a runtime
-//! admission path, not a redispatch). The empty-proof is complete over exactly this subset.
+//! completeness hole. **De-scoped — each spec-marked, so the claim and the spec's enumeration
+//! coincide:** sanitizer-backed compiled composites (spec: deferred, confining deployments only)
+//! and input-sanitizer argument substitution (spec: design direction, refused at load) and cast
+//! resolution of an Unknown (spec: attempted by the harness itself at check and at admission,
+//! never surfaced as a plan object). The empty-proof is complete over exactly this subset.
 //!
 //! Blocked **child returns** are planned separately with their own closed vocabulary
 //! ([`crate::branch::ReturnPlan`]: accept, or sanitize with an optional accepted residual) — a
@@ -84,10 +93,15 @@ pub enum RemedyStep {
 }
 
 /// An executable remedy plan: an atomic composition of steps that clears the **whole** block.
+/// The plan value *is* its authority assignment: `required` carries, per authority, the exact gaps
+/// its one ruling must cover, so execution validates the supplied rulings against precisely the
+/// grouping that was offered — overlapping mandates cannot silently reroute it, and a stale handle
+/// cannot retarget a different assignment (plans re-derive and match by value).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemedyPlan {
     pub id: PlanId,
     pub steps: Vec<RemedyStep>,
+    pub required: Vec<RequiredRuling>,
 }
 
 /// A prose remedy the agent carries out itself as ordinary, separately-checked calls — never atomic
@@ -143,10 +157,7 @@ pub(crate) fn plan(registry: &Registry, views: &Views, call: &ResolvedCall, raw:
         effects: views.present_effects(),
     };
 
-    let mut plans = Vec::new();
-    if let Some(steps) = directly_clearable(registry, &start, call) {
-        plans.push(RemedyPlan { id: PlanId(0), steps });
-    }
+    let plans = enumerate_plans(registry, &start, call);
 
     let mut recommendations = Vec::new();
     // Only when the block does not clear atomically do we look for a curative first redispatch — the
@@ -172,6 +183,8 @@ pub(crate) fn plan(registry: &Registry, views: &Views, call: &ResolvedCall, raw:
 /// Is `call` clearable at `state` by one atomic plan? `Some(steps)` when every requirement gap has a
 /// covering authority and the narrowing (if any) is accepted; `None` when a gap is a redispatch
 /// species (`prior`/`cap`), has no covering authority, or the committed label is still Unknown.
+/// First-registered routing only — curability does not depend on *which* competent authority rules,
+/// so the reachability search and the reference oracle stay on this cheap form.
 fn directly_clearable(registry: &Registry, state: &State, call: &ResolvedCall) -> Option<Vec<RemedyStep>> {
     let contract = registry.tool(call.tool())?;
     let has_effect = |kind: &EffectKind| state.effects.contains(kind);
@@ -191,6 +204,84 @@ fn directly_clearable(registry: &Registry, state: &State, call: &ResolvedCall) -
                 steps.push(RemedyStep::Accept);
             }
             Some(steps)
+        }
+    }
+}
+
+/// Every sound plan for `call` at `state`: one per **unique grouped authority assignment**. Each
+/// requirement gap independently chooses among its competent authorities (registration order, so
+/// plan 0 is the all-first-choices assignment); a choice combination groups into per-authority
+/// covers, and combinations whose groupings coincide are one plan. Enumeration is total — the
+/// registry's load lint bounds the worst-case assignment count, so there is no runtime truncation
+/// and "every sound alternative" holds literally. Empty when a gap has no competent authority, the
+/// state is unresolved, or the block needs no atomic plan.
+fn enumerate_plans(registry: &Registry, state: &State, call: &ResolvedCall) -> Vec<RemedyPlan> {
+    let Some(contract) = registry.tool(call.tool()) else {
+        return Vec::new();
+    };
+    let has_effect = |kind: &EffectKind| state.effects.contains(kind);
+    let block = match check::evaluate_state(registry, contract, &state.label, &has_effect, call) {
+        CheckOutcome::Block(block) => block,
+        CheckOutcome::Allow | CheckOutcome::Unresolved(_) => return Vec::new(),
+    };
+
+    // Per gap, all competent authorities. Any gap with none makes the block plan-free (a
+    // prior/cap gap has no covering mandate by construction).
+    let mut choices: Vec<Vec<&AuthorityName>> = Vec::with_capacity(block.requirement_gaps.len());
+    for gap in &block.requirement_gaps {
+        let competent: Vec<&AuthorityName> = registry
+            .authorities()
+            .iter()
+            .filter(|authority| covers_gap(authority, gap, &contract.tags))
+            .map(|authority| &authority.name)
+            .collect();
+        if competent.is_empty() {
+            return Vec::new();
+        }
+        choices.push(competent);
+    }
+
+    let mut plans: Vec<RemedyPlan> = Vec::new();
+    let mut assignment = vec![0usize; choices.len()];
+    loop {
+        // Group this combination's per-gap choices into per-authority covers, in gap order.
+        let mut required: Vec<RequiredRuling> = Vec::new();
+        for (index, gap) in block.requirement_gaps.iter().enumerate() {
+            let authority = choices[index][assignment[index]].clone();
+            match required.iter_mut().find(|r| r.authority == authority) {
+                Some(existing) => existing.covers.push(gap.clone()),
+                None => required.push(RequiredRuling {
+                    authority,
+                    covers: vec![gap.clone()],
+                }),
+            }
+        }
+        if !plans.iter().any(|plan| plan.required == required) {
+            let mut steps: Vec<RemedyStep> = required
+                .iter()
+                .map(|r| RemedyStep::Authorize(r.authority.clone()))
+                .collect();
+            if block.narrowing.is_some() {
+                steps.push(RemedyStep::Accept);
+            }
+            plans.push(RemedyPlan {
+                id: PlanId(plans.len() as u32),
+                steps,
+                required,
+            });
+        }
+        // Odometer over the per-gap choice indices.
+        let mut position = choices.len();
+        loop {
+            if position == 0 {
+                return plans;
+            }
+            position -= 1;
+            assignment[position] += 1;
+            if assignment[position] < choices[position].len() {
+                break;
+            }
+            assignment[position] = 0;
         }
     }
 }
@@ -222,24 +313,6 @@ fn prerequisite_runnable(registry: &Registry, state: &State, tool: &ToolContract
 pub struct RequiredRuling {
     pub authority: AuthorityName,
     pub covers: Vec<Gap>,
-}
-
-/// Group a block's requirement gaps by their covering authority (first-match, registration order).
-pub(crate) fn required_rulings(registry: &Registry, block: &RawBlock, tags: &[TagName]) -> Vec<RequiredRuling> {
-    let mut grouped: Vec<RequiredRuling> = Vec::new();
-    for gap in &block.requirement_gaps {
-        let Some(authority) = authority_for(registry, gap, tags) else {
-            continue;
-        };
-        match grouped.iter_mut().find(|r| &r.authority == authority) {
-            Some(existing) => existing.covers.push(gap.clone()),
-            None => grouped.push(RequiredRuling {
-                authority: authority.clone(),
-                covers: vec![gap.clone()],
-            }),
-        }
-    }
-    grouped
 }
 
 /// The first registered authority whose mandate reaches `gap` (and whose scope covers the call's
@@ -478,6 +551,171 @@ mod tests {
             planned.plans[0].steps,
             vec![RemedyStep::Authorize(AuthorityName::new("officer"))]
         );
+    }
+
+    #[test]
+    fn alternative_authorities_yield_one_plan_per_assignment() {
+        // Two officers can cover the trust floor; only the attester attends the mark. The gaps
+        // [floor, mark] choose independently → two plans, first-registered assignment first, each
+        // carrying its exact grouped covers.
+        let tool = ToolContract {
+            name: ToolName::new("wire"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![],
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(TRUSTED),
+                    audience: vec![],
+                },
+                attention: vec![MarkName::new("signoff")],
+                ..Requires::default()
+            },
+            output_sanitizer: None,
+        };
+        let officer = |name: &str| Authority {
+            name: AuthorityName::new(name),
+            mandate: Mandate {
+                trust_ceiling: Some(TRUSTED),
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+        };
+        let attester = Authority {
+            name: AuthorityName::new("attester"),
+            mandate: Mandate {
+                attends: vec![MarkName::new("signoff")],
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![tool],
+            authorities: vec![officer("officer-a"), officer("officer-b"), attester],
+            sanitizers: vec![],
+            casts: vec![],
+        });
+        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let planned = plan_of(&registry, &log, &call("wire", json!({})));
+        let floor = Gap::TrustFloor {
+            required: TRUSTED,
+            actual: SUSPICIOUS,
+        };
+        let mark = Gap::Attention(MarkName::new("signoff"));
+        assert_eq!(planned.plans.len(), 2);
+        assert_eq!(planned.plans[0].id, PlanId::new(0));
+        assert_eq!(
+            planned.plans[0].required,
+            vec![
+                RequiredRuling {
+                    authority: AuthorityName::new("officer-a"),
+                    covers: vec![floor.clone()],
+                },
+                RequiredRuling {
+                    authority: AuthorityName::new("attester"),
+                    covers: vec![mark.clone()],
+                },
+            ]
+        );
+        assert_eq!(planned.plans[1].id, PlanId::new(1));
+        assert_eq!(
+            planned.plans[1].required,
+            vec![
+                RequiredRuling {
+                    authority: AuthorityName::new("officer-b"),
+                    covers: vec![floor],
+                },
+                RequiredRuling {
+                    authority: AuthorityName::new("attester"),
+                    covers: vec![mark],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_duplicated_requirement_entry_is_one_gap_and_mints_no_permuted_duplicates() {
+        // `attention = ["signoff", "signoff"]` is one obligation: the check canonicalizes the gap
+        // set, so two competent authorities yield exactly two plans (one per authority), never the
+        // order-permuted pair a duplicate gap would mint.
+        let tool = ToolContract {
+            name: ToolName::new("wire"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![],
+            requires: Requires {
+                attention: vec![MarkName::new("signoff"), MarkName::new("signoff")],
+                ..Requires::default()
+            },
+            output_sanitizer: None,
+        };
+        let attester = |name: &str| Authority {
+            name: AuthorityName::new(name),
+            mandate: Mandate {
+                attends: vec![MarkName::new("signoff")],
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![tool],
+            authorities: vec![attester("a"), attester("b")],
+            sanitizers: vec![],
+            casts: vec![],
+        });
+        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let planned = plan_of(&registry, &log, &call("wire", json!({})));
+        assert_eq!(planned.plans.len(), 2);
+        for plan in &planned.plans {
+            assert_eq!(plan.required.len(), 1);
+            assert_eq!(plan.required[0].covers, vec![Gap::Attention(MarkName::new("signoff"))]);
+        }
+    }
+
+    #[test]
+    fn one_authority_covering_both_gaps_is_one_grouped_ruling() {
+        // A single authority legitimately attending the mark AND holding the trust ceiling covers
+        // both gaps with one ruling — one plan, one required entry, both covers (the sound
+        // single-Ruling assignment; distinct-issuer constraints are policy-language future work).
+        let tool = ToolContract {
+            name: ToolName::new("wire"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![],
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(TRUSTED),
+                    audience: vec![],
+                },
+                attention: vec![MarkName::new("signoff")],
+                ..Requires::default()
+            },
+            output_sanitizer: None,
+        };
+        let officer = Authority {
+            name: AuthorityName::new("officer"),
+            mandate: Mandate {
+                trust_ceiling: Some(TRUSTED),
+                attends: vec![MarkName::new("signoff")],
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![tool],
+            authorities: vec![officer],
+            sanitizers: vec![],
+            casts: vec![],
+        });
+        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let planned = plan_of(&registry, &log, &call("wire", json!({})));
+        assert_eq!(planned.plans.len(), 1);
+        assert_eq!(planned.plans[0].required.len(), 1);
+        assert_eq!(planned.plans[0].required[0].authority, AuthorityName::new("officer"));
+        assert_eq!(planned.plans[0].required[0].covers.len(), 2);
     }
 
     #[test]
@@ -897,7 +1135,9 @@ mod tests {
             // The generators produce valid-by-construction configs (ranks within the chain,
             // re-keyed names, empty mandates dropped), so a build failure is a broken generator or
             // a validation change that silently shrank this property's coverage — fail loudly,
-            // never skip.
+            // never skip. The one legitimate refusal is the alternative-count lint: a generated
+            // config multiplying interchangeable authorities past the bound is a genuine scope
+            // filter (such configs are unloadable by design), not lost coverage.
             let built = Registry::build(RegistryConfig {
                 trust_chain: chain(),
                 tools,
@@ -905,6 +1145,9 @@ mod tests {
                 sanitizers: vec![],
                 casts: vec![],
             });
+            if matches!(built, Err(crate::registry::LoadError::TooManyPlanAlternatives { .. })) {
+                return Ok(());
+            }
             prop_assert!(built.is_ok(), "generated config must load: {:?}", built.err());
             let registry = built.unwrap();
 
@@ -932,6 +1175,105 @@ mod tests {
 
             let oracle = reference::curable(&registry, &state, &call);
             prop_assert_eq!(planned.is_curable(), oracle);
+        }
+
+        /// The planner's plan set is exactly the reference's assignment set — every sound grouped
+        /// authority assignment, no more, no fewer, in the same order. The reference re-implements
+        /// competence and grouping independently (the duplication is the point: the curability
+        /// boolean above cannot see missing, duplicated, or mis-grouped alternatives).
+        #[test]
+        fn planner_enumerates_exactly_the_sound_assignments(
+            tools in prop::collection::vec(a_tool(0), 1..3),
+            authorities in prop::collection::vec(an_authority(0), 0..3),
+            state in a_state(),
+            target in 0usize..3,
+        ) {
+            let tools: Vec<_> = tools.into_iter().enumerate().map(|(i, mut t)| {
+                t.name = ToolName::new(format!("t{i}"));
+                t
+            }).collect();
+            let authorities: Vec<_> = authorities.into_iter().enumerate().filter_map(|(i, mut a)| {
+                a.name = AuthorityName::new(format!("a{i}"));
+                if a.mandate.is_empty() { None } else { Some(a) }
+            }).collect();
+            let built = Registry::build(RegistryConfig {
+                trust_chain: chain(),
+                tools,
+                authorities: authorities.clone(),
+                sanitizers: vec![],
+                casts: vec![],
+            });
+            if matches!(built, Err(crate::registry::LoadError::TooManyPlanAlternatives { .. })) {
+                return Ok(());
+            }
+            prop_assert!(built.is_ok(), "generated config must load: {:?}", built.err());
+            let registry = built.unwrap();
+
+            let target = ToolName::new(format!("t{}", target % registry.tools().count().max(1)));
+            let contract = registry.tool(&target).expect("target is modulo the re-keyed tool count");
+            let call = synthetic_call(contract);
+            let has_effect = |kind: &EffectKind| state.effects.contains(kind);
+            let raw = match check::evaluate_state(&registry, contract, &state.label, &has_effect, &call) {
+                CheckOutcome::Block(raw) => raw,
+                _ => return Ok(()),
+            };
+
+            let mut log = vec![user_value(state.label.clone())];
+            for kind in &state.effects {
+                log.push(committed_effect(kind.clone()));
+            }
+            let projection = Projection::build(&log, Revision::new(log.len() as u64));
+            let trajectory = traj();
+            let views = projection.view(&trajectory);
+            let planned = plan(&registry, &views, &call, &raw);
+
+            // Independent competence: a deliberate re-statement of the mandate semantics.
+            let competent = |authority: &Authority, gap: &Gap| -> bool {
+                let scoped = authority.scope.covers(&contract.tags);
+                match gap {
+                    Gap::TrustFloor { required, .. } =>
+                        scoped && authority.mandate.trust_ceiling.is_some_and(|c| c >= *required),
+                    Gap::Includes { recipients } => scoped && authority.mandate.reader_ceiling.as_ref()
+                        .is_some_and(|c| Dim::Known(c.clone()).covers(recipients) == Adequacy::Holds),
+                    Gap::NoPrior(kind) => scoped && authority.mandate.waivers.contains(kind),
+                    Gap::Attention(mark) => authority.mandate.attends.contains(mark),
+                    Gap::Prior(_) | Gap::Cap { .. } => false,
+                }
+            };
+            let per_gap: Vec<Vec<&Authority>> = raw.requirement_gaps.iter()
+                .map(|gap| authorities.iter().filter(|a| competent(a, gap)).collect())
+                .collect();
+            let expected: Vec<Vec<(AuthorityName, Vec<Gap>)>> = if per_gap.iter().any(Vec::is_empty) {
+                Vec::new()
+            } else {
+                // Cartesian product in registration order, grouped in gap order.
+                let mut combos: Vec<Vec<(AuthorityName, Vec<Gap>)>> = vec![Vec::new()];
+                for (gap, options) in raw.requirement_gaps.iter().zip(&per_gap) {
+                    let mut next = Vec::new();
+                    for combo in &combos {
+                        for option in options {
+                            let mut grouped = combo.clone();
+                            match grouped.iter_mut().find(|(name, _)| name == &option.name) {
+                                Some((_, covers)) => covers.push(gap.clone()),
+                                None => grouped.push((option.name.clone(), vec![gap.clone()])),
+                            }
+                            next.push(grouped);
+                        }
+                    }
+                    combos = next;
+                }
+                let mut unique = Vec::new();
+                for combo in combos {
+                    if !unique.contains(&combo) {
+                        unique.push(combo);
+                    }
+                }
+                unique
+            };
+            let actual: Vec<Vec<(AuthorityName, Vec<Gap>)>> = planned.plans.iter()
+                .map(|p| p.required.iter().map(|r| (r.authority.clone(), r.covers.clone())).collect())
+                .collect();
+            prop_assert_eq!(actual, expected);
         }
     }
 

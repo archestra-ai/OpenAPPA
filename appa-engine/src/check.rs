@@ -153,6 +153,16 @@ pub(crate) fn evaluate_state(
     for mark in &contract.requires.attention {
         gaps.push(Gap::Attention(mark.clone()));
     }
+    // Canonical: a duplicated requirement entry (the same mark or effect listed twice) is one gap —
+    // a repeat adds no obligation, and downstream plan enumeration would otherwise mint
+    // order-permuted duplicate assignments from it.
+    let mut seen = Vec::with_capacity(gaps.len());
+    for gap in gaps {
+        if !seen.contains(&gap) {
+            seen.push(gap);
+        }
+    }
+    let gaps = seen;
 
     if gaps.is_empty() && narrowing.is_none() {
         CheckOutcome::Allow
