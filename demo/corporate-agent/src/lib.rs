@@ -1,18 +1,30 @@
 //! A corporate assistant demo for exercising OpenAPPA.
 //!
-//! One binary, `corp-agent` — an agent on OpenRouter that spawns the shared
-//! `corp-systems-mcp` server (the sibling [`corp-systems`](../corp-systems)
-//! crate: mock `hr`, `finance`, `task_tracker`, `public_forum` systems plus
-//! `send_email`) and drives its own tool loop **mediated by the embedded
-//! `appa-sdk`** ([`appa_hook`]): every proposed call is policy-checked before it
-//! executes, every result is admitted or sealed before it enters model context.
+//! Two binaries over the same mock corporate systems (the sibling
+//! [`corp-systems`](../corp-systems) crate: `hr`, `finance`, `task_tracker`,
+//! `public_forum` plus `send_email`):
 //!
-//! The policy is the demo's payload. `appa-policy.toml` (the default) blocks the
-//! injection scenario's exfiltration; `appa-policy-open.toml` registers the same
-//! tools with no constraints, reproducing the original unmediated leak — same
-//! binary, same loop, `--policy` selects.
+//! - `corp-agent` — a rig agent that spawns `corp-systems-mcp` and drives its
+//!   own tool loop **mediated by the embedded `appa-sdk`** ([`appa_hook`]):
+//!   every proposed call is policy-checked before it executes, every result is
+//!   admitted or sealed before it enters model context.
+//! - `appa-corp-agent` — the same assistant on the full `appa-agent` loop,
+//!   where the runtime owns tool execution and the reserved `fork` /
+//!   `submit_result` tools are live: a tainting read can be confined to a child
+//!   trajectory, and a child's return can cross through a registered sanitizer.
+//!   Its tools run in-process ([`fork_tools`]), the same `corp-systems` code the
+//!   MCP server wraps.
+//!
+//! The policy is the demo's payload. `appa-policy.toml` (corp-agent's default)
+//! blocks the injection scenario's exfiltration; `appa-policy-open.toml`
+//! registers the same tools with no constraints, reproducing the original
+//! unmediated leak. `appa-corp-agent` takes its policy explicitly — the bench
+//! arms run `bench-corp/policies/{appa,open}.toml`, whose guarded variant adds
+//! the branch-aware story: forum taint, an egress-gated ticket, and an
+//! hr-audience sanitizer for child returns.
 
 pub mod appa_hook;
+pub mod fork_tools;
 pub mod mcp;
 
 use std::path::PathBuf;

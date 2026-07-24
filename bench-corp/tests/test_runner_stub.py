@@ -100,19 +100,21 @@ def test_diagnostic_patterns_match_the_real_log_wording() -> None:
     silently zeroing (or inflating) a summary column."""
     stderr_text = "\n".join(
         [
-            # corp-agent startup banner: mentions execute_remedy_plan but is
-            # neither a block nor a remedy.
-            "connected to corp-systems-mcp — policy appa-policy.toml — 4 tools "
-            "(+ execute_remedy_plan): search_hr, read_hr, create_hr, send_email",
-            # An APPA block, with the runtime's feedback (also mentions
-            # execute_remedy_plan; must count as a block only).
-            "appa: send_email: blocked by policy; execute one offered plan with execute_remedy_plan",
-            # An executed remedy.
-            "appa: remedy authorized send_email — executing",
             # A FIDES audit-log line.
             "  BLOCKED send_email: policy_violation — untrusted context",
+            # appa-corp-agent's replay: startup banner and dispatch/proposal
+            # lines count as nothing (the banner mentions the policy, not a
+            # block), block feedback as a block, an accepted narrowing and a
+            # sanitized child return as remedies.
+            "appa: policy policy.toml — 13 tools in-process at http://127.0.0.1:50000/",
+            'appa: [t0] proposes read_hr({"file":"alice-chen.md"})',
+            "appa: [t0] block feedback: this call would narrow the trajectory",
+            "appa: remedy authorized [t1]: narrowing accepted trust=internal "
+            'audience=Public -> trust=internal audience=Restricted({"hr"})',
+            "appa: remedy authorized [t1]: child return crossed as the pii-redactor derivation",
+            "appa: [t0] dispatch ran, committing [egress]",
         ]
     )
     assert runner._count(runner._APPA_BLOCK, stderr_text) == 1
     assert runner._count(runner._FIDES_BLOCK, stderr_text) == 1
-    assert runner._count(runner._REMEDY, stderr_text) == 1
+    assert runner._count(runner._REMEDY, stderr_text) == 2

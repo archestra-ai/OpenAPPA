@@ -16,6 +16,15 @@ autobins = false
 appa-sdk = { path = "../../appa-sdk" }
 appa-runtime = { path = "../../appa-runtime" }
 appa-engine = { path = "../../appa-engine" }
+# The full agent loop (fork/submit_result) behind the `appa-corp-agent` binary.
+appa-agent = { path = "../../appa-agent" }
+# The corp systems' semantics, executed in-process by `appa-corp-agent` — the
+# same code the MCP server wraps, so both binaries act on identical systems.
+corp-systems = { path = "../corp-systems" }
+# The loopback shim `appa-corp-agent` serves its policy tools on (the runtime's
+# tool backends are a closed set: builtin fixtures or HTTP).
+axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1"] }
+tokio-util = "0.7"
 # `rig` is the dep-rename of `rig-core`; it owns the agent loop and mediates tool
 # calls through the APPA hook. Pinned to 0.40 with `rmcp`.
 rig = { package = "rig-core", version = "0.40", features = ["rmcp"] }
@@ -34,3 +43,7 @@ thiserror = "2"
 [[bin]]
 name = "corp-agent"
 path = "src/bin/corp_agent.rs"
+
+[[bin]]
+name = "appa-corp-agent"
+path = "src/bin/appa_corp_agent.rs"

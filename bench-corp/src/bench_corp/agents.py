@@ -1,8 +1,9 @@
-"""The four benchmarked agents: the two demo agents, each guarded and open.
+"""The benchmarked agents: the demo agents under fixed defense settings.
 
-Four fixed configurations, all driven through the demos' existing CLIs — the
-bench adds no flags to either demo. One shared model (``--model``) keeps the
-comparison defense-vs-defense.
+Fixed configurations, all driven through the demos' existing CLIs — the bench
+adds no flags of its own. One shared model (``--model``) keeps the comparison
+defense-vs-defense: the appa agent guarded, branching-disabled (the ablation),
+and open, plus FIDES with and without its defense.
 """
 
 from __future__ import annotations
@@ -14,12 +15,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+POLICIES_DIR = Path(__file__).resolve().parents[2] / "policies"
 CORP_SYSTEMS_DIR = REPO_ROOT / "demo" / "corp-systems"
 CORP_AGENT_DIR = REPO_ROOT / "demo" / "corporate-agent"
 FIDES_DIR = REPO_ROOT / "demo" / "corporate-agent-fides"
 
 CORP_SYSTEMS_BIN = CORP_SYSTEMS_DIR / "target" / "debug" / "corp-systems-mcp"
-CORP_AGENT_BIN = CORP_AGENT_DIR / "target" / "debug" / "corp-agent"
+APPA_CORP_AGENT_BIN = CORP_AGENT_DIR / "target" / "debug" / "appa-corp-agent"
 FIDES_BIN = FIDES_DIR / ".venv" / "bin" / "corp-agent-fides"
 
 DEFAULT_MODEL = "openai/gpt-5.6-luna"
@@ -29,18 +31,29 @@ DEFAULT_MODEL = "openai/gpt-5.6-luna"
 class Agent:
     name: str
     executable: Path
-    # Set only for APPA agents: the demo policy the runner prunes per episode.
+    # Set only for APPA agents: the benchmark policy the runner prunes per episode.
     policy_file: Path | None = None
+    # Set only for agents that spawn the MCP server (the appa agent runs the
+    # corp systems in-process and takes no --server-bin).
+    mcp_server: Path | None = None
     extra_args: tuple[str, ...] = ()
 
 
 AGENTS: dict[str, Agent] = {
-    "appa": Agent(name="appa", executable=CORP_AGENT_BIN, policy_file=CORP_AGENT_DIR / "appa-policy.toml"),
-    "appa-open": Agent(
-        name="appa-open", executable=CORP_AGENT_BIN, policy_file=CORP_AGENT_DIR / "appa-policy-open.toml"
+    # The appa agent is appa-corp-agent: the full appa-agent loop with the
+    # reserved fork/submit_result tools live. The ablation arm proves
+    # branching is what the fork scenarios pay for, and the open arm is the
+    # undefended baseline on the same loop.
+    "appa": Agent(name="appa", executable=APPA_CORP_AGENT_BIN, policy_file=POLICIES_DIR / "appa.toml"),
+    "appa-nofork": Agent(
+        name="appa-nofork",
+        executable=APPA_CORP_AGENT_BIN,
+        policy_file=POLICIES_DIR / "appa.toml",
+        extra_args=("--max-forks", "0"),
     ),
-    "fides": Agent(name="fides", executable=FIDES_BIN),
-    "fides-open": Agent(name="fides-open", executable=FIDES_BIN, extra_args=("--no-defense",)),
+    "appa-open": Agent(name="appa-open", executable=APPA_CORP_AGENT_BIN, policy_file=POLICIES_DIR / "open.toml"),
+    "fides": Agent(name="fides", executable=FIDES_BIN, mcp_server=CORP_SYSTEMS_BIN),
+    "fides-open": Agent(name="fides-open", executable=FIDES_BIN, mcp_server=CORP_SYSTEMS_BIN, extra_args=("--no-defense",)),
 }
 
 
@@ -55,8 +68,10 @@ def build_binaries(agents: list[Agent]) -> None:
             "The FIDES demo's virtualenv provides the corp-agent-fides entry point.\n"
             f"Create it once:  cd {FIDES_DIR} && uv venv && uv pip install -e ."
         )
-    crates = [CORP_SYSTEMS_DIR]  # every agent spawns the MCP server
-    if any(agent.executable == CORP_AGENT_BIN for agent in agents):
+    crates = []
+    if any(agent.mcp_server is not None for agent in agents):
+        crates.append(CORP_SYSTEMS_DIR)
+    if any(agent.executable == APPA_CORP_AGENT_BIN for agent in agents):
         crates.append(CORP_AGENT_DIR)
     # Independent crates, separate target dirs: build concurrently. Pinning
     # CARGO_TARGET_DIR keeps the output at the exact path the bench spawns
@@ -93,9 +108,9 @@ def command_for(
         str(episode_dir / "data"),
         "--sink-root",
         str(episode_dir / "sink"),
-        "--server-bin",
-        str(CORP_SYSTEMS_BIN),
     ]
+    if agent.mcp_server is not None:
+        command += ["--server-bin", str(agent.mcp_server)]
     if agent.policy_file is not None:
         command += ["--policy", str(episode_dir / "policy.toml")]
     return [*command, *agent.extra_args]

@@ -21,6 +21,16 @@ lands in the email sink. With the open contrast policy
 (`appa-policy-open.toml`) the same binary, same loop, and same prompt leak an
 HR secret via `send_email` — the difference is only the declared policy.
 
+A second binary, **`appa-corp-agent`**, runs the same assistant on the full
+[`appa-agent`](../../appa-agent) loop instead of rig: the runtime owns tool
+execution and the reserved `fork`/`submit_result` tools are live, so a
+tainting read can be confined to a child trajectory and a child's return can
+cross back through a registered sanitizer. Its tools execute in-process (the
+same `corp-systems` code the MCP server wraps) and it takes `--policy`
+explicitly — the bench-owned policies live in
+[`bench-corp/policies/`](../../bench-corp/policies); `--max-forks 0` is the
+no-branching ablation.
+
 This is a **standalone cargo workspace**, deliberately outside the root
 workspace, so the demo deps (MCP stack, LLM client) stay out of
 `cargo test --workspace`. Build and test it from this directory.
@@ -35,10 +45,18 @@ data/
 src/
   appa_hook.rs   the rig AgentHook mediating each call through appa-sdk (+ the reserved remedy tool)
   mcp.rs         MCP plumbing: server-binary resolution, spawn, tool-schema conversion, result classification
-  bin/corp_agent.rs     the mediated rig agent (corp-agent)
+  fork_tools.rs  in-process corp tools behind a loopback shim (appa-corp-agent)
+  bin/corp_agent.rs        the mediated rig agent (corp-agent)
+  bin/appa_corp_agent.rs   the full-loop agent with fork/submit_result (appa-corp-agent)
 tests/
   appa_hook.rs      e2e: the real hook path + real server + real policies; no key needed
+  fork_scenarios.rs e2e: the fork policy's branch mechanics against a scripted model; no key needed
+  fork_policy.rs    the bench fork policies assemble, sanitizer included
 ```
+
+The branch-aware policies `appa-corp-agent` runs under live in
+[`bench-corp/policies/`](../../bench-corp/policies) — the bench owns them,
+this crate's tests exercise them.
 
 The systems, the MCP server, and the corpus (with the planted injection) live
 in the sibling [`corp-systems`](../corp-systems) crate; the agent builds and

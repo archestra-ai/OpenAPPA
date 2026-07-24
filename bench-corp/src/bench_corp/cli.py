@@ -39,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
         "--agent",
         action="append",
         choices=sorted(AGENTS),
-        help="Agent to run (repeatable). Default: all four.",
+        help="Agent to run (repeatable). Default: all of them.",
     )
     run_parser.add_argument(
         "--scenario", action="append", help="Scenario name under scenarios/ (repeatable). Default: all."

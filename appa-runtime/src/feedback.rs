@@ -18,7 +18,10 @@
 //! that cannot fork (exhausted fork budget, the SDK's `CallSession`) gets neither. On a gap-only
 //! block fork advice always stays out — a child begins at the same label, so a fork cures no gap
 //! — and so does an unliftable block with no executable plan: the child would face the same
-//! gaps, and a narrowing that never lands needs no confining.
+//! gaps, and a narrowing that never lands needs no confining. A child's unliftable block instead
+//! carries the branch's own terminal fact: the block is decided for this branch, whose remaining
+//! moves are its still-legal work and a `submit_result` finish — the return crossing stays
+//! checked, so the lead names mechanism, never permission.
 
 use appa_engine::check::{Gap, Narrowing, RawBlock};
 use appa_engine::plan::{PlannedBlock, Recommendation, RemedyPlan};
@@ -149,7 +152,15 @@ pub fn block_feedback(
         if planned.recommendations.iter().any(Recommendation::is_curative) {
             "blocked by policy; run a redispatch prerequisite first, then re-propose this call"
         } else {
-            "blocked by policy; no remedy is available for this call"
+            match surface {
+                // A child's terminal block still leaves it its structural moves: keep doing
+                // branch-legal work, and finish through submit_result — the return crossing is
+                // itself checked, so this names mechanism, never permission.
+                FeedbackSurface::Child => {
+                    "blocked by policy; no remedy is available for this call in this branch — complete what this branch still can, then finish with submit_result: return the value the parent needs, or null after side-effect-only work"
+                }
+                FeedbackSurface::Root { .. } => "blocked by policy; no remedy is available for this call",
+            }
         }
     } else if raw.requirement_gaps.is_empty() {
         // A pure narrowing. Acceptance is informed — it executes only in a round after this offer

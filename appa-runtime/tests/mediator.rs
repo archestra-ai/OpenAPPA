@@ -6,6 +6,7 @@ use appa_engine::label::{Audience, Dim, Label, ReaderId, Trust};
 use appa_engine::names::{AuthorityName, CastName, SanitizerName};
 use appa_engine::projection::Projection;
 use appa_engine::value::ToolName;
+use appa_runtime::config::ConfigError;
 use appa_runtime::external::{AuthorityBackend, CastBackend, SanitizerBackend};
 use appa_runtime::store::TenantId;
 use appa_runtime::tool::{BuiltinTool, EXECUTE_REMEDY_PLAN, FORK, SUBMIT_RESULT, ToolBackend};
@@ -224,6 +225,60 @@ url = "http://tools.internal/alpha"
         ["alpha", "zeta", EXECUTE_REMEDY_PLAN, FORK, SUBMIT_RESULT]
     );
     assert!(mediator.advertised_tools(false, false)[0].function.parameters.is_none());
+}
+
+#[test]
+fn declared_tool_parameters_are_advertised_verbatim() {
+    let mediator = Mediator::new(
+        config(
+            r#"
+version = 1
+[[tool]]
+name = "read_hr"
+parameters = { type = "object", properties = { file = { type = "string" } }, required = ["file"], additionalProperties = false }
+[tool.implementation.http]
+url = "http://tools.internal/read_hr"
+[[tool]]
+name = "bare"
+[tool.implementation.http]
+url = "http://tools.internal/bare"
+"#,
+        ),
+        BTreeMap::new(),
+    )
+    .expect("HTTP tools assemble");
+
+    let tools = mediator.advertised_tools(false, false);
+    assert_eq!(
+        parameters(&tools, "read_hr"),
+        &json!({
+            "type": "object",
+            "properties": { "file": { "type": "string" } },
+            "required": ["file"],
+            "additionalProperties": false
+        })
+    );
+    let bare = tools
+        .iter()
+        .find(|tool| tool.function.name == "bare")
+        .expect("bare is advertised");
+    assert!(bare.function.parameters.is_none());
+}
+
+#[test]
+fn non_object_tool_parameters_are_refused_at_load() {
+    let source = r#"
+version = 1
+[[tool]]
+name = "broken"
+parameters = "not a schema"
+[tool.implementation.http]
+url = "http://tools.internal/broken"
+"#;
+    assert!(matches!(
+        Config::from_toml_str(source),
+        Err(ConfigError::ToolParametersNotAnObject { tool }) if tool == "broken"
+    ));
 }
 
 #[tokio::test]

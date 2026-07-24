@@ -25,11 +25,11 @@ def test_prune_keeps_only_enabled_systems(agent_name: str) -> None:
     policy = AGENTS[agent_name].policy_file.read_text()
     pruned = prune_policy(policy, ("hr", "email"))
     assert _tool_names(pruned) == {"search_hr", "read_hr", "create_hr", "send_email"}
-    # Everything but the tool list survives the round trip.
+    # Everything but the tool list survives the round trip — for the fork
+    # policy that includes the sanitizer, boundary, and preamble tables its
+    # child-return declassification depends on.
     original, result = tomllib.loads(policy), tomllib.loads(pruned)
-    assert result["version"] == original["version"]
-    assert result["trust_chain"] == original["trust_chain"]
-    assert result.get("authority") == original.get("authority")
+    assert {k: v for k, v in result.items() if k != "tool"} == {k: v for k, v in original.items() if k != "tool"}
 
 
 def test_prune_preserves_tool_annotations() -> None:
