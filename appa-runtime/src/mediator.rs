@@ -4,10 +4,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use appa_engine::contract::ToolContract;
 use appa_engine::engine::Engine;
 use appa_engine::fact::{Fact, Revision};
+use appa_engine::label::Dim;
 use appa_engine::names::{AuthorityName, CastName, SanitizerName};
 use appa_engine::projection::Projection;
+use appa_engine::registry::TrustChain;
 use appa_engine::value::{ToolName, TrajectoryId};
 use serde_json::json;
 use thiserror::Error;
@@ -201,7 +204,7 @@ impl Mediator {
             .engine
             .registry()
             .tools()
-            .map(|contract| policy_tool_schema(contract.name.as_str()))
+            .map(|contract| policy_tool_schema(contract, self.engine.registry().trust_chain()))
             .collect();
         tools.push(reserved_tool_schema(EXECUTE_REMEDY_PLAN));
         if can_fork {
@@ -284,21 +287,74 @@ fn is_reserved(name: &str) -> bool {
     matches!(name, EXECUTE_REMEDY_PLAN | FORK | SUBMIT_RESULT)
 }
 
-fn policy_tool_schema(name: &str) -> WireTool {
+fn policy_tool_schema(contract: &ToolContract, trust_chain: &TrustChain) -> WireTool {
     WireTool {
         kind: "function".to_string(),
         function: WireToolSchema {
-            name: name.to_string(),
-            description: None,
+            name: contract.name.as_str().to_string(),
+            description: Some(policy_description(contract, trust_chain)),
             parameters: None,
         },
     }
 }
 
+fn policy_description(contract: &ToolContract, trust_chain: &TrustChain) -> String {
+    let mut clauses = Vec::new();
+    match &contract.delta {
+        None => clauses.push("output label is unknown".to_string()),
+        Some(delta) => {
+            match &delta.trust {
+                Some(Dim::Known(trust)) => clauses.push(format!(
+                    "output trust={}",
+                    trust_chain
+                        .name_of(*trust)
+                        .expect("validated tool trust rank is in the chain")
+                )),
+                Some(Dim::Unknown) => clauses.push("output trust=unknown".to_string()),
+                None => {}
+            }
+            match &delta.audience {
+                Some(Dim::Known(audience)) => clauses.push(format!("output audience={audience:?}")),
+                Some(Dim::Unknown) => clauses.push("output audience=unknown".to_string()),
+                None => {}
+            }
+            if delta.is_none() {
+                clauses.push("output label is neutral".to_string());
+            }
+        }
+    }
+    if let Some(trust) = contract.requires.label.trust_floor {
+        clauses.push(format!(
+            "requires trust>={}",
+            trust_chain
+                .name_of(trust)
+                .expect("validated requirement trust rank is in the chain")
+        ));
+    }
+    if !contract.requires.label.audience.is_empty() {
+        clauses.push(format!("audience requirements={:?}", contract.requires.label.audience));
+    }
+    if !contract.requires.history.is_empty() {
+        clauses.push(format!("history requirements={:?}", contract.requires.history));
+    }
+    if !contract.emits.is_empty() {
+        clauses.push(format!(
+            "effects=[{}]",
+            contract
+                .emits
+                .iter()
+                .map(|effect| effect.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
+    format!("APPA contract: {}.", clauses.join("; "))
+}
+
 fn reserved_tool_schema(name: &str) -> WireTool {
     let (description, parameters) = match name {
         EXECUTE_REMEDY_PLAN => (
-            "Execute a remedy plan offered after a blocked tool call.",
+            "Execute an offered remedy in this trajectory. Accepting a narrowing permanently restricts this trajectory; use fork instead when later work needs its current label.",
             json!({
                 "type": "object",
                 "properties": { "plan_id": { "type": "string" } },
@@ -307,7 +363,7 @@ fn reserved_tool_schema(name: &str) -> WireTool {
             }),
         ),
         FORK => (
-            "Fork a child session to carry out one task.",
+            "Run one self-contained task in an isolated child trajectory. Delegate actions that depend on restrictive data, but keep later actions requiring the parent's current label in the parent. Child prose does not return; submit_result null finishes side-effect-only work.",
             json!({
                 "type": "object",
                 "properties": { "task": { "type": "string", "minLength": 1 } },
@@ -316,7 +372,7 @@ fn reserved_tool_schema(name: &str) -> WireTool {
             }),
         ),
         SUBMIT_RESULT => (
-            "Return one result to the parent session, or null to return nothing.",
+            "Finish this child. Return a value only when the parent needs that data; use null after side-effect-only work so the parent label stays unchanged.",
             json!({
                 "type": "object",
                 "properties": { "value": { "type": ["string", "null"] } },

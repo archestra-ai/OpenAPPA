@@ -5,6 +5,15 @@ use appa_engine::check::{Gap, Narrowing, RawBlock};
 use appa_engine::plan::{PlannedBlock, Recommendation, RemedyPlan};
 use serde::Serialize;
 
+/// The trajectory a block's feedback addresses — what branching fact its narrowing lead may
+/// honestly carry. A `Root` that can fork hears the fork alternative; a `Child` hears that its
+/// restriction is branch-confined; anything else hears the acceptance alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeedbackSurface {
+    Root { can_fork: bool },
+    Child,
+}
+
 #[derive(Serialize)]
 struct WirePlan<'a> {
     plan_id: &'a str,
@@ -32,6 +41,8 @@ struct WireBlock<'a> {
     plans: Vec<WirePlan<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     redispatch: Vec<WireRedispatch<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fork: Option<&'a str>,
 }
 
 fn wire_plans(offers: &[(String, RemedyPlan)]) -> Vec<WirePlan<'_>> {
@@ -52,7 +63,25 @@ fn wire_plans(offers: &[(String, RemedyPlan)]) -> Vec<WirePlan<'_>> {
         .collect()
 }
 
-fn payload(raw: &RawBlock, planned: &PlannedBlock, offers: &[(String, RemedyPlan)]) -> String {
+fn payload(
+    raw: &RawBlock,
+    planned: &PlannedBlock,
+    offers: &[(String, RemedyPlan)],
+    surface: FeedbackSurface,
+) -> String {
+    let advises_fork =
+        matches!(surface, FeedbackSurface::Root { can_fork: true }) && raw.narrowing.is_some() && !offers.is_empty();
+    let fork = if advises_fork {
+        planned
+            .recommendations
+            .iter()
+            .find_map(|recommendation| match recommendation {
+                Recommendation::Fork { reason } => Some(reason.as_str()),
+                Recommendation::Redispatch { .. } => None,
+            })
+    } else {
+        None
+    };
     let block = WireBlock {
         requirement_gaps: &raw.requirement_gaps,
         narrowing: raw.narrowing.as_ref(),
@@ -68,14 +97,20 @@ fn payload(raw: &RawBlock, planned: &PlannedBlock, offers: &[(String, RemedyPlan
                 Recommendation::Fork { .. } => None,
             })
             .collect(),
+        fork,
     };
     serde_json::to_string(&block).expect("the block payload serializes: engine types are Serialize")
 }
 
 /// Render a block's model-facing feedback: the fixed prose lead for its decision kind, then the
 /// exact typed payload. A pure narrowing (no requirement gap) presents as an acceptance — the
-/// agent's own step, no authority involved; anything with gaps presents as a block to remedy.
-pub fn block_feedback(raw: &RawBlock, planned: &PlannedBlock, offers: &[(String, RemedyPlan)]) -> String {
+/// agent's own step, no authority involved. Anything with gaps presents as a block to remedy.
+pub fn block_feedback(
+    raw: &RawBlock,
+    planned: &PlannedBlock,
+    offers: &[(String, RemedyPlan)],
+    surface: FeedbackSurface,
+) -> String {
     let lead = if offers.is_empty() {
         if planned.recommendations.iter().any(Recommendation::is_curative) {
             "blocked by policy; run a redispatch prerequisite first, then re-propose this call"
@@ -83,11 +118,33 @@ pub fn block_feedback(raw: &RawBlock, planned: &PlannedBlock, offers: &[(String,
             "blocked by policy; no remedy is available for this call"
         }
     } else if raw.requirement_gaps.is_empty() {
-        "narrowing: this call restricts the trajectory label; accept it with execute_remedy_plan"
+        match surface {
+            FeedbackSurface::Root { can_fork: true } => {
+                "narrowing: this call restricts the trajectory label; accept it with execute_remedy_plan, or fork the restricting work into a child session to keep this session's label"
+            }
+            FeedbackSurface::Root { can_fork: false } => {
+                "narrowing: this call restricts the trajectory label; accept it with execute_remedy_plan"
+            }
+            FeedbackSurface::Child => {
+                "narrowing: this call restricts this branch's label only — the parent session is unaffected; accept it with execute_remedy_plan"
+            }
+        }
+    } else if raw.narrowing.is_some() {
+        match surface {
+            FeedbackSurface::Root { can_fork: true } => {
+                "blocked by policy; execute one offered plan with execute_remedy_plan — it also accepts this call's narrowing — or fork the restricting work into a child session to keep this session's label"
+            }
+            FeedbackSurface::Root { can_fork: false } => {
+                "blocked by policy; execute one offered plan with execute_remedy_plan"
+            }
+            FeedbackSurface::Child => {
+                "blocked by policy; execute one offered plan with execute_remedy_plan; its narrowing restricts this branch's label only — the parent session is unaffected"
+            }
+        }
     } else {
         "blocked by policy; execute one offered plan with execute_remedy_plan"
     };
-    format!("{lead}\n{}", payload(raw, planned, offers))
+    format!("{lead}\n{}", payload(raw, planned, offers, surface))
 }
 
 /// Render the feedback after an authority declined one offer: the denial, then the remaining
@@ -188,7 +245,12 @@ mod tests {
             recommendations: vec![],
         };
         let offers = vec![("remedy-7".to_string(), planned.plans[0].clone())];
-        let payload = parsed(&block_feedback(&raw, &planned, &offers));
+        let payload = parsed(&block_feedback(
+            &raw,
+            &planned,
+            &offers,
+            FeedbackSurface::Root { can_fork: true },
+        ));
 
         let gaps = payload["requirement_gaps"].as_array().expect("gaps array");
         assert_eq!(gaps.len(), 6);
@@ -224,10 +286,12 @@ mod tests {
         let planned = PlannedBlock {
             raw: raw.clone(),
             plans: vec![accept_plan.clone()],
-            recommendations: vec![],
+            recommendations: vec![Recommendation::Fork {
+                reason: "confine the loss".to_string(),
+            }],
         };
         let offers = vec![("remedy-0".to_string(), accept_plan)];
-        let feedback = block_feedback(&raw, &planned, &offers);
+        let feedback = block_feedback(&raw, &planned, &offers, FeedbackSurface::Root { can_fork: true });
         let payload = parsed(&feedback);
         assert_eq!(payload["requirement_gaps"].as_array().unwrap().len(), 0);
         assert_eq!(payload["narrowing"]["from"]["trust"]["Known"], 1);
@@ -238,6 +302,62 @@ mod tests {
         );
         assert_eq!(payload["plans"][0]["accepts_narrowing"], true);
         assert_eq!(payload["plans"][0]["rulings"].as_array().unwrap().len(), 0);
+        assert_eq!(payload["fork"], "confine the loss");
+        let payload = parsed(&block_feedback(
+            &raw,
+            &planned,
+            &offers,
+            FeedbackSurface::Root { can_fork: false },
+        ));
+        assert!(payload.get("fork").is_none());
+        let payload = parsed(&block_feedback(&raw, &planned, &offers, FeedbackSurface::Child));
+        assert!(payload.get("fork").is_none());
+    }
+
+    #[test]
+    fn a_mixed_block_carries_the_fork_alternative_only_for_a_forking_root() {
+        let floor = Gap::TrustFloor {
+            required: Trust::new(1),
+            actual: Trust::new(0),
+        };
+        let raw = RawBlock {
+            requirement_gaps: vec![floor.clone()],
+            narrowing: Some(narrowing()),
+        };
+        let mut plan = plan_with("officer", vec![floor]);
+        plan.steps.push(RemedyStep::Accept);
+        let planned = PlannedBlock {
+            raw: raw.clone(),
+            plans: vec![plan.clone()],
+            recommendations: vec![Recommendation::Fork {
+                reason: "confine the loss".to_string(),
+            }],
+        };
+        let offers = vec![("remedy-0".to_string(), plan)];
+        let payload = parsed(&block_feedback(
+            &raw,
+            &planned,
+            &offers,
+            FeedbackSurface::Root { can_fork: true },
+        ));
+        assert_eq!(payload["fork"], "confine the loss");
+        assert_eq!(payload["plans"][0]["accepts_narrowing"], true);
+        let payload = parsed(&block_feedback(
+            &raw,
+            &planned,
+            &offers,
+            FeedbackSurface::Root { can_fork: false },
+        ));
+        assert!(payload.get("fork").is_none());
+        let payload = parsed(&block_feedback(&raw, &planned, &offers, FeedbackSurface::Child));
+        assert!(payload.get("fork").is_none());
+        let payload = parsed(&block_feedback(
+            &raw,
+            &planned,
+            &[],
+            FeedbackSurface::Root { can_fork: true },
+        ));
+        assert!(payload.get("fork").is_none());
     }
 
     #[test]
@@ -270,7 +390,12 @@ mod tests {
             ("remedy-0".to_string(), planned.plans[0].clone()),
             ("remedy-1".to_string(), planned.plans[1].clone()),
         ];
-        let payload = parsed(&block_feedback(&raw, &planned, &offers));
+        let payload = parsed(&block_feedback(
+            &raw,
+            &planned,
+            &offers,
+            FeedbackSurface::Root { can_fork: true },
+        ));
         assert_eq!(payload["plans"].as_array().unwrap().len(), 2);
         assert_eq!(payload["plans"][0]["plan_id"], "remedy-0");
         assert_eq!(payload["plans"][0]["rulings"][0]["authority"], "officer-a");
@@ -284,7 +409,12 @@ mod tests {
             plans: vec![],
             recommendations: planned.recommendations.clone(),
         };
-        let payload = parsed(&block_feedback(&raw, &none_planned, &[]));
+        let payload = parsed(&block_feedback(
+            &raw,
+            &none_planned,
+            &[],
+            FeedbackSurface::Root { can_fork: true },
+        ));
         assert_eq!(payload["plans"].as_array().unwrap().len(), 0);
         assert_eq!(payload["redispatch"][0]["tool"], "backup");
     }

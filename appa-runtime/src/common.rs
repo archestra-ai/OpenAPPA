@@ -168,8 +168,13 @@ impl Core {
                     .engine
                     .plan(&views, &call, &raw)
                     .expect("checked tool is registered");
+                let surface = if self.store.parent_of(&self.tenant, &self.session)?.is_some() {
+                    crate::feedback::FeedbackSurface::Child
+                } else {
+                    crate::feedback::FeedbackSurface::Root { can_fork: false }
+                };
                 let feedback = if planned.plans.is_empty() {
-                    crate::feedback::block_feedback(&raw, &planned, &[])
+                    crate::feedback::block_feedback(&raw, &planned, &[], surface)
                 } else {
                     let attempts = self.remedy_attempts.entry(call.digest()).or_insert(0);
                     *attempts += 1;
@@ -187,7 +192,7 @@ impl Core {
                             (handle, plan.clone())
                         })
                         .collect();
-                    let feedback = crate::feedback::block_feedback(&raw, &planned, &offers);
+                    let feedback = crate::feedback::block_feedback(&raw, &planned, &offers, surface);
                     self.pending_blocks.push(PendingBlock { call, offers });
                     feedback
                 };

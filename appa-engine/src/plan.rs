@@ -103,9 +103,19 @@ pub(crate) fn plan(registry: &Registry, views: &Views, call: &ResolvedCall, raw:
     {
         recommendations.push(Recommendation::Redispatch { tool, reason });
     }
+    let fork_reason = match (&raw.narrowing, raw.requirement_gaps.is_empty()) {
+        (Some(_), true) => {
+            "delegate the restricting work to a child session: the child accepts this narrowing and this session's label stays"
+        }
+        (Some(_), false) => {
+            "delegate the restricting work to a child session: the child accepts this narrowing and remedies the requirement gaps there, and this session's label stays"
+        }
+        (None, _) => {
+            "handle in a subagent (advisory: a child begins at the same label, so a fork cures no requirement)"
+        }
+    };
     recommendations.push(Recommendation::Fork {
-        reason: "handle in a subagent (advisory: a child begins at the same label, so a fork cures no requirement)"
-            .to_string(),
+        reason: fork_reason.to_string(),
     });
 
     PlannedBlock {
