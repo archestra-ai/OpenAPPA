@@ -48,6 +48,29 @@ def test_hr_reads_are_trusted_but_private() -> None:
     assert props["source_integrity"] == "trusted"
 
 
+def test_ticket_writes_demand_untainted_trust() -> None:
+    # The sibling policy's create_task_tracker requires trust=internal; a write
+    # is not exempt from a gate just because it is not the outbound sink.
+    props = _tools_by_name()["create_task_tracker"].additional_properties
+    assert props["accepts_untrusted"] is False
+
+
+def test_forum_writes_are_public_egress_with_no_trust_floor() -> None:
+    # requires = { audience = { includes = ["public"] } }, no trust floor: a
+    # tainted branch may answer the forum, but private data may not be posted.
+    props = _tools_by_name()["create_public_forum"].additional_properties
+    assert props["accepts_untrusted"] is True
+    assert props["max_allowed_confidentiality"] == "public"
+
+
+def test_ungated_writes_stay_ungated() -> None:
+    # No `requires` in the sibling policy for these two, so no gate here.
+    for name in ("create_hr", "create_finance"):
+        props = _tools_by_name()[name].additional_properties
+        assert props["accepts_untrusted"] is True
+        assert "max_allowed_confidentiality" not in props
+
+
 def _label_of(server_bin: Path, corpus: Path, sink: Path, name: str, *args: str) -> dict:
     async def run():
         async with CorpSystemsClient(corpus, sink, server_bin) as client:

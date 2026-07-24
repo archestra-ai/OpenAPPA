@@ -22,12 +22,31 @@ so:
     hr           -> integrity=trusted,   confidentiality=private   (the secret)
     finance      -> integrity=trusted,   confidentiality=private   (restricted; to whom is inexpressible — see "Where the mapping stops")
     task_tracker -> integrity=trusted,   confidentiality=public
-    send_email   -> accepts_untrusted=False, max_allowed_confidentiality=public
+
+Those four are the *deltas* — what a tool's result contributes to the fold. A
+tool's ``requires`` transcribes separately, onto the two gates FIDES checks
+before any function body runs. Both are read off the tool declaration for
+**every** tool, not only for sinks
+(``agent_framework.security._get_additional_properties``), so a constrained
+internal write is as expressible as a constrained egress:
+
+    requires.trust = "internal"            ->  accepts_untrusted=False
+    requires.audience.includes = ["public"] ->  max_allowed_confidentiality=public
+
+The sibling policy constrains three tools, and all three transcribe:
+
+    send_email           trust=internal, audience includes $to
+                             -> accepts_untrusted=False, max_conf=public
+    create_task_tracker  trust=internal, prior egress
+                             -> accepts_untrusted=False   (the prior does not
+                                transcribe — see "Where the mapping stops")
+    create_public_forum  audience includes "public", no trust floor on purpose
+                             -> accepts_untrusted=True, max_conf=public
 
 Reads/searches are pure sources (``accepts_untrusted=True``): safe to call even
-in a tainted context because they cannot exfiltrate. ``send_email`` is the only
-egress sink, so it is the only tool that refuses an untrusted or over-private
-context — exactly the single gated flow the APPA demo guards.
+in a tainted context because they cannot exfiltrate. ``create_hr`` and
+``create_finance`` carry no ``requires`` in the sibling policy and are left
+unconstrained here for the same reason.
 
 Where the mapping stops
 -----------------------
@@ -94,6 +113,17 @@ accident. That reflex must not be extended here: re-labelling finance to chase
 parity would trade a result for a symmetry that the label model cannot actually
 support, and would silently delete the one place the bench separates a
 recipient-granular flow decision from a level comparison.
+
+The second residual is **ordering**. ``create_task_tracker`` demands two things
+in the sibling policy — internal trust *and* a prior egress (``effects = { has =
+["egress"] }``: the change ticket follows the public acknowledgement it responds
+to). A FIDES context is a fold of two labels and carries no predicate over what
+the trajectory already did, so the trust half transcribes and the ordering half
+has no image at all. This arm therefore refuses a tainted ticket and permits an
+untainted one filed with no egress behind it, where the sibling policy refuses
+both. Unlike the finance row nothing is being *chosen* here — there is no second
+setting to run, so the declaration states the half it can and this paragraph
+states the half it cannot.
 """
 
 from __future__ import annotations
@@ -117,6 +147,24 @@ _LABELS: dict[System, tuple[str, str]] = {
 # framework rather than fetched content) carries nothing that should taint or
 # restrict the trajectory — the FIDES analogue of APPA's `delta = {}`.
 _NEUTRAL = ("trusted", "public")
+
+# What each `create_*` *demands*, transcribed from the sibling policy's
+# `requires` (see the module docstring). Every `create_*` is neutral in the fold
+# — none of them narrows the trajectory — but neutral output is not the same
+# claim as an unconstrained call, and reading the delta off the tool while
+# leaving `requires` untranscribed is what silently opened the internal writes.
+_CREATE_PROPS: dict[System, dict[str, Any]] = {
+    # No `requires` in the sibling policy: an internal write nobody gates.
+    System.HR: {"accepts_untrusted": True},
+    System.FINANCE: {"accepts_untrusted": True},
+    # `requires = { trust = "internal", effects = { has = ["egress"] } }` — the
+    # trust floor transcribes; the prior egress has no image here.
+    System.TASK_TRACKER: {"accepts_untrusted": False},
+    # `requires = { audience = { includes = ["public"] } }` and deliberately no
+    # trust floor: a forum-tainted branch may still answer the forum, but
+    # hr-narrowed content may never be posted to it.
+    System.PUBLIC_FORUM: {"accepts_untrusted": True, "max_allowed_confidentiality": "public"},
+}
 
 # The full 13-tool surface of the shared server: the default when no live
 # listing narrows `available` (offline tests, docs).
@@ -207,19 +255,22 @@ def build_tools(client: CorpSystemsClient, available: Collection[str] | None = N
             f"Read a file from {blurb} by exact file name.",
             dict(source_props),
         )
-        # create_* are internal writes, not egress sinks in this demo; allow
-        # them in any context (neutral), mirroring APPA's `delta = {}`.
+        # `create_*` is not the outbound mail sink, but "not the sink" does not
+        # mean "ungated": each carries its own `requires` from the sibling
+        # policy — a trust floor on the ticket, a public-audience ceiling on the
+        # forum post (publishing is egress too), nothing on hr/finance.
         add(
             f"create_{system.dir_name}",
             make_create(system),
             f"Create a new file in {blurb}.",
-            {"accepts_untrusted": True},
+            dict(_CREATE_PROPS[system]),
         )
 
     async def send_email(to: str, subject: str, body: str) -> list[Content]:
         return await forward("send_email", {"to": to, "subject": subject, "body": body}, _NEUTRAL)
 
-    # The one egress sink. FIDES enforces BOTH gates before the body runs:
+    # The outbound mail sink, the only tool gated on both axes at once. FIDES
+    # enforces both before the body runs:
     #   accepts_untrusted=False          -> refuse a tainted (untrusted) context
     #   max_allowed_confidentiality=public -> refuse writing PRIVATE data outward
     # Together they are the FIDES analogue of APPA's

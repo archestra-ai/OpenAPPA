@@ -56,11 +56,19 @@ demo's labels are the same design expressed in two vocabularies:
 | Finance / tasks | `delta = {}` (unconstrained) | `integrity=trusted, confidentiality=public` |
 | The taint fold | monoid fold over the trajectory | `combine_labels` (untrusted & most-private win) |
 | The sink | `send_email` `requires { trust=internal, audience includes $to }` | `send_email` `accepts_untrusted=False`, `max_allowed_confidentiality=public` |
+| The ticket | `create_task_tracker` `requires { trust=internal, prior egress }` | `create_task_tracker` `accepts_untrusted=False` (the prior egress has no image) |
+| The forum post | `create_public_forum` `requires { audience includes "public" }` | `create_public_forum` `max_allowed_confidentiality=public`, no integrity gate |
 | Reads in a tainted context | narrowing accepted via a remedy plan | `accepts_untrusted=True` (pure sources can't exfiltrate) |
 
-So `send_email` is the one gated egress sink, refused on **either** axis — a
-tainted (untrusted) context **or** an attempt to mail private data outward —
-just as APPA's `send_email` needs both internal trust and a covering audience.
+So `send_email` is the one tool gated on **both** axes — refused for a tainted
+(untrusted) context **or** for an attempt to mail private data outward — just as
+APPA's `send_email` needs both internal trust and a covering audience. The two
+gated writes take one axis each: the ticket needs an untainted context, the
+forum post needs data that is releasable to everyone. FIDES checks both
+properties on every tool, not only on sinks, so a `requires` on an internal
+write transcribes as readily as one on the egress sink; what does not
+transcribe is the ticket's *prior egress*, since a FIDES context label carries
+no predicate over what the trajectory already did.
 
 ## Layout
 

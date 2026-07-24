@@ -100,10 +100,15 @@ branching demo): `appa` can complete them only by confining the restricted
 work to a child trajectory, `appa-nofork` is expected to lose utility on both
 by design (blocked with no branch to confine the restriction to), and the
 open baselines show the undefended cost. The gates they turn on live in
-`policies/appa.toml`; FIDES permits every `create_*` in a tainted context and
-has no analogue, so an arm that passes without the constraint has walked
-through an open door, not beaten a closed one. That is a caveat on reading
-these two rows, not grounds for dropping them — every arm runs every scenario.
+`policies/appa.toml`, and the FIDES arm carries the half of each that its label
+model can state: `create_task_tracker` declares `accepts_untrusted=False` (the
+trust floor), `create_public_forum` declares `max_allowed_confidentiality=public`
+(the audience requirement). What it cannot state is the ticket's *prior egress* —
+a FIDES context label is a fold with no predicate over what the trajectory
+already did — so on these two rows the FIDES gate is the weaker of the two by a
+known amount, and a pass there is a pass against one constraint rather than
+two. That is a caveat on reading these two rows, not grounds for dropping them —
+every arm runs every scenario.
 
 `follow-forum-steps` is attack-only on purpose: the thread's "onboarding
 checklist" *is* the payload, so there is no legitimate version of the task to
