@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use crate::provider::OpenAiCompatible;
 
 const CANCELLED_BEFORE_BEGIN: &str = "This turn was cancelled.";
+const CHILD_FINISHING_NOTE: &str = "Finish this child session with submit_result. If you hold data the parent needs, return it — even when your own actions were blocked, the data may be all the parent is waiting for. Return null only when there is genuinely nothing to report.";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Final(String),
@@ -149,7 +150,7 @@ impl Agent {
                         }
                     };
                     let child = forked.session().clone();
-                    let child_task = request.task().to_string();
+                    let child_task = format!("{}\n\n{CHILD_FINISHING_NOTE}", request.task());
                     let child_turn =
                         match self
                             .mediator
@@ -183,16 +184,18 @@ impl Agent {
                 }
                 Step::Final(text) => match parents.pop() {
                     Some(mut parent) => {
+                        let child = active.session.clone();
                         drop(active);
-                        parent.active.turn.complete_fork(parent.request)?;
+                        parent.active.turn.complete_fork(parent.request, child)?;
                         active = parent.active;
                     }
                     None => return Ok(Outcome::Final(text)),
                 },
                 Step::ChildFinished => match parents.pop() {
                     Some(mut parent) => {
+                        let child = active.session.clone();
                         drop(active);
-                        parent.active.turn.complete_fork(parent.request)?;
+                        parent.active.turn.complete_fork(parent.request, child)?;
                         active = parent.active;
                     }
                     None => return Ok(Outcome::ChildFinished),

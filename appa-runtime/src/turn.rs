@@ -46,7 +46,11 @@ const POLICY_STOP_INFERENCE: &str = "This turn could not continue: upstream infe
 const POLICY_STOP_CANCELLED: &str = "This turn was cancelled.";
 const FORK_ONLY_FEEDBACK: &str =
     "fork must be the only call in its assistant round and take exactly one non-empty string task";
-const FORK_COMPLETE: &str = "the child session finished";
+// A join tells the parent whether a value crossed — nothing more. Void, bare prose and
+// abandonment share one response on purpose: a void return carries zero bits of child-derived
+// content, and that indistinguishability is load-bearing for the confinement profile.
+const FORK_RETURNED: &str = "the child session finished and returned its result";
+const FORK_NO_RETURN: &str = "the child session finished without returning a value";
 const FORK_FAILED: &str = "the child session could not be started";
 const CHILD_FINISHED_REMAINDER: &str = "the call was not executed because the child session has finished";
 
@@ -214,6 +218,11 @@ impl ForkRequest {
     pub fn task(&self) -> &str {
         &self.task
     }
+}
+
+enum ForkOutcome {
+    Completed { child: TrajectoryId },
+    Failed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -524,12 +533,12 @@ impl Turn {
         Ok(Step::Continue)
     }
 
-    pub fn complete_fork(&mut self, request: ForkRequest) -> Result<Step, TurnError> {
-        self.finish_fork(request, FORK_COMPLETE)
+    pub fn complete_fork(&mut self, request: ForkRequest, child: TrajectoryId) -> Result<Step, TurnError> {
+        self.finish_fork(request, ForkOutcome::Completed { child })
     }
 
     pub fn fail_fork(&mut self, request: ForkRequest) -> Result<Step, TurnError> {
-        self.finish_fork(request, FORK_FAILED)
+        self.finish_fork(request, ForkOutcome::Failed)
     }
 
     pub fn stop(&mut self, reason: StopReason) -> Result<Step, TurnError> {
@@ -585,11 +594,23 @@ impl Turn {
         Ok(Step::Fork(ForkRequest { identity, task }))
     }
 
-    fn finish_fork(&mut self, request: ForkRequest, response: &'static str) -> Result<Step, TurnError> {
+    fn finish_fork(&mut self, request: ForkRequest, outcome: ForkOutcome) -> Result<Step, TurnError> {
         self.require(Lifecycle::AwaitingFork, "finish a fork")?;
         if self.fork_identity.as_ref() != Some(&request.identity) {
             return Err(TurnError::ForkIdentity);
         }
+        let response = match outcome {
+            ForkOutcome::Completed { child } => {
+                let (log, revision) = self.mediator.store().snapshot(&self.tenant, &self.session)?;
+                let projection = Projection::build(&log, revision);
+                if projection.view(&self.session).returns_by(&child) > 0 {
+                    FORK_RETURNED
+                } else {
+                    FORK_NO_RETURN
+                }
+            }
+            ForkOutcome::Failed => FORK_FAILED,
+        };
         self.feedback(&request.identity.call_id, response)?;
         self.fork_identity = None;
         self.lifecycle = Lifecycle::Ready;

@@ -998,11 +998,15 @@ delta = {}
     };
     assert_eq!(first_request.task(), "task one");
     assert!(matches!(first.transcript(), Err(TurnError::Lifecycle { .. })));
+    let no_child = empty.create_session(tenant.clone());
     assert!(matches!(
-        first.complete_fork(second_request),
+        first.complete_fork(second_request, no_child.clone()),
         Err(TurnError::ForkIdentity)
     ));
-    assert!(matches!(first.complete_fork(first_request).unwrap(), Step::Continue));
+    assert!(matches!(
+        first.complete_fork(first_request, no_child).unwrap(),
+        Step::Continue
+    ));
     assert!(matches!(
         first.mediate(final_answer("done"), &mut budget).await.unwrap(),
         Step::Final(_)
@@ -1036,8 +1040,15 @@ async fn a_fork_request_cannot_complete_a_later_turn_on_the_same_trajectory() {
         panic!("second fork expected")
     };
 
-    assert!(matches!(second.complete_fork(stale), Err(TurnError::ForkIdentity)));
-    assert!(matches!(second.complete_fork(current).unwrap(), Step::Continue));
+    let no_child = mediator.create_session(tenant.clone());
+    assert!(matches!(
+        second.complete_fork(stale, no_child.clone()),
+        Err(TurnError::ForkIdentity)
+    ));
+    assert!(matches!(
+        second.complete_fork(current, no_child).unwrap(),
+        Step::Continue
+    ));
     second.stop(StopReason::Cancelled).unwrap();
 }
 
@@ -1087,7 +1098,7 @@ async fn child_context_stops_at_the_fork_and_raw_returns_cross_once() {
     ));
     assert!(matches!(child_turn.transcript(), Err(TurnError::Lifecycle { .. })));
     drop(child_turn);
-    parent_turn.complete_fork(request).unwrap();
+    parent_turn.complete_fork(request, child.clone()).unwrap();
     let parent_context = parent_turn.transcript().unwrap();
     assert!(parent_context.contains(&WireMessage::user("finding")));
     assert!(!parent_context.contains(&WireMessage::assistant("child free text")));
@@ -1126,6 +1137,61 @@ async fn child_context_stops_at_the_fork_and_raw_returns_cross_once() {
         1
     );
     parent_turn.stop(StopReason::Cancelled).unwrap();
+}
+
+#[tokio::test]
+async fn the_join_signal_distinguishes_a_crossed_value_from_every_non_crossing_ending() {
+    #[derive(Clone, Copy)]
+    enum Ending {
+        Crossed,
+        Void,
+        Prose,
+    }
+
+    async fn join_feedback(ending: Ending) -> String {
+        let mediator = mediator("version = 1\n", &[]);
+        let tenant = TenantId::new("tenant");
+        let parent = mediator.create_session(tenant.clone());
+        let mut budget = RunBudget::default();
+
+        let mut parent_turn = begin(&mediator, &tenant, &parent, "delegate now").await;
+        let Step::Fork(request) = parent_turn
+            .mediate(calls(vec![call("fork", FORK, r#"{"task":"errand"}"#)]), &mut budget)
+            .await
+            .unwrap()
+        else {
+            panic!("fork expected")
+        };
+        budget.charge_fork().unwrap();
+        let child = mediator.fork_session(&tenant, &parent).unwrap();
+        let mut child_turn = begin(&mediator, &tenant, &child, request.task()).await;
+
+        let completion = match ending {
+            Ending::Crossed => calls(vec![call("return", SUBMIT_RESULT, r#"{"value":"finding"}"#)]),
+            Ending::Void => calls(vec![call("return", SUBMIT_RESULT, r#"{"value":null}"#)]),
+            Ending::Prose => final_answer("child-only conclusion"),
+        };
+        child_turn.mediate(completion, &mut budget).await.unwrap();
+        drop(child_turn);
+        parent_turn.complete_fork(request, child).unwrap();
+
+        facts(&mediator, &tenant, &parent)
+            .iter()
+            .find_map(|fact| match fact {
+                Fact::BlockFeedback { call_id, content, .. } if call_id.as_str() == "fork" => {
+                    Some(content.clone())
+                }
+                _ => None,
+            })
+            .expect("the join answers the fork call")
+    }
+
+    let crossed = join_feedback(Ending::Crossed).await;
+    let void = join_feedback(Ending::Void).await;
+    let prose = join_feedback(Ending::Prose).await;
+
+    assert_ne!(crossed, void);
+    assert_eq!(void, prose);
 }
 
 #[tokio::test]
@@ -2047,7 +2113,7 @@ delta = {}
             .unwrap(),
         Step::PolicyStop(_)
     ));
-    parent_turn.complete_fork(request).unwrap();
+    parent_turn.complete_fork(request, child.clone()).unwrap();
     let log = facts(&mediator, &tenant, &parent);
     assert_eq!(
         log.iter()

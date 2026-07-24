@@ -373,7 +373,7 @@ fn reserved_tool_schema(name: &str) -> WireTool {
             }),
         ),
         FORK => (
-            "Run one self-contained task in an isolated child trajectory. Delegate actions that depend on restrictive data, but keep later actions requiring the parent's current label in the parent. Child prose does not return; submit_result null finishes side-effect-only work.",
+            "Run one self-contained task in an isolated child trajectory. Delegate actions that depend on restrictive data, but keep later actions requiring the parent's current label in the parent. Must be the only call in its assistant round. Child prose does not return; submit_result null finishes side-effect-only work.",
             json!({
                 "type": "object",
                 "properties": { "task": { "type": "string", "minLength": 1 } },

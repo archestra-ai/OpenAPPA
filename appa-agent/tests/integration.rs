@@ -360,7 +360,7 @@ url = "{}/invoke"
 }
 
 #[tokio::test]
-async fn serial_fork_joins_only_the_admitted_child_return_and_fixed_fork_response() {
+async fn serial_fork_joins_only_the_admitted_child_return_and_an_outcome_specific_fork_response() {
     let fork_call = call("fork-1", FORK, r#"{"task":"child task"}"#);
     let submit_call = call("submit-1", SUBMIT_RESULT, r#"{"value":"child finding"}"#);
     let (endpoint, server) = spawn_model(vec![
@@ -385,9 +385,14 @@ async fn serial_fork_joins_only_the_admitted_child_return_and_fixed_fork_respons
     assert_eq!(tool_names(&root_first), ["execute_remedy_plan", FORK]);
 
     let child = requests[1].completion();
-    assert_eq!(
-        child.messages,
-        [WireMessage::user("root task"), WireMessage::user("child task")]
+    assert_eq!(child.messages.len(), 2);
+    assert_eq!(child.messages[0], WireMessage::user("root task"));
+    assert_eq!(child.messages[1].role, "user");
+    assert!(
+        child.messages[1]
+            .content
+            .as_deref()
+            .is_some_and(|content| content.starts_with("child task"))
     );
     assert_eq!(tool_names(&child), ["execute_remedy_plan", FORK, SUBMIT_RESULT]);
 
@@ -593,9 +598,15 @@ async fn cancellation_during_child_provider_wait_unwinds_the_whole_family() {
 
     let requests = server.await.expect("model server joins");
     assert_eq!(requests.len(), 2);
-    assert_eq!(
-        requests[1].completion().messages,
-        [WireMessage::user("root task"), WireMessage::user("child task")]
+    let child = requests[1].completion();
+    assert_eq!(child.messages.len(), 2);
+    assert_eq!(child.messages[0], WireMessage::user("root task"));
+    assert_eq!(child.messages[1].role, "user");
+    assert!(
+        child.messages[1]
+            .content
+            .as_deref()
+            .is_some_and(|content| content.starts_with("child task"))
     );
     let log = facts(&mediator, &tenant, &root);
     let ends = turn_end_counts(&log);

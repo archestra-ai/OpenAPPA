@@ -128,7 +128,7 @@ pub fn block_feedback(
     } else if raw.requirement_gaps.is_empty() {
         match surface {
             FeedbackSurface::Root { can_fork: true } => {
-                "narrowing: this call restricts the trajectory label; accept it with execute_remedy_plan in your next response, or fork the restricting work into a child session to keep this session's label"
+                "narrowing: this call restricts the trajectory label. Fork the restricting work into a child session to keep this session's label, or, if every later step can live with the restriction, accept it with execute_remedy_plan in your next response — acceptance is permanent for this session"
             }
             FeedbackSurface::Root { can_fork: false } => {
                 "narrowing: this call restricts the trajectory label; accept it with execute_remedy_plan in your next response"
