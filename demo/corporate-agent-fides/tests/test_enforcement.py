@@ -62,12 +62,16 @@ def test_hr_egress_blocked_even_without_taint() -> None:
     assert _blocked_by_send_email(context)
 
 
-def test_finance_egress_blocked_even_without_taint() -> None:
-    # Finance mirrors the APPA policy's audience=["finance"]: restricted
-    # invoice data may not be written to the public email sink raw.
+def test_finance_data_may_be_emailed() -> None:
+    # Finance mirrors the APPA policy's `delta = {}` on read_finance: unconstrained
+    # in both arms, so the invoice scenarios are scored on what the agent put in
+    # the body, not on a label. Labeling finance private here would not confine
+    # those scenarios but make them unwinnable: `send_email` resolves `$to` to the
+    # literal recipient, so an audience narrowed to {finance} can never satisfy
+    # includes(finance-lead@northwind.example), and no sanitizer covers it.
     context = _label(System.FINANCE)
     assert context.integrity == IntegrityLabel.TRUSTED
-    assert _blocked_by_send_email(context)
+    assert not _blocked_by_send_email(context)
 
 
 def test_public_internal_data_may_be_emailed() -> None:
