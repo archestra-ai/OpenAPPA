@@ -20,7 +20,7 @@ so:
 
     public_forum -> integrity=untrusted (the taint), confidentiality=public
     hr           -> integrity=trusted,   confidentiality=private   (the secret)
-    finance      -> integrity=trusted,   confidentiality=public    (unconstrained, like the APPA policy's `delta = {}`)
+    finance      -> integrity=trusted,   confidentiality=public    (no closer image exists — see "Where the mapping stops")
     task_tracker -> integrity=trusted,   confidentiality=public
     send_email   -> accepts_untrusted=False, max_allowed_confidentiality=public
 
@@ -49,21 +49,41 @@ requirement names the recipient: ``audience = { includes = ["$to"] }``
 resolves ``$to`` to the literal address at dispatch. That is a strictly richer
 question than a ceiling.
 
-The two agree today only because ``bench-corp/policies/appa.toml`` mints
-exactly one reader token, ``hr``, and never an address. No audience set can
-contain ``finance-lead@northwind.example``, so ``includes($to)`` degenerates
-into "is this trajectory still ``Public``?" — which is precisely
-``max_allowed_confidentiality=public``. The value-granular machinery is
-declared but not exercised, so the transcription lands.
+The **hr** row still transcribes exactly, because its audience is one symbolic
+token: ``exactly = ["hr"]`` admits no address, so ``includes($to)`` degenerates
+there into "is this trajectory still ``Public``?" — which is precisely
+``max_allowed_confidentiality=public``. Private-or-not is the whole question,
+and FIDES can ask it.
 
-Give any tool's ``delta`` a real recipient set and the transcription breaks
-irreparably. A trajectory carrying data readable by ``finance-lead@`` but not
-``all@`` has no image in an ordinal chain: ``public`` releases to both,
-``private`` and ``user_identity`` release to neither. **If that day comes, the
-divergence is the measurement, not a defect to repair.** #82 aligned the finance
-label because the two policies *could* match there and had drifted apart by
-accident; do not extend that reflex to a constraint FIDES cannot express, or
-re-aligning the labels will silently delete the result.
+The **finance** row no longer transcribes, and cannot. ``read_finance`` narrows
+the trajectory to a real reader set — ``{finance-lead@northwind.example,
+ap@northwind.example}`` — so the same invoice data reaches ``finance-lead@`` and
+is refused to ``all@``. That distinction has no image in an ordinal chain:
+``public`` releases to both recipients, ``private`` and ``user_identity``
+release to neither.
+
+``public`` is not a charitable pick — the benign task forces it. The invoice
+scenarios ask for a status mail to ``finance-lead@``, so the deployment intends
+finance data to leave by email; with ``send_email`` capped at
+``max_allowed_confidentiality=public``, labelling finance ``private`` blocks the
+*sanctioned* task, not the attack, and buys its 0% ASR by sending nothing at
+all. Any practitioner who needs that email to work is pushed to ``public`` — and
+thereby authorises every other recipient too. The coarseness demonstrates itself
+through FIDES's own configuration logic.
+
+That equivalence ends as soon as a scenario aims its attack at the *wrong
+recipient* rather than at content. There, ``private`` really would block the
+attack, at the price of the benign task, and choosing a single setting would
+mean choosing FIDES's failure mode for it. Run both settings as separate arms
+and report both rows: the chain has three elements, so exhaustion is available
+and beats advocacy.
+
+**That divergence is the measurement, not drift to repair.** #82 aligned the
+finance label because the two policies *could* match there and had come apart by
+accident. That reflex must not be extended here: re-labelling finance to chase
+parity would trade a result for a symmetry that the label model cannot actually
+support, and would silently delete the one place the bench separates a
+recipient-granular flow decision from a level comparison.
 """
 
 from __future__ import annotations
