@@ -1,6 +1,7 @@
 //! `corp-systems-mcp`: the mock-corporate-systems MCP server over stdio.
 //!
-//! Runs standalone or (usually) spawned as a subprocess by `corp-agent`.
+//! Runs standalone or (usually) spawned as a subprocess by one of the sibling
+//! demo agents (`corp-agent`, `corp-agent-fides`).
 //!
 //! ```sh
 //! corp-systems-mcp                       # data root: ./data next to the crate
@@ -12,7 +13,7 @@
 //! `println!` on stdout would corrupt the protocol framing.
 
 use clap::Parser;
-use corporate_agent_demo::{resolve_data_root, server::CorpSystems};
+use corp_systems::{resolve_data_root, server::CorpSystems};
 use rmcp::ServiceExt;
 use rmcp::transport::stdio;
 use std::path::PathBuf;

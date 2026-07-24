@@ -26,6 +26,7 @@ fi
 
 echo "· building corp-agent + corp-systems-mcp (model: $MODEL)…" >&2
 cargo build -q
+cargo build -q --manifest-path "$CRATE_DIR/../corp-systems/Cargo.toml"
 
 # run_agent <prompt> [extra corp-agent flags...]
 run_agent() {

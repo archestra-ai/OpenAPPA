@@ -23,7 +23,7 @@ use appa_sdk::{CallSession, Config, SdkOptions};
 use clap::Parser;
 use corporate_agent_demo::appa_hook::{AppaHook, RemedyTool};
 use corporate_agent_demo::mcp::{self, BODY_CAP_BYTES, mcp_tool_schema, resolve_policy, resolve_server_bin};
-use corporate_agent_demo::{clean_key, load_dotenv, resolve_data_root};
+use corporate_agent_demo::{clean_key, load_dotenv, resolve_data_root, resolve_sink_root};
 use rig::client::CompletionClient;
 use rig::completion::Prompt;
 use rig::message::Message;
@@ -57,17 +57,19 @@ struct Args {
     #[arg(long, default_value_t = 12)]
     max_turns: usize,
 
-    /// Path to the `corp-systems-mcp` binary. Defaults to a sibling of this executable.
+    /// Path to the `corp-systems-mcp` binary. Defaults to `CORP_SYSTEMS_BIN`,
+    /// else the sibling `corp-systems` crate's debug build (built on demand).
     #[arg(long)]
     server_bin: Option<PathBuf>,
 
-    /// Data root passed through to the spawned server.
+    /// Corpus root passed through to the spawned server. Defaults to
+    /// `CORP_DATA_ROOT`, else the sibling `corp-systems` crate's `data/`.
     #[arg(long)]
     data_root: Option<PathBuf>,
 
     /// Where the spawned server's `send_email` writes its `email/` folder.
-    /// Defaults to `CORP_SINK_ROOT`, else the data root.
-    #[arg(long, env = "CORP_SINK_ROOT")]
+    /// Defaults to `CORP_SINK_ROOT`, else this crate's `data/`.
+    #[arg(long)]
     sink_root: Option<PathBuf>,
 
     /// The APPA policy file. Defaults to $APPA_DEMO_POLICY, else the crate's appa-policy.toml.
@@ -108,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
 
     let server_bin = resolve_server_bin(args.server_bin)?;
     let data_root = resolve_data_root(args.data_root);
-    let sink_root = args.sink_root.unwrap_or_else(|| data_root.clone());
+    let sink_root = resolve_sink_root(args.sink_root);
     let server = mcp::spawn_corp_systems(&server_bin, &data_root, &sink_root).await?;
 
     let mcp_tools = server.peer().list_all_tools().await.context("listing MCP tools")?;

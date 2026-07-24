@@ -35,19 +35,37 @@ pub async fn spawn_corp_systems(
         .context("MCP handshake with corp-systems-mcp failed")
 }
 
-/// Default the server binary to a sibling of the current executable.
+/// Resolve the `corp-systems-mcp` binary: an explicit override, else
+/// `CORP_SYSTEMS_BIN`, else the sibling `corp-systems` crate's debug build —
+/// built on demand via `cargo build`, so a fresh checkout just works.
 pub fn resolve_server_bin(explicit: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     if let Some(path) = explicit {
         return Ok(path);
     }
-    let exe = std::env::current_exe().context("locating the current executable")?;
-    let dir = exe.parent().context("current executable has no parent directory")?;
+    if let Ok(env) = std::env::var("CORP_SYSTEMS_BIN")
+        && !env.trim().is_empty()
+    {
+        return Ok(PathBuf::from(env));
+    }
+    let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../corp-systems");
     let name = if cfg!(windows) {
         "corp-systems-mcp.exe"
     } else {
         "corp-systems-mcp"
     };
-    Ok(dir.join(name))
+    let bin = crate_dir.join("target/debug").join(name);
+    let manifest = crate_dir.join("Cargo.toml");
+    let status = std::process::Command::new("cargo")
+        .args(["build", "-q", "--manifest-path"])
+        .arg(&manifest)
+        .status()
+        .with_context(|| format!("running `cargo build` for {}", manifest.display()))?;
+    anyhow::ensure!(
+        status.success() && bin.is_file(),
+        "building corp-systems-mcp failed — build it manually: cargo build --manifest-path {}",
+        manifest.display()
+    );
+    Ok(bin)
 }
 
 /// Resolve the policy file: an explicit override, else `APPA_DEMO_POLICY`, else the guarded

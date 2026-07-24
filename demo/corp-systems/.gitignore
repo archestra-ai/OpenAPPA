@@ -1,0 +1,8 @@
+/target
+
+# A standalone server run without --sink-root drops emails under the corpus;
+# keep the corpus clean in git regardless.
+/data/email/
+
+# macOS
+.DS_Store

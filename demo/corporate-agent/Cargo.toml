@@ -19,31 +19,17 @@ appa-engine = { path = "../../appa-engine" }
 # `rig` is the dep-rename of `rig-core`; it owns the agent loop and mediates tool
 # calls through the APPA hook. Pinned to 0.40 with `rmcp`.
 rig = { package = "rig-core", version = "0.40", features = ["rmcp"] }
-# rmcp 1.8: `transport-io` is the stdio server; `transport-child-process` is the
-# agent spawning the server as a subprocess.
-rmcp = { version = "1.8", features = [
-    "server",
-    "macros",
-    "transport-io",
-    "client",
-    "transport-child-process",
-] }
+# rmcp 1.8 client side only: the server lives in the sibling `corp-systems`
+# crate; `transport-child-process` is the agent spawning it as a subprocess.
+rmcp = { version = "1.8", features = ["client", "transport-child-process"] }
 # Explicit features (not left to unification): the loop and tests need process
 # spawning, sockets, and timeouts.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "net", "io-util", "time"] }
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Must stay 1.x to match rmcp 1.8's `#[tool]` schema derive.
-schemars = "1"
 anyhow = "1"
 thiserror = "2"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-[[bin]]
-name = "corp-systems-mcp"
-path = "src/bin/corp_systems.rs"
 
 [[bin]]
 name = "corp-agent"
