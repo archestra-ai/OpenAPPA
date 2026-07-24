@@ -166,8 +166,11 @@ pub fn block_feedback(
         // A pure narrowing. Acceptance is informed — it executes only in a round after this offer
         // ("in your next response") — and the surface's branch fact rides along.
         match surface {
+            // Fork leads: it is the reversible choice. Accepting folds the restriction into this
+            // trajectory for good — no authority widens an audience, and trust never rises — so
+            // an acceptance taken for one step can strand every later step that needed the label.
             FeedbackSurface::Root { can_fork: true } => {
-                "narrowing: this call restricts the trajectory label; accept it with execute_remedy_plan in your next response, or fork the restricting work into a child session to keep this session's label"
+                "narrowing: this call restricts the trajectory label. Fork the restricting work into a child session to keep this session's label, or, if every later step can live with the restriction, accept it with execute_remedy_plan in your next response — acceptance is permanent for this session"
             }
             FeedbackSurface::Root { can_fork: false } => {
                 "narrowing: this call restricts the trajectory label; accept it with execute_remedy_plan in your next response"

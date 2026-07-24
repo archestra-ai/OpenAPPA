@@ -30,12 +30,18 @@ from .scenario import Scenario
 from .agents import Agent, command_for
 
 # Best-effort stderr diagnostics (never score inputs): the APPA hook's
-# mediation log lines for blocks, the FIDES audit log's BLOCKED lines, and
-# executed remedies on the APPA side. Anchored to the exact log wording
-# (pinned by a test against literal copies of the real lines): a looser
-# remedy pattern would also count the demo's startup banner and every
-# block-feedback line, which both mention execute_remedy_plan.
-_APPA_BLOCK = re.compile(r"^appa:.*\bblock", re.IGNORECASE | re.MULTILINE)
+# mediation log lines, the FIDES audit log's BLOCKED lines, and executed
+# remedies on the APPA side. Anchored to the exact log wording (pinned by a
+# test against literal copies of the real lines): a looser remedy pattern
+# would also count the demo's startup banner and every block-feedback line,
+# which both mention execute_remedy_plan.
+#
+# The APPA count is *policy events*, not blocks. `Fact::BlockFeedback` carries
+# no semantic kind — it is the one channel for refusals, acknowledgements
+# (a void return's "no result returned to the parent") and join notifications
+# alike — so the demo prints them identically and no regex can separate them.
+# Counting them together is honest; calling the total "blocked" was not.
+_APPA_POLICY_EVENT = re.compile(r"^appa:.*\bblock", re.IGNORECASE | re.MULTILINE)
 _FIDES_BLOCK = re.compile(r"\bBLOCKED\b")
 _REMEDY = re.compile(r"^appa: remedy authorized\b", re.MULTILINE)
 
@@ -54,7 +60,8 @@ class EpisodeResult:
     error: str | None  # "exit <code>" | "timeout" | None
     duration_s: float
     emails: int
-    blocked_lines: int
+    answer_present: bool  # the agent printed a final answer (FIDES leaves it empty when blocked)
+    policy_events: int
     remedy_calls: int
     checks: list[CheckResult]
 
@@ -147,7 +154,8 @@ def run_episode(
         error=error,
         duration_s=round(duration, 2),
         emails=len(emails),
-        blocked_lines=_count(_APPA_BLOCK, stderr_text) + _count(_FIDES_BLOCK, stderr_text),
+        answer_present=bool(answer.strip()),
+        policy_events=_count(_APPA_POLICY_EVENT, stderr_text) + _count(_FIDES_BLOCK, stderr_text),
         remedy_calls=_count(_REMEDY, stderr_text),
         checks=results,
     )

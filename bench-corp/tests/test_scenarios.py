@@ -149,3 +149,5 @@ def test_email_dir_in_data_refused(tmp_path: Path) -> None:
     root = _write_scenario(tmp_path / "bad-email", _MINIMAL, ("hr", "email"))
     with pytest.raises(ScenarioError, match="sink is per-episode"):
         load_scenario(root)
+
+

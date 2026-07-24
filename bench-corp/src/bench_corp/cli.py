@@ -16,7 +16,7 @@ from pathlib import Path
 from joblib import Parallel, delayed
 
 from .agents import DEFAULT_MODEL, REPO_ROOT, AGENTS, Agent, build_binaries
-from .report import print_table, summarize, write_summary
+from .report import print_scenario_table, print_table, summarize, write_summary
 from .runner import EpisodeResult, run_episode
 from .scenario import Scenario, ScenarioError, discover_scenarios
 
@@ -164,6 +164,7 @@ def main(argv: list[str] | None = None) -> int:
     write_summary(run_dir, summaries, results)
     print(f"\nrun {run_id} — model {args.model}, {args.reps} rep(s)\n")
     print_table(summaries)
+    print_scenario_table(results)
     print(f"\nfull records: {run_dir}")
     return 0
 
