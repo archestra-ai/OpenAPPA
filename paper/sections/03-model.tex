@@ -1,0 +1,95 @@
+\section{The Model}\label{sec:model}
+
+\paragraph{Threat model.}
+The model agent is assumed to be benign but susceptible to confusion; malicious influence enters strictly through untrusted inputs or unvetted content~\cite{greshake2023not}. The policy engine, host configuration, and external authorities constitute the trusted computing base. We assume a durable, append-only event log, ensuring that policy checks evaluate against a consistent history. Addressing covert channels within model outputs is outside our scope~\cite{lampson1973note}.
+
+\paragraph{Label state.}
+The label state is $S = \powerset(U) \times T$, where $U$ is a finite set of opaque principal (reader) identities and $T$ is a finite trust chain. Audiences are specified as concrete static reader sets, with call placeholders resolved by direct substitution. Deployments can customize the trust chain $T$ for their environment. Because $S$ is a finite product lattice under component-wise meet ($\cap, \min$) and join ($\cup, \max$)~\cite{denning1976lattice,birkhoff1967lattice}, policy composition rules are associative, commutative, and monotonic by construction—guaranteeing deterministic state aggregation without custom proof obligations.
+
+\paragraph{Checked actions.}
+The checked monoid models policy actions on $S$, equipped with action composition and identity. In the primary model, non-identity actions are strictly restrictive meets:
+\[
+  a_i = (\cap A_i, \min r_i).
+\]
+Rulings resolve execution policy requirements per call without modifying the label state directly. Because label aggregation ($\fold$) composes meets, it is commutative and monotone.
+
+\begin{proposition}[Collapse]\label{prop:collapse}
+In the primary model, the fold collapses to a running meet consisting of a single reader set intersection and a minimum trust level, eliminating the need to re-evaluate trajectory history.
+\end{proposition}
+Proof in Appendix~\ref{app:proofs}.
+
+\begin{proposition}[Monotone descent and settlement]\label{prop:descent}
+In the primary model, every label update is a meet operation. Because both underlying sets are finite, the label state descends monotonically under the partial order and stabilizes after finitely many strict descents.
+\end{proposition}
+Note that label stabilization reflects bounded permission narrowing rather than execution termination, as identity actions may continue indefinitely. Proof in Appendix~\ref{app:proofs}.
+
+\paragraph{Branch state.}
+Execution trajectories form a directed \emph{trajectory tree} rooted at the primary parent trajectory. Labels are trajectory-local to each branch node, whereas the event log is globally shared. A \texttt{fork(p)} operation creates a child trajectory with initial label $L_c := L_p$ and a pre-declared exit contract. Subsequent child actions fold exclusively into $L_c$. Parent and child nevertheless append to the same serialized event log. Prior to an explicit \texttt{submit\_result(v)} merge, no child context or result values enter the parent trajectory.
+
+\begin{proposition}[Parent preservation]\label{prop:preservation}
+For every child trace beginning at a fork, $L_c \le L_p^{\mathrm{fork}}$, and every child action leaves the parent's label unchanged. Trajectory abandonment therefore preserves the parent state exactly. A merge computes $L_p' = L_p \meet \lab(v)$, which cannot widen the parent label and preserves it exactly if and only if $L_p \le \lab(v)$.
+\end{proposition}
+\begin{definition}[Taint-confining branch]
+A branch is taint-confining when it is abandoned or exits under the adequacy relation $L_p \le \lab(v)$.
+\end{definition}
+Returning an un-sanitized restrictive raw value maintains safety but propagates restrictions back to the parent trajectory, requiring re-evaluation against the pre-read acquisition policy. Proof in Appendix~\ref{app:proofs} follows from child fold locality and meet laws.
+
+\paragraph{The log monoid.}
+The log is modeled as the free monoid over events under concatenation~\cite{pierce2002types}, where events are appended during execution lifecycle phases without separate approval phases. Events fall into two primary categories:
+\begin{itemize}
+  \item \textbf{Dispatch lifecycle facts} record full audit information about tool execution attempts and outcomes, including opened dispatches, failures ($\mathrm{CloseFailure}$), and indeterminate outcomes ($\mathrm{CloseIndeterminate}$).
+  \item \textbf{Governance events} record rulings, associated dispatches, trajectory boundaries (turn ends, forks, merges), narrowing acceptances, sanitizer applications, and label casts.
+\end{itemize}
+
+History predicates (\texttt{prior} and \texttt{no\_prior}) and Remedy planning evaluate over a narrower projection rather than raw facts: the \emph{committed-effect projection} $\mathcal{E}(\ell)$, a tree-wide projection over the shared event log incorporating a tool contract's \texttt{emits} sequence $K$ only when a dispatch closes with reported success ($\mathrm{CloseSuccess}(K)$). Formally:
+\[
+  \mathcal{E}(\ell \cdot \mathrm{CloseSuccess}(K)) = \mathcal{E}(\ell) \uplus K,
+\]
+whereas
+\[
+  \mathcal{E}(\ell \cdot \mathrm{CloseFailure}) = \mathcal{E}(\ell), \quad \mathcal{E}(\ell \cdot \mathrm{CloseIndeterminate}) = \mathcal{E}(\ell).
+\]
+History predicates are defined over $\mathcal{E}$:
+\[
+  \mathrm{prior}(k, \ell) \iff k \in \mathcal{E}(\ell), \qquad \mathrm{no\_prior}(k, \ell) \iff k \notin \mathcal{E}(\ell).
+\]
+Table~\ref{tab:dispatch_outcomes} summarizes these outcome semantics. Under reported-success semantics, $\mathrm{prior}(k)$ proves a reported-success dispatch committed effect $k$, while $\mathrm{no\_prior}(k)$ proves only the absence of a committed effect—not the absence of un-committed attempts.
+
+\begin{table}[t]
+\centering
+\caption{Outcome semantics for the committed-effect projection $\mathcal{E}$.}
+\label{tab:dispatch_outcomes}
+\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\columnwidth}{@{}l *{3}{>{\centering\arraybackslash}X} @{}}
+\toprule
+\textbf{Dispatch outcome} & \makecell[c]{\textbf{Committed}\\\textbf{to $\mathcal{E}$?}} & \makecell[c]{\textbf{Establishes}\\\textbf{$\mathrm{prior}(k)$?}} & \makecell[c]{\textbf{Invalidates}\\\textbf{$\mathrm{no\_prior}(k)$?}} \\
+\midrule
+Success with $k$ & $\checkmark$ & $\checkmark$ & $\checkmark$ \\
+Failure          & $\times$     & $\times$     & $\times$     \\
+Indeterminate    & $\times$     & $\times$     & $\times$     \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The engine queries the log solely to evaluate history predicates over $\mathcal{E}$, verify ruling validity, and perform audits. Cached projections, such as tracking observed event types, correspond to monoid homomorphisms~\cite{pierce2002types}. Separate ``effects dimensions'' used in prior architectures are represented directly as log projections rather than label components: an effect tracks execution history rather than data confidentiality and integrity. Unifying events and labels into a single monoid product would blur essential semantic distinctions between per-value policy bounds and per-run execution logs.
+
+\paragraph{Integrating external policy logic through log views.}
+Custom execution policies and numerical thresholds are implemented via log projections coupled with external authority resolvers. For example, cumulative metrics such as financial spend limits (\texttt{finance.spend}) are computed by log views that determine whether an action requires human authorization. Recording these operations as named log events avoids introducing quantitative state into the label algebra, keeping scalar magnitudes outside the lattice model.
+
+\paragraph{Contracts.}
+A tool contract specifies policy declarations for both commitment mechanisms: a \texttt{delta} action declaring the raw output's Label contribution, and an \texttt{emits} sequence committed to the log projection $\mathcal{E}$ upon reported dispatch success. Prospective evaluation checks the contribution expected to be admitted; the trajectory folds the validated Label of the raw, sanitized, or cast-resolved value that is actually admitted, while \texttt{emits} enters $\mathcal{E}$ on reported dispatch success whether or not a value is admitted. Tool contracts specify \texttt{requires} clauses:
+\begin{itemize}
+  \item minimum trust floors,
+  \item audience cover constraints $\readers(\fold) \supseteq \mathrm{recipients}$,
+  \item source context bounds ($\subseteq C$),
+  \item history predicates (persistent-negative \texttt{no\_prior} and persistent-positive \texttt{prior}), and
+  \item call-scoped attention requirements.
+\end{itemize}
+Unlike historical event constraints, attention demands cannot be satisfied by past actions; they require an explicit ruling from an authorizing component during atomic plan execution. Routing \texttt{tags} convey no algebraic weight and serve solely to route requests to appropriate policy authorities (\S\ref{sec:rulings}).
+
+Dynamic resolvers and variable placeholders belong to the trusted computing base. Surface conventions, such as automatic source deltas derived from access control lists, simplify policy specification without altering underlying contract semantics.
+
+\paragraph{Unknown.}
+Unknown values are not represented as elements within the lattice carrier; there is no ordering such as $\mathit{trusted} < \mathit{unknown} < \mathit{suspicious}$. Unresolved attributes remain outside the label algebra, preserving total algebraic composition and monoid laws while policy checks detect missing information. Reclassifying unknown inputs requires explicit, audited cast events. A cast is defined either as a static constant or via a dynamic resolver restricted to a bounded set of admissible target labels. Static casts establish a fixed default policy, while target ceilings prevent dynamic classifiers from arbitrarily elevating un-trusted data. This treatment aligns with gradual typing interpretations of unknown values \cite{disney2011gradual,fennell2013gradual}, directly mirroring how static type checkers manage partially annotated Python or TypeScript codebases: unannotated inputs default to an unclassified \texttt{Unknown} boundary rather than an assumed default position in the type hierarchy, requiring explicit casts or assertions to enter the security algebra.
+

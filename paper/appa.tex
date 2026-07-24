@@ -1,0 +1,112 @@
+%% AISec 2026 (co-located with ACM CCS) submission draft.
+%% Format: ACM sigconf, anonymized, <=10 pages excluding bibliography and
+%% well-marked appendices (<=2 extra pages; 12 pages total max).
+\documentclass[sigconf,anonymous,review]{acmart}
+
+%% Workshop copyright/DOI placeholders -- fill at camera-ready.
+\setcopyright{acmlicensed}
+\copyrightyear{2026}
+\acmYear{2026}
+\acmConference[AISec '26]{19th ACM Workshop on Artificial Intelligence and
+  Security}{November 2026}{The Hague, Netherlands}
+\acmBooktitle{Proceedings of the 19th ACM Workshop on Artificial Intelligence
+  and Security (AISec '26)}
+\acmPrice{}
+\acmDOI{XXXXXXX.XXXXXXX}
+\acmISBN{978-x-xxxx-xxxx-x/YY/MM}
+
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\let\Bbbk\undefined
+\usepackage{amssymb}
+\usepackage{makecell}
+
+%% ---- Draft-note macros: TODOs, FIXMEs, and decision stubs ----
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{[TODO:} #1\textbf{]}}}
+\newcommand{\fixme}[1]{\textcolor{orange}{\textbf{[FIXME:} #1\textbf{]}}}
+\newcommand{\stub}[1]{\textcolor{purple}{\textbf{[STUB:} #1\textbf{]}}}
+
+%% ---- Notation macros ----
+\newcommand{\appa}{APPA}
+\newcommand{\meet}{\ensuremath{\wedge}}
+\newcommand{\fold}{\ensuremath{\mathit{fold}}}
+\newcommand{\readers}{\ensuremath{\mathit{readers}}}
+\newcommand{\lab}{\ensuremath{\mathit{label}}}
+\newcommand{\LabelState}{S}
+\newcommand{\powerset}{\mathcal{P}}
+
+%% Theorem environments (acmart provides theorem/definition styles).
+%% acmart already defines theorem, proposition, definition, lemma, corollary.
+
+\begin{document}
+
+\title[APPA]{Agentic Permissions Policy Algebra for Taint Confinement in LLM Agents}
+%% Alternate titles (skeleton): "APPA: Branching for Taint Confinement in LLM
+%% Agents" / "Fork, Inspect, and Safely Return".
+
+%% Anonymized for submission (class option `anonymous').
+\author{Anonymous Author(s)}
+\affiliation{%
+  \institution{Anonymous Institution}
+  \city{}
+  \country{}
+}
+
+\renewcommand{\shortauthors}{Anon.}
+
+\begin{abstract}
+\input{sections/00-abstract}
+\end{abstract}
+
+\begin{CCSXML}
+<ccs2012>
+ <concept>
+  <concept_id>10002978.10003014</concept_id>
+  <concept_desc>Security and privacy~Network security</concept_desc>
+  <concept_significance>100</concept_significance>
+ </concept>
+ <concept>
+  <concept_id>10002978.10002991</concept_id>
+  <concept_desc>Security and privacy~Information flow control</concept_desc>
+  <concept_significance>500</concept_significance>
+ </concept>
+ <concept>
+  <concept_id>10010147.10010178</concept_id>
+  <concept_desc>Computing methodologies~Artificial intelligence</concept_desc>
+  <concept_significance>300</concept_significance>
+ </concept>
+</ccs2012>
+\end{CCSXML}
+\ccsdesc[500]{Security and privacy~Information flow control}
+\ccsdesc[300]{Computing methodologies~Artificial intelligence}
+%% \todo in CCS concepts: regenerate proper CCSXML at https://dl.acm.org/ccs
+
+\keywords{LLM agents, prompt injection, information flow control, taint
+  tracking, declassification, confused deputy}
+
+\maketitle
+
+\input{sections/01-intro}
+\input{sections/02-related}
+\input{sections/03-model}
+\input{sections/04-enforcement}
+\input{sections/05-rulings}
+\input{sections/06-branching}
+\input{sections/08-evaluation}
+\input{sections/09-limitations}
+\input{sections/10-conclusion}
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{appa}
+
+\appendix
+\input{sections/appendix}
+
+%% Required by AISec'26 CfP: explicit Generative AI use declaration, placed
+%% after references/appendices; does not count toward the page limit.
+\section*{Use of Generative AI}
+GPT-5.6 Sol and Claude Fable 5 were used in development and experiments, Gemini 3.6 Flash was used to edit the paper.
+
+\end{document}

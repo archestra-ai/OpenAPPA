@@ -1,0 +1,51 @@
+\section{Introduction}\label{sec:intro}
+
+Delegating tasks to an LLM agent introduces a computational variant of the principal--agent problem~\cite{jensen1976theory,ross1973economic}: the agent acts with the delegated authority of its principal while consuming data and instructions across shared channels. Whenever an agent processes sensitive context alongside unvetted tool outputs, external inputs, or untrusted data, structural risks inevitably arise. Unauthorized data exfiltration, unintended tool calls, and policy violations can result from adversarial prompt injection---where attacker-controlled text hijacks control flow~\cite{greshake2023not}---but also from model hallucinations, ambiguous instructions, or miscalibrated agent reasoning~\cite{ji2023survey}. In all these cases, exposing a capable agent to private data, external sinks, and unvetted content turns read access into a vector for exfiltration and policy breaches.
+
+Existing defenses generally fall into two main paradigms. On one hand, imperative
+guardrails---such as hardcoded conditional logic (\texttt{if} statements), prompt-injection classifiers, and output hygiene rules~\cite{inan2023llama,nvidia2023nemoguardrails}---judge
+\emph{content} or enforce ad-hoc per-tool conditions. Consequently, imperative guardrails fail to scale: the required checks grow exponentially with the number of tools $N$ and their properties, making ad-hoc conditional logic intractable and fragile. Moreover, they are easily bypassed by paraphrasing, offer no guarantees against non-adversarial agent errors, and treat prompt injection as an isolated bug rather than a symptom of mixed-confidentiality processing~\cite{sabelfeld2003language}. On the other hand, static structural restrictions---such as fixed allowlists, rigid role boundaries, or mandatory human-in-the-loop approvals---judge \emph{structure}. However, when enforced coarsely, \emph{structural restrictions} tend to be overeager, degrading agent utility~\cite{Liu2026SafeHarbor,Wang2025AgentSpec,Wei2026From}.
+
+Agent information-flow control (IFC) offers a third approach. CaMeL separates control and data flow~\cite{camel2025}; \textsc{Fides} propagates confidentiality and integrity labels across messages, actions, arguments, and results to check consequential calls against deterministic policies~\cite{fides}. However, existing agent IFC frameworks face a severe usability bottleneck. Architectural frameworks like CaMeL require fully reworking the execution harness around rigid control-data pipelines. Dynamic label-tracking systems like \textsc{Fides} prevent exfiltration by revoking access once an agent taints its context---effectively destroying the agent's usability for the remainder of its task. \appa{} (\textbf{Agentic Permissions Policy Algebra}) addresses this limitation through \emph{branching for taint confinement}. Instead of allowing a restricted read to taint the primary agent context and lock out subsequent tools, \appa{} isolates sensitive computations within temporary, disposable child trajectories. The child branch operates under narrowed permissions to inspect restricted data, while the primary trajectory remains completely untainted, retaining full operational authority and receiving only sanitized outputs upon merge.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/VisAbstract.png}
+  \caption{\appa{} branching architecture for taint confinement. When inspecting untrusted or restricted data, the host forks a speculative child branch with an isolated transcript and descended Label. Unsanitized state returns to the parent trajectory are strictly blocked, while sanitized derivatives safely merge. All execution steps project in real time to a single append-only event log.}
+  \label{fig:concept}
+\end{figure}
+
+Specifically, \appa{} operationalizes taint confinement through pre-dispatch interception and host-managed context branching (Figure~\ref{fig:concept}). Rather than waiting for sensitive data to reach an external sink or permanently degrading the primary planner context upon a restrictive read, \appa{} intercepts prospective label descents prior to tool execution. When an agent needs to acquire or inspect restrictive data, the host can establish a temporary, disposable child trajectory that inherits the parent's current Label but begins with a branch-local model transcript, carrying the permission narrowing locally. Parent messages and tool results are not copied automatically; the host explicitly supplies task inputs to the child branch. The child branch inspects the data and executes intermediate reasoning or tool calls under its descended label, while the parent trajectory remains unaffected at its original permission level. If the branch terminates or is abandoned, the parent process retains its broader access rights without context taint.
+
+Data acquisition thus becomes an explicit, manageable policy event. When a prospective tool call is blocked or would narrow trajectory permissions, \appa{} distinguishes between executable in-session remedy plans, advisory recommendations, refusal, and host-level orchestration:
+\begin{itemize}
+  \item executable in-session plans: \texttt{Authorize} (issuing an atomic policy ruling) and \texttt{Accept} (accepting the Label restriction within the main trajectory);
+  \item separately checked \texttt{Redispatch} recommendations proposing tool dispatches that satisfy missing prerequisites or narrow restrictive caps;
+  \item ordinary refusal, where the agent declines the read by not reproposing the call; and
+  \item host-managed branching, an orchestration option outside the blocked call's executable Remedy plan.
+\end{itemize}
+Rather than forcing developers to scatter imperative guardrails throughout agent code, \appa{} provides a structured framework that embeds custom domain logic via modular authority handlers and sanitizer implementations. When discretionary release or external approval is required, an authorized authority renders the canonical request and executes it via an atomic, single-call ruling, eliminating reusable grant tokens and preventing replay attacks while preserving robust declassification guarantees~\cite{zdancewic2001robust}. Crucially, all execution branches append real-world side-effects and governance events to a single, globally shared log in real time, ensuring that context isolation never conceals executed physical actions.
+
+Contributions, in order of importance:
+\begin{enumerate}
+  \item \textbf{Host-managed branching for taint confinement:} applying
+    label-seeded context branching to dynamic agent IFC, combining transcript
+    isolation with trajectory-local Label folding, checked child returns,
+    direct-parent merge, and tree-wide committed-effect tracking
+    (\S\ref{sec:branching}).
+  \item \textbf{Prospective acquisition enforcement:} a pre-read check that
+    intercepts prospective Label descents before restrictive data enters a
+    trajectory, exposing executable in-session plans (\texttt{Authorize},
+    \texttt{Accept}), separately checked \texttt{Redispatch} recommendations, and
+    ordinary refusal, while leaving branching as a host-managed
+    orchestration option (\S\ref{sec:enforcement}).
+  \item A two-monoid model supporting the construction---label actions
+    checked, events recorded---with policy as pure data and proofs of monotone
+    descent, parent preservation, and merge confinement (\S\ref{sec:model}).
+  \item Atomic, single-call rulings over engine-rendered requests, used for
+    bounded branch exits and other exceptional dispatches without granting
+    persistent privileges or widening labels (\S\ref{sec:rulings}).
+  \item An evaluation on
+    AgentDojo~\cite{debenedettiAgentDojoDynamicEnvironment2024} and a direct comparison with \textsc{Fides} (\S\ref{sec:evaluation}).
+    \todo{soften/sharpen once numbers exist.}
+\end{enumerate}

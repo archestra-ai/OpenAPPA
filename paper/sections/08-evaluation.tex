@@ -1,0 +1,48 @@
+\section{Evaluation}\label{sec:evaluation}
+
+\stub{Evaluation is designed but not yet run; this section states the protocol and metrics. Numbers TODO.}
+
+\paragraph{Primary question.}
+When a host explicitly establishes a child before restrictive work, do Label seeding, trajectory-local enforcement, and checked return preserve the parent Label compared with accepting the same narrowing in the parent? The evaluation must measure this directly; a generic defended-versus-undefended benchmark does not isolate the paper's core contribution~\cite{debenedettiAgentDojoDynamicEnvironment2024}.
+
+\paragraph{Paired trajectory benchmark.}
+We will construct AgentDojo episodes~\cite{debenedettiAgentDojoDynamicEnvironment2024} in which an agent:
+\begin{enumerate}
+  \item performs a task requiring inspection of restrictive or attacker-controlled data, and
+  \item subsequently executes an independent benign action whose sink would be disabled by the descended label.
+\end{enumerate}
+Task variants will cover a first task requiring no return value, a schema-bounded derivative, and a return value that cannot be safely derived. We will report second-task completion rates, strict descents of the \emph{parent} label, preservation of the parent's ruling-free release frontier, and branch outcomes (\texttt{abandon}, bounded return, or rejected vs. accepted raw \texttt{merge}).
+
+\paragraph{Security question.}
+We will execute AgentDojo injection tasks where the attacker controls child-visible content and attempts:
+\begin{enumerate}
+  \item direct child egress,
+  \item raw-data return through \texttt{submit\_result},
+  \item schema-conforming semantic data exfiltration, and
+  \item history erasure via abandonment.
+\end{enumerate}
+We will report attack success rates and the specific structural check that blocked each attempt. Branching is designed to increase utility without weakening sink enforcement; schema-only exits are expected by design to fail against semantic data exfiltration unless supported by a trusted exit assertion~\cite{sabelfeld2009declassification}.
+
+\paragraph{Baselines and ablations.}
+We will compare:
+\begin{itemize}
+  \item an undefended agent;
+  \item sink-only IFC that unconditionally accepts acquisition taints;
+  \item hard decline of restrictive reads;
+  \item \textsc{Fides}'s basic and selective-hiding planners~\cite{fides};
+  \item APPA with branching disabled; and
+  \item full APPA.
+\end{itemize}
+An abandon-only bounded-exit ablation will isolate the utility of execution isolation from that of the trusted derivative mechanism. We will not evaluate copied or discardable branch logs as functional ablations because they violate the threat model; these configurations will be evaluated strictly as negative invariant test cases.
+
+\paragraph{Main metrics.}
+Alongside standard task utility and injection attack success rates, we will measure parent-label descents avoided, post-acquisition benign actions completed, branches created, abandoned, and merged, exit rejections, authority interventions, and token and latency overhead per branch. Both security and utility metrics must be reported, as preventing label creep represents a primary utility benefit under strict enforcement. All evaluated branches represent explicit host-created child sessions. The evaluation protocol will record the child prompt or task handoff used in each branch, attributing token and latency overhead directly to explicit child setup and task initialization.
+
+\paragraph{Case study.}
+We will evaluate the CRM/invoice scenario from \S\ref{sec:branching} end-to-end using the engine implementation and publish its policy contracts, parent/child label traces, shared event log, injected payload, exit assertion, and post-merge benign execution trace. The case study will additionally include failure and timeout traces showing that while the append-only log records all audit outcomes, the committed-effect projection $\mathcal{E}$ remains unchanged.
+
+\paragraph{Planner completeness evaluation.}
+Evaluation of planner completeness will compare the production search with an independent reference reachability closure over the implemented subset (atomic \texttt{Authorize}/\texttt{Accept} plans and curative \texttt{Redispatch} transitions).
+
+\paragraph{Secondary study.}
+We will annotate $k$ risky tools, classify all remaining tools as \texttt{Unknown}, and perform a parameter sweep over the cast policy space. This study remains secondary to the branch evaluation: incremental tool annotation provides supporting machinery rather than the core contribution.
