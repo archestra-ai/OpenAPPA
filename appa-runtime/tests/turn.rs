@@ -61,6 +61,42 @@ fn facts(mediator: &Mediator, tenant: &TenantId, session: &TrajectoryId) -> Vec<
     mediator.snapshot(tenant, session).expect("snapshot").0
 }
 
+fn offered_plan(
+    mediator: &Mediator,
+    tenant: &TenantId,
+    session: &TrajectoryId,
+    call_id: &str,
+    description: &str,
+) -> String {
+    let content = facts(mediator, tenant, session)
+        .iter()
+        .rev()
+        .find_map(|fact| match fact {
+            Fact::BlockFeedback {
+                call_id: id, content, ..
+            } if id.as_str() == call_id => Some(content.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{call_id} has no block feedback"));
+    let at = content
+        .find(description)
+        .unwrap_or_else(|| panic!("no plan matching {description:?} in: {content}"));
+    let head = &content[..at];
+    let open = head
+        .rfind("\"remedy-")
+        .unwrap_or_else(|| panic!("no quoted handle precedes {description:?} in: {content}"));
+    let rest = &head[open + 1..];
+    let close = rest.find('"').expect("the handle's closing quote");
+    rest[..close].to_string()
+}
+
+/// `execute_remedy_plan(plan_id)` arguments for a handle resolved by [`offered_plan`].
+fn remedy_args(handle: &str) -> String {
+    format!(r#"{{"plan_id":"{handle}"}}"#)
+}
+
+const RAW_ACCEPT: &str = "accept the narrowing and return the result raw";
+
 fn tool_values(log: &[Fact]) -> Vec<(&str, &appa_engine::label::Label)> {
     log.iter()
         .filter_map(|fact| match fact {
@@ -539,6 +575,7 @@ constant = { trust = "suspicious" }
     );
 }
 
+/// Facts carrying the named committed effect — the checkpoint or a close, wherever it landed.
 fn effect_carriers(log: &[Fact], kind: &str) -> usize {
     log.iter()
         .filter(|fact| match fact {
@@ -554,6 +591,9 @@ fn effect_carriers(log: &[Fact], kind: &str) -> usize {
 
 #[tokio::test]
 async fn a_pending_cast_success_commits_effects_before_its_offer_resolves() {
+    // The external effect happened the moment the tool succeeded; the success checkpoint commits
+    // it immediately, so a later call's no_prior(read) in the SAME round sees it — the raw body
+    // stays confined behind the offer. Acceptance later folds the value without a second effect.
     let mediated = mediator(
         r#"
 version = 1
@@ -593,8 +633,10 @@ constant = { trust = "suspicious" }
         Step::Continue
     ));
     let log = facts(&mediated, &tenant, &session);
+    // The checkpoint committed the effect while the dispatch stays open and the body confined...
     assert_eq!(effect_carriers(&log, "read"), 1);
     assert!(tool_values(&log).is_empty());
+    // ...so the same-round audit call failed its no_prior(read) and never dispatched.
     assert_eq!(
         log.iter()
             .filter(|fact| matches!(fact, Fact::DispatchOpened { .. }))
@@ -620,6 +662,7 @@ constant = { trust = "suspicious" }
         tool_values(&log).iter().map(|(body, _)| *body).collect::<Vec<_>>(),
         ["mail body"]
     );
+    // The close contributed no duplicate: the one effect carrier is still the checkpoint.
     assert_eq!(effect_carriers(&log, "read"), 1);
 }
 
@@ -665,6 +708,9 @@ constant = { trust = "suspicious" }
 
 #[tokio::test]
 async fn ordinary_narrowing_acceptance_requires_a_later_round() {
+    // Informed acceptance holds for ordinary soft blocks as for pending casts: an acceptance
+    // authored in the same assistant response that triggered the offer predates it and is
+    // refused; the same offer executes in the next round.
     let mediated = mediator(
         r#"
 version = 1
@@ -719,6 +765,8 @@ delta = { audience = { exactly = ["internal"] } }
 
 #[tokio::test]
 async fn an_authority_only_plan_executes_in_its_offering_round() {
+    // The round gate binds acceptances, not rulings: a plan with no Accept step is executable in
+    // the very round that offered it.
     let mediated = mediator(
         r#"
 version = 1
@@ -764,6 +812,79 @@ implementation = { builtin = "approve" }
 }
 
 #[tokio::test]
+async fn return_offers_run_cheapest_first_and_the_free_crossing_leads_the_feedback() {
+    // The menu a blocked return offers is ordered by what each plan costs the parent: a
+    // residual-free sanitize crosses the value and narrows nothing, raw acceptance narrows
+    // permanently. A child reads the menu as "how do I return this" and takes the first entry, so
+    // the ordering is the affordance — and the prose names the free crossing rather than leading
+    // with the void return, which is only the best move when no free crossing exists.
+    let mediated = mediator(
+        r#"
+version = 1
+[[tool]]
+name = "read"
+delta = { audience = { exactly = ["internal"] } }
+
+[[sanitizer]]
+name = "pii"
+on = ["tool_output"]
+[sanitizer.can_reduce]
+audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+[sanitizer.implementation]
+builtin = "redact-email"
+"#,
+        &[("read", BuiltinTool::Echo("ask eve@corp.com".to_string()))],
+    );
+    let tenant = TenantId::new("tenant");
+    let parent = mediated.create_session(tenant.clone());
+    let mut budget = RunBudget::default();
+    let mut parent_turn = begin(&mediated, &tenant, &parent, "parent").await;
+    parent_turn.mediate(final_answer("ready"), &mut budget).await.unwrap();
+    drop(parent_turn);
+
+    let child = mediated.fork_session(&tenant, &parent).unwrap();
+    let session = child.clone();
+    let mut turn = child_with_internal_read(&mediated, &tenant, &child, &mut budget).await;
+    turn.mediate(
+        calls(vec![call("submit", SUBMIT_RESULT, r#"{"value":"ask eve@corp.com"}"#)]),
+        &mut budget,
+    )
+    .await
+    .unwrap();
+
+    let sanitize = offered_plan(&mediated, &tenant, &session, "submit", "derivation");
+    let accept = offered_plan(&mediated, &tenant, &session, "submit", RAW_ACCEPT);
+    assert!(
+        sanitize < accept,
+        "the free crossing must hold the lower handle: sanitize={sanitize} accept={accept}"
+    );
+
+    let content = facts(&mediated, &tenant, &session)
+        .iter()
+        .rev()
+        .find_map(|fact| match fact {
+            Fact::BlockFeedback {
+                call_id, content, ..
+            } if call_id.as_str() == "submit" => Some(content.clone()),
+            _ => None,
+        })
+        .expect("the blocked return answers the submit");
+    // The property, not the phrasing: the free crossing is named in the prose, ahead of the menu
+    // every plan is listed in. A child that reads only the first sentences still sees it.
+    let named_at = content
+        .find(&format!("\"{sanitize}\""))
+        .unwrap_or_else(|| panic!("the free crossing is never named: {content}"));
+    let menu_at = content
+        .find("Call execute_remedy_plan with plan_id")
+        .unwrap_or_else(|| panic!("no menu in: {content}"));
+    assert!(
+        named_at < menu_at,
+        "the free crossing must be named before the menu: {content}"
+    );
+    assert!(content.contains("submit_result null"), "{content}");
+}
+
+#[tokio::test]
 async fn return_acceptance_is_round_gated_but_a_residual_free_sanitize_is_not() {
     let mediated = mediator(
         r#"
@@ -796,7 +917,7 @@ builtin = "redact-email"
             .mediate(
                 calls(vec![
                     call("submit", SUBMIT_RESULT, r#"{"value":"ask eve@corp.com"}"#),
-                    call("early-accept", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-1"}"#),
+                    call("early-accept", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-2"}"#),
                 ]),
                 &mut budget,
             )
@@ -815,7 +936,7 @@ builtin = "redact-email"
                 calls(vec![call(
                     "accept-return",
                     EXECUTE_REMEDY_PLAN,
-                    r#"{"plan_id":"remedy-1"}"#
+                    r#"{"plan_id":"remedy-2"}"#
                 )]),
                 &mut budget,
             )
@@ -832,7 +953,7 @@ builtin = "redact-email"
             .mediate(
                 calls(vec![
                     call("submit", SUBMIT_RESULT, r#"{"value":"ask eve@corp.com"}"#),
-                    call("same-round-sanitize", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-2"}"#),
+                    call("same-round-sanitize", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-1"}"#),
                 ]),
                 &mut budget,
             )
@@ -1363,7 +1484,7 @@ builtin = "redact-email"
         turn.mediate(
             calls(vec![
                 call("submit", SUBMIT_RESULT, r#"{"value":"ask eve@corp.com"}"#),
-                call("early-sanitize", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-2"}"#),
+                call("early-sanitize", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-1"}"#),
             ]),
             &mut budget,
         )
@@ -1382,7 +1503,7 @@ builtin = "redact-email"
             calls(vec![call(
                 "sanitize-return",
                 EXECUTE_REMEDY_PLAN,
-                r#"{"plan_id":"remedy-2"}"#
+                r#"{"plan_id":"remedy-1"}"#
             )]),
             &mut budget,
         )
@@ -1501,14 +1622,11 @@ builtin = "redact-email"
         )
         .await
         .unwrap();
+    let sanitize = offered_plan(&mediator, &tenant, &sanitized_child, "submit", "derivation");
     assert!(matches!(
         sanitized_turn
             .mediate(
-                calls(vec![call(
-                    "sanitize-return",
-                    EXECUTE_REMEDY_PLAN,
-                    r#"{"plan_id":"remedy-2"}"#,
-                )]),
+                calls(vec![call("sanitize-return", EXECUTE_REMEDY_PLAN, &remedy_args(&sanitize))]),
                 &mut budget,
             )
             .await
@@ -1541,14 +1659,11 @@ builtin = "redact-email"
         )
         .await
         .unwrap();
+    let accept = offered_plan(&mediator, &tenant, &raw_child, "submit", RAW_ACCEPT);
     assert!(matches!(
         raw_turn
             .mediate(
-                calls(vec![call(
-                    "accept-return",
-                    EXECUTE_REMEDY_PLAN,
-                    r#"{"plan_id":"remedy-1"}"#,
-                )]),
+                calls(vec![call("accept-return", EXECUTE_REMEDY_PLAN, &remedy_args(&accept))]),
                 &mut budget,
             )
             .await
@@ -1641,7 +1756,7 @@ builtin = "redact-email"
                 calls(vec![call(
                     "sibling-cross",
                     EXECUTE_REMEDY_PLAN,
-                    r#"{"plan_id":"remedy-1"}"#,
+                    r#"{"plan_id":"remedy-2"}"#,
                 )]),
                 &mut budget,
             )
@@ -1656,7 +1771,7 @@ builtin = "redact-email"
                 calls(vec![call(
                     "stale-offer",
                     EXECUTE_REMEDY_PLAN,
-                    r#"{"plan_id":"remedy-1"}"#,
+                    r#"{"plan_id":"remedy-2"}"#,
                 )]),
                 &mut budget,
             )
@@ -1670,7 +1785,7 @@ builtin = "redact-email"
                 calls(vec![call(
                     "replayed-offer",
                     EXECUTE_REMEDY_PLAN,
-                    r#"{"plan_id":"remedy-1"}"#,
+                    r#"{"plan_id":"remedy-2"}"#,
                 )]),
                 &mut budget,
             )
@@ -1770,7 +1885,7 @@ resolver = {{ url = "{beta_url}", timeout_ms = 1000 }}
         assert!(matches!(
             child
                 .mediate(
-                    calls(vec![call(call_id, EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-2"}"#,)]),
+                    calls(vec![call(call_id, EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-1"}"#,)]),
                     &mut budget,
                 )
                 .await
@@ -1783,7 +1898,7 @@ resolver = {{ url = "{beta_url}", timeout_ms = 1000 }}
     assert!(matches!(
         child
             .mediate(
-                calls(vec![call("beta-1", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-3"}"#,)]),
+                calls(vec![call("beta-1", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-2"}"#,)]),
                 &mut budget,
             )
             .await
@@ -1808,7 +1923,7 @@ resolver = {{ url = "{beta_url}", timeout_ms = 1000 }}
                 calls(vec![call(
                     "second-alpha-1",
                     EXECUTE_REMEDY_PLAN,
-                    r#"{"plan_id":"remedy-5"}"#,
+                    r#"{"plan_id":"remedy-4"}"#,
                 )]),
                 &mut budget,
             )
@@ -1824,7 +1939,7 @@ resolver = {{ url = "{beta_url}", timeout_ms = 1000 }}
                 calls(vec![call(
                     "accept-raw",
                     EXECUTE_REMEDY_PLAN,
-                    r#"{"plan_id":"remedy-1"}"#,
+                    r#"{"plan_id":"remedy-3"}"#,
                 )]),
                 &mut budget,
             )

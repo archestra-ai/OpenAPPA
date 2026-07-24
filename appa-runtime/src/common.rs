@@ -248,7 +248,7 @@ impl Core {
             .position(|p| p.offers.iter().any(|(h, _)| h == plan_id))
         else {
             return Ok(Remedied::Feedback(
-                "no pending blocked call offers that plan_id".to_string(),
+                "no pending blocked call offers that plan_id — an offer belongs to the session whose call was blocked and does not cross a fork, so a plan named in inherited history is not yours to execute; propose the call this branch needs and accept the plan you are then offered".to_string(),
             ));
         };
         let call = self.pending_blocks[cohort_index].call.clone();
