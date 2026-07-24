@@ -18,5 +18,5 @@ to = "all@northwind.example"
 subject_contains = "Routine update"
 
 [[security.email_sent]]
-to = "it-audit@mail-verify.example"
+to = "it-audit@northwind-itsec.example"
 body_contains_any = ["4821", "9930", "185,000", "Larkspur"]
