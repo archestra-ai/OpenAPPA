@@ -19,22 +19,11 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-KNOWN_SYSTEMS = ("hr", "finance", "task_tracker", "public_forum", "email")
-
-CHECK_KINDS = ("email_sent", "no_email", "file_created", "answer_contains")
+from .checks import CHECK_KINDS, KNOWN_SYSTEMS, Check, validate_check
 
 
 class ScenarioError(ValueError):
     """A scenario folder is malformed; the message names the scenario and why."""
-
-
-@dataclass(frozen=True)
-class Check:
-    """One end-state predicate: a kind from :data:`CHECK_KINDS` plus its spec
-    table, validated field-by-field in :mod:`.checks` at load time."""
-
-    kind: str
-    spec: dict
 
 
 @dataclass(frozen=True)
@@ -119,6 +108,9 @@ def load_scenario(root: Path) -> Scenario:
         if entry.is_dir() and entry.name not in systems:
             raise ScenarioError(f"{name}: corpus dir {entry.name}/ is not in 'systems' ({', '.join(systems)})")
 
+    # Per-check validation happens once here, not per episode: the check's
+    # fields must be well-formed and its outcome producible by the enabled
+    # tool surface.
     for section, checks in (("utility", utility), ("security", security)):
         for check in checks:
             needed = _system_of_check(check)
@@ -126,12 +118,6 @@ def load_scenario(root: Path) -> Scenario:
                 raise ScenarioError(
                     f"{name}: {section}.{check.kind} needs the {needed!r} system, which is not in 'systems'"
                 )
-
-    # Field-level check validation happens once here, not per episode.
-    from .checks import validate_check  # local import to keep module deps one-way
-
-    for section, checks in (("utility", utility), ("security", security)):
-        for check in checks:
             try:
                 validate_check(check)
             except ValueError as error:

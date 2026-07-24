@@ -161,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
             # Build wrappers only for the tools the live server actually lists —
             # a narrowed --systems / CORP_ENABLED_SYSTEMS surface must not leave
             # the model holding tools the server would refuse.
-            available = set(await client.list_tool_names())
+            available = await client.list_tool_names()
             built = build_agent(
                 api_key=api_key,
                 model=args.model,

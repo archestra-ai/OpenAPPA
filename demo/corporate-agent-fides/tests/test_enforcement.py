@@ -18,7 +18,7 @@ from agent_framework.security import (
 )
 
 from corp_fides.systems import CorpSystemsClient, System
-from corp_fides.tools import _LABELS, ALL_TOOL_NAMES, build_tools
+from corp_fides.tools import _LABELS, build_tools
 
 # Declarations need no live server — no tool is invoked.
 _OFFLINE_CLIENT: CorpSystemsClient = None  # type: ignore[assignment]
@@ -33,7 +33,7 @@ def _label(system: System) -> ContentLabel:
 
 
 def _send_email_gates() -> tuple[bool, ConfidentialityLabel]:
-    tools = build_tools(_OFFLINE_CLIENT, set(ALL_TOOL_NAMES))
+    tools = build_tools(_OFFLINE_CLIENT)
     props = next(t for t in tools if t.name == "send_email").additional_properties
     return props["accepts_untrusted"], ConfidentialityLabel(props["max_allowed_confidentiality"])
 

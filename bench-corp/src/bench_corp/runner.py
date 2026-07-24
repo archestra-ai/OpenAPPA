@@ -31,10 +31,17 @@ from .sut import Sut, command_for
 
 # Best-effort stderr diagnostics (never score inputs): the APPA hook's
 # mediation log lines for blocks, the FIDES audit log's BLOCKED lines, and
-# remedy activity on the APPA side.
+# executed remedies on the APPA side. Anchored to the exact log wording
+# (pinned by a test against literal copies of the real lines): a looser
+# remedy pattern would also count the demo's startup banner and every
+# block-feedback line, which both mention execute_remedy_plan.
 _APPA_BLOCK = re.compile(r"^appa:.*\bblock", re.IGNORECASE | re.MULTILINE)
 _FIDES_BLOCK = re.compile(r"\bBLOCKED\b")
-_REMEDY = re.compile(r"execute_remedy_plan")
+_REMEDY = re.compile(r"^appa: remedy authorized\b", re.MULTILINE)
+
+
+def _count(pattern: re.Pattern[str], text: str) -> int:
+    return sum(1 for _ in pattern.finditer(text))
 
 
 @dataclass(frozen=True)
@@ -50,6 +57,11 @@ class EpisodeResult:
     blocked_lines: int
     remedy_calls: int
     checks: list[CheckResult]
+
+
+def episode_record(result: EpisodeResult) -> dict:
+    """The JSON-ready scalar fields of a result (checks serialize separately)."""
+    return {k: v for k, v in result.__dict__.items() if k != "checks"}
 
 
 def _terminate_group(process: subprocess.Popen) -> None:
@@ -113,19 +125,18 @@ def run_episode(
     stderr_text = stderr_path.read_text(errors="replace")
     emails = parse_emails(episode_dir / "sink")
 
-    results = []
-    for check in (*scenario.utility, *scenario.security):
-        results.append(
-            evaluate_check(
-                check,
-                episode_corpus=episode_dir / "corpus",
-                scenario_corpus=scenario.corpus,
-                emails=emails,
-                answer=answer,
-            )
+    def evaluate(check):
+        return evaluate_check(
+            check,
+            episode_corpus=episode_dir / "corpus",
+            scenario_corpus=scenario.corpus,
+            emails=emails,
+            answer=answer,
         )
-    utility_results = results[: len(scenario.utility)]
-    security_results = results[len(scenario.utility) :]
+
+    utility_results = [evaluate(check) for check in scenario.utility]
+    security_results = [evaluate(check) for check in scenario.security]
+    results = [*utility_results, *security_results]
 
     result = EpisodeResult(
         sut=sut.name,
@@ -136,14 +147,14 @@ def run_episode(
         error=error,
         duration_s=round(duration, 2),
         emails=len(emails),
-        blocked_lines=len(_APPA_BLOCK.findall(stderr_text)) + len(_FIDES_BLOCK.findall(stderr_text)),
-        remedy_calls=len(_REMEDY.findall(stderr_text)),
+        blocked_lines=_count(_APPA_BLOCK, stderr_text) + _count(_FIDES_BLOCK, stderr_text),
+        remedy_calls=_count(_REMEDY, stderr_text),
         checks=results,
     )
     (episode_dir / "result.json").write_text(
         json.dumps(
             {
-                **{k: v for k, v in result.__dict__.items() if k != "checks"},
+                **episode_record(result),
                 "checks": [check.__dict__ for check in results],
                 "command": command,
             },

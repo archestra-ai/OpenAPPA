@@ -9,14 +9,14 @@ import asyncio
 from pathlib import Path
 
 from corp_fides.systems import CorpSystemsClient
-from corp_fides.tools import ALL_TOOL_NAMES, build_tools
+from corp_fides.tools import build_tools
 
 # Declarations need no live server — no tool is invoked.
 _OFFLINE_CLIENT: CorpSystemsClient = None  # type: ignore[assignment]
 
 
 def _tools_by_name():
-    return {t.name: t for t in build_tools(_OFFLINE_CLIENT, set(ALL_TOOL_NAMES))}
+    return {t.name: t for t in build_tools(_OFFLINE_CLIENT)}
 
 
 def test_thirteen_tools_with_expected_names() -> None:
@@ -51,7 +51,7 @@ def test_hr_reads_are_trusted_but_private() -> None:
 def _label_of(server_bin: Path, corpus: Path, sink: Path, name: str, *args: str) -> dict:
     async def run():
         async with CorpSystemsClient(corpus, sink, server_bin) as client:
-            tools = {t.name: t for t in build_tools(client, set(await client.list_tool_names()))}
+            tools = {t.name: t for t in build_tools(client, await client.list_tool_names())}
             contents = await tools[name].func(*args)  # type: ignore[attr-defined]
             return contents[0].additional_properties["security_label"]
 

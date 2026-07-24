@@ -7,6 +7,7 @@ comparison defense-vs-defense.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -27,34 +28,49 @@ DEFAULT_MODEL = "openai/gpt-5.6-luna"
 @dataclass(frozen=True)
 class Sut:
     name: str
-    kind: str  # "appa" | "fides"
-    # appa: the demo policy file to prune per episode; fides: extra CLI flags.
+    executable: Path
+    # Set only for APPA SUTs: the demo policy the runner prunes per episode.
     policy_file: Path | None = None
     extra_args: tuple[str, ...] = ()
 
 
 SUTS: dict[str, Sut] = {
-    "appa": Sut(name="appa", kind="appa", policy_file=CORP_AGENT_DIR / "appa-policy.toml"),
-    "appa-open": Sut(name="appa-open", kind="appa", policy_file=CORP_AGENT_DIR / "appa-policy-open.toml"),
-    "fides": Sut(name="fides", kind="fides"),
-    "fides-open": Sut(name="fides-open", kind="fides", extra_args=("--no-defense",)),
+    "appa": Sut(name="appa", executable=CORP_AGENT_BIN, policy_file=CORP_AGENT_DIR / "appa-policy.toml"),
+    "appa-open": Sut(
+        name="appa-open", executable=CORP_AGENT_BIN, policy_file=CORP_AGENT_DIR / "appa-policy-open.toml"
+    ),
+    "fides": Sut(name="fides", executable=FIDES_BIN),
+    "fides-open": Sut(name="fides-open", executable=FIDES_BIN, extra_args=("--no-defense",)),
 }
 
 
-def build_binaries() -> None:
-    """Build the two Rust binaries the bench spawns (idempotent, up front —
+def build_binaries(suts: list[Sut]) -> None:
+    """Build the Rust binaries the selected SUTs spawn (idempotent, up front —
     never mid-episode, where a cargo build would distort durations)."""
-    for manifest_dir in (CORP_SYSTEMS_DIR, CORP_AGENT_DIR):
-        subprocess.run(
-            ["cargo", "build", "--manifest-path", str(manifest_dir / "Cargo.toml")],
-            check=True,
-        )
-    if not FIDES_BIN.is_file():
+    # The cheap precondition first: a missing FIDES venv must fail in
+    # milliseconds, not after minutes of cargo builds.
+    if any(sut.executable == FIDES_BIN for sut in suts) and not FIDES_BIN.is_file():
         sys.exit(
             f"missing {FIDES_BIN}\n"
             "The FIDES demo's virtualenv provides the corp-agent-fides entry point.\n"
             f"Create it once:  cd {FIDES_DIR} && uv venv && uv pip install -e ."
         )
+    crates = [CORP_SYSTEMS_DIR]  # every SUT spawns the MCP server
+    if any(sut.executable == CORP_AGENT_BIN for sut in suts):
+        crates.append(CORP_AGENT_DIR)
+    # Independent crates, separate target dirs: build concurrently. Pinning
+    # CARGO_TARGET_DIR keeps the output at the exact path the bench spawns
+    # even when the caller's shell redirects it globally.
+    builds = [
+        subprocess.Popen(
+            ["cargo", "build", "--manifest-path", str(crate / "Cargo.toml")],
+            env={**os.environ, "CARGO_TARGET_DIR": str(crate / "target")},
+        )
+        for crate in crates
+    ]
+    for build in builds:
+        if build.wait() != 0:
+            sys.exit("cargo build failed (see output above)")
 
 
 def command_for(
@@ -68,7 +84,8 @@ def command_for(
     ``corpus/``, ``sink/``, and (for APPA SUTs) the pruned ``policy.toml``."""
     # No --quiet: stderr.txt is the episode's full mediation/audit log — the
     # diagnostics (blocked-call counts) and any post-hoc reading depend on it.
-    common = [
+    command = [
+        str(sut.executable),
         prompt,
         "--model",
         model,
@@ -79,6 +96,6 @@ def command_for(
         "--server-bin",
         str(CORP_SYSTEMS_BIN),
     ]
-    if sut.kind == "appa":
-        return [str(CORP_AGENT_BIN), *common, "--policy", str(episode_dir / "policy.toml")]
-    return [str(FIDES_BIN), *common, *sut.extra_args]
+    if sut.policy_file is not None:
+        command += ["--policy", str(episode_dir / "policy.toml")]
+    return [*command, *sut.extra_args]

@@ -60,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--reps must be at least 1")
 
     if not args.skip_build:
-        build_binaries()
+        build_binaries(suts)
 
     run_id = time.strftime("%Y%m%d-%H%M%S")
     run_dir = args.runs_dir / run_id

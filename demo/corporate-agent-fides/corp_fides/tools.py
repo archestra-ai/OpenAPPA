@@ -31,6 +31,7 @@ context — exactly the single gated flow the APPA demo guards.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import Any
 
 from agent_framework import Content, tool
@@ -50,8 +51,8 @@ _LABELS: dict[System, tuple[str, str]] = {
 # restrict the trajectory — the FIDES analogue of APPA's `delta = {}`.
 _NEUTRAL = ("trusted", "public")
 
-# The full 13-tool surface of the shared server: what `available` means when no
-# live listing narrows it (offline tests, docs).
+# The full 13-tool surface of the shared server: the default when no live
+# listing narrows `available` (offline tests, docs).
 ALL_TOOL_NAMES: frozenset[str] = frozenset(
     f"{verb}_{system.dir_name}" for system in _LABELS for verb in ("search", "read", "create")
 ) | {"send_email"}
@@ -67,18 +68,20 @@ def _labeled(text: str, label: tuple[str, str]) -> Content:
     )
 
 
-def build_tools(client: CorpSystemsClient, available: set[str]) -> list[Any]:
+def build_tools(client: CorpSystemsClient, available: Collection[str] | None = None) -> list[Any]:
     """Construct the FIDES-labeled tools over a systems client, one per name in
     ``available``.
 
     ``available`` is the live server's tool listing (``list_tool_names``): when
     the server runs with a narrowed ``--systems`` / ``CORP_ENABLED_SYSTEMS``
     surface, only those tools are built, so the model is never shown a tool the
-    server would refuse. Offline callers pass :data:`ALL_TOOL_NAMES`.
+    server would refuse. ``None`` (offline callers) means the full surface.
 
     ``client`` must be entered (its async context open) by the time a tool is
     invoked; building the tools — and inspecting their declarations — needs no
     live server."""
+    if available is None:
+        available = ALL_TOOL_NAMES
 
     async def forward(name: str, arguments: dict[str, Any], label: tuple[str, str]) -> list[Content]:
         text, is_error = await client.call(name, arguments)
