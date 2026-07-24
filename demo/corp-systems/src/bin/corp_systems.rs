@@ -1,17 +1,19 @@
 //! `corp-systems-mcp`: the mock-corporate-systems MCP server over stdio.
 //!
-//! Runs standalone or (usually) spawned as a subprocess by `corp-agent`.
+//! Runs standalone or (usually) spawned as a subprocess by one of the sibling
+//! demo agents (`corp-agent`, `corp-agent-fides`).
 //!
 //! ```sh
 //! corp-systems-mcp                       # data root: ./data next to the crate
 //! corp-systems-mcp --data-root /tmp/corp # override the data root
+//! corp-systems-mcp --sink-root /tmp/out  # send_email writes under here instead
 //! ```
 //!
 //! stdout is the JSON-RPC channel, so **all logging goes to stderr** — a stray
 //! `println!` on stdout would corrupt the protocol framing.
 
 use clap::Parser;
-use corporate_agent_demo::{resolve_data_root, server::CorpSystems};
+use corp_systems::{resolve_data_root, server::CorpSystems};
 use rmcp::ServiceExt;
 use rmcp::transport::stdio;
 use std::path::PathBuf;
@@ -23,6 +25,12 @@ struct Args {
     /// or the crate's `data/` directory.
     #[arg(long, env = "CORP_DATA_ROOT")]
     data_root: Option<PathBuf>,
+
+    /// Root directory `send_email` writes its `email/` folder under. Defaults to
+    /// `CORP_SINK_ROOT`, else the data root — split it when the corpus is shared
+    /// and the observable sink should stay local to one demo.
+    #[arg(long, env = "CORP_SINK_ROOT")]
+    sink_root: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -35,10 +43,11 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    let root = resolve_data_root(args.data_root);
-    tracing::info!(data_root = %root.display(), "corp-systems-mcp starting");
+    let corpus_root = resolve_data_root(args.data_root);
+    let sink_root = args.sink_root.unwrap_or_else(|| corpus_root.clone());
+    tracing::info!(corpus_root = %corpus_root.display(), sink_root = %sink_root.display(), "corp-systems-mcp starting");
 
-    let service = CorpSystems::new(root).serve(stdio()).await?;
+    let service = CorpSystems::new(corpus_root, sink_root).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
 }

@@ -47,23 +47,28 @@ pub struct SendEmailArgs {
     pub body: String,
 }
 
-/// The server state: the data root plus the generated tool router.
+/// The server state: the read-only corpus root, the sink root `send_email`
+/// writes under, and the generated tool router. The two roots coincide when the
+/// server owns its whole data tree, and split when the corpus is shared between
+/// demos and each keeps its own observable `email/` folder.
 #[derive(Clone)]
 pub struct CorpSystems {
-    root: PathBuf,
+    corpus_root: PathBuf,
+    sink_root: PathBuf,
     tool_router: ToolRouter<Self>,
 }
 
 impl CorpSystems {
-    pub fn new(root: PathBuf) -> Self {
+    pub fn new(corpus_root: PathBuf, sink_root: PathBuf) -> Self {
         Self {
-            root,
+            corpus_root,
+            sink_root,
             tool_router: Self::tool_router(),
         }
     }
 
     fn do_search(&self, system: System, args: SearchArgs) -> CallToolResult {
-        match systems::search(&self.root, system, &args.query) {
+        match systems::search(&self.corpus_root, system, &args.query) {
             Ok(hits) if hits.is_empty() => CallToolResult::success(vec![Content::text(format!(
                 "no matches for {:?} in the {system} system",
                 args.query
@@ -80,14 +85,14 @@ impl CorpSystems {
     }
 
     fn do_read(&self, system: System, args: ReadArgs) -> CallToolResult {
-        match systems::read(&self.root, system, &args.file) {
+        match systems::read(&self.corpus_root, system, &args.file) {
             Ok(body) => CallToolResult::success(vec![Content::text(body)]),
             Err(e) => error_result(e.to_string()),
         }
     }
 
     fn do_create(&self, system: System, args: CreateArgs) -> CallToolResult {
-        match systems::create(&self.root, system, &args.file, &args.content) {
+        match systems::create(&self.corpus_root, system, &args.file, &args.content) {
             Ok(()) => CallToolResult::success(vec![Content::text(format!(
                 "created {} in the {system} system",
                 args.file
@@ -159,7 +164,7 @@ impl CorpSystems {
 
     #[tool(description = "Send an outbound email. Delivers the message to the given recipient.")]
     fn send_email(&self, Parameters(a): Parameters<SendEmailArgs>) -> CallToolResult {
-        match systems::send_email(&self.root, &a.to, &a.subject, &a.body) {
+        match systems::send_email(&self.sink_root, &a.to, &a.subject, &a.body) {
             Ok(file) => CallToolResult::success(vec![Content::text(format!(
                 "email sent to {} (subject: {:?}); archived as {file}",
                 a.to, a.subject
