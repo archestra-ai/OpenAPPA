@@ -5,9 +5,9 @@ use appa_engine::check::{Gap, Narrowing, RawBlock};
 use appa_engine::plan::{PlannedBlock, Recommendation, RemedyPlan};
 use serde::Serialize;
 
-/// The trajectory a block's feedback addresses — what branching fact its narrowing lead may
-/// honestly carry. A `Root` that can fork hears the fork alternative; a `Child` hears that its
-/// restriction is branch-confined; anything else hears the acceptance alone.
+/// The trajectory a block's feedback addresses. It fixes two things: how far an acceptance reaches
+/// (a `Root`'s over the session, a `Child`'s over its branch alone) and whether a branch
+/// alternative may honestly be advised — only a `Root` that can fork.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FeedbackSurface {
     Root { can_fork: bool },
@@ -66,25 +66,25 @@ fn wire_plans(offers: &[(String, RemedyPlan)]) -> Vec<WirePlan<'_>> {
         .collect()
 }
 
-fn payload(
+fn fork_advice<'a>(
     raw: &RawBlock,
-    planned: &PlannedBlock,
+    planned: &'a PlannedBlock,
     offers: &[(String, RemedyPlan)],
     surface: FeedbackSurface,
-) -> String {
-    let advises_fork =
-        matches!(surface, FeedbackSurface::Root { can_fork: true }) && raw.narrowing.is_some() && !offers.is_empty();
-    let fork = if advises_fork {
-        planned
-            .recommendations
-            .iter()
-            .find_map(|recommendation| match recommendation {
-                Recommendation::Fork { reason } => Some(reason.as_str()),
-                Recommendation::Redispatch { .. } => None,
-            })
-    } else {
-        None
-    };
+) -> Option<&'a str> {
+    if !matches!(surface, FeedbackSurface::Root { can_fork: true }) || raw.narrowing.is_none() || offers.is_empty() {
+        return None;
+    }
+    planned
+        .recommendations
+        .iter()
+        .find_map(|recommendation| match recommendation {
+            Recommendation::Fork { reason } => Some(reason.as_str()),
+            Recommendation::Redispatch { .. } => None,
+        })
+}
+
+fn payload(raw: &RawBlock, planned: &PlannedBlock, offers: &[(String, RemedyPlan)], fork: Option<&str>) -> String {
     let block = WireBlock {
         requirement_gaps: &raw.requirement_gaps,
         narrowing: raw.narrowing.as_ref(),
@@ -114,6 +114,7 @@ pub fn block_feedback(
     offers: &[(String, RemedyPlan)],
     surface: FeedbackSurface,
 ) -> String {
+    let fork = fork_advice(raw, planned, offers, surface);
     let lead = if offers.is_empty() {
         if planned.recommendations.iter().any(Recommendation::is_curative) {
             "blocked by policy; run a redispatch prerequisite first, then re-propose this call"
@@ -126,38 +127,50 @@ pub fn block_feedback(
             }
         }
     } else if raw.requirement_gaps.is_empty() {
-        match surface {
-            FeedbackSurface::Root { can_fork: true } => {
-                "narrowing: this call restricts the trajectory label. Fork the restricting work into a child session to keep this session's label, or, if every later step can live with the restriction, accept it with execute_remedy_plan in your next response — acceptance is permanent for this session"
+        match fork {
+            Some(_) => {
+                "narrowing: this call restricts the trajectory label. Fork the restricting work into a child session to keep this session's label, or accept it with execute_remedy_plan in your next response — acceptance is permanent for this session, so run any later step that needs the current label before you accept"
             }
-            FeedbackSurface::Root { can_fork: false } => {
-                "narrowing: this call restricts the trajectory label; accept it with execute_remedy_plan in your next response"
-            }
-            FeedbackSurface::Child => {
-                "narrowing: this call restricts this branch's label only — the parent session is unaffected; accept it with execute_remedy_plan in your next response"
-            }
+            None => match surface {
+                FeedbackSurface::Root { .. } => {
+                    "narrowing: this call restricts the trajectory label; accept it with execute_remedy_plan in your next response — acceptance is permanent for this session, so run any later step that needs the current label before you accept"
+                }
+                FeedbackSurface::Child => {
+                    "narrowing: this call restricts this branch's label only — the parent session is unaffected; accept it with execute_remedy_plan in your next response — acceptance is permanent for this branch, so run any later step of this branch that needs the current label before you accept"
+                }
+            },
         }
     } else if raw.narrowing.is_some() {
-        match surface {
-            FeedbackSurface::Root { can_fork: true } => {
-                "blocked by policy; execute one offered plan with execute_remedy_plan in your next response — it also accepts this call's narrowing — or fork the restricting work into a child session to keep this session's label"
+        match fork {
+            Some(_) => {
+                "blocked by policy; execute one offered plan with execute_remedy_plan in your next response — it also accepts this call's narrowing, permanently for this session — or fork the restricting work into a child session to keep this session's label"
             }
-            FeedbackSurface::Root { can_fork: false } => {
-                "blocked by policy; execute one offered plan with execute_remedy_plan in your next response"
-            }
-            FeedbackSurface::Child => {
-                "blocked by policy; execute one offered plan with execute_remedy_plan in your next response; its narrowing restricts this branch's label only — the parent session is unaffected"
-            }
+            None => match surface {
+                FeedbackSurface::Root { .. } => {
+                    "blocked by policy; execute one offered plan with execute_remedy_plan in your next response — it also accepts this call's narrowing, permanently for this session, so run any later step that needs the current label first"
+                }
+                FeedbackSurface::Child => {
+                    "blocked by policy; execute one offered plan with execute_remedy_plan in your next response; its narrowing restricts this branch's label only — the parent session is unaffected — and accepting it is permanent for this branch"
+                }
+            },
         }
     } else {
         "blocked by policy; execute one offered plan with execute_remedy_plan"
     };
-    format!("{lead}\n{}", payload(raw, planned, offers, surface))
+    format!("{lead}\n{}", payload(raw, planned, offers, fork))
+}
+
+fn acceptance_cost(surface: FeedbackSurface) -> &'static str {
+    match surface {
+        FeedbackSurface::Root { .. } => "permanent for this session",
+        FeedbackSurface::Child => "permanent for this branch; the parent session is unaffected",
+    }
 }
 
 /// Render the feedback after an authority declined one offer: the denial, then the remaining
-/// sibling plans as the same typed payload shape (no gaps re-listed — the block is unchanged).
-pub fn denial_feedback(remaining: &[(String, RemedyPlan)]) -> String {
+/// sibling plans as the same typed payload shape (no gaps re-listed — the block is unchanged). A
+/// sibling that carries an acceptance re-offers the narrowing, so its cost is named again here.
+pub fn denial_feedback(remaining: &[(String, RemedyPlan)], surface: FeedbackSurface) -> String {
     if remaining.is_empty() {
         return "the authority declined to authorize this call; no alternative plan remains".to_string();
     }
@@ -165,14 +178,22 @@ pub fn denial_feedback(remaining: &[(String, RemedyPlan)]) -> String {
     struct WireRemaining<'a> {
         plans: Vec<WirePlan<'a>>,
     }
-    let payload = serde_json::to_string(&WireRemaining {
-        plans: wire_plans(remaining),
-    })
-    .expect("the plan payload serializes: engine types are Serialize");
-    format!("the authority declined to authorize this call; alternatives remain\n{payload}")
+    let plans = wire_plans(remaining);
+    let accepts = plans.iter().any(|plan| plan.accepts_narrowing);
+    let payload = serde_json::to_string(&WireRemaining { plans })
+        .expect("the plan payload serializes: engine types are Serialize");
+    let cost = if accepts {
+        format!(
+            " — a plan marked accepts_narrowing restricts the label when executed, {}",
+            acceptance_cost(surface)
+        )
+    } else {
+        String::new()
+    };
+    format!("the authority declined to authorize this call; alternatives remain{cost}\n{payload}")
 }
 
-pub fn cast_offer_feedback(handle: &str, narrowing: &Narrowing) -> String {
+pub fn cast_offer_feedback(handle: &str, narrowing: &Narrowing, surface: FeedbackSurface) -> String {
     #[derive(Serialize)]
     struct WireOffer<'a> {
         plan_id: &'a str,
@@ -184,7 +205,8 @@ pub fn cast_offer_feedback(handle: &str, narrowing: &Narrowing) -> String {
     })
     .expect("the narrowing payload serializes");
     format!(
-        "result withheld: admitting it narrows the trajectory label; accept with execute_remedy_plan in your next response\n{payload}"
+        "result withheld: admitting it narrows the trajectory label; accept with execute_remedy_plan in your next response — acceptance is {}\n{payload}",
+        acceptance_cost(surface)
     )
 }
 
@@ -439,15 +461,19 @@ mod tests {
             actual: Trust::new(0),
         };
         let remaining = vec![("remedy-1".to_string(), plan_with("officer-b", vec![floor]))];
-        let payload = parsed(&denial_feedback(&remaining));
+        let payload = parsed(&denial_feedback(&remaining, FeedbackSurface::Root { can_fork: false }));
         assert_eq!(payload["plans"].as_array().unwrap().len(), 1);
         assert_eq!(payload["plans"][0]["plan_id"], "remedy-1");
-        assert!(!denial_feedback(&[]).contains('\n'));
+        assert!(!denial_feedback(&[], FeedbackSurface::Root { can_fork: false }).contains('\n'));
     }
 
     #[test]
     fn a_cast_offer_carries_the_exact_narrowing_and_handle() {
-        let payload = parsed(&cast_offer_feedback("remedy-3", &narrowing()));
+        let payload = parsed(&cast_offer_feedback(
+            "remedy-3",
+            &narrowing(),
+            FeedbackSurface::Root { can_fork: false },
+        ));
         assert_eq!(payload["plan_id"], "remedy-3");
         assert_eq!(payload["narrowing"]["from"]["trust"]["Known"], 1);
         assert_eq!(

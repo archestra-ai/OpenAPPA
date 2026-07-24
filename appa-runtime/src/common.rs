@@ -165,6 +165,14 @@ impl Core {
         }])
     }
 
+    fn surface(&self) -> Result<crate::feedback::FeedbackSurface, StoreError> {
+        Ok(if self.store.parent_of(&self.tenant, &self.session)?.is_some() {
+            crate::feedback::FeedbackSurface::Child
+        } else {
+            crate::feedback::FeedbackSurface::Root { can_fork: false }
+        })
+    }
+
     /// Check one ordinary tool call against the live projection. On a clean allow the dispatch is
     /// opened and its id returned; on a block the remedy handle is minted and pushed; every other
     /// case yields model-visible feedback. Never authors a `BlockFeedback` fact — the facade does.
@@ -183,11 +191,7 @@ impl Core {
                     .engine
                     .plan(&views, &call, &raw)
                     .expect("checked tool is registered");
-                let surface = if self.store.parent_of(&self.tenant, &self.session)?.is_some() {
-                    crate::feedback::FeedbackSurface::Child
-                } else {
-                    crate::feedback::FeedbackSurface::Root { can_fork: false }
-                };
+                let surface = self.surface()?;
                 let feedback = if planned.plans.is_empty() {
                     crate::feedback::block_feedback(&raw, &planned, &[], surface)
                 } else {
@@ -314,9 +318,10 @@ impl Core {
                 }),
                 AuthorityAnswer::Deny | AuthorityAnswer::Abstain => {
                     // The denial consumes only this offer; siblings stay live and are re-listed.
+                    let surface = self.surface()?;
                     let cohort = &mut self.pending_blocks[cohort_index];
                     cohort.offers.retain(|(h, _)| h != plan_id);
-                    let feedback = crate::feedback::denial_feedback(&cohort.offers);
+                    let feedback = crate::feedback::denial_feedback(&cohort.offers, surface);
                     if cohort.offers.is_empty() {
                         self.pending_blocks.remove(cohort_index);
                     }
@@ -536,7 +541,7 @@ pub(crate) fn remedy_tool_schema() -> WireTool {
         function: WireToolSchema {
             name: EXECUTE_REMEDY_PLAN.to_string(),
             description: Some(
-                "Execute a remedy plan offered after a blocked tool call. Pass the plan_id quoted in the block feedback.".to_string(),
+                "Execute a remedy plan offered after a blocked tool call. Pass the plan_id quoted in the block feedback. Accepting a narrowing permanently restricts this trajectory; run any later step that needs its current label first.".to_string(),
             ),
             parameters: Some(serde_json::json!({
                 "type": "object",

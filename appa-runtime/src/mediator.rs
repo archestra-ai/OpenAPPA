@@ -212,7 +212,7 @@ impl Mediator {
                 )
             })
             .collect();
-        tools.push(reserved_tool_schema(EXECUTE_REMEDY_PLAN));
+        tools.push(remedy_tool_schema(can_fork));
         if can_fork {
             tools.push(reserved_tool_schema(FORK));
         }
@@ -361,17 +361,31 @@ fn policy_description(contract: &ToolContract, trust_chain: &TrustChain) -> Stri
     format!("APPA contract: {}.", clauses.join("; "))
 }
 
-fn reserved_tool_schema(name: &str) -> WireTool {
-    let (description, parameters) = match name {
-        EXECUTE_REMEDY_PLAN => (
-            "Execute an offered remedy in this trajectory. Accepting a narrowing permanently restricts this trajectory; use fork instead when later work needs its current label.",
-            json!({
+fn remedy_tool_schema(can_fork: bool) -> WireTool {
+    let escape = if can_fork {
+        "use fork instead when later work needs its current label"
+    } else {
+        "run any later work that needs its current label before you accept"
+    };
+    WireTool {
+        kind: "function".to_string(),
+        function: WireToolSchema {
+            name: EXECUTE_REMEDY_PLAN.to_string(),
+            description: Some(format!(
+                "Execute an offered remedy in this trajectory. Accepting a narrowing permanently restricts this trajectory; {escape}."
+            )),
+            parameters: Some(json!({
                 "type": "object",
                 "properties": { "plan_id": { "type": "string" } },
                 "required": ["plan_id"],
                 "additionalProperties": false
-            }),
-        ),
+            })),
+        },
+    }
+}
+
+fn reserved_tool_schema(name: &str) -> WireTool {
+    let (description, parameters) = match name {
         FORK => (
             "Run one self-contained task in an isolated child trajectory. Delegate actions that depend on restrictive data, but keep later actions requiring the parent's current label in the parent. Must be the only call in its assistant round. Child prose does not return; submit_result null finishes side-effect-only work.",
             json!({

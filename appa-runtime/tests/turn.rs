@@ -1178,9 +1178,7 @@ async fn the_join_signal_distinguishes_a_crossed_value_from_every_non_crossing_e
         facts(&mediator, &tenant, &parent)
             .iter()
             .find_map(|fact| match fact {
-                Fact::BlockFeedback { call_id, content, .. } if call_id.as_str() == "fork" => {
-                    Some(content.clone())
-                }
+                Fact::BlockFeedback { call_id, content, .. } if call_id.as_str() == "fork" => Some(content.clone()),
                 _ => None,
             })
             .expect("the join answers the fork call")
