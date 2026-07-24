@@ -1,7 +1,7 @@
-"""``bench-corp run``: drive the SUT × scenario × rep grid and score it.
+"""``bench-corp run``: drive the agent × scenario × rep grid and score it.
 
 Reproducibility: ``config.json`` in every run dir records the model, reps,
-SUT and scenario lists, git SHA, and whether the worktree was dirty.
+agent and scenario lists, git SHA, and whether the worktree was dirty.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from pathlib import Path
 from .report import print_table, summarize, write_summary
 from .runner import run_episode
 from .scenario import ScenarioError, discover_scenarios
-from .sut import DEFAULT_MODEL, REPO_ROOT, SUTS, build_binaries
+from .agents import DEFAULT_MODEL, REPO_ROOT, AGENTS, build_binaries
 
 BENCH_DIR = Path(__file__).resolve().parents[2]
 SCENARIOS_DIR = BENCH_DIR / "scenarios"
@@ -36,10 +36,10 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     run_parser = sub.add_parser("run", help="Run the grid and print the summary table.")
     run_parser.add_argument(
-        "--sut",
+        "--agent",
         action="append",
-        choices=sorted(SUTS),
-        help="System under test (repeatable). Default: all four.",
+        choices=sorted(AGENTS),
+        help="Agent to run (repeatable). Default: all four.",
     )
     run_parser.add_argument(
         "--scenario", action="append", help="Scenario name under scenarios/ (repeatable). Default: all."
@@ -55,12 +55,12 @@ def main(argv: list[str] | None = None) -> int:
         scenarios = discover_scenarios(SCENARIOS_DIR, args.scenario)
     except ScenarioError as error:
         parser.error(str(error))
-    suts = [SUTS[name] for name in (args.sut or sorted(SUTS))]
+    agents = [AGENTS[name] for name in (args.agent or sorted(AGENTS))]
     if args.reps < 1:
         parser.error("--reps must be at least 1")
 
     if not args.skip_build:
-        build_binaries(suts)
+        build_binaries(agents)
 
     run_id = time.strftime("%Y%m%d-%H%M%S")
     run_dir = args.runs_dir / run_id
@@ -71,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
                 "model": args.model,
                 "reps": args.reps,
                 "timeout_s": args.timeout,
-                "suts": [s.name for s in suts],
+                "agents": [s.name for s in agents],
                 "scenarios": [s.name for s in scenarios],
                 **_git_state(),
             },
@@ -80,20 +80,20 @@ def main(argv: list[str] | None = None) -> int:
         + "\n"
     )
 
-    total = len(suts) * len(scenarios) * args.reps
+    total = len(agents) * len(scenarios) * args.reps
     done = 0
     results = []
-    for sut in suts:
+    for agent in agents:
         for scenario in scenarios:
             for rep in range(1, args.reps + 1):
                 done += 1
-                print(f"[{done}/{total}] {sut.name} / {scenario.name} / rep{rep}", file=sys.stderr)
+                print(f"[{done}/{total}] {agent.name} / {scenario.name} / rep{rep}", file=sys.stderr)
                 result = run_episode(
-                    sut,
+                    agent,
                     scenario,
                     rep,
                     model=args.model,
-                    episode_dir=run_dir / sut.name / scenario.name / f"rep{rep}",
+                    episode_dir=run_dir / agent.name / scenario.name / f"rep{rep}",
                     timeout_s=args.timeout,
                 )
                 status = "error " + result.error if result.error else "ok"

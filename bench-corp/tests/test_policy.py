@@ -7,22 +7,22 @@ import tomllib
 import pytest
 
 from bench_corp.policy import SYSTEM_OF_TOOL, PolicyError, prune_policy
-from bench_corp.sut import SUTS
+from bench_corp.agents import AGENTS
 
 
 def _tool_names(policy_toml: str) -> set[str]:
     return {tool["name"] for tool in tomllib.loads(policy_toml).get("tool", [])}
 
 
-@pytest.mark.parametrize("sut_name", ["appa", "appa-open"])
-def test_demo_policies_cover_exactly_the_known_surface(sut_name: str) -> None:
-    policy = SUTS[sut_name].policy_file.read_text()
+@pytest.mark.parametrize("agent_name", ["appa", "appa-open"])
+def test_demo_policies_cover_exactly_the_known_surface(agent_name: str) -> None:
+    policy = AGENTS[agent_name].policy_file.read_text()
     assert _tool_names(policy) == set(SYSTEM_OF_TOOL)
 
 
-@pytest.mark.parametrize("sut_name", ["appa", "appa-open"])
-def test_prune_keeps_only_enabled_systems(sut_name: str) -> None:
-    policy = SUTS[sut_name].policy_file.read_text()
+@pytest.mark.parametrize("agent_name", ["appa", "appa-open"])
+def test_prune_keeps_only_enabled_systems(agent_name: str) -> None:
+    policy = AGENTS[agent_name].policy_file.read_text()
     pruned = prune_policy(policy, ("hr", "email"))
     assert _tool_names(pruned) == {"search_hr", "read_hr", "create_hr", "send_email"}
     # Everything but the tool list survives the round trip.
@@ -33,7 +33,7 @@ def test_prune_keeps_only_enabled_systems(sut_name: str) -> None:
 
 
 def test_prune_preserves_tool_annotations() -> None:
-    policy = SUTS["appa"].policy_file.read_text()
+    policy = AGENTS["appa"].policy_file.read_text()
     pruned = tomllib.loads(prune_policy(policy, ("hr", "public_forum", "email")))
     by_name = {tool["name"]: tool for tool in pruned["tool"]}
     assert by_name["read_public_forum"]["delta"] == {"trust": "suspicious"}

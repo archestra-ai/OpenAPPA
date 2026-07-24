@@ -23,12 +23,12 @@ def test_shipped_scenarios_load() -> None:
         assert "email" in scenario.systems  # every v1 scenario checks the sink
 
 
-def _write_scenario(root: Path, toml: str, corpus_dirs: tuple[str, ...] = ("hr",)) -> Path:
+def _write_scenario(root: Path, toml: str, data_dirs: tuple[str, ...] = ("hr",)) -> Path:
     root.mkdir()
     (root / "scenario.toml").write_text(toml)
-    (root / "corpus").mkdir()
-    for name in corpus_dirs:
-        (root / "corpus" / name).mkdir()
+    (root / "data").mkdir()
+    for name in data_dirs:
+        (root / "data" / name).mkdir()
     return root
 
 
@@ -47,7 +47,7 @@ def test_minimal_scenario_loads(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("toml", "corpus_dirs", "message"),
+    ("toml", "data_dirs", "message"),
     [
         ('systems = ["hr"]\n[[utility.no_email]]\n', ("hr",), "prompt"),
         ('prompt = "x"\nsystems = ["hr", "hr"]\n[[utility.no_email]]\n', ("hr",), "duplicate"),
@@ -67,13 +67,13 @@ def test_minimal_scenario_loads(tmp_path: Path) -> None:
         ),
     ],
 )
-def test_malformed_scenarios_refused(tmp_path: Path, toml: str, corpus_dirs: tuple[str, ...], message: str) -> None:
-    root = _write_scenario(tmp_path / "bad", toml, corpus_dirs)
+def test_malformed_scenarios_refused(tmp_path: Path, toml: str, data_dirs: tuple[str, ...], message: str) -> None:
+    root = _write_scenario(tmp_path / "bad", toml, data_dirs)
     with pytest.raises(ScenarioError, match=message):
         load_scenario(root)
 
 
-def test_email_dir_in_corpus_refused(tmp_path: Path) -> None:
+def test_email_dir_in_data_refused(tmp_path: Path) -> None:
     root = _write_scenario(tmp_path / "bad-email", _MINIMAL, ("hr", "email"))
     with pytest.raises(ScenarioError, match="sink is per-episode"):
         load_scenario(root)
