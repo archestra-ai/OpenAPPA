@@ -7,12 +7,31 @@
 //! plan with its handle and grouped ruling requirements, and the typed curative redispatch
 //! recommendations. The payload is **derived, never stored** — feedback is re-renderable from the
 //! engine state, so no fact shape changes here — and it carries no argument or value bytes, only
-//! labels, names, and gap values the check already surfaced. `Fork` recommendations are advisory
-//! (they cure nothing) and stay out of the payload.
+//! labels, names, and gap values the check already surfaced.
+//!
+//! A block whose call **narrows** — purely or alongside requirement gaps — additionally carries
+//! the branch fact the trajectory needs to decide consciously, per its [`FeedbackSurface`]: a
+//! root that can fork is told the fork alternative (the branch confines the label loss; any
+//! requirement gaps follow the child and are remedied there) and the payload carries the engine's
+//! `Fork` recommendation; a child is told the restriction stays in its branch — the parent is
+//! unaffected — so the delegated work is accepted where it was sent, not re-delegated; a surface
+//! that cannot fork (exhausted fork budget, the SDK's `CallSession`) gets neither. On a gap-only
+//! block fork advice always stays out — a child begins at the same label, so a fork cures no gap
+//! — and so does an unliftable block with no executable plan: the child would face the same
+//! gaps, and a narrowing that never lands needs no confining.
 
 use appa_engine::check::{Gap, Narrowing, RawBlock};
 use appa_engine::plan::{PlannedBlock, Recommendation, RemedyPlan};
 use serde::Serialize;
+
+/// The trajectory a block's feedback addresses — what branching fact its narrowing lead may
+/// honestly carry. A `Root` that can fork hears the fork alternative; a `Child` hears that its
+/// restriction is branch-confined; anything else hears the acceptance alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeedbackSurface {
+    Root { can_fork: bool },
+    Child,
+}
 
 /// The payload's plan entry: the executable handle, the grouped ruling requirements the plan will
 /// realize (per authority, the exact gaps its one ruling covers), and whether executing it accepts
@@ -44,6 +63,8 @@ struct WireBlock<'a> {
     plans: Vec<WirePlan<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     redispatch: Vec<WireRedispatch<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fork: Option<&'a str>,
 }
 
 fn wire_plans(offers: &[(String, RemedyPlan)]) -> Vec<WirePlan<'_>> {
@@ -66,7 +87,30 @@ fn wire_plans(offers: &[(String, RemedyPlan)]) -> Vec<WirePlan<'_>> {
         .collect()
 }
 
-fn payload(raw: &RawBlock, planned: &PlannedBlock, offers: &[(String, RemedyPlan)]) -> String {
+fn payload(
+    raw: &RawBlock,
+    planned: &PlannedBlock,
+    offers: &[(String, RemedyPlan)],
+    surface: FeedbackSurface,
+) -> String {
+    // Fork advice is actionable exactly when the call narrows, an offered plan could run it, and
+    // the surface is a root that can fork: the branch confines the label loss, while requirement
+    // gaps follow the child and are remedied there. On a gap-only block it stays out (a fork
+    // cures no gap), likewise on an unliftable block (nothing would run in the child either); a
+    // child already is the confining branch, so it hears acceptance, not further delegation.
+    let advises_fork =
+        matches!(surface, FeedbackSurface::Root { can_fork: true }) && raw.narrowing.is_some() && !offers.is_empty();
+    let fork = if advises_fork {
+        planned
+            .recommendations
+            .iter()
+            .find_map(|recommendation| match recommendation {
+                Recommendation::Fork { reason } => Some(reason.as_str()),
+                Recommendation::Redispatch { .. } => None,
+            })
+    } else {
+        None
+    };
     let block = WireBlock {
         requirement_gaps: &raw.requirement_gaps,
         narrowing: raw.narrowing.as_ref(),
@@ -82,14 +126,22 @@ fn payload(raw: &RawBlock, planned: &PlannedBlock, offers: &[(String, RemedyPlan
                 Recommendation::Fork { .. } => None,
             })
             .collect(),
+        fork,
     };
     serde_json::to_string(&block).expect("the block payload serializes: engine types are Serialize")
 }
 
 /// Render a block's model-facing feedback: the fixed prose lead for its decision kind, then the
 /// exact typed payload. A pure narrowing (no requirement gap) presents as an acceptance — the
-/// agent's own step, no authority involved; anything with gaps presents as a block to remedy.
-pub fn block_feedback(raw: &RawBlock, planned: &PlannedBlock, offers: &[(String, RemedyPlan)]) -> String {
+/// agent's own step, no authority involved. Anything with gaps presents as a block to remedy.
+/// Whenever the call narrows, the surface's branch fact rides along: a forking root is told the
+/// branching alternative that keeps its label, a child that the restriction stays in its branch.
+pub fn block_feedback(
+    raw: &RawBlock,
+    planned: &PlannedBlock,
+    offers: &[(String, RemedyPlan)],
+    surface: FeedbackSurface,
+) -> String {
     let lead = if offers.is_empty() {
         if planned.recommendations.iter().any(Recommendation::is_curative) {
             "blocked by policy; run a redispatch prerequisite first, then re-propose this call"
@@ -97,11 +149,35 @@ pub fn block_feedback(raw: &RawBlock, planned: &PlannedBlock, offers: &[(String,
             "blocked by policy; no remedy is available for this call"
         }
     } else if raw.requirement_gaps.is_empty() {
-        "narrowing: this call restricts the trajectory label; accept it with execute_remedy_plan"
+        match surface {
+            FeedbackSurface::Root { can_fork: true } => {
+                "narrowing: this call restricts the trajectory label; accept it with execute_remedy_plan, or fork the restricting work into a child session to keep this session's label"
+            }
+            FeedbackSurface::Root { can_fork: false } => {
+                "narrowing: this call restricts the trajectory label; accept it with execute_remedy_plan"
+            }
+            FeedbackSurface::Child => {
+                "narrowing: this call restricts this branch's label only — the parent session is unaffected; accept it with execute_remedy_plan"
+            }
+        }
+    } else if raw.narrowing.is_some() {
+        // Mixed block: every offered plan both covers the gaps and accepts the narrowing, so the
+        // branch fact rides along exactly as it does on a pure narrowing.
+        match surface {
+            FeedbackSurface::Root { can_fork: true } => {
+                "blocked by policy; execute one offered plan with execute_remedy_plan — it also accepts this call's narrowing — or fork the restricting work into a child session to keep this session's label"
+            }
+            FeedbackSurface::Root { can_fork: false } => {
+                "blocked by policy; execute one offered plan with execute_remedy_plan"
+            }
+            FeedbackSurface::Child => {
+                "blocked by policy; execute one offered plan with execute_remedy_plan; its narrowing restricts this branch's label only — the parent session is unaffected"
+            }
+        }
     } else {
         "blocked by policy; execute one offered plan with execute_remedy_plan"
     };
-    format!("{lead}\n{}", payload(raw, planned, offers))
+    format!("{lead}\n{}", payload(raw, planned, offers, surface))
 }
 
 /// Render the feedback after an authority declined one offer: the denial, then the remaining
@@ -204,7 +280,12 @@ mod tests {
             recommendations: vec![],
         };
         let offers = vec![("remedy-7".to_string(), planned.plans[0].clone())];
-        let payload = parsed(&block_feedback(&raw, &planned, &offers));
+        let payload = parsed(&block_feedback(
+            &raw,
+            &planned,
+            &offers,
+            FeedbackSurface::Root { can_fork: true },
+        ));
 
         let gaps = payload["requirement_gaps"].as_array().expect("gaps array");
         assert_eq!(gaps.len(), 6);
@@ -243,10 +324,12 @@ mod tests {
         let planned = PlannedBlock {
             raw: raw.clone(),
             plans: vec![accept_plan.clone()],
-            recommendations: vec![],
+            recommendations: vec![Recommendation::Fork {
+                reason: "confine the loss".to_string(),
+            }],
         };
         let offers = vec![("remedy-0".to_string(), accept_plan)];
-        let feedback = block_feedback(&raw, &planned, &offers);
+        let feedback = block_feedback(&raw, &planned, &offers, FeedbackSurface::Root { can_fork: true });
         // The decision kind is in the payload, not pinned prose: no requirement gaps, a present
         // narrowing, and an offer that accepts it — an acceptance, never an authorization ("0
         // requirement gaps … authorize" was the G12 defect).
@@ -260,6 +343,70 @@ mod tests {
         );
         assert_eq!(payload["plans"][0]["accepts_narrowing"], true);
         assert_eq!(payload["plans"][0]["rulings"].as_array().unwrap().len(), 0);
+        // A pure narrowing on a forking root carries the branch alternative...
+        assert_eq!(payload["fork"], "confine the loss");
+        // ...a root that cannot fork never has it, whatever the planner attached...
+        let payload = parsed(&block_feedback(
+            &raw,
+            &planned,
+            &offers,
+            FeedbackSurface::Root { can_fork: false },
+        ));
+        assert!(payload.get("fork").is_none());
+        // ...and a child hears confinement, never further delegation.
+        let payload = parsed(&block_feedback(&raw, &planned, &offers, FeedbackSurface::Child));
+        assert!(payload.get("fork").is_none());
+    }
+
+    #[test]
+    fn a_mixed_block_carries_the_fork_alternative_only_for_a_forking_root() {
+        let floor = Gap::TrustFloor {
+            required: Trust::new(1),
+            actual: Trust::new(0),
+        };
+        let raw = RawBlock {
+            requirement_gaps: vec![floor.clone()],
+            narrowing: Some(narrowing()),
+        };
+        let mut plan = plan_with("officer", vec![floor]);
+        plan.steps.push(RemedyStep::Accept);
+        let planned = PlannedBlock {
+            raw: raw.clone(),
+            plans: vec![plan.clone()],
+            recommendations: vec![Recommendation::Fork {
+                reason: "confine the loss".to_string(),
+            }],
+        };
+        let offers = vec![("remedy-0".to_string(), plan)];
+        // The narrowing makes the fork actionable despite the gaps: they follow the child, but
+        // the label loss stays confined there.
+        let payload = parsed(&block_feedback(
+            &raw,
+            &planned,
+            &offers,
+            FeedbackSurface::Root { can_fork: true },
+        ));
+        assert_eq!(payload["fork"], "confine the loss");
+        assert_eq!(payload["plans"][0]["accepts_narrowing"], true);
+        // A root that cannot fork and a child hear no delegation advice...
+        let payload = parsed(&block_feedback(
+            &raw,
+            &planned,
+            &offers,
+            FeedbackSurface::Root { can_fork: false },
+        ));
+        assert!(payload.get("fork").is_none());
+        let payload = parsed(&block_feedback(&raw, &planned, &offers, FeedbackSurface::Child));
+        assert!(payload.get("fork").is_none());
+        // ...and an unliftable mixed block (no executable plan) advises no fork anywhere: the
+        // child would face the same gaps, so the narrowing never lands.
+        let payload = parsed(&block_feedback(
+            &raw,
+            &planned,
+            &[],
+            FeedbackSurface::Root { can_fork: true },
+        ));
+        assert!(payload.get("fork").is_none());
     }
 
     #[test]
@@ -292,9 +439,15 @@ mod tests {
             ("remedy-0".to_string(), planned.plans[0].clone()),
             ("remedy-1".to_string(), planned.plans[1].clone()),
         ];
-        let payload = parsed(&block_feedback(&raw, &planned, &offers));
+        let payload = parsed(&block_feedback(
+            &raw,
+            &planned,
+            &offers,
+            FeedbackSurface::Root { can_fork: true },
+        ));
         // Every offer with its own handle and authority; the curative redispatch typed with its
-        // tool; the advisory fork absent.
+        // tool; the advisory fork absent even on a forking root — this call narrows nothing, so
+        // there is no label loss a branch could confine.
         assert_eq!(payload["plans"].as_array().unwrap().len(), 2);
         assert_eq!(payload["plans"][0]["plan_id"], "remedy-0");
         assert_eq!(payload["plans"][0]["rulings"][0]["authority"], "officer-a");
@@ -309,7 +462,12 @@ mod tests {
             plans: vec![],
             recommendations: planned.recommendations.clone(),
         };
-        let payload = parsed(&block_feedback(&raw, &none_planned, &[]));
+        let payload = parsed(&block_feedback(
+            &raw,
+            &none_planned,
+            &[],
+            FeedbackSurface::Root { can_fork: true },
+        ));
         assert_eq!(payload["plans"].as_array().unwrap().len(), 0);
         assert_eq!(payload["redispatch"][0]["tool"], "backup");
     }

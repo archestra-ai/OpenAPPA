@@ -174,8 +174,15 @@ impl Core {
                     .engine
                     .plan(&views, &call, &raw)
                     .expect("checked tool is registered");
+                // The CallSession surface has no fork tool: a host-forked child still hears the
+                // branch-confinement fact; a root never hears advice it cannot act on.
+                let surface = if self.store.parent_of(&self.tenant, &self.session)?.is_some() {
+                    crate::feedback::FeedbackSurface::Child
+                } else {
+                    crate::feedback::FeedbackSurface::Root { can_fork: false }
+                };
                 let feedback = if planned.plans.is_empty() {
-                    crate::feedback::block_feedback(&raw, &planned, &[])
+                    crate::feedback::block_feedback(&raw, &planned, &[], surface)
                 } else {
                     // The remedy budget bounds blocked-proposal rounds per digest: each cohort of
                     // offers is one round, within which every plan is consultable once.
@@ -195,7 +202,7 @@ impl Core {
                             (handle, plan.clone())
                         })
                         .collect();
-                    let feedback = crate::feedback::block_feedback(&raw, &planned, &offers);
+                    let feedback = crate::feedback::block_feedback(&raw, &planned, &offers, surface);
                     self.pending_blocks.push(PendingBlock { call, offers });
                     feedback
                 };

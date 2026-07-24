@@ -676,8 +676,18 @@ impl Turn {
                         .engine()
                         .plan(&views, &call, &raw)
                         .expect("checked tool is registered");
+                    // The branch fact tracks the trajectory's real surface: a child hears that its
+                    // restriction is branch-confined; a root hears the fork alternative exactly
+                    // when the reserved `fork` tool is offered this round.
+                    let surface = if self.is_child {
+                        crate::feedback::FeedbackSurface::Child
+                    } else {
+                        crate::feedback::FeedbackSurface::Root {
+                            can_fork: budget.allows_fork_from_depth(self.depth),
+                        }
+                    };
                     let feedback = if planned.plans.is_empty() {
-                        crate::feedback::block_feedback(&raw, &planned, &[])
+                        crate::feedback::block_feedback(&raw, &planned, &[], surface)
                     } else {
                         drop(projection);
                         // The budget counts blocked-proposal cohorts, not executions or denials, so
@@ -697,7 +707,7 @@ impl Turn {
                                 (handle, plan.clone())
                             })
                             .collect::<Vec<_>>();
-                        let feedback = crate::feedback::block_feedback(&raw, &planned, &offers);
+                        let feedback = crate::feedback::block_feedback(&raw, &planned, &offers, surface);
                         self.pending.push(PendingBlock { call, offers });
                         feedback
                     };
@@ -984,7 +994,7 @@ impl Turn {
                     .map(|(handle, plan)| format!("\"{handle}\" to {}", describe_return_plan(plan)))
                     .collect();
                 let feedback = format!(
-                    "returning this raw would narrow the parent; call execute_remedy_plan with plan_id {}; or submit_result null to return nothing",
+                    "returning this raw would narrow the parent; call execute_remedy_plan with plan_id {}; or submit_result null when the child has completed its side effects and the parent needs no value",
                     menu.join(", ")
                 );
                 self.pending_returns.push(PendingReturn {
