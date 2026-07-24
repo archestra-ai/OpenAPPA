@@ -17,7 +17,7 @@ While context branching and sub-agent orchestration are common operational capab
   \item any returned value crosses through the checked child-return and direct-parent merge path.
 \end{enumerate}
 
-\subsection{Fork by inheritance}
+\subsection{Inheritance-based forking}
 When creating a child trajectory, \appa{} combines security-critical label inheritance with transcript isolation:
 \begin{itemize}
   \item \textbf{Label inheritance}: The child inherits the parent's current Label state at the fork point, setting $L_c^0 := L_p^{\mathrm{fork}}$.
@@ -28,10 +28,10 @@ Preserving Label inheritance ($L_c^0 := L_p^{\mathrm{fork}}$) is security-essent
 
 However, transcript isolation introduces an operational utility limitation. Because the child receives a fresh model context rather than a continuation of the parent's conversation, the host application must supply the child's task instructions and inputs explicitly. While conservative for confidentiality, this design requires host-level prompt construction and task orchestration.
 
-\subsection{Descend locally}
+\subsection{Child-local execution}
 Child-local work is dispatched within the child context, where all subsequent actions are enforced against the evolving child label $L_c$. Updates to $L_c$ affect only the child label and never update $L_p$. The parent process may pause or proceed concurrently, but it remains isolated from child messages and tool outputs until an explicit exit occurs. This isolation guarantees the pre-merge properties of Proposition~\ref{prop:preservation}, regardless of the child's internal behavior.
 
-\subsection{Exit explicitly}
+\subsection{Explicit branch exit}
 An execution branch yields one of three outcomes:
 \begin{enumerate}
   \item an \texttt{abandon} signal;
