@@ -28,8 +28,30 @@ use tokio_util::sync::CancellationToken;
 const FORK_POLICY: &str = include_str!("../../../bench-corp/policies/appa.toml");
 const HR_RECORD: &str = "Onboarding buddy: Priya Sharma (ext 4471)";
 
+/// The shared policy's ticket requirement, and the `reply-and-file-ticket`
+/// deployment posture that strengthens it: a change ticket follows the public
+/// acknowledgement it responds to. The bench declares that clause in the one
+/// scenario that tests it (`[policy.appa.requires]` there) rather than taxing
+/// every episode with it, so the branching test below — the test the gate
+/// exists for — applies the same posture to the shared policy here.
+const SHARED_TICKET_REQUIRES: &str = r#"requires = { trust = "internal" }"#;
+const TICKET_REQUIRES_PRIOR_EGRESS: &str = r#"requires = { trust = "internal", effects = { has = ["egress"] } }"#;
+
+fn ticket_gated_on_prior_egress() -> String {
+    assert_eq!(
+        FORK_POLICY.matches(SHARED_TICKET_REQUIRES).count(),
+        1,
+        "the ticket is the only tool asking for bare internal trust — the posture has one place to land"
+    );
+    FORK_POLICY.replace(SHARED_TICKET_REQUIRES, TICKET_REQUIRES_PRIOR_EGRESS)
+}
+
 fn mediator() -> Arc<Mediator> {
-    let config = Config::from_toml_str(FORK_POLICY).expect("the fork policy parses");
+    mediator_for(FORK_POLICY)
+}
+
+fn mediator_for(policy: &str) -> Arc<Mediator> {
+    let config = Config::from_toml_str(policy).expect("the fork policy parses");
     let builtins: BTreeMap<_, _> = config
         .registry_config()
         .tools
@@ -131,7 +153,7 @@ async fn a_tainted_trajectory_never_files_the_ticket() {
 
 #[tokio::test]
 async fn a_fork_confines_the_taint_and_its_egress_unlocks_the_ticket() {
-    let mediator = mediator();
+    let mediator = mediator_for(&ticket_gated_on_prior_egress());
     let (_, session, outcome, facts) = run(
         mediator,
         vec![
