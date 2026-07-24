@@ -1,7 +1,7 @@
 \section{The Model}\label{sec:model}
 
 \paragraph{Threat model.}
-The model agent is assumed to be benign but susceptible to confusion; malicious influence enters strictly through untrusted inputs or unvetted content~\cite{greshake2023not}. The policy engine, host configuration, and external authorities constitute the trusted computing base. We assume a durable, append-only event log, ensuring that policy checks evaluate against a consistent history. Addressing covert channels within model outputs is beyond the scope of this framework~\cite{lampson1973note}.
+The model agent is assumed to be benign but susceptible to confusion; malicious influence enters strictly through untrusted inputs or unvetted content~\cite{greshake2023not}. The policy engine, host configuration, and external authorities constitute the trusted computing base. We assume a durable, append-only event log, ensuring that policy checks evaluate against a consistent history. Addressing covert channels within model outputs is outside our scope~\cite{lampson1973note}.
 
 \paragraph{Label state.}
 The label state is $S = \powerset(U) \times T$, where $U$ is a finite set of opaque principal (reader) identities and $T$ is a finite trust chain. Audiences are specified as concrete static reader sets, with call placeholders resolved by direct substitution. Deployments can customize the trust chain $T$ for their environment. Because $S$ is a finite product lattice under component-wise meet ($\cap, \min$) and join ($\cup, \max$)~\cite{denning1976lattice,birkhoff1967lattice}, policy composition rules are associative, commutative, and monotonic by construction—guaranteeing deterministic state aggregation without custom proof obligations.
@@ -32,7 +32,7 @@ For every child trace beginning at a fork, $L_c \le L_p^{\mathrm{fork}}$, and ev
 \begin{definition}[Taint-confining branch]
 A branch is taint-confining when it is abandoned or exits under the adequacy relation $L_p \le \lab(v)$.
 \end{definition}
-Returning an un-sanitized restrictive raw value maintains safety but propagates restrictions back to the parent trajectory, requiring re-evaluation against the pre-read acquisition policy. Proof in Appendix~\ref{app:proofs} follows from locality of the child fold and the meet laws.
+Returning an un-sanitized restrictive raw value maintains safety but propagates restrictions back to the parent trajectory, requiring re-evaluation against the pre-read acquisition policy. Proof in Appendix~\ref{app:proofs} follows from child fold locality and meet laws.
 
 \paragraph{The log monoid.}
 The log is modeled as the free monoid over events under concatenation~\cite{pierce2002types}, where events are appended during execution lifecycle phases without separate approval phases. Events fall into two primary categories:
@@ -41,7 +41,7 @@ The log is modeled as the free monoid over events under concatenation~\cite{pier
   \item \textbf{Governance events} record rulings, associated dispatches, trajectory boundaries (turn ends, forks, merges), narrowing acceptances, sanitizer applications, and label casts.
 \end{itemize}
 
-History predicates (\texttt{prior} and \texttt{no\_prior}) and Remedy planning evaluate over a narrower projection rather than raw lifecycle facts: the \emph{committed-effect projection} $\mathcal{E}(\ell)$, a tree-wide projection over the shared event log incorporating a tool contract's \texttt{emits} sequence $K$ only when a dispatch closes with reported success ($\mathrm{CloseSuccess}(K)$). Formally:
+History predicates (\texttt{prior} and \texttt{no\_prior}) and Remedy planning evaluate over a narrower projection rather than raw facts: the \emph{committed-effect projection} $\mathcal{E}(\ell)$, a tree-wide projection over the shared event log incorporating a tool contract's \texttt{emits} sequence $K$ only when a dispatch closes with reported success ($\mathrm{CloseSuccess}(K)$). Formally:
 \[
   \mathcal{E}(\ell \cdot \mathrm{CloseSuccess}(K)) = \mathcal{E}(\ell) \uplus K,
 \]
@@ -78,7 +78,7 @@ The engine queries the log solely to evaluate history predicates over $\mathcal{
 Custom execution policies and numerical thresholds are implemented via log projections coupled with external authority resolvers. For example, cumulative metrics such as financial spend limits (\texttt{finance.spend}) are computed by log views that determine whether an action requires human authorization. Recording these operations as named log events avoids introducing quantitative state into the label algebra, keeping scalar magnitudes outside the lattice model.
 
 \paragraph{Contracts.}
-A tool contract specifies policy declarations for both commitment mechanisms: a \texttt{delta} action declaring the raw output's Label contribution, and an \texttt{emits} sequence committed to the log projection $\mathcal{E}$ upon reported dispatch success. Prospective evaluation checks the contribution expected to be admitted; the trajectory folds the validated Label of the raw, sanitized, or cast-resolved value that is actually admitted, while \texttt{emits} enters $\mathcal{E}$ on reported dispatch success whether or not a value is admitted. Contracts also specify \texttt{requires} clauses:
+A tool contract specifies policy declarations for both commitment mechanisms: a \texttt{delta} action declaring the raw output's Label contribution, and an \texttt{emits} sequence committed to the log projection $\mathcal{E}$ upon reported dispatch success. Prospective evaluation checks the contribution expected to be admitted; the trajectory folds the validated Label of the raw, sanitized, or cast-resolved value that is actually admitted, while \texttt{emits} enters $\mathcal{E}$ on reported dispatch success whether or not a value is admitted. Tool contracts specify \texttt{requires} clauses:
 \begin{itemize}
   \item minimum trust floors,
   \item audience cover constraints $\readers(\fold) \supseteq \mathrm{recipients}$,
