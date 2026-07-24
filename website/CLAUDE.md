@@ -6,7 +6,8 @@ especially `website/content/docs/` — drifts from the actual project and is
 
 **When working on anything APPA-related (spec, paper, engine semantics,
 terminology, contracts), do not take website content into account.** The
-authoritative sources are, in order: `docs/spec.md`, `docs/paper.md`, and the
+authoritative sources are, in order: `docs/spec.md`, the `paper/` LaTeX
+draft, and the
 root `CLAUDE.md`. If the website contradicts them, the website is wrong —
 never propagate its wording, claims, or terminology back into the spec,
 paper, or any APPA discussion.

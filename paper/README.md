@@ -12,8 +12,6 @@ Artificial Intelligence and Security, co-located with ACM CCS).
 
 ## Layout
 
-- `paper.md` — the source skeleton/outline the LaTeX draft was generated from
-  (kept as the working design document).
 - `appa.tex` — ACM `acmart` root file; draft-note macros `\todo`, `\fixme`,
   `\stub` render in color.
 - `sections/*.tex` — one file per section; `sections/appendix.tex` holds the
