@@ -123,6 +123,95 @@ pub enum LoadError {
     OutputSanitizerWithPendingCast(String),
     #[error("tool {tool}'s declared raw output does not satisfy sanitizer {sanitizer}'s `from` precondition")]
     OutputSanitizerSourceUnmet { tool: String, sanitizer: String },
+    #[error(
+        "tool {tool}: {count} worst-case alternative remedy assignments exceed the {max} the planner enumerates — reduce the requirement entries or the competent authorities"
+    )]
+    TooManyPlanAlternatives { tool: String, count: u128, max: u128 },
+}
+
+/// The most unique grouped authority assignments one block may enumerate — the bound that keeps
+/// alternative-plan enumeration total (no runtime truncation, "every sound alternative" literal).
+/// A fixed engine constant, deliberately not a config knob: a policy that trips it has a shape
+/// problem (multiplying interchangeable authorities per gap), not a tuning problem.
+pub(crate) const MAX_PLAN_ALTERNATIVES: u128 = 16;
+
+/// The worst-case alternative count for one tool: every requirement entry unmet, each choosing
+/// independently among its competent authorities. An entry with no competence contributes `1`, not
+/// `0` — a state where *its* gap is unmet has no plans at all, but a state missing only the other
+/// gaps still multiplies theirs, so zeroing the product would under-count. Duplicate entries (the
+/// same mark or effect listed twice) count once, matching the check's canonical deduped gap set.
+/// `includes` competence is recipient-dependent (call arguments), upper-bounded by every
+/// scope-covering authority holding a reader ceiling. `cap` and `prior` are redispatch species
+/// with no covering mandate.
+fn worst_case_plan_alternatives(tool: &ToolContract, authorities: &[Authority]) -> u128 {
+    use crate::check::Gap;
+    use crate::contract::{AudienceRequirement, HistoryRequirement};
+    use crate::fact::EffectKind;
+    use crate::plan::covers_gap;
+
+    let mut count: u128 = 1;
+    let mut multiply = |competent: usize| count = count.saturating_mul(competent.max(1) as u128);
+
+    if let Some(floor) = tool.requires.label.trust_floor {
+        let gap = Gap::TrustFloor {
+            required: floor,
+            actual: floor,
+        };
+        multiply(
+            authorities
+                .iter()
+                .filter(|authority| covers_gap(authority, &gap, &tool.tags))
+                .count(),
+        );
+    }
+    let mut seen_includes: Vec<&AudienceRequirement> = Vec::new();
+    for requirement in &tool.requires.label.audience {
+        match requirement {
+            AudienceRequirement::Includes(_) if !seen_includes.contains(&requirement) => {
+                seen_includes.push(requirement);
+                multiply(
+                    authorities
+                        .iter()
+                        .filter(|authority| {
+                            authority.scope.covers(&tool.tags) && authority.mandate.reader_ceiling.is_some()
+                        })
+                        .count(),
+                );
+            }
+            AudienceRequirement::Includes(_) | AudienceRequirement::Cap(_) => {}
+        }
+    }
+    let mut seen_no_prior: Vec<&EffectKind> = Vec::new();
+    for requirement in &tool.requires.history {
+        match requirement {
+            HistoryRequirement::NoPrior(kind) if !seen_no_prior.contains(&kind) => {
+                seen_no_prior.push(kind);
+                let gap = Gap::NoPrior(kind.clone());
+                multiply(
+                    authorities
+                        .iter()
+                        .filter(|authority| covers_gap(authority, &gap, &tool.tags))
+                        .count(),
+                );
+            }
+            HistoryRequirement::NoPrior(_) | HistoryRequirement::Prior(_) => {}
+        }
+    }
+    let mut seen_marks: Vec<&crate::names::MarkName> = Vec::new();
+    for mark in &tool.requires.attention {
+        if seen_marks.contains(&mark) {
+            continue;
+        }
+        seen_marks.push(mark);
+        let gap = Gap::Attention(mark.clone());
+        multiply(
+            authorities
+                .iter()
+                .filter(|authority| covers_gap(authority, &gap, &tool.tags))
+                .count(),
+        );
+    }
+    count
 }
 
 /// The validated, indexed, immutable registry.
@@ -177,6 +266,21 @@ impl Registry {
             })?;
             if seen_authorities.insert(authority.name.clone(), ()).is_some() {
                 return Err(LoadError::DuplicateAuthority(authority.name.as_str().to_string()));
+            }
+        }
+
+        // Bound alternative-plan enumeration: per tool, the worst case (every requirement unmet)
+        // multiplies each requirement entry's competent-authority count. Static except `includes`,
+        // whose recipients are call arguments — upper-bounded by every scope-covering authority
+        // with a reader ceiling. Refused at load, so enumeration never truncates at runtime.
+        for tool in tools.values() {
+            let count = worst_case_plan_alternatives(tool, &config.authorities);
+            if count > MAX_PLAN_ALTERNATIVES {
+                return Err(LoadError::TooManyPlanAlternatives {
+                    tool: tool.name.as_str().to_string(),
+                    count,
+                    max: MAX_PLAN_ALTERNATIVES,
+                });
             }
         }
 
@@ -706,5 +810,40 @@ mod tests {
             resolution: CastResolution::Constant(CastTarget::Trust(Trust::new(0))),
         }];
         assert!(Registry::build(cfg).is_ok());
+    }
+
+    #[test]
+    fn the_alternative_plan_bound_refuses_an_over_wide_registry() {
+        // Two attention marks, each attended by N interchangeable authorities: N² worst-case
+        // assignments. 4 authorities (16) sits exactly on the bound; 5 (25) is refused at load —
+        // so runtime enumeration is total, never truncated.
+        let two_marks = |name: &str| {
+            let mut t = tool(name);
+            t.requires = Requires {
+                attention: vec![MarkName::new("m1"), MarkName::new("m2")],
+                ..Requires::default()
+            };
+            t
+        };
+        let attester = |name: String| Authority {
+            name: AuthorityName::new(name),
+            mandate: Mandate {
+                attends: vec![MarkName::new("m1"), MarkName::new("m2")],
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+        };
+        let mut cfg = base();
+        cfg.tools = vec![two_marks("wire")];
+        cfg.authorities = (0..4).map(|i| attester(format!("a{i}"))).collect();
+        assert!(Registry::build(cfg).is_ok());
+
+        let mut cfg = base();
+        cfg.tools = vec![two_marks("wire")];
+        cfg.authorities = (0..5).map(|i| attester(format!("a{i}"))).collect();
+        assert!(matches!(
+            Registry::build(cfg),
+            Err(LoadError::TooManyPlanAlternatives { count: 25, max: 16, .. })
+        ));
     }
 }

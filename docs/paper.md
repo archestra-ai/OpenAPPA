@@ -473,9 +473,9 @@ Contributions:
 - **Fork**: child starts at parent's fold (fresh slate = laundering
   primitive: "summarize what we know" into a public label); child appends
   to the **same shared log** — the parent's history is its prefix; the fork
-  boundary kills anything pending (an in-flight plan execution — an
-  approval request not yet ruled — finds the boundary
-  and dies — falls out of the boundary clause, no special rule).
+  boundary marks, never gates (a plan execution landing after it
+  re-validates against the live state and refuses on any value mismatch —
+  falls out of the boundary clause, no special rule).
 - **Merge, per monoid**: returned value = data, absorbed ∩/min ⇒ **Prop.: a
   child cannot widen its parent** (∩ cannot add readers; in v1 the child
   holds no widened state to begin with — the prop is load-bearing under
@@ -484,7 +484,9 @@ Contributions:
   the child happened in the world the moment it was sent, not at merge
   time. A ruling issued in a branch is a record, not a token — consumed
   inside its own atomic plan execution, nothing for the parent to reuse;
-  merge appends a boundary, killing anything still pending. Finalization
+  merge appends a boundary that marks, never gates — later executions
+  re-validate against the merged state, and the child's pending offers
+  died with its final turn. Finalization
   trivial for every started branch (return/failure/abandonment): nothing
   was withheld, so nothing can be lost. Result label less restrictive
   than the

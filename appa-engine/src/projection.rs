@@ -13,13 +13,16 @@ use std::collections::BTreeSet;
 
 use crate::fact::{BoundaryKind, CloseOutcome, EffectKind, Fact, ReturnPolicy, Revision};
 use crate::label::{Dim, DimValue, Label};
-use crate::value::{CanonicalDigest, ChildReturnId, DispatchId, LabeledValue, TrajectoryId, ValueId};
+use crate::value::{CanonicalDigest, ChildReturnId, DispatchId, LabeledValue, Provenance, TrajectoryId, ValueId};
 
-/// One admitted value as the fold needs it: which branch it belongs to and its own label.
+/// One admitted value as the fold and the Authority review need it: which branch it belongs to,
+/// its own label, and where it came from (the provenance an Authority reviews for a referenced
+/// argument — the fold never reads it).
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AdmittedValue {
     trajectory: TrajectoryId,
     label: Label,
+    provenance: Provenance,
 }
 
 /// One opened dispatch's identity, for occurrence counting.
@@ -81,9 +84,14 @@ impl Projection {
 
         for fact in log {
             match fact {
-                Fact::ValueAdmitted { trajectory, value, .. } => values.push(AdmittedValue {
+                Fact::ValueAdmitted {
+                    trajectory,
+                    value,
+                    provenance,
+                } => values.push(AdmittedValue {
                     trajectory: trajectory.clone(),
                     label: value.label.clone(),
+                    provenance: provenance.clone(),
                 }),
                 Fact::DispatchOpened {
                     trajectory, dispatch, ..
@@ -102,7 +110,7 @@ impl Projection {
                 }
                 // A cast overrides its value's Unknown dimension in the fold; the body is untouched.
                 Fact::CastApplied { value, resolved, .. } => {
-                    if let Some(v) = values.get_mut(value.index() as usize) {
+                    if let Some(v) = usize::try_from(value.index()).ok().and_then(|i| values.get_mut(i)) {
                         match resolved {
                             DimValue::Trust(t) => v.label.trust = Dim::Known(*t),
                             DimValue::Audience(a) => v.label.audience = Dim::Known(a.clone()),
@@ -117,7 +125,10 @@ impl Projection {
                 Fact::AssistantMessage { .. } | Fact::BlockFeedback { .. } => {}
                 // Transformer applications are audit only — the labels they establish ride the
                 // ValueAdmitted appended beside them, so the fold reads nothing here.
-                Fact::SanitizerApplied { .. } | Fact::OutputCastApplied { .. } => {}
+                Fact::SanitizerApplied { .. }
+                | Fact::OutputCastApplied { .. }
+                | Fact::OutputCastAccepted { .. }
+                | Fact::OutputCastLapsed { .. } => {}
                 Fact::ChildReturn { id, value, .. } => child_returns.push(ReturnedChild {
                     id: id.clone(),
                     value: value.clone(),
@@ -162,7 +173,10 @@ impl Projection {
 
     /// The label of an admitted value, or `None` if the id is out of range.
     pub fn value_label(&self, id: ValueId) -> Option<&Label> {
-        self.values.get(id.index() as usize).map(|v| &v.label)
+        usize::try_from(id.index())
+            .ok()
+            .and_then(|i| self.values.get(i))
+            .map(|v| &v.label)
     }
 
     /// The branch-local restrictive fold for `trajectory`: start from its fork seed (the parent's
@@ -210,12 +224,21 @@ impl Views<'_> {
         self.projection.value_label(id)
     }
 
+    /// The provenance of an admitted value by id — what an Authority reviews for a referenced
+    /// argument. Read-only audit context; the fold never consumes it.
+    pub fn value_provenance(&self, id: ValueId) -> Option<&Provenance> {
+        usize::try_from(id.index())
+            .ok()
+            .and_then(|i| self.projection.values.get(i))
+            .map(|value| &value.provenance)
+    }
+
     /// Does this value belong to the scoped trajectory? A cast may only resolve its own branch's
     /// values, never a sibling's.
     pub fn owns_value(&self, id: ValueId) -> bool {
-        self.projection
-            .values
-            .get(id.index() as usize)
+        usize::try_from(id.index())
+            .ok()
+            .and_then(|i| self.projection.values.get(i))
             .is_some_and(|value| &value.trajectory == self.trajectory)
     }
 

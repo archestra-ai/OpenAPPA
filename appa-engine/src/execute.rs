@@ -29,11 +29,12 @@ use thiserror::Error;
 use crate::check::{self, CheckOutcome, Gap};
 use crate::engine::opened_dispatch;
 use crate::fact::{Fact, FactBatch};
+use crate::label::Label;
 use crate::names::AuthorityName;
-use crate::plan::{self, PlanId, covers_gap};
+use crate::plan::{self, covers_gap};
 use crate::projection::Views;
 use crate::registry::Registry;
-use crate::value::{DispatchId, ResolvedCall};
+use crate::value::{DispatchId, Provenance, ResolvedCall, ValueId};
 
 /// Who exercised a ruling. The mandate is the named authority's; the issuer records who pressed the
 /// button, because one release — the response sink — bars the end user structurally.
@@ -55,15 +56,39 @@ pub enum Sink {
 
 /// A ruling the runtime gathered from an authority for one **specific pending dispatch**: the exact
 /// [`DispatchId`] (trajectory + canonical digest + occurrence) it was approved for, the mandate it
-/// acts under, who exercised it, and the gaps it claims to cover. Binding the whole dispatch — not
-/// just the digest — makes a ruling both call-scoped (`transfer(A,$1)` cannot admit `transfer(B,$100)`)
-/// and single-use (a repeat identical call is a new occurrence and takes a fresh ruling).
+/// acts under, who exercised it, the gaps it claims to cover, and the review it was issued over.
+/// Binding the whole dispatch — not just the digest — makes a ruling both call-scoped
+/// (`transfer(A,$1)` cannot admit `transfer(B,$100)`) and single-use (a repeat identical call is a
+/// new occurrence and takes a fresh ruling).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ruling {
     pub dispatch: DispatchId,
     pub authority: AuthorityName,
     pub issuer: Issuer,
     pub covers: Vec<Gap>,
+    pub reviewed: AuthorityReview,
+}
+
+/// The context an Authority reviewed when it ruled — persisted with the Ruling so the log carries
+/// exactly what was put to the reviewer, not merely a digest of hidden state: the reviewed tool,
+/// the trajectory label fold at review time, and, per referenced argument Value, its label and
+/// provenance. Argument and Value bytes never appear here (they never cross to an Authority);
+/// recipients live in the ruling's `covers` (`Gap::Includes`), never duplicated. Plan execution
+/// re-validates this context against the live views before persisting it — a relayer cannot land a
+/// review naming a different tool, a false fold, or a dangling reference.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorityReview {
+    pub tool: crate::value::ToolName,
+    pub trajectory_label: Label,
+    pub arg_refs: Vec<ReviewedRef>,
+}
+
+/// One referenced argument Value as the Authority reviewed it: its id, label, and provenance.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewedRef {
+    pub value: ValueId,
+    pub label: Label,
+    pub provenance: Provenance,
 }
 
 /// Why a plan could not execute.
@@ -89,6 +114,10 @@ pub enum PlanError {
     RulingExceedsMandate { authority: String },
     #[error("an end-user ruling cannot cover a response-sink gap")]
     EndUserResponseSink,
+    #[error("the supplied rulings do not realize the chosen plan's grouped assignment exactly")]
+    RulingAssignmentMismatch,
+    #[error("a ruling's recorded review does not match the live state it would admit")]
+    ReviewMismatch,
 }
 
 /// Execute a remedy plan: verify coverage and the issuer bar, then emit the atomic
@@ -96,7 +125,7 @@ pub enum PlanError {
 pub(crate) fn execute_plan(
     registry: &Registry,
     views: &Views,
-    plan: PlanId,
+    chosen: &plan::RemedyPlan,
     call: &ResolvedCall,
     rulings: &[Ruling],
     sink: Sink,
@@ -111,11 +140,54 @@ pub(crate) fn execute_plan(
         CheckOutcome::Unresolved(_) => return Err(PlanError::Unresolved),
     };
 
-    // The plan id must name a plan this block actually offers at the current revision — not an
-    // arbitrary or stale id.
+    // The chosen plan must be one this block offers at the current revision, matched **by value**
+    // — a stale ordinal cannot retarget a different assignment after state drift.
     let planned = plan::plan(registry, views, call, &block);
-    if !planned.plans.iter().any(|offered| offered.id == plan) {
-        return Err(PlanError::UnknownPlan(plan.value()));
+    if !planned.plans.iter().any(|offered| offered == chosen) {
+        return Err(PlanError::UnknownPlan(chosen.id.value()));
+    }
+    let plan = chosen.id;
+
+    // The supplied rulings must realize exactly the chosen plan's grouped assignment: one ruling
+    // per required entry, with precisely its authority and covers, and nothing extra — overlapping
+    // mandates cannot flatten or reroute the offered grouping.
+    if rulings.len() != chosen.required.len() {
+        return Err(PlanError::RulingAssignmentMismatch);
+    }
+    for required in &chosen.required {
+        let matched = rulings
+            .iter()
+            .filter(|ruling| ruling.authority == required.authority && ruling.covers == required.covers)
+            .count();
+        if matched != 1 {
+            return Err(PlanError::RulingAssignmentMismatch);
+        }
+    }
+
+    // The recorded review must match the live state this execution admits: the reviewed tool is
+    // this call's, the fold is the current one, and every reviewed reference resolves to a live
+    // value of this branch with the label and provenance the authority saw. A relayer cannot land
+    // a review of some other state; a race that moved what was reviewed refuses here and the
+    // authority is consulted afresh.
+    let live_label = views.current_label();
+    for ruling in rulings {
+        if ruling.reviewed.tool != contract.name || ruling.reviewed.trajectory_label != live_label {
+            return Err(PlanError::ReviewMismatch);
+        }
+        // Completeness both ways: the review names exactly the call's argument references — an
+        // omitted reference is as false a review as a fabricated one.
+        let reviewed_ids: Vec<ValueId> = ruling.reviewed.arg_refs.iter().map(|r| r.value).collect();
+        if reviewed_ids != call.arg_refs() {
+            return Err(PlanError::ReviewMismatch);
+        }
+        for reviewed in &ruling.reviewed.arg_refs {
+            let resolves = views.owns_value(reviewed.value)
+                && views.value_label(reviewed.value) == Some(&reviewed.label)
+                && views.value_provenance(reviewed.value) == Some(&reviewed.provenance);
+            if !resolves {
+                return Err(PlanError::ReviewMismatch);
+            }
+        }
     }
 
     // The exact dispatch this execution will open — including its occurrence. Every ruling must be
@@ -172,6 +244,7 @@ pub(crate) fn execute_plan(
             authority: ruling.authority.clone(),
             issuer: ruling.issuer,
             covers: ruling.covers.clone(),
+            reviewed: ruling.reviewed.clone(),
         });
     }
     if let Some(narrowing) = block.narrowing {
@@ -267,11 +340,23 @@ mod tests {
         }
     }
 
+    /// The review these tests' honest relayer records: `wire` over the suspicious/public fold every
+    /// test log folds to, no argument references. Execution validates this against the live views,
+    /// so the fixture must state the real state, not a placeholder.
+    fn top_review() -> AuthorityReview {
+        AuthorityReview {
+            tool: ToolName::new("wire"),
+            trajectory_label: known(SUSPICIOUS, Audience::Public),
+            arg_refs: vec![],
+        }
+    }
+
     /// The dispatch every ruling in these tests is scoped to — `wire({})`, first occurrence in `t`.
     fn wire_dispatch() -> DispatchId {
         DispatchId::new(traj(), call("wire", json!({})).digest(), 0)
     }
 
+    /// Execute against the block's first offered plan (the all-first-choices assignment).
     fn run(
         registry: &Registry,
         log: &[Fact],
@@ -281,14 +366,29 @@ mod tests {
     ) -> Result<FactBatch, PlanError> {
         let projection = Projection::build(log, Revision::new(log.len() as u64));
         let trajectory = traj();
-        execute_plan(
-            registry,
-            &projection.view(&trajectory),
-            PlanId::new(0),
-            call,
-            rulings,
-            sink,
-        )
+        let views = projection.view(&trajectory);
+        let chosen = offered_plan(registry, &views, call);
+        execute_plan(registry, &views, &chosen, call, rulings, sink)
+    }
+
+    /// The first plan the live state offers for `call`, or a fabricated never-offered one when the
+    /// state offers none (so refusal paths still exercise the value match).
+    fn offered_plan(registry: &Registry, views: &Views, call: &ResolvedCall) -> plan::RemedyPlan {
+        let planned = match check::evaluate(registry, registry.tool(call.tool()).unwrap(), views, call) {
+            CheckOutcome::Block(block) => plan::plan(registry, views, call, &block),
+            _ => {
+                return plan::RemedyPlan {
+                    id: plan::PlanId::new(0),
+                    steps: vec![],
+                    required: vec![],
+                };
+            }
+        };
+        planned.plans.first().cloned().unwrap_or(plan::RemedyPlan {
+            id: plan::PlanId::new(0),
+            steps: vec![],
+            required: vec![],
+        })
     }
 
     #[test]
@@ -299,6 +399,7 @@ mod tests {
             dispatch: wire_dispatch(),
             authority: AuthorityName::new("officer"),
             issuer: Issuer::Authority,
+            reviewed: top_review(),
             covers: vec![floor_gap()],
         };
         let batch = run(&registry, &log, &call("wire", json!({})), &[ruling], Sink::Tool).unwrap();
@@ -316,6 +417,7 @@ mod tests {
             dispatch: DispatchId::new(traj(), call("wire", json!({ "to": "elsewhere" })).digest(), 0),
             authority: AuthorityName::new("officer"),
             issuer: Issuer::Authority,
+            reviewed: top_review(),
             covers: vec![floor_gap()],
         };
         assert_eq!(
@@ -350,6 +452,7 @@ mod tests {
             dispatch: wire_dispatch(),
             authority: AuthorityName::new("officer"),
             issuer: Issuer::Authority,
+            reviewed: top_review(),
             covers: vec![floor_gap()],
         };
         assert_eq!(
@@ -366,15 +469,26 @@ mod tests {
             dispatch: wire_dispatch(),
             authority: AuthorityName::new("officer"),
             issuer: Issuer::Authority,
+            reviewed: top_review(),
             covers: vec![floor_gap()],
         };
         let projection = Projection::build(&log, Revision::new(log.len() as u64));
         let trajectory = traj();
+        // A plan value the live block does not offer — same steps shape, wrong assignment — is
+        // refused by the value match, whatever its ordinal claims.
+        let fabricated = plan::RemedyPlan {
+            id: plan::PlanId::new(999),
+            steps: vec![plan::RemedyStep::Authorize(AuthorityName::new("officer"))],
+            required: vec![plan::RequiredRuling {
+                authority: AuthorityName::new("officer"),
+                covers: vec![],
+            }],
+        };
         assert_eq!(
             execute_plan(
                 &registry,
                 &projection.view(&trajectory),
-                PlanId::new(999),
+                &fabricated,
                 &call("wire", json!({})),
                 std::slice::from_ref(&ruling),
                 Sink::Tool,
@@ -387,10 +501,10 @@ mod tests {
     fn uncovered_gap_is_rejected() {
         let registry = registry();
         let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
-        // No rulings supplied → the trust floor gap is uncovered.
+        // No rulings supplied for a one-ruling plan → the assignment is not realized.
         assert!(matches!(
             run(&registry, &log, &call("wire", json!({})), &[], Sink::Tool),
-            Err(PlanError::GapUncovered(_))
+            Err(PlanError::RulingAssignmentMismatch)
         ));
     }
 
@@ -404,6 +518,7 @@ mod tests {
             dispatch: wire_dispatch(),
             authority: AuthorityName::new("officer"),
             issuer: Issuer::Authority,
+            reviewed: top_review(),
             covers: vec![floor_gap()],
         };
         assert_eq!(
@@ -459,11 +574,15 @@ mod tests {
             dispatch: wire_dispatch(),
             authority: AuthorityName::new("attester"),
             issuer: Issuer::Authority,
+            reviewed: top_review(),
             covers: vec![floor_gap()],
         };
+        // The offered plan's assignment names the officer; a ruling from the attester does not
+        // realize it — refused at the assignment check, before the mandate re-verification even
+        // runs (which stays beneath it as defense in depth).
         assert!(matches!(
             run(&registry, &log, &call("wire", json!({})), &[ruling], Sink::Tool),
-            Err(PlanError::RulingExceedsMandate { .. })
+            Err(PlanError::RulingAssignmentMismatch)
         ));
     }
 
@@ -475,6 +594,7 @@ mod tests {
             dispatch: wire_dispatch(),
             authority: AuthorityName::new("officer"),
             issuer: Issuer::EndUser,
+            reviewed: top_review(),
             covers: vec![floor_gap()],
         };
         // The identical ruling is fine for a tool sink but barred for the response sink.
@@ -533,23 +653,100 @@ mod tests {
         })
         .unwrap();
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        // This log folds to trusted/public; the recorded reviews must state that state exactly.
+        let review = AuthorityReview {
+            tool: ToolName::new("wire"),
+            trajectory_label: known(TRUSTED, Audience::Public),
+            arg_refs: vec![],
+        };
         let rulings = vec![
             Ruling {
                 dispatch: wire_dispatch(),
                 authority: AuthorityName::new("a1"),
                 issuer: Issuer::Authority,
+                reviewed: review.clone(),
                 covers: vec![Gap::Attention(MarkName::new("m1"))],
             },
             Ruling {
                 dispatch: wire_dispatch(),
                 authority: AuthorityName::new("a2"),
                 issuer: Issuer::Authority,
+                reviewed: review,
                 covers: vec![Gap::Attention(MarkName::new("m2"))],
             },
         ];
         let batch = run(&registry, &log, &call("wire", json!({})), &rulings, Sink::Tool).unwrap();
         let ruling_count = batch.facts.iter().filter(|f| matches!(f, Fact::Ruling { .. })).count();
         assert_eq!(ruling_count, 2);
+    }
+
+    #[test]
+    fn a_false_or_dangling_review_is_refused() {
+        let registry = registry();
+        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let with_review = |reviewed: AuthorityReview| Ruling {
+            dispatch: wire_dispatch(),
+            authority: AuthorityName::new("officer"),
+            issuer: Issuer::Authority,
+            reviewed,
+            covers: vec![floor_gap()],
+        };
+        // A review claiming a fold the live state does not hold cannot land.
+        let false_label = AuthorityReview {
+            trajectory_label: Label::top(),
+            ..top_review()
+        };
+        assert_eq!(
+            run(
+                &registry,
+                &log,
+                &call("wire", json!({})),
+                &[with_review(false_label)],
+                Sink::Tool
+            ),
+            Err(PlanError::ReviewMismatch)
+        );
+        // A review naming a different tool than the dispatch cannot land.
+        let wrong_tool = AuthorityReview {
+            tool: ToolName::new("other"),
+            ..top_review()
+        };
+        assert_eq!(
+            run(
+                &registry,
+                &log,
+                &call("wire", json!({})),
+                &[with_review(wrong_tool)],
+                Sink::Tool
+            ),
+            Err(PlanError::ReviewMismatch)
+        );
+        // A review referencing a value the branch does not hold cannot land.
+        let dangling = AuthorityReview {
+            arg_refs: vec![ReviewedRef {
+                value: ValueId::new(7),
+                label: known(SUSPICIOUS, Audience::Public),
+                provenance: Provenance::UserInput,
+            }],
+            ..top_review()
+        };
+        assert_eq!(
+            run(
+                &registry,
+                &log,
+                &call("wire", json!({})),
+                &[with_review(dangling)],
+                Sink::Tool
+            ),
+            Err(PlanError::ReviewMismatch)
+        );
+        // Completeness is two-way: a review that OMITS a reference the call carries is as false as
+        // a fabricated one — the digest ignores refs, so only this check catches the omission.
+        let ref_call = ResolvedCall::new(ToolName::new("wire"), json!({}), vec![ValueId::new(0)]);
+        assert_eq!(
+            run(&registry, &log, &ref_call, &[with_review(top_review())], Sink::Tool),
+            Err(PlanError::ReviewMismatch)
+        );
     }
 
     #[test]
