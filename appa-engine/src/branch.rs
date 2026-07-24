@@ -9,8 +9,9 @@
 //! direct parent at the engine-derived `parent.combine(returned)`, and lands its `Merge` boundary
 //! as **one atomic batch** — value-granular, structurally unable to widen the parent (min trust,
 //! ∩ audience), with no orphanable intermediate state. Reparenting and cross-family crossings are
-//! refused, and a raw crossing that would narrow the parent exists only through an executed return
-//! plan.
+//! refused, a child returns **at most once** (its first crossing consumes the errand —
+//! [`BranchError::AlreadyReturned`]), and a raw crossing that would narrow the parent exists only
+//! through an executed return plan.
 //!
 //! Label folds are branch-local (each branch folds its own ancestry); the revision and the
 //! effect/history views are family-wide, so an abandoned child's egress still trips a parent's
@@ -35,10 +36,8 @@ pub enum BranchError {
     AlreadyForked,
     #[error("the parent's current label has an unresolved dimension — resolve it before forking")]
     ParentUnresolved,
-    #[error("no child return registered for the given id")]
-    UnknownChildReturn,
-    #[error("this child return was already merged")]
-    AlreadyMerged,
+    #[error("the child has already returned — a child returns at most once")]
+    AlreadyReturned,
     #[error("the child was not forked from this parent (reparenting/cross-family merge refused)")]
     NotDirectParent,
     #[error("no sanitizer registered as {0}")]
@@ -124,6 +123,11 @@ pub(crate) fn submit_child_return(
     match parent.parent_of(child) {
         Some(direct) if direct == parent.trajectory() => {}
         _ => return Err(BranchError::NotDirectParent),
+    }
+    // One errand, one result: a child's first crossing consumes its return channel, whatever the
+    // policy — a second `submit_result` is refused, not re-merged.
+    if parent.returns_by(child) > 0 {
+        return Err(BranchError::AlreadyReturned);
     }
     let policy = parent.return_policy_of(child).ok_or(BranchError::NotForked)?.clone();
     let fold = parent.branch_label(child);
@@ -239,6 +243,9 @@ pub(crate) fn check_child_return(
     match parent.parent_of(child) {
         Some(direct) if direct == parent.trajectory() => {}
         _ => return Err(BranchError::NotDirectParent),
+    }
+    if parent.returns_by(child) > 0 {
+        return Err(BranchError::AlreadyReturned);
     }
     // The blocked-return flow exists only under a Raw policy: a bound sanitizer crosses
     // unconditionally, and the model never chooses a path.
@@ -1101,9 +1108,9 @@ mod tests {
     }
 
     #[test]
-    fn an_executed_plan_kills_its_siblings_by_value() {
-        // Execute Accept; the merge narrows the parent, so the sibling composed plan (offered
-        // over the pre-merge labels) matches no fresh offer in either order.
+    fn an_executed_plan_consumes_the_childs_return_channel() {
+        // Execute Accept; the crossing consumes the child's one return, so the sibling composed
+        // plan is refused outright — in either order.
         let mut log = blocked_family();
         let batch = execute(
             &registry(),
@@ -1131,12 +1138,10 @@ mod tests {
                     raw_digest: RawResultDigest::of(b"findings"),
                 },
             ),
-            // The merge converged the parent onto the child fold: no block remains at all.
-            Err(BranchError::ReturnOfferStale)
+            Err(BranchError::AlreadyReturned)
         );
 
-        // Reverse order: the composed plan merges first and narrows the parent to its residual; a
-        // block remains, but the stale Accept embeds the pre-merge narrowing and is not offered.
+        // Reverse order: the composed plan merges first; the stale Accept dies the same way.
         let mut log = blocked_family();
         let batch = execute(
             &registry(),
@@ -1164,7 +1169,26 @@ mod tests {
                     body: ValueBody::new("findings"),
                 },
             ),
-            Err(BranchError::ReturnPlanNotOffered)
+            Err(BranchError::AlreadyReturned)
+        );
+    }
+
+    #[test]
+    fn a_second_return_from_one_child_is_refused() {
+        // A silent (non-narrowing) crossing consumes the child's return: the next submission and
+        // even the return check itself are refused, whatever they carry.
+        let mut log = forked(known(SUSPICIOUS, internal()));
+        let projection = build(&log);
+        let ret = submit_child_return(&registry(), &projection.view(&parent()), &child(), raw("first")).unwrap();
+        log.extend(ret.facts);
+        let projection = build(&log);
+        assert_eq!(
+            submit_child_return(&registry(), &projection.view(&parent()), &child(), raw("second")),
+            Err(BranchError::AlreadyReturned)
+        );
+        assert_eq!(
+            check_child_return(&registry(), &projection.view(&parent()), &child()),
+            Err(BranchError::AlreadyReturned)
         );
     }
 

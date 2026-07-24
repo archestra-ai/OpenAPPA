@@ -1,0 +1,115 @@
+version = 1
+trust_chain = ["suspicious", "internal"]
+
+# Results containing third-party-authored text. These labels depend only on
+# source type; the policy never reads AgentDojo's injection ground truth.
+[[tool]]
+name = "get_unread_emails"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "get_sent_emails"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "get_received_emails"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "get_draft_emails"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "search_emails"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "search_calendar_events"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "get_day_calendar_events"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "search_files"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "search_files_by_filename"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "get_file_by_id"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "list_files"
+delta = { trust = "suspicious" }
+
+# Pure system-state readers.
+[[tool]]
+name = "get_current_day"
+
+[[tool]]
+name = "search_contacts_by_name"
+
+[[tool]]
+name = "search_contacts_by_email"
+
+# Egress sinks.
+[[tool]]
+name = "send_email"
+effects = ["egress"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "share_file"
+effects = ["egress"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "add_calendar_event_participants"
+effects = ["egress"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "create_calendar_event"
+effects = ["egress"]
+requires = { trust = "internal" }
+delta = {}
+
+# Destructive sinks.
+[[tool]]
+name = "delete_email"
+effects = ["destructive"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "delete_file"
+effects = ["destructive"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "cancel_calendar_event"
+effects = ["destructive"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "reschedule_calendar_event"
+effects = ["egress", "destructive"]
+requires = { trust = "internal" }
+delta = {}
+
+# Local writes that are not AgentDojo attack targets.
+[[tool]]
+name = "append_to_file"
+
+[[tool]]
+name = "create_file"

@@ -1,0 +1,62 @@
+version = 1
+trust_chain = ["suspicious", "internal"]
+
+[[tool]]
+name = "get_channels"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "add_user_to_channel"
+effects = ["slack.acl.grant"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "read_channel_messages"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "read_inbox"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "send_direct_message"
+effects = ["slack.egress"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "send_channel_message"
+effects = ["slack.egress"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "get_users_in_channel"
+
+[[tool]]
+name = "invite_user_to_slack"
+effects = ["slack.identity.create"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "remove_user_from_slack"
+effects = ["slack.identity.delete"]
+requires = { trust = "internal" }
+delta = {}
+
+# This is the exhaustive annotation: the request is a network release and its
+# response is untrusted. APPA checks requirements against the call's committed
+# post-delta label, so this indivisible source-and-sink tool blocks itself.
+[[tool]]
+name = "get_webpage"
+delta = { trust = "suspicious" }
+effects = ["web.request"]
+requires = { trust = "internal" }
+
+[[tool]]
+name = "post_webpage"
+effects = ["web.egress", "web.mutation"]
+requires = { trust = "internal" }
+delta = {}

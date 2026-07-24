@@ -7,11 +7,12 @@ use thiserror::Error;
 
 use crate::admit::{self, AdmitError, CastAnswer, CastError, ResultAdmission};
 use crate::branch::{self, BranchError, ReturnSubmission};
-use crate::check::{self, CheckOutcome, RawBlock, UnresolvedFact};
+use crate::check::{self, CheckOutcome, Narrowing, RawBlock, UnresolvedFact};
 use crate::contract::ToolContract;
 use crate::execute::{self, PlanError, Ruling, Sink};
 use crate::fact::{Fact, FactBatch, ReturnPolicy};
-use crate::plan::{self, PlanId, PlannedBlock};
+use crate::label::DimValue;
+use crate::plan::{self, PlannedBlock};
 use crate::projection::Views;
 use crate::registry::Registry;
 use crate::value::{DispatchId, ResolvedCall, TrajectoryId};
@@ -63,17 +64,18 @@ impl Engine {
     }
 
     /// Execute a remedy plan: land the covering rulings, the narrowing acceptance, and the dispatch
-    /// as one atomic batch, enforcing mandate coverage and the response-sink issuer bar. See
-    /// [`crate::execute`].
+    /// as one atomic batch, enforcing the plan's exact grouped assignment, mandate coverage, and
+    /// the response-sink issuer bar. The chosen plan is matched by value against the live offers —
+    /// the return-path staleness story. See [`crate::execute`].
     pub fn execute_plan(
         &self,
         views: &Views,
-        plan: PlanId,
+        chosen: &plan::RemedyPlan,
         call: &ResolvedCall,
         rulings: &[Ruling],
         sink: Sink,
     ) -> Result<FactBatch, PlanError> {
-        execute::execute_plan(&self.registry, views, plan, call, rulings, sink)
+        execute::execute_plan(&self.registry, views, chosen, call, rulings, sink)
     }
 
     /// Close a dispatch and admit its result — raw, sanitized, or withheld. The label folds only
@@ -88,27 +90,30 @@ impl Engine {
         admit::admit_result(&self.registry, views, dispatch, call, admission)
     }
 
+    /// The narrowing admitting a cast-resolved value of `call` would fold into the live trajectory
+    /// label, or `None` when it does not move it — the whole filled label, established dimensions
+    /// included (see `admit::pending_cast_narrowing`). The runtime derives the acceptance offer
+    /// from this; admission re-derives it under the family lock, so a stale offer refuses by value
+    /// (D2).
+    pub fn cast_narrowing(
+        &self,
+        views: &Views,
+        call: &ResolvedCall,
+        resolved: &DimValue,
+    ) -> Result<Option<Narrowing>, EngineError> {
+        let contract = self.contract(call)?;
+        Ok(admit::pending_cast_narrowing(
+            views,
+            &admit::cast_filled_label(contract, resolved),
+        ))
+    }
+
     /// Attach the sound remedies to a raw block: executable plans and prose recommendations. An empty
     /// result (no plans, no curative recommendation) is a proof the block is unliftable over the
     /// implemented remedy subset — see [`crate::plan`].
     pub fn plan(&self, views: &Views, call: &ResolvedCall, raw: &RawBlock) -> Result<PlannedBlock, EngineError> {
         self.contract(call)?;
         Ok(plan::plan(&self.registry, views, call, raw))
-    }
-
-    /// The rulings a blocked call's remedy plan needs gathered: per authority, the gaps it must cover
-    /// (mandate routing stays engine-side). The runtime gathers a ruling from each and passes them to
-    /// [`Engine::execute_plan`]. A call that is not blocked yields an empty list.
-    pub fn required_rulings(
-        &self,
-        views: &Views,
-        call: &ResolvedCall,
-    ) -> Result<Vec<plan::RequiredRuling>, EngineError> {
-        let contract = self.contract(call)?;
-        match check::evaluate(&self.registry, contract, views, call) {
-            CheckOutcome::Block(block) => Ok(plan::required_rulings(&self.registry, &block, &contract.tags)),
-            _ => Ok(Vec::new()),
-        }
     }
 
     /// Resolve an Unknown dimension of an admitted value by a validated cast answer.
@@ -189,7 +194,7 @@ pub(crate) fn opened_dispatch(
     let fact = Fact::DispatchOpened {
         trajectory: views.trajectory().clone(),
         dispatch: dispatch.clone(),
-        proposed_label: check::effective_delta(registry, contract).apply(&views.current_label()),
+        proposed_label: check::committed_label(registry, contract, &views.current_label()),
         proposed_effects: contract.emits.clone(),
     };
     (dispatch, fact)
@@ -255,10 +260,10 @@ mod tests {
         ToolContract {
             name: ToolName::new("get_ticket"),
             tags: vec![],
-            delta: Delta {
+            delta: Some(Delta {
                 trust: None,
                 audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")]))),
-            },
+            }),
             emits: vec![],
             requires: Requires {
                 label: LabelRequirements {
@@ -306,10 +311,10 @@ mod tests {
         let export = ToolContract {
             name: ToolName::new("export"),
             tags: vec![],
-            delta: Delta {
+            delta: Some(Delta {
                 trust: None,
                 audience: Some(Dim::Known(internal.clone())),
-            },
+            }),
             emits: vec![],
             requires: Requires::default(),
             output_sanitizer: Some(SanitizerName::new("declassify")),
@@ -344,10 +349,10 @@ mod tests {
         let scan = ToolContract {
             name: ToolName::new("scan_inbox"),
             tags: vec![],
-            delta: Delta {
+            delta: Some(Delta {
                 trust: Some(Dim::Unknown),
                 audience: None,
-            },
+            }),
             emits: vec![],
             requires: Requires::default(),
             output_sanitizer: None,
@@ -376,7 +381,7 @@ mod tests {
         let send = ToolContract {
             name: ToolName::new("send_email"),
             tags: vec![],
-            delta: Delta::NONE,
+            delta: Some(Delta::NONE),
             emits: vec![EffectKind::new("egress")],
             requires: Requires {
                 label: LabelRequirements {
@@ -409,7 +414,7 @@ mod tests {
         let del = ToolContract {
             name: ToolName::new("delete_db"),
             tags: vec![],
-            delta: Delta::NONE,
+            delta: Some(Delta::NONE),
             emits: vec![],
             requires: Requires {
                 history: vec![
@@ -436,7 +441,7 @@ mod tests {
         let tool = ToolContract {
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Delta::NONE,
+            delta: Some(Delta::NONE),
             emits: vec![],
             requires: Requires {
                 attention: vec![MarkName::new("signoff")],
@@ -461,6 +466,69 @@ mod tests {
         let log = vec![user_value(Label::new(Dim::Unknown, Dim::Known(Audience::Public)))];
         match check(&e, &log, &call("get_ticket", json!({}))) {
             CheckOutcome::Unresolved(facts) => {
+                assert_eq!(facts.len(), 1);
+                assert_eq!(facts[0].dimension, Dimension::Trust);
+            }
+            other => panic!("expected unresolved, got {other:?}"),
+        }
+    }
+
+    /// A contract with no delta at all: the deployment never described this tool's output.
+    fn unannotated_tool(name: &str) -> ToolContract {
+        ToolContract {
+            name: ToolName::new(name),
+            tags: vec![],
+            delta: None,
+            emits: vec![],
+            requires: Requires::default(),
+            output_sanitizer: None,
+        }
+    }
+
+    #[test]
+    fn an_unannotated_tool_dispatches_and_its_result_admits_unknown() {
+        // The call itself checks against the trajectory as it stands (its Unknown contribution
+        // folds only at admission), and the raw result enters at Unknown in both dimensions —
+        // fail-closed at the values, never a dead-end at the call.
+        let e = engine(vec![unannotated_tool("probe")]);
+        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let proposed = call("probe", json!({}));
+        assert_eq!(check(&e, &log, &proposed), CheckOutcome::Allow);
+
+        let t = traj();
+        let p = Projection::build(&log, Revision::new(log.len() as u64));
+        let batch = e.open_dispatch(&p.view(&t), &proposed).unwrap();
+        log.extend(batch.facts);
+        let p = Projection::build(&log, Revision::new(log.len() as u64));
+        let dispatch = DispatchId::new(t.clone(), proposed.digest(), 0);
+        let batch = e
+            .admit_result(
+                &p.view(&t),
+                &dispatch,
+                &proposed,
+                ResultAdmission::SuccessRaw {
+                    body: ValueBody::new("raw"),
+                },
+            )
+            .unwrap();
+        log.extend(batch.facts);
+        let p = Projection::build(&log, Revision::new(log.len() as u64));
+        let current = p.view(&t).current_label();
+        assert_eq!(current.trust, Dim::Unknown);
+        assert_eq!(current.audience, Dim::Unknown);
+    }
+
+    #[test]
+    fn an_unknown_trajectory_blocks_only_requirement_consuming_calls() {
+        // After an unannotated read the fold is Unknown. A sink whose requirement consumes the
+        // dimension is Unresolved, naming exactly the consumed dimension's values to cast; a
+        // requirement-free call still flows — the gradual-annotation story.
+        let e = engine(vec![unannotated_tool("noop"), crm_tool()]);
+        let log = vec![user_value(Label::new(Dim::Unknown, Dim::Unknown))];
+        assert_eq!(check(&e, &log, &call("noop", json!({}))), CheckOutcome::Allow);
+        match check(&e, &log, &call("get_ticket", json!({}))) {
+            CheckOutcome::Unresolved(facts) => {
+                // get_ticket requires a trust floor only: the audience Unknown is not consumed.
                 assert_eq!(facts.len(), 1);
                 assert_eq!(facts[0].dimension, Dimension::Trust);
             }
@@ -500,7 +568,7 @@ mod tests {
         let send = ToolContract {
             name: ToolName::new("send_email"),
             tags: vec![],
-            delta: Delta::NONE,
+            delta: Some(Delta::NONE),
             emits: vec![],
             requires: Requires {
                 label: LabelRequirements {
@@ -517,6 +585,18 @@ mod tests {
             CheckOutcome::Block(b) => assert!(matches!(b.requirement_gaps.as_slice(), [Gap::Includes { .. }])),
             other => panic!("expected includes gap on a malformed call, got {other:?}"),
         }
+
+        // On an Unknown audience the malformed placeholder is unresolved-first, never a gap: a
+        // gap could be covered by a reader-ceiling authority and open the dispatch with the
+        // Unknown never resolved.
+        let log = vec![user_value(Label::new(Dim::Known(TRUSTED), Dim::Unknown))];
+        match check(&e, &log, &call("send_email", json!({}))) {
+            CheckOutcome::Unresolved(facts) => {
+                assert_eq!(facts.len(), 1);
+                assert_eq!(facts[0].dimension, Dimension::Audience);
+            }
+            other => panic!("expected unresolved on an Unknown audience, got {other:?}"),
+        }
     }
 
     #[test]
@@ -527,7 +607,7 @@ mod tests {
         let wire = ToolContract {
             name: ToolName::new("wire"),
             tags: vec![],
-            delta: Delta::NONE,
+            delta: Some(Delta::NONE),
             emits: vec![],
             requires: Requires {
                 label: LabelRequirements {
@@ -554,11 +634,19 @@ mod tests {
             casts: vec![],
         };
         let e = Engine::new(Registry::build(cfg).unwrap());
-        // A suspicious trajectory blocks `wire` on the trust floor; the officer's mandate covers it.
+        // A suspicious trajectory blocks `wire` on the trust floor; the officer's mandate covers
+        // it — the offered plan's grouped assignment routes the gap to the officer.
         let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
         let p = Projection::build(&log, Revision::new(log.len() as u64));
         let t = traj();
-        let required = e.required_rulings(&p.view(&t), &call("wire", json!({}))).unwrap();
+        let wire_call = call("wire", json!({}));
+        let raw = match e.check(&p.view(&t), &wire_call).unwrap() {
+            CheckOutcome::Block(raw) => raw,
+            other => panic!("expected a block, got {other:?}"),
+        };
+        let planned = e.plan(&p.view(&t), &wire_call, &raw).unwrap();
+        assert_eq!(planned.plans.len(), 1);
+        let required = &planned.plans[0].required;
         assert_eq!(required.len(), 1);
         assert_eq!(required[0].authority, AuthorityName::new("officer"));
         assert_eq!(

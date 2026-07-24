@@ -33,8 +33,15 @@ content = "You are a confined incident-response agent."
 A `[[tool]]` declares one tool's contract: what a successful call folds into
 the trajectory label (`delta`), what outer-world effects it commits (`effects`,
 the tool's `emits`), and what the trajectory must already satisfy before the
-call may run (`requires`). Only `name` is required — a tool with no `delta`,
-no `effects`, and no `requires` bars nothing and folds nothing.
+call may run (`requires`). Only `name` is required — but a tool with no `delta`
+key at all is **unannotated**: its results are admitted at `Unknown` in both
+dimensions (fail-closed — any downstream requirement that consumes the
+dimension blocks until a registered cast resolves it). The deliberate "this
+result carries nothing" annotation is the explicit empty delta, `delta = {}`.
+An unannotated tool may not itself declare label requirements (`trust` /
+`audience`) — its own Unknown consequence could outrun them, so the load
+refuses the combination: declare the delta (even `{}`) first. History and
+attention requirements are fine without one.
 
 ```toml
 [[tool]]
@@ -55,9 +62,11 @@ effects  = ["email.sent", "finance.spend"]              # emits
 
 - **`delta`** is *restrictive*: it can only lower trust and intersect the
   audience. `audience = { exactly = ["finance"] }` commits the reader set to
-  `finance`; there is no permissive delta. A `delta` never inherits a default —
-  an omitted dimension folds the identity (top trust, public audience), so it
-  neither narrows the trajectory nor lowers the value's own label.
+  `finance`; there is no permissive delta. Within a *declared* delta an omitted
+  dimension folds the identity (top trust, public audience) — the author
+  annotated the tool and owns the shorthand. Omitting the `delta` key entirely
+  is different: the tool is unannotated and its results enter `Unknown` (see
+  above).
 - **`output_sanitizer = "name"`** binds the tool's output to a registered
   `tool_output` sanitizer (RP4): every successful result is confined raw and
   only the sanitizer's derivation is admitted, at its declared transition label
@@ -124,24 +133,30 @@ required — an authority that cannot rule is inert. The in-process
 one competence a policy may grant itself is clearing what it can fully see, not
 vouching trust or readers it cannot. HITL is a resolver *channel*, not a
 different kind of authority. A `resolver` HTTP endpoint is a privileged sink: it
-receives the call's identity (tool name, canonical digest, the argument value
-ids) and the requirement gaps it would clear — including the recipients of the
-proposed release, the subject it authorizes — but never the tool result body or
-the non-recipient argument payload. Its answer is authorization data, so point it
-only at a service the operator trusts, over a trusted network.
+receives the call's identity (tool name, canonical digest) and the typed review
+context — the trajectory label fold at review time and, per referenced argument
+value, its label and provenance — plus the requirement gaps it would clear,
+including the recipients of the proposed release, the subject it authorizes. It
+never receives the tool result body or the non-recipient argument payload. The
+context put to the authority is persisted verbatim on the `Ruling` fact it
+produces (`reviewed`), so the log replays the review itself. Its answer is
+authorization data, so point it only at a service the operator trusts, over a
+trusted network.
 
 ## Sanitizers
 
 A `[[sanitizer]]` declares an **audience-only** transition a value may take
 through a registered transform — declassification via a registered transformer,
 never a fold outcome. Trust is never sanitizer territory: there is no field here
-to raise it. `on` says where it may apply, with the exact tokens `tool_input`
-and/or `tool_output`.
+to raise it. `on` says where it may apply; the only live token is
+`tool_output`. (`tool_input` names the de-scoped input-argument substitution —
+an input sanitizer would sit inert, so the loader refuses it rather than
+accepting dead configuration.)
 
 ```toml
 [[sanitizer]]
 name = "pii-redactor"
-on   = ["tool_input", "tool_output"]
+on   = ["tool_output"]
 
 [sanitizer.can_reduce]
 # applies only when the source audience satisfies `from`; produces exactly `to`
@@ -234,15 +249,17 @@ delta    = { audience = { exactly = ["internal"] } }
 name     = "send_email"                                 # send_email(body, to: $recipient)
 requires = { trust = "trusted", audience = { includes = ["$recipient"] } }
 effects  = ["egress"]
+delta    = {}   # deliberately neutral: a delivery receipt carries nothing
 
 [[tool]]
 name     = "file_github_ticket"
 requires = { trust = "trusted", audience = { includes = ["public"] } }
 effects  = ["egress", "mutation"]
+delta    = {}
 
 [[sanitizer]]
 name = "remove_pii"
-on   = ["tool_input", "tool_output"]
+on   = ["tool_output"]
 [sanitizer.can_reduce]
 audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
 [sanitizer.implementation]
@@ -286,11 +303,13 @@ delta = { trust = "suspicious", audience = { exactly = ["operator", "sre-team"] 
 name     = "k8s_delete_resource"
 requires = { trust = "trusted" }
 effects  = ["mutation"]
+delta    = {}   # status strings carry nothing; unannotated would fold Unknown
 
 [[tool]]
 name     = "http_post"                                  # a public sink
 requires = { audience = { includes = ["public"] } }
 effects  = ["egress"]
+delta    = {}
 ```
 
 Logs are third-party text, so their `delta` marks the trajectory `suspicious`.

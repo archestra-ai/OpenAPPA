@@ -109,6 +109,10 @@ pub enum LoadError {
     DualPendingCast(String),
     #[error("tool {tool} declares a pending-cast {dimension:?} output and a `requires` on that dimension")]
     PendingCastWithRequirement { tool: String, dimension: Dimension },
+    #[error(
+        "tool {0} is unannotated (no delta) but declares label requirements: declare its delta (`delta = {{}}` for a deliberately neutral output) so the committed label the requirements check is established"
+    )]
+    UnannotatedWithLabelRequirement(String),
     #[error("tool {tool} binds output sanitizer {sanitizer}, which is not registered")]
     UnknownOutputSanitizer { tool: String, sanitizer: String },
     #[error("tool {tool} binds {sanitizer}, which is not registered for tool output")]
@@ -119,6 +123,95 @@ pub enum LoadError {
     OutputSanitizerWithPendingCast(String),
     #[error("tool {tool}'s declared raw output does not satisfy sanitizer {sanitizer}'s `from` precondition")]
     OutputSanitizerSourceUnmet { tool: String, sanitizer: String },
+    #[error(
+        "tool {tool}: {count} worst-case alternative remedy assignments exceed the {max} the planner enumerates — reduce the requirement entries or the competent authorities"
+    )]
+    TooManyPlanAlternatives { tool: String, count: u128, max: u128 },
+}
+
+/// The most unique grouped authority assignments one block may enumerate — the bound that keeps
+/// alternative-plan enumeration total (no runtime truncation, "every sound alternative" literal).
+/// A fixed engine constant, deliberately not a config knob: a policy that trips it has a shape
+/// problem (multiplying interchangeable authorities per gap), not a tuning problem.
+pub(crate) const MAX_PLAN_ALTERNATIVES: u128 = 16;
+
+/// The worst-case alternative count for one tool: every requirement entry unmet, each choosing
+/// independently among its competent authorities. An entry with no competence contributes `1`, not
+/// `0` — a state where *its* gap is unmet has no plans at all, but a state missing only the other
+/// gaps still multiplies theirs, so zeroing the product would under-count. Duplicate entries (the
+/// same mark or effect listed twice) count once, matching the check's canonical deduped gap set.
+/// `includes` competence is recipient-dependent (call arguments), upper-bounded by every
+/// scope-covering authority holding a reader ceiling. `cap` and `prior` are redispatch species
+/// with no covering mandate.
+fn worst_case_plan_alternatives(tool: &ToolContract, authorities: &[Authority]) -> u128 {
+    use crate::check::Gap;
+    use crate::contract::{AudienceRequirement, HistoryRequirement};
+    use crate::fact::EffectKind;
+    use crate::plan::covers_gap;
+
+    let mut count: u128 = 1;
+    let mut multiply = |competent: usize| count = count.saturating_mul(competent.max(1) as u128);
+
+    if let Some(floor) = tool.requires.label.trust_floor {
+        let gap = Gap::TrustFloor {
+            required: floor,
+            actual: floor,
+        };
+        multiply(
+            authorities
+                .iter()
+                .filter(|authority| covers_gap(authority, &gap, &tool.tags))
+                .count(),
+        );
+    }
+    let mut seen_includes: Vec<&AudienceRequirement> = Vec::new();
+    for requirement in &tool.requires.label.audience {
+        match requirement {
+            AudienceRequirement::Includes(_) if !seen_includes.contains(&requirement) => {
+                seen_includes.push(requirement);
+                multiply(
+                    authorities
+                        .iter()
+                        .filter(|authority| {
+                            authority.scope.covers(&tool.tags) && authority.mandate.reader_ceiling.is_some()
+                        })
+                        .count(),
+                );
+            }
+            AudienceRequirement::Includes(_) | AudienceRequirement::Cap(_) => {}
+        }
+    }
+    let mut seen_no_prior: Vec<&EffectKind> = Vec::new();
+    for requirement in &tool.requires.history {
+        match requirement {
+            HistoryRequirement::NoPrior(kind) if !seen_no_prior.contains(&kind) => {
+                seen_no_prior.push(kind);
+                let gap = Gap::NoPrior(kind.clone());
+                multiply(
+                    authorities
+                        .iter()
+                        .filter(|authority| covers_gap(authority, &gap, &tool.tags))
+                        .count(),
+                );
+            }
+            HistoryRequirement::NoPrior(_) | HistoryRequirement::Prior(_) => {}
+        }
+    }
+    let mut seen_marks: Vec<&crate::names::MarkName> = Vec::new();
+    for mark in &tool.requires.attention {
+        if seen_marks.contains(&mark) {
+            continue;
+        }
+        seen_marks.push(mark);
+        let gap = Gap::Attention(mark.clone());
+        multiply(
+            authorities
+                .iter()
+                .filter(|authority| covers_gap(authority, &gap, &tool.tags))
+                .count(),
+        );
+    }
+    count
 }
 
 /// The validated, indexed, immutable registry.
@@ -146,7 +239,7 @@ impl Registry {
 
         let mut tools = BTreeMap::new();
         for tool in config.tools {
-            let declared_trust = match &tool.delta.trust {
+            let declared_trust = match tool.delta.as_ref().and_then(|d| d.trust.as_ref()) {
                 Some(Dim::Known(t)) => Some(*t),
                 Some(Dim::Unknown) | None => None,
             };
@@ -173,6 +266,21 @@ impl Registry {
             })?;
             if seen_authorities.insert(authority.name.clone(), ()).is_some() {
                 return Err(LoadError::DuplicateAuthority(authority.name.as_str().to_string()));
+            }
+        }
+
+        // Bound alternative-plan enumeration: per tool, the worst case (every requirement unmet)
+        // multiplies each requirement entry's competent-authority count. Static except `includes`,
+        // whose recipients are call arguments — upper-bounded by every scope-covering authority
+        // with a reader ceiling. Refused at load, so enumeration never truncates at runtime.
+        for tool in tools.values() {
+            let count = worst_case_plan_alternatives(tool, &config.authorities);
+            if count > MAX_PLAN_ALTERNATIVES {
+                return Err(LoadError::TooManyPlanAlternatives {
+                    tool: tool.name.as_str().to_string(),
+                    count,
+                    max: MAX_PLAN_ALTERNATIVES,
+                });
             }
         }
 
@@ -250,11 +358,27 @@ impl Registry {
 /// exactly one. And never a `requires` on a pending-cast dimension: the check evaluates that
 /// dimension as identity (the contribution folds only at admission, resolved), so a requirement on
 /// it could be outrun by the call's own unestablished consequences — refused at load instead.
+/// An unannotated tool (no delta at all) declares nothing pending, but the same outrun concern
+/// applies to **both** dimensions at once: the check evaluates its unestablished contribution as
+/// identity while the admitted result folds Unknown, so a label requirement on an unannotated
+/// tool could pass on a state its own consequence invalidates. Refused at load, like the
+/// pending-cast case — the author declares the delta (`delta = {}` for neutral) first. History
+/// and attention requirements are fine: no label dimension is consumed.
 fn validate_pending_cast(tool: &ToolContract) -> Result<(), LoadError> {
-    if matches!(tool.delta.trust, Some(Dim::Unknown)) && matches!(tool.delta.audience, Some(Dim::Unknown)) {
+    let Some(delta) = &tool.delta else {
+        let requires_label = tool.requires.label.trust_floor.is_some() || !tool.requires.label.audience.is_empty();
+        return if requires_label {
+            Err(LoadError::UnannotatedWithLabelRequirement(
+                tool.name.as_str().to_string(),
+            ))
+        } else {
+            Ok(())
+        };
+    };
+    if matches!(delta.trust, Some(Dim::Unknown)) && matches!(delta.audience, Some(Dim::Unknown)) {
         return Err(LoadError::DualPendingCast(tool.name.as_str().to_string()));
     }
-    match tool.delta.pending_cast_dim() {
+    match delta.pending_cast_dim() {
         Some(Dimension::Trust) if tool.requires.label.trust_floor.is_some() => {
             Err(LoadError::PendingCastWithRequirement {
                 tool: tool.name.as_str().to_string(),
@@ -275,6 +399,8 @@ fn validate_pending_cast(tool: &ToolContract) -> Result<(), LoadError> {
 /// `tool_output` sanitizer; the tool's declared raw output must satisfy the transition's `from`
 /// (both sides are static, so an inapplicable transition is refused here, never at admission); and
 /// the binding cannot pair with a pending-cast output (the two Phase-2 disciplines don't compose).
+/// An unannotated tool cannot bind a sanitizer either: its raw output label is Unknown, which
+/// never satisfies the `from` — the source-unmet arm below refuses it.
 fn validate_output_binding(
     tool: &ToolContract,
     sanitizers: &BTreeMap<SanitizerName, Sanitizer>,
@@ -292,12 +418,12 @@ fn validate_output_binding(
             sanitizer: name.as_str().to_string(),
         });
     }
-    if tool.delta.pending_cast_dim().is_some() {
+    if tool.pending_cast_dim().is_some() {
         return Err(LoadError::OutputSanitizerWithPendingCast(
             tool.name.as_str().to_string(),
         ));
     }
-    let raw = tool.delta.output_label();
+    let raw = tool.output_label();
     if raw.audience.covers(&sanitizer.can_reduce.from_includes) != Adequacy::Holds {
         return Err(LoadError::OutputSanitizerSourceUnmet {
             tool: tool.name.as_str().to_string(),
@@ -343,7 +469,7 @@ mod tests {
         ToolContract {
             name: ToolName::new(name),
             tags: vec![],
-            delta: Delta::NONE,
+            delta: Some(Delta::NONE),
             emits: vec![],
             requires: Requires::default(),
             output_sanitizer: None,
@@ -408,10 +534,10 @@ mod tests {
     fn refuses_rank_out_of_chain() {
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
-            delta: Delta {
+            delta: Some(Delta {
                 trust: Some(Dim::Known(Trust::new(9))),
                 audience: None,
-            },
+            }),
             output_sanitizer: None,
             ..tool("over")
         }];
@@ -460,10 +586,10 @@ mod tests {
     fn refuses_dual_pending_cast_output() {
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
-            delta: Delta {
+            delta: Some(Delta {
                 trust: Some(Dim::Unknown),
                 audience: Some(Dim::Unknown),
-            },
+            }),
             output_sanitizer: None,
             ..tool("scan")
         }];
@@ -480,10 +606,10 @@ mod tests {
 
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
-            delta: Delta {
+            delta: Some(Delta {
                 trust: Some(Dim::Unknown),
                 audience: None,
-            },
+            }),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(Trust::new(1)),
@@ -504,10 +630,10 @@ mod tests {
 
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
-            delta: Delta {
+            delta: Some(Delta {
                 trust: None,
                 audience: Some(Dim::Unknown),
-            },
+            }),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
@@ -529,10 +655,10 @@ mod tests {
         // The other dimension's requirement composes fine with a pending-cast one.
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
-            delta: Delta {
+            delta: Some(Delta {
                 trust: Some(Dim::Unknown),
                 audience: None,
-            },
+            }),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
@@ -542,6 +668,60 @@ mod tests {
             },
             output_sanitizer: None,
             ..tool("scan")
+        }];
+        assert!(Registry::build(cfg).is_ok());
+    }
+
+    #[test]
+    fn refuses_label_requirements_on_an_unannotated_tool() {
+        use crate::contract::{LabelRequirements, Requires};
+
+        // An unannotated tool's own result folds Unknown after the check ran on identity — a
+        // label requirement could be outrun by the call's own consequence, so it is refused at
+        // load (the pending-cast rule, applied to the wholly-unestablished case).
+        let mut cfg = base();
+        cfg.tools = vec![ToolContract {
+            delta: None,
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(Trust::new(1)),
+                    audience: vec![],
+                },
+                ..Requires::default()
+            },
+            ..tool("send")
+        }];
+        assert!(matches!(
+            Registry::build(cfg),
+            Err(LoadError::UnannotatedWithLabelRequirement(name)) if name == "send"
+        ));
+
+        // History/attention requirements consume no label dimension: fine without a delta.
+        let mut cfg = base();
+        cfg.tools = vec![ToolContract {
+            delta: None,
+            requires: Requires {
+                history: vec![crate::contract::HistoryRequirement::Prior(
+                    crate::fact::EffectKind::new("backup"),
+                )],
+                ..Requires::default()
+            },
+            ..tool("send")
+        }];
+        assert!(Registry::build(cfg).is_ok());
+
+        // The explicit neutral delta composes with any requirement.
+        let mut cfg = base();
+        cfg.tools = vec![ToolContract {
+            delta: Some(Delta::NONE),
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(Trust::new(1)),
+                    audience: vec![],
+                },
+                ..Requires::default()
+            },
+            ..tool("send")
         }];
         assert!(Registry::build(cfg).is_ok());
     }
@@ -561,10 +741,10 @@ mod tests {
         };
         let internal = || Audience::restricted([ReaderId::new("internal")]);
         let bound_tool = |sanitizer: &str| ToolContract {
-            delta: Delta {
+            delta: Some(Delta {
                 trust: None,
                 audience: Some(Dim::Known(internal())),
-            },
+            }),
             output_sanitizer: Some(SanitizerName::new(sanitizer)),
             ..tool("export")
         };
@@ -604,10 +784,10 @@ mod tests {
         let mut cfg = base();
         cfg.sanitizers = vec![sanitizer("declassify", true, internal())];
         cfg.tools = vec![ToolContract {
-            delta: Delta {
+            delta: Some(Delta {
                 trust: Some(Dim::Unknown),
                 audience: Some(Dim::Known(internal())),
-            },
+            }),
             ..bound_tool("declassify")
         }];
         assert!(matches!(
@@ -630,5 +810,40 @@ mod tests {
             resolution: CastResolution::Constant(CastTarget::Trust(Trust::new(0))),
         }];
         assert!(Registry::build(cfg).is_ok());
+    }
+
+    #[test]
+    fn the_alternative_plan_bound_refuses_an_over_wide_registry() {
+        // Two attention marks, each attended by N interchangeable authorities: N² worst-case
+        // assignments. 4 authorities (16) sits exactly on the bound; 5 (25) is refused at load —
+        // so runtime enumeration is total, never truncated.
+        let two_marks = |name: &str| {
+            let mut t = tool(name);
+            t.requires = Requires {
+                attention: vec![MarkName::new("m1"), MarkName::new("m2")],
+                ..Requires::default()
+            };
+            t
+        };
+        let attester = |name: String| Authority {
+            name: AuthorityName::new(name),
+            mandate: Mandate {
+                attends: vec![MarkName::new("m1"), MarkName::new("m2")],
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+        };
+        let mut cfg = base();
+        cfg.tools = vec![two_marks("wire")];
+        cfg.authorities = (0..4).map(|i| attester(format!("a{i}"))).collect();
+        assert!(Registry::build(cfg).is_ok());
+
+        let mut cfg = base();
+        cfg.tools = vec![two_marks("wire")];
+        cfg.authorities = (0..5).map(|i| attester(format!("a{i}"))).collect();
+        assert!(matches!(
+            Registry::build(cfg),
+            Err(LoadError::TooManyPlanAlternatives { count: 25, max: 16, .. })
+        ));
     }
 }

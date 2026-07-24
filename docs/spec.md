@@ -88,8 +88,9 @@ flowchart LR
 
 The mediation loop, on each round-trip: the run's turns accumulate into the
 trajectory; every tool call the model proposes is checked before dispatch; an
-allowed call runs and, on success, its declared contributions land (label
-delta and effects); a blocked call never runs — the model receives exactly what
+allowed call runs and its declared contributions land (effects on success,
+the label delta at admission); a blocked call never runs — the model
+receives exactly what
 failed — requirement gaps or a narrowing — and the available remedy plans
 instead, and can execute an engine-side plan by id (see The check).
 
@@ -138,8 +139,11 @@ never operated on directly.
 - **label requirement** — what the trajectory label must satisfy before a
   tool may run. Contracts declare it as `requires`.
 
-Tool calls are transactional: once a tool call succeeds, its delta is folded
-into the trajectory. Sanitizing after the fact cannot clear a trajectory.
+Tool calls are transactional: when a successful call's result value — or its
+registered derivation — is admitted, the delta is folded into the trajectory.
+The label folds only from admitted values: a success whose result admits no
+value (an oversized body, a refused derivation) appends its effects and folds
+nothing. Sanitizing after the fact cannot clear a trajectory.
 
 ## Labels
 
@@ -162,20 +166,24 @@ label itself never rises.
 
 ### Audience
 
-A set of readers drawn from a fixed per-deployment universe, with named,
-possibly nested groups; `public` means the whole universe. A customer's
-secrecy taxonomy embeds as nested groups
-(`level-3-readers ⊂ level-2-readers ⊂ everyone`) — classification schemes
-are audience *configuration*, not a new dimension.
+A set of readers drawn from a fixed per-deployment universe; `public` means
+the whole universe.
 
-Reader sets are symbolic — domains, named groups, explicit id-lists.
-Containments among named groups are configuration the engine decides as
-data; membership of a raw id (`john ∈ hr`) is a dispatch-time question for a
-registered **resolver**. A ruling naming a group binds the group
-symbolically: every check resolves membership fresh at decision time — a
-removed member is excluded from all later checks, but nothing looks back
-between checks; mid-flight revocation is the directory's concern, not the
-engine's.
+Reader sets in the current dialect are **explicit id-lists**: every audience
+that reaches the algebra is a concrete set of reader ids, so intersection and
+subset are exact. A customer's secrecy taxonomy embeds by writing each tier
+out as its member readers — classification schemes are audience
+*configuration*, not a new dimension.
+
+Named, possibly nested groups
+(`level-3-readers ⊂ level-2-readers ⊂ everyone`) with membership resolved by
+a registered **resolver** (`john ∈ hr` as a dispatch-time question, resolved
+fresh at every check, so a removed member is excluded from all later checks
+while nothing looks back between checks) are the design direction for
+directory-backed deployments — deliberately not in the current dialect,
+which trades revocation freshness for exactness of the set operations. Until
+a resolver exists, a directory change reaches the engine only by reloading
+the configuration's id-lists.
 
 Reading restricted data **shrinks** the reader set (intersection: only
 people cleared for every input may read the combination); the set never
@@ -191,7 +199,7 @@ the reader set from either side:
 
 ### How the label moves
 
-A contract's `delta` describes what a successful call does to the
+A contract's `delta` describes what a successful, admitted call does to the
 trajectory label — and every delta is *restrictive*: intersect the
 audience, take the minimum trust. There is no permissive delta. A ruling
 covers a requirement gap for one dispatch while the label stays put (see
@@ -226,10 +234,13 @@ species of records share it:
 - **Governance events** — what was decided: authority rulings and the
   dispatches that consume them, the agent's narrowing acceptances, boundary
   events, sanitizer applications,
-  casts. A **boundary event** is not a decision — it is punctuation:
-  a mark in the log that pending plan executions — approval requests not
-  yet ruled — cannot outlive. The engine appends
-  one at the end of each assistant turn, at fork, and at merge.
+  casts. A **boundary event** is not a decision — it is punctuation: it
+  marks, never gates. Pending plan offers die with their turn at the
+  harness, and a plan execution is always re-validated against the live
+  state it lands in — an offer whose block re-derives unchanged executes;
+  one the state has moved past mismatches by value and is refused. The
+  engine appends one at the end of each assistant turn, at fork, and at
+  merge.
 
 The log is consulted in exactly three ways: **history requirements** in
 contracts, **ruling validity** (rulings, their consumption, boundaries), and
@@ -252,23 +263,27 @@ branches in realtime — an abandoned branch returns no value, yet its
 `egress` must stay visible (see Branching). Their clocks differ: label
 requirements evaluate on the label the call would commit, history
 requirements on the log as it stands, so a call's own `emits` can never
-trigger its own precondition (see Check timing). And the log is ordered
-and counted where a label fold is idempotent: the seen-effect-kinds set is
-only a cached view, and views that need multiplicity — the summed
-`finance.spend` magnitude below — read the records, not the set. Folding
-events into the label would silently make history branch-scoped, checked
-on the wrong clock, and blind to how often anything happened.
+trigger its own precondition (see Check timing). And the log stays ordered
+where a label fold is idempotent — but every history check consumes it as
+**kind-containment only**: `prior(k)` / `no_prior(k)` ask whether a matching
+effect exists, never how many times or how large. The engine keeps no
+magnitude view and feeds none to any authority; counting and summing are
+deliberately outside the model. Folding events into the label would
+silently make history branch-scoped and checked on the wrong clock.
 
 Effects are also the model's sanctioned pressure-release valve —
 deliberately. A deployment can encode almost any bespoke gating ritual as
-effect vocabulary plus a dynamic authority: a `finance.spend` effect whose
-accumulated magnitude — a log view, summed by a registered authority —
-decides between auto-approving and paging a human. That is better than the
-alternatives: the hack is a named effect in an auditable log, not a
-distortion of the label rules, and the guarantees on everything else stand.
-(Budget as a label dimension is deliberately out of scope; a deployment
-whose effect vocabulary sprawls is signaling it wants a workflow engine on
-top, not a bigger policy engine.)
+effect vocabulary plus a dynamic authority: a `finance.spend` effect routed
+to an authority that decides between auto-approving and paging a human.
+The engine hands that authority the call's identity and the gaps its ruling
+would cover — not an accumulated magnitude: if its decision needs "how much
+was spent so far", the authority keeps that account in its own systems,
+out-of-band. That is better than the alternatives: the hack is a named
+effect in an auditable log, not a distortion of the label rules, and the
+guarantees on everything else stand. (Budget as a label dimension is
+deliberately out of scope, and so are engine-side magnitude views; a
+deployment whose effect vocabulary sprawls is signaling it wants a workflow
+engine on top, not a bigger policy engine.)
 
 ## Tool contracts
 
@@ -302,9 +317,11 @@ label, `emits` for the log — plus `requires` and routing-only `tags`:
     authority that *attends* the mark (see Mandates), delivered inside the
     atomic plan execution — approval and dispatch coincide; a repeat
     dispatch takes a fresh ruling. Tool and authority never name each
-    other: both reference the mark. The ruling is over the exact rendered
-    call — tool plus resolved arguments; attending to `transfer(A, $1)`
-    must not authorize `transfer(B, $100)`.
+    other: both reference the mark. The ruling *binds* the exact rendered
+    call — tool plus resolved arguments, via the canonical digest;
+    attending to `transfer(A, $1)` must not authorize `transfer(B, $100)`
+    (what the authority *sees* is the staged review — see Deployment
+    staging).
 - **`tags`** — names with no algebraic life: they do not fold, never enter
   a check, and commit nothing to the log. Their sole job is routing — an
   authority's scope names the tags it has jurisdiction over (see
@@ -318,6 +335,9 @@ contract:
 name     = "send_email"        # send_email(to: $recipient)
 requires = { trust = "trusted", audience = { includes = ["$recipient"] } }
 effects  = ["egress"]          # emits
+delta    = {}                  # deliberately neutral: a delivery receipt
+                               # carries nothing (no delta at all = unannotated
+                               # → results admitted at Unknown, fail-closed)
 ```
 
 Naive placeholders do not solve real-world ACLs, so delegating resolution
@@ -332,8 +352,8 @@ is the expert's view of the same fact. And source deltas are derivable: a
 dynamic resolver mapping a document to its ACL's reader set auto-generates
 `audience ∩ readers(doc)`, so humans hand-write the sinks they care about
 and inherit the sources for free. The two slots stay distinct underneath —
-the delta is what a successful call *commits* to the label, the requirement is
-what the label must *satisfy* — and they are independent: a contract may
+the delta is what a successful call *commits* to the label, the requirement
+is what the label must *satisfy* — and they are independent: a contract may
 carry either, both, or neither, and a call with both is checked on both.
 
 The concrete configuration surface is drafted in "The configuration
@@ -404,6 +424,12 @@ Ordered checks, each with its clock:
   *commit* — the current label with the call's own `delta` applied. A
   strict narrowing is soft-blocked (see The check), and
   dispatch waits for the agent's acceptance of exactly that narrowing.
+  One qualification: a **pending-cast output dimension** is established
+  only at admission, so its contribution cannot be on this clock — it
+  contributes identity here and is checked *post-return*, against the live
+  label, while the raw result stays confined: the same discipline shifted,
+  not an exemption (acceptance and lapse rules under Unknown as a
+  first-class citizen).
 - **Label requirements** then evaluate on the current label — which, with
   an accepted narrowing in force, *is* the label the dispatch commits. The
   order is load-bearing: checked before the narrowing, a call could outrun
@@ -429,7 +455,8 @@ post-read content. (Deployments whose channel physically shows every
 message to fixed readers regardless of the label are out of scope: APPA
 governs agentic trajectories, not generic channels.)
 
-The delta commits and the effects append only when the tool call succeeds.
+The effects append when the tool call succeeds; the delta commits at
+admission (see The data model).
 
 ### Remedy plans
 
@@ -462,6 +489,21 @@ own slot, never as a requirement gap: nothing in `requires` failed, and
 the acceptance plan, not a ruling, answers it. A call like
 `search_and_share` fills both.
 
+The list enumerates **every sound alternative**: each requirement gap
+independently chooses among its competent authorities, a choice
+combination groups into per-authority covers — a plan *is* its grouped
+assignment, and execution realizes exactly that grouping — and
+combinations whose groupings coincide are one plan. Enumeration is total
+because the bound is enforced at load, never by runtime truncation: a
+registry whose worst case (every requirement unmet) would exceed the
+planner's alternative cap is refused as a configuration-shape error. An
+authority's denial or abstention consumes only the plan it was consulted
+for; the block's sibling plans stay offered, so an advertised alternative
+is always actually executable. What bounds re-proposal is the harness's
+blocked-proposal budget per rendered call, charged when a block's offers
+are minted — never by denials (a lost commit race after an approval may
+re-consult on the retry; the turn's own budgets bound it).
+
 Two facts about the list:
 
 - **Nonempty is the weak direction**: a plan *exists* relative to the
@@ -473,13 +515,18 @@ Two facts about the list:
   registry: the in-scope (tag-routed) ruled covers
   whose declared mandate
   ceiling reaches the gap; the input-sanitizer substitutions that would
-  produce an admissible derived argument (any deployment); the
-  output-sanitizer-backed composites (confining deployments only); for a failed
+  produce an admissible derived argument (design direction — no
+  implementation applies them yet, and the loader refuses a `tool_input`
+  registration rather than carry an inert one); the
+  output-sanitizer-backed composites (confining deployments only;
+  deferred — see Compiled composites); for a failed
   `prior(k)`, the registered tools whose `emits` include `k` — the plan is
   to make the effect happen; for a failed cap, the registered tools whose
   restrictive delta would drop the offending readers — the plan is to
   narrow first, accept that narrowing, and re-propose; for an unresolved
-  fact, the registered casts whose declared targets could resolve it; for
+  fact, the registered casts whose declared targets could resolve it —
+  attempted by the harness itself at check and at admission, never
+  surfaced as plan objects (see Unknown as a first-class citizen); for
   waivers and attention demands, the declared
   mandates that cover them; for a narrowing soft block, the acceptance
   plan — always available, from no registry entry at all, because it
@@ -550,9 +597,9 @@ The mechanism is the remedy plan; every plan with an engine-side step is
 **atomic**. Executing a
 ruling-carrying plan is
 one indivisible step on the suspended branch: the engine renders the call, puts
-it to the authority — with provenance, never value bytes — and on approval
-dispatches it; the plan id, the ruling, and the dispatch land in the log
-together. (An acceptance plan is atomic trivially: accept and dispatch,
+it to the authority — the staged review, never value bytes (see Deployment
+staging) — and on approval dispatches it; the plan id, the ruling (carrying
+its review), and the dispatch land in the log together. (An acceptance plan is atomic trivially: accept and dispatch,
 one step, no authority round trip — the plan id and the dispatch are the
 whole record.) Consequences, by construction rather than bookkeeping:
 
@@ -697,7 +744,25 @@ even when the agent may already be steered by injected content:
   attacker-derived is the remaining social-engineering channel; rendering
   the exact checked call closes it.
 
+  *Deployment staging.* The review today is the call's **identity** — tool
+  plus canonical digest, which binds the exact resolved arguments — plus
+  the **typed context**: the trajectory label fold at review time, each
+  referenced Value's label and provenance, and the gaps (whose
+  `includes` names the release's recipients). The context put to the
+  authority is persisted verbatim on the ruling it produces, so the log
+  replays the review itself, never a hash of hidden state. The full
+  canonical rendered-call *view* — agent-authored literals visible,
+  Value-derived leaves as secure references — additionally requires
+  leaf-level provenance discovery, which no implementation performs yet;
+  until it exists argument bytes never cross, because without leaf
+  provenance "showing the literals" would show any admitted Value bytes
+  the model copied into them.
+
 ### Compiled composites (confining deployments)
+
+**Deferred: no implementation compiles composites yet.** Until it lands,
+the planner's remedy space excludes composites and its completeness claim
+says so.
 
 A multi-step plan (e.g. confined acquisition feeding a sanitizer) is not
 handed to the agent as steps — it is the same `execute_remedy_plan` object
@@ -801,7 +866,8 @@ resolver = { url = "https://approver.corp/rule", timeout_ms = 30000 }
 
 [[sanitizer]]
 name = "pii-redactor"
-on   = ["tool_input", "tool_output"]
+on   = ["tool_output"]   # the only live point; "tool_input" (argument
+                         # substitution) is design direction and refused at load
 
 [sanitizer.can_reduce]
 # audience only, by construction: trust is never sanitizer territory
@@ -858,12 +924,14 @@ delta    = { audience = { exactly = ["internal"] } }
 name     = "send_email"        # send_email(body, to: $recipient)
 requires = { trust = "trusted", audience = { includes = ["$recipient"] } }
 effects  = ["egress"]
+delta    = {}                  # neutral by declaration, not by omission
 
 [[tool]]
 name     = "file_github_ticket"
 # we never post things that are not public
 requires = { trust = "trusted", audience = { includes = ["public"] } }
 effects  = ["egress", "mutation"]
+delta    = {}
 ```
 
 Registered: `remove_pii` — a sanitizer with mandate audience
@@ -923,9 +991,9 @@ fork.
   neutral `L0`: a fresh-slate child could "summarize what we know" into a
   public label, a laundering primitive. The child appends to the same shared
   log; the parent's history is simply its prefix. A fork appends a boundary
-  event — which is why nothing pending survives into parent or child: an
-  in-flight plan execution — an approval request not yet ruled — finds
-  the boundary and dies; no special rule needed.
+  event, which marks, never gates: an execution landing after it
+  re-validates against the state it finds (see The event log); no special
+  rule needed.
 - **Merge.** Two things come back, each in its native way:
   - The **returned value** is data: the parent absorbs its label like any
     other read — intersect readers, min trust. Nothing the child did can
@@ -938,19 +1006,27 @@ fork.
     sent, not at merge time. A ruling issued in a branch is a record, not a
     token: it was consumed inside its own atomic plan execution, so its
     presence in the shared log gives the parent nothing to reuse. The merge
-    appends a boundary event; any plan execution still pending in the
-    child dies
-    there, like at any boundary.
+    appends a boundary event that marks rather than gates (see The event
+    log); the child's own pending offers died with its final turn.
   - Finalization is thereby trivial for every started branch, whatever its
     fate — return, failure, abandonment: nothing was withheld, so nothing
     can be lost. "The branch died" means no *value* crossed; history was
-    already shared. A child may also end its errand *explicitly* with a
+    already shared. A child returns **at most once**: the fork's mandate
+    covers one errand and one result, so the first crossing consumes the
+    return channel and a later `submit_result` is refused — a child is not
+    a standing pipe into its parent. A child may also end its errand
+    *explicitly* with a
     **void return** — `submit_result` with no value: a deliberate,
     cleanly-acknowledged "nothing to report" that crosses nothing and
     propagates no label. To the parent it is indistinguishable from
     abandonment (that indistinguishability is the point — a void carries
     zero bits of child-derived content); the child's own log carries the
-    audit that the errand ended by choice rather than by death.
+    audit that the errand ended by choice rather than by death. A void
+    return leaves no family-visible record precisely to preserve that
+    indistinguishability — in particular it does **not** consume the
+    return channel: at-most-once binds value crossings, not endings, so a
+    child that voided (or was abandoned) may still later cross its one
+    value.
 
 Cross-branch history is deliberately global: with one shared realtime log,
 a child's `egress` fails a parent's `no_prior(egress)`. That conservatism
@@ -1018,18 +1094,55 @@ not a mere parser.
 Real-world deployments are messy; APPA does not assume every tool is
 annotated. Both label dimensions support **Unknown** — and it is not another
 point on the scale: `trusted < unknown < suspicious` does not exist. It
-means "this label has not been established yet": a value with an Unknown
-dimension cannot be folded or checked at all until a registered cast fills
-it in. A check that runs into Unknown inputs reports *which*
-facts are unresolved, never a blanket Unknown result.
+means "this label has not been established yet". Unknown is absorbing under
+the fold (one Unknown value makes the trajectory's dimension Unknown), and a
+requirement that **consumes** an Unknown dimension cannot pass: the check
+reports *which* values are unresolved — never a blanket Unknown result, and
+never a failure verdict, because an unresolved dimension is a missing fact,
+not a violation. A call whose requirements consume no Unknown dimension
+proceeds: an Unknown trajectory does not brick unannotated flows, it fails
+closed exactly at the sinks that care.
+
+The default is pinned fail-closed at the configuration surface: a tool
+listed with **no `delta` at all is unannotated** — its results are admitted
+at Unknown in both dimensions. Declaring is different from omitting: within
+a *declared* delta an omitted dimension contributes the fold identity (the
+author annotated the tool and owns the shorthand), and the deliberate
+"this result carries nothing" annotation is the explicit empty delta,
+`delta = {}`. An unannotated tool may not itself declare **label**
+requirements: the check evaluates its unestablished contribution as
+identity (the Unknown folds only at admission), so its own consequence
+could outrun the requirement — the same outrun the pending-cast load rule
+refuses, applied to the wholly-unestablished case. Declaring the delta,
+even the empty one, comes first; refused at load. History and attention
+requirements consume no label dimension and compose fine.
 
 A registered cast fills the dimension in: **constant** (`unknown →
 trusted` for YOLO deployments, `→ suspicious` for paranoid ones) or
 **resolver-implemented** per value, under its declared ceiling of
 admissible targets. Richer schemes — human in the loop on first use,
 cached afterwards — live behind the resolver. This is fail-closed by
-construction: annotate five high-risk tools, leave the rest Unknown, and
-still catch the obvious flows.
+construction: annotate five high-risk tools, leave the rest unannotated,
+and still catch the obvious flows — anything Unknown-tainted blocks at an
+annotated sink until a cast resolves it.
+
+A resolution whose admission strictly narrows the live trajectory label
+does not admit on its own: the acceptance discipline follows the value
+past the dispatch (see Check timing). The narrowing is the **whole**
+admission's fold move against the live label — established dimensions
+included, because the fold may have moved since the pre-dispatch check
+sanctioned them, and a composed narrowing nobody accepted must not fold.
+The raw result stays confined while the agent is offered exactly the
+narrowing the admission would fold; acceptance lands the cast record, the
+acceptance, and the admitted value in one atomic batch. An offer the turn
+ends without accepting **lapses** — the dispatch closes successfully,
+effects standing and nothing admitted; the close and the unaccepted
+resolution are durable records, never only feedback. An
+acceptance is **informed**: it must arrive in a round after the one that
+surfaced the offer — an acceptance authored in the same assistant
+response that triggered the offer predates it and is refused. A
+resolution that moves nothing admits directly: the acceptance is owed for
+narrowings, not for casts.
 
 ## Implementation shape
 
@@ -1077,8 +1190,8 @@ xor resolver-implemented**.
   (tool call + result) with its label, never separated.
 - **Label** — who may read the run's information (audience) and how trusted
   it is (trust).
-- **Delta** — a contract's declared label action, applied when the call
-  succeeds.
+- **Delta** — a contract's declared label action, folded as the call's
+  result value (or its registered derivation) is admitted.
 - **Effect** — a recorded fact of what the run did outside (`egress`,
   `mutation`): declared by a contract as `emits`, appended to the log when
   the call succeeds, read back by history requirements.
@@ -1099,10 +1212,12 @@ xor resolver-implemented**.
   return's merge into the parent — shrinking the release frontier.
   Soft-blocked until the agent accepts it; the block always carries the
   acceptance plan, so it is never terminal.
-- **Acceptance** — the agent's own free plan step acknowledging a narrowing
-  before the flow proceeds (a call's dispatch, a child return's merge): no
-  authority involved, no security power exercised, clears no requirement;
-  the plan id in the log is the record.
+- **Acceptance** — the agent's own free step acknowledging a narrowing
+  before it folds: no authority involved, no security power exercised,
+  clears no requirement. Three sites, each durably recorded: a call's
+  dispatch, a child return's merge, and a pending-Cast admission
+  (post-dispatch — the label is established only at admission; see
+  Unknown as a first-class citizen).
 - **Remedy plan** — an executable object with an id; every engine-side plan
   runs atomically via `execute_remedy_plan(plan_id)`: render, rule (when
   the plan carries a ruling), dispatch, log. A plan for a failed `prior(k)`

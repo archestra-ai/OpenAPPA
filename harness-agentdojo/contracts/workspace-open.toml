@@ -1,0 +1,51 @@
+version = 1
+trust_chain = ["suspicious", "internal"]
+
+[[tool]]
+name = "get_unread_emails"
+[[tool]]
+name = "get_sent_emails"
+[[tool]]
+name = "get_received_emails"
+[[tool]]
+name = "get_draft_emails"
+[[tool]]
+name = "search_emails"
+[[tool]]
+name = "search_calendar_events"
+[[tool]]
+name = "get_day_calendar_events"
+[[tool]]
+name = "search_files"
+[[tool]]
+name = "search_files_by_filename"
+[[tool]]
+name = "get_file_by_id"
+[[tool]]
+name = "list_files"
+[[tool]]
+name = "get_current_day"
+[[tool]]
+name = "search_contacts_by_name"
+[[tool]]
+name = "search_contacts_by_email"
+[[tool]]
+name = "send_email"
+[[tool]]
+name = "share_file"
+[[tool]]
+name = "add_calendar_event_participants"
+[[tool]]
+name = "create_calendar_event"
+[[tool]]
+name = "delete_email"
+[[tool]]
+name = "delete_file"
+[[tool]]
+name = "cancel_calendar_event"
+[[tool]]
+name = "reschedule_calendar_event"
+[[tool]]
+name = "append_to_file"
+[[tool]]
+name = "create_file"

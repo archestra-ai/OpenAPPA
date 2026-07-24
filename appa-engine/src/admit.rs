@@ -11,7 +11,7 @@
 use thiserror::Error;
 
 use crate::authority::CastResolution;
-use crate::check::UnresolvedFact;
+use crate::check::{Narrowing, UnresolvedFact};
 use crate::fact::{CloseOutcome, Fact, FactBatch};
 use crate::label::{Adequacy, Dim, DimValue, Label};
 use crate::names::{CastName, SanitizerName};
@@ -41,7 +41,26 @@ pub enum ResultAdmission {
     /// the confined raw result is admitted at the output label with the Unknown dimension filled.
     /// The audit digest is computed by the engine from `body` (the cast never transforms the
     /// bytes), so the recorded raw-result binding cannot disagree with the admitted value.
+    /// Refused when the admission would strictly narrow the live trajectory label — the whole
+    /// filled label against the live fold, established dimensions included — because a narrowing
+    /// folds only through the agent's acceptance ([`ResultAdmission::SuccessCastAccepted`]).
     SuccessCast {
+        body: ValueBody,
+        cast: CastName,
+        resolved: DimValue,
+    },
+    /// A strict-narrowing cast resolution the agent accepted: `accepted` is the exact narrowing the
+    /// offer surfaced. Admission re-derives the live narrowing under the family lock and refuses on
+    /// any mismatch — a stale acceptance cannot fold a different narrowing than the one shown.
+    SuccessCastAccepted {
+        body: ValueBody,
+        cast: CastName,
+        resolved: DimValue,
+        accepted: Narrowing,
+    },
+    /// A pending-cast offer the turn ended without accepting: the dispatch closes successfully —
+    /// effects stand, nothing admitted — and the unaccepted resolution is recorded for audit.
+    SuccessCastLapsed {
         body: ValueBody,
         cast: CastName,
         resolved: DimValue,
@@ -79,6 +98,64 @@ pub enum AdmitError {
     ConstantMismatch,
     #[error("cast answer exceeds the resolver's may_cast ceiling")]
     CeilingExceeded,
+    #[error("the cast resolution narrows the trajectory label: admission requires the agent's acceptance")]
+    NarrowingUnaccepted,
+    #[error("the accepted narrowing does not match the live trajectory state")]
+    AcceptanceMismatch,
+}
+
+/// The narrowing admitting a cast-resolved value would fold into the **live** trajectory label, or
+/// `None` when the admission does not move it. The whole filled label is considered, established
+/// dimensions included: the pre-dispatch check accepted the established contribution against the
+/// fold *at check time*, but the fold may have moved since (a child return merging under an
+/// accepted return plan), making that same contribution newly restrictive — so admission re-derives
+/// against live state, like every other offer in this codebase. The cost is an occasional second
+/// acceptance for a tool whose established dimension is restrictive; the alternative folds a
+/// composed narrowing nobody accepted. An `Unknown` live dimension absorbs and yields `None`.
+pub(crate) fn pending_cast_narrowing(views: &Views, filled: &Label) -> Option<Narrowing> {
+    let from = views.current_label();
+    let to = from.combine(filled);
+    if to == from { None } else { Some(Narrowing { from, to }) }
+}
+
+/// Validate a pending-cast resolution against the contract and the registered cast: the resolved
+/// dimension must be the contract's pending one, and the answer must sit inside the registered
+/// cast's declaration — a misbehaving resolver (or runtime) cannot widen a label past the ceiling.
+fn validate_cast_resolution(
+    registry: &Registry,
+    contract: &crate::contract::ToolContract,
+    cast: &CastName,
+    resolved: &DimValue,
+) -> Result<(), AdmitError> {
+    if contract.pending_cast_dim() != Some(resolved.dimension()) {
+        return Err(AdmitError::NotPendingCast);
+    }
+    let registered = registry
+        .cast(cast)
+        .ok_or_else(|| AdmitError::UnknownCast(cast.as_str().to_string()))?;
+    match &registered.resolution {
+        CastResolution::Constant(declared) => {
+            if resolved != declared {
+                return Err(AdmitError::ConstantMismatch);
+            }
+        }
+        CastResolution::Resolver { may_cast } => {
+            if !may_cast.admits(resolved) {
+                return Err(AdmitError::CeilingExceeded);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The output label with exactly the pending dimension filled by the resolution; the established
+/// one is preserved untouched.
+pub(crate) fn cast_filled_label(contract: &crate::contract::ToolContract, resolved: &DimValue) -> Label {
+    let output = contract.output_label();
+    match resolved {
+        DimValue::Trust(t) => Label::new(Dim::Known(*t), output.audience),
+        DimValue::Audience(a) => Label::new(output.trust, Dim::Known(a.clone())),
+    }
 }
 
 /// An authority/resolver's answer to an Unknown dimension.
@@ -160,7 +237,7 @@ pub(crate) fn admit_result(
         ResultAdmission::SuccessRaw { body } => {
             // A pending-cast output confines the raw result: no value may carry an unestablished
             // label into the trajectory (the model would see the body before its label exists).
-            if contract.delta.pending_cast_dim().is_some() {
+            if contract.pending_cast_dim().is_some() {
                 return Err(AdmitError::OutputPendingCast);
             }
             // A sanitizer-bound tool's raw result is likewise confined: only the bound derivation
@@ -168,36 +245,17 @@ pub(crate) fn admit_result(
             if contract.output_sanitizer.is_some() {
                 return Err(AdmitError::OutputSanitizerBound);
             }
-            vec![close_success(), admit_value(contract.delta.output_label(), body)]
+            vec![close_success(), admit_value(contract.output_label(), body)]
         }
         ResultAdmission::SuccessCast { body, cast, resolved } => {
+            validate_cast_resolution(registry, contract, &cast, &resolved)?;
+            let label = cast_filled_label(contract, &resolved);
+            // An admission that strictly narrows the live label folds only through the agent's
+            // acceptance — refused bare, at this single admission choke point (D2).
+            if pending_cast_narrowing(views, &label).is_some() {
+                return Err(AdmitError::NarrowingUnaccepted);
+            }
             let raw_digest = RawResultDigest::of(body.as_str().as_bytes());
-            if contract.delta.pending_cast_dim() != Some(resolved.dimension()) {
-                return Err(AdmitError::NotPendingCast);
-            }
-            let registered = registry
-                .cast(&cast)
-                .ok_or_else(|| AdmitError::UnknownCast(cast.as_str().to_string()))?;
-            // The engine re-validates the resolution against the registered cast — a misbehaving
-            // resolver (or runtime) cannot widen a label past the declared ceiling.
-            match &registered.resolution {
-                CastResolution::Constant(declared) => {
-                    if &resolved != declared {
-                        return Err(AdmitError::ConstantMismatch);
-                    }
-                }
-                CastResolution::Resolver { may_cast } => {
-                    if !may_cast.admits(&resolved) {
-                        return Err(AdmitError::CeilingExceeded);
-                    }
-                }
-            }
-            let output = contract.delta.output_label();
-            // Fill exactly the pending dimension; the established one is preserved untouched.
-            let label = match &resolved {
-                DimValue::Trust(t) => Label::new(Dim::Known(*t), output.audience),
-                DimValue::Audience(a) => Label::new(output.trust, Dim::Known(a.clone())),
-            };
             vec![
                 close_success(),
                 Fact::OutputCastApplied {
@@ -211,12 +269,62 @@ pub(crate) fn admit_result(
                 admit_value(label, body),
             ]
         }
+        ResultAdmission::SuccessCastAccepted {
+            body,
+            cast,
+            resolved,
+            accepted,
+        } => {
+            validate_cast_resolution(registry, contract, &cast, &resolved)?;
+            let label = cast_filled_label(contract, &resolved);
+            // The acceptance binds the exact narrowing the offer surfaced; the live narrowing is
+            // re-derived here, under the family lock — a stale acceptance (the label moved, or
+            // nothing narrows any more) mismatches and is refused.
+            if pending_cast_narrowing(views, &label) != Some(accepted.clone()) {
+                return Err(AdmitError::AcceptanceMismatch);
+            }
+            let raw_digest = RawResultDigest::of(body.as_str().as_bytes());
+            vec![
+                close_success(),
+                Fact::OutputCastApplied {
+                    trajectory: trajectory.clone(),
+                    dispatch: dispatch.clone(),
+                    cast,
+                    dimension: resolved.dimension(),
+                    resolved: resolved.clone(),
+                    raw_digest,
+                },
+                Fact::OutputCastAccepted {
+                    trajectory: trajectory.clone(),
+                    dispatch: dispatch.clone(),
+                    narrowing: accepted,
+                },
+                admit_value(label, body),
+            ]
+        }
+        ResultAdmission::SuccessCastLapsed { body, cast, resolved } => {
+            validate_cast_resolution(registry, contract, &cast, &resolved)?;
+            let raw_digest = RawResultDigest::of(body.as_str().as_bytes());
+            // The turn ended without the agent accepting: effects stand, nothing admitted, and the
+            // unaccepted resolution is durable audit — never only feedback.
+            vec![
+                close_success(),
+                Fact::OutputCastLapsed {
+                    trajectory: trajectory.clone(),
+                    dispatch: dispatch.clone(),
+                    cast,
+                    dimension: resolved.dimension(),
+                    resolved,
+                    raw_digest,
+                },
+            ]
+        }
         ResultAdmission::SuccessSanitized {
             body,
             sanitizer,
             raw_digest,
         } => {
-            if contract.delta.pending_cast_dim().is_some() {
+            if contract.pending_cast_dim().is_some() {
                 return Err(AdmitError::OutputPendingCast);
             }
             // Only the contract's own bound sanitizer may relabel this tool's output — a sanitized
@@ -231,7 +339,7 @@ pub(crate) fn admit_result(
             if !san.on.output {
                 return Err(AdmitError::SanitizerNotOutput(sanitizer.as_str().to_string()));
             }
-            let raw = contract.delta.output_label();
+            let raw = contract.output_label();
             // The raw source must satisfy the transition's `from` before the `to` may apply.
             // (Load validation already refuses an inapplicable binding, so this cannot fire for a
             // built registry; kept so the function stays total over its inputs.)
@@ -332,10 +440,10 @@ mod tests {
         let get = ToolContract {
             name: ToolName::new("get_ticket"),
             tags: vec![],
-            delta: Delta {
+            delta: Some(Delta {
                 trust: Some(Dim::Known(SUSPICIOUS)),
                 audience: Some(Dim::Known(internal())),
-            },
+            }),
             emits: vec![EffectKind::new("read")],
             requires: Default::default(),
             output_sanitizer: None,
@@ -366,6 +474,10 @@ mod tests {
             name: CastName::new("paranoid"),
             resolution: CastResolution::Constant(DimValue::Trust(SUSPICIOUS)),
         };
+        let audience_cast = Cast {
+            name: CastName::new("roomer"),
+            resolution: CastResolution::Constant(DimValue::Audience(internal())),
+        };
         let resolver_cast = Cast {
             name: CastName::new("classifier"),
             resolution: CastResolution::Resolver {
@@ -380,10 +492,22 @@ mod tests {
         let scan = ToolContract {
             name: ToolName::new("scan_inbox"),
             tags: vec![],
-            delta: Delta {
+            delta: Some(Delta {
                 trust: Some(Dim::Unknown),
                 audience: Some(Dim::Known(internal())),
-            },
+            }),
+            emits: vec![EffectKind::new("read")],
+            requires: Default::default(),
+            output_sanitizer: None,
+        };
+        // A tool whose output audience is pending-cast — the other dimension's variant.
+        let poll = ToolContract {
+            name: ToolName::new("poll_room"),
+            tags: vec![],
+            delta: Some(Delta {
+                trust: Some(Dim::Known(SUSPICIOUS)),
+                audience: Some(Dim::Unknown),
+            }),
             emits: vec![EffectKind::new("read")],
             requires: Default::default(),
             output_sanitizer: None,
@@ -393,20 +517,20 @@ mod tests {
         let export = ToolContract {
             name: ToolName::new("export_ticket"),
             tags: vec![],
-            delta: Delta {
+            delta: Some(Delta {
                 trust: Some(Dim::Known(SUSPICIOUS)),
                 audience: Some(Dim::Known(internal())),
-            },
+            }),
             emits: vec![EffectKind::new("read")],
             requires: Default::default(),
             output_sanitizer: Some(crate::names::SanitizerName::new("declassify")),
         };
         Registry::build(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![get, scan, export],
+            tools: vec![get, scan, poll, export],
             authorities: vec![],
             sanitizers: vec![out_san, finance_san],
-            casts: vec![const_cast, resolver_cast],
+            casts: vec![const_cast, audience_cast, resolver_cast],
         })
         .unwrap()
     }
@@ -737,6 +861,96 @@ mod tests {
     }
 
     #[test]
+    fn a_moved_established_dimension_demands_acceptance() {
+        // The blocker scenario: between dispatch and admission the live audience moved (a child
+        // return merging under an accepted return plan) to a set disjoint from the contract's
+        // established `internal`. The resolved trust itself moves nothing — but the established
+        // audience contribution is newly restrictive against the live fold, and it may not fold
+        // silently: the full-label rule demands acceptance.
+        let reg = registry();
+        let call = scan_call();
+        // The moving value lands AFTER the dispatch opened — the state at open time would have
+        // passed; the movement is what admission must catch.
+        let (mut log, dispatch) = open_log(&call);
+        log.push(Fact::ValueAdmitted {
+            trajectory: traj(),
+            value: LabeledValue::new(
+                ValueBody::new("merged from a child"),
+                Label::new(
+                    Dim::Known(SUSPICIOUS),
+                    Dim::Known(Audience::restricted([ReaderId::new("finance")])),
+                ),
+            ),
+            provenance: Provenance::UserInput,
+        });
+        let p = views_of(&log);
+        let t = traj();
+        assert_eq!(
+            admit_result(
+                &reg,
+                &p.view(&t),
+                &dispatch,
+                &call,
+                ResultAdmission::SuccessCast {
+                    body: ValueBody::new("inbox contents"),
+                    cast: CastName::new("paranoid"),
+                    resolved: DimValue::Trust(SUSPICIOUS),
+                },
+            ),
+            Err(AdmitError::NarrowingUnaccepted)
+        );
+    }
+
+    #[test]
+    fn an_audience_pending_cast_follows_the_same_acceptance_discipline() {
+        let reg = registry();
+        let call = ResolvedCall::new(ToolName::new("poll_room"), json!({}), vec![]);
+        let (log, dispatch) = open_log(&call);
+        let t = traj();
+        // From the top label the filled {suspicious, internal} strictly narrows both dimensions:
+        // refused bare, admitted with the exact full-label acceptance.
+        let p = views_of(&log);
+        assert_eq!(
+            admit_result(
+                &reg,
+                &p.view(&t),
+                &dispatch,
+                &call,
+                ResultAdmission::SuccessCast {
+                    body: ValueBody::new("room roster"),
+                    cast: CastName::new("roomer"),
+                    resolved: DimValue::Audience(internal()),
+                },
+            ),
+            Err(AdmitError::NarrowingUnaccepted)
+        );
+        let p = views_of(&log);
+        let batch = admit_result(
+            &reg,
+            &p.view(&t),
+            &dispatch,
+            &call,
+            ResultAdmission::SuccessCastAccepted {
+                body: ValueBody::new("room roster"),
+                cast: CastName::new("roomer"),
+                resolved: DimValue::Audience(internal()),
+                accepted: Narrowing {
+                    from: Label::top(),
+                    to: Label::new(Dim::Known(SUSPICIOUS), Dim::Known(internal())),
+                },
+            },
+        )
+        .unwrap();
+        match batch.facts.last().unwrap() {
+            Fact::ValueAdmitted { value, .. } => {
+                assert_eq!(value.label.trust, Dim::Known(SUSPICIOUS));
+                assert_eq!(value.label.audience, Dim::Known(internal()));
+            }
+            other => panic!("expected ValueAdmitted, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn pending_cast_confines_raw_and_sanitized_admission() {
         let reg = registry();
         let call = scan_call();
@@ -773,11 +987,29 @@ mod tests {
         );
     }
 
+    /// A log already folded to suspicious/internal — `scan_inbox`'s whole filled label — holding
+    /// one open dispatch: admitting the cast-resolved result moves nothing.
+    fn narrowed_open_log(call: &ResolvedCall) -> (Vec<Fact>, DispatchId) {
+        let (mut log, dispatch) = open_log(call);
+        log.insert(
+            0,
+            Fact::ValueAdmitted {
+                trajectory: traj(),
+                value: LabeledValue::new(
+                    ValueBody::new("prior suspicious internal read"),
+                    Label::new(Dim::Known(SUSPICIOUS), Dim::Known(internal())),
+                ),
+                provenance: Provenance::UserInput,
+            },
+        );
+        (log, dispatch)
+    }
+
     #[test]
-    fn pending_cast_admits_at_the_resolved_label() {
+    fn a_non_narrowing_cast_admits_at_the_resolved_label() {
         let reg = registry();
         let call = scan_call();
-        let (log, dispatch) = open_log(&call);
+        let (log, dispatch) = narrowed_open_log(&call);
         let p = views_of(&log);
         let t = traj();
         let batch = admit_result(
@@ -809,6 +1041,192 @@ mod tests {
             }
             other => panic!("expected ValueAdmitted, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_narrowing_cast_resolution_requires_acceptance() {
+        let reg = registry();
+        let call = scan_call();
+        // The fold sits at top trust: resolving to suspicious strictly narrows it.
+        let (log, dispatch) = open_log(&call);
+        let p = views_of(&log);
+        let t = traj();
+        assert_eq!(
+            admit_result(
+                &reg,
+                &p.view(&t),
+                &dispatch,
+                &call,
+                ResultAdmission::SuccessCast {
+                    body: ValueBody::new("inbox contents"),
+                    cast: CastName::new("paranoid"),
+                    resolved: DimValue::Trust(SUSPICIOUS),
+                },
+            ),
+            Err(AdmitError::NarrowingUnaccepted)
+        );
+    }
+
+    #[test]
+    fn an_accepted_cast_narrowing_admits_in_one_batch() {
+        let reg = registry();
+        let call = scan_call();
+        let (log, dispatch) = open_log(&call);
+        let p = views_of(&log);
+        let t = traj();
+        // The narrowing is the whole admission's fold move — the resolved trust AND the
+        // established internal audience, both against the live label.
+        let accepted = Narrowing {
+            from: Label::top(),
+            to: Label::new(Dim::Known(SUSPICIOUS), Dim::Known(internal())),
+        };
+        let batch = admit_result(
+            &reg,
+            &p.view(&t),
+            &dispatch,
+            &call,
+            ResultAdmission::SuccessCastAccepted {
+                body: ValueBody::new("inbox contents"),
+                cast: CastName::new("paranoid"),
+                resolved: DimValue::Trust(SUSPICIOUS),
+                accepted: accepted.clone(),
+            },
+        )
+        .unwrap();
+        // One atomic batch: close-success → OutputCastApplied → OutputCastAccepted → ValueAdmitted.
+        assert!(matches!(
+            &batch.facts[0],
+            Fact::DispatchClosed {
+                outcome: CloseOutcome::Success { .. },
+                ..
+            }
+        ));
+        assert!(matches!(&batch.facts[1], Fact::OutputCastApplied { .. }));
+        assert!(matches!(
+            &batch.facts[2],
+            Fact::OutputCastAccepted { narrowing, .. } if narrowing == &accepted
+        ));
+        match &batch.facts[3] {
+            Fact::ValueAdmitted { value, .. } => {
+                assert_eq!(value.label.trust, Dim::Known(SUSPICIOUS));
+                assert_eq!(value.label.audience, Dim::Known(internal()));
+            }
+            other => panic!("expected ValueAdmitted, got {other:?}"),
+        }
+        // Folding the batch lands the accepted narrowing in the trajectory label.
+        let mut next = log.clone();
+        next.extend(batch.facts);
+        let p2 = views_of(&next);
+        assert_eq!(p2.view(&t).current_label().trust, Dim::Known(SUSPICIOUS));
+    }
+
+    #[test]
+    fn a_stale_cast_acceptance_is_refused() {
+        let reg = registry();
+        let call = scan_call();
+        let t = traj();
+        // An acceptance whose narrowing does not match the live one — here missing the established
+        // audience contribution the full-label rule includes — is refused.
+        let (log, dispatch) = open_log(&call);
+        let p = views_of(&log);
+        assert_eq!(
+            admit_result(
+                &reg,
+                &p.view(&t),
+                &dispatch,
+                &call,
+                ResultAdmission::SuccessCastAccepted {
+                    body: ValueBody::new("inbox contents"),
+                    cast: CastName::new("paranoid"),
+                    resolved: DimValue::Trust(SUSPICIOUS),
+                    accepted: Narrowing {
+                        from: Label::top(),
+                        to: Label::new(Dim::Known(SUSPICIOUS), Dim::Known(Audience::Public)),
+                    },
+                },
+            ),
+            Err(AdmitError::AcceptanceMismatch)
+        );
+        // A live state where nothing narrows any more refuses the acceptance too — the runtime
+        // retries the plain admission instead.
+        let (narrowed, dispatch) = narrowed_open_log(&call);
+        let p = views_of(&narrowed);
+        assert_eq!(
+            admit_result(
+                &reg,
+                &p.view(&t),
+                &dispatch,
+                &call,
+                ResultAdmission::SuccessCastAccepted {
+                    body: ValueBody::new("inbox contents"),
+                    cast: CastName::new("paranoid"),
+                    resolved: DimValue::Trust(SUSPICIOUS),
+                    accepted: Narrowing {
+                        from: Label::top(),
+                        to: Label::new(Dim::Known(SUSPICIOUS), Dim::Known(Audience::Public)),
+                    },
+                },
+            ),
+            Err(AdmitError::AcceptanceMismatch)
+        );
+    }
+
+    #[test]
+    fn a_lapsed_cast_closes_with_audit_and_no_value() {
+        let reg = registry();
+        let call = scan_call();
+        let (log, dispatch) = open_log(&call);
+        let p = views_of(&log);
+        let t = traj();
+        let batch = admit_result(
+            &reg,
+            &p.view(&t),
+            &dispatch,
+            &call,
+            ResultAdmission::SuccessCastLapsed {
+                body: ValueBody::new("inbox contents"),
+                cast: CastName::new("paranoid"),
+                resolved: DimValue::Trust(SUSPICIOUS),
+            },
+        )
+        .unwrap();
+        // Effects stand, the unaccepted resolution is durable audit, nothing is admitted.
+        assert_eq!(batch.facts.len(), 2);
+        assert!(matches!(
+            &batch.facts[0],
+            Fact::DispatchClosed { outcome: CloseOutcome::Success { effects }, .. } if effects == &[EffectKind::new("read")]
+        ));
+        assert!(matches!(
+            &batch.facts[1],
+            Fact::OutputCastLapsed {
+                dimension: Dimension::Trust,
+                resolved: DimValue::Trust(tr),
+                raw_digest,
+                ..
+            } if *tr == SUSPICIOUS && raw_digest == &RawResultDigest::of(b"inbox contents")
+        ));
+        // The fold is untouched by the lapse.
+        let mut next = log.clone();
+        next.extend(batch.facts);
+        let p2 = views_of(&next);
+        assert_eq!(p2.view(&t).current_label(), Label::top());
+        // A lapse still validates the resolution — an unregistered cast records nothing.
+        let (log, dispatch) = open_log(&call);
+        let p = views_of(&log);
+        assert_eq!(
+            admit_result(
+                &reg,
+                &p.view(&t),
+                &dispatch,
+                &call,
+                ResultAdmission::SuccessCastLapsed {
+                    body: ValueBody::new("inbox contents"),
+                    cast: CastName::new("bogus"),
+                    resolved: DimValue::Trust(SUSPICIOUS),
+                },
+            ),
+            Err(AdmitError::UnknownCast("bogus".to_string()))
+        );
     }
 
     #[test]

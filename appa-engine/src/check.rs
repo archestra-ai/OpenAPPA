@@ -3,8 +3,11 @@
 //! Ordered by the spec's clocks: **narrowing** first (on the label the dispatch would commit),
 //! then **label requirements** (on that same committed label), then **history requirements** (on
 //! the log as it stands — a call's own `emits` never trips its own precondition). Attention demands
-//! are per-call gaps, never satisfied by history. If any consumed label dimension is `Unknown`, the
-//! check is [`CheckOutcome::Unresolved`] — it names the values to cast, never a blanket Unknown.
+//! are per-call gaps, never satisfied by history. If a label requirement **consumes** an `Unknown`
+//! dimension, the check is [`CheckOutcome::Unresolved`] — it names the values to cast, never a
+//! blanket Unknown. A call with no requirement on an Unknown dimension proceeds: an Unknown
+//! trajectory does not brick unannotated flows, it fails closed exactly at the sinks whose
+//! requirements consume it (the gradual-annotation story).
 //!
 //! This module is pure and has no ad-hoc judgment: every branch is label arithmetic or a log query.
 
@@ -65,24 +68,36 @@ pub enum CheckOutcome {
     Unresolved(Vec<UnresolvedFact>),
 }
 
-/// The contribution a successful call would actually fold. For an unbound tool that is its raw
-/// `delta`; a sanitizer-bound tool (RP4) folds the **bound derivation** instead, so its audience
-/// contribution is the sanitizer's declared `to` (trust untouched — never sanitizer territory).
-/// The distinction is load-bearing for the narrowing clock: a bound tool whose raw output is
-/// internal but whose sanitizer declassifies to public narrows nothing, and must not soft-block a
-/// narrowing that never enters the trajectory.
-pub(crate) fn effective_delta(registry: &Registry, contract: &ToolContract) -> Delta {
-    match &contract.output_sanitizer {
-        None => contract.delta.clone(),
-        Some(name) => {
+/// The contribution a successful call would actually fold, on the check's clock. For an unbound
+/// tool that is its declared `delta`; a sanitizer-bound tool (RP4) folds the **bound derivation**
+/// instead, so its audience contribution is the sanitizer's declared `to` (trust untouched — never
+/// sanitizer territory). The distinction is load-bearing for the narrowing clock: a bound tool
+/// whose raw output is internal but whose sanitizer declassifies to public narrows nothing, and
+/// must not soft-block a narrowing that never enters the trajectory. `None` is the unannotated
+/// tool: like a pending-cast dimension, its contribution (Unknown) folds only at admission, so it
+/// is identity here.
+pub(crate) fn effective_delta(registry: &Registry, contract: &ToolContract) -> Option<Delta> {
+    match (&contract.delta, &contract.output_sanitizer) {
+        (delta, None) => delta.clone(),
+        (Some(delta), Some(name)) => {
             let sanitizer = registry
                 .sanitizer(name)
                 .expect("load validation: bound output sanitizer is registered");
-            Delta {
-                trust: contract.delta.trust.clone(),
+            Some(Delta {
+                trust: delta.trust.clone(),
                 audience: Some(Dim::Known(sanitizer.can_reduce.to.clone())),
-            }
+            })
         }
+        (None, Some(_)) => unreachable!("load validation: a sanitizer-bound tool declares a delta"),
+    }
+}
+
+/// The label the trajectory would hold after this call commits, on the check's clock (see
+/// [`effective_delta`] — an unannotated tool contributes identity here, Unknown at admission).
+pub(crate) fn committed_label(registry: &Registry, contract: &ToolContract, current: &Label) -> Label {
+    match effective_delta(registry, contract) {
+        Some(delta) => delta.apply(current),
+        None => current.clone(),
     }
 }
 
@@ -95,23 +110,24 @@ pub(crate) fn evaluate(
     call: &ResolvedCall,
 ) -> CheckOutcome {
     let current = views.current_label();
-    let committed = effective_delta(registry, contract).apply(&current);
-
-    // Any Unknown dimension the check would consume must be resolved first — reported with the
-    // offending branch values, which only the views can enumerate.
-    let unresolved = unresolved_facts(views, &committed);
-    if !unresolved.is_empty() {
-        return CheckOutcome::Unresolved(unresolved);
+    match evaluate_state(registry, contract, &current, &|kind| views.has_effect(kind), call) {
+        // The state evaluation only signals that a requirement consumed an Unknown dimension; the
+        // offending branch values are named here, where the views can enumerate them.
+        CheckOutcome::Unresolved(_) => {
+            let committed = committed_label(registry, contract, &current);
+            let dims = consumed_unresolved(contract, &committed, call);
+            CheckOutcome::Unresolved(unresolved_facts(views, &dims))
+        }
+        outcome => outcome,
     }
-
-    evaluate_state(registry, contract, &current, &|kind| views.has_effect(kind), call)
 }
 
 /// The gap logic on an abstract `(current label, effect predicate)` state — the one place the two
-/// clocks live, shared by [`evaluate`] and the remedy reachability search (`plan`). A committed
-/// label that is still `Unknown` yields [`CheckOutcome::Unresolved`] with no listed facts: the
-/// caller that has the values (the view path) details them; the state-only search treats it as a
-/// dead end (unresolved resolution is a cast path, outside the reachability subset).
+/// clocks live, shared by [`evaluate`] and the remedy reachability search (`plan`). A label
+/// requirement that consumes an `Unknown` dimension yields [`CheckOutcome::Unresolved`] with no
+/// listed facts: the caller that has the values (the view path) details them; the state-only
+/// search treats it as a dead end (unresolved resolution is a cast path, outside the reachability
+/// subset). An Unknown dimension nothing requires blocks nothing.
 pub(crate) fn evaluate_state(
     registry: &Registry,
     contract: &ToolContract,
@@ -119,8 +135,8 @@ pub(crate) fn evaluate_state(
     has_effect: &impl Fn(&EffectKind) -> bool,
     call: &ResolvedCall,
 ) -> CheckOutcome {
-    let committed = effective_delta(registry, contract).apply(current);
-    if matches!(committed.trust, Dim::Unknown) || matches!(committed.audience, Dim::Unknown) {
+    let committed = committed_label(registry, contract, current);
+    if !consumed_unresolved(contract, &committed, call).is_empty() {
         return CheckOutcome::Unresolved(Vec::new());
     }
 
@@ -137,6 +153,16 @@ pub(crate) fn evaluate_state(
     for mark in &contract.requires.attention {
         gaps.push(Gap::Attention(mark.clone()));
     }
+    // Canonical: a duplicated requirement entry (the same mark or effect listed twice) is one gap —
+    // a repeat adds no obligation, and downstream plan enumeration would otherwise mint
+    // order-permuted duplicate assignments from it.
+    let mut seen = Vec::with_capacity(gaps.len());
+    for gap in gaps {
+        if !seen.contains(&gap) {
+            seen.push(gap);
+        }
+    }
+    let gaps = seen;
 
     if gaps.is_empty() && narrowing.is_none() {
         CheckOutcome::Allow
@@ -148,11 +174,44 @@ pub(crate) fn evaluate_state(
     }
 }
 
-/// The branch values with an Unknown in a dimension the committed label leaves Unknown.
-fn unresolved_facts(views: &Views, committed: &Label) -> Vec<UnresolvedFact> {
+/// The dimensions whose Unknown state a label requirement of this call consumes — the ones a cast
+/// must resolve before the check can decide. Requirement-scoped by design; a malformed `includes`
+/// placeholder consumes the dimension only when the audience is Unknown (unresolved-first), and
+/// on a Known audience stays the hard fail-closed gap `label_gaps` reports.
+fn consumed_unresolved(contract: &ToolContract, committed: &Label, call: &ResolvedCall) -> Vec<Dimension> {
+    let mut dims = Vec::new();
+    if let Some(floor) = contract.requires.label.trust_floor
+        && committed.trust.meets_floor(floor) == Adequacy::Unresolved
+    {
+        dims.push(Dimension::Trust);
+    }
+    let audience_unresolved = contract
+        .requires
+        .label
+        .audience
+        .iter()
+        .any(|requirement| match requirement {
+            AudienceRequirement::Includes(spec) => match resolve_recipients(spec, call) {
+                Some(recipients) => committed.audience.covers(&recipients) == Adequacy::Unresolved,
+                // A malformed placeholder on an Unknown audience still consumes the dimension:
+                // downgrading it to an ordinary gap would let an authority with a reader ceiling
+                // cover the fail-closed sentinel and open the dispatch with the Unknown never
+                // resolved. On a Known audience it stays the unwaivable-by-trajectory hard gap.
+                None => matches!(committed.audience, Dim::Unknown),
+            },
+            AudienceRequirement::Cap(cap) => committed.audience.within_cap(cap) == Adequacy::Unresolved,
+        });
+    if audience_unresolved {
+        dims.push(Dimension::Audience);
+    }
+    dims
+}
+
+/// The branch values with an Unknown in a consumed-unresolved dimension.
+fn unresolved_facts(views: &Views, dims: &[Dimension]) -> Vec<UnresolvedFact> {
     let mut facts = Vec::new();
-    let trust_unknown = matches!(committed.trust, Dim::Unknown);
-    let audience_unknown = matches!(committed.audience, Dim::Unknown);
+    let trust_unknown = dims.contains(&Dimension::Trust);
+    let audience_unknown = dims.contains(&Dimension::Audience);
     if !trust_unknown && !audience_unknown {
         return facts;
     }
