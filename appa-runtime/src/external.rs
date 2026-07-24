@@ -177,12 +177,14 @@ pub enum SanitizerAnswer {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuiltinSanitizer {
     RedactEmail,
+    RedactNumbers,
 }
 
 impl BuiltinSanitizer {
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "redact-email" => Some(BuiltinSanitizer::RedactEmail),
+            "redact-numbers" => Some(BuiltinSanitizer::RedactNumbers),
             _ => None,
         }
     }
@@ -208,6 +210,9 @@ impl SanitizerBackend {
         match self {
             SanitizerBackend::Builtin(BuiltinSanitizer::RedactEmail) => {
                 SanitizerAnswer::Derived(redact_email(&input.body))
+            }
+            SanitizerBackend::Builtin(BuiltinSanitizer::RedactNumbers) => {
+                SanitizerAnswer::Derived(redact_numbers(&input.body))
             }
             SanitizerBackend::Http { url, timeout, client } => {
                 match post_json::<DerivedWire>(client, url, *timeout, input).await {
@@ -254,6 +259,26 @@ fn is_emailish(token: &str) -> bool {
         }
         None => false,
     }
+}
+
+/// Replace every maximal ASCII-digit run with a fixed placeholder. Like [`redact_email`], a
+/// deliberately simple builtin fixture — it strips numeric identifiers (SSNs, salaries, account
+/// digits) and keeps everything else verbatim; registration is a trust decision, not verification.
+fn redact_numbers(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut in_digits = false;
+    for ch in input.chars() {
+        if ch.is_ascii_digit() {
+            if !in_digits {
+                out.push_str("[redacted-number]");
+                in_digits = true;
+            }
+        } else {
+            in_digits = false;
+            out.push(ch);
+        }
+    }
+    out
 }
 
 // --- casts ---------------------------------------------------------------------
@@ -595,6 +620,26 @@ mod tests {
         assert_eq!(out, "mail [redacted-email] and bob then done");
         assert_eq!(redact_email("no addresses here"), "no addresses here");
         assert_eq!(redact_email("a\nb@x.io\tc"), "a\n[redacted-email]\tc");
+    }
+
+    #[test]
+    fn redact_numbers_replaces_digit_runs_only() {
+        assert_eq!(
+            redact_numbers("SSN 123-45-4821, base $185,000"),
+            "SSN [redacted-number]-[redacted-number]-[redacted-number], base $[redacted-number],[redacted-number]"
+        );
+        assert_eq!(redact_numbers("buddy is Priya Sharma"), "buddy is Priya Sharma");
+        assert_eq!(redact_numbers(""), "");
+    }
+
+    #[tokio::test]
+    async fn builtin_redact_numbers_sanitizer_derives() {
+        let answer = SanitizerBackend::Builtin(BuiltinSanitizer::RedactNumbers)
+            .derive(&SanitizerInput {
+                body: "extension 4471".into(),
+            })
+            .await;
+        assert_eq!(answer, SanitizerAnswer::Derived("extension [redacted-number]".into()));
     }
 
     #[tokio::test]

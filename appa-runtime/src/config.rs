@@ -74,6 +74,8 @@ pub enum ConfigError {
     UnknownBuiltin { kind: &'static str, name: String },
     #[error("bad preamble role {found:?}: only \"system\" and \"developer\" may head the transcript")]
     BadPreambleRole { found: String },
+    #[error("tool {tool}: `parameters` must be a JSON-Schema object (a TOML table)")]
+    ToolParametersNotAnObject { tool: String },
     #[error("registry rejected: {0}")]
     Registry(#[from] LoadError),
 }
@@ -120,6 +122,7 @@ pub struct Config {
     sanitizer_impls: BTreeMap<SanitizerName, SanitizerImpl>,
     cast_impls: BTreeMap<CastName, CastImpl>,
     tool_impls: BTreeMap<ToolName, ToolImpl>,
+    tool_parameters: BTreeMap<ToolName, serde_json::Value>,
     child_return: ReturnPolicy,
     preamble: Vec<WireMessage>,
 }
@@ -149,10 +152,14 @@ impl Config {
 
         let mut tools = Vec::new();
         let mut tool_impls = BTreeMap::new();
+        let mut tool_parameters = BTreeMap::new();
         for t in raw.tool {
-            let (tool, imp) = t.convert(&trust_chain)?;
+            let (tool, imp, parameters) = t.convert(&trust_chain)?;
             if let Some(imp) = imp {
                 tool_impls.insert(tool.name.clone(), imp);
+            }
+            if let Some(parameters) = parameters {
+                tool_parameters.insert(tool.name.clone(), parameters);
             }
             tools.push(tool);
         }
@@ -240,6 +247,7 @@ impl Config {
             sanitizer_impls,
             cast_impls,
             tool_impls,
+            tool_parameters,
             child_return,
             preamble,
         })
@@ -283,6 +291,12 @@ impl Config {
 
     pub fn tool_impl(&self, name: &ToolName) -> Option<&ToolImpl> {
         self.tool_impls.get(name)
+    }
+
+    /// The tool's declared argument schema (`parameters`), advertised verbatim in its wire schema.
+    /// Advisory to the model only — the engine checks flows, never argument shapes.
+    pub fn tool_parameters(&self, name: &ToolName) -> Option<&serde_json::Value> {
+        self.tool_parameters.get(name)
     }
 }
 
@@ -371,10 +385,14 @@ struct RawTool {
     effects: Vec<String>,
     implementation: Option<RawToolImpl>,
     output_sanitizer: Option<String>,
+    parameters: Option<serde_json::Value>,
 }
 
 impl RawTool {
-    fn convert(self, chain: &TrustChain) -> Result<(ToolContract, Option<ToolImpl>), ConfigError> {
+    fn convert(
+        self,
+        chain: &TrustChain,
+    ) -> Result<(ToolContract, Option<ToolImpl>, Option<serde_json::Value>), ConfigError> {
         let ctx = || format!("tool {}", self.name);
         // No `delta` key at all = unannotated (results admitted at Unknown/Unknown, fail-closed);
         // `delta = {}` = the deliberate neutral annotation. The distinction is the whole point —
@@ -385,6 +403,11 @@ impl RawTool {
             None => Requires::default(),
         };
         let imp = self.implementation.map(|i| i.convert(&self.name)).transpose()?;
+        if let Some(parameters) = &self.parameters
+            && !parameters.is_object()
+        {
+            return Err(ConfigError::ToolParametersNotAnObject { tool: self.name });
+        }
         Ok((
             ToolContract {
                 name: ToolName::new(self.name),
@@ -395,6 +418,7 @@ impl RawTool {
                 output_sanitizer: self.output_sanitizer.map(SanitizerName::new),
             },
             imp,
+            self.parameters,
         ))
     }
 }

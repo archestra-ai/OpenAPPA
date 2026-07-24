@@ -118,7 +118,12 @@ pub fn block_feedback(
         if planned.recommendations.iter().any(Recommendation::is_curative) {
             "blocked by policy; run a redispatch prerequisite first, then re-propose this call"
         } else {
-            "blocked by policy; no remedy is available for this call"
+            match surface {
+                FeedbackSurface::Child => {
+                    "blocked by policy; no remedy is available for this call in this branch — complete what this branch still can, then finish with submit_result: return the value the parent needs, or null after side-effect-only work"
+                }
+                FeedbackSurface::Root { .. } => "blocked by policy; no remedy is available for this call",
+            }
         }
     } else if raw.requirement_gaps.is_empty() {
         match surface {
