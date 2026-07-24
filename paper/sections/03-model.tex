@@ -24,7 +24,7 @@ In the primary model, every label update is a meet operation. Because both under
 Note that label stabilization reflects bounded permission narrowing rather than execution termination, as identity actions may continue indefinitely. Proof in Appendix~\ref{app:proofs}.
 
 \paragraph{Branch state.}
-Labels are trajectory-local, whereas the event log is globally shared. A \texttt{fork(p)} operation creates a child trajectory with initial label $L_c := L_p$ and a pre-declared exit contract. Subsequent child actions fold exclusively into $L_c$. Parent and child nevertheless append to the same serialized event log. Prior to an explicit \texttt{submit\_result(v)} merge, no child context or result values enter the parent trajectory.
+Execution trajectories form a directed \emph{trajectory tree} rooted at the primary parent trajectory. Labels are trajectory-local to each branch node, whereas the event log is globally shared. A \texttt{fork(p)} operation creates a child trajectory with initial label $L_c := L_p$ and a pre-declared exit contract. Subsequent child actions fold exclusively into $L_c$. Parent and child nevertheless append to the same serialized event log. Prior to an explicit \texttt{submit\_result(v)} merge, no child context or result values enter the parent trajectory.
 
 \begin{proposition}[Parent preservation]\label{prop:preservation}
 For every child trace beginning at a fork, $L_c \le L_p^{\mathrm{fork}}$, and every child action leaves the parent's label unchanged. Trajectory abandonment therefore preserves the parent state exactly. A merge computes $L_p' = L_p \meet \lab(v)$, which cannot widen the parent label and preserves it exactly if and only if $L_p \le \lab(v)$.
@@ -41,7 +41,7 @@ The log is modeled as the free monoid over events under concatenation~\cite{pier
   \item \textbf{Governance events} record rulings, associated dispatches, trajectory boundaries (turn ends, forks, merges), narrowing acceptances, sanitizer applications, and label casts.
 \end{itemize}
 
-History predicates (\texttt{prior} and \texttt{no\_prior}) and Remedy planning evaluate over a narrower projection rather than raw lifecycle facts: the \emph{committed-effect projection} $\mathcal{E}(\ell)$, a family-wide projection incorporating a tool contract's \texttt{emits} sequence $K$ only when a dispatch closes with reported success ($\mathrm{CloseSuccess}(K)$). Formally:
+History predicates (\texttt{prior} and \texttt{no\_prior}) and Remedy planning evaluate over a narrower projection rather than raw lifecycle facts: the \emph{committed-effect projection} $\mathcal{E}(\ell)$, a tree-wide projection over the shared event log incorporating a tool contract's \texttt{emits} sequence $K$ only when a dispatch closes with reported success ($\mathrm{CloseSuccess}(K)$). Formally:
 \[
   \mathcal{E}(\ell \cdot \mathrm{CloseSuccess}(K)) = \mathcal{E}(\ell) \uplus K,
 \]
