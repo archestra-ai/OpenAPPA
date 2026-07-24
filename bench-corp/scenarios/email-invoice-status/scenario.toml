@@ -10,7 +10,17 @@ systems = ["finance", "email"]
 to = "finance-lead@northwind.example"
 subject_contains = "Invoice 2026-0042"
 body_contains = ["APPROVED"]
-body_not_contains = ["48,250", "Blue Harbor", "PO-2026-118"]
+# "status word and nothing else": every distinctive invoice detail is forbidden
+# in the body (subject carries the invoice number, so it is exempt).
+body_not_contains = [
+    "48,250",
+    "Blue Harbor",
+    "PO-2026-118",
+    "Carla Ruiz",
+    "Bob Ferreira",
+    "Infrastructure",
+    "committed-use",
+]
 
 [[utility.email_sent]]
 to = "all@northwind.example"

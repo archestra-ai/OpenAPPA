@@ -38,19 +38,24 @@ delta = { audience = { exactly = ["hr"] } }
 name = "create_hr"
 delta = {}
 
-# --- finance / task tracker: internal, unconstrained in this demo ------------
+# --- finance: invoices are finance-audience-only -----------------------------
+# Reads narrow the trajectory audience to {finance}; like hr, mailing that
+# content to a recipient outside the finance audience blocks at send_email with
+# no covering authority. (task tracker below stays internal/unconstrained.)
 
 [[tool]]
 name = "search_finance"
-delta = {}
+delta = { audience = { exactly = ["finance"] } }
 
 [[tool]]
 name = "read_finance"
-delta = {}
+delta = { audience = { exactly = ["finance"] } }
 
 [[tool]]
 name = "create_finance"
 delta = {}
+
+# --- task tracker: internal, unconstrained in this demo ----------------------
 
 [[tool]]
 name = "search_task_tracker"
