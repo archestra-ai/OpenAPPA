@@ -1,48 +1,61 @@
 \section{Evaluation}\label{sec:evaluation}
 
-\stub{Evaluation is designed but not yet run; this section states the protocol and metrics. Numbers TODO.}
+\stub{Evaluation protocol designed for multi-turn execution. Benchmark environment and run numbers TODO.}
 
-\paragraph{Primary question.}
-When a host explicitly establishes a child before restrictive work, do Label seeding, trajectory-local enforcement, and checked return preserve the parent Label compared with accepting the same narrowing in the parent? The evaluation must measure this directly; a generic defended-versus-undefended benchmark does not isolate the paper's core contribution~\cite{debenedettiAgentDojoDynamicEnvironment2024}.
+\paragraph{Benchmark design and rationale.}
+Existing agent security benchmarks, such as AgentDojo~\cite{debenedettiAgentDojoDynamicEnvironment2024}, evaluate agent behavior primarily in single-turn settings (a single user prompt mapped to a single tool invocation). Single-turn benchmarks are fundamentally inadequate for evaluating dynamic information flow control (IFC) and context branching. Dynamic taint accumulation and label creep only manifest across sequential interactions, where an unvetted or restrictive data acquisition in an early turn restricts or disables downstream tool capabilities in subsequent turns. Furthermore, evaluating host-managed context branching requires multi-turn execution harnesses that support child trajectory initialization, local execution steps, and policy-checked merge returns. To evaluate \appa{}, we construct a dedicated multi-turn trajectory benchmark suite featuring sequential multi-tool workflows, mixed-confidentiality data sources, and multi-step prompt injection vectors.
 
-\paragraph{Paired trajectory benchmark.}
-We will construct AgentDojo episodes~\cite{debenedettiAgentDojoDynamicEnvironment2024} in which an agent:
+\stub{INFO TO GLEAN FROM BENCHMARK SUITE:
+  - Benchmark size: Total number of multi-turn evaluation tasks (e.g., 50--100 episodes).
+  - Trajectory depth: Average turn count and tool call chain length per task (e.g., 3--8 turns per episode).
+  - Tool taxonomy: Number of integrated tools ($N$), breakdown of annotated read/write sinks, and permission label distributions.
+  - Taint sources: Proportion of tasks featuring unvetted web/email data, internal confidential records, or mixed-trust inputs.
+  - Injection vectors: Distribution of embedded adversarial payloads (direct egress commands, prompt hijacking, data exfiltration triggers).
+}
+
+\paragraph{Primary utility question.}
+When a host explicitly establishes a child trajectory before restrictive work, do Label seeding, trajectory-local enforcement, and checked return preserve the parent Label compared with accepting the same narrowing in the parent? The evaluation measures this directly across paired multi-turn workflows where an agent:
 \begin{enumerate}
-  \item performs a task requiring inspection of restrictive or attacker-controlled data, and
+  \item performs an initial task requiring inspection of restrictive or attacker-controlled data, and
   \item subsequently executes an independent benign action whose sink would be disabled by the descended label.
 \end{enumerate}
-Task variants will cover a first task requiring no return value, a schema-bounded derivative, and a return value that cannot be safely derived. We will report second-task completion rates, strict descents of the \emph{parent} label, preservation of the parent's ruling-free release frontier, and branch outcomes (\texttt{abandon}, bounded return, or rejected vs. accepted raw \texttt{merge}).
+Task variants cover a first task requiring no return value, a schema-bounded derivative, and a return value that cannot be safely derived.
 
 \paragraph{Security question.}
-We will execute AgentDojo injection tasks where the attacker controls child-visible content and attempts:
+We evaluate security enforcement across multi-turn agent workflows containing mixed-confidentiality data sources (e.g., confidential user records, untrusted web/email content) and external communication sinks. The evaluation measures whether \appa{}'s dynamic IFC and prospective enforcement prevent policy violations and unauthorized data flows across three primary failure modes:
 \begin{enumerate}
-  \item direct child egress,
-  \item raw-data return through \texttt{submit\_result},
-  \item schema-conforming semantic data exfiltration, and
-  \item history erasure via abandonment.
+  \item \textbf{Unauthorized Egress:} Attempts to transmit restricted or unvetted context to unauthorized external sinks or disallowable tool calls.
+  \item \textbf{Unchecked Return Bleed:} Attempts to return raw, unsanitized payloads or non-compliant schema derivatives from a child branch back into the parent trajectory.
+  \item \textbf{Persistent Privilege Escalation:} Attempts to reuse single-call authorization rulings or persistently widen trajectory security labels across subsequent dispatches.
 \end{enumerate}
-We will report attack success rates and the specific structural check that blocked each attempt. Branching is designed to increase utility without weakening sink enforcement; schema-only exits are expected by design to fail against semantic data exfiltration unless supported by a trusted exit assertion~\cite{sabelfeld2009declassification}.
 
 \paragraph{Baselines and ablations.}
-We will compare:
+We compare \appa{} against:
 \begin{itemize}
-  \item an undefended agent;
+  \item an undefended agent (no IFC enforcement);
   \item sink-only IFC that unconditionally accepts acquisition taints;
-  \item hard decline of restrictive reads;
+  \item hard decline of restrictive reads (refusing unvetted acquisitions);
   \item \textsc{Fides}'s basic and selective-hiding planners~\cite{fides};
-  \item APPA with branching disabled; and
-  \item full APPA.
+  \item \appa{} with branching disabled (parent trajectory absorbs all taints); and
+  \item full \appa{} with prospective acquisition enforcement and host-managed branching.
 \end{itemize}
-An abandon-only bounded-exit ablation will isolate the utility of execution isolation from that of the trusted derivative mechanism. We will not evaluate copied or discardable branch logs as functional ablations because they violate the threat model; these configurations will be evaluated strictly as negative invariant test cases.
+An abandon-only bounded-exit ablation isolates the utility of execution isolation from that of the trusted derivative mechanism. Copied or discardable branch logs are evaluated strictly as negative invariant test cases to verify threat model bounds.
 
-\paragraph{Main metrics.}
-Alongside standard task utility and injection attack success rates, we will measure parent-label descents avoided, post-acquisition benign actions completed, branches created, abandoned, and merged, exit rejections, authority interventions, and token and latency overhead per branch. Both security and utility metrics must be reported, as preventing label creep represents a primary utility benefit under strict enforcement. All evaluated branches represent explicit host-created child sessions. The evaluation protocol will record the child prompt or task handoff used in each branch, attributing token and latency overhead directly to explicit child setup and task initialization.
+\stub{INFO TO GLEAN FROM BENCHMARK RUN:
+  - Task Completion Rate (Utility): Task success percentage across benign multi-turn workflows across all baselines and \appa{}.
+  - Label Creep Avoidance: Frequency and percentage of episodes where the parent trajectory label $L_p$ remains untainted while completing downstream benign tasks.
+  - Attack Success Rate (ASR): Percentage of prompt injection attacks succeeding in data exfiltration or policy violation across multi-turn interactions.
+  - Defense Check Attribution: Breakdown of specific \appa{} structural checks (prospective refusal, child sink block, merge rejection, exit assertion failure) that intercepted each attack attempt.
+  - Branch Lifecycle Statistics: Absolute count and percentage of child branches initialized, merged via bounded return, abandoned, or rejected.
+  - System Overhead: Average latency overhead (ms) and token consumption per branch initialization, child step, and sanitizer evaluation.
+  - Ablation Delta: Quantitative comparison showing utility and security metrics for full \appa{} versus abandon-only and branching-disabled configurations.
+}
 
 \paragraph{Case study.}
-We will evaluate the CRM/invoice scenario from \S\ref{sec:branching} end-to-end using the engine implementation and publish its policy contracts, parent/child label traces, shared event log, injected payload, exit assertion, and post-merge benign execution trace. The case study will additionally include failure and timeout traces showing that while the append-only log records all audit outcomes, the committed-effect projection $\mathcal{E}$ remains unchanged.
+We evaluate the CRM/invoice scenario from \S\ref{sec:branching} end-to-end using the engine implementation and publish its policy contracts, parent/child label traces, shared event log, injected payload, exit assertion, and post-merge benign execution trace. The case study additionally includes failure and timeout traces showing that while the append-only log records all audit outcomes, the committed-effect projection $\mathcal{E}$ remains unchanged.
 
 \paragraph{Planner completeness evaluation.}
-Evaluation of planner completeness will compare the production search with an independent reference reachability closure over the implemented subset (atomic \texttt{Authorize}/\texttt{Accept} plans and curative \texttt{Redispatch} transitions).
+Evaluation of planner completeness compares the production search with an independent reference reachability closure over the implemented subset (atomic \texttt{Authorize}/\texttt{Accept} plans and curative \texttt{Redispatch} transitions).
 
 \paragraph{Secondary study.}
-We will annotate $k$ risky tools, classify all remaining tools as \texttt{Unknown}, and perform a parameter sweep over the cast policy space. This study remains secondary to the branch evaluation: incremental tool annotation provides supporting machinery rather than the core contribution.
+We annotate $k$ risky tools, classify all remaining tools as \texttt{Unknown}, and perform a parameter sweep over the cast policy space. This study remains secondary to the branch evaluation: incremental tool annotation provides supporting machinery rather than the core contribution.
