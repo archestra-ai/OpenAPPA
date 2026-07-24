@@ -28,6 +28,42 @@ Reads/searches are pure sources (``accepts_untrusted=True``): safe to call even
 in a tainted context because they cannot exfiltrate. ``send_email`` is the only
 egress sink, so it is the only tool that refuses an untrusted or over-private
 context — exactly the single gated flow the APPA demo guards.
+
+Where the mapping stops
+-----------------------
+
+The trust/integrity row above is a true isomorphism: two ranks either side, and
+``accepts_untrusted=False`` is ``requires.trust = "internal"``. The audience row
+is not. It holds only because of a property of *today's* APPA policy, and it
+will stop holding the moment that property changes.
+
+FIDES confidentiality is an ordinal chain — ``PUBLIC < PRIVATE <
+USER_IDENTITY`` — enforced as a numeric ceiling against a sink's
+``max_allowed_confidentiality`` (``agent_framework/security.py``). Despite its
+name and its ``metadata={"user_id": ...}``, ``USER_IDENTITY`` means "more
+secret than private", not "for this reader": no policy path in FIDES reads the
+call's arguments, so no label can distinguish one recipient from another.
+
+APPA's audience is a reader *set*, folded by intersection, and the sink's
+requirement names the recipient: ``audience = { includes = ["$to"] }``
+resolves ``$to`` to the literal address at dispatch. That is a strictly richer
+question than a ceiling.
+
+The two agree today only because ``bench-corp/policies/appa.toml`` mints
+exactly one reader token, ``hr``, and never an address. No audience set can
+contain ``finance-lead@northwind.example``, so ``includes($to)`` degenerates
+into "is this trajectory still ``Public``?" — which is precisely
+``max_allowed_confidentiality=public``. The value-granular machinery is
+declared but not exercised, so the transcription lands.
+
+Give any tool's ``delta`` a real recipient set and the transcription breaks
+irreparably. A trajectory carrying data readable by ``finance-lead@`` but not
+``all@`` has no image in an ordinal chain: ``public`` releases to both,
+``private`` and ``user_identity`` release to neither. **If that day comes, the
+divergence is the measurement, not a defect to repair.** #82 aligned the finance
+label because the two policies *could* match there and had drifted apart by
+accident; do not extend that reflex to a constraint FIDES cannot express, or
+re-aligning the labels will silently delete the result.
 """
 
 from __future__ import annotations
