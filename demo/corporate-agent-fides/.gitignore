@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+# The observable send_email sink — a run artifact, never committed.
+data/email/
