@@ -863,9 +863,7 @@ builtin = "redact-email"
         .iter()
         .rev()
         .find_map(|fact| match fact {
-            Fact::BlockFeedback {
-                call_id, content, ..
-            } if call_id.as_str() == "submit" => Some(content.clone()),
+            Fact::BlockFeedback { call_id, content, .. } if call_id.as_str() == "submit" => Some(content.clone()),
             _ => None,
         })
         .expect("the blocked return answers the submit");
@@ -1626,7 +1624,11 @@ builtin = "redact-email"
     assert!(matches!(
         sanitized_turn
             .mediate(
-                calls(vec![call("sanitize-return", EXECUTE_REMEDY_PLAN, &remedy_args(&sanitize))]),
+                calls(vec![call(
+                    "sanitize-return",
+                    EXECUTE_REMEDY_PLAN,
+                    &remedy_args(&sanitize)
+                )]),
                 &mut budget,
             )
             .await
