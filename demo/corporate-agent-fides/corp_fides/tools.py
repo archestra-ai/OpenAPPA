@@ -19,7 +19,7 @@ so:
 
     public_forum -> integrity=untrusted (the taint), confidentiality=public
     hr           -> integrity=trusted,   confidentiality=private   (the secret)
-    finance      -> integrity=trusted,   confidentiality=public    (internal, egress-able)
+    finance      -> integrity=trusted,   confidentiality=private   (restricted, like the APPA policy's audience=["finance"])
     task_tracker -> integrity=trusted,   confidentiality=public
     send_email   -> accepts_untrusted=False, max_allowed_confidentiality=public
 
@@ -41,7 +41,7 @@ from .systems import CorpSystemsClient, System
 # Per-system output label (integrity, confidentiality). See module docstring.
 _LABELS: dict[System, tuple[str, str]] = {
     System.HR: ("trusted", "private"),
-    System.FINANCE: ("trusted", "public"),
+    System.FINANCE: ("trusted", "private"),
     System.TASK_TRACKER: ("trusted", "public"),
     System.PUBLIC_FORUM: ("untrusted", "public"),
 }
