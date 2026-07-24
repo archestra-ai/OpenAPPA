@@ -129,28 +129,28 @@ pub fn block_feedback(
     } else if raw.requirement_gaps.is_empty() {
         match fork {
             Some(_) => {
-                "narrowing: this call restricts the trajectory label. Fork the restricting work into a child session to keep this session's label, or accept it with execute_remedy_plan in your next response — acceptance is permanent for this session, so run any later step that needs the current label before you accept"
+                "narrowing: this call restricts the trajectory label, and acceptance is permanent for this session — no authority widens an audience, and trust never rises. Fork the restricting work into a child session to keep this session's label; or run every later step that needs the current label first, then accept with execute_remedy_plan in a later response"
             }
             None => match surface {
                 FeedbackSurface::Root { .. } => {
-                    "narrowing: this call restricts the trajectory label; accept it with execute_remedy_plan in your next response — acceptance is permanent for this session, so run any later step that needs the current label before you accept"
+                    "narrowing: this call restricts the trajectory label, and acceptance is permanent for this session — no authority widens an audience, and trust never rises. Run every later step that needs the current label first, then accept with execute_remedy_plan in a later response"
                 }
                 FeedbackSurface::Child => {
-                    "narrowing: this call restricts this branch's label only — the parent session is unaffected; accept it with execute_remedy_plan in your next response — acceptance is permanent for this branch, so run any later step of this branch that needs the current label before you accept"
+                    "narrowing: this call restricts this branch's label only — the parent session is unaffected — and acceptance is permanent for this branch. Run every later step of this branch that needs the current label first, then accept with execute_remedy_plan in a later response"
                 }
             },
         }
     } else if raw.narrowing.is_some() {
         match fork {
             Some(_) => {
-                "blocked by policy; execute one offered plan with execute_remedy_plan in your next response — it also accepts this call's narrowing, permanently for this session — or fork the restricting work into a child session to keep this session's label"
+                "blocked by policy; every offered plan also accepts this call's narrowing, permanently for this session. Fork the restricting work into a child session to keep this session's label; or run every later step that needs the current label first, then execute a plan with execute_remedy_plan in a later response"
             }
             None => match surface {
                 FeedbackSurface::Root { .. } => {
-                    "blocked by policy; execute one offered plan with execute_remedy_plan in your next response — it also accepts this call's narrowing, permanently for this session, so run any later step that needs the current label first"
+                    "blocked by policy; every offered plan also accepts this call's narrowing, permanently for this session. Run every later step that needs the current label first, then execute one with execute_remedy_plan in a later response"
                 }
                 FeedbackSurface::Child => {
-                    "blocked by policy; execute one offered plan with execute_remedy_plan in your next response; its narrowing restricts this branch's label only — the parent session is unaffected — and accepting it is permanent for this branch"
+                    "blocked by policy; every offered plan also accepts this call's narrowing, permanent for this branch — the parent session is unaffected. Run every later step of this branch that needs the current label first, then execute one with execute_remedy_plan in a later response"
                 }
             },
         }
@@ -205,7 +205,7 @@ pub fn cast_offer_feedback(handle: &str, narrowing: &Narrowing, surface: Feedbac
     })
     .expect("the narrowing payload serializes");
     format!(
-        "result withheld: admitting it narrows the trajectory label; accept with execute_remedy_plan in your next response — acceptance is {}\n{payload}",
+        "result withheld: admitting it narrows the trajectory label, and acceptance is {}. Run every later step that needs the current label first, then accept with execute_remedy_plan in a later response\n{payload}",
         acceptance_cost(surface)
     )
 }

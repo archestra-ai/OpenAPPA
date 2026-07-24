@@ -1011,9 +1011,9 @@ impl Turn {
                     .iter()
                     .map(|(handle, plan)| {
                         let informed = match plan {
-                            // Acceptance-carrying plans are informed: executable next response only.
+                            // Acceptance-carrying plans are informed: never in the offering round.
                             ReturnPlan::Accept(_) | ReturnPlan::Sanitize { residual: Some(_), .. } => {
-                                " (in your next response)"
+                                " (in a later response)"
                             }
                             ReturnPlan::Sanitize { residual: None, .. } => "",
                         };
@@ -1021,7 +1021,7 @@ impl Turn {
                     })
                     .collect();
                 let feedback = format!(
-                    "returning this raw would narrow the parent, permanently for the parent session; call execute_remedy_plan with plan_id {}; or submit_result null when the child has completed its side effects and the parent needs no value",
+                    "returning this raw narrows the parent, permanently for the parent session — every later parent step that needs the parent's current label is lost with it. Weigh that against both alternatives: submit_result null returns no value and leaves the parent's label untouched (side effects this branch already committed hold either way), or call execute_remedy_plan with plan_id {}",
                     menu.join(", ")
                 );
                 self.pending_returns.push(PendingReturn {
