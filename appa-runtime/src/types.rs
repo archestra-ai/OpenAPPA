@@ -5,7 +5,7 @@ use thiserror::Error;
 use appa_engine::label::Label;
 use appa_engine::value::{DispatchId, ResolvedCall, ToolName};
 
-use appa_runtime::store::StoreError;
+use crate::store::StoreError;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SdkOptions {

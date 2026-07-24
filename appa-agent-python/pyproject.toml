@@ -1,0 +1,33 @@
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "appa-agent-python"
+version = "0.1.0"
+description = "Synchronous PyO3 bindings for OpenAPPA CallSession mediation"
+requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+]
+
+[tool.maturin]
+features = ["extension-module"]
+module-name = "appa_agent_python"
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "../Cargo.toml" },
+    { file = "../Cargo.lock" },
+    { file = "src/**/*.rs" },
+    { file = "../appa-engine/Cargo.toml" },
+    { file = "../appa-engine/src/**/*.rs" },
+    { file = "../appa-runtime/Cargo.toml" },
+    { file = "../appa-runtime/src/**/*.rs" },
+    { file = "../appa-sdk/Cargo.toml" },
+    { file = "../appa-sdk/src/**/*.rs" },
+]

@@ -8,10 +8,10 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use crate::config::{AuthorityImpl, Config};
+use crate::external::AuthorityBackend;
+use crate::tool::HttpClient;
 use appa_engine::names::AuthorityName;
-use appa_runtime::config::{AuthorityImpl, Config};
-use appa_runtime::external::AuthorityBackend;
-use appa_runtime::tool::HttpClient;
 
 /// Build the authority backends for every registered authority. Absence of an implementation is
 /// fail-closed HITL, exactly as the runtime assembles it.

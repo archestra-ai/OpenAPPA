@@ -1,5 +1,5 @@
 //! The TOML policy loader: the spec's configuration dialect → the engine's [`RegistryConfig`]
-//! plus the runtime-side implementation bindings.
+//! plus the outer-layer implementation bindings.
 //!
 //! Configuration is data (spec §"The configuration surface"): four top-level kinds — tools,
 //! authorities, sanitizers, casts — over an ordered trust chain. This module parses that dialect
@@ -7,7 +7,7 @@
 //! `appa-proxy`-era key or a bare operator-less list is a loud load error), then converts each into
 //! the engine's native, already-validated types. The split is deliberate: the **declaration** (what
 //! an authority may cover, a cast's ceiling) is engine territory and lands in [`RegistryConfig`]; the
-//! **implementation** (an HTTP resolver URL, a builtin name) is runtime territory and lands in the
+//! **implementation** (an HTTP resolver URL, a builtin name) is outer-layer territory and lands in the
 //! per-name impl maps this module also returns. Parsing runs **both** the surface lints (unknown
 //! rank name, operator-required audience, constant-XOR-resolver, implementation-required, closed
 //! builtin names) **and** the engine's algebraic load lints (`Registry::build`: no-empty-mandate,
@@ -109,7 +109,7 @@ pub enum CastImpl {
 }
 
 /// A fully parsed and **fully validated** policy: the immutable engine [`Registry`] plus the
-/// runtime's per-name implementation bindings. Parsing runs both the surface lints and the engine's
+/// outer layer's per-name implementation bindings. Parsing runs both the surface lints and the engine's
 /// algebraic load lints, so a returned `Config` is always loadable.
 #[derive(Clone, Debug)]
 pub struct Config {

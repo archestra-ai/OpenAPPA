@@ -1,7 +1,7 @@
 //! The session store: server-minted trajectories, their families, and the one append-only log per
 //! family behind a compare-and-swap `Revision`.
 //!
-//! This is the runtime's state, kept deliberately narrow (one in-memory implementation; a durable
+//! This is the outer layer's state, kept deliberately narrow (one in-memory implementation; a durable
 //! backend is a follow-up behind this same surface). Three things live here:
 //!
 //! - **Sessions.** Each trajectory id is *server-minted* and bound to an authenticated caller (the
@@ -21,11 +21,12 @@
 //! synchronous and non-blocking (in-memory), safe to call from the async request path.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 use appa_engine::branch::BranchError;
 use appa_engine::fact::{Fact, FactBatch, Revision};
@@ -90,13 +91,35 @@ struct SessionRecord {
 
 #[derive(Debug, Default)]
 pub struct SessionStore {
+    identity: StoreIdentity,
     sessions: Mutex<BTreeMap<TrajectoryId, SessionRecord>>,
     next_id: AtomicU64,
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct StoreIdentity(Arc<()>);
+
+impl PartialEq for StoreIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for StoreIdentity {}
+
+impl fmt::Debug for StoreIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("StoreIdentity")
+    }
+}
+
 impl SessionStore {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         SessionStore::default()
+    }
+
+    pub(crate) fn identity(&self) -> StoreIdentity {
+        self.identity.clone()
     }
 
     fn mint(&self) -> TrajectoryId {
@@ -104,7 +127,7 @@ impl SessionStore {
         TrajectoryId::new(format!("appa-s-{n}"))
     }
 
-    pub fn create_session(&self, tenant: TenantId) -> TrajectoryId {
+    pub(crate) fn create_session(&self, tenant: TenantId) -> TrajectoryId {
         let id = self.mint();
         let record = SessionRecord {
             tenant,
@@ -122,12 +145,43 @@ impl SessionStore {
     /// without its seed as its first fact (no fresh-slate `Label::top()` laundering branch if seeding
     /// is rejected, loses, or is cancelled). `make_seed` runs the engine's seed derivation; a failure
     /// leaves no child. The caller must own `parent`.
-    pub fn fork<F>(
+    pub(crate) fn fork<F>(
         &self,
         tenant: &TenantId,
         parent: &TrajectoryId,
         make_seed: F,
     ) -> Result<(TrajectoryId, Revision), StoreError>
+    where
+        F: FnOnce(&TrajectoryId, &[Fact], Revision) -> Result<FactBatch, BranchError>,
+    {
+        let (child, revision, _) = self.fork_inner(tenant, parent, make_seed, false)?;
+        Ok((child, revision))
+    }
+
+    pub(crate) fn fork_reserved<F>(
+        &self,
+        tenant: &TenantId,
+        parent: &TrajectoryId,
+        make_seed: F,
+    ) -> Result<(TrajectoryId, Revision, OwnedMutexGuard<()>), StoreError>
+    where
+        F: FnOnce(&TrajectoryId, &[Fact], Revision) -> Result<FactBatch, BranchError>,
+    {
+        let (child, revision, guard) = self.fork_inner(tenant, parent, make_seed, true)?;
+        Ok((
+            child,
+            revision,
+            guard.expect("a reserved fork creates its lease before publishing the child"),
+        ))
+    }
+
+    fn fork_inner<F>(
+        &self,
+        tenant: &TenantId,
+        parent: &TrajectoryId,
+        make_seed: F,
+        reserve_lease: bool,
+    ) -> Result<(TrajectoryId, Revision, Option<OwnedMutexGuard<()>>), StoreError>
     where
         F: FnOnce(&TrajectoryId, &[Fact], Revision) -> Result<FactBatch, BranchError>,
     {
@@ -143,26 +197,41 @@ impl SessionStore {
             log.revision = log.revision.next();
             log.revision
         };
+        let turn_lock = Arc::new(AsyncMutex::new(()));
+        let guard = reserve_lease.then(|| {
+            turn_lock
+                .clone()
+                .try_lock_owned()
+                .expect("a new child turn lock is uncontended before publication")
+        });
         self.sessions.lock().expect("store lock").insert(
             child.clone(),
             SessionRecord {
                 tenant: tenant.clone(),
                 family,
                 parent: Some(parent.clone()),
-                turn_lock: Arc::new(AsyncMutex::new(())),
+                turn_lock,
             },
         );
-        Ok((child, revision))
+        Ok((child, revision, guard))
     }
 
-    pub fn parent_of(&self, tenant: &TenantId, session: &TrajectoryId) -> Result<Option<TrajectoryId>, StoreError> {
+    pub(crate) fn parent_of(
+        &self,
+        tenant: &TenantId,
+        session: &TrajectoryId,
+    ) -> Result<Option<TrajectoryId>, StoreError> {
         let sessions = self.sessions.lock().expect("store lock");
         Ok(require_owned(&sessions, tenant, session)?.parent.clone())
     }
 
     /// The session's turn lease. A driver acquires it (async) for the whole turn so only one turn runs
     /// per trajectory at a time (see [`SessionRecord`]). The caller must own `session`.
-    pub fn turn_lock(&self, tenant: &TenantId, session: &TrajectoryId) -> Result<Arc<AsyncMutex<()>>, StoreError> {
+    pub(crate) fn turn_lock(
+        &self,
+        tenant: &TenantId,
+        session: &TrajectoryId,
+    ) -> Result<Arc<AsyncMutex<()>>, StoreError> {
         let sessions = self.sessions.lock().expect("store lock");
         Ok(require_owned(&sessions, tenant, session)?.turn_lock.clone())
     }
@@ -175,7 +244,7 @@ impl SessionStore {
 
     /// Append a batch iff the family is still at `batch.basis` — the serialization point. A loser
     /// (a concurrent branch advanced the revision) gets [`StoreError::Stale`] and must re-project.
-    pub fn conditional_append(
+    pub(crate) fn conditional_append(
         &self,
         tenant: &TenantId,
         session: &TrajectoryId,
@@ -197,7 +266,12 @@ impl SessionStore {
     /// and a concurrent cancellation cannot both append the same close (no double-commit of effects),
     /// and because it is one lock acquisition (never a CAS-loop) it lands in bounded steps despite
     /// continuous competing appends — it cannot livelock.
-    pub fn finalize<F>(&self, tenant: &TenantId, session: &TrajectoryId, decide: F) -> Result<Revision, StoreError>
+    pub(crate) fn finalize<F>(
+        &self,
+        tenant: &TenantId,
+        session: &TrajectoryId,
+        decide: F,
+    ) -> Result<Revision, StoreError>
     where
         F: FnOnce(&[Fact], Revision) -> Option<FactBatch>,
     {
@@ -436,5 +510,26 @@ mod tests {
         let tenant = TenantId::new("host-a");
         let root = store.create_session(tenant.clone());
         assert_eq!(store.parent_of(&tenant, &root).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_reserved_fork_publishes_the_child_with_its_turn_lease_held() {
+        let store = SessionStore::new();
+        let tenant = TenantId::new("host-a");
+        let parent = store.create_session(tenant.clone());
+        let (child, _, guard) = store.fork_reserved(&tenant, &parent, seed(parent.clone())).unwrap();
+        let lease = store.turn_lock(&tenant, &child).unwrap();
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), lease.clone().lock_owned())
+                .await
+                .is_err()
+        );
+        drop(guard);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), lease.lock_owned())
+                .await
+                .is_ok()
+        );
     }
 }

@@ -1,9 +1,9 @@
-//! The OpenAI-compatible `/v1/chat/completions` wire types (non-streaming), owned by the runtime.
+//! The OpenAI-compatible `/v1/chat/completions` wire types (non-streaming), shared by runtime consumers.
 //!
 //! The same shapes serve both faces: the **north** request a thin harness sends, and the
 //! **upstream** request/response the runtime exchanges with the model. They are deliberately minimal
 //! — string content only, function tool calls — enough for the confining executor, not a full mirror
-//! of the vendor API. North input is untrusted and validated by [`crate::admission`] before anything
+//! of the vendor API. North input is untrusted and validated by the runtime admission layer before anything
 //! reaches the engine; upstream output is likewise never trusted as history (RP1/CC2).
 
 use serde::{Deserialize, Serialize};
@@ -19,6 +19,12 @@ pub struct ChatCompletionRequest {
     pub tools: Option<Vec<WireTool>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+}
+
+impl crate::Completion {
+    pub fn has_tool_calls(&self) -> bool {
+        !self.tool_calls.is_empty()
+    }
 }
 
 /// One message in a completion exchange. `role` is a free string on the wire and narrowed to a

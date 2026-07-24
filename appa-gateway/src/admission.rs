@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use crate::wire::{ChatCompletionRequest, WireRole};
+use appa_runtime::wire::{ChatCompletionRequest, WireRole};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UserTurn(String);
@@ -70,7 +70,7 @@ pub fn admit_north_request(request: &ChatCompletionRequest) -> Result<UserTurn, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::{WireFunctionCall, WireMessage, WireTool, WireToolCall, WireToolSchema};
+    use appa_runtime::wire::{WireFunctionCall, WireMessage, WireTool, WireToolCall, WireToolSchema};
 
     fn request(messages: Vec<WireMessage>) -> ChatCompletionRequest {
         ChatCompletionRequest {

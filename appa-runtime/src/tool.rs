@@ -1,4 +1,4 @@
-//! South tool execution: the runtime *invokes* a tool and classifies the result into a
+//! South tool execution: a backend *invokes* a tool and classifies the result into a
 //! [`ToolOutcome`] (RP3) the turn-drive admits.
 
 use std::time::Duration;
@@ -10,6 +10,10 @@ use appa_engine::value::{ResolvedCall, ToolName};
 /// The maximum tool-result body the runtime will admit as a value. A larger 2xx body still commits
 /// effects but is sealed, never admitted.
 pub const DEFAULT_BODY_CAP_BYTES: usize = 256 * 1024;
+
+pub const EXECUTE_REMEDY_PLAN: &str = "execute_remedy_plan";
+pub const FORK: &str = "fork";
+pub const SUBMIT_RESULT: &str = "submit_result";
 
 /// A runtime-owned HTTP client with **redirects disabled** — a newtype so the safe policy is the
 /// only way to obtain one. Redirect-following would let a backend hide a 3xx behind a final 2xx, or
@@ -27,7 +31,17 @@ impl HttpClient {
         )
     }
 
-    pub(crate) fn inner(&self) -> &reqwest::Client {
+    pub fn loopback() -> Self {
+        HttpClient(
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .build()
+                .expect("a loopback-only rustls reqwest client builds"),
+        )
+    }
+
+    pub fn inner(&self) -> &reqwest::Client {
         &self.0
     }
 }
@@ -59,6 +73,7 @@ impl RenderedCall {
 pub enum BodyDisposition {
     Available(String),
     RejectedTooLarge,
+    Unavailable,
 }
 
 /// The real outcome of a tool invocation (RP3). Note that [`ToolOutcome::Failure`] is payload-free
@@ -161,7 +176,7 @@ async fn read_capped(mut response: reqwest::Response, cap: usize) -> ToolOutcome
 /// cannot drive it to grow with the response — total allocation stays `O(cap)`, independent of how
 /// much the backend sends. `limit` uses saturating arithmetic, so an absurd `cap` near `usize::MAX`
 /// cannot overflow.
-pub(crate) async fn read_body_capped(response: &mut reqwest::Response, cap: usize) -> Option<Vec<u8>> {
+pub async fn read_body_capped(response: &mut reqwest::Response, cap: usize) -> Option<Vec<u8>> {
     let limit = cap.saturating_add(1);
     let mut body = Vec::new();
     loop {

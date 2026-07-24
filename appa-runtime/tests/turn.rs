@@ -1,0 +1,1686 @@
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+use appa_engine::fact::{BoundaryKind, CloseOutcome, Fact};
+use appa_engine::label::{Audience, Dim, Label, ReaderId, Trust};
+use appa_engine::value::{Provenance, RawResultDigest, ResolvedCall, ToolName, TrajectoryId};
+use appa_runtime::store::TenantId;
+use appa_runtime::tool::{BuiltinTool, EXECUTE_REMEDY_PLAN, FORK, SUBMIT_RESULT};
+use appa_runtime::{
+    Completion, Config, Limits, Mediator, RunBudget, Step, StopReason, Turn, TurnError, WireFunctionCall, WireMessage,
+    WireToolCall,
+};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
+
+fn mediator(policy: &str, tools: &[(&str, BuiltinTool)]) -> Arc<Mediator> {
+    let config = Config::from_toml_str(policy).expect("policy parses");
+    let tools = tools
+        .iter()
+        .map(|(name, backend)| (ToolName::new(*name), backend.clone()))
+        .collect::<BTreeMap<_, _>>();
+    Arc::new(Mediator::new(config, tools).expect("mediator assembles"))
+}
+
+fn call(id: &str, name: &str, arguments: &str) -> WireToolCall {
+    WireToolCall {
+        id: id.to_string(),
+        kind: "function".to_string(),
+        function: WireFunctionCall {
+            name: name.to_string(),
+            arguments: arguments.to_string(),
+        },
+    }
+}
+
+fn calls(tool_calls: Vec<WireToolCall>) -> Completion {
+    Completion {
+        content: None,
+        tool_calls,
+    }
+}
+
+fn final_answer(content: &str) -> Completion {
+    Completion {
+        content: Some(content.to_string()),
+        tool_calls: Vec::new(),
+    }
+}
+
+async fn begin(mediator: &Arc<Mediator>, tenant: &TenantId, session: &TrajectoryId, text: &str) -> Turn {
+    mediator
+        .begin_turn(tenant.clone(), session.clone(), text, CancellationToken::new())
+        .await
+        .expect("turn begins")
+}
+
+fn facts(mediator: &Mediator, tenant: &TenantId, session: &TrajectoryId) -> Vec<Fact> {
+    mediator.snapshot(tenant, session).expect("snapshot").0
+}
+
+fn tool_values(log: &[Fact]) -> Vec<(&str, &appa_engine::label::Label)> {
+    log.iter()
+        .filter_map(|fact| match fact {
+            Fact::ValueAdmitted {
+                value,
+                provenance: Provenance::ToolResult { .. },
+                ..
+            } => Some((value.body.as_str(), &value.label)),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn parent_with_completed_turn(
+    mediator: &Arc<Mediator>,
+    tenant: &TenantId,
+    budget: &mut RunBudget,
+) -> TrajectoryId {
+    let parent = mediator.create_session(tenant.clone());
+    let mut turn = begin(mediator, tenant, &parent, "parent").await;
+    assert!(matches!(
+        turn.mediate(final_answer("ready"), budget).await.unwrap(),
+        Step::Final(_)
+    ));
+    parent
+}
+
+async fn child_with_internal_read(
+    mediator: &Arc<Mediator>,
+    tenant: &TenantId,
+    parent: &TrajectoryId,
+    budget: &mut RunBudget,
+) -> Turn {
+    let child = mediator.fork_session_reserved(tenant, parent).unwrap();
+    let mut turn = mediator
+        .begin_forked_turn(tenant.clone(), child, "inspect", CancellationToken::new())
+        .unwrap();
+    assert!(matches!(
+        turn.mediate(calls(vec![call("read", "read", "{}")]), budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call(
+                "accept-read",
+                EXECUTE_REMEDY_PLAN,
+                r#"{"plan_id":"remedy-0"}"#,
+            )]),
+            budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    turn
+}
+
+#[tokio::test]
+async fn ordinary_calls_are_serial_and_only_admitted_results_enter_the_transcript() {
+    let mediator = mediator(
+        r#"
+version = 1
+[[tool]]
+name = "first"
+delta = {}
+[[tool]]
+name = "second"
+delta = {}
+"#,
+        &[
+            ("first", BuiltinTool::Echo("one".to_string())),
+            ("second", BuiltinTool::Echo("two".to_string())),
+        ],
+    );
+    let tenant = TenantId::new("tenant");
+    let session = mediator.create_session(tenant.clone());
+    let mut turn = begin(&mediator, &tenant, &session, "run both").await;
+    let mut budget = RunBudget::default();
+
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call("a", "first", "{}"), call("b", "second", "{}")]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    let log = facts(&mediator, &tenant, &session);
+    let opened: Vec<_> = log
+        .iter()
+        .filter_map(|fact| match fact {
+            Fact::DispatchOpened { dispatch, .. } => Some(dispatch),
+            _ => None,
+        })
+        .collect();
+    let closed: Vec<_> = log
+        .iter()
+        .filter_map(|fact| match fact {
+            Fact::DispatchClosed { dispatch, .. } => Some(dispatch),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(opened, closed);
+    assert_eq!(
+        tool_values(&log).iter().map(|(body, _)| *body).collect::<Vec<_>>(),
+        ["one", "two"]
+    );
+
+    let transcript = turn.transcript().unwrap();
+    assert_eq!(transcript.len(), 4);
+    assert_eq!(transcript[0], WireMessage::user("run both"));
+    assert_eq!(transcript[1].tool_calls.as_ref().unwrap().len(), 2);
+    assert_eq!(transcript[2], WireMessage::tool_result("a", "one"));
+    assert_eq!(transcript[3], WireMessage::tool_result("b", "two"));
+
+    assert!(matches!(
+        turn.mediate(final_answer("finished"), &mut budget).await.unwrap(),
+        Step::Final(answer) if answer == "finished"
+    ));
+}
+
+#[tokio::test]
+async fn sanitizer_and_pending_cast_outputs_keep_raw_bodies_confined() {
+    let sanitizer = mediator(
+        r#"
+version = 1
+[[tool]]
+name = "export"
+delta = { audience = { exactly = ["internal"] } }
+output_sanitizer = "pii"
+
+[[sanitizer]]
+name = "pii"
+on = ["tool_output"]
+[sanitizer.can_reduce]
+audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+[sanitizer.implementation]
+builtin = "redact-email"
+"#,
+        &[("export", BuiltinTool::Echo("contact bob@corp.com".to_string()))],
+    );
+    let tenant = TenantId::new("tenant");
+    let session = sanitizer.create_session(tenant.clone());
+    let mut turn = begin(&sanitizer, &tenant, &session, "export").await;
+    let mut budget = RunBudget::default();
+    assert!(matches!(
+        turn.mediate(calls(vec![call("s", "export", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    let log = facts(&sanitizer, &tenant, &session);
+    let admitted = tool_values(&log);
+    assert_eq!(admitted.len(), 1);
+    assert_eq!(admitted[0].0, "contact [redacted-email]");
+    assert_eq!(admitted[0].1.audience, Dim::Known(Audience::Public));
+    assert!(log.iter().any(|fact| matches!(
+        fact,
+        Fact::SanitizerApplied { raw_digest, .. }
+            if raw_digest == &RawResultDigest::of(b"contact bob@corp.com")
+    )));
+    assert_eq!(
+        turn.transcript().unwrap().last(),
+        Some(&WireMessage::tool_result("s", "contact [redacted-email]"))
+    );
+    turn.stop(StopReason::Cancelled).unwrap();
+
+    let pending_cast = mediator(
+        r#"
+version = 1
+[[tool]]
+name = "scan"
+effects = ["read"]
+delta = { trust = "unknown" }
+"#,
+        &[("scan", BuiltinTool::Echo("secret mailbox".to_string()))],
+    );
+    let session = pending_cast.create_session(tenant.clone());
+    let mut turn = begin(&pending_cast, &tenant, &session, "scan").await;
+    assert!(matches!(
+        turn.mediate(calls(vec![call("c", "scan", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    let log = facts(&pending_cast, &tenant, &session);
+    assert!(tool_values(&log).is_empty());
+    assert!(log.iter().any(|fact| matches!(
+        fact,
+        Fact::DispatchClosed {
+            outcome: CloseOutcome::Success { effects },
+            ..
+        } if effects.iter().any(|effect| effect.as_str() == "read")
+    )));
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(fact, Fact::BlockFeedback { .. }))
+            .count(),
+        1
+    );
+    turn.stop(StopReason::Cancelled).unwrap();
+}
+
+#[tokio::test]
+async fn authority_remedies_allow_or_deny_before_any_south_dispatch() {
+    let allow = mediator(
+        r#"
+version = 1
+[[tool]]
+name = "wire"
+effects = ["spend"]
+[tool.requires]
+attention = ["signoff"]
+
+[[authority]]
+name = "officer"
+mandate = { attends = ["signoff"] }
+implementation = { builtin = "approve" }
+"#,
+        &[("wire", BuiltinTool::Echo("paid".to_string()))],
+    );
+    let tenant = TenantId::new("tenant");
+    let session = allow.create_session(tenant.clone());
+    let mut turn = begin(&allow, &tenant, &session, "pay").await;
+    let mut budget = RunBudget::default();
+    turn.mediate(calls(vec![call("blocked", "wire", "{}")]), &mut budget)
+        .await
+        .unwrap();
+    assert!(
+        !facts(&allow, &tenant, &session)
+            .iter()
+            .any(|fact| matches!(fact, Fact::DispatchOpened { .. }))
+    );
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call("remedy", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-0"}"#,)]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    let log = facts(&allow, &tenant, &session);
+    assert_eq!(log.iter().filter(|fact| matches!(fact, Fact::Ruling { .. })).count(), 1);
+    assert!(log.iter().any(|fact| matches!(
+        fact,
+        Fact::DispatchClosed {
+            outcome: CloseOutcome::Success { effects },
+            ..
+        } if effects.iter().any(|effect| effect.as_str() == "spend")
+    )));
+    turn.stop(StopReason::Cancelled).unwrap();
+
+    let (url, server) = spawn_authority("deny").await;
+    let deny_policy = format!(
+        r#"
+version = 1
+[[tool]]
+name = "wire"
+effects = ["spend"]
+[tool.requires]
+attention = ["signoff"]
+
+[[authority]]
+name = "officer"
+mandate = {{ attends = ["signoff"] }}
+implementation = {{ resolver = {{ url = "{url}" }} }}
+"#
+    );
+    let deny = mediator(&deny_policy, &[("wire", BuiltinTool::Echo("must not run".to_string()))]);
+    let session = deny.create_session(tenant.clone());
+    let mut turn = begin(&deny, &tenant, &session, "pay").await;
+    turn.mediate(calls(vec![call("blocked", "wire", "{}")]), &mut budget)
+        .await
+        .unwrap();
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call("denied", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-0"}"#,)]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    server.await.unwrap();
+    let log = facts(&deny, &tenant, &session);
+    assert!(!log.iter().any(|fact| matches!(fact, Fact::Ruling { .. })));
+    assert!(!log.iter().any(|fact| matches!(fact, Fact::DispatchOpened { .. })));
+    turn.stop(StopReason::Cancelled).unwrap();
+}
+
+#[tokio::test]
+async fn a_denied_authority_leaves_its_sibling_offer_and_the_approval_records_its_review() {
+    let (deny_url, deny_server) = spawn_authority("deny").await;
+    let policy = format!(
+        r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+[[tool]]
+name = "wire"
+effects = ["spend"]
+[tool.requires]
+attention = ["signoff"]
+
+[[authority]]
+name = "no-officer"
+mandate = {{ attends = ["signoff"] }}
+implementation = {{ resolver = {{ url = "{deny_url}" }} }}
+
+[[authority]]
+name = "yes-officer"
+mandate = {{ attends = ["signoff"] }}
+implementation = {{ builtin = "approve" }}
+"#
+    );
+    let mediated = mediator(&policy, &[("wire", BuiltinTool::Echo("paid".to_string()))]);
+    let tenant = TenantId::new("tenant");
+    let session = mediated.create_session(tenant.clone());
+    let mut turn = begin(&mediated, &tenant, &session, "pay").await;
+    let mut budget = RunBudget::default();
+
+    assert!(matches!(
+        turn.mediate(calls(vec![call("blocked", "wire", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call("denied", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-0"}"#)]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    assert!(
+        !facts(&mediated, &tenant, &session)
+            .iter()
+            .any(|fact| matches!(fact, Fact::DispatchOpened { .. }))
+    );
+
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![
+                call("approved", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-1"}"#,)
+            ]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    deny_server.await.unwrap();
+
+    let log = facts(&mediated, &tenant, &session);
+    let (authority, reviewed) = log
+        .iter()
+        .find_map(|fact| match fact {
+            Fact::Ruling {
+                authority, reviewed, ..
+            } => Some((authority, reviewed)),
+            _ => None,
+        })
+        .expect("the sibling approval lands one ruling");
+    assert_eq!(authority.as_str(), "yes-officer");
+    assert_eq!(reviewed.tool, ToolName::new("wire"));
+    assert_eq!(
+        reviewed.trajectory_label,
+        Label::new(Dim::Known(Trust::new(1)), Dim::Known(Audience::Public))
+    );
+    assert!(reviewed.arg_refs.is_empty());
+    assert_eq!(log.iter().filter(|fact| matches!(fact, Fact::Ruling { .. })).count(), 1);
+    assert!(log.iter().any(|fact| matches!(
+        fact,
+        Fact::DispatchClosed {
+            outcome: CloseOutcome::Success { effects },
+            ..
+        } if effects.iter().any(|effect| effect.as_str() == "spend")
+    )));
+    turn.stop(StopReason::Cancelled).unwrap();
+}
+
+#[tokio::test]
+async fn pending_cast_acceptance_requires_a_later_round_and_admits_once() {
+    let mediated = mediator(
+        r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+[[tool]]
+name = "scan"
+effects = ["read"]
+delta = { trust = "unknown" }
+
+[[cast]]
+name = "paranoid"
+constant = { trust = "suspicious" }
+"#,
+        &[("scan", BuiltinTool::Echo("mail body".to_string()))],
+    );
+    let tenant = TenantId::new("tenant");
+    let session = mediated.create_session(tenant.clone());
+    let mut turn = begin(&mediated, &tenant, &session, "scan").await;
+    let mut budget = RunBudget::default();
+
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![
+                call("scan", "scan", "{}"),
+                call("early-accept", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-0"}"#,),
+            ]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    let offered = facts(&mediated, &tenant, &session);
+    assert!(tool_values(&offered).is_empty());
+    assert!(!offered.iter().any(|fact| matches!(fact, Fact::DispatchClosed { .. })));
+    assert!(offered.iter().any(|fact| matches!(
+        fact,
+        Fact::BlockFeedback { call_id, .. } if call_id.as_str() == "early-accept"
+    )));
+
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call("accept", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-0"}"#,)]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    let log = facts(&mediated, &tenant, &session);
+    assert_eq!(
+        tool_values(&log).iter().map(|(body, _)| *body).collect::<Vec<_>>(),
+        ["mail body"]
+    );
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(fact, Fact::OutputCastAccepted { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(fact, Fact::DispatchClosed { .. }))
+            .count(),
+        1
+    );
+
+    let transcript = turn.transcript().unwrap();
+    let scan_response = transcript
+        .iter()
+        .find(|message| message.tool_call_id.as_deref() == Some("scan"))
+        .expect("the scan call has an offer response");
+    assert_ne!(scan_response.content.as_deref(), Some("mail body"));
+    let acceptance_response = transcript
+        .iter()
+        .find(|message| message.tool_call_id.as_deref() == Some("accept"))
+        .expect("the acceptance call has the admitted result");
+    assert_eq!(acceptance_response.content.as_deref(), Some("mail body"));
+
+    assert!(matches!(
+        turn.mediate(final_answer("done"), &mut budget).await.unwrap(),
+        Step::Final(answer) if answer == "done"
+    ));
+    assert!(
+        !facts(&mediated, &tenant, &session)
+            .iter()
+            .any(|fact| matches!(fact, Fact::OutputCastLapsed { .. }))
+    );
+}
+
+#[tokio::test]
+async fn every_unaccepted_pending_cast_lapses_before_the_turn_boundary() {
+    let mediated = mediator(
+        r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+[[tool]]
+name = "scan"
+effects = ["read"]
+delta = { trust = "unknown" }
+
+[[cast]]
+name = "paranoid"
+constant = { trust = "suspicious" }
+"#,
+        &[("scan", BuiltinTool::Echo("mail body".to_string()))],
+    );
+    let tenant = TenantId::new("tenant");
+    let session = mediated.create_session(tenant.clone());
+    let mut turn = begin(&mediated, &tenant, &session, "scan twice").await;
+    let mut budget = RunBudget::default();
+
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![
+                call("first", "scan", "{}"),
+                call("second", "scan", r#"{"again":true}"#)
+            ]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    assert!(matches!(
+        turn.mediate(final_answer("done"), &mut budget).await.unwrap(),
+        Step::Final(_)
+    ));
+
+    let log = facts(&mediated, &tenant, &session);
+    assert!(tool_values(&log).is_empty());
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(fact, Fact::OutputCastLapsed { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(
+                fact,
+                Fact::DispatchClosed {
+                    outcome: CloseOutcome::Success { .. },
+                    ..
+                }
+            ))
+            .count(),
+        2
+    );
+    let turn_end = log
+        .iter()
+        .position(|fact| {
+            matches!(
+                fact,
+                Fact::Boundary {
+                    kind: BoundaryKind::TurnEnd,
+                    ..
+                }
+            )
+        })
+        .expect("the turn ends");
+    assert!(
+        log[..turn_end]
+            .iter()
+            .filter(|fact| matches!(fact, Fact::OutputCastLapsed { .. }))
+            .count()
+            == 2
+    );
+}
+
+#[tokio::test]
+async fn mixed_fork_rounds_have_no_side_effects_and_requests_are_turn_bound() {
+    let mediated = mediator(
+        r#"
+version = 1
+[[tool]]
+name = "write"
+effects = ["mutation"]
+delta = {}
+"#,
+        &[("write", BuiltinTool::Echo("written".to_string()))],
+    );
+    let tenant = TenantId::new("tenant");
+    let mixed_session = mediated.create_session(tenant.clone());
+    let mut mixed = begin(&mediated, &tenant, &mixed_session, "delegate").await;
+    let mut budget = RunBudget::default();
+    assert!(matches!(
+        mixed
+            .mediate(
+                calls(vec![
+                    call("fork", FORK, r#"{"task":"inspect"}"#),
+                    call("write", "write", "{}"),
+                ]),
+                &mut budget,
+            )
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    let log = facts(&mediated, &tenant, &mixed_session);
+    assert!(!log.iter().any(|fact| matches!(fact, Fact::DispatchOpened { .. })));
+    let responses: Vec<_> = log
+        .iter()
+        .filter_map(|fact| match fact {
+            Fact::BlockFeedback { call_id, .. } => Some(call_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(responses, ["fork", "write"]);
+    mixed.stop(StopReason::Cancelled).unwrap();
+
+    let empty = mediator("version = 1\n", &[]);
+    let first_session = empty.create_session(tenant.clone());
+    let second_session = empty.create_session(tenant.clone());
+    let mut first = begin(&empty, &tenant, &first_session, "first").await;
+    let mut second = begin(&empty, &tenant, &second_session, "second").await;
+    let Step::Fork(first_request) = first
+        .mediate(calls(vec![call("f1", FORK, r#"{"task":"task one"}"#)]), &mut budget)
+        .await
+        .unwrap()
+    else {
+        panic!("first fork expected")
+    };
+    let Step::Fork(second_request) = second
+        .mediate(calls(vec![call("f2", FORK, r#"{"task":"task two"}"#)]), &mut budget)
+        .await
+        .unwrap()
+    else {
+        panic!("second fork expected")
+    };
+    assert_eq!(first_request.task(), "task one");
+    assert!(matches!(first.transcript(), Err(TurnError::Lifecycle { .. })));
+    assert!(matches!(
+        first.complete_fork(second_request),
+        Err(TurnError::ForkIdentity)
+    ));
+    assert!(matches!(first.complete_fork(first_request).unwrap(), Step::Continue));
+    assert!(matches!(
+        first.mediate(final_answer("done"), &mut budget).await.unwrap(),
+        Step::Final(_)
+    ));
+    drop(second);
+}
+
+#[tokio::test]
+async fn a_fork_request_cannot_complete_a_later_turn_on_the_same_trajectory() {
+    let mediator = mediator("version = 1\n", &[]);
+    let tenant = TenantId::new("tenant");
+    let session = mediator.create_session(tenant.clone());
+    let mut budget = RunBudget::default();
+
+    let mut first = begin(&mediator, &tenant, &session, "first turn").await;
+    let Step::Fork(stale) = first
+        .mediate(calls(vec![call("fork", FORK, r#"{"task":"first"}"#)]), &mut budget)
+        .await
+        .unwrap()
+    else {
+        panic!("first fork expected")
+    };
+    drop(first);
+
+    let mut second = begin(&mediator, &tenant, &session, "second turn").await;
+    let Step::Fork(current) = second
+        .mediate(calls(vec![call("fork", FORK, r#"{"task":"second"}"#)]), &mut budget)
+        .await
+        .unwrap()
+    else {
+        panic!("second fork expected")
+    };
+
+    assert!(matches!(second.complete_fork(stale), Err(TurnError::ForkIdentity)));
+    assert!(matches!(second.complete_fork(current).unwrap(), Step::Continue));
+    second.stop(StopReason::Cancelled).unwrap();
+}
+
+#[tokio::test]
+async fn child_context_stops_at_the_fork_and_raw_returns_cross_once() {
+    let mediator = mediator("version = 1\n", &[]);
+    let tenant = TenantId::new("tenant");
+    let parent = mediator.create_session(tenant.clone());
+    let mut budget = RunBudget::default();
+
+    let mut first = begin(&mediator, &tenant, &parent, "root task").await;
+    first.mediate(final_answer("prior answer"), &mut budget).await.unwrap();
+    drop(first);
+
+    let mut parent_turn = begin(&mediator, &tenant, &parent, "delegate now").await;
+    let Step::Fork(request) = parent_turn
+        .mediate(calls(vec![call("fork", FORK, r#"{"task":"inspect"}"#)]), &mut budget)
+        .await
+        .unwrap()
+    else {
+        panic!("fork expected")
+    };
+    budget.charge_fork().unwrap();
+    let child = mediator.fork_session(&tenant, &parent).unwrap();
+    let mut child_turn = begin(&mediator, &tenant, &child, request.task()).await;
+    assert_eq!(child_turn.depth(), 1);
+    assert!(child_turn.is_child());
+    assert_eq!(
+        child_turn.transcript().unwrap(),
+        [
+            WireMessage::user("root task"),
+            WireMessage::assistant("prior answer"),
+            WireMessage::user("delegate now"),
+            WireMessage::user("inspect"),
+        ]
+    );
+
+    assert!(matches!(
+        child_turn
+            .mediate(
+                calls(vec![call("return", SUBMIT_RESULT, r#"{"value":"finding"}"#,)]),
+                &mut budget,
+            )
+            .await
+            .unwrap(),
+        Step::ChildFinished
+    ));
+    assert!(matches!(child_turn.transcript(), Err(TurnError::Lifecycle { .. })));
+    drop(child_turn);
+    parent_turn.complete_fork(request).unwrap();
+    let parent_context = parent_turn.transcript().unwrap();
+    assert!(parent_context.contains(&WireMessage::user("finding")));
+    assert!(!parent_context.contains(&WireMessage::assistant("child free text")));
+
+    let mut second_child_turn = begin(&mediator, &tenant, &child, "return again").await;
+    assert!(matches!(
+        second_child_turn
+            .mediate(
+                calls(vec![call("again", SUBMIT_RESULT, r#"{"value":"second"}"#,)]),
+                &mut budget,
+            )
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    second_child_turn
+        .mediate(final_answer("cannot return twice"), &mut budget)
+        .await
+        .unwrap();
+    let log = facts(&mediator, &tenant, &parent);
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(fact, Fact::ChildReturn { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(
+                fact,
+                Fact::Boundary {
+                    kind: BoundaryKind::Merge { .. },
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+    parent_turn.stop(StopReason::Cancelled).unwrap();
+}
+
+#[tokio::test]
+async fn child_free_final_prose_finishes_without_crossing_to_the_parent() {
+    let mediator = mediator("version = 1\n", &[]);
+    let tenant = TenantId::new("tenant");
+    let parent = mediator.create_session(tenant.clone());
+    let forked = mediator.fork_session_reserved(&tenant, &parent).unwrap();
+    let child = forked.session().clone();
+    let mut turn = mediator
+        .begin_forked_turn(tenant.clone(), forked, "inspect", CancellationToken::new())
+        .unwrap();
+    let mut budget = RunBudget::default();
+
+    assert!(matches!(
+        turn.mediate(final_answer("child-only conclusion"), &mut budget)
+            .await
+            .unwrap(),
+        Step::ChildFinished
+    ));
+    let log = facts(&mediator, &tenant, &parent);
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(
+                fact,
+                Fact::AssistantMessage {
+                    trajectory,
+                    content: Some(_),
+                    calls,
+                } if trajectory == &child && calls.is_empty()
+            ))
+            .count(),
+        1
+    );
+    assert!(appa_runtime::transcript::model_transcript(&[], &log, &parent).is_empty());
+}
+
+#[tokio::test]
+async fn sanitized_and_void_child_returns_have_closed_crossing_semantics() {
+    let sanitized = mediator(
+        r#"
+version = 1
+[[sanitizer]]
+name = "pii"
+on = ["tool_output"]
+[sanitizer.can_reduce]
+audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+[sanitizer.implementation]
+builtin = "redact-email"
+[child]
+return_sanitizer = "pii"
+"#,
+        &[],
+    );
+    let tenant = TenantId::new("tenant");
+    let parent = sanitized.create_session(tenant.clone());
+    let child = sanitized.fork_session(&tenant, &parent).unwrap();
+    let mut child_turn = begin(&sanitized, &tenant, &child, "inspect").await;
+    let mut budget = RunBudget::default();
+    assert!(matches!(
+        child_turn
+            .mediate(
+                calls(vec![call("return", SUBMIT_RESULT, r#"{"value":"ask eve@corp.com"}"#,)]),
+                &mut budget,
+            )
+            .await
+            .unwrap(),
+        Step::ChildFinished
+    ));
+    let log = facts(&sanitized, &tenant, &parent);
+    let returned: Vec<_> = log
+        .iter()
+        .filter_map(|fact| match fact {
+            Fact::ValueAdmitted {
+                value,
+                provenance: Provenance::ChildReturn { .. },
+                ..
+            } => Some(value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(returned.len(), 1);
+    assert_eq!(returned[0].body.as_str(), "ask [redacted-email]");
+    assert_eq!(returned[0].label.audience, Dim::Known(Audience::Public));
+    assert!(log.iter().any(|fact| matches!(
+        fact,
+        Fact::ChildReturn {
+            derivation: appa_engine::fact::ReturnDerivation::Sanitized { raw_digest, .. },
+            ..
+        } if raw_digest == &RawResultDigest::of(b"ask eve@corp.com")
+    )));
+    let parent_context = appa_runtime::transcript::model_transcript(&[], &log, &parent);
+    assert!(parent_context.contains(&WireMessage::user("ask [redacted-email]")));
+    assert!(!parent_context.contains(&WireMessage::user("ask eve@corp.com")));
+
+    let raw = mediator(
+        "version = 1\n[[tool]]\nname = \"after\"\ndelta = {}\n",
+        &[("after", BuiltinTool::Echo("must not run".to_string()))],
+    );
+    let parent = raw.create_session(tenant.clone());
+    let child = raw.fork_session(&tenant, &parent).unwrap();
+    let mut child_turn = begin(&raw, &tenant, &child, "inspect").await;
+    assert!(matches!(
+        child_turn
+            .mediate(
+                calls(vec![
+                    call("void", SUBMIT_RESULT, r#"{"value":null}"#),
+                    call("after", "after", "{}"),
+                ]),
+                &mut budget,
+            )
+            .await
+            .unwrap(),
+        Step::ChildFinished
+    ));
+    let log = facts(&raw, &tenant, &parent);
+    assert!(!log.iter().any(|fact| matches!(fact, Fact::ChildReturn { .. })));
+    assert!(!log.iter().any(|fact| matches!(fact, Fact::DispatchOpened { .. })));
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(fact, Fact::BlockFeedback { .. }))
+            .count(),
+        2
+    );
+    assert!(!log.iter().any(|fact| matches!(
+        fact,
+        Fact::ValueAdmitted {
+            provenance: Provenance::ChildReturn { .. },
+            ..
+        }
+    )));
+    assert!(!log.iter().any(|fact| matches!(
+        fact,
+        Fact::Boundary {
+            kind: BoundaryKind::Merge { .. },
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn narrowing_return_plans_cross_only_the_selected_raw_or_sanitized_value() {
+    let mediator = mediator(
+        r#"
+version = 1
+[[tool]]
+name = "read"
+delta = { audience = { exactly = ["internal"] } }
+
+[[sanitizer]]
+name = "pii"
+on = ["tool_output"]
+[sanitizer.can_reduce]
+audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+[sanitizer.implementation]
+builtin = "redact-email"
+"#,
+        &[("read", BuiltinTool::Echo("ask eve@corp.com".to_string()))],
+    );
+    let tenant = TenantId::new("tenant");
+    let parent = mediator.create_session(tenant.clone());
+    let mut budget = RunBudget::default();
+    let mut parent_turn = begin(&mediator, &tenant, &parent, "parent").await;
+    parent_turn.mediate(final_answer("ready"), &mut budget).await.unwrap();
+    drop(parent_turn);
+
+    let sanitized_child = mediator.fork_session(&tenant, &parent).unwrap();
+    let mut sanitized_turn = begin(&mediator, &tenant, &sanitized_child, "read").await;
+    sanitized_turn
+        .mediate(calls(vec![call("read", "read", "{}")]), &mut budget)
+        .await
+        .unwrap();
+    sanitized_turn
+        .mediate(
+            calls(vec![call(
+                "accept-read",
+                EXECUTE_REMEDY_PLAN,
+                r#"{"plan_id":"remedy-0"}"#,
+            )]),
+            &mut budget,
+        )
+        .await
+        .unwrap();
+    sanitized_turn
+        .mediate(
+            calls(vec![call("submit", SUBMIT_RESULT, r#"{"value":"ask eve@corp.com"}"#)]),
+            &mut budget,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        sanitized_turn
+            .mediate(
+                calls(vec![call(
+                    "sanitize-return",
+                    EXECUTE_REMEDY_PLAN,
+                    r#"{"plan_id":"remedy-2"}"#,
+                )]),
+                &mut budget,
+            )
+            .await
+            .unwrap(),
+        Step::ChildFinished
+    ));
+    drop(sanitized_turn);
+
+    let raw_child = mediator.fork_session(&tenant, &parent).unwrap();
+    let mut raw_turn = begin(&mediator, &tenant, &raw_child, "read").await;
+    raw_turn
+        .mediate(calls(vec![call("read", "read", "{}")]), &mut budget)
+        .await
+        .unwrap();
+    raw_turn
+        .mediate(
+            calls(vec![call(
+                "accept-read",
+                EXECUTE_REMEDY_PLAN,
+                r#"{"plan_id":"remedy-0"}"#,
+            )]),
+            &mut budget,
+        )
+        .await
+        .unwrap();
+    raw_turn
+        .mediate(
+            calls(vec![call("submit", SUBMIT_RESULT, r#"{"value":"ask eve@corp.com"}"#)]),
+            &mut budget,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        raw_turn
+            .mediate(
+                calls(vec![call(
+                    "accept-return",
+                    EXECUTE_REMEDY_PLAN,
+                    r#"{"plan_id":"remedy-1"}"#,
+                )]),
+                &mut budget,
+            )
+            .await
+            .unwrap(),
+        Step::ChildFinished
+    ));
+
+    let log = facts(&mediator, &tenant, &parent);
+    let returned: Vec<_> = log
+        .iter()
+        .filter_map(|fact| match fact {
+            Fact::ValueAdmitted {
+                value,
+                provenance: Provenance::ChildReturn { .. },
+                ..
+            } => Some(value.body.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(returned, ["ask [redacted-email]", "ask eve@corp.com"]);
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(fact, Fact::ChildReturnAcceptance { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(
+                fact,
+                Fact::ChildReturn {
+                    derivation: appa_engine::fact::ReturnDerivation::Sanitized { .. },
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn stale_sibling_child_return_offer_cannot_cross_or_replay() {
+    let mediator = mediator(
+        r#"
+version = 1
+[[tool]]
+name = "read"
+delta = { audience = { exactly = ["internal"] } }
+
+[[sanitizer]]
+name = "pii"
+on = ["tool_output"]
+[sanitizer.can_reduce]
+audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+[sanitizer.implementation]
+builtin = "redact-email"
+"#,
+        &[("read", BuiltinTool::Echo("internal".to_string()))],
+    );
+    let tenant = TenantId::new("tenant");
+    let mut budget = RunBudget::default();
+    let parent = parent_with_completed_turn(&mediator, &tenant, &mut budget).await;
+
+    let mut first = child_with_internal_read(&mediator, &tenant, &parent, &mut budget).await;
+    assert!(matches!(
+        first
+            .mediate(
+                calls(vec![call("first-offer", SUBMIT_RESULT, r#"{"value":"first"}"#)]),
+                &mut budget,
+            )
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+
+    let mut sibling = child_with_internal_read(&mediator, &tenant, &parent, &mut budget).await;
+    assert!(matches!(
+        sibling
+            .mediate(
+                calls(vec![call("sibling-offer", SUBMIT_RESULT, r#"{"value":"second"}"#,)]),
+                &mut budget,
+            )
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    assert!(matches!(
+        sibling
+            .mediate(
+                calls(vec![call(
+                    "sibling-cross",
+                    EXECUTE_REMEDY_PLAN,
+                    r#"{"plan_id":"remedy-1"}"#,
+                )]),
+                &mut budget,
+            )
+            .await
+            .unwrap(),
+        Step::ChildFinished
+    ));
+
+    assert!(matches!(
+        first
+            .mediate(
+                calls(vec![call(
+                    "stale-offer",
+                    EXECUTE_REMEDY_PLAN,
+                    r#"{"plan_id":"remedy-1"}"#,
+                )]),
+                &mut budget,
+            )
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    assert!(matches!(
+        first
+            .mediate(
+                calls(vec![call(
+                    "replayed-offer",
+                    EXECUTE_REMEDY_PLAN,
+                    r#"{"plan_id":"remedy-1"}"#,
+                )]),
+                &mut budget,
+            )
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    first.stop(StopReason::Cancelled).unwrap();
+
+    let log = facts(&mediator, &tenant, &parent);
+    let crossings: Vec<_> = log
+        .iter()
+        .filter_map(|fact| match fact {
+            Fact::ChildReturn { value, .. } => Some(value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(crossings.len(), 1);
+    assert_eq!(crossings[0].body.as_str(), "second");
+    assert_eq!(
+        crossings[0].label.audience,
+        Dim::Known(Audience::restricted([ReaderId::new("internal")]))
+    );
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(
+                fact,
+                Fact::Boundary {
+                    kind: BoundaryKind::Merge { .. },
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+    for call_id in ["stale-offer", "replayed-offer"] {
+        assert_eq!(
+            log.iter()
+                .filter(|fact| matches!(
+                    fact,
+                    Fact::BlockFeedback { call_id: answered, .. } if answered.as_str() == call_id
+                ))
+                .count(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn failed_return_sanitizers_are_charged_per_raw_digest_and_sanitizer() {
+    let (alpha_url, alpha_requests, alpha_server) = spawn_repeating_response("not json").await;
+    let (beta_url, beta_requests, beta_server) = spawn_repeating_response("not json").await;
+    let policy = format!(
+        r#"
+version = 1
+[[tool]]
+name = "read"
+delta = {{ audience = {{ exactly = ["internal"] }} }}
+
+[[sanitizer]]
+name = "alpha"
+on = ["tool_output"]
+[sanitizer.can_reduce]
+audience = {{ from = {{ includes = ["internal"] }}, to = {{ exactly = ["public"] }} }}
+[sanitizer.implementation]
+resolver = {{ url = "{alpha_url}", timeout_ms = 1000 }}
+
+[[sanitizer]]
+name = "beta"
+on = ["tool_output"]
+[sanitizer.can_reduce]
+audience = {{ from = {{ includes = ["internal"] }}, to = {{ exactly = ["public"] }} }}
+[sanitizer.implementation]
+resolver = {{ url = "{beta_url}", timeout_ms = 1000 }}
+"#
+    );
+    let mediator = mediator(&policy, &[("read", BuiltinTool::Echo("internal".to_string()))]);
+    let tenant = TenantId::new("tenant");
+    let mut budget = RunBudget::new(Limits {
+        max_remedy_attempts_per_gap: 2,
+        ..Limits::default()
+    });
+    let parent = parent_with_completed_turn(&mediator, &tenant, &mut budget).await;
+    let mut child = child_with_internal_read(&mediator, &tenant, &parent, &mut budget).await;
+
+    assert!(matches!(
+        child
+            .mediate(
+                calls(vec![call("first-offer", SUBMIT_RESULT, r#"{"value":"first"}"#)]),
+                &mut budget,
+            )
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    for call_id in ["alpha-1", "alpha-2", "alpha-over-limit"] {
+        assert!(matches!(
+            child
+                .mediate(
+                    calls(vec![call(call_id, EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-2"}"#,)]),
+                    &mut budget,
+                )
+                .await
+                .unwrap(),
+            Step::Continue
+        ));
+    }
+    assert_eq!(alpha_requests.load(Ordering::SeqCst), 2);
+
+    assert!(matches!(
+        child
+            .mediate(
+                calls(vec![call("beta-1", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-3"}"#,)]),
+                &mut budget,
+            )
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    assert_eq!(beta_requests.load(Ordering::SeqCst), 1);
+
+    assert!(matches!(
+        child
+            .mediate(
+                calls(vec![call("second-offer", SUBMIT_RESULT, r#"{"value":"second"}"#)]),
+                &mut budget,
+            )
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    assert!(matches!(
+        child
+            .mediate(
+                calls(vec![call(
+                    "second-alpha-1",
+                    EXECUTE_REMEDY_PLAN,
+                    r#"{"plan_id":"remedy-5"}"#,
+                )]),
+                &mut budget,
+            )
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    assert_eq!(alpha_requests.load(Ordering::SeqCst), 3);
+
+    assert!(matches!(
+        child
+            .mediate(
+                calls(vec![call(
+                    "accept-raw",
+                    EXECUTE_REMEDY_PLAN,
+                    r#"{"plan_id":"remedy-1"}"#,
+                )]),
+                &mut budget,
+            )
+            .await
+            .unwrap(),
+        Step::ChildFinished
+    ));
+    alpha_server.abort();
+    beta_server.abort();
+
+    let log = facts(&mediator, &tenant, &parent);
+    for call_id in [
+        "alpha-1",
+        "alpha-2",
+        "alpha-over-limit",
+        "beta-1",
+        "second-alpha-1",
+        "accept-raw",
+    ] {
+        assert_eq!(
+            log.iter()
+                .filter(|fact| matches!(
+                    fact,
+                    Fact::BlockFeedback { call_id: answered, .. } if answered.as_str() == call_id
+                ))
+                .count(),
+            1
+        );
+    }
+    let returned: Vec<_> = log
+        .iter()
+        .filter_map(|fact| match fact {
+            Fact::ValueAdmitted {
+                value,
+                provenance: Provenance::ChildReturn { .. },
+                ..
+            } => Some(value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(returned.len(), 1);
+    assert_eq!(returned[0].body.as_str(), "first");
+    assert_eq!(
+        returned[0].label.audience,
+        Dim::Known(Audience::restricted([ReaderId::new("internal")]))
+    );
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(fact, Fact::ChildReturnAcceptance { .. }))
+            .count(),
+        1
+    );
+    assert!(!log.iter().any(|fact| matches!(
+        fact,
+        Fact::ChildReturn {
+            derivation: appa_engine::fact::ReturnDerivation::Sanitized { .. },
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn hostile_cast_resolver_answer_above_may_cast_is_discarded() {
+    let (resolver_url, requests, server) = spawn_repeating_response(r#"{"trust":"trusted"}"#).await;
+    let policy = format!(
+        r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+
+[[tool]]
+name = "scan"
+effects = ["read"]
+delta = {{ trust = "unknown" }}
+
+[[cast]]
+name = "classifier"
+resolver = {{ url = "{resolver_url}", may_cast = {{ trust = ["suspicious"] }} }}
+"#
+    );
+    let mediator = mediator(&policy, &[("scan", BuiltinTool::Echo("mailbox".to_string()))]);
+    let tenant = TenantId::new("tenant");
+    let session = mediator.create_session(tenant.clone());
+    let mut turn = begin(&mediator, &tenant, &session, "scan").await;
+    let mut budget = RunBudget::default();
+
+    assert!(matches!(
+        turn.mediate(calls(vec![call("scan-call", "scan", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    server.abort();
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+
+    let log = facts(&mediator, &tenant, &session);
+    assert!(log.iter().any(|fact| matches!(
+        fact,
+        Fact::DispatchClosed {
+            outcome: CloseOutcome::Success { effects },
+            ..
+        } if effects.len() == 1 && effects[0].as_str() == "read"
+    )));
+    assert!(
+        !log.iter()
+            .any(|fact| matches!(fact, Fact::CastApplied { .. } | Fact::OutputCastApplied { .. }))
+    );
+    assert!(tool_values(&log).is_empty());
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(
+                fact,
+                Fact::BlockFeedback { call_id, .. } if call_id.as_str() == "scan-call"
+            ))
+            .count(),
+        1
+    );
+    turn.stop(StopReason::Cancelled).unwrap();
+}
+
+#[tokio::test]
+async fn cancellation_mid_round_closes_open_call_and_answers_all_remaining_calls() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        accepted_tx.send(()).ok();
+        let _socket = socket;
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+    let policy = format!(
+        r#"
+version = 1
+[[tool]]
+name = "slow"
+[tool.implementation.http]
+url = "http://{address}/run"
+
+[[tool]]
+name = "fast-a"
+effects = ["later.a"]
+delta = {{}}
+
+[[tool]]
+name = "fast-b"
+effects = ["later.b"]
+delta = {{}}
+"#
+    );
+    let mediator = mediator(
+        &policy,
+        &[
+            ("fast-a", BuiltinTool::Echo("a".to_string())),
+            ("fast-b", BuiltinTool::Echo("b".to_string())),
+        ],
+    );
+    let tenant = TenantId::new("tenant");
+    let session = mediator.create_session(tenant.clone());
+    let token = CancellationToken::new();
+    let cancel = token.clone();
+    tokio::spawn(async move {
+        accepted_rx.await.ok();
+        cancel.cancel();
+    });
+    let mut turn = mediator
+        .begin_turn(tenant.clone(), session.clone(), "run", token)
+        .await
+        .unwrap();
+    let mut budget = RunBudget::default();
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![
+                call("slow-call", "slow", "{}"),
+                call("fast-a-call", "fast-a", "{}"),
+                call("fast-b-call", "fast-b", "{}"),
+            ]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::PolicyStop(_)
+    ));
+    server.abort();
+
+    let log = facts(&mediator, &tenant, &session);
+    let opened: Vec<_> = log
+        .iter()
+        .filter_map(|fact| match fact {
+            Fact::DispatchOpened { dispatch, .. } => Some(dispatch),
+            _ => None,
+        })
+        .collect();
+    let closed: Vec<_> = log
+        .iter()
+        .filter_map(|fact| match fact {
+            Fact::DispatchClosed {
+                dispatch,
+                outcome: CloseOutcome::Indeterminate,
+                ..
+            } => Some(dispatch),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(opened, closed);
+    assert_eq!(opened.len(), 1);
+    let slow = ResolvedCall::new(ToolName::new("slow"), serde_json::json!({}), Vec::new());
+    assert_eq!(opened[0].digest(), &slow.digest());
+    assert!(!log.iter().any(|fact| matches!(
+        fact,
+        Fact::DispatchClosed {
+            outcome: CloseOutcome::Success { .. },
+            ..
+        }
+    )));
+    let answered: Vec<_> = log
+        .iter()
+        .filter_map(|fact| match fact {
+            Fact::BlockFeedback { call_id, .. } => Some(call_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(answered, ["slow-call", "fast-a-call", "fast-b-call"]);
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(
+                fact,
+                Fact::AssistantMessage { calls, .. } if calls.is_empty()
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(
+                fact,
+                Fact::Boundary {
+                    kind: BoundaryKind::TurnEnd,
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn one_budget_is_shared_across_root_and_descendant_turns() {
+    let mediator = mediator(
+        r#"
+version = 1
+[[tool]]
+name = "read"
+delta = {}
+"#,
+        &[("read", BuiltinTool::Echo("value".to_string()))],
+    );
+    let tenant = TenantId::new("tenant");
+    let parent = mediator.create_session(tenant.clone());
+    let mut parent_turn = begin(&mediator, &tenant, &parent, "root").await;
+    let mut budget = RunBudget::new(Limits {
+        max_tool_invocations: 1,
+        ..Limits::default()
+    });
+    parent_turn
+        .mediate(calls(vec![call("root-read", "read", "{}")]), &mut budget)
+        .await
+        .unwrap();
+    assert!(budget.is_exhausted());
+
+    let Step::Fork(request) = parent_turn
+        .mediate(calls(vec![call("fork", FORK, r#"{"task":"child"}"#)]), &mut budget)
+        .await
+        .unwrap()
+    else {
+        panic!("fork expected")
+    };
+    budget.charge_fork().unwrap();
+    let child = mediator.fork_session(&tenant, &parent).unwrap();
+    let mut child_turn = begin(&mediator, &tenant, &child, request.task()).await;
+    assert!(matches!(
+        child_turn
+            .mediate(calls(vec![call("child-read", "read", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::PolicyStop(_)
+    ));
+    parent_turn.complete_fork(request).unwrap();
+    let log = facts(&mediator, &tenant, &parent);
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(fact, Fact::DispatchOpened { .. }))
+            .count(),
+        1
+    );
+    parent_turn.stop(StopReason::BudgetExhausted).unwrap();
+
+    let mut fork_budget = RunBudget::new(Limits {
+        max_forks: 1,
+        max_fork_depth: 2,
+        ..Limits::default()
+    });
+    assert!(fork_budget.allows_fork_from_depth(0));
+    assert!(fork_budget.allows_fork_from_depth(1));
+    assert!(!fork_budget.allows_fork_from_depth(2));
+    fork_budget.charge_fork().unwrap();
+    assert_eq!(fork_budget.charge_fork(), Err(appa_runtime::BudgetExhausted));
+}
+
+async fn spawn_repeating_response(body: &'static str) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let server_requests = requests.clone();
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            read_request_headers(&mut socket).await;
+            server_requests.fetch_add(1, Ordering::SeqCst);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    (format!("http://{address}/resolve"), requests, handle)
+}
+
+async fn read_request_headers(socket: &mut tokio::net::TcpStream) {
+    let mut received = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        let count = socket.read(&mut buffer).await.unwrap();
+        if count == 0 {
+            return;
+        }
+        received.extend_from_slice(&buffer[..count]);
+        if received.windows(4).any(|window| window == b"\r\n\r\n") {
+            return;
+        }
+    }
+}
+
+async fn spawn_authority(ruling: &'static str) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        read_request_headers(&mut socket).await;
+        let body = format!(r#"{{"ruling":"{ruling}"}}"#);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+    (format!("http://{address}/rule"), handle)
+}

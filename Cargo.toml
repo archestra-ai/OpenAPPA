@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["appa-dojo-sidecar", "appa-engine", "appa-runtime", "appa-sdk"]
+members = ["appa-agent", "appa-agent-python", "appa-dojo-sidecar", "appa-engine", "appa-gateway", "appa-runtime", "appa-sdk"]
 
 [workspace.package]
 edition = "2024"
@@ -21,3 +21,5 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1"] }
 tokio-util = { version = "0.7", default-features = false }
 appa-engine = { path = "appa-engine" }
+appa-runtime = { path = "appa-runtime" }
+appa-sdk = { path = "appa-sdk" }

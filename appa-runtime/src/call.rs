@@ -1,15 +1,14 @@
-//! The per-call session facade: **a framework owns the loop**.
+//! Compatibility per-call facade for a trusted framework that owns the loop.
 
 use thiserror::Error;
 
 use appa_engine::value::ResolvedCall;
 
-use appa_runtime::store::StoreError;
-use appa_runtime::tool::{RenderedCall, ToolOutcome};
-use appa_runtime::wire::WireTool;
-
 use crate::common::{self, Admission, Checked, Core, Remedied};
+use crate::store::StoreError;
+use crate::tool::{RenderedCall, ToolOutcome};
 use crate::types::{AdmittedResult, DispatchHandle, HandleInner, OpenError, ReportError, SdkOptions, ToolSurfaceError};
+use crate::wire::WireTool;
 
 #[derive(Debug, Error)]
 pub enum CallError {

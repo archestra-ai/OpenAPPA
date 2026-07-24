@@ -3,20 +3,27 @@
 
 use std::collections::VecDeque;
 
-use appa_engine::fact::{Fact, ProposedCall};
+use appa_engine::fact::{BoundaryKind, Fact, ProposedCall};
 use appa_engine::value::{Provenance, ToolCallId, TrajectoryId};
 
 use crate::wire::{WireFunctionCall, WireMessage, WireToolCall};
 
-/// Build the ordered model-visible messages for one branch: the server preamble followed by the
-/// branch's turns replayed from the log. `preamble` is the server-pinned `system`/`developer` messages
-/// (never client-supplied); `log` is the shared family log; `trajectory` scopes to one branch.
+/// Build the ordered model-visible messages for one branch: the server preamble followed by its
+/// inherited ancestor snapshots and branch-local turns. Each ancestor snapshot ends at the last
+/// complete message before the descendant's fork, so a pending tool-call round never enters a child
+/// context and later ancestor activity cannot become a cross-branch channel.
 pub fn model_transcript(preamble: &[WireMessage], log: &[Fact], trajectory: &TrajectoryId) -> Vec<WireMessage> {
     let mut messages: Vec<WireMessage> = preamble.to_vec();
     let mut pending: VecDeque<ToolCallId> = VecDeque::new();
     let mut deferred: Vec<WireMessage> = Vec::new();
 
-    for fact in log.iter().filter(|f| f.trajectory() == trajectory) {
+    let segments = ancestry_segments(log, trajectory);
+    for fact in log.iter().enumerate().filter_map(|(index, fact)| {
+        segments
+            .iter()
+            .any(|(member, end)| fact.trajectory() == member && index < *end)
+            .then_some(fact)
+    }) {
         match fact {
             Fact::ValueAdmitted {
                 value,
@@ -66,6 +73,77 @@ pub fn model_transcript(preamble: &[WireMessage], log: &[Fact], trajectory: &Tra
     messages
 }
 
+fn ancestry_segments(log: &[Fact], target: &TrajectoryId) -> Vec<(TrajectoryId, usize)> {
+    let mut lineage = vec![target.clone()];
+    let mut child = target;
+    while let Some(parent) = fork_parent(log, child) {
+        if lineage.contains(&parent) {
+            break;
+        }
+        lineage.push(parent);
+        child = lineage.last().expect("a parent was just appended");
+    }
+    lineage.reverse();
+
+    lineage
+        .iter()
+        .enumerate()
+        .map(|(index, member)| {
+            let end = lineage
+                .get(index + 1)
+                .and_then(|descendant| fork_index(log, member, descendant))
+                .map(|fork| completed_prefix_end(log, member, fork))
+                .unwrap_or(log.len());
+            (member.clone(), end)
+        })
+        .collect()
+}
+
+fn fork_parent(log: &[Fact], child: &TrajectoryId) -> Option<TrajectoryId> {
+    log.iter().find_map(|fact| match fact {
+        Fact::Boundary {
+            trajectory,
+            kind: BoundaryKind::Fork { parent, .. },
+        } if trajectory == child => Some(parent.clone()),
+        _ => None,
+    })
+}
+
+fn fork_index(log: &[Fact], parent: &TrajectoryId, child: &TrajectoryId) -> Option<usize> {
+    log.iter().position(|fact| {
+        matches!(
+            fact,
+            Fact::Boundary {
+                trajectory,
+                kind: BoundaryKind::Fork { parent: fork_parent, .. },
+            } if trajectory == child && fork_parent == parent
+        )
+    })
+}
+
+fn completed_prefix_end(log: &[Fact], trajectory: &TrajectoryId, limit: usize) -> usize {
+    let mut pending = 0usize;
+    let mut safe_end = 0usize;
+    for (index, fact) in log.iter().enumerate().take(limit) {
+        if fact.trajectory() != trajectory {
+            continue;
+        }
+        match fact {
+            Fact::AssistantMessage { calls, .. } => pending += calls.len(),
+            Fact::ValueAdmitted {
+                provenance: Provenance::ToolResult { .. },
+                ..
+            }
+            | Fact::BlockFeedback { .. } => pending = pending.saturating_sub(1),
+            _ => {}
+        }
+        if pending == 0 {
+            safe_end = index + 1;
+        }
+    }
+    safe_end
+}
+
 fn flush_if_drained(pending: &VecDeque<ToolCallId>, deferred: &mut Vec<WireMessage>, messages: &mut Vec<WireMessage>) {
     if pending.is_empty() && !deferred.is_empty() {
         messages.append(deferred);
@@ -99,6 +177,7 @@ fn render_call(call: &ProposedCall) -> WireToolCall {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use appa_engine::fact::ReturnPolicy;
     use appa_engine::label::{Audience, Dim, Label, Trust};
     use appa_engine::value::{ChildReturnId, DispatchId, LabeledValue, ResolvedCall, ToolName, ValueBody};
     use serde_json::json;
@@ -112,10 +191,25 @@ mod tests {
     }
 
     fn user(text: &str) -> Fact {
+        user_for(traj(), text)
+    }
+
+    fn user_for(trajectory: TrajectoryId, text: &str) -> Fact {
         Fact::ValueAdmitted {
-            trajectory: traj(),
+            trajectory,
             value: LabeledValue::new(ValueBody::new(text), public(3)),
             provenance: Provenance::UserInput,
+        }
+    }
+
+    fn fork(parent: &TrajectoryId, child: &TrajectoryId) -> Fact {
+        Fact::Boundary {
+            trajectory: child.clone(),
+            kind: BoundaryKind::Fork {
+                parent: parent.clone(),
+                seed: public(3),
+                return_policy: ReturnPolicy::Raw,
+            },
         }
     }
 
@@ -239,5 +333,65 @@ mod tests {
         let out = model_transcript(&[], &log, &traj());
         assert_eq!(out.len(), 1);
         assert_eq!(out[0], WireMessage::user("parent turn"));
+    }
+
+    #[test]
+    fn a_child_inherits_only_the_parents_completed_prefix() {
+        let parent = traj();
+        let child = TrajectoryId::new("child");
+        let log = vec![
+            user_for(parent.clone(), "root task"),
+            Fact::AssistantMessage {
+                trajectory: parent.clone(),
+                content: Some("working".to_string()),
+                calls: vec![],
+            },
+            Fact::AssistantMessage {
+                trajectory: parent.clone(),
+                content: None,
+                calls: vec![proposed("fork_1", "fork", json!({ "task": "inspect" }))],
+            },
+            fork(&parent, &child),
+            user_for(child.clone(), "inspect"),
+            user_for(parent.clone(), "post-fork parent turn"),
+        ];
+
+        let out = model_transcript(&[], &log, &child);
+        assert_eq!(
+            out,
+            vec![
+                WireMessage::user("root task"),
+                WireMessage::assistant("working"),
+                WireMessage::user("inspect"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_grandchild_inherits_each_ancestor_snapshot_without_siblings() {
+        let root = traj();
+        let child = TrajectoryId::new("child");
+        let sibling = TrajectoryId::new("sibling");
+        let grandchild = TrajectoryId::new("grandchild");
+        let log = vec![
+            user_for(root.clone(), "root task"),
+            fork(&root, &child),
+            user_for(child.clone(), "child task"),
+            fork(&root, &sibling),
+            user_for(sibling, "sibling task"),
+            fork(&child, &grandchild),
+            user_for(grandchild.clone(), "grandchild task"),
+            user_for(child, "late child turn"),
+        ];
+
+        let out = model_transcript(&[], &log, &grandchild);
+        assert_eq!(
+            out,
+            vec![
+                WireMessage::user("root task"),
+                WireMessage::user("child task"),
+                WireMessage::user("grandchild task"),
+            ]
+        );
     }
 }

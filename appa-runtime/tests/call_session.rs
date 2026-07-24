@@ -1,7 +1,7 @@
 
 use appa_engine::label::{Audience, Dim, ReaderId, Trust};
 use appa_engine::value::ToolName;
-use appa_sdk::{
+use appa_runtime::{
     AdmittedResult, BodyDisposition, CallDecision, CallError, CallSession, Config, RemedyDecision, RenderedCall,
     SdkOptions, ToolOutcome,
 };
@@ -100,9 +100,9 @@ async fn spawn_authority(rulings: Vec<&'static str>) -> String {
 async fn an_allowed_call_is_checked_executed_and_reported() {
     let mut session = open(LOOKUP_POLICY);
     session
-        .bind_tools(vec![appa_sdk::WireTool {
+        .bind_tools(vec![appa_runtime::WireTool {
             kind: "function".into(),
-            function: appa_sdk::WireToolSchema {
+            function: appa_runtime::WireToolSchema {
                 name: "lookup".into(),
                 description: None,
                 parameters: None,
@@ -213,4 +213,38 @@ async fn repeated_identical_calls_are_distinct_occurrences() {
     assert_eq!(handle.occurrence(), 1);
     session.report_outcome(handle, ok_body("two")).unwrap();
     session.end_turn().unwrap();
+}
+
+#[tokio::test]
+async fn unavailable_success_commits_effects_without_admitting_a_value() {
+    let mut session = open(
+        r#"
+version = 1
+[[tool]]
+name = "send"
+effects = ["email.sent"]
+delta = {}
+[[tool]]
+name = "before_send_only"
+requires = { effects = { has_no = ["email.sent"] } }
+delta = {}
+"#,
+    );
+    session.begin_turn("send once").unwrap();
+    let CallDecision::Allow { handle } = session.check_call(call("send", serde_json::json!({}))).unwrap() else {
+        panic!("send should be allowed")
+    };
+    let result = session
+        .report_outcome(
+            handle,
+            ToolOutcome::Success {
+                body: BodyDisposition::Unavailable,
+            },
+        )
+        .unwrap();
+    assert!(matches!(result, AdmittedResult::Sealed { .. }));
+    assert!(matches!(
+        session.check_call(call("before_send_only", serde_json::json!({}))),
+        Ok(CallDecision::Block { .. })
+    ));
 }
