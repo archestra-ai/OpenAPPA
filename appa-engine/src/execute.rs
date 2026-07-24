@@ -7,11 +7,12 @@ use thiserror::Error;
 use crate::check::{self, CheckOutcome, Gap};
 use crate::engine::opened_dispatch;
 use crate::fact::{Fact, FactBatch};
+use crate::label::Label;
 use crate::names::AuthorityName;
-use crate::plan::{self, PlanId, covers_gap};
+use crate::plan::{self, covers_gap};
 use crate::projection::Views;
 use crate::registry::Registry;
-use crate::value::{DispatchId, ResolvedCall};
+use crate::value::{DispatchId, Provenance, ResolvedCall, ValueId};
 
 /// Who exercised a ruling. The mandate is the named authority's; the issuer records who pressed the
 /// button, because one release — the response sink — bars the end user structurally.
@@ -31,15 +32,28 @@ pub enum Sink {
 
 /// A ruling the runtime gathered from an authority for one **specific pending dispatch**: the exact
 /// [`DispatchId`] (trajectory + canonical digest + occurrence) it was approved for, the mandate it
-/// acts under, who exercised it, and the gaps it claims to cover. Binding the whole dispatch — not
-/// just the digest — makes a ruling both call-scoped (`transfer(A,$1)` cannot admit `transfer(B,$100)`)
-/// and single-use (a repeat identical call is a new occurrence and takes a fresh ruling).
+/// acts under, who exercised it, the gaps it claims to cover, and the review it was issued over.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ruling {
     pub dispatch: DispatchId,
     pub authority: AuthorityName,
     pub issuer: Issuer,
     pub covers: Vec<Gap>,
+    pub reviewed: AuthorityReview,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorityReview {
+    pub tool: crate::value::ToolName,
+    pub trajectory_label: Label,
+    pub arg_refs: Vec<ReviewedRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewedRef {
+    pub value: ValueId,
+    pub label: Label,
+    pub provenance: Provenance,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -64,6 +78,10 @@ pub enum PlanError {
     RulingExceedsMandate { authority: String },
     #[error("an end-user ruling cannot cover a response-sink gap")]
     EndUserResponseSink,
+    #[error("the supplied rulings do not realize the chosen plan's grouped assignment exactly")]
+    RulingAssignmentMismatch,
+    #[error("a ruling's recorded review does not match the live state it would admit")]
+    ReviewMismatch,
 }
 
 /// Execute a remedy plan: verify coverage and the issuer bar, then emit the atomic
@@ -71,7 +89,7 @@ pub enum PlanError {
 pub(crate) fn execute_plan(
     registry: &Registry,
     views: &Views,
-    plan: PlanId,
+    chosen: &plan::RemedyPlan,
     call: &ResolvedCall,
     rulings: &[Ruling],
     sink: Sink,
@@ -87,8 +105,41 @@ pub(crate) fn execute_plan(
     };
 
     let planned = plan::plan(registry, views, call, &block);
-    if !planned.plans.iter().any(|offered| offered.id == plan) {
-        return Err(PlanError::UnknownPlan(plan.value()));
+    if !planned.plans.iter().any(|offered| offered == chosen) {
+        return Err(PlanError::UnknownPlan(chosen.id.value()));
+    }
+    let plan = chosen.id;
+
+    if rulings.len() != chosen.required.len() {
+        return Err(PlanError::RulingAssignmentMismatch);
+    }
+    for required in &chosen.required {
+        let matched = rulings
+            .iter()
+            .filter(|ruling| ruling.authority == required.authority && ruling.covers == required.covers)
+            .count();
+        if matched != 1 {
+            return Err(PlanError::RulingAssignmentMismatch);
+        }
+    }
+
+    let live_label = views.current_label();
+    for ruling in rulings {
+        if ruling.reviewed.tool != contract.name || ruling.reviewed.trajectory_label != live_label {
+            return Err(PlanError::ReviewMismatch);
+        }
+        let reviewed_ids: Vec<ValueId> = ruling.reviewed.arg_refs.iter().map(|r| r.value).collect();
+        if reviewed_ids != call.arg_refs() {
+            return Err(PlanError::ReviewMismatch);
+        }
+        for reviewed in &ruling.reviewed.arg_refs {
+            let resolves = views.owns_value(reviewed.value)
+                && views.value_label(reviewed.value) == Some(&reviewed.label)
+                && views.value_provenance(reviewed.value) == Some(&reviewed.provenance);
+            if !resolves {
+                return Err(PlanError::ReviewMismatch);
+            }
+        }
     }
 
     let (dispatch, dispatch_opened) = opened_dispatch(registry, contract, views, call);
@@ -139,6 +190,7 @@ pub(crate) fn execute_plan(
             authority: ruling.authority.clone(),
             issuer: ruling.issuer,
             covers: ruling.covers.clone(),
+            reviewed: ruling.reviewed.clone(),
         });
     }
     if let Some(narrowing) = block.narrowing {
@@ -233,6 +285,14 @@ mod tests {
         }
     }
 
+    fn top_review() -> AuthorityReview {
+        AuthorityReview {
+            tool: ToolName::new("wire"),
+            trajectory_label: known(SUSPICIOUS, Audience::Public),
+            arg_refs: vec![],
+        }
+    }
+
     fn wire_dispatch() -> DispatchId {
         DispatchId::new(traj(), call("wire", json!({})).digest(), 0)
     }
@@ -246,14 +306,27 @@ mod tests {
     ) -> Result<FactBatch, PlanError> {
         let projection = Projection::build(log, Revision::new(log.len() as u64));
         let trajectory = traj();
-        execute_plan(
-            registry,
-            &projection.view(&trajectory),
-            PlanId::new(0),
-            call,
-            rulings,
-            sink,
-        )
+        let views = projection.view(&trajectory);
+        let chosen = offered_plan(registry, &views, call);
+        execute_plan(registry, &views, &chosen, call, rulings, sink)
+    }
+
+    fn offered_plan(registry: &Registry, views: &Views, call: &ResolvedCall) -> plan::RemedyPlan {
+        let planned = match check::evaluate(registry, registry.tool(call.tool()).unwrap(), views, call) {
+            CheckOutcome::Block(block) => plan::plan(registry, views, call, &block),
+            _ => {
+                return plan::RemedyPlan {
+                    id: plan::PlanId::new(0),
+                    steps: vec![],
+                    required: vec![],
+                };
+            }
+        };
+        planned.plans.first().cloned().unwrap_or(plan::RemedyPlan {
+            id: plan::PlanId::new(0),
+            steps: vec![],
+            required: vec![],
+        })
     }
 
     #[test]
@@ -264,6 +337,7 @@ mod tests {
             dispatch: wire_dispatch(),
             authority: AuthorityName::new("officer"),
             issuer: Issuer::Authority,
+            reviewed: top_review(),
             covers: vec![floor_gap()],
         };
         let batch = run(&registry, &log, &call("wire", json!({})), &[ruling], Sink::Tool).unwrap();
@@ -279,6 +353,7 @@ mod tests {
             dispatch: DispatchId::new(traj(), call("wire", json!({ "to": "elsewhere" })).digest(), 0),
             authority: AuthorityName::new("officer"),
             issuer: Issuer::Authority,
+            reviewed: top_review(),
             covers: vec![floor_gap()],
         };
         assert_eq!(
@@ -311,6 +386,7 @@ mod tests {
             dispatch: wire_dispatch(),
             authority: AuthorityName::new("officer"),
             issuer: Issuer::Authority,
+            reviewed: top_review(),
             covers: vec![floor_gap()],
         };
         assert_eq!(
@@ -327,15 +403,24 @@ mod tests {
             dispatch: wire_dispatch(),
             authority: AuthorityName::new("officer"),
             issuer: Issuer::Authority,
+            reviewed: top_review(),
             covers: vec![floor_gap()],
         };
         let projection = Projection::build(&log, Revision::new(log.len() as u64));
         let trajectory = traj();
+        let fabricated = plan::RemedyPlan {
+            id: plan::PlanId::new(999),
+            steps: vec![plan::RemedyStep::Authorize(AuthorityName::new("officer"))],
+            required: vec![plan::RequiredRuling {
+                authority: AuthorityName::new("officer"),
+                covers: vec![],
+            }],
+        };
         assert_eq!(
             execute_plan(
                 &registry,
                 &projection.view(&trajectory),
-                PlanId::new(999),
+                &fabricated,
                 &call("wire", json!({})),
                 std::slice::from_ref(&ruling),
                 Sink::Tool,
@@ -350,7 +435,7 @@ mod tests {
         let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
         assert!(matches!(
             run(&registry, &log, &call("wire", json!({})), &[], Sink::Tool),
-            Err(PlanError::GapUncovered(_))
+            Err(PlanError::RulingAssignmentMismatch)
         ));
     }
 
@@ -362,6 +447,7 @@ mod tests {
             dispatch: wire_dispatch(),
             authority: AuthorityName::new("officer"),
             issuer: Issuer::Authority,
+            reviewed: top_review(),
             covers: vec![floor_gap()],
         };
         assert_eq!(
@@ -415,11 +501,12 @@ mod tests {
             dispatch: wire_dispatch(),
             authority: AuthorityName::new("attester"),
             issuer: Issuer::Authority,
+            reviewed: top_review(),
             covers: vec![floor_gap()],
         };
         assert!(matches!(
             run(&registry, &log, &call("wire", json!({})), &[ruling], Sink::Tool),
-            Err(PlanError::RulingExceedsMandate { .. })
+            Err(PlanError::RulingAssignmentMismatch)
         ));
     }
 
@@ -431,6 +518,7 @@ mod tests {
             dispatch: wire_dispatch(),
             authority: AuthorityName::new("officer"),
             issuer: Issuer::EndUser,
+            reviewed: top_review(),
             covers: vec![floor_gap()],
         };
         assert!(
@@ -487,23 +575,94 @@ mod tests {
         })
         .unwrap();
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let review = AuthorityReview {
+            tool: ToolName::new("wire"),
+            trajectory_label: known(TRUSTED, Audience::Public),
+            arg_refs: vec![],
+        };
         let rulings = vec![
             Ruling {
                 dispatch: wire_dispatch(),
                 authority: AuthorityName::new("a1"),
                 issuer: Issuer::Authority,
+                reviewed: review.clone(),
                 covers: vec![Gap::Attention(MarkName::new("m1"))],
             },
             Ruling {
                 dispatch: wire_dispatch(),
                 authority: AuthorityName::new("a2"),
                 issuer: Issuer::Authority,
+                reviewed: review,
                 covers: vec![Gap::Attention(MarkName::new("m2"))],
             },
         ];
         let batch = run(&registry, &log, &call("wire", json!({})), &rulings, Sink::Tool).unwrap();
         let ruling_count = batch.facts.iter().filter(|f| matches!(f, Fact::Ruling { .. })).count();
         assert_eq!(ruling_count, 2);
+    }
+
+    #[test]
+    fn a_false_or_dangling_review_is_refused() {
+        let registry = registry();
+        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let with_review = |reviewed: AuthorityReview| Ruling {
+            dispatch: wire_dispatch(),
+            authority: AuthorityName::new("officer"),
+            issuer: Issuer::Authority,
+            reviewed,
+            covers: vec![floor_gap()],
+        };
+        let false_label = AuthorityReview {
+            trajectory_label: Label::top(),
+            ..top_review()
+        };
+        assert_eq!(
+            run(
+                &registry,
+                &log,
+                &call("wire", json!({})),
+                &[with_review(false_label)],
+                Sink::Tool
+            ),
+            Err(PlanError::ReviewMismatch)
+        );
+        let wrong_tool = AuthorityReview {
+            tool: ToolName::new("other"),
+            ..top_review()
+        };
+        assert_eq!(
+            run(
+                &registry,
+                &log,
+                &call("wire", json!({})),
+                &[with_review(wrong_tool)],
+                Sink::Tool
+            ),
+            Err(PlanError::ReviewMismatch)
+        );
+        let dangling = AuthorityReview {
+            arg_refs: vec![ReviewedRef {
+                value: ValueId::new(7),
+                label: known(SUSPICIOUS, Audience::Public),
+                provenance: Provenance::UserInput,
+            }],
+            ..top_review()
+        };
+        assert_eq!(
+            run(
+                &registry,
+                &log,
+                &call("wire", json!({})),
+                &[with_review(dangling)],
+                Sink::Tool
+            ),
+            Err(PlanError::ReviewMismatch)
+        );
+        let ref_call = ResolvedCall::new(ToolName::new("wire"), json!({}), vec![ValueId::new(0)]);
+        assert_eq!(
+            run(&registry, &log, &ref_call, &[with_review(top_review())], Sink::Tool),
+            Err(PlanError::ReviewMismatch)
+        );
     }
 
     #[test]

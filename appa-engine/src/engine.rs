@@ -4,11 +4,12 @@ use thiserror::Error;
 
 use crate::admit::{self, AdmitError, CastAnswer, CastError, ResultAdmission};
 use crate::branch::{self, BranchError, ReturnSubmission};
-use crate::check::{self, CheckOutcome, RawBlock, UnresolvedFact};
+use crate::check::{self, CheckOutcome, Narrowing, RawBlock, UnresolvedFact};
 use crate::contract::ToolContract;
 use crate::execute::{self, PlanError, Ruling, Sink};
 use crate::fact::{Fact, FactBatch, ReturnPolicy};
-use crate::plan::{self, PlanId, PlannedBlock};
+use crate::label::DimValue;
+use crate::plan::{self, PlannedBlock};
 use crate::projection::Views;
 use crate::registry::Registry;
 use crate::value::{DispatchId, ResolvedCall, TrajectoryId};
@@ -58,17 +59,18 @@ impl Engine {
     }
 
     /// Execute a remedy plan: land the covering rulings, the narrowing acceptance, and the dispatch
-    /// as one atomic batch, enforcing mandate coverage and the response-sink issuer bar. See
-    /// [`crate::execute`].
+    /// as one atomic batch, enforcing the plan's exact grouped assignment, mandate coverage, and
+    /// the response-sink issuer bar. The chosen plan is matched by value against the live offers —
+    /// the return-path staleness story. See [`crate::execute`].
     pub fn execute_plan(
         &self,
         views: &Views,
-        plan: PlanId,
+        chosen: &plan::RemedyPlan,
         call: &ResolvedCall,
         rulings: &[Ruling],
         sink: Sink,
     ) -> Result<FactBatch, PlanError> {
-        execute::execute_plan(&self.registry, views, plan, call, rulings, sink)
+        execute::execute_plan(&self.registry, views, chosen, call, rulings, sink)
     }
 
     /// Close a dispatch and admit its result — raw, sanitized, or withheld. The label folds only
@@ -83,27 +85,30 @@ impl Engine {
         admit::admit_result(&self.registry, views, dispatch, call, admission)
     }
 
+    /// The narrowing admitting a cast-resolved value of `call` would fold into the live trajectory
+    /// label, or `None` when it does not move it — the whole filled label, established dimensions
+    /// included (see `admit::pending_cast_narrowing`). The runtime derives the acceptance offer
+    /// from this; admission re-derives it under the family lock, so a stale offer refuses by value
+    /// (D2).
+    pub fn cast_narrowing(
+        &self,
+        views: &Views,
+        call: &ResolvedCall,
+        resolved: &DimValue,
+    ) -> Result<Option<Narrowing>, EngineError> {
+        let contract = self.contract(call)?;
+        Ok(admit::pending_cast_narrowing(
+            views,
+            &admit::cast_filled_label(contract, resolved),
+        ))
+    }
+
     /// Attach the sound remedies to a raw block: executable plans and prose recommendations. An empty
     /// result (no plans, no curative recommendation) is a proof the block is unliftable over the
     /// implemented remedy subset — see [`crate::plan`].
     pub fn plan(&self, views: &Views, call: &ResolvedCall, raw: &RawBlock) -> Result<PlannedBlock, EngineError> {
         self.contract(call)?;
         Ok(plan::plan(&self.registry, views, call, raw))
-    }
-
-    /// The rulings a blocked call's remedy plan needs gathered: per authority, the gaps it must cover
-    /// (mandate routing stays engine-side). The runtime gathers a ruling from each and passes them to
-    /// [`Engine::execute_plan`]. A call that is not blocked yields an empty list.
-    pub fn required_rulings(
-        &self,
-        views: &Views,
-        call: &ResolvedCall,
-    ) -> Result<Vec<plan::RequiredRuling>, EngineError> {
-        let contract = self.contract(call)?;
-        match check::evaluate(&self.registry, contract, views, call) {
-            CheckOutcome::Block(block) => Ok(plan::required_rulings(&self.registry, &block, &contract.tags)),
-            _ => Ok(Vec::new()),
-        }
     }
 
     pub fn admit_cast(
@@ -600,7 +605,14 @@ mod tests {
         let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
         let p = Projection::build(&log, Revision::new(log.len() as u64));
         let t = traj();
-        let required = e.required_rulings(&p.view(&t), &call("wire", json!({}))).unwrap();
+        let wire_call = call("wire", json!({}));
+        let raw = match e.check(&p.view(&t), &wire_call).unwrap() {
+            CheckOutcome::Block(raw) => raw,
+            other => panic!("expected a block, got {other:?}"),
+        };
+        let planned = e.plan(&p.view(&t), &wire_call, &raw).unwrap();
+        assert_eq!(planned.plans.len(), 1);
+        let required = &planned.plans[0].required;
         assert_eq!(required.len(), 1);
         assert_eq!(required[0].authority, AuthorityName::new("officer"));
         assert_eq!(

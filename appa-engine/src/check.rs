@@ -121,6 +121,13 @@ pub(crate) fn evaluate_state(
     for mark in &contract.requires.attention {
         gaps.push(Gap::Attention(mark.clone()));
     }
+    let mut seen = Vec::with_capacity(gaps.len());
+    for gap in gaps {
+        if !seen.contains(&gap) {
+            seen.push(gap);
+        }
+    }
+    let gaps = seen;
 
     if gaps.is_empty() && narrowing.is_none() {
         CheckOutcome::Allow

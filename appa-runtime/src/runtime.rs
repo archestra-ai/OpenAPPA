@@ -34,6 +34,12 @@ pub enum InitError {
 pub struct Budgets {
     pub max_inference_rounds: u32,
     pub max_tool_invocations: u32,
+    /// How many **blocked-proposal rounds** one call (by digest) may open per turn. Each round is
+    /// one cohort of offered plans, within which every plan is consultable once — an authority's
+    /// denial consumes only its own offer, never this budget, so every advertised alternative is
+    /// actually executable. (One qualification: a CAS-stale retry after a genuine concurrent
+    /// family-log move leaves the approved offer live, so that authority may be consulted again on
+    /// the retry — bounded by the turn's rounds and deadline, never by a stale menu.)
     pub max_remedy_attempts_per_gap: u32,
     pub per_external_timeout: Duration,
     pub turn_deadline: Duration,

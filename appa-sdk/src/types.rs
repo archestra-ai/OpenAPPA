@@ -9,6 +9,9 @@ use appa_runtime::store::StoreError;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SdkOptions {
+    /// How many **blocked-proposal rounds** one call (by digest) may open per turn — each round is
+    /// one cohort of offered plans, every plan in it consultable once; a denial consumes only its
+    /// own offer, never this budget. Mirrors the runtime's semantics.
     pub max_remedy_attempts_per_gap: u32,
     pub per_external_timeout: std::time::Duration,
 }

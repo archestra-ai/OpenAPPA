@@ -3,13 +3,12 @@
 use std::collections::BTreeMap;
 
 use appa_engine::admit::{AdmitError, ResultAdmission};
-use appa_engine::check::{CheckOutcome, Narrowing};
+use appa_engine::check::CheckOutcome;
 use appa_engine::engine::Engine;
 use appa_engine::execute::{Issuer, Ruling, Sink};
 use appa_engine::fact::{BoundaryKind, Fact, FactBatch, ReturnPolicy};
 use appa_engine::label::Label;
 use appa_engine::names::AuthorityName;
-use appa_engine::plan::PlanId;
 use appa_engine::projection::Projection;
 use appa_engine::value::{
     CanonicalDigest, DispatchId, LabeledValue, Provenance, ResolvedCall, ToolName, TrajectoryId, ValueBody,
@@ -30,13 +29,13 @@ pub(crate) const SEALED_WITHHELD: &str = "[tool result withheld: exceeds the siz
 pub(crate) const SEALED_FAILED: &str = "[tool call failed]";
 pub(crate) const SEALED_INDETERMINATE: &str = "[tool call outcome unknown — it may or may not have run]";
 
-/// A blocked call awaiting the model's remedy decision, keyed by an SDK-minted turn-unique handle
-/// (the engine's `PlanId` is block-local and never exposed to the model).
+/// A blocked call's cohort: every offered plan for one blocked proposal, each keyed by an
+/// SDK-minted turn-unique handle (the engine's `PlanId` is block-local and never exposed to the
+/// model). Mirrors the runtime: a success consumes the whole cohort, a denial only its offer.
 #[derive(Debug)]
 pub(crate) struct PendingBlock {
-    pub(crate) handle: String,
     pub(crate) call: ResolvedCall,
-    pub(crate) plan: PlanId,
+    pub(crate) offers: Vec<(String, appa_engine::plan::RemedyPlan)>,
 }
 
 /// The shared state and engine/store operations both facades hold. A facade embeds one `Core` and
@@ -172,43 +171,28 @@ impl Core {
                     .engine
                     .plan(&views, &call, &raw)
                     .expect("checked tool is registered");
-                let gaps = raw.requirement_gaps.len();
-                let narrowed = raw.narrowing.as_ref().map(narrowed_dims);
-                let curative: Vec<String> = planned
-                    .recommendations
-                    .iter()
-                    .filter_map(|r| match r {
-                        appa_engine::plan::Recommendation::Redispatch { tool, .. } => Some(tool.as_str().to_string()),
-                        appa_engine::plan::Recommendation::Fork { .. } => None,
-                    })
-                    .collect();
-                let feedback = match planned.plans.first() {
-                    Some(plan) => {
-                        let via = authorize_via(plan);
-                        let handle = format!("remedy-{}", self.next_remedy_handle);
-                        self.next_remedy_handle += 1;
-                        self.pending_blocks.push(PendingBlock {
-                            handle: handle.clone(),
-                            call,
-                            plan: plan.id,
-                        });
-                        match (gaps, narrowed.as_deref()) {
-                            (0, Some(dims)) => format!(
-                                "narrowing: this call restricts the trajectory's {dims} label; call execute_remedy_plan with plan_id \"{handle}\" to accept and proceed"
-                            ),
-                            (n, Some(dims)) => format!(
-                                "blocked by policy ({n} requirement gap(s), and narrows {dims}); call execute_remedy_plan with plan_id \"{handle}\" to authorize{via}"
-                            ),
-                            (n, None) => format!(
-                                "blocked by policy ({n} requirement gap(s)); call execute_remedy_plan with plan_id \"{handle}\" to authorize{via}"
-                            ),
-                        }
+                let feedback = if planned.plans.is_empty() {
+                    appa_runtime::feedback::block_feedback(&raw, &planned, &[])
+                } else {
+                    let attempts = self.remedy_attempts.entry(call.digest()).or_insert(0);
+                    *attempts += 1;
+                    if *attempts > self.options.max_remedy_attempts_per_gap {
+                        return Ok(Checked::Feedback(
+                            "the remedy attempt limit for this call was reached".to_string(),
+                        ));
                     }
-                    None if !curative.is_empty() => format!(
-                        "blocked by policy; run {} first, then re-propose this call",
-                        curative.join(" or ")
-                    ),
-                    None => "blocked by policy; no remedy is available for this call".to_string(),
+                    let offers: Vec<(String, appa_engine::plan::RemedyPlan)> = planned
+                        .plans
+                        .iter()
+                        .map(|plan| {
+                            let handle = format!("remedy-{}", self.next_remedy_handle);
+                            self.next_remedy_handle += 1;
+                            (handle, plan.clone())
+                        })
+                        .collect();
+                    let feedback = appa_runtime::feedback::block_feedback(&raw, &planned, &offers);
+                    self.pending_blocks.push(PendingBlock { call, offers });
+                    feedback
                 };
                 Ok(Checked::Feedback(feedback))
             }
@@ -233,65 +217,86 @@ impl Core {
                 "execute_remedy_plan requires a string plan_id".to_string(),
             ));
         };
-        let Some(index) = self.pending_blocks.iter().position(|p| p.handle == plan_id) else {
+        let Some(cohort_index) = self
+            .pending_blocks
+            .iter()
+            .position(|p| p.offers.iter().any(|(h, _)| h == plan_id))
+        else {
             return Ok(Remedied::Feedback(
                 "no pending blocked call offers that plan_id".to_string(),
             ));
         };
-        let block = self.pending_blocks.remove(index);
-
-        let attempts = self.remedy_attempts.entry(block.call.digest()).or_insert(0);
-        *attempts += 1;
-        if *attempts > self.options.max_remedy_attempts_per_gap {
-            return Ok(Remedied::Feedback(
-                "the remedy attempt limit for this call was reached".to_string(),
-            ));
-        }
+        let call = self.pending_blocks[cohort_index].call.clone();
+        let chosen = self.pending_blocks[cohort_index]
+            .offers
+            .iter()
+            .find(|(h, _)| h == plan_id)
+            .map(|(_, plan)| plan.clone())
+            .expect("the cohort was found by this handle");
 
         let (log, rev) = self.store.snapshot(&self.tenant, &self.session)?;
         let projection = Projection::build(&log, rev);
         let views = projection.view(&self.session);
-        let required = self
-            .engine
-            .required_rulings(&views, &block.call)
-            .expect("pending call is registered");
+        let still_offered = match self.engine.check(&views, &call) {
+            Ok(CheckOutcome::Block(raw)) => self
+                .engine
+                .plan(&views, &call, &raw)
+                .expect("pending call is registered")
+                .plans
+                .contains(&chosen),
+            _ => false,
+        };
+        if !still_offered {
+            self.pending_blocks.remove(cohort_index);
+            return Ok(Remedied::Feedback(
+                "the state changed and this offer no longer applies; re-propose the call".to_string(),
+            ));
+        }
         let dispatch = DispatchId::new(
             self.session.clone(),
-            block.call.digest(),
-            views.dispatch_count(&block.call.digest()),
+            call.digest(),
+            views.dispatch_count(&call.digest()),
         );
 
         let mut rulings = Vec::new();
-        for req in &required {
+        for req in &chosen.required {
             let Some(backend) = self.authorities.get(&req.authority) else {
                 return Ok(Remedied::Feedback(
                     "an authority for this plan is not configured".to_string(),
                 ));
             };
-            let request = AuthorityRequest::new(req.authority.clone(), &block.call, req.covers.clone());
+            let Ok(request) = AuthorityRequest::new(req.authority.clone(), &call, req.covers.clone(), &views) else {
+                return Ok(Remedied::Feedback(
+                    "the call's argument references no longer resolve".to_string(),
+                ));
+            };
             // Awaited outside any store lock; a slow or unreachable authority fails closed.
             let answer = tokio::time::timeout(self.options.per_external_timeout, backend.rule(&request))
                 .await
                 .unwrap_or(AuthorityAnswer::Abstain);
             match answer {
+                // The ruling records the review context put to the authority, verbatim.
                 AuthorityAnswer::Approve => rulings.push(Ruling {
                     dispatch: dispatch.clone(),
                     authority: req.authority.clone(),
                     issuer: Issuer::Authority,
                     covers: req.covers.clone(),
+                    reviewed: request.review(),
                 }),
                 AuthorityAnswer::Deny | AuthorityAnswer::Abstain => {
-                    return Ok(Remedied::Feedback(
-                        "the authority declined to authorize this call".to_string(),
-                    ));
+                    // The denial consumes only this offer; siblings stay live and are re-listed.
+                    let cohort = &mut self.pending_blocks[cohort_index];
+                    cohort.offers.retain(|(h, _)| h != plan_id);
+                    let feedback = appa_runtime::feedback::denial_feedback(&cohort.offers);
+                    if cohort.offers.is_empty() {
+                        self.pending_blocks.remove(cohort_index);
+                    }
+                    return Ok(Remedied::Feedback(feedback));
                 }
             }
         }
 
-        let batch = match self
-            .engine
-            .execute_plan(&views, block.plan, &block.call, &rulings, Sink::Tool)
-        {
+        let batch = match self.engine.execute_plan(&views, &chosen, &call, &rulings, Sink::Tool) {
             Ok(batch) => batch,
             Err(_) => {
                 return Ok(Remedied::Feedback(
@@ -311,10 +316,8 @@ impl Core {
         match self.store.conditional_append(&self.tenant, &self.session, batch) {
             Ok(_) => {}
             Err(StoreError::Stale { .. }) => {
-                self.pending_blocks.push(block);
-                return Ok(Remedied::Feedback(
-                    "the state changed; re-propose the call and remedy".to_string(),
-                ));
+                // The cohort is untouched — the model may retry the same offer on fresh state.
+                return Ok(Remedied::Feedback("the state changed; retry the remedy".to_string()));
             }
             Err(e) => return Err(e),
         }
@@ -322,10 +325,9 @@ impl Core {
             opened, dispatch,
             "the executed plan opens the dispatch its rulings name"
         );
-        Ok(Remedied::Authorized {
-            dispatch,
-            call: block.call,
-        })
+        // The executed plan's dispatch consumes the whole cohort.
+        self.pending_blocks.remove(cohort_index);
+        Ok(Remedied::Authorized { dispatch, call })
     }
 
     /// Open the dispatch for a clean-allow call through the store's serialized finalization: the
@@ -392,7 +394,10 @@ impl Core {
                     | AdmitError::NotPendingCast
                     | AdmitError::UnknownCast(_)
                     | AdmitError::ConstantMismatch
-                    | AdmitError::CeilingExceeded,
+                    | AdmitError::CeilingExceeded
+                    // Unreachable through the SDK: pending-cast tools are refused at open.
+                    | AdmitError::NarrowingUnaccepted
+                    | AdmitError::AcceptanceMismatch,
                 ) => {
                     verdict = Admission::Refused;
                     None
@@ -433,37 +438,6 @@ pub(crate) fn outcome_to_admission(outcome: &ToolOutcome) -> ResultAdmission {
         } => ResultAdmission::SuccessNoValue,
         ToolOutcome::Failure => ResultAdmission::Failure,
         ToolOutcome::Indeterminate => ResultAdmission::Indeterminate,
-    }
-}
-
-fn narrowed_dims(narrowing: &Narrowing) -> String {
-    let mut dims = Vec::new();
-    if narrowing.from.trust != narrowing.to.trust {
-        dims.push("trust");
-    }
-    if narrowing.from.audience != narrowing.to.audience {
-        dims.push("audience");
-    }
-    if dims.is_empty() {
-        "label".to_string()
-    } else {
-        dims.join(" and ")
-    }
-}
-
-fn authorize_via(plan: &appa_engine::plan::RemedyPlan) -> String {
-    let authorities: Vec<&str> = plan
-        .steps
-        .iter()
-        .filter_map(|step| match step {
-            appa_engine::plan::RemedyStep::Authorize(name) => Some(name.as_str()),
-            appa_engine::plan::RemedyStep::Accept => None,
-        })
-        .collect();
-    if authorities.is_empty() {
-        String::new()
-    } else {
-        format!(" via {}", authorities.join(", "))
     }
 }
 

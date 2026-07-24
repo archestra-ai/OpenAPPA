@@ -3,6 +3,7 @@ pub mod admission;
 pub mod config;
 pub mod drive;
 pub mod external;
+pub mod feedback;
 pub mod inference;
 pub mod runtime;
 pub mod server;

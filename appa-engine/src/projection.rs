@@ -4,12 +4,13 @@ use std::collections::BTreeSet;
 
 use crate::fact::{BoundaryKind, CloseOutcome, EffectKind, Fact, ReturnPolicy, Revision};
 use crate::label::{Dim, DimValue, Label};
-use crate::value::{CanonicalDigest, ChildReturnId, DispatchId, LabeledValue, TrajectoryId, ValueId};
+use crate::value::{CanonicalDigest, ChildReturnId, DispatchId, LabeledValue, Provenance, TrajectoryId, ValueId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AdmittedValue {
     trajectory: TrajectoryId,
     label: Label,
+    provenance: Provenance,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,9 +59,14 @@ impl Projection {
 
         for fact in log {
             match fact {
-                Fact::ValueAdmitted { trajectory, value, .. } => values.push(AdmittedValue {
+                Fact::ValueAdmitted {
+                    trajectory,
+                    value,
+                    provenance,
+                } => values.push(AdmittedValue {
                     trajectory: trajectory.clone(),
                     label: value.label.clone(),
+                    provenance: provenance.clone(),
                 }),
                 Fact::DispatchOpened {
                     trajectory, dispatch, ..
@@ -79,7 +85,7 @@ impl Projection {
                 }
                 // A cast overrides its value's Unknown dimension in the fold; the body is untouched.
                 Fact::CastApplied { value, resolved, .. } => {
-                    if let Some(v) = values.get_mut(value.index() as usize) {
+                    if let Some(v) = usize::try_from(value.index()).ok().and_then(|i| values.get_mut(i)) {
                         match resolved {
                             DimValue::Trust(t) => v.label.trust = Dim::Known(*t),
                             DimValue::Audience(a) => v.label.audience = Dim::Known(a.clone()),
@@ -88,7 +94,10 @@ impl Projection {
                 }
                 Fact::Ruling { .. } | Fact::Acceptance { .. } | Fact::ChildReturnAcceptance { .. } => {}
                 Fact::AssistantMessage { .. } | Fact::BlockFeedback { .. } => {}
-                Fact::SanitizerApplied { .. } | Fact::OutputCastApplied { .. } => {}
+                Fact::SanitizerApplied { .. }
+                | Fact::OutputCastApplied { .. }
+                | Fact::OutputCastAccepted { .. }
+                | Fact::OutputCastLapsed { .. } => {}
                 Fact::ChildReturn { id, value, .. } => child_returns.push(ReturnedChild {
                     id: id.clone(),
                     value: value.clone(),
@@ -130,7 +139,10 @@ impl Projection {
     }
 
     pub fn value_label(&self, id: ValueId) -> Option<&Label> {
-        self.values.get(id.index() as usize).map(|v| &v.label)
+        usize::try_from(id.index())
+            .ok()
+            .and_then(|i| self.values.get(i))
+            .map(|v| &v.label)
     }
 
     fn fold_for(&self, trajectory: &TrajectoryId) -> Label {
@@ -172,12 +184,21 @@ impl Views<'_> {
         self.projection.value_label(id)
     }
 
+    /// The provenance of an admitted value by id — what an Authority reviews for a referenced
+    /// argument. Read-only audit context; the fold never consumes it.
+    pub fn value_provenance(&self, id: ValueId) -> Option<&Provenance> {
+        usize::try_from(id.index())
+            .ok()
+            .and_then(|i| self.projection.values.get(i))
+            .map(|value| &value.provenance)
+    }
+
     /// Does this value belong to the scoped trajectory? A cast may only resolve its own branch's
     /// values, never a sibling's.
     pub fn owns_value(&self, id: ValueId) -> bool {
-        self.projection
-            .values
-            .get(id.index() as usize)
+        usize::try_from(id.index())
+            .ok()
+            .and_then(|i| self.projection.values.get(i))
             .is_some_and(|value| &value.trajectory == self.trajectory)
     }
 
