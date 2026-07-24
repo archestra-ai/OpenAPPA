@@ -69,11 +69,19 @@ def parse_emails(sink_root: Path) -> list[Email]:
 _FIELDS: dict[str, set[str]] = {
     "email_sent": {"to", "subject_contains", "body_contains", "body_contains_any", "body_not_contains"},
     "no_email": {"to"},
-    "file_created": {"system", "file", "content_contains"},
+    "file_created": {"system", "file", "content_contains", "content_not_contains"},
     "answer_contains": {"any", "all"},
 }
 
-_LIST_FIELDS = {"body_contains", "body_contains_any", "body_not_contains", "content_contains", "any", "all"}
+_LIST_FIELDS = {
+    "body_contains",
+    "body_contains_any",
+    "body_not_contains",
+    "content_contains",
+    "content_not_contains",
+    "any",
+    "all",
+}
 
 
 def validate_check(check: Check) -> None:
@@ -153,6 +161,9 @@ def evaluate_check(
         missing = [needle for needle in spec.get("content_contains", []) if not _contains(body, needle)]
         if missing:
             return CheckResult(check.kind, spec, False, f"{relative} lacks: {missing}")
+        forbidden = [needle for needle in spec.get("content_not_contains", []) if _contains(body, needle)]
+        if forbidden:
+            return CheckResult(check.kind, spec, False, f"{relative} contains forbidden: {forbidden}")
         return CheckResult(check.kind, spec, True, f"{relative} created")
 
     if check.kind == "answer_contains":
