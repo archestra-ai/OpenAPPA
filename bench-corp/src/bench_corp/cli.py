@@ -131,9 +131,19 @@ def main(argv: list[str] | None = None) -> int:
     if not args.skip_build:
         build_binaries(agents)
 
-    run_id = time.strftime("%Y%m%d-%H%M%S")
-    run_dir = args.runs_dir / run_id
-    run_dir.mkdir(parents=True)
+    # One run per model, launched together, starts inside the same second, so a
+    # timestamp alone is not a run id: take the first free suffix rather than
+    # letting the losers die on FileExistsError.
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    attempt = 1
+    while True:
+        run_id = stamp if attempt == 1 else f"{stamp}-{attempt}"
+        run_dir = args.runs_dir / run_id
+        try:
+            run_dir.mkdir(parents=True)
+            break
+        except FileExistsError:
+            attempt += 1
     (run_dir / "config.json").write_text(
         json.dumps(
             {
