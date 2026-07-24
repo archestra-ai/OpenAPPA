@@ -158,10 +158,14 @@ def main(argv: list[str] | None = None) -> int:
         # The shared corp-systems-mcp server stays up for the whole run; the
         # FIDES-labeled tools forward every call through this client.
         async with CorpSystemsClient(corpus_root, sink_root, args.server_bin) as client:
+            # Build wrappers only for the tools the live server actually lists —
+            # a narrowed --systems / CORP_ENABLED_SYSTEMS surface must not leave
+            # the model holding tools the server would refuse.
+            available = set(await client.list_tool_names())
             built = build_agent(
                 api_key=api_key,
                 model=args.model,
-                tools=build_tools(client),
+                tools=build_tools(client, available),
                 sink_root=sink_root,
                 defend=args.defend,
                 quarantine_model=args.quarantine_model,

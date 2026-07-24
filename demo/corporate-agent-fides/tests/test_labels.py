@@ -9,14 +9,14 @@ import asyncio
 from pathlib import Path
 
 from corp_fides.systems import CorpSystemsClient
-from corp_fides.tools import build_tools
+from corp_fides.tools import ALL_TOOL_NAMES, build_tools
 
 # Declarations need no live server — no tool is invoked.
 _OFFLINE_CLIENT: CorpSystemsClient = None  # type: ignore[assignment]
 
 
 def _tools_by_name():
-    return {t.name: t for t in build_tools(_OFFLINE_CLIENT)}
+    return {t.name: t for t in build_tools(_OFFLINE_CLIENT, set(ALL_TOOL_NAMES))}
 
 
 def test_thirteen_tools_with_expected_names() -> None:
@@ -51,7 +51,7 @@ def test_hr_reads_are_trusted_but_private() -> None:
 def _label_of(server_bin: Path, corpus: Path, sink: Path, name: str, *args: str) -> dict:
     async def run():
         async with CorpSystemsClient(corpus, sink, server_bin) as client:
-            tools = {t.name: t for t in build_tools(client)}
+            tools = {t.name: t for t in build_tools(client, set(await client.list_tool_names()))}
             contents = await tools[name].func(*args)  # type: ignore[attr-defined]
             return contents[0].additional_properties["security_label"]
 
@@ -72,3 +72,11 @@ def test_error_text_carries_the_neutral_label(server_bin: Path, corpus: Path, si
     # A not-found error is trusted framework text, not fetched content.
     label = _label_of(server_bin, corpus, sink, "read_public_forum", "missing.md")
     assert label == {"integrity": "trusted", "confidentiality": "public"}
+
+
+def test_reduced_surface_builds_only_listed_tools() -> None:
+    # A narrowed server (--systems hr,email) lists 4 tools; the wrappers must
+    # match exactly — no dead tools advertised to the model.
+    available = {"search_hr", "read_hr", "create_hr", "send_email"}
+    tools = build_tools(_OFFLINE_CLIENT, available)
+    assert {t.name for t in tools} == available

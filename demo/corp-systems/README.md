@@ -56,6 +56,13 @@ cargo run --bin corp-systems-mcp -- \
 |------|-----|---------|
 | `--data-root` | `CORP_DATA_ROOT` | this crate's `data/` |
 | `--sink-root` | `CORP_SINK_ROOT` | the data root |
+| `--systems` | `CORP_ENABLED_SYSTEMS` | all five |
+
+`--systems` takes a comma-separated enable list (e.g. `hr,public_forum,email`);
+a disabled system's tools are absent from `list_tools` and refused when called.
+The env form matters because the demo agents spawn this server as a child with
+the environment forwarded — `bench-corp` narrows the tool surface per scenario
+this way without any demo changes.
 
 stdout carries the MCP JSON-RPC channel; all logging goes to stderr.
 

@@ -7,6 +7,7 @@
 //! the semantics live there, once. `send_email` has no `read`/`search` mate —
 //! the `email/` folder is a write-only side-effect the injection demo watches.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -58,12 +59,38 @@ pub struct CorpSystems {
     tool_router: ToolRouter<Self>,
 }
 
+/// Which [`System`] a tool belongs to, for the `--systems` enable filter.
+/// Exhaustive over the 13 declared tools on purpose: a tool added to the
+/// router without a mapping here fails server startup (see [`CorpSystems::new`])
+/// instead of silently escaping the filter.
+fn system_of_tool(name: &str) -> Option<System> {
+    match name {
+        "search_hr" | "read_hr" | "create_hr" => Some(System::Hr),
+        "search_finance" | "read_finance" | "create_finance" => Some(System::Finance),
+        "search_task_tracker" | "read_task_tracker" | "create_task_tracker" => Some(System::TaskTracker),
+        "search_public_forum" | "read_public_forum" | "create_public_forum" => Some(System::PublicForum),
+        "send_email" => Some(System::Email),
+        _ => None,
+    }
+}
+
 impl CorpSystems {
-    pub fn new(corpus_root: PathBuf, sink_root: PathBuf) -> Self {
+    /// Build the server over the given roots with only `enabled` systems'
+    /// tools live: the rest are absent from `list_tools` and refused when
+    /// called. Pass [`System::ALL`] (collected) for the full surface.
+    pub fn new(corpus_root: PathBuf, sink_root: PathBuf, enabled: BTreeSet<System>) -> Self {
+        let mut tool_router = Self::tool_router();
+        for tool in tool_router.list_all() {
+            let system = system_of_tool(&tool.name)
+                .expect("every corp-systems tool maps to a System; extend system_of_tool for new tools");
+            if !enabled.contains(&system) {
+                tool_router.disable_route(tool.name);
+            }
+        }
         Self {
             corpus_root,
             sink_root,
-            tool_router: Self::tool_router(),
+            tool_router,
         }
     }
 

@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_framework import Agent
-from agent_framework.openai import OpenAIChatClient
+from agent_framework.openai import OpenAIChatCompletionClient
 from agent_framework.security import SecureAgentConfig
 
 # The agent's system prompt. This is *agent* configuration, not policy — FIDES
@@ -45,8 +45,13 @@ PREAMBLE = (
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 
-def make_chat_client(model: str, api_key: str) -> OpenAIChatClient:
+def make_chat_client(model: str, api_key: str) -> OpenAIChatCompletionClient:
     """The model client. OpenAI-compatible against OpenRouter by default.
+
+    Chat-completions, not the Responses API: OpenRouter serves chat completions
+    for every model, while its Responses emulation rejects multi-turn
+    ``previous_response_id`` chains for some models (e.g. the openai/gpt-5.6
+    family) — which breaks any tool loop after the first turn.
 
     To match Microsoft's FIDES sample exactly, replace the body with::
 
@@ -54,7 +59,7 @@ def make_chat_client(model: str, api_key: str) -> OpenAIChatClient:
         from azure.identity import AzureCliCredential
         return FoundryChatClient(async_credential=AzureCliCredential())
     """
-    return OpenAIChatClient(model=model, api_key=api_key, base_url=OPENROUTER_BASE_URL)
+    return OpenAIChatCompletionClient(model=model, api_key=api_key, base_url=OPENROUTER_BASE_URL)
 
 
 @dataclass

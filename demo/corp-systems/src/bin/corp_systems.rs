@@ -12,7 +12,9 @@
 //! stdout is the JSON-RPC channel, so **all logging goes to stderr** — a stray
 //! `println!` on stdout would corrupt the protocol framing.
 
+use anyhow::Context;
 use clap::Parser;
+use corp_systems::systems::System;
 use corp_systems::{resolve_data_root, server::CorpSystems};
 use rmcp::ServiceExt;
 use rmcp::transport::stdio;
@@ -31,6 +33,12 @@ struct Args {
     /// and the observable sink should stay local to one demo.
     #[arg(long, env = "CORP_SINK_ROOT")]
     sink_root: Option<PathBuf>,
+
+    /// Comma-separated systems to enable, e.g. `hr,public_forum,email`.
+    /// Defaults to `CORP_ENABLED_SYSTEMS`, else all five. A disabled system's
+    /// tools are absent from `list_tools` and refused when called.
+    #[arg(long, env = "CORP_ENABLED_SYSTEMS")]
+    systems: Option<String>,
 }
 
 #[tokio::main]
@@ -45,9 +53,18 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let corpus_root = resolve_data_root(args.data_root);
     let sink_root = args.sink_root.unwrap_or_else(|| corpus_root.clone());
-    tracing::info!(corpus_root = %corpus_root.display(), sink_root = %sink_root.display(), "corp-systems-mcp starting");
+    let enabled = match args.systems.as_deref() {
+        Some(list) => System::parse_list(list).context("parsing --systems / CORP_ENABLED_SYSTEMS")?,
+        None => System::ALL.into_iter().collect(),
+    };
+    tracing::info!(
+        corpus_root = %corpus_root.display(),
+        sink_root = %sink_root.display(),
+        systems = %enabled.iter().map(|s| s.dir_name()).collect::<Vec<_>>().join(","),
+        "corp-systems-mcp starting"
+    );
 
-    let service = CorpSystems::new(corpus_root, sink_root).serve(stdio()).await?;
+    let service = CorpSystems::new(corpus_root, sink_root, enabled).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
 }
