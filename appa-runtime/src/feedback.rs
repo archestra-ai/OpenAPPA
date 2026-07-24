@@ -14,7 +14,8 @@
 //! every [`FeedbackSurface`] states it: a root's acceptance is permanent for the session, a
 //! child's for its branch alone (the parent is unaffected, so delegated work is accepted where it
 //! was sent, not re-delegated). Because acceptance is one-way, the cost is stated with the move
-//! that avoids it — run the steps that still need the current label *before* accepting. The
+//! that avoids it, and that move leads the sentence — run the steps that still need the current
+//! label *first*, then accept — because the imperative a reader meets first is the one acted on. The
 //! **branch alternative** is a property of the surface, so it is conditional: a root that can fork
 //! is told to confine the label loss in a child (requirement gaps follow the child and are remedied
 //! there) and the payload carries the engine's `Fork` recommendation; a surface that cannot fork
@@ -172,22 +173,24 @@ pub fn block_feedback(
         }
     } else if raw.requirement_gaps.is_empty() {
         // A pure narrowing. Acceptance is informed — it executes only in a round after this offer
-        // ("in your next response"). Every surface hears what the acceptance costs and how far the
+        // ("in a later response"). Every surface hears what the acceptance costs and how far the
         // cost reaches; only the branch alternative is conditional on being actionable, because a
-        // surface that cannot fork can still reorder its own work.
+        // surface that cannot fork can still reorder its own work. The option-preserving move
+        // leads and acceptance is the terminal clause: an imperative read first is acted on first,
+        // and an acceptance taken before the label-requiring work strands that work for good.
         match fork {
             // Fork leads: it is the reversible choice. Accepting folds the restriction into this
             // trajectory for good — no authority widens an audience, and trust never rises — so
             // an acceptance taken for one step can strand every later step that needed the label.
             Some(_) => {
-                "narrowing: this call restricts the trajectory label. Fork the restricting work into a child session to keep this session's label, or accept it with execute_remedy_plan in your next response — acceptance is permanent for this session, so run any later step that needs the current label before you accept"
+                "narrowing: this call restricts the trajectory label, and acceptance is permanent for this session — no authority widens an audience, and trust never rises. Fork the restricting work into a child session to keep this session's label; or run every later step that needs the current label first, then accept with execute_remedy_plan in a later response"
             }
             None => match surface {
                 FeedbackSurface::Root { .. } => {
-                    "narrowing: this call restricts the trajectory label; accept it with execute_remedy_plan in your next response — acceptance is permanent for this session, so run any later step that needs the current label before you accept"
+                    "narrowing: this call restricts the trajectory label, and acceptance is permanent for this session — no authority widens an audience, and trust never rises. Run every later step that needs the current label first, then accept with execute_remedy_plan in a later response"
                 }
                 FeedbackSurface::Child => {
-                    "narrowing: this call restricts this branch's label only — the parent session is unaffected; accept it with execute_remedy_plan in your next response — acceptance is permanent for this branch, so run any later step of this branch that needs the current label before you accept"
+                    "narrowing: this call restricts this branch's label only — the parent session is unaffected — and acceptance is permanent for this branch. Run every later step of this branch that needs the current label first, then accept with execute_remedy_plan in a later response"
                 }
             },
         }
@@ -196,14 +199,14 @@ pub fn block_feedback(
         // round-gated (next response) and carries the same acceptance cost as a pure narrowing.
         match fork {
             Some(_) => {
-                "blocked by policy; execute one offered plan with execute_remedy_plan in your next response — it also accepts this call's narrowing, permanently for this session — or fork the restricting work into a child session to keep this session's label"
+                "blocked by policy; every offered plan also accepts this call's narrowing, permanently for this session. Fork the restricting work into a child session to keep this session's label; or run every later step that needs the current label first, then execute a plan with execute_remedy_plan in a later response"
             }
             None => match surface {
                 FeedbackSurface::Root { .. } => {
-                    "blocked by policy; execute one offered plan with execute_remedy_plan in your next response — it also accepts this call's narrowing, permanently for this session, so run any later step that needs the current label first"
+                    "blocked by policy; every offered plan also accepts this call's narrowing, permanently for this session. Run every later step that needs the current label first, then execute one with execute_remedy_plan in a later response"
                 }
                 FeedbackSurface::Child => {
-                    "blocked by policy; execute one offered plan with execute_remedy_plan in your next response; its narrowing restricts this branch's label only — the parent session is unaffected — and accepting it is permanent for this branch"
+                    "blocked by policy; every offered plan also accepts this call's narrowing, permanent for this branch — the parent session is unaffected. Run every later step of this branch that needs the current label first, then execute one with execute_remedy_plan in a later response"
                 }
             },
         }
@@ -262,7 +265,7 @@ pub fn cast_offer_feedback(handle: &str, narrowing: &Narrowing, surface: Feedbac
     })
     .expect("the narrowing payload serializes");
     format!(
-        "result withheld: admitting it narrows the trajectory label; accept with execute_remedy_plan in your next response — acceptance is {}\n{payload}",
+        "result withheld: admitting it narrows the trajectory label, and acceptance is {}. Run every later step that needs the current label first, then accept with execute_remedy_plan in a later response\n{payload}",
         acceptance_cost(surface)
     )
 }
