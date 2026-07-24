@@ -116,6 +116,11 @@ pub enum Fact {
         proposed_label: Label,
         proposed_effects: Vec<EffectKind>,
     },
+    DispatchSucceeded {
+        trajectory: TrajectoryId,
+        dispatch: DispatchId,
+        effects: Vec<EffectKind>,
+    },
     DispatchClosed {
         trajectory: TrajectoryId,
         dispatch: DispatchId,
@@ -196,6 +201,7 @@ impl Fact {
             | Fact::AssistantMessage { trajectory, .. }
             | Fact::BlockFeedback { trajectory, .. }
             | Fact::DispatchOpened { trajectory, .. }
+            | Fact::DispatchSucceeded { trajectory, .. }
             | Fact::DispatchClosed { trajectory, .. }
             | Fact::Ruling { trajectory, .. }
             | Fact::Acceptance { trajectory, .. }

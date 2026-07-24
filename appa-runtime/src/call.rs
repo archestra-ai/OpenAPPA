@@ -59,12 +59,27 @@ impl CallSession {
         self.core.tools.as_deref()
     }
 
+    /// Begin one agent run (one framework `prompt`): admit the user turn and take the run lease.
+    /// Opens the run's first inference round; signal each later model completion with
+    /// [`CallSession::begin_round`].
     pub fn begin_turn(&mut self, text: impl Into<String>) -> Result<(), CallError> {
         if self.turn_active {
             return Err(CallError::TurnActive);
         }
         self.core.admit_user_turn(text.into())?;
+        self.core.round += 1;
         self.turn_active = true;
+        Ok(())
+    }
+
+    /// Signal that a new model completion is being mediated. Load-bearing for informed
+    /// acceptance: a remedy plan that accepts a narrowing executes only in a round after the one
+    /// that surfaced its offer, so a framework must call this at each completion boundary — one
+    /// that never does cannot execute acceptance-carrying plans at all (fail-closed; the model
+    /// keeps receiving the next-response refusal). Ruling-only plans are not round-gated.
+    pub fn begin_round(&mut self) -> Result<(), CallError> {
+        self.guard_ready()?;
+        self.core.round += 1;
         Ok(())
     }
 

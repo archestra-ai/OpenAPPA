@@ -412,6 +412,51 @@ async fn a_blocked_return_crosses_only_the_chosen_derivation() {
 }
 
 #[tokio::test]
+async fn a_returned_child_session_refuses_a_new_turn_with_conflict() {
+    let (model, seen) = spawn_scripted_model(vec![
+        final_round("1", "parent ready"),
+        tool_round("2", "submit_result", r#"{"value":"finding"}"#),
+    ])
+    .await;
+    let base = spawn_server(runtime_with_echo(model)).await;
+    let client = reqwest::Client::new();
+
+    let first = client.post(&base).json(&user_request("start")).send().await.unwrap();
+    let parent = first
+        .headers()
+        .get("x-appa-session")
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_string();
+
+    let child_resp = client
+        .post(&base)
+        .header("x-appa-parent-session", &parent)
+        .json(&user_request("investigate"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(child_resp.status(), 200);
+    let child = child_resp
+        .headers()
+        .get("x-appa-session")
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_string();
+
+    let requests_before = seen.lock().unwrap().len();
+    let re_drive = client
+        .post(&base)
+        .header("x-appa-session", &child)
+        .json(&user_request("return again"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(re_drive.status(), 409);
+    assert_eq!(seen.lock().unwrap().len(), requests_before);
+}
+
+#[tokio::test]
 async fn a_void_submit_result_crosses_nothing_to_the_parent() {
     let (model, seen) = spawn_scripted_model(vec![
         final_round("1", "parent ready"),

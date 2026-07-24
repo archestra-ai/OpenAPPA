@@ -23,6 +23,7 @@ use thiserror::Error;
 use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
 
+use crate::common::uninformed_acceptance_feedback;
 use crate::external::{
     AuthorityAnswer, AuthorityRequest, CastAnswer as BackendCast, CastInput, SanitizerAnswer, SanitizerInput,
 };
@@ -166,6 +167,8 @@ pub enum BeginTurnError {
     Cancelled,
     #[error("the reserved child belongs to another mediator")]
     ForeignFork,
+    #[error("this session already returned its result — a returned child is closed to new turns")]
+    SessionReturned,
     #[error("session store fault: {0}")]
     Store(#[from] StoreError),
 }
@@ -244,6 +247,7 @@ impl Lifecycle {
 struct PendingBlock {
     call: ResolvedCall,
     offers: Vec<(String, RemedyPlan)>,
+    offered_round: u32,
 }
 
 struct PendingReturn {
@@ -251,6 +255,7 @@ struct PendingReturn {
     body: String,
     raw_digest: RawResultDigest,
     offers: Vec<(String, ReturnPlan)>,
+    offered_round: u32,
 }
 
 struct PendingCast {
@@ -376,9 +381,9 @@ impl Mediator {
     ) -> Result<Turn, BeginTurnError> {
         let mut depth = 0u32;
         let mut cursor = session.clone();
-        let parent = self.store().parent_of(&tenant, &cursor)?;
-        let is_child = parent.is_some();
-        let mut next = parent;
+        let direct_parent = self.store().parent_of(&tenant, &cursor)?;
+        let is_child = direct_parent.is_some();
+        let mut next = direct_parent.clone();
         while let Some(parent) = next {
             depth = depth.saturating_add(1);
             cursor = parent;
@@ -386,7 +391,15 @@ impl Mediator {
         }
 
         let value = LabeledValue::new(ValueBody::new(text), self.config().boundary_label().clone());
-        let turn_admission = self.store().finalize(&tenant, &session, |_, revision| {
+        let mut returned = false;
+        let turn_admission = self.store().finalize(&tenant, &session, |facts, revision| {
+            if let Some(parent) = &direct_parent {
+                let projection = Projection::build(facts, revision);
+                if projection.view(parent).returns_by(&session) > 0 {
+                    returned = true;
+                    return None;
+                }
+            }
             Some(FactBatch::new(
                 revision,
                 vec![Fact::ValueAdmitted {
@@ -396,6 +409,9 @@ impl Mediator {
                 }],
             ))
         })?;
+        if returned {
+            return Err(BeginTurnError::SessionReturned);
+        }
 
         Ok(Turn {
             mediator: self.clone(),
@@ -678,7 +694,11 @@ impl Turn {
                             })
                             .collect::<Vec<_>>();
                         let feedback = crate::feedback::block_feedback(&raw, &planned, &offers, surface);
-                        self.pending.push(PendingBlock { call, offers });
+                        self.pending.push(PendingBlock {
+                            call,
+                            offers,
+                            offered_round: self.rounds,
+                        });
                         feedback
                     };
                     self.feedback(call_id, &feedback)?;
@@ -728,6 +748,14 @@ impl Turn {
             .find(|(offer, _)| offer == handle)
             .map(|(_, plan)| plan.clone())
             .expect("the cohort was found by this handle");
+        let accepts_narrowing = chosen
+            .steps
+            .iter()
+            .any(|step| matches!(step, appa_engine::plan::RemedyStep::Accept(_)));
+        if accepts_narrowing && self.pending[cohort_index].offered_round == self.rounds {
+            self.feedback(call_id, &uninformed_acceptance_feedback(handle))?;
+            return Ok(CallProgress::Go);
+        }
         let (log, revision) = self.mediator.store().snapshot(&self.tenant, &self.session)?;
         let projection = Projection::build(&log, revision);
         let views = projection.view(&self.session);
@@ -959,7 +987,16 @@ impl Turn {
                     .collect();
                 let menu: Vec<String> = offers
                     .iter()
-                    .map(|(handle, plan)| format!("\"{handle}\" to {}", describe_return_plan(plan)))
+                    .map(|(handle, plan)| {
+                        let informed = match plan {
+                            // Acceptance-carrying plans are informed: executable next response only.
+                            ReturnPlan::Accept(_) | ReturnPlan::Sanitize { residual: Some(_), .. } => {
+                                " (in your next response)"
+                            }
+                            ReturnPlan::Sanitize { residual: None, .. } => "",
+                        };
+                        format!("\"{handle}\" to {}{informed}", describe_return_plan(plan))
+                    })
                     .collect();
                 let feedback = format!(
                     "returning this raw would narrow the parent; call execute_remedy_plan with plan_id {}; or submit_result null when the child has completed its side effects and the parent needs no value",
@@ -970,6 +1007,7 @@ impl Turn {
                     body: body.to_string(),
                     raw_digest: RawResultDigest::of(body.as_bytes()),
                     offers,
+                    offered_round: self.rounds,
                 });
                 drop(projection);
                 self.feedback(call_id, &feedback)?;
@@ -995,6 +1033,14 @@ impl Turn {
             .find(|(offer, _)| offer == handle)
             .map(|(_, plan)| plan.clone())
             .expect("the caller located this pending return offer");
+        let accepts_narrowing = matches!(
+            &plan,
+            ReturnPlan::Accept(_) | ReturnPlan::Sanitize { residual: Some(_), .. }
+        );
+        if accepts_narrowing && self.pending_returns[index].offered_round == self.rounds {
+            self.feedback(call_id, &uninformed_acceptance_feedback(handle))?;
+            return Ok(CallProgress::Go);
+        }
         let parent = self.pending_returns[index].parent.clone();
         {
             let (log, revision) = self.mediator.store().snapshot(&self.tenant, &self.session)?;
@@ -1229,6 +1275,21 @@ impl Turn {
         resolved: DimValue,
         narrowing: Narrowing,
     ) -> Result<(), TurnError> {
+        self.mediator
+            .store()
+            .finalize(&self.tenant, &self.session, |facts, revision| {
+                let projection = Projection::build(facts, revision);
+                let views = projection.view(&self.session);
+                if views.is_succeeded(&dispatch) {
+                    return None;
+                }
+                Some(
+                    self.mediator
+                        .engine()
+                        .observe_success(&views, &dispatch, &call)
+                        .expect("the runtime holds this dispatch open and checkpoints it once"),
+                )
+            })?;
         let handle = format!("remedy-{}", self.next_handle);
         self.next_handle += 1;
         let feedback = crate::feedback::cast_offer_feedback(&handle, &narrowing);
@@ -1250,12 +1311,7 @@ impl Turn {
     fn handle_execute_cast_accept(&mut self, call_id: &ToolCallId, index: usize) -> Result<CallProgress, TurnError> {
         if self.pending_casts[index].offered_round == self.rounds {
             let handle = self.pending_casts[index].handle.clone();
-            self.feedback(
-                call_id,
-                &format!(
-                    "this acceptance predates the offer it names; read the offer, then call execute_remedy_plan with plan_id \"{handle}\" in your next response"
-                ),
-            )?;
+            self.feedback(call_id, &uninformed_acceptance_feedback(&handle))?;
             return Ok(CallProgress::Go);
         }
 
@@ -1603,7 +1659,13 @@ impl Turn {
                         Some(batch)
                     }
                     Err(AdmitError::NotOpen) => None,
-                    Err(AdmitError::UnknownTool(_) | AdmitError::DigestMismatch | AdmitError::ForeignDispatch) => {
+                    Err(
+                        AdmitError::UnknownTool(_)
+                        | AdmitError::DigestMismatch
+                        | AdmitError::ForeignDispatch
+                        | AdmitError::AlreadySucceeded
+                        | AdmitError::SuccessContradicted,
+                    ) => {
                         result = Admission::InvariantBreach;
                         None
                     }

@@ -58,7 +58,10 @@ fn wire_plans(offers: &[(String, RemedyPlan)]) -> Vec<WirePlan<'_>> {
                     covers: &required.covers,
                 })
                 .collect(),
-            accepts_narrowing: plan.steps.contains(&appa_engine::plan::RemedyStep::Accept),
+            accepts_narrowing: plan
+                .steps
+                .iter()
+                .any(|step| matches!(step, appa_engine::plan::RemedyStep::Accept(_))),
         })
         .collect()
 }
@@ -120,25 +123,25 @@ pub fn block_feedback(
     } else if raw.requirement_gaps.is_empty() {
         match surface {
             FeedbackSurface::Root { can_fork: true } => {
-                "narrowing: this call restricts the trajectory label; accept it with execute_remedy_plan, or fork the restricting work into a child session to keep this session's label"
+                "narrowing: this call restricts the trajectory label; accept it with execute_remedy_plan in your next response, or fork the restricting work into a child session to keep this session's label"
             }
             FeedbackSurface::Root { can_fork: false } => {
-                "narrowing: this call restricts the trajectory label; accept it with execute_remedy_plan"
+                "narrowing: this call restricts the trajectory label; accept it with execute_remedy_plan in your next response"
             }
             FeedbackSurface::Child => {
-                "narrowing: this call restricts this branch's label only — the parent session is unaffected; accept it with execute_remedy_plan"
+                "narrowing: this call restricts this branch's label only — the parent session is unaffected; accept it with execute_remedy_plan in your next response"
             }
         }
     } else if raw.narrowing.is_some() {
         match surface {
             FeedbackSurface::Root { can_fork: true } => {
-                "blocked by policy; execute one offered plan with execute_remedy_plan — it also accepts this call's narrowing — or fork the restricting work into a child session to keep this session's label"
+                "blocked by policy; execute one offered plan with execute_remedy_plan in your next response — it also accepts this call's narrowing — or fork the restricting work into a child session to keep this session's label"
             }
             FeedbackSurface::Root { can_fork: false } => {
-                "blocked by policy; execute one offered plan with execute_remedy_plan"
+                "blocked by policy; execute one offered plan with execute_remedy_plan in your next response"
             }
             FeedbackSurface::Child => {
-                "blocked by policy; execute one offered plan with execute_remedy_plan; its narrowing restricts this branch's label only — the parent session is unaffected"
+                "blocked by policy; execute one offered plan with execute_remedy_plan in your next response; its narrowing restricts this branch's label only — the parent session is unaffected"
             }
         }
     } else {
@@ -280,7 +283,7 @@ mod tests {
         };
         let accept_plan = RemedyPlan {
             id: PlanId::new(0),
-            steps: vec![RemedyStep::Accept],
+            steps: vec![RemedyStep::Accept(narrowing())],
             required: vec![],
         };
         let planned = PlannedBlock {
@@ -325,7 +328,7 @@ mod tests {
             narrowing: Some(narrowing()),
         };
         let mut plan = plan_with("officer", vec![floor]);
-        plan.steps.push(RemedyStep::Accept);
+        plan.steps.push(RemedyStep::Accept(narrowing()));
         let planned = PlannedBlock {
             raw: raw.clone(),
             plans: vec![plan.clone()],
@@ -381,6 +384,10 @@ mod tests {
                     tool: ToolName::new("backup"),
                     reason: "emit the prior".to_string(),
                 },
+                Recommendation::Redispatch {
+                    tool: ToolName::new("snapshot"),
+                    reason: "emit the prior".to_string(),
+                },
                 Recommendation::Fork {
                     reason: "advisory".to_string(),
                 },
@@ -402,6 +409,7 @@ mod tests {
         assert_eq!(payload["plans"][1]["plan_id"], "remedy-1");
         assert_eq!(payload["plans"][1]["rulings"][0]["authority"], "officer-b");
         assert_eq!(payload["redispatch"][0]["tool"], "backup");
+        assert_eq!(payload["redispatch"][1]["tool"], "snapshot");
         assert!(payload.get("fork").is_none());
 
         let none_planned = PlannedBlock {

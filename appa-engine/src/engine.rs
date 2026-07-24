@@ -85,6 +85,18 @@ impl Engine {
         admit::admit_result(&self.registry, views, dispatch, call, admission)
     }
 
+    /// Record observed success for a still-open dispatch whose value finalization is deferred (a
+    /// pending-cast offer): its declared effects commit now, at the one append point the spec puts
+    /// at success, while the raw result stays confined. See [`crate::admit::observe_success`].
+    pub fn observe_success(
+        &self,
+        views: &Views,
+        dispatch: &DispatchId,
+        call: &ResolvedCall,
+    ) -> Result<FactBatch, AdmitError> {
+        admit::observe_success(&self.registry, views, dispatch, call)
+    }
+
     /// The narrowing admitting a cast-resolved value of `call` would fold into the live trajectory
     /// label, or `None` when it does not move it — the whole filled label, established dimensions
     /// included (see `admit::pending_cast_narrowing`). The runtime derives the acceptance offer

@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::authority::Authority;
-use crate::check::{self, CheckOutcome, Gap, RawBlock};
+use crate::check::{self, CheckOutcome, Gap, Narrowing, RawBlock};
 use crate::contract::ToolContract;
 use crate::fact::EffectKind;
 use crate::label::{Adequacy, Dim, Label};
@@ -33,7 +33,7 @@ impl PlanId {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemedyStep {
     Authorize(AuthorityName),
-    Accept,
+    Accept(Narrowing),
 }
 
 /// An executable remedy plan: an atomic composition of steps that clears the **whole** block.
@@ -86,8 +86,8 @@ struct State {
     effects: BTreeSet<EffectKind>,
 }
 
-/// Plan the remedies for a raw block. Emits the executable plan when the block clears in one atomic
-/// step, and a curative `Redispatch` when only a prior tool call unlocks it; `Fork` is always
+/// Plan the remedies for a raw block. Emits the executable plans when the block clears in one atomic
+/// step, and every curative `Redispatch` when only a prior tool call unlocks it; `Fork` is always
 /// advisory. See the module docs for the curability model.
 pub(crate) fn plan(registry: &Registry, views: &Views, call: &ResolvedCall, raw: &RawBlock) -> PlannedBlock {
     let start = State {
@@ -98,10 +98,10 @@ pub(crate) fn plan(registry: &Registry, views: &Views, call: &ResolvedCall, raw:
     let plans = enumerate_plans(registry, &start, call);
 
     let mut recommendations = Vec::new();
-    if plans.is_empty()
-        && let Some((tool, reason)) = curative_redispatch(registry, &start, call, raw)
-    {
-        recommendations.push(Recommendation::Redispatch { tool, reason });
+    if plans.is_empty() {
+        for (tool, reason) in curative_redispatches(registry, &start, call, raw) {
+            recommendations.push(Recommendation::Redispatch { tool, reason });
+        }
     }
     let fork_reason = match (&raw.narrowing, raw.requirement_gaps.is_empty()) {
         (Some(_), true) => {
@@ -128,7 +128,14 @@ pub(crate) fn plan(registry: &Registry, views: &Views, call: &ResolvedCall, raw:
 fn directly_clearable(registry: &Registry, state: &State, call: &ResolvedCall) -> Option<Vec<RemedyStep>> {
     let contract = registry.tool(call.tool())?;
     let has_effect = |kind: &EffectKind| state.effects.contains(kind);
-    match check::evaluate_state(registry, contract, &state.label, &has_effect, call) {
+    match check::evaluate_state(
+        registry,
+        contract,
+        &state.label,
+        &has_effect,
+        call,
+        check::PlaceholderGaps::FailClosed,
+    ) {
         CheckOutcome::Allow => Some(Vec::new()),
         CheckOutcome::Unresolved(_) => None,
         CheckOutcome::Block(block) => {
@@ -140,8 +147,8 @@ fn directly_clearable(registry: &Registry, state: &State, call: &ResolvedCall) -
                     steps.push(step);
                 }
             }
-            if block.narrowing.is_some() {
-                steps.push(RemedyStep::Accept);
+            if let Some(narrowing) = block.narrowing {
+                steps.push(RemedyStep::Accept(narrowing));
             }
             Some(steps)
         }
@@ -153,7 +160,14 @@ fn enumerate_plans(registry: &Registry, state: &State, call: &ResolvedCall) -> V
         return Vec::new();
     };
     let has_effect = |kind: &EffectKind| state.effects.contains(kind);
-    let block = match check::evaluate_state(registry, contract, &state.label, &has_effect, call) {
+    let block = match check::evaluate_state(
+        registry,
+        contract,
+        &state.label,
+        &has_effect,
+        call,
+        check::PlaceholderGaps::FailClosed,
+    ) {
         CheckOutcome::Block(block) => block,
         CheckOutcome::Allow | CheckOutcome::Unresolved(_) => return Vec::new(),
     };
@@ -194,8 +208,8 @@ fn enumerate_plans(registry: &Registry, state: &State, call: &ResolvedCall) -> V
                 .iter()
                 .map(|r| RemedyStep::Authorize(r.authority.clone()))
                 .collect();
-            if block.narrowing.is_some() {
-                steps.push(RemedyStep::Accept);
+            if let Some(narrowing) = &block.narrowing {
+                steps.push(RemedyStep::Accept(narrowing.clone()));
             }
             plans.push(RemedyPlan {
                 id: PlanId(plans.len() as u32),
@@ -222,13 +236,20 @@ fn enumerate_plans(registry: &Registry, state: &State, call: &ResolvedCall) -> V
 fn prerequisite_runnable(registry: &Registry, state: &State, tool: &ToolContract) -> bool {
     let call = synthetic_call(tool);
     let has_effect = |kind: &EffectKind| state.effects.contains(kind);
-    match check::evaluate_state(registry, tool, &state.label, &has_effect, &call) {
+    match check::evaluate_state(
+        registry,
+        tool,
+        &state.label,
+        &has_effect,
+        &call,
+        check::PlaceholderGaps::Waived,
+    ) {
         CheckOutcome::Allow => true,
         CheckOutcome::Unresolved(_) => false,
         CheckOutcome::Block(block) => block
             .requirement_gaps
             .iter()
-            .all(|gap| matches!(gap, Gap::Includes { .. }) || authority_for(registry, gap, &tool.tags).is_some()),
+            .all(|gap| authority_for(registry, gap, &tool.tags).is_some()),
     }
 }
 
@@ -312,19 +333,27 @@ fn is_unresolved(registry: &Registry, state: &State, call: &ResolvedCall) -> boo
         Some(contract) => {
             let has_effect = |kind: &EffectKind| state.effects.contains(kind);
             matches!(
-                check::evaluate_state(registry, contract, &state.label, &has_effect, call),
+                check::evaluate_state(
+                    registry,
+                    contract,
+                    &state.label,
+                    &has_effect,
+                    call,
+                    check::PlaceholderGaps::FailClosed
+                ),
                 CheckOutcome::Unresolved(_)
             )
         }
     }
 }
 
-fn curative_redispatch(
+fn curative_redispatches(
     registry: &Registry,
     start: &State,
     call: &ResolvedCall,
     raw: &RawBlock,
-) -> Option<(ToolName, String)> {
+) -> Vec<(ToolName, String)> {
+    let mut curative = Vec::new();
     for tool in registry.tools() {
         if !prerequisite_runnable(registry, start, tool) {
             continue;
@@ -335,10 +364,10 @@ fn curative_redispatch(
         }
         let mut visiting = Vec::new();
         if curable(registry, &next, call, &mut visiting) {
-            return Some((tool.name.clone(), redispatch_reason(tool, raw)));
+            curative.push((tool.name.clone(), redispatch_reason(tool, raw)));
         }
     }
-    None
+    curative
 }
 
 fn redispatch_reason(tool: &ToolContract, raw: &RawBlock) -> String {
@@ -670,7 +699,13 @@ mod tests {
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("get", json!({})));
         assert!(planned.is_curable());
-        assert_eq!(planned.plans[0].steps, vec![RemedyStep::Accept]);
+        assert_eq!(
+            planned.plans[0].steps,
+            vec![RemedyStep::Accept(Narrowing {
+                from: known(TRUSTED, Audience::Public),
+                to: known(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
+            })]
+        );
     }
 
     #[test]
@@ -708,6 +743,242 @@ mod tests {
         assert!(matches!(
             planned.recommendations.iter().find(|r| r.is_curative()),
             Some(Recommendation::Redispatch { tool, .. }) if tool == &ToolName::new("backup")
+        ));
+    }
+
+    #[test]
+    fn prior_gap_with_multiple_emitters_surfaces_every_curative_redispatch() {
+        let delete = ToolContract {
+            name: ToolName::new("delete_db"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![],
+            requires: Requires {
+                history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
+                ..Requires::default()
+            },
+            output_sanitizer: None,
+        };
+        let backup = |name: &str| ToolContract {
+            name: ToolName::new(name),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![EffectKind::new("backup.done")],
+            requires: Requires::default(),
+            output_sanitizer: None,
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![delete, backup("backup_full"), backup("backup_fast")],
+            authorities: vec![],
+            sanitizers: vec![],
+            casts: vec![],
+        });
+        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let planned = plan_of(&registry, &log, &call("delete_db", json!({})));
+        assert!(planned.is_curable());
+        let curative: Vec<&ToolName> = planned
+            .recommendations
+            .iter()
+            .filter_map(|r| match r {
+                Recommendation::Redispatch { tool, .. } => Some(tool),
+                Recommendation::Fork { .. } => None,
+            })
+            .collect();
+        assert_eq!(
+            curative,
+            vec![&ToolName::new("backup_fast"), &ToolName::new("backup_full")]
+        );
+    }
+
+    #[test]
+    fn static_includes_prerequisite_without_covering_authority_is_not_advertised() {
+        let delete = ToolContract {
+            name: ToolName::new("delete_db"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![],
+            requires: Requires {
+                history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
+                ..Requires::default()
+            },
+            output_sanitizer: None,
+        };
+        let backup = ToolContract {
+            name: ToolName::new("backup"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![EffectKind::new("backup.done")],
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                        Audience::restricted([ReaderId::new("auditor")]),
+                    ))],
+                },
+                ..Requires::default()
+            },
+            output_sanitizer: None,
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![delete, backup],
+            authorities: vec![],
+            sanitizers: vec![],
+            casts: vec![],
+        });
+        let log = vec![user_value(known(
+            TRUSTED,
+            Audience::restricted([ReaderId::new("internal")]),
+        ))];
+        let planned = plan_of(&registry, &log, &call("delete_db", json!({})));
+        assert!(!planned.is_curable());
+        assert!(planned.recommendations.iter().all(|r| !r.is_curative()));
+    }
+
+    #[test]
+    fn static_includes_prerequisite_with_covering_authority_is_advertised() {
+        let delete = ToolContract {
+            name: ToolName::new("delete_db"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![],
+            requires: Requires {
+                history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
+                ..Requires::default()
+            },
+            output_sanitizer: None,
+        };
+        let backup = ToolContract {
+            name: ToolName::new("backup"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![EffectKind::new("backup.done")],
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                        Audience::restricted([ReaderId::new("auditor")]),
+                    ))],
+                },
+                ..Requires::default()
+            },
+            output_sanitizer: None,
+        };
+        let voucher = Authority {
+            name: AuthorityName::new("voucher"),
+            mandate: Mandate {
+                reader_ceiling: Some(Audience::restricted([ReaderId::new("auditor")])),
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![delete, backup],
+            authorities: vec![voucher],
+            sanitizers: vec![],
+            casts: vec![],
+        });
+        let log = vec![user_value(known(
+            TRUSTED,
+            Audience::restricted([ReaderId::new("internal")]),
+        ))];
+        let planned = plan_of(&registry, &log, &call("delete_db", json!({})));
+        assert!(planned.is_curable());
+        assert!(matches!(
+            planned.recommendations.iter().find(|r| r.is_curative()),
+            Some(Recommendation::Redispatch { tool, .. }) if tool == &ToolName::new("backup")
+        ));
+    }
+
+    #[test]
+    fn a_sentinel_shaped_static_recipient_is_not_mistaken_for_a_placeholder() {
+        let archive = ToolContract {
+            name: ToolName::new("archive"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![],
+            requires: Requires {
+                history: vec![HistoryRequirement::Prior(EffectKind::new("email.sent"))],
+                ..Requires::default()
+            },
+            output_sanitizer: None,
+        };
+        let send = ToolContract {
+            name: ToolName::new("send"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![EffectKind::new("email.sent")],
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![
+                        AudienceRequirement::Includes(RecipientSpec::Static(Audience::restricted([ReaderId::new(
+                            "<unresolved:to>",
+                        )]))),
+                        AudienceRequirement::Includes(RecipientSpec::Placeholder("to".into())),
+                    ],
+                },
+                ..Requires::default()
+            },
+            output_sanitizer: None,
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![archive, send],
+            authorities: vec![],
+            sanitizers: vec![],
+            casts: vec![],
+        });
+        let log = vec![user_value(known(
+            TRUSTED,
+            Audience::restricted([ReaderId::new("internal")]),
+        ))];
+        let planned = plan_of(&registry, &log, &call("archive", json!({})));
+        assert!(!planned.is_curable());
+    }
+
+    #[test]
+    fn placeholder_includes_prerequisite_is_still_advertised() {
+        let archive = ToolContract {
+            name: ToolName::new("archive"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![],
+            requires: Requires {
+                history: vec![HistoryRequirement::Prior(EffectKind::new("email.sent"))],
+                ..Requires::default()
+            },
+            output_sanitizer: None,
+        };
+        let send = ToolContract {
+            name: ToolName::new("send"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![EffectKind::new("email.sent")],
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Placeholder("to".into()))],
+                },
+                ..Requires::default()
+            },
+            output_sanitizer: None,
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![archive, send],
+            authorities: vec![],
+            sanitizers: vec![],
+            casts: vec![],
+        });
+        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let planned = plan_of(&registry, &log, &call("archive", json!({})));
+        assert!(planned.is_curable());
+        assert!(matches!(
+            planned.recommendations.iter().find(|r| r.is_curative()),
+            Some(Recommendation::Redispatch { tool, .. }) if tool == &ToolName::new("send")
         ));
     }
 
@@ -1028,7 +1299,7 @@ mod tests {
             let call = synthetic_call(contract);
 
             let has_effect = |kind: &EffectKind| state.effects.contains(kind);
-            let raw = match check::evaluate_state(&registry, contract, &state.label, &has_effect, &call) {
+            let raw = match check::evaluate_state(&registry, contract, &state.label, &has_effect, &call, check::PlaceholderGaps::FailClosed) {
                 CheckOutcome::Block(raw) => raw,
                 _ => return Ok(()),
             };
@@ -1078,7 +1349,7 @@ mod tests {
             let contract = registry.tool(&target).expect("target is modulo the re-keyed tool count");
             let call = synthetic_call(contract);
             let has_effect = |kind: &EffectKind| state.effects.contains(kind);
-            let raw = match check::evaluate_state(&registry, contract, &state.label, &has_effect, &call) {
+            let raw = match check::evaluate_state(&registry, contract, &state.label, &has_effect, &call, check::PlaceholderGaps::FailClosed) {
                 CheckOutcome::Block(raw) => raw,
                 _ => return Ok(()),
             };

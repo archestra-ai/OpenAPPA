@@ -18,6 +18,8 @@ pub enum BranchError {
     AlreadyForked,
     #[error("the parent's current label has an unresolved dimension — resolve it before forking")]
     ParentUnresolved,
+    #[error("the fork parent already returned its result — a returned child cannot fork")]
+    ParentReturned,
     #[error("the child has already returned — a child returns at most once")]
     AlreadyReturned,
     #[error("the child was not forked from this parent (reparenting/cross-family merge refused)")]
@@ -60,6 +62,9 @@ pub(crate) fn seed_child(
     }
     if parent.parent_of(child).is_some() {
         return Err(BranchError::AlreadyForked);
+    }
+    if parent.returns_by(parent.trajectory()) > 0 {
+        return Err(BranchError::ParentReturned);
     }
     match &return_policy {
         ReturnPolicy::Raw => {}
@@ -123,8 +128,12 @@ pub(crate) fn submit_child_return(
 }
 
 /// The one place a return's facts are assembled: the child's `ChildReturn` record, the optional
-/// return-scoped acceptance, the parent's `ValueAdmitted` at `parent.combine(returned)`, and the
-/// `Merge` boundary — always one batch, never split across commit points.
+/// return-scoped acceptance, the parent's `ValueAdmitted` under the returned value's own label,
+/// and the `Merge` boundary — always one batch, never split across commit points. The parent
+/// *fold* absorbs the crossing at projection (intersect readers, min trust) — identical to folding
+/// `parent.combine(returned)`, since `combine` is idempotent — while the stored per-value label
+/// stays the value's intrinsic one, so authority review context and cast targeting see what the
+/// value *is*, not the parent's unrelated restrictions.
 fn crossing_facts(
     parent: &Views,
     child: &TrajectoryId,
@@ -133,7 +142,6 @@ fn crossing_facts(
     acceptance: Option<Narrowing>,
 ) -> Vec<Fact> {
     let id = ChildReturnId::new(child.clone(), parent.returns_by(child));
-    let merged_label = parent.current_label().combine(&value.label);
     let mut facts = vec![Fact::ChildReturn {
         trajectory: child.clone(),
         id: id.clone(),
@@ -149,7 +157,7 @@ fn crossing_facts(
     }
     facts.push(Fact::ValueAdmitted {
         trajectory: parent.trajectory().clone(),
-        value: LabeledValue::new(value.body, merged_label),
+        value,
         provenance: Provenance::ChildReturn {
             child: child.clone(),
             id: id.clone(),
@@ -1080,6 +1088,25 @@ mod tests {
     }
 
     #[test]
+    fn a_returned_child_cannot_become_a_fork_parent() {
+        let mut log = forked(known(SUSPICIOUS, internal()));
+        let projection = build(&log);
+        let ret = submit_child_return(&registry(), &projection.view(&parent()), &child(), raw("finding")).unwrap();
+        log.extend(ret.facts);
+        let projection = build(&log);
+        assert_eq!(
+            seed_child(
+                &registry(),
+                &projection.view(&child()),
+                &TrajectoryId::new("grandchild"),
+                ReturnPolicy::Raw,
+            )
+            .map(|_| ()),
+            Err(BranchError::ParentReturned)
+        );
+    }
+
+    #[test]
     fn a_submission_off_the_fork_policy_is_refused() {
         let log = forked(known(TRUSTED, internal()));
         let projection = build(&log);
@@ -1184,7 +1211,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_result_value_is_engine_derived_not_the_returned_label() {
+    fn merge_admits_the_returned_label_and_the_parent_fold_still_combines() {
         let mut log = forked_bound(known(SUSPICIOUS, internal()), sanitized_policy());
         let values_before = log.iter().filter(|f| matches!(f, Fact::ValueAdmitted { .. })).count();
         let projection = build(&log);
@@ -1202,7 +1229,7 @@ mod tests {
         let projection = build(&log);
         assert_eq!(
             projection.value_label(ValueId::new(values_before as u64)),
-            Some(&known(SUSPICIOUS, internal()))
+            Some(&known(SUSPICIOUS, Audience::Public))
         );
         assert_eq!(
             projection.view(&parent()).current_label(),

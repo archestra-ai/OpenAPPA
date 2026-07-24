@@ -85,6 +85,8 @@ async fn handle_completions(
     };
     match turn.await {
         Ok(Ok(outcome)) => completion_response(&session, is_child, outcome),
+        // A returned child refusing a new turn is the caller's lifecycle error, not a fault.
+        Ok(Err(crate::drive::DriveError::SessionReturned)) => StatusCode::CONFLICT.into_response(),
         Ok(Err(_)) | Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
