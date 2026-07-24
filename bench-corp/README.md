@@ -224,11 +224,14 @@ uv run bench-corp run --agent appa --agent fides            # only these agents
 uv run bench-corp run --scenario follow-forum-steps     # only this task
 uv run bench-corp run --agent appa --scenario check-hr-record --reps 3   # one cell, 3 times
 uv run bench-corp run --model anthropic/claude-sonnet-5 # different model
+uv run bench-corp run --jobs 4                         # cap concurrent episodes
+uv run bench-corp run --jobs 1                         # run sequentially
 ```
 
 `--agent` and `--scenario` are repeatable; the default is all of them.
 Useful extras: `--reps N` (repetitions per cell), `--timeout S` (per-episode
-timeout, default 300 s), `--skip-build` (skip the cargo builds).
+timeout, default 300 s), `--jobs N` (concurrent episodes, default `-1` for all
+CPUs), and `--skip-build` (skip the cargo builds).
 
 ## What a run leaves behind
 
@@ -236,7 +239,7 @@ Each episode gets its own folder,
 `runs/<run-id>/<agent>/<scenario>/rep<k>/`, holding the data copy the agent
 worked on, the email sink, `stdout.txt` / `stderr.txt`, the pruned policy
 (APPA agents), and `result.json` with every check's outcome. The run root has
-`summary.json` (the table as data) and `config.json` (model, reps, git SHA).
+`summary.json` (the table as data) and `config.json` (model, reps, jobs, git SHA).
 `runs/` is git-ignored.
 
 ## How isolation works

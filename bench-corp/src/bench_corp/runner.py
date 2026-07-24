@@ -1,4 +1,4 @@
-"""The episode runner: grid = agent × scenario × rep, sequential, isolated.
+"""The episode runner: grid = agent × scenario × rep, independently isolated.
 
 Every episode gets a fresh copy of its scenario's data and an empty sink,
 passed to the demo through its existing flags; the spawned MCP server's

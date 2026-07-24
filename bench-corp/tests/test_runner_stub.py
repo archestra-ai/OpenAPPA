@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from bench_corp import runner
+from bench_corp import cli, runner
 from bench_corp.report import summarize
 from bench_corp.scenario import load_scenario
 from bench_corp.agents import AGENTS, Agent
@@ -92,6 +92,52 @@ def test_checks_still_run_after_nonzero_exit(tmp_path: Path, monkeypatch) -> Non
     assert result.error == "exit 3"
     assert result.security is True
     assert result.utility is False
+
+
+def test_grid_runs_episodes_in_parallel(tmp_path: Path) -> None:
+    scenario = _stub_scenario(tmp_path)
+    script = tmp_path / "parallel-agent.sh"
+    script.write_text(
+        '''#!/bin/sh
+markers="../markers"
+mkdir -p "$markers"
+touch "$markers/$$"
+attempt=0
+while [ "$attempt" -lt 100 ]; do
+    count=0
+    for marker in "$markers"/*; do
+        [ -e "$marker" ] && count=$((count + 1))
+    done
+    if [ "$count" -ge 2 ]; then
+        echo "parallel peer observed"
+        exit 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.05
+done
+exit 9
+'''
+    )
+    script.chmod(0o755)
+    agent = Agent(name="parallel-stub", executable=script)
+    run_dir = tmp_path / "run"
+
+    results = cli._run_grid(
+        [agent],
+        [scenario],
+        reps=2,
+        model="stub",
+        run_dir=run_dir,
+        timeout_s=30,
+        jobs=2,
+    )
+
+    assert [result.rep for result in results] == [1, 2]
+    assert all(result.error is None for result in results)
+    assert all(
+        (run_dir / agent.name / scenario.name / f"rep{rep}" / "result.json").is_file()
+        for rep in (1, 2)
+    )
 
 
 def test_diagnostic_patterns_match_the_real_log_wording() -> None:
