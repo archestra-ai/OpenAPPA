@@ -1,3 +1,6 @@
+import subprocess
+import sys
+
 import pytest
 
 from appa_dojo.bench import grouped_means, policy_name_for
@@ -32,3 +35,19 @@ def test_grouped_means_preserve_each_eval_dimension() -> None:
         "injection_task_1": 0.5,
         "injection_task_2": 0.0,
     }
+
+
+def test_stock_pipeline_does_not_import_the_native_or_bridge_modules() -> None:
+    code = """
+import os
+import sys
+os.environ["OPENROUTER_API_KEY"] = "test-key"
+from appa_dojo.pipeline import build_pipeline
+from appa_dojo.policies import Policy
+built = build_pipeline("test-model", "none", Policy("open", "version = 1", frozenset()))
+assert built.executor is None
+assert "appa_agent_python" not in sys.modules
+assert "appa_dojo.native" not in sys.modules
+assert "appa_dojo.tool_bridge" not in sys.modules
+"""
+    subprocess.run([sys.executable, "-c", code], check=True)

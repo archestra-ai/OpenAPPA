@@ -1,4 +1,4 @@
-//! External decision backends: authorities, sanitizers, and casts — the runtime's
+//! External decision backends: authorities, sanitizers, and casts — the outer layer's
 //! trusted base of dynamic judgment, invoked south of the engine.
 //!
 //! Three closed backend families (enum dispatch, no `dyn`). Each **fails closed** by default: an

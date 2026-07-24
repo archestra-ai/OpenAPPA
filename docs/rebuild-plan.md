@@ -1,6 +1,22 @@
-# Plan v8: OpenAPPA two-component rebuild (Engine + Runtime) — confining agent-executor
+# Archived plan v8: OpenAPPA two-component rebuild
 
-Status: DRAFT for approval — then autonomous execution.
+Status: SUPERSEDED. This file records the plan that produced the initial engine/runtime
+implementation; it is not the current crate architecture.
+
+The current dependency graph is:
+
+```text
+appa-gateway -------> appa-agent -> appa-runtime -> appa-engine
+appa-sdk --------------------------> appa-runtime
+appa-dojo-sidecar -> appa-sdk
+appa-agent-python -> appa-sdk + appa-runtime
+```
+
+`appa-runtime::Mediator` owns policy assembly, family state, branch-aware context, concrete
+backends, and the canonical turn mediation lifecycle. `appa-sdk` selectively exposes the restricted
+trusted-framework `CallSession` profile. `appa-agent` owns OpenAI-compatible inference and serial
+fork-join. `appa-gateway` preserves the north HTTP contract. The remainder of this document
+describes the superseded monolith that combined today's runtime, agent, and gateway.
 
 **Sources of truth: `docs/spec.md` + the initial task prompt.** All Rust code was dropped in #41;
 from-scratch build. CLAUDE.md's earlier-prototype references are **disregarded** (removed by the

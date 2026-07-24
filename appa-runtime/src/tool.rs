@@ -1,4 +1,4 @@
-//! South tool execution: the runtime *invokes* a tool and classifies the result into a
+//! South tool execution: a backend *invokes* a tool and classifies the result into a
 //! [`ToolOutcome`] (RP3) the turn-drive admits.
 //!
 //! The classification is the whole safety point. A tool either **succeeded** (its `emits` are facts
@@ -20,6 +20,13 @@ use appa_engine::value::{ResolvedCall, ToolName};
 /// effects but is sealed, never admitted.
 pub const DEFAULT_BODY_CAP_BYTES: usize = 256 * 1024;
 
+/// The reserved tool that executes a remedy plan offered after a blocked call.
+pub const EXECUTE_REMEDY_PLAN: &str = "execute_remedy_plan";
+/// The reserved tool that forks a child session for one delegated task.
+pub const FORK: &str = "fork";
+/// The reserved tool through which a child session returns one value to its parent.
+pub const SUBMIT_RESULT: &str = "submit_result";
+
 /// A runtime-owned HTTP client with **redirects disabled** — a newtype so the safe policy is the
 /// only way to obtain one. Redirect-following would let a backend hide a 3xx behind a final 2xx, or
 /// resend a tool/authority payload to a `Location` it chose (307/308).
@@ -36,7 +43,19 @@ impl HttpClient {
         )
     }
 
-    pub(crate) fn inner(&self) -> &reqwest::Client {
+    /// A redirect- and proxy-disabled client for literal loopback capability endpoints.
+    pub fn loopback() -> Self {
+        HttpClient(
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .build()
+                .expect("a loopback-only rustls reqwest client builds"),
+        )
+    }
+
+    /// Access the redirect-disabled client for consumers that own an HTTP protocol layer.
+    pub fn inner(&self) -> &reqwest::Client {
         &self.0
     }
 }
@@ -71,6 +90,8 @@ pub enum BodyDisposition {
     Available(String),
     /// A 2xx body over the cap. Effects commit; no value is admitted (a sealed token to the model).
     RejectedTooLarge,
+    /// Execution succeeded, but the host could not produce a value representation. Effects commit.
+    Unavailable,
 }
 
 /// The real outcome of a tool invocation (RP3). Note that [`ToolOutcome::Failure`] is payload-free
@@ -189,7 +210,7 @@ async fn read_capped(mut response: reqwest::Response, cap: usize) -> ToolOutcome
 /// cannot drive it to grow with the response — total allocation stays `O(cap)`, independent of how
 /// much the backend sends. `limit` uses saturating arithmetic, so an absurd `cap` near `usize::MAX`
 /// cannot overflow.
-pub(crate) async fn read_body_capped(response: &mut reqwest::Response, cap: usize) -> Option<Vec<u8>> {
+pub async fn read_body_capped(response: &mut reqwest::Response, cap: usize) -> Option<Vec<u8>> {
     let limit = cap.saturating_add(1);
     let mut body = Vec::new();
     loop {

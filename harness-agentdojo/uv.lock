@@ -73,11 +73,17 @@ wheels = [
 ]
 
 [[package]]
+name = "appa-agent-python"
+version = "0.1.0"
+source = { editable = "../appa-agent-python" }
+
+[[package]]
 name = "appa-dojo"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "agentdojo" },
+    { name = "appa-agent-python" },
     { name = "openai" },
 ]
 
@@ -90,6 +96,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "agentdojo", specifier = "==0.1.35" },
+    { name = "appa-agent-python", editable = "../appa-agent-python" },
     { name = "openai", specifier = ">=1" },
 ]
 

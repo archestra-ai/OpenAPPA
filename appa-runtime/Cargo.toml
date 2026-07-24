@@ -6,15 +6,14 @@ publish = false
 
 [dependencies]
 appa-engine = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-toml = { workspace = true }
-tracing = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
-reqwest = { workspace = true }
-axum = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
 
 [lints]
 workspace = true

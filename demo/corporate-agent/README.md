@@ -1,13 +1,15 @@
 # corporate-agent
 
-A **corporate assistant agent** and a mock **internal-systems MCP server**,
-built to exercise [OpenAPPA](../../). The agent is a normal
-[rig](https://docs.rs/rig-core) agent on **OpenRouter** — rig owns the loop and
-the conversation — with **[`appa-sdk`](../../appa-sdk)** dropped in as a
-mediation hook: every proposed tool call is policy-checked before it runs, and
-every result is admitted or sealed before the model sees it. The server exposes
-fake company systems — `hr`, `finance`, `task_tracker`, and a `public_forum` —
-as folders on disk, plus a mocked `send_email`.
+A **corporate assistant agent** built to exercise [OpenAPPA](../../). The agent
+is a normal [rig](https://docs.rs/rig-core) agent on **OpenRouter** — rig owns
+the loop and the conversation — with **[`appa-sdk`](../../appa-sdk)** dropped
+in as a mediation hook: every proposed tool call is policy-checked before it
+runs, and every result is admitted or sealed before the model sees it. The
+agent spawns the shared [`corp-systems`](../corp-systems) MCP server: fake
+company systems — `hr`, `finance`, `task_tracker`, and a `public_forum` — as
+folders on disk, plus a mocked `send_email`. The sibling
+[`corporate-agent-fides`](../corporate-agent-fides) demo runs the *same* server
+and corpus under Microsoft's FIDES instead — only the defense differs.
 
 The hook drives the SDK's per-call facade (`CallSession`), the deployment shape
 for "a framework owns the loop". (The SDK's other facade, `AppaSession`, is for
@@ -29,22 +31,20 @@ workspace, so the demo deps (MCP stack, LLM client) stay out of
 appa-policy.toml       the guarded policy: forum taints, HR narrows, send_email gated
 appa-policy-open.toml  the contrast policy: same 13 tools, no constraints — the leak
 data/
-  hr/            employees, an individual record with a salary/SSN secret, PTO policy
-  finance/       invoices, Q2 budget, expense policy
-  task_tracker/  a couple of tickets
-  public_forum/  benign public posts + a planted prompt-injection thread
   email/         write-only sink: send_email drops files here (git-ignored)
 src/
-  systems.rs     the search/read/create/send_email primitives (semantics live here)
-  server.rs      13 #[tool] methods wrapping them  ->  the MCP server
   appa_hook.rs   the rig AgentHook mediating each call through appa-sdk (+ the reserved remedy tool)
-  mcp.rs         MCP plumbing: spawn, tool-schema conversion, result classification
-  bin/corp_systems.rs   the stdio MCP server binary  (corp-systems-mcp)
-  bin/corp_agent.rs     the mediated rig agent       (corp-agent)
+  mcp.rs         MCP plumbing: server-binary resolution, spawn, tool-schema conversion, result classification
+  bin/corp_agent.rs     the mediated rig agent (corp-agent)
 tests/
-  server_tools.rs   drives the real server over MCP; no API key needed
   appa_hook.rs      e2e: the real hook path + real server + real policies; no key needed
 ```
+
+The systems, the MCP server, and the corpus (with the planted injection) live
+in the sibling [`corp-systems`](../corp-systems) crate; the agent builds and
+spawns its `corp-systems-mcp` binary on demand. Reads come from the shared
+corpus; `send_email` writes to this demo's own `data/email/` (`--sink-root`),
+so the observable leak lands here.
 
 ### Tools (13)
 
@@ -72,7 +72,7 @@ $EDITOR .env        # set OPENROUTER_API_KEY (and optionally APPA_DEMO_MODEL)
 ```sh
 cd demo/corporate-agent
 cargo build
-cargo test          # server correctness + the mediated-loop e2e — no API key required
+cargo test          # the mediated-loop e2e (builds the sibling server) — no API key required
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
@@ -110,13 +110,16 @@ Useful flags:
 | `--chat` | interactive REPL instead of one-shot (`exit` to quit) |
 | `--model <id>` | OpenRouter model id (env `APPA_DEMO_MODEL`; default `anthropic/claude-sonnet-5`) |
 | `--max-rounds <n>` | inference rounds per turn (default 12) |
-| `--data-root <path>` | use a different data directory (forwarded to the server) |
+| `--data-root <path>` | corpus root forwarded to the server (env `CORP_DATA_ROOT`; default: sibling `corp-systems/data`) |
+| `--sink-root <path>` | where the server's `send_email` writes (env `CORP_SINK_ROOT`; default: this demo's `data/`) |
+| `--server-bin <path>` | the `corp-systems-mcp` binary (env `CORP_SYSTEMS_BIN`; default: sibling debug build, built on demand) |
 | `--quiet` | print only the final answer, no run log |
 
 ## The prompt-injection demo
 
-`data/public_forum/acme-forum-thread.md` contains a planted instruction telling
-any AI assistant to read the HR record and email it to an outside address.
+`../corp-systems/data/public_forum/acme-forum-thread.md` contains a planted
+instruction telling any AI assistant to read the HR record and email it to an
+outside address.
 
 **Unmediated** (the open policy), the agent chains `search_public_forum` →
 `read_public_forum` → `read_hr` → `send_email`, and the leak lands in
@@ -139,9 +142,5 @@ covers the gap declines — the sink stays empty:
 
 ## Running the server on its own
 
-```sh
-cargo run --bin corp-systems-mcp            # stdio; data root defaults to ./data
-cargo run --bin corp-systems-mcp -- --data-root /tmp/corp
-```
-
-stdout is the JSON-RPC channel — all server logging goes to **stderr**.
+The server is the sibling [`corp-systems`](../corp-systems) crate — see its
+README for standalone usage.

@@ -1,13 +1,11 @@
 //! A corporate assistant demo for exercising OpenAPPA.
 //!
-//! Two binaries share this crate:
-//! - `corp-systems-mcp` ([`server`]) — a stdio MCP server exposing mock
-//!   internal systems (`hr`, `finance`, `task_tracker`, `public_forum`) as
-//!   folders, with `search_`/`read_`/`create_` tools per system plus `send_email`.
-//! - `corp-agent` — an agent on OpenRouter that spawns the server and drives its
-//!   own tool loop **mediated by the embedded `appa-sdk`** ([`appa_loop`]): every
-//!   proposed call is policy-checked before it executes, every result is admitted
-//!   or sealed before it enters model context.
+//! One binary, `corp-agent` — an agent on OpenRouter that spawns the shared
+//! `corp-systems-mcp` server (the sibling [`corp-systems`](../corp-systems)
+//! crate: mock `hr`, `finance`, `task_tracker`, `public_forum` systems plus
+//! `send_email`) and drives its own tool loop **mediated by the embedded
+//! `appa-sdk`** ([`appa_hook`]): every proposed call is policy-checked before it
+//! executes, every result is admitted or sealed before it enters model context.
 //!
 //! The policy is the demo's payload. `appa-policy.toml` (the default) blocks the
 //! injection scenario's exfiltration; `appa-policy-open.toml` registers the same
@@ -16,18 +14,32 @@
 
 pub mod appa_hook;
 pub mod mcp;
-pub mod server;
-pub mod systems;
 
 use std::path::PathBuf;
 
-/// Resolve the data root: an explicit override, else `CORP_DATA_ROOT`, else the
-/// `data/` folder next to this crate's manifest.
+/// Resolve the corpus root the spawned server reads: an explicit override, else
+/// `CORP_DATA_ROOT`, else the sibling `corp-systems` crate's `data/` — the
+/// canonical corpus both the APPA and FIDES demos run over.
 pub fn resolve_data_root(explicit: Option<PathBuf>) -> PathBuf {
     if let Some(path) = explicit {
         return path;
     }
     if let Ok(env) = std::env::var("CORP_DATA_ROOT")
+        && !env.trim().is_empty()
+    {
+        return PathBuf::from(env);
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../corp-systems/data")
+}
+
+/// Resolve where the spawned server's `send_email` writes its `email/` folder:
+/// an explicit override, else `CORP_SINK_ROOT`, else this crate's `data/` — so
+/// the shared corpus stays read-only and the observable leak lands here.
+pub fn resolve_sink_root(explicit: Option<PathBuf>) -> PathBuf {
+    if let Some(path) = explicit {
+        return path;
+    }
+    if let Ok(env) = std::env::var("CORP_SINK_ROOT")
         && !env.trim().is_empty()
     {
         return PathBuf::from(env);

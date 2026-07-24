@@ -52,8 +52,13 @@ impl Drop for TempData {
 }
 
 async fn spawn(root: &PathBuf) -> mcp::CorpSystemsClient {
-    let bin = env!("CARGO_BIN_EXE_corp-systems-mcp");
-    mcp::spawn_corp_systems(&PathBuf::from(bin), root).await.expect("spawn")
+    // The server binary lives in the sibling `corp-systems` crate; the resolver
+    // builds it on demand (concurrent tests serialize on cargo's build lock).
+    let bin = tokio::task::spawn_blocking(|| mcp::resolve_server_bin(None))
+        .await
+        .expect("resolver task")
+        .expect("corp-systems-mcp builds");
+    mcp::spawn_corp_systems(&bin, root, root).await.expect("spawn")
 }
 
 /// Build a hook on `policy` behind the running server, with the user turn already admitted.
