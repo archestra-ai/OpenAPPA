@@ -22,12 +22,11 @@ When a host explicitly establishes a child trajectory before restrictive work, d
 Task variants cover a first task requiring no return value, a schema-bounded derivative, and a return value that cannot be safely derived.
 
 \paragraph{Security question.}
-We evaluate security robustness against multi-turn prompt injection tasks where the attacker controls child-visible content and attempts:
+We evaluate security enforcement across multi-turn agent workflows containing mixed-confidentiality data sources (e.g., confidential user records, untrusted web/email content) and external communication sinks. The evaluation measures whether \appa{}'s dynamic IFC and prospective enforcement prevent policy violations and unauthorized data flows across three primary failure modes:
 \begin{enumerate}
-  \item direct child egress via unauthorized external tools,
-  \item raw-data return through \texttt{submit\_result} or raw merge calls,
-  \item schema-conforming semantic data exfiltration embedded within bounded return values, and
-  \item history erasure or log evasion via branch abandonment.
+  \item \textbf{Unauthorized Egress:} Attempts to transmit restricted or unvetted context to unauthorized external sinks or disallowable tool calls.
+  \item \textbf{Unchecked Return Bleed:} Attempts to return raw, unsanitized payloads or non-compliant schema derivatives from a child branch back into the parent trajectory.
+  \item \textbf{Persistent Privilege Escalation:} Attempts to reuse single-call authorization rulings or persistently widen trajectory security labels across subsequent dispatches.
 \end{enumerate}
 
 \paragraph{Baselines and ablations.}
