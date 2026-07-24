@@ -7,6 +7,8 @@ requires-python = ">=3.10"
 dependencies = [
     "agent-framework-core",
     "agent-framework-openai",
+    # The MCP client: the tools forward to the shared corp-systems-mcp server.
+    "mcp",
 ]
 
 [project.optional-dependencies]

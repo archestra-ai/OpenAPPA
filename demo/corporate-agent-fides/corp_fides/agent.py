@@ -27,12 +27,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from agent_framework import Agent
 from agent_framework.openai import OpenAIChatClient
 from agent_framework.security import SecureAgentConfig
-
-from .tools import build_tools
 
 # The agent's system prompt. This is *agent* configuration, not policy — FIDES
 # governs flows (labels, gates), never the model's instructions. Kept verbatim
@@ -69,19 +68,19 @@ def build_agent(
     *,
     api_key: str,
     model: str,
-    corpus_root: Path,
+    tools: list[Any],
     sink_root: Path,
     defend: bool = True,
     quarantine_model: str | None = None,
 ) -> BuiltAgent:
-    """Assemble the corporate agent over the mock systems.
+    """Assemble the corporate agent over the FIDES-labeled tools (built by
+    :func:`~.tools.build_tools` over a live :class:`~.systems.CorpSystemsClient`).
 
     ``defend=True`` installs FIDES via :class:`SecureAgentConfig`; ``defend=False``
     is the unmediated contrast — the same binary, same loop, same prompt — that
     lets the planted injection reach ``send_email`` and leak, exactly like the
     APPA demo's ``appa-policy-open.toml``.
     """
-    tools, _ = build_tools(corpus_root, sink_root)
     client = make_chat_client(model, api_key)
 
     if not defend:

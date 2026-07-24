@@ -2,14 +2,18 @@
 # Shared setup for the corp-agent-fides scenario scripts. `source` this — don't run it.
 #
 # It cd's to the crate root, loads `.env` (so FIDES_DEMO_MODEL / OPENROUTER_API_KEY
-# are available here and to the module), and defines the `run_agent` /
+# are available here and to the module), builds the shared `corp-systems-mcp`
+# server (the sibling Rust crate both demos spawn), and defines the `run_agent` /
 # `reset_email` / `show_email` helpers the scenarios use. The corpus is the
-# sibling `corporate-agent/data`; the `send_email` sink is this demo's own
+# sibling `corp-systems/data`; the `send_email` sink is this demo's own
 # `data/email/`.
 set -euo pipefail
 
 CRATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$CRATE_DIR"
+
+echo "· building corp-systems-mcp (the shared MCP server)…" >&2
+cargo build -q --manifest-path "$CRATE_DIR/../corp-systems/Cargo.toml"
 
 if [[ -f .env ]]; then
   set -a

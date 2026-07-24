@@ -2,10 +2,13 @@
 
 Thirteen tools — ``search_``/``read_``/``create_`` for each of ``hr``,
 ``finance``, ``task_tracker``, ``public_forum``, plus the outbound
-``send_email`` sink — mirroring the sibling Rust demo's MCP server. What is new
-here is the *labeling*: every tool result carries a FIDES ``security_label``
-(the integrity/confidentiality analogue of OpenAPPA's trust/audience), and the
-egress sink declares the policy that FIDES enforces before it runs.
+``send_email`` sink — the exact surface of the shared ``corp-systems-mcp``
+server. Each is a native Agent Framework tool that *forwards* the call over
+MCP (:class:`~.systems.CorpSystemsClient`), so the semantics are literally the
+sibling Rust server's. What lives here is the *labeling*: every tool result
+carries a FIDES ``security_label`` (the integrity/confidentiality analogue of
+OpenAPPA's trust/audience), and the egress sink declares the policy FIDES
+enforces before it runs.
 
 The mapping from the sibling APPA policy (``appa-policy.toml``) to FIDES labels:
 
@@ -28,13 +31,11 @@ context — exactly the single gated flow the APPA demo guards.
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from agent_framework import Content, tool
 
-from . import systems
-from .systems import System
+from .systems import CorpSystemsClient, System
 
 # Per-system output label (integrity, confidentiality). See module docstring.
 _LABELS: dict[System, tuple[str, str]] = {
@@ -44,9 +45,9 @@ _LABELS: dict[System, tuple[str, str]] = {
     System.PUBLIC_FORUM: ("untrusted", "public"),
 }
 
-# A neutral receipt (creation acks, send confirmations) carries nothing that
-# should taint or restrict the trajectory — the FIDES analogue of APPA's
-# `delta = {}`.
+# A neutral receipt (creation acks, send confirmations, error text from the
+# framework rather than fetched content) carries nothing that should taint or
+# restrict the trajectory — the FIDES analogue of APPA's `delta = {}`.
 _NEUTRAL = ("trusted", "public")
 
 
@@ -60,51 +61,37 @@ def _labeled(text: str, label: tuple[str, str]) -> Content:
     )
 
 
-def _render_search(system: System, query: str, hits: list[systems.Hit]) -> str:
-    if not hits:
-        return f"no matches for {query!r} in the {system.dir_name} system"
-    lines = [f"{len(hits)} match(es) in the {system.dir_name} system:"]
-    lines += [f"- {h.file} — {h.snippet}" for h in hits]
-    return "\n".join(lines)
+def build_tools(client: CorpSystemsClient) -> list[Any]:
+    """Construct the thirteen FIDES-labeled tools over a systems client.
 
+    ``client`` must be entered (its async context open) by the time a tool is
+    invoked; building the tools — and inspecting their declarations — needs no
+    live server."""
 
-def build_tools(corpus_root: Path, sink_root: Path) -> tuple[list[Any], Callable[[], None]]:
-    """Construct the thirteen FIDES-labeled tools bound to a corpus + sink.
-
-    Returns ``(tools, sink_is_empty_checker)`` — the second value is unused by
-    the agent but handy for tests. Reads come from ``corpus_root`` (the shared,
-    read-only corpus); ``send_email`` writes to ``sink_root`` (this demo's own
-    observable folder)."""
+    async def forward(name: str, arguments: dict[str, Any], label: tuple[str, str]) -> list[Content]:
+        text, is_error = await client.call(name, arguments)
+        # Errors are trusted framework text, not fetched content.
+        return [_labeled(text, _NEUTRAL if is_error else label)]
 
     def make_search(system: System):
         label = _LABELS[system]
 
-        def _search(query: str) -> list[Content]:
-            hits = systems.search(corpus_root, system, query)
-            return [_labeled(_render_search(system, query, hits), label)]
+        async def _search(query: str) -> list[Content]:
+            return await forward(f"search_{system.dir_name}", {"query": query}, label)
 
         return _search
 
     def make_read(system: System):
         label = _LABELS[system]
 
-        def _read(file: str) -> list[Content]:
-            try:
-                body = systems.read(corpus_root, system, file)
-            except (FileNotFoundError, systems.NameError_) as exc:
-                # Errors are trusted framework text, not fetched content.
-                return [_labeled(str(exc), _NEUTRAL)]
-            return [_labeled(body, label)]
+        async def _read(file: str) -> list[Content]:
+            return await forward(f"read_{system.dir_name}", {"file": file}, label)
 
         return _read
 
     def make_create(system: System):
-        def _create(file: str, content: str) -> list[Content]:
-            try:
-                systems.create(corpus_root, system, file, content)
-            except (FileExistsError, systems.NameError_) as exc:
-                return [_labeled(str(exc), _NEUTRAL)]
-            return [_labeled(f"created {file} in the {system.dir_name} system", _NEUTRAL)]
+        async def _create(file: str, content: str) -> list[Content]:
+            return await forward(f"create_{system.dir_name}", {"file": file, "content": content}, _NEUTRAL)
 
         return _create
 
@@ -148,9 +135,8 @@ def build_tools(corpus_root: Path, sink_root: Path) -> tuple[list[Any], Callable
             )
         )
 
-    def send_email(to: str, subject: str, body: str) -> list[Content]:
-        file = systems.send_email(sink_root, to, subject, body)
-        return [_labeled(f"email sent to {to} (subject: {subject!r}); archived as {file}", _NEUTRAL)]
+    async def send_email(to: str, subject: str, body: str) -> list[Content]:
+        return await forward("send_email", {"to": to, "subject": subject, "body": body}, _NEUTRAL)
 
     # The one egress sink. FIDES enforces BOTH gates before the body runs:
     #   accepts_untrusted=False          -> refuse a tainted (untrusted) context
@@ -169,7 +155,4 @@ def build_tools(corpus_root: Path, sink_root: Path) -> tuple[list[Any], Callable
         )
     )
 
-    def sink_is_empty() -> None:  # pragma: no cover - test convenience only
-        return None
-
-    return tools, sink_is_empty
+    return tools

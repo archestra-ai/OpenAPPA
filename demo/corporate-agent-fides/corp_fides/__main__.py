@@ -18,7 +18,8 @@ import sys
 from pathlib import Path
 
 from .agent import build_agent
-from .systems import System, resolve_corpus_root, resolve_sink_root
+from .systems import CorpSystemsClient, System, resolve_corpus_root, resolve_sink_root
+from .tools import build_tools
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _CRATE_DIR = _PACKAGE_DIR.parent
@@ -120,8 +121,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", default=os.environ.get("FIDES_DEMO_MODEL", "anthropic/claude-sonnet-5"))
     parser.add_argument("--quarantine-model", default=os.environ.get("FIDES_QUARANTINE_MODEL") or None)
     parser.add_argument("--api-key", default=os.environ.get("OPENROUTER_API_KEY"))
-    parser.add_argument("--data-root", type=Path, default=None, help="Corpus root (defaults to sibling corporate-agent/data).")
+    parser.add_argument("--data-root", type=Path, default=None, help="Corpus root (defaults to sibling corp-systems/data).")
     parser.add_argument("--sink-root", type=Path, default=None, help="Where send_email writes (defaults to this demo's data/).")
+    parser.add_argument(
+        "--server-bin",
+        type=Path,
+        default=None,
+        help="The corp-systems-mcp binary (defaults to the sibling crate's debug build, built on demand).",
+    )
     parser.add_argument("--quiet", action="store_true", help="Print only the final answer.")
     args = parser.parse_args(argv)
 
@@ -144,22 +151,27 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
-    built = build_agent(
-        api_key=api_key,
-        model=args.model,
-        corpus_root=corpus_root,
-        sink_root=sink_root,
-        defend=args.defend,
-        quarantine_model=args.quarantine_model,
-    )
+    if not args.chat and not args.prompt:
+        parser.error("no task given: pass a prompt argument or use --chat")
 
-    if args.chat:
-        asyncio.run(_run_chat(built, args.quiet))
-    else:
-        prompt = args.prompt
-        if not prompt:
-            parser.error("no task given: pass a prompt argument or use --chat")
-        asyncio.run(_run_once(built, prompt, args.quiet))
+    async def _amain() -> None:
+        # The shared corp-systems-mcp server stays up for the whole run; the
+        # FIDES-labeled tools forward every call through this client.
+        async with CorpSystemsClient(corpus_root, sink_root, args.server_bin) as client:
+            built = build_agent(
+                api_key=api_key,
+                model=args.model,
+                tools=build_tools(client),
+                sink_root=sink_root,
+                defend=args.defend,
+                quarantine_model=args.quarantine_model,
+            )
+            if args.chat:
+                await _run_chat(built, args.quiet)
+            else:
+                await _run_once(built, args.prompt, args.quiet)
+
+    asyncio.run(_amain())
     return 0
 
 

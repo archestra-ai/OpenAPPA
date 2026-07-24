@@ -1,38 +1,41 @@
-"""The mock corporate systems, as plain folders on disk.
+"""The connection to the shared mock corporate systems.
 
-A direct Python port of the sibling Rust demo's ``systems.rs`` so the two
-demos run over the *same* corpus and the *same* planted injection — the only
-difference between them is the defense (OpenAPPA's policy engine there, FIDES
-here). Each :class:`System` is a subdirectory holding ``.md``/``.txt`` files;
-the three verbs — :func:`search`, :func:`read`, :func:`create` — plus the
-:func:`send_email` sink are the whole behaviour. The FIDES tool wrappers in
-``tools.py`` stay thin delegators, exactly like ``server.rs``.
+The systems themselves — ``hr``, ``finance``, ``task_tracker``,
+``public_forum`` folders with ``search``/``read``/``create`` verbs plus the
+``send_email`` sink — live in the sibling Rust ``corp-systems`` crate as a
+stdio MCP server (``corp-systems-mcp``). Both demos spawn that *same* binary
+over the *same* corpus and the *same* planted injection; the only variable
+between them is the defense (OpenAPPA's policy engine there, FIDES here).
 
-All file names that reach the filesystem come from the model (untrusted), so
-every entry point runs them through :func:`validate_file_name` first.
+This module owns the plumbing: resolving the corpus/sink roots and the server
+binary (building it on demand via cargo), and :class:`CorpSystemsClient`, a
+thin async MCP client the FIDES-labeled tools in ``tools.py`` forward through.
 
-The corpus is read-only and defaults to the sibling ``corporate-agent/data``
-tree; the ``send_email`` sink writes into this demo's own ``data/email/`` so
-the two demos never fight over one observable folder.
+The corpus is read-only; ``send_email`` writes into this demo's own
+``data/email/`` (``--sink-root``) so the two demos never fight over one
+observable folder.
 """
 
 from __future__ import annotations
 
 import os
-import re
-import time
-from dataclasses import dataclass
+import shutil
+import subprocess
 from enum import Enum
 from pathlib import Path
+from typing import Any
+
+from mcp import ClientSession, StdioServerParameters, types
+from mcp.client.stdio import stdio_client
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _CRATE_DIR = _PACKAGE_DIR.parent
-# The sibling Rust demo owns the canonical corpus + planted injection thread.
-_SIBLING_CORPUS = (_CRATE_DIR / ".." / "corporate-agent" / "data").resolve()
+# The sibling crate owns the server, the canonical corpus, and the injection.
+_CORP_SYSTEMS_DIR = (_CRATE_DIR / ".." / "corp-systems").resolve()
 
 
 class System(str, Enum):
-    """One mock internal system, backed by a subdirectory of the data root."""
+    """One mock internal system, backed by a subdirectory of the corpus root."""
 
     HR = "hr"
     FINANCE = "finance"
@@ -45,33 +48,21 @@ class System(str, Enum):
         return self.value
 
 
-@dataclass(frozen=True)
-class Hit:
-    """A single search hit: the file it matched and the first matching line."""
-
-    file: str
-    snippet: str
-
-
-class NameError_(ValueError):
-    """A file name supplied by the model was unsafe."""
-
-
 def resolve_corpus_root(explicit: str | os.PathLike[str] | None = None) -> Path:
-    """Where the ``search``/``read`` verbs look. Explicit override, else
-    ``CORP_DATA_ROOT``, else the sibling ``corporate-agent/data`` corpus."""
+    """Where the server's ``search``/``read`` verbs look. Explicit override,
+    else ``CORP_DATA_ROOT``, else the sibling ``corp-systems/data`` corpus."""
     if explicit is not None:
         return Path(explicit).resolve()
     env = os.environ.get("CORP_DATA_ROOT", "").strip()
     if env:
         return Path(env).resolve()
-    return _SIBLING_CORPUS
+    return _CORP_SYSTEMS_DIR / "data"
 
 
 def resolve_sink_root(explicit: str | os.PathLike[str] | None = None) -> Path:
-    """Where ``send_email`` drops its files — this demo's own writable
-    ``data/`` dir by default, so the shared read-only corpus stays pristine and
-    the leak is observed *here*."""
+    """Where the server's ``send_email`` drops its files — this demo's own
+    writable ``data/`` dir by default, so the shared read-only corpus stays
+    pristine and the leak is observed *here*."""
     if explicit is not None:
         return Path(explicit).resolve()
     env = os.environ.get("CORP_SINK_ROOT", "").strip()
@@ -80,109 +71,96 @@ def resolve_sink_root(explicit: str | os.PathLike[str] | None = None) -> Path:
     return _CRATE_DIR / "data"
 
 
-def validate_file_name(name: str) -> None:
-    """Reject anything that could escape the system's directory or hide as a
-    dotfile. Model-supplied input — validated at this single choke point."""
-    stripped = name.strip()
-    if not stripped:
-        raise NameError_(f"invalid file name {name!r}: empty")
-    if "/" in name or "\\" in name:
-        raise NameError_(f"invalid file name {name!r}: contains a path separator")
-    if ".." in name:
-        raise NameError_(f"invalid file name {name!r}: contains '..'")
-    if name.startswith("."):
-        raise NameError_(f"invalid file name {name!r}: starts with '.'")
-    if Path(name).is_absolute():
-        raise NameError_(f"invalid file name {name!r}: is an absolute path")
-
-
-def _list_files(directory: Path) -> list[tuple[str, str]]:
-    """Every ``.md``/``.txt`` file in ``directory``, sorted by name, as
-    ``(name, body)``. A folder that does not exist yet reads as empty."""
-    if not directory.is_dir():
-        return []
-    out: list[tuple[str, str]] = []
-    for entry in sorted(directory.iterdir(), key=lambda p: p.name):
-        if entry.is_file() and entry.suffix in (".md", ".txt"):
-            out.append((entry.name, entry.read_text(encoding="utf-8", errors="replace")))
-    return out
-
-
-def _available_names(directory: Path) -> str:
-    files = _list_files(directory)
-    return ", ".join(n for n, _ in files) if files else "(none)"
-
-
-def _truncate(s: str, limit: int = 200) -> str:
-    return s if len(s) <= limit else s[:limit] + "…"
-
-
-def _first_line(body: str) -> str:
-    for line in body.splitlines():
-        if line.strip():
-            return _truncate(line.strip())
-    return ""
-
-
-def search(root: Path, system: System, query: str) -> list[Hit]:
-    """Case-insensitive substring search over file names and contents. One hit
-    per matching file; its snippet is the first matching line (trimmed)."""
-    needle = query.strip().lower()
-    directory = root / system.dir_name
-    hits: list[Hit] = []
-    for name, body in _list_files(directory):
-        if not needle:
-            hits.append(Hit(file=name, snippet=_first_line(body)))
-            continue
-        if needle in name.lower():
-            hits.append(Hit(file=name, snippet=_first_line(body)))
-            continue
-        for line in body.splitlines():
-            if needle in line.lower():
-                hits.append(Hit(file=name, snippet=_truncate(line.strip())))
-                break
-    return hits
-
-
-def read(root: Path, system: System, file: str) -> str:
-    """Full contents of a named file. Not-found lists the available files so
-    the model can correct itself."""
-    validate_file_name(file)
-    directory = root / system.dir_name
-    path = directory / file
-    if not path.is_file():
-        raise FileNotFoundError(
-            f"no file named {file!r} in the {system.dir_name} system; "
-            f"available: {_available_names(directory)}"
+def resolve_server_bin(explicit: str | os.PathLike[str] | None = None) -> Path:
+    """The ``corp-systems-mcp`` binary: explicit override, else
+    ``CORP_SYSTEMS_BIN``, else the sibling crate's debug build — built on
+    demand via cargo, so a fresh checkout just works."""
+    if explicit is not None:
+        return Path(explicit).resolve()
+    env = os.environ.get("CORP_SYSTEMS_BIN", "").strip()
+    if env:
+        return Path(env).resolve()
+    manifest = _CORP_SYSTEMS_DIR / "Cargo.toml"
+    binary = _CORP_SYSTEMS_DIR / "target" / "debug" / "corp-systems-mcp"
+    if shutil.which("cargo") is None:
+        if binary.is_file():
+            return binary
+        raise RuntimeError(
+            f"corp-systems-mcp not found at {binary} and cargo is not installed; "
+            f"build the sibling server crate first: cargo build --manifest-path {manifest}"
         )
-    return path.read_text(encoding="utf-8", errors="replace")
+    build = subprocess.run(
+        ["cargo", "build", "-q", "--manifest-path", str(manifest)],
+        capture_output=True,
+        text=True,
+    )
+    if build.returncode != 0 or not binary.is_file():
+        raise RuntimeError(
+            f"building corp-systems-mcp failed:\n{build.stderr}\n"
+            f"build it manually: cargo build --manifest-path {manifest}"
+        )
+    return binary
 
 
-def create(root: Path, system: System, file: str, content: str) -> None:
-    """Write a new file. Refuses to overwrite an existing one."""
-    validate_file_name(file)
-    directory = root / system.dir_name
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / file
-    if path.exists():
-        raise FileExistsError(f"a file named {file!r} already exists in the {system.dir_name} system")
-    path.write_text(content, encoding="utf-8")
+class CorpSystemsClient:
+    """An async MCP client over a spawned ``corp-systems-mcp``.
 
+    Use as an async context manager; :meth:`call` forwards one tool call and
+    returns ``(text, is_error)``. Error text is delivered like the server sends
+    it — model-readable, flagged — and the labeled tool wrappers in
+    ``tools.py`` decide what label it carries.
+    """
 
-def _slug(subject: str) -> str:
-    s = re.sub(r"[^a-z0-9]+", "-", subject.lower()).strip("-")
-    s = s[:40]
-    return s or "message"
+    def __init__(
+        self,
+        corpus_root: Path,
+        sink_root: Path,
+        server_bin: str | os.PathLike[str] | None = None,
+    ) -> None:
+        self._corpus_root = corpus_root
+        self._sink_root = sink_root
+        self._server_bin = server_bin
+        self._transport_cm: Any = None
+        self._session_cm: ClientSession | None = None
+        self._session: ClientSession | None = None
 
+    async def __aenter__(self) -> "CorpSystemsClient":
+        # Resolving may `cargo build` the sibling crate — deferred to entry so
+        # constructing a client (e.g. to build tools) stays side-effect free.
+        params = StdioServerParameters(
+            command=str(resolve_server_bin(self._server_bin)),
+            args=[
+                "--data-root",
+                str(self._corpus_root),
+                "--sink-root",
+                str(self._sink_root),
+            ],
+        )
+        self._transport_cm = stdio_client(params)
+        read, write = await self._transport_cm.__aenter__()
+        self._session_cm = ClientSession(read, write)
+        self._session = await self._session_cm.__aenter__()
+        await self._session.initialize()
+        return self
 
-def send_email(sink_root: Path, to: str, subject: str, body: str) -> str:
-    """The mocked outbound email sink: writes the message as a file into the
-    ``email/`` folder and returns the saved file name. There is no
-    ``read``/``search`` counterpart — the folder is purely the observable
-    side-effect the injection demo inspects."""
-    directory = sink_root / System.EMAIL.dir_name
-    directory.mkdir(parents=True, exist_ok=True)
-    stamp = int(time.time())
-    file = f"{stamp}-{_slug(subject)}.md"
-    (directory / file).write_text(f"To: {to}\nSubject: {subject}\n\n{body}\n", encoding="utf-8")
-    return file
+    async def __aexit__(self, *exc_info: Any) -> None:
+        if self._session_cm is not None:
+            await self._session_cm.__aexit__(*exc_info)
+            self._session_cm = None
+            self._session = None
+        if self._transport_cm is not None:
+            await self._transport_cm.__aexit__(*exc_info)
+            self._transport_cm = None
+
+    async def call(self, tool: str, arguments: dict[str, Any]) -> tuple[str, bool]:
+        if self._session is None:
+            raise RuntimeError("CorpSystemsClient used outside its async context")
+        result = await self._session.call_tool(tool, arguments)
+        text = "".join(c.text for c in result.content if isinstance(c, types.TextContent))
+        return text, bool(result.isError)
+
+    async def list_tool_names(self) -> list[str]:
+        if self._session is None:
+            raise RuntimeError("CorpSystemsClient used outside its async context")
+        listing = await self._session.list_tools()
+        return [t.name for t in listing.tools]

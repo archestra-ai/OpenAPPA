@@ -3,11 +3,13 @@
 The OpenAPPA **corporate-agent** scenario, defended by **[FIDES]** on
 **[Microsoft Agent Framework]** instead of by OpenAPPA's own policy engine.
 
-Same corpus, same planted prompt injection, same thirteen-tool surface as the
-sibling Rust [`corporate-agent`](../corporate-agent) demo — the *only* variable
-is the defense. It exists to read one information-flow system against the other
-on an identical attack: OpenAPPA's **trust / audience** algebra there, FIDES's
-**integrity / confidentiality** labels here.
+Both demos spawn the **same** [`corp-systems`](../corp-systems) MCP server over
+the **same** corpus and the **same** planted prompt injection as the sibling
+Rust [`corporate-agent`](../corporate-agent) demo — same binary, same thirteen
+tools, same data; the *only* variable is the defense. It exists to read one
+information-flow system against the other on an identical attack: OpenAPPA's
+**trust / audience** algebra there, FIDES's **integrity / confidentiality**
+labels here.
 
 [FIDES]: https://devblogs.microsoft.com/agent-framework/fides/
 [Microsoft Agent Framework]: https://learn.microsoft.com/en-us/agent-framework/
@@ -62,32 +64,35 @@ just as APPA's `send_email` needs both internal trust and a covering audience.
 
 ```
 corp_fides/
-  systems.py    mock corporate systems on disk (search/read/create/send_email) — port of systems.rs
-  tools.py      the 13 FIDES-labeled tools; the APPA->FIDES label mapping lives here
+  systems.py    the connection to the shared corp-systems-mcp server: root/binary resolution + MCP client
+  tools.py      the 13 FIDES-labeled tools forwarding over MCP; the APPA->FIDES label mapping lives here
   agent.py      builds the model client(s) + SecureAgentConfig + Agent (FIDES on, or --no-defense)
   __main__.py   the CLI: corp-agent-fides
 tests/
-  test_systems.py      framework-free: the systems primitives (no key)
+  test_systems.py      drives the shared server over MCP from Python (no key)
   test_labels.py       the tools' declared policy + the labels their results carry (no key)
   test_enforcement.py  drives the real FIDES taint fold + gate to prove the exfil is blocked (no key)
 scripts/        ready-made scenarios (mirroring the sibling demo)
 ```
 
-The corpus (`data/hr`, `data/public_forum`, …) is **not duplicated** — reads
-default to the sibling `../corporate-agent/data`, so it is literally the same
-records and the same planted `acme-forum-thread.md`. `send_email` writes to this
-demo's own `data/email/` (git-ignored) so the observable sink stays separate.
+Neither the systems nor the corpus are duplicated: the tools spawn the sibling
+[`corp-systems`](../corp-systems) crate's `corp-systems-mcp` binary (built on
+demand) over its `data/` — literally the same server, records, and planted
+`acme-forum-thread.md` the APPA demo runs against. `send_email` writes to this
+demo's own `data/email/` (git-ignored, `--sink-root`) so the observable sink
+stays separate.
 
 ## Prerequisites
 
 - Python ≥ 3.10.
-- An OpenRouter API key **for the agent**. The systems layer and all three test
-  modules need none.
+- A recent Rust toolchain, to build the shared `corp-systems-mcp` server (done
+  automatically on first run).
+- An OpenRouter API key **for the agent**. The tests need none.
 
 ```sh
 cd demo/corporate-agent-fides
 uv venv && source .venv/bin/activate      # or your venv of choice
-uv pip install -e .                        # agent-framework-core + agent-framework-openai
+uv pip install -e .                        # agent-framework-core + agent-framework-openai + mcp
 cp .env.example .env                       # set OPENROUTER_API_KEY
 ```
 
@@ -95,13 +100,14 @@ cp .env.example .env                       # set OPENROUTER_API_KEY
 
 ```sh
 cd demo/corporate-agent-fides
-python -m pytest           # 15 tests, no API key required
+python -m pytest           # 16 tests, no API key required
 ```
 
 `test_enforcement.py` is the important one: it drives FIDES's real
 `combine_labels` and `check_confidentiality_allowed` with this demo's labels and
 asserts the injection flow is refused at `send_email` — the LLM-independent core
-of the block, provable offline.
+of the block, provable offline. `test_systems.py` drives the *shared* server
+binary over MCP (skipped, with a message, if no Rust toolchain is available).
 
 ## Run
 
@@ -135,8 +141,9 @@ corp-agent-fides --chat
 | `--no-defense` | build the agent without `SecureAgentConfig` (the leak) |
 | `--model <id>` | OpenRouter model id (env `FIDES_DEMO_MODEL`; default `anthropic/claude-sonnet-5`) |
 | `--quarantine-model <id>` | model for the quarantine client (env `FIDES_QUARANTINE_MODEL`; default: same as `--model`) |
-| `--data-root <path>` | corpus root (env `CORP_DATA_ROOT`; default: sibling `corporate-agent/data`) |
-| `--sink-root <path>` | where `send_email` writes (default: this demo's `data/`) |
+| `--data-root <path>` | corpus root (env `CORP_DATA_ROOT`; default: sibling `corp-systems/data`) |
+| `--sink-root <path>` | where `send_email` writes (env `CORP_SINK_ROOT`; default: this demo's `data/`) |
+| `--server-bin <path>` | the `corp-systems-mcp` binary (env `CORP_SYSTEMS_BIN`; default: sibling debug build, built on demand) |
 | `--quiet` | print only the final answer |
 
 ## Swapping the model backend
