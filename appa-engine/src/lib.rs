@@ -9,7 +9,7 @@
 //! precedence). It implements `docs/spec.md`; where the two disagree, the spec is design
 //! direction and this crate is what runs today.
 //!
-//! The model is two monoids (see `docs/paper.md`): a **checked** monoid of label actions
+//! The model is two monoids (see `docs/spec.md`): a **checked** monoid of label actions
 //! (audience × trust) and a **free** monoid of events. Propagation folds the label
 //! restrictively (min trust, intersect audience); checking is the sink-side adequacy relation.
 //! The two are never conflated.
