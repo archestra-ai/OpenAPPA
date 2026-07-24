@@ -396,7 +396,9 @@ async fn a_blocked_return_crosses_only_the_chosen_derivation() {
         // …submit raw (blocked: remedy-1 Accept, remedy-2 sanitize-then-accept)…
         tool_round("4", "submit_result", r#"{"value":"report: contact eve@corp.com"}"#),
         // …and cross through the sanitizer.
-        tool_round("5", "execute_remedy_plan", r#"{"plan_id":"remedy-2"}"#),
+        // The return menu runs cheapest-first, so the sanitize offer — the crossing that costs
+        // the parent nothing — holds the lower handle and raw acceptance the higher.
+        tool_round("5", "execute_remedy_plan", r#"{"plan_id":"remedy-1"}"#),
         // Parent turn 2.
         final_round("6", "thanks"),
     ])

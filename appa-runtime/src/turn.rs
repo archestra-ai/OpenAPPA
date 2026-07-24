@@ -47,6 +47,11 @@ const SEALED_FAILED: &str = "[tool call failed]";
 const SEALED_INDETERMINATE: &str = "[tool call outcome unknown — it may or may not have run]";
 const POLICY_STOP_BUDGET: &str = "This turn reached its resource budget and was stopped.";
 const POLICY_STOP_INFERENCE: &str = "This turn could not continue: upstream inference was unavailable.";
+
+/// Refusal for a `plan_id` this session was never offered. It names the fork case because that is
+/// the one a model walks into by reading rather than by guessing: a child inherits its parent's
+/// history, so an offer addressed to the parent is visible in the child's own context.
+const NO_SUCH_OFFER: &str = "no pending blocked call offers that plan_id — an offer belongs to the session whose call was blocked and does not cross a fork, so a plan named in inherited history is not yours to execute; propose the call this branch needs and accept the plan you are then offered";
 const POLICY_STOP_CANCELLED: &str = "This turn was cancelled.";
 const FORK_ONLY_FEEDBACK: &str =
     "fork must be the only call in its assistant round and take exactly one non-empty string task";
@@ -798,7 +803,7 @@ impl Turn {
             .iter()
             .position(|pending| pending.offers.iter().any(|(offer, _)| offer == handle))
         else {
-            self.feedback(call_id, "no pending blocked call offers that plan_id")?;
+            self.feedback(call_id, NO_SUCH_OFFER)?;
             return Ok(CallProgress::Go);
         };
         if !budget.can_invoke_tool() {
@@ -1047,6 +1052,13 @@ impl Turn {
                 Ok(RawReturnGo::Answered)
             }
             Ok(ReturnCheck::Block { plans, .. }) => {
+                // Offer the plans cheapest-first, so the lowest handle is the one that costs the
+                // parent least. A child reads the menu as "how do I return this" and takes the
+                // first entry; ordering by cost makes that reflex land on the free crossing
+                // instead of on raw acceptance. The sort is stable, so the engine's own order
+                // survives within a rank.
+                let mut plans = plans;
+                plans.sort_by_key(return_plan_cost);
                 let offers: Vec<(String, ReturnPlan)> = plans
                     .into_iter()
                     .map(|plan| {
@@ -1072,8 +1084,24 @@ impl Turn {
                 // the menu that carries it. `null` is stated as a plain alternative, not as a
                 // conditional one: a child whose own side effects were just blocked would read any
                 // precondition as excluding itself, and side effects commit family-wide regardless.
+                //
+                // Which alternative leads depends on what the engine could offer. A residual-free
+                // sanitizer crosses the value *and* leaves the parent's label intact, so where one
+                // exists it beats the void return outright — naming it first keeps a child that
+                // needs to return something from reading `null` as its only cost-free move.
+                let free_crossing = offers
+                    .iter()
+                    .find(|(_, plan)| matches!(plan, ReturnPlan::Sanitize { residual: None, .. }))
+                    .map(|(handle, _)| handle.as_str());
+                let cost = "returning this raw narrows the parent, permanently for the parent session — every later parent step that needs the parent's current label is lost with it";
+                let alternatives = match free_crossing {
+                    Some(handle) => format!(
+                        "You need not pay that to return a value: plan \"{handle}\" crosses one with the parent's label untouched. If the parent needs no value at all, submit_result null returns none and leaves the label untouched too (side effects this branch already committed hold either way)"
+                    ),
+                    None => "Every plan offered here narrows it too. Weigh that against submit_result null, which returns no value and leaves the parent's label untouched (side effects this branch already committed hold either way)".to_string(),
+                };
                 let feedback = format!(
-                    "returning this raw narrows the parent, permanently for the parent session — every later parent step that needs the parent's current label is lost with it. Weigh that against both alternatives: submit_result null returns no value and leaves the parent's label untouched (side effects this branch already committed hold either way), or call execute_remedy_plan with plan_id {}",
+                    "{cost}. {alternatives}. Call execute_remedy_plan with plan_id {}",
                     menu.join(", ")
                 );
                 self.pending_returns.push(PendingReturn {
@@ -1964,6 +1992,21 @@ fn turn_end(session: &TrajectoryId) -> Fact {
     Fact::Boundary {
         trajectory: session.clone(),
         kind: BoundaryKind::TurnEnd,
+    }
+}
+
+/// What a return plan costs the parent, lowest first. Only the label matters here: a crossing that
+/// leaves the parent's label untouched is free however much work the sanitizer did, and raw
+/// acceptance is dearest because the narrowing it folds into the parent is permanent — no authority
+/// widens a dimension back.
+fn return_plan_cost(plan: &ReturnPlan) -> u8 {
+    match plan {
+        // Crosses the value and narrows nothing.
+        ReturnPlan::Sanitize { residual: None, .. } => 0,
+        // Crosses a derivation, narrowing the parent by whatever the sanitizer could not shed.
+        ReturnPlan::Sanitize { residual: Some(_), .. } => 1,
+        // Crosses the value raw, narrowing the parent to this branch's label.
+        ReturnPlan::Accept(_) => 2,
     }
 }
 

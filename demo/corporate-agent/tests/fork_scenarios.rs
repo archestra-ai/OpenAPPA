@@ -201,9 +201,10 @@ async fn an_hr_child_return_crosses_only_as_the_redacted_derivation() {
                 "submit_result",
                 r#"{"value":"Alice's onboarding buddy is Priya Sharma (ext 4471)"}"#,
             )]),
-            // remedy-1 is the raw-return acceptance (it would narrow the parent
-            // to the hr audience); remedy-2 is the pii-redactor derivation.
-            tool_round(vec![call("c6", "execute_remedy_plan", r#"{"plan_id":"remedy-2"}"#)]),
+            // The return menu runs cheapest-first: remedy-1 is the pii-redactor derivation, the
+            // crossing that leaves the parent's label intact, and remedy-2 the raw-return
+            // acceptance that would narrow the parent to the hr audience.
+            tool_round(vec![call("c6", "execute_remedy_plan", r#"{"plan_id":"remedy-1"}"#)]),
             // Parent, still public-audience, emails the redacted fact out.
             tool_round(vec![call(
                 "c7",
