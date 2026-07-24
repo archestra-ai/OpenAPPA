@@ -1,12 +1,13 @@
 """AgentDojo tool executor mediated by a current OpenAPPA CallSession."""
 
-import logging
+import copy
 from ast import literal_eval
 from collections.abc import Mapping, Sequence
 
 from agentdojo.agent_pipeline.base_pipeline_element import BasePipelineElement
 from agentdojo.agent_pipeline.tool_execution import (
     EMPTY_FUNCTION_NAME,
+    ToolsExecutionLoop,
     ToolsExecutor,
     is_string_list,
     tool_result_to_str,
@@ -24,20 +25,10 @@ from agentdojo.types import (
     text_content_block_from_string,
 )
 
-from appa_dojo.bridge import (
-    Admitted,
-    Allowed,
-    AuthorizedCall,
-    Blocked,
-    Declined,
-    Sealed,
-    SidecarClient,
-)
+from appa_dojo.constants import EXECUTE_REMEDY_PLAN, POLICY_BLOCK_SENTINEL
+from appa_dojo.native import Blocked, Delivered, NativeSession
+from appa_dojo.tool_bridge import ToolBridge
 
-logger = logging.getLogger(__name__)
-
-EXECUTE_REMEDY_PLAN = "execute_remedy_plan"
-POLICY_BLOCK_SENTINEL = "Blocked by OpenAPPA policy: "
 NESTED_CALL_ERROR = "nested tool calls are not permitted under policy"
 
 
@@ -82,11 +73,13 @@ class AppaToolsExecutor(ToolsExecutor):
         self,
         policy: str,
         tool_output_formatter=tool_result_to_str,
-        sidecar: SidecarClient | None = None,
+        tool_bridge: ToolBridge | None = None,
     ) -> None:
         super().__init__(tool_output_formatter)
         self.policy = policy
-        self.sidecar = sidecar or SidecarClient()
+        self.tool_bridge = tool_bridge or ToolBridge()
+        self.session: NativeSession | None = None
+        self._trace_projection: list[tuple[str, FunctionCall | None]] = []
 
     def query(
         self,
@@ -103,11 +96,12 @@ class AppaToolsExecutor(ToolsExecutor):
             return query, runtime, env, messages, extra_args
 
         if not any(message["role"] == "tool" for message in messages):
-            self._open_episode(messages, runtime)
+            self._open_episode(messages, runtime, env)
 
         results = []
         for tool_call in tool_calls:
             if tool_call.function == EMPTY_FUNCTION_NAME:
+                self._trace_projection.append((tool_call.id, None))
                 results.append(
                     self._result(
                         tool_call,
@@ -117,6 +111,7 @@ class AppaToolsExecutor(ToolsExecutor):
                 )
                 continue
             if tool_call.function not in runtime.functions:
+                self._trace_projection.append((tool_call.id, None))
                 results.append(
                     self._result(
                         tool_call,
@@ -126,6 +121,7 @@ class AppaToolsExecutor(ToolsExecutor):
                 )
                 continue
             if has_nested_call(tool_call.args):
+                self._trace_projection.append((tool_call.id, None))
                 results.append(
                     self._result(
                         tool_call,
@@ -139,25 +135,13 @@ class AppaToolsExecutor(ToolsExecutor):
                 if isinstance(value, str) and is_string_list(value):
                     tool_call.args[name] = literal_eval(value)
 
-            if tool_call.function == EXECUTE_REMEDY_PLAN:
-                plan_id = tool_call.args.get("plan_id")
-                decision = self.sidecar.resolve_remedy(plan_id if isinstance(plan_id, str) else None)
-                match decision:
-                    case Declined(feedback):
-                        results.append(
-                            self._result(
-                                tool_call,
-                                "",
-                                f"{POLICY_BLOCK_SENTINEL}{feedback}",
-                            )
-                        )
-                    case AuthorizedCall(tool, arguments):
-                        results.append(self._execute_and_report(tool_call, tool, arguments, runtime, env))
-                continue
-
-            decision = self.sidecar.check(tool_call.function, dict(tool_call.args))
+            session = self.session
+            if session is None:
+                raise RuntimeError("the native APPA episode is not open")
+            decision = session.dispatch(tool_call.function, dict(tool_call.args))
             match decision:
                 case Blocked(feedback):
+                    self._trace_projection.append((tool_call.id, None))
                     results.append(
                         self._result(
                             tool_call,
@@ -165,23 +149,35 @@ class AppaToolsExecutor(ToolsExecutor):
                             f"{POLICY_BLOCK_SENTINEL}{feedback}",
                         )
                     )
-                case Allowed():
-                    results.append(
-                        self._execute_and_report(
-                            tool_call,
-                            tool_call.function,
-                            dict(tool_call.args),
-                            runtime,
-                            env,
+                case Delivered(content, dispatched_tool, dispatched_arguments, _):
+                    self._trace_projection.append(
+                        (
+                            tool_call.id,
+                            FunctionCall(
+                                function=dispatched_tool,
+                                args=dispatched_arguments,
+                                id=tool_call.id,
+                            ),
                         )
                     )
+                    results.append(self._result(tool_call, content, None))
 
         return query, runtime, env, [*messages, *results], extra_args
 
     def close(self) -> None:
-        self.sidecar.close()
+        try:
+            self._close_episode()
+        finally:
+            self.tool_bridge.close()
 
-    def _open_episode(self, messages: Sequence[ChatMessage], runtime: FunctionsRuntime) -> None:
+    def finish_episode(self, messages: Sequence[ChatMessage]) -> list[ChatMessage]:
+        try:
+            self._record_unexecuted_tail(messages)
+            return self._project_trace(messages)
+        finally:
+            self._close_episode()
+
+    def _open_episode(self, messages: Sequence[ChatMessage], runtime: FunctionsRuntime, env: Env) -> None:
         user_prompt = next(
             (get_text_content_as_str(message["content"]) for message in messages if message["role"] == "user"),
             None,
@@ -189,33 +185,59 @@ class AppaToolsExecutor(ToolsExecutor):
         if user_prompt is None:
             raise ValueError("AgentDojo episode has no user message")
         tools = sorted(name for name in runtime.functions if name != EXECUTE_REMEDY_PLAN)
-        self.sidecar.open(self.policy, tools, user_prompt)
+        self._close_episode()
+        self._trace_projection.clear()
+        bridge_url = self.tool_bridge.open_episode(runtime, env, self.output_formatter, set(tools))
+        try:
+            self.session = NativeSession(self.policy, tools, user_prompt, bridge_url)
+        except Exception:
+            self.tool_bridge.close_episode()
+            raise
 
-    def _execute_and_report(
-        self,
-        visible_call: FunctionCall,
-        dispatched_tool: str,
-        arguments: dict[str, object],
-        runtime: FunctionsRuntime,
-        env: Env,
-    ) -> ChatToolResultMessage:
-        tool_result, error = runtime.run_function(env, dispatched_tool, arguments)
-        if error is not None:
-            result = self.sidecar.report_indeterminate()
-        else:
-            try:
-                body = self.output_formatter(tool_result)
-            except Exception:
-                self.sidecar.report_indeterminate()
-                logger.exception("could not format the result of %s", dispatched_tool)
-                raise
-            result = self.sidecar.report_success(body)
+    def _close_episode(self) -> None:
+        try:
+            if self.session is not None:
+                self.session.close()
+        finally:
+            self.session = None
+            self.tool_bridge.close_episode()
 
-        match result:
-            case Admitted(content):
-                return self._result(visible_call, content, None)
-            case Sealed(token):
-                return self._result(visible_call, token, None)
+    def _project_trace(self, messages: Sequence[ChatMessage]) -> list[ChatMessage]:
+        projected = copy.deepcopy(list(messages))
+        decisions = iter(self._trace_projection)
+        for message in projected:
+            if message["role"] == "assistant" and message["tool_calls"] is not None:
+                exact_calls = []
+                for call in message["tool_calls"]:
+                    try:
+                        call_id, dispatched = next(decisions)
+                    except StopIteration as error:
+                        raise RuntimeError("the dispatch trace has fewer entries than proposed calls") from error
+                    if call_id != call.id:
+                        raise RuntimeError("the dispatch trace is not aligned with proposed call order")
+                    if dispatched is not None:
+                        exact_calls.append(dispatched)
+                message["tool_calls"] = exact_calls
+        try:
+            next(decisions)
+        except StopIteration:
+            return projected
+        raise RuntimeError("the dispatch trace has entries without proposed calls")
+
+    def _record_unexecuted_tail(self, messages: Sequence[ChatMessage]) -> None:
+        proposed = [
+            call for message in messages if message["role"] == "assistant" for call in (message["tool_calls"] or [])
+        ]
+        if len(proposed) == len(self._trace_projection):
+            return
+        if len(proposed) < len(self._trace_projection):
+            raise RuntimeError("the dispatch trace has entries without proposed calls")
+        last = messages[-1]
+        trailing = last["tool_calls"] if last["role"] == "assistant" else None
+        missing = proposed[len(self._trace_projection) :]
+        if trailing is None or missing != list(trailing):
+            raise RuntimeError("only a trailing unexecuted assistant batch may lack dispatch entries")
+        self._trace_projection.extend((call.id, None) for call in missing)
 
     @staticmethod
     def _result(call: FunctionCall, content: str, error: str | None) -> ChatToolResultMessage:
@@ -226,3 +248,26 @@ class AppaToolsExecutor(ToolsExecutor):
             tool_call=call,
             error=error,
         )
+
+
+class AppaToolsExecutionLoop(BasePipelineElement):
+    """Run AgentDojo's loop and close the episode while projecting exact dispatch traces."""
+
+    def __init__(self, executor: AppaToolsExecutor, llm: BasePipelineElement) -> None:
+        self.executor = executor
+        self.loop = ToolsExecutionLoop([executor, llm])
+
+    def query(
+        self,
+        query: str,
+        runtime: FunctionsRuntime,
+        env: Env = EmptyEnv(),
+        messages: Sequence[ChatMessage] = [],
+        extra_args: dict = {},
+    ):
+        try:
+            query, runtime, env, messages, extra_args = self.loop.query(query, runtime, env, messages, extra_args)
+        except Exception:
+            self.executor._close_episode()
+            raise
+        return query, runtime, env, self.executor.finish_episode(messages), extra_args

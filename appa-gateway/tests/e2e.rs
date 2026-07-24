@@ -1,4 +1,4 @@
-//! End-to-end: the real `appa-runtime` north server over HTTP, only the upstream model stubbed.
+//! End-to-end: the real `appa-gateway` north server over HTTP, only the upstream model stubbed.
 //!
 //! A canned OpenAI server scripts the model's moves; south tools are builtin fixtures. These assert
 //! the confining executor's externally observable contract: a turn drives a tool call and returns a
@@ -8,12 +8,12 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use appa_engine::value::ToolName;
+use appa_gateway::inference::Inference;
+use appa_gateway::runtime::Runtime;
+use appa_runtime::ToolName;
 use appa_runtime::config::Config;
-use appa_runtime::inference::Inference;
-use appa_runtime::runtime::Runtime;
 use appa_runtime::tool::{BuiltinTool, HttpClient};
-use appa_runtime::wire::{ChatCompletionResponse, WireFunctionCall, WireMessage, WireToolCall};
+use appa_runtime::wire::{ChatCompletionRequest, ChatCompletionResponse, WireFunctionCall, WireMessage, WireToolCall};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -242,6 +242,50 @@ async fn a_child_sessions_free_text_does_not_cross_north() {
 }
 
 #[tokio::test]
+async fn north_header_forks_respect_the_runtime_depth_limit() {
+    let responses = (0..=4)
+        .map(|index| final_round(&index.to_string(), "finished"))
+        .collect();
+    let (model, _) = spawn_scripted_model(responses).await;
+    let base = spawn_server(runtime_with_echo(model)).await;
+    let client = reqwest::Client::new();
+
+    let root = client.post(&base).json(&user_request("root")).send().await.unwrap();
+    let mut parent = root
+        .headers()
+        .get("x-appa-session")
+        .and_then(|value| value.to_str().ok())
+        .unwrap()
+        .to_string();
+
+    for depth in 1..=4 {
+        let child = client
+            .post(&base)
+            .header("x-appa-parent-session", &parent)
+            .json(&user_request(&format!("child {depth}")))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(child.status(), 200);
+        parent = child
+            .headers()
+            .get("x-appa-session")
+            .and_then(|value| value.to_str().ok())
+            .unwrap()
+            .to_string();
+    }
+
+    let over_limit = client
+        .post(&base)
+        .header("x-appa-parent-session", parent)
+        .json(&user_request("too deep"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(over_limit.status(), 400);
+}
+
+#[tokio::test]
 async fn a_child_quarantine_returns_only_through_submit_result() {
     // The S14 child-quarantine scenario over the real wire: a child forked from a parent submits a
     // result and then tries to leak a secret in its free final text. The parent's next model
@@ -250,11 +294,10 @@ async fn a_child_quarantine_returns_only_through_submit_result() {
     let (model, seen) = spawn_scripted_model(vec![
         // Parent turn 1: opens the session.
         final_round("1", "parent ready"),
-        // Child turn: return a finding, then attempt to leak in free text.
+        // Child turn: returning a finding terminates the child immediately.
         tool_round("2", "submit_result", r#"{"value":"finding: the cron job is broken"}"#),
-        final_round("3", "LEAK the password is hunter2"),
         // Parent turn 2: whatever it answers — the interesting part is the request it was sent.
-        final_round("4", "thanks"),
+        final_round("3", "thanks"),
     ])
     .await;
     let base = spawn_server(runtime_with_echo(model)).await;
@@ -296,13 +339,16 @@ async fn a_child_quarantine_returns_only_through_submit_result() {
     // value crossed, the child's free text did not.
     let requests = seen.lock().unwrap();
     let parent_request = requests.last().expect("the parent's second turn reached the model");
+    let parent_request: ChatCompletionRequest = serde_json::from_str(parent_request).unwrap();
     assert!(
-        parent_request.contains("finding: the cron job is broken"),
-        "the submit_result value must reach the parent's transcript"
+        parent_request
+            .messages
+            .contains(&WireMessage::user("finding: the cron job is broken"))
     );
     assert!(
-        !parent_request.contains("hunter2"),
-        "the child's free text must never reach the parent's transcript"
+        !parent_request
+            .messages
+            .contains(&WireMessage::assistant("LEAK the password is hunter2"))
     );
 }
 
@@ -351,9 +397,8 @@ async fn a_blocked_return_crosses_only_the_chosen_derivation() {
         tool_round("4", "submit_result", r#"{"value":"report: contact eve@corp.com"}"#),
         // …and cross through the sanitizer.
         tool_round("5", "execute_remedy_plan", r#"{"plan_id":"remedy-2"}"#),
-        final_round("6", "returned"),
         // Parent turn 2.
-        final_round("7", "thanks"),
+        final_round("6", "thanks"),
     ])
     .await;
     let base = spawn_server(runtime_with_taint_and_pii(model)).await;
@@ -387,13 +432,16 @@ async fn a_blocked_return_crosses_only_the_chosen_derivation() {
 
     let requests = seen.lock().unwrap();
     let parent_request = requests.last().expect("the parent's second turn reached the model");
+    let parent_request: ChatCompletionRequest = serde_json::from_str(parent_request).unwrap();
     assert!(
-        parent_request.contains("report: contact"),
-        "the sanitized derivation must reach the parent's transcript"
+        parent_request
+            .messages
+            .contains(&WireMessage::user("report: contact [redacted-email]"))
     );
     assert!(
-        !parent_request.contains("eve@corp.com"),
-        "the raw submission must never reach the parent's transcript"
+        !parent_request
+            .messages
+            .contains(&WireMessage::user("report: contact eve@corp.com"))
     );
 }
 
@@ -405,8 +453,7 @@ async fn a_void_submit_result_crosses_nothing_to_the_parent() {
         tool_round("2", "get_secret", "{}"),
         tool_round("3", "execute_remedy_plan", r#"{"plan_id":"remedy-0"}"#),
         tool_round("4", "submit_result", r#"{"value":null}"#),
-        final_round("5", "nothing to report"),
-        final_round("6", "ok"),
+        final_round("5", "ok"),
     ])
     .await;
     let base = spawn_server(runtime_with_taint_and_pii(model)).await;
@@ -440,9 +487,16 @@ async fn a_void_submit_result_crosses_nothing_to_the_parent() {
 
     let requests = seen.lock().unwrap();
     let parent_request = requests.last().expect("the parent's second turn reached the model");
+    let parent_request: ChatCompletionRequest = serde_json::from_str(parent_request).unwrap();
     assert!(
-        !parent_request.contains("eve@corp.com") && !parent_request.contains("nothing to report"),
-        "a void return crosses nothing — no value, no child free text"
+        !parent_request
+            .messages
+            .contains(&WireMessage::user("contact eve@corp.com"))
+    );
+    assert!(
+        !parent_request
+            .messages
+            .contains(&WireMessage::assistant("nothing to report"))
     );
 }
 

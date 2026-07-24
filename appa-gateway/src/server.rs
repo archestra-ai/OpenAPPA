@@ -1,5 +1,5 @@
 //! The north HTTP face: `POST /v1/chat/completions`, OpenAI-shaped and non-streaming, wired to the
-//! RP1 admission profile and the RP2 drive.
+//! RP1 admission profile and the canonical agent loop.
 //!
 //! Session identity is a trusted-host input: `X-APPA-Tenant` names the authenticated caller, and a
 //! session/parent id is bound to that tenant — a foreign or unknown id is rejected, never namespaced or
@@ -18,15 +18,14 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use tokio_util::sync::CancellationToken;
 
-use appa_engine::branch::BranchError;
-use appa_engine::projection::Projection;
-use appa_engine::value::TrajectoryId;
+use appa_runtime::SessionForkError;
+use appa_runtime::TrajectoryId;
+use appa_runtime::store::{StoreError, TenantId};
+use appa_runtime::wire::{ChatCompletionRequest, ChatCompletionResponse, WireMessage};
 
 use crate::admission::admit_north_request;
 use crate::drive::{TurnOutcome, drive_turn};
 use crate::runtime::Runtime;
-use crate::store::{StoreError, TenantId};
-use crate::wire::{ChatCompletionRequest, ChatCompletionResponse, WireMessage};
 
 const SESSION_HEADER: &str = "x-appa-session";
 const PARENT_HEADER: &str = "x-appa-parent-session";
@@ -62,7 +61,8 @@ impl Runtime {
 enum SessionError {
     Unknown,
     Foreign,
-    Fork(BranchError),
+    Fork(String),
+    DepthLimit,
     Store,
 }
 
@@ -78,15 +78,13 @@ async fn handle_completions(
         Err(err) => return (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
     };
 
-    let (session, is_child) = match resolve_session(&rt, &tenant, &headers) {
-        Ok(resolved) => resolved,
-        // Unknown and foreign are reported identically, so an outsider cannot use the status to probe
-        // which session ids exist across tenants (the existence-oracle the distinction would leak).
-        Err(SessionError::Unknown | SessionError::Foreign) => {
-            return (StatusCode::NOT_FOUND, "no such session for this caller").into_response();
-        }
-        Err(SessionError::Fork(err)) => return (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
-        Err(SessionError::Store) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let session = match resolve_session(&rt, &tenant, &headers).await {
+        Ok(session) => session,
+        Err(error) => return session_error_response(error),
+    };
+    let is_child = match rt.mediator().is_child(&tenant, &session) {
+        Ok(is_child) => is_child,
+        Err(error) => return session_error_response(session_error(error)),
     };
 
     // The turn runs as its own task, so a dropped request future (client disconnect) can never
@@ -110,37 +108,49 @@ async fn handle_completions(
 
 /// Resolve the session a request drives: an existing owned session, a freshly forked child, or a newly
 /// minted root — enforcing tenant ownership on every existing id.
-fn resolve_session(
-    rt: &Arc<Runtime>,
-    tenant: &TenantId,
-    headers: &HeaderMap,
-) -> Result<(TrajectoryId, bool), SessionError> {
+async fn resolve_session(rt: &Runtime, tenant: &TenantId, headers: &HeaderMap) -> Result<TrajectoryId, SessionError> {
     if let Some(id) = header(headers, SESSION_HEADER) {
         let session = TrajectoryId::new(id);
-        let parent = rt.store().parent_of(tenant, &session).map_err(session_error)?;
-        return Ok((session, parent.is_some()));
+        rt.mediator().is_child(tenant, &session).map_err(session_error)?;
+        return Ok(session);
     }
     if let Some(parent_id) = header(headers, PARENT_HEADER) {
         let parent = TrajectoryId::new(parent_id);
-        let (child, _) = rt
-            .store()
-            .fork(tenant, &parent, |child, facts, revision| {
-                let projection = Projection::build(facts, revision);
-                rt.engine()
-                    .seed_child(&projection.view(&parent), child, rt.config().child_return_policy())
-            })
-            .map_err(session_error)?;
-        return Ok((child, true));
+        let child = rt
+            .mediator()
+            .fork_session_serialized(tenant, &parent, rt.max_fork_depth())
+            .await
+            .map_err(session_fork_error)?;
+        return Ok(child);
     }
-    Ok((rt.store().create_session(tenant.clone()), false))
+    Ok(rt.mediator().create_session(tenant.clone()))
 }
 
 fn session_error(err: StoreError) -> SessionError {
     match err {
         StoreError::UnknownSession(_) => SessionError::Unknown,
         StoreError::ForeignSession { .. } => SessionError::Foreign,
-        StoreError::Seed(branch) => SessionError::Fork(branch),
+        StoreError::Seed(branch) => SessionError::Fork(branch.to_string()),
         StoreError::Stale { .. } => SessionError::Store,
+    }
+}
+
+fn session_fork_error(error: SessionForkError) -> SessionError {
+    match error {
+        SessionForkError::Store(error) => session_error(error),
+        SessionForkError::DepthLimit { .. } => SessionError::DepthLimit,
+    }
+}
+
+fn session_error_response(error: SessionError) -> Response {
+    match error {
+        // Keep unknown and foreign indistinguishable to avoid a cross-tenant existence oracle.
+        SessionError::Unknown | SessionError::Foreign => {
+            (StatusCode::NOT_FOUND, "no such session for this caller").into_response()
+        }
+        SessionError::Fork(error) => (StatusCode::BAD_REQUEST, error).into_response(),
+        SessionError::DepthLimit => (StatusCode::BAD_REQUEST, "fork depth limit reached").into_response(),
+        SessionError::Store => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 

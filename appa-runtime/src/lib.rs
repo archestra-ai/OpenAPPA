@@ -1,29 +1,31 @@
-//! # appa-runtime — the OpenAPPA confining agent-executor
+//! # appa-runtime - OpenAPPA's stateful mediation runtime
 //!
-//! The runtime owns everything the pure [`appa_engine`] refuses to. It has three faces:
-//! **north** an OpenAI-compatible `/v1/chat/completions` wire to a thin harness; **upstream**
-//! an inference client to the model; **south** it *executes* tool calls against registered tool
-//! backends. The harness sends a user turn; the runtime drives inference, tool execution, and
-//! policy mediation, looping internally until the model yields a final assistant message.
-//!
-//! Concretely it reads the TOML policy config and builds the engine registry, resolves a
-//! proposed call into an immutable `ResolvedCall`, owns the in-memory append-only event log
-//! (the sole source of truth per trajectory id) with serialized conditional append, and holds
-//! the external authority/sanitizer/cast/audience/tool implementations.
-//!
-//! Because the runtime executes tools, it can withhold a raw result and surface only a
-//! sanitized/cast derivative on the bound paths — confinement of the model's reads on those
-//! paths and of tool sinks. See `docs/rebuild-plan.md` for the full architecture.
+//! [`Mediator`] is the canonical assembly: it owns policy, engine, trajectory families, and
+//! concrete south backends, but never inference or an agent loop. [`CallSession`] is the restricted
+//! trusted-framework profile for harnesses that execute tools themselves.
 
-pub mod admission;
+mod assemble;
+mod call;
+mod common;
 pub mod config;
-pub mod drive;
 pub mod external;
 pub mod feedback;
-pub mod inference;
-pub mod runtime;
-pub mod server;
+pub mod mediator;
 pub mod store;
 pub mod tool;
 pub mod transcript;
+mod turn;
+mod types;
 pub mod wire;
+
+pub use appa_engine::label::Label;
+pub use appa_engine::value::{ToolName, TrajectoryId};
+pub use call::{CallDecision, CallError, CallSession, RemedyDecision};
+pub use config::Config;
+pub use mediator::{ForkedSession, InitError, Mediator, SessionForkError};
+pub use tool::{BodyDisposition, RenderedCall, ToolOutcome};
+pub use turn::{
+    BeginTurnError, BudgetExhausted, Completion, ForkRequest, Limits, RunBudget, Step, StopReason, Turn, TurnError,
+};
+pub use types::{AdmittedResult, DispatchHandle, OpenError, ReportError, SdkOptions, SessionBusy, ToolSurfaceError};
+pub use wire::{WireFunctionCall, WireMessage, WireTool, WireToolCall, WireToolSchema};

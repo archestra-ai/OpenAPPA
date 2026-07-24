@@ -6,7 +6,7 @@ from pathlib import Path
 
 from agentdojo.task_suite.load_suites import get_suite
 
-from appa_dojo.defense import EXECUTE_REMEDY_PLAN, POLICY_BLOCK_SENTINEL
+from appa_dojo.constants import EXECUTE_REMEDY_PLAN, POLICY_BLOCK_SENTINEL
 from appa_dojo.pipeline import build_pipeline
 from appa_dojo.policies import load_policy
 

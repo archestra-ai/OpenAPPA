@@ -994,6 +994,12 @@ fork.
   event, which marks, never gates: an execution landing after it
   re-validates against the state it finds (see The event log); no special
   rule needed.
+  The model-visible handoff is likewise a snapshot, not a live channel: the
+  child receives every completed ancestor message through the fork plus its
+  child task. It receives neither an ancestor's incomplete tool-call round,
+  later ancestor activity, nor sibling activity. Nested children inherit the
+  corresponding completed prefix from each ancestor. Only `submit_result`
+  carries child-derived data back.
 - **Merge.** Two things come back, each in its native way:
   - The **returned value** is data: the parent absorbs its label like any
     other read — intersect readers, min trust. Nothing the child did can

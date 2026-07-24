@@ -2,9 +2,9 @@
 
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path
+from importlib.resources import files
 
-CONTRACTS_DIR = Path(__file__).resolve().parents[2] / "contracts"
+CONTRACTS = files("appa_dojo").joinpath("contracts")
 
 
 @dataclass(frozen=True)
@@ -23,17 +23,17 @@ class Policy:
 
 
 def load_policy(name: str) -> Policy:
-    path = CONTRACTS_DIR / f"{name}.toml"
-    source = path.read_text()
+    resource = CONTRACTS.joinpath(f"{name}.toml")
+    source = resource.read_text(encoding="utf-8")
     raw = tomllib.loads(source)
     entries = raw.get("tool")
     if not isinstance(entries, list):
-        raise ValueError(f"policy {path} has no [[tool]] declarations")
+        raise ValueError(f"policy {name!r} has no [[tool]] declarations")
     names = []
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
-            raise ValueError(f"policy {path} has an invalid [[tool]] declaration")
+            raise ValueError(f"policy {name!r} has an invalid [[tool]] declaration")
         names.append(entry["name"])
     if len(names) != len(set(names)):
-        raise ValueError(f"policy {path} declares a tool more than once")
+        raise ValueError(f"policy {name!r} declares a tool more than once")
     return Policy(name=name, toml=source, tools=frozenset(names))

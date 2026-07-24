@@ -475,7 +475,10 @@ Contributions:
   to the **same shared log** — the parent's history is its prefix; the fork
   boundary marks, never gates (a plan execution landing after it
   re-validates against the live state and refuses on any value mismatch —
-  falls out of the boundary clause, no special rule).
+  falls out of the boundary clause, no special rule). The child's
+  model context is the completed ancestor prefix through the fork plus its
+  task, never a live view of later ancestor or sibling activity; only the
+  labeled `submit_result` path carries child-derived data back.
 - **Merge, per monoid**: returned value = data, absorbed ∩/min ⇒ **Prop.: a
   child cannot widen its parent** (∩ cannot add readers; in v1 the child
   holds no widened state to begin with — the prop is load-bearing under

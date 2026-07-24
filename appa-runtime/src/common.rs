@@ -1,9 +1,7 @@
 //! Shared engine/store operations behind the session facade.
 //!
-//! The per-call [`crate::CallSession`] (a framework owns the loop, mediating through a hook) is the
-//! front door onto the policy machinery. Everything that touches the engine, the store, or the
-//! authority backends lives here as plain functions over the shared state ([`Core`]); the facade
-//! adds only *orchestration* — how it sequences these calls and surfaces a decision to its host.
+//! The compatibility [`crate::CallSession`] facade uses these engine/store operations while a trusted
+//! framework owns the loop and tool execution.
 
 use std::collections::BTreeMap;
 
@@ -19,19 +17,18 @@ use appa_engine::value::{
     CanonicalDigest, DispatchId, LabeledValue, Provenance, ResolvedCall, ToolName, TrajectoryId, ValueBody,
 };
 
-use appa_runtime::config::Config;
-use appa_runtime::external::{AuthorityAnswer, AuthorityBackend, AuthorityRequest};
-use appa_runtime::runtime::{EXECUTE_REMEDY_PLAN, SUBMIT_RESULT};
-use appa_runtime::store::{SessionStore, StoreError, TenantId};
-use appa_runtime::tool::{BodyDisposition, ToolOutcome};
-use appa_runtime::wire::{WireTool, WireToolSchema};
-
 use crate::assemble;
+use crate::config::Config;
+use crate::external::{AuthorityAnswer, AuthorityBackend, AuthorityRequest};
+use crate::store::{SessionStore, StoreError, TenantId};
+use crate::tool::{BodyDisposition, EXECUTE_REMEDY_PLAN, FORK, SUBMIT_RESULT, ToolOutcome};
 use crate::types::{OpenError, SdkOptions, ToolSurfaceError};
+use crate::wire::{WireTool, WireToolSchema};
 
 // The fixed model-visible terminals, byte-identical to the runtime turn-drive's (RP3).
 pub(crate) const SEALED_WITHHELD: &str = "[tool result withheld: exceeds the size the policy admits]";
 pub(crate) const SEALED_FAILED: &str = "[tool call failed]";
+pub(crate) const SEALED_UNAVAILABLE: &str = "[tool result unavailable]";
 pub(crate) const SEALED_INDETERMINATE: &str = "[tool call outcome unknown — it may or may not have run]";
 
 /// A blocked call's cohort: every offered plan for one blocked proposal, each keyed by an
@@ -43,8 +40,7 @@ pub(crate) struct PendingBlock {
     pub(crate) offers: Vec<(String, appa_engine::plan::RemedyPlan)>,
 }
 
-/// The shared state and engine/store operations both facades hold. A facade embeds one `Core` and
-/// layers its own orchestration state (a round queue, a lifecycle gate) on top.
+/// The compatibility facade's shared engine/store state.
 pub(crate) struct Core {
     pub(crate) config: Config,
     pub(crate) engine: Engine,
@@ -87,7 +83,7 @@ pub(crate) struct DispatchIdentityBreach;
 
 impl Core {
     /// Open on a loaded policy, rejecting every feature the SDK v0 defers so a policy never
-    /// half-works. Shared verbatim by both facades.
+    /// half-works.
     pub(crate) fn open(config: Config, options: SdkOptions) -> Result<Core, OpenError> {
         validate_policy(&config)?;
         let engine = Engine::new(config.registry().clone());
@@ -179,7 +175,7 @@ impl Core {
                     .plan(&views, &call, &raw)
                     .expect("checked tool is registered");
                 let feedback = if planned.plans.is_empty() {
-                    appa_runtime::feedback::block_feedback(&raw, &planned, &[])
+                    crate::feedback::block_feedback(&raw, &planned, &[])
                 } else {
                     // The remedy budget bounds blocked-proposal rounds per digest: each cohort of
                     // offers is one round, within which every plan is consultable once.
@@ -199,7 +195,7 @@ impl Core {
                             (handle, plan.clone())
                         })
                         .collect();
-                    let feedback = appa_runtime::feedback::block_feedback(&raw, &planned, &offers);
+                    let feedback = crate::feedback::block_feedback(&raw, &planned, &offers);
                     self.pending_blocks.push(PendingBlock { call, offers });
                     feedback
                 };
@@ -304,7 +300,7 @@ impl Core {
                     // The denial consumes only this offer; siblings stay live and are re-listed.
                     let cohort = &mut self.pending_blocks[cohort_index];
                     cohort.offers.retain(|(h, _)| h != plan_id);
-                    let feedback = appa_runtime::feedback::denial_feedback(&cohort.offers);
+                    let feedback = crate::feedback::denial_feedback(&cohort.offers);
                     if cohort.offers.is_empty() {
                         self.pending_blocks.remove(cohort_index);
                     }
@@ -454,6 +450,9 @@ pub(crate) fn outcome_to_admission(outcome: &ToolOutcome) -> ResultAdmission {
         },
         ToolOutcome::Success {
             body: BodyDisposition::RejectedTooLarge,
+        }
+        | ToolOutcome::Success {
+            body: BodyDisposition::Unavailable,
         } => ResultAdmission::SuccessNoValue,
         ToolOutcome::Failure => ResultAdmission::Failure,
         ToolOutcome::Indeterminate => ResultAdmission::Indeterminate,
@@ -469,6 +468,9 @@ pub(crate) fn sealed_token(outcome: &ToolOutcome, admitted: bool) -> Option<&'st
         ToolOutcome::Success {
             body: BodyDisposition::RejectedTooLarge,
         } => Some(SEALED_WITHHELD),
+        ToolOutcome::Success {
+            body: BodyDisposition::Unavailable,
+        } => Some(SEALED_UNAVAILABLE),
         ToolOutcome::Failure => Some(SEALED_FAILED),
         ToolOutcome::Indeterminate => Some(SEALED_INDETERMINATE),
     }
@@ -488,7 +490,7 @@ fn validate_policy(config: &Config) -> Result<(), OpenError> {
     }
     for tool in &rc.tools {
         let name = tool.name.as_str();
-        if name == EXECUTE_REMEDY_PLAN || name == SUBMIT_RESULT {
+        if matches!(name, EXECUTE_REMEDY_PLAN | FORK | SUBMIT_RESULT) {
             return Err(OpenError::ReservedToolConflict(name.to_string()));
         }
         if tool.output_sanitizer.is_some() {
@@ -527,7 +529,8 @@ pub(crate) fn remedy_tool_schema() -> WireTool {
             parameters: Some(serde_json::json!({
                 "type": "object",
                 "properties": { "plan_id": { "type": "string" } },
-                "required": ["plan_id"]
+                "required": ["plan_id"],
+                "additionalProperties": false
             })),
         },
     }

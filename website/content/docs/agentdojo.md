@@ -5,15 +5,16 @@ order: 4
 description: Benchmarking the engine against prompt injection.
 ---
 
-The `harness-agentdojo` crate-adjacent Python package runs the core engine as a tool-call-veto defense inside [AgentDojo](https://github.com/ethz-spylab/agentdojo), the prompt-injection benchmark.
+The `harness-agentdojo` Python package runs OpenAPPA as a tool-call defense inside [AgentDojo](https://github.com/ethz-spylab/agentdojo), the prompt-injection benchmark.
 
 The key property: **the policy never reads the injected text**. It tracks which sources the conversation's context came from (a per-turn label fold) and blocks tool calls whose contract the folded context cannot satisfy.
 
 ## Layout
 
-- `check` — stateless Rust policy check over the core engine: one JSON request (contracts + episode so far + proposed call) in on stdin, one decision out on stdout.
-- `harness-agentdojo/src/baton_dojo/defense.py` — a drop-in replacement for AgentDojo's `ToolsExecutor` that consults the policy check before executing each tool call the LLM emits. Blocked calls come back on the normal tool-error channel and are never executed.
-- `harness-agentdojo/contracts/workspace.toml` — the policy as data. Every suite tool is labeled by its *source type*, never by whether a given result actually carries an injection — that is the benchmark's ground truth, and peeking is cheating. Readers of third-party text are `suspicious`, pure-state readers `trusted`, sinks require a `trusted` context.
+- `appa-agent-python` — the PyO3 adapter that keeps each dispatch handle in Rust and owns the complete check, execution, and outcome-admission transaction.
+- `harness-agentdojo/src/appa_dojo/defense.py` — a drop-in replacement for AgentDojo's `ToolsExecutor`. Allowed calls execute through a capability-scoped loopback bridge; blocked calls return on the normal tool-error channel and never execute.
+- `harness-agentdojo/src/appa_dojo/contracts/workspace.toml` — the packaged policy data. Every suite tool is labeled by its *source type*, never by whether a given result actually carries an injection — that is the benchmark's ground truth, and peeking is cheating. Readers of third-party text are `suspicious`, pure-state readers `trusted`, sinks require a `trusted` context.
+- `appa-dojo-sidecar` — the retained JSON-lines compatibility path; benchmark pipelines use PyO3 by default.
 
 ## Running the benchmark
 
@@ -21,8 +22,8 @@ The key property: **the policy never reads the injected text**. It tracks which 
 uv sync
 
 # Compare a defended and an undefended pipeline via OpenRouter:
-uv run baton-dojo bench --model openai/gpt-4o-mini-2024-07-18 --defense baton
-uv run baton-dojo bench --model openai/gpt-4o-mini-2024-07-18 --defense none
+uv run appa-dojo bench --model openai/gpt-4o-mini-2024-07-18 --defense appa
+uv run appa-dojo bench --model openai/gpt-4o-mini-2024-07-18 --defense none
 ```
 
 `bench` prints clean utility, utility under attack, attack success rate, and the number of policy-blocked calls. Per-episode JSON, including full message logs, lands under `--logdir`.
@@ -30,9 +31,9 @@ uv run baton-dojo bench --model openai/gpt-4o-mini-2024-07-18 --defense none
 ## Narrowing a run
 
 ```sh
-uv run baton-dojo bench --model openai/gpt-4o-mini-2024-07-18 \
+uv run appa-dojo bench --model openai/gpt-4o-mini-2024-07-18 \
   --user-tasks user_task_0 user_task_13 --injection-tasks injection_task_0 \
-  --attack important_instructions --unknown-policy allow_with_audit --logdir runs
+  --attack important_instructions --logdir runs
 ```
 
 ## Sharding

@@ -5,7 +5,7 @@ use thiserror::Error;
 use appa_engine::label::Label;
 use appa_engine::value::{DispatchId, ResolvedCall, ToolName};
 
-use appa_runtime::store::StoreError;
+use crate::store::StoreError;
 
 /// Session tuning. The remedy bound mirrors the runtime's default budget.
 #[derive(Clone, Copy, Debug)]
