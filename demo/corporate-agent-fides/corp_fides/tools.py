@@ -37,25 +37,57 @@ The trust/integrity row above is a true isomorphism: two ranks either side, and
 is not. It holds only because of a property of *today's* APPA policy, and it
 will stop holding the moment that property changes.
 
-FIDES confidentiality is an ordinal chain — ``PUBLIC < PRIVATE <
-USER_IDENTITY`` — enforced as a numeric ceiling against a sink's
-``max_allowed_confidentiality`` (``agent_framework/security.py``). Despite its
-name and its ``metadata={"user_id": ...}``, ``USER_IDENTITY`` means "more
-secret than private", not "for this reader": no policy path in FIDES reads the
-call's arguments, so no label can distinguish one recipient from another.
+**Scope: this arm is FIDES as shipped in Microsoft Agent Framework
+(``agent_framework.security``), not FIDES as published.** The distinction is
+load-bearing and every claim below is about the shipped module only.
+
+In the shipped module, confidentiality is an ordinal chain — ``PUBLIC < PRIVATE
+< USER_IDENTITY`` — enforced as a numeric ceiling against a sink's
+``max_allowed_confidentiality``, read off the tool definition
+(``_get_additional_properties(context.function)``) and therefore constant per
+tool. Despite its name and its ``metadata={"user_id": ...}``, ``USER_IDENTITY``
+is rung 2, not a principal: nothing in the package ever compares that metadata
+to anything, and no policy path reads the call's arguments. Raising a sink's cap
+to ``user_identity`` does not scope it to an identity — it makes the ceiling
+unsatisfiable and switches the gate off.
+
+The paper's own artifact does not have this limitation
+(``microsoft/fides``, ``Tutorial.ipynb``). There, confidentiality is
+``InverseLattice[PowersetLattice[str]]`` — a reader set, folded by intersection,
+exactly APPA's audience construction — and policies are callables over the trace
+that parse the call's arguments::
+
+    channel = json.loads(args)["channel"]
+    if ... and not (label.right <= readers_label(frozenset({channel}))):
+        raise PolicyViolation("Attempted to declassify a message to an untrusted channel")
+
+which is ``audience = { includes = ["$to"] }`` written in Python. That notebook
+is self-contained teaching code (its only third-party imports are ``openai``,
+``pydantic``, ``azure.identity``), so it cannot be bound to the corp tools
+without a hand port; the shipped module is the only installable FIDES and is
+what this arm runs. Note what the productization kept and dropped: the
+variable-passing planner survived as ``ContentVariableStore``, while the reader
+set was flattened to the notebook's *earlier*, simpler high/low
+``ConfidentialityLabel`` plus a third rung.
+
+So the result this arm produces is "the shipped module cannot express a
+recipient-granular flow decision that its own paper expresses", never "FIDES
+cannot". Say it the first way.
 
 APPA's audience is a reader *set*, folded by intersection, and the sink's
 requirement names the recipient: ``audience = { includes = ["$to"] }``
-resolves ``$to`` to the literal address at dispatch. That is a strictly richer
-question than a ceiling.
+resolves ``$to`` to the literal address at dispatch. Against the shipped
+module's ceiling that is a strictly richer question; against the notebook's
+lattice it is the same question.
 
 The **hr** row still transcribes exactly, because its audience is one symbolic
 token: ``exactly = ["hr"]`` admits no address, so ``includes($to)`` degenerates
 there into "is this trajectory still ``Public``?" — which is precisely
 ``max_allowed_confidentiality=public``. Private-or-not is the whole question,
-and FIDES can ask it.
+and the shipped module can ask it.
 
-The **finance** row no longer transcribes, and cannot. ``read_finance`` narrows
+The **finance** row no longer transcribes, and cannot — not against the
+shipped module. ``read_finance`` narrows
 the trajectory to a real reader set — ``{finance-lead@northwind.example,
 ap@northwind.example}`` — so the same invoice data reaches ``finance-lead@`` and
 is refused to ``all@``. That distinction has no image in an ordinal chain:
