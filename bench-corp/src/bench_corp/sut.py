@@ -81,7 +81,7 @@ def command_for(
     episode_dir: Path,
 ) -> list[str]:
     """The subprocess argv for one episode. The episode dir already holds
-    ``corpus/``, ``sink/``, and (for APPA SUTs) the pruned ``policy.toml``."""
+    ``data/``, ``sink/``, and (for APPA SUTs) the pruned ``policy.toml``."""
     # No --quiet: stderr.txt is the episode's full mediation/audit log — the
     # diagnostics (blocked-call counts) and any post-hoc reading depend on it.
     command = [
@@ -90,7 +90,7 @@ def command_for(
         "--model",
         model,
         "--data-root",
-        str(episode_dir / "corpus"),
+        str(episode_dir / "data"),
         "--sink-root",
         str(episode_dir / "sink"),
         "--server-bin",

@@ -17,14 +17,14 @@ def _sink_with(tmp_path: Path, *messages: tuple[str, str, str]) -> Path:
 
 
 def _eval(check: Check, *, tmp_path: Path, emails=(), answer: str = "") -> bool:
-    scenario_corpus = tmp_path / "scenario-corpus"
-    scenario_corpus.mkdir(exist_ok=True)
-    episode_corpus = tmp_path / "corpus"
-    episode_corpus.mkdir(exist_ok=True)
+    scenario_data = tmp_path / "scenario-data"
+    scenario_data.mkdir(exist_ok=True)
+    episode_data = tmp_path / "data"
+    episode_data.mkdir(exist_ok=True)
     return evaluate_check(
         check,
-        episode_corpus=episode_corpus,
-        scenario_corpus=scenario_corpus,
+        episode_data=episode_data,
+        scenario_data=scenario_data,
         emails=list(emails),
         answer=answer,
     ).passed
@@ -62,20 +62,20 @@ def test_no_email(tmp_path: Path) -> None:
     assert _eval(Check("no_email", {}), tmp_path=tmp_path, emails=[])
 
 
-def test_file_created_diffs_against_scenario_corpus(tmp_path: Path) -> None:
-    scenario_corpus = tmp_path / "scenario-corpus"
-    (scenario_corpus / "task_tracker").mkdir(parents=True)
-    (scenario_corpus / "task_tracker" / "OLD.md").write_text("old")
-    episode_corpus = tmp_path / "corpus"
-    (episode_corpus / "task_tracker").mkdir(parents=True)
-    (episode_corpus / "task_tracker" / "OLD.md").write_text("old")
-    (episode_corpus / "task_tracker" / "BENCH-AUDIT.md").write_text("Public-forum injection audit completed.")
+def test_file_created_diffs_against_scenario_data(tmp_path: Path) -> None:
+    scenario_data = tmp_path / "scenario-data"
+    (scenario_data / "task_tracker").mkdir(parents=True)
+    (scenario_data / "task_tracker" / "OLD.md").write_text("old")
+    episode_data = tmp_path / "data"
+    (episode_data / "task_tracker").mkdir(parents=True)
+    (episode_data / "task_tracker" / "OLD.md").write_text("old")
+    (episode_data / "task_tracker" / "BENCH-AUDIT.md").write_text("Public-forum injection audit completed.")
 
     def run(spec: dict) -> bool:
         return evaluate_check(
             Check("file_created", spec),
-            episode_corpus=episode_corpus,
-            scenario_corpus=scenario_corpus,
+            episode_data=episode_data,
+            scenario_data=scenario_data,
             emails=[],
             answer="",
         ).passed

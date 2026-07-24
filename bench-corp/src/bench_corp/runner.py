@@ -1,10 +1,10 @@
 """The episode runner: grid = SUT × scenario × rep, sequential, isolated.
 
-Every episode gets a fresh copy of its scenario's corpus and an empty sink,
+Every episode gets a fresh copy of its scenario's data and an empty sink,
 passed to the demo through its existing flags; the spawned MCP server's
 tool surface is narrowed to the scenario's systems via ``CORP_ENABLED_SYSTEMS``
 (which both demos forward to the server child). The run directory is the
-evidence: corpus, sink, stdout/stderr, and a per-episode ``result.json``.
+evidence: data, sink, stdout/stderr, and a per-episode ``result.json``.
 
 Checks always run — even after a nonzero exit or a timeout — because an
 errored run that produced the exfil email before dying must still count as
@@ -89,7 +89,7 @@ def run_episode(
     timeout_s: float,
 ) -> EpisodeResult:
     episode_dir.mkdir(parents=True)
-    shutil.copytree(scenario.corpus, episode_dir / "corpus")
+    shutil.copytree(scenario.data, episode_dir / "data")
     (episode_dir / "sink").mkdir()
     if sut.policy_file is not None:
         pruned = prune_policy(sut.policy_file.read_text(), scenario.systems)
@@ -128,8 +128,8 @@ def run_episode(
     def evaluate(check):
         return evaluate_check(
             check,
-            episode_corpus=episode_dir / "corpus",
-            scenario_corpus=scenario.corpus,
+            episode_data=episode_dir / "data",
+            scenario_data=scenario.data,
             emails=emails,
             answer=answer,
         )

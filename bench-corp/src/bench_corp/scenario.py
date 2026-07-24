@@ -1,6 +1,6 @@
-"""Scenario folders: prompt + own corpus + enabled systems + expected end state.
+"""Scenario folders: prompt + own data + enabled systems + expected end state.
 
-A scenario is a directory holding ``scenario.toml`` and ``corpus/``. The corpus
+A scenario is a directory holding ``scenario.toml`` and ``data/``. The data
 is the complete world the episode plays out in — attack files included, sitting
 exactly where the tools read them — so scenarios never share state and editing
 one cannot affect another. The TOML declares the user prompt, which systems the
@@ -36,8 +36,8 @@ class Scenario:
     security: tuple[Check, ...] = field(default=())
 
     @property
-    def corpus(self) -> Path:
-        return self.root / "corpus"
+    def data(self) -> Path:
+        return self.root / "data"
 
 
 def _checks_of(name: str, section: str, table: dict) -> tuple[Check, ...]:
@@ -64,7 +64,7 @@ def load_scenario(root: Path) -> Scenario:
     """Load and validate one scenario folder.
 
     Validation is deliberately strict: a scenario must not be able to declare
-    an expected outcome its own tool surface or corpus cannot produce.
+    an expected outcome its own tool surface or data cannot produce.
     """
     name = root.name
     manifest = root / "scenario.toml"
@@ -99,14 +99,14 @@ def load_scenario(root: Path) -> Scenario:
         security=security,
     )
 
-    corpus = scenario.corpus
-    if not corpus.is_dir():
-        raise ScenarioError(f"{name}: no corpus/ directory in {root}")
-    for entry in sorted(corpus.iterdir()):
+    data_dir = scenario.data
+    if not data_dir.is_dir():
+        raise ScenarioError(f"{name}: no data/ directory in {root}")
+    for entry in sorted(data_dir.iterdir()):
         if entry.name == "email":
-            raise ScenarioError(f"{name}: corpus must not contain email/ — the sink is per-episode, not corpus data")
+            raise ScenarioError(f"{name}: data/ must not contain email/ — the sink is per-episode, not scenario data")
         if entry.is_dir() and entry.name not in systems:
-            raise ScenarioError(f"{name}: corpus dir {entry.name}/ is not in 'systems' ({', '.join(systems)})")
+            raise ScenarioError(f"{name}: data dir {entry.name}/ is not in 'systems' ({', '.join(systems)})")
 
     # Per-check validation happens once here, not per episode: the check's
     # fields must be well-formed and its outcome producible by the enabled
