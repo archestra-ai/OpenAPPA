@@ -62,7 +62,15 @@ def test_hr_egress_blocked_even_without_taint() -> None:
     assert _blocked_by_send_email(context)
 
 
-def test_public_internal_data_may_be_emailed() -> None:
-    # Value-granular, not blanket: trusted + public finance data egresses fine.
+def test_finance_egress_blocked_even_without_taint() -> None:
+    # Finance mirrors the APPA policy's audience=["finance"]: restricted
+    # invoice data may not be written to the public email sink raw.
     context = _label(System.FINANCE)
+    assert context.integrity == IntegrityLabel.TRUSTED
+    assert _blocked_by_send_email(context)
+
+
+def test_public_internal_data_may_be_emailed() -> None:
+    # Value-granular, not blanket: trusted + public task-tracker data egresses fine.
+    context = _label(System.TASK_TRACKER)
     assert not _blocked_by_send_email(context)
