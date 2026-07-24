@@ -1,4 +1,4 @@
-"""The episode runner: grid = SUT × scenario × rep, sequential, isolated.
+"""The episode runner: grid = agent × scenario × rep, sequential, isolated.
 
 Every episode gets a fresh copy of its scenario's data and an empty sink,
 passed to the demo through its existing flags; the spawned MCP server's
@@ -27,7 +27,7 @@ from pathlib import Path
 from .checks import CheckResult, evaluate_check, parse_emails
 from .policy import prune_policy
 from .scenario import Scenario
-from .sut import Sut, command_for
+from .agents import Agent, command_for
 
 # Best-effort stderr diagnostics (never score inputs): the APPA hook's
 # mediation log lines for blocks, the FIDES audit log's BLOCKED lines, and
@@ -46,7 +46,7 @@ def _count(pattern: re.Pattern[str], text: str) -> int:
 
 @dataclass(frozen=True)
 class EpisodeResult:
-    sut: str
+    agent: str
     scenario: str
     rep: int
     utility: bool | None  # None when the scenario declares no utility checks
@@ -65,7 +65,7 @@ def episode_record(result: EpisodeResult) -> dict:
 
 
 def _terminate_group(process: subprocess.Popen) -> None:
-    """Stop the SUT and everything it spawned (each demo runs the MCP server
+    """Stop the agent and everything it spawned (each demo runs the MCP server
     as its own child, which a plain kill would orphan)."""
     for sig, grace in ((signal.SIGTERM, 5.0), (signal.SIGKILL, 5.0)):
         try:
@@ -80,7 +80,7 @@ def _terminate_group(process: subprocess.Popen) -> None:
 
 
 def run_episode(
-    sut: Sut,
+    agent: Agent,
     scenario: Scenario,
     rep: int,
     *,
@@ -91,14 +91,14 @@ def run_episode(
     episode_dir.mkdir(parents=True)
     shutil.copytree(scenario.data, episode_dir / "data")
     (episode_dir / "sink").mkdir()
-    if sut.policy_file is not None:
-        pruned = prune_policy(sut.policy_file.read_text(), scenario.systems)
+    if agent.policy_file is not None:
+        pruned = prune_policy(agent.policy_file.read_text(), scenario.systems)
         (episode_dir / "policy.toml").write_text(pruned)
 
     env = os.environ.copy()
     env["CORP_ENABLED_SYSTEMS"] = ",".join(scenario.systems)
 
-    command = command_for(sut, prompt=scenario.prompt, model=model, episode_dir=episode_dir)
+    command = command_for(agent, prompt=scenario.prompt, model=model, episode_dir=episode_dir)
     stdout_path = episode_dir / "stdout.txt"
     stderr_path = episode_dir / "stderr.txt"
     started = time.monotonic()
@@ -139,7 +139,7 @@ def run_episode(
     results = [*utility_results, *security_results]
 
     result = EpisodeResult(
-        sut=sut.name,
+        agent=agent.name,
         scenario=scenario.name,
         rep=rep,
         utility=all(r.passed for r in utility_results) if utility_results else None,

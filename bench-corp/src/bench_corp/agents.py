@@ -1,4 +1,4 @@
-"""The systems under test: the two demo agents, each guarded and open.
+"""The four benchmarked agents: the two demo agents, each guarded and open.
 
 Four fixed configurations, all driven through the demos' existing CLIs — the
 bench adds no flags to either demo. One shared model (``--model``) keeps the
@@ -26,37 +26,37 @@ DEFAULT_MODEL = "openai/gpt-5.6-luna"
 
 
 @dataclass(frozen=True)
-class Sut:
+class Agent:
     name: str
     executable: Path
-    # Set only for APPA SUTs: the demo policy the runner prunes per episode.
+    # Set only for APPA agents: the demo policy the runner prunes per episode.
     policy_file: Path | None = None
     extra_args: tuple[str, ...] = ()
 
 
-SUTS: dict[str, Sut] = {
-    "appa": Sut(name="appa", executable=CORP_AGENT_BIN, policy_file=CORP_AGENT_DIR / "appa-policy.toml"),
-    "appa-open": Sut(
+AGENTS: dict[str, Agent] = {
+    "appa": Agent(name="appa", executable=CORP_AGENT_BIN, policy_file=CORP_AGENT_DIR / "appa-policy.toml"),
+    "appa-open": Agent(
         name="appa-open", executable=CORP_AGENT_BIN, policy_file=CORP_AGENT_DIR / "appa-policy-open.toml"
     ),
-    "fides": Sut(name="fides", executable=FIDES_BIN),
-    "fides-open": Sut(name="fides-open", executable=FIDES_BIN, extra_args=("--no-defense",)),
+    "fides": Agent(name="fides", executable=FIDES_BIN),
+    "fides-open": Agent(name="fides-open", executable=FIDES_BIN, extra_args=("--no-defense",)),
 }
 
 
-def build_binaries(suts: list[Sut]) -> None:
-    """Build the Rust binaries the selected SUTs spawn (idempotent, up front —
+def build_binaries(agents: list[Agent]) -> None:
+    """Build the Rust binaries the selected agents spawn (idempotent, up front —
     never mid-episode, where a cargo build would distort durations)."""
     # The cheap precondition first: a missing FIDES venv must fail in
     # milliseconds, not after minutes of cargo builds.
-    if any(sut.executable == FIDES_BIN for sut in suts) and not FIDES_BIN.is_file():
+    if any(agent.executable == FIDES_BIN for agent in agents) and not FIDES_BIN.is_file():
         sys.exit(
             f"missing {FIDES_BIN}\n"
             "The FIDES demo's virtualenv provides the corp-agent-fides entry point.\n"
             f"Create it once:  cd {FIDES_DIR} && uv venv && uv pip install -e ."
         )
-    crates = [CORP_SYSTEMS_DIR]  # every SUT spawns the MCP server
-    if any(sut.executable == CORP_AGENT_BIN for sut in suts):
+    crates = [CORP_SYSTEMS_DIR]  # every agent spawns the MCP server
+    if any(agent.executable == CORP_AGENT_BIN for agent in agents):
         crates.append(CORP_AGENT_DIR)
     # Independent crates, separate target dirs: build concurrently. Pinning
     # CARGO_TARGET_DIR keeps the output at the exact path the bench spawns
@@ -74,18 +74,18 @@ def build_binaries(suts: list[Sut]) -> None:
 
 
 def command_for(
-    sut: Sut,
+    agent: Agent,
     *,
     prompt: str,
     model: str,
     episode_dir: Path,
 ) -> list[str]:
     """The subprocess argv for one episode. The episode dir already holds
-    ``data/``, ``sink/``, and (for APPA SUTs) the pruned ``policy.toml``."""
+    ``data/``, ``sink/``, and (for APPA agents) the pruned ``policy.toml``."""
     # No --quiet: stderr.txt is the episode's full mediation/audit log — the
     # diagnostics (blocked-call counts) and any post-hoc reading depend on it.
     command = [
-        str(sut.executable),
+        str(agent.executable),
         prompt,
         "--model",
         model,
@@ -96,6 +96,6 @@ def command_for(
         "--server-bin",
         str(CORP_SYSTEMS_BIN),
     ]
-    if sut.policy_file is not None:
+    if agent.policy_file is not None:
         command += ["--policy", str(episode_dir / "policy.toml")]
-    return [*command, *sut.extra_args]
+    return [*command, *agent.extra_args]
