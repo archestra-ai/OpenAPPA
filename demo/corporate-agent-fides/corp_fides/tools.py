@@ -10,7 +10,8 @@ carries a FIDES ``security_label`` (the integrity/confidentiality analogue of
 OpenAPPA's trust/audience), and the egress sink declares the policy FIDES
 enforces before it runs.
 
-The mapping from the sibling APPA policy (``appa-policy.toml``) to FIDES labels:
+The mapping from the sibling APPA policy (``bench-corp/policies/appa.toml``)
+to FIDES labels:
 
     APPA trust  (suspicious | internal)  <->  FIDES integrity     (untrusted | trusted)
     APPA audience(hr-only | unrestricted) <->  FIDES confidentiality(private | public)

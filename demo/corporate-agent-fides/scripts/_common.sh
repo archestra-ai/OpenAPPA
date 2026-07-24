@@ -3,7 +3,7 @@
 #
 # It cd's to the crate root, loads `.env` (so FIDES_DEMO_MODEL / OPENROUTER_API_KEY
 # are available here and to the module), builds the shared `corp-systems-mcp`
-# server (the sibling Rust crate both demos spawn), and defines the `run_agent` /
+# server (the sibling Rust crate this demo spawns), and defines the `run_agent` /
 # `reset_email` / `show_email` helpers the scenarios use. The corpus is the
 # sibling `corp-systems/data`; the `send_email` sink is this demo's own
 # `data/email/`.

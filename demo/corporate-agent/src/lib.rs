@@ -1,31 +1,22 @@
 //! A corporate assistant demo for exercising OpenAPPA.
 //!
-//! Two binaries over the same mock corporate systems (the sibling
+//! One binary, `appa-corp-agent`, over the mock corporate systems (the sibling
 //! [`corp-systems`](../corp-systems) crate: `hr`, `finance`, `task_tracker`,
-//! `public_forum` plus `send_email`):
+//! `public_forum` plus `send_email`): the assistant on the full `appa-agent`
+//! loop, where the runtime owns tool execution and the reserved `fork` /
+//! `submit_result` tools are live — a tainting read can be confined to a child
+//! trajectory, and a child's return can cross through a registered sanitizer.
+//! Its tools run in-process ([`fork_tools`]), the same `corp-systems` code the
+//! MCP server wraps, so this agent and the sibling `corporate-agent-fides`
+//! demo act on identical systems.
 //!
-//! - `corp-agent` — a rig agent that spawns `corp-systems-mcp` and drives its
-//!   own tool loop **mediated by the embedded `appa-sdk`** ([`appa_hook`]):
-//!   every proposed call is policy-checked before it executes, every result is
-//!   admitted or sealed before it enters model context.
-//! - `appa-corp-agent` — the same assistant on the full `appa-agent` loop,
-//!   where the runtime owns tool execution and the reserved `fork` /
-//!   `submit_result` tools are live: a tainting read can be confined to a child
-//!   trajectory, and a child's return can cross through a registered sanitizer.
-//!   Its tools run in-process ([`fork_tools`]), the same `corp-systems` code the
-//!   MCP server wraps.
-//!
-//! The policy is the demo's payload. `appa-policy.toml` (corp-agent's default)
-//! blocks the injection scenario's exfiltration; `appa-policy-open.toml`
-//! registers the same tools with no constraints, reproducing the original
-//! unmediated leak. `appa-corp-agent` takes its policy explicitly — the bench
-//! arms run `bench-corp/policies/{appa,open}.toml`, whose guarded variant adds
-//! the branch-aware story: forum taint, an egress-gated ticket, and an
-//! hr-audience sanitizer for child returns.
+//! The policy is the demo's payload, and the agent takes it explicitly: the
+//! bench arms run `bench-corp/policies/{appa,open}.toml`. The guarded variant
+//! carries the branch-aware story — forum taint, an egress-gated ticket, and an
+//! hr-audience sanitizer for child returns; the open variant registers the same
+//! tools with the neutral delta, reproducing the undefended leak.
 
-pub mod appa_hook;
 pub mod fork_tools;
-pub mod mcp;
 
 use std::path::PathBuf;
 

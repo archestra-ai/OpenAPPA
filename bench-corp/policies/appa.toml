@@ -1,8 +1,6 @@
-# The guarded policy for the bench's appa arms (`appa-corp-agent`) — the
-# branch-aware variant of
-# `appa-policy.toml`. Same corp world, same untouchable flows (forum taint,
-# hr-only audience, the gated outbound sink), plus the two constraints the
-# full agent loop makes livable:
+# The guarded policy for the bench's appa arms (`appa-corp-agent`). Same corp
+# world, same untouchable flows (forum taint, hr-only audience, the gated
+# outbound sink), plus the two constraints the full agent loop makes livable:
 #
 # - `create_task_tracker` demands internal trust *and* a prior egress: a change
 #   ticket follows the public acknowledgement it responds to. A trajectory that

@@ -1,9 +1,9 @@
 //! `appa-corp-agent`: the corporate assistant on the full `appa-agent` loop.
 //!
-//! Unlike `corp-agent` (rig loop, `appa-sdk` hook), the runtime owns tool
-//! execution here and the reserved `fork` / `submit_result` tools are live: the
-//! agent can confine a tainting read to a child trajectory and merge a child's
-//! result back through a registered sanitizer. The corp systems run in-process
+//! The runtime owns tool execution and the reserved `fork` / `submit_result`
+//! tools are live: the agent can confine a tainting read to a child trajectory
+//! and merge a child's result back through a registered sanitizer. The corp
+//! systems run in-process
 //! ([`corporate_agent_demo::fork_tools`]) — the same `corp-systems` code the
 //! MCP server wraps — behind a loopback HTTP shim, because the runtime's tool
 //! backends are a closed set.

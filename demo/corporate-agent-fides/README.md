@@ -3,13 +3,15 @@
 The OpenAPPA **corporate-agent** scenario, defended by **[FIDES]** on
 **[Microsoft Agent Framework]** instead of by OpenAPPA's own policy engine.
 
-Both demos spawn the **same** [`corp-systems`](../corp-systems) MCP server over
-the **same** corpus and the **same** planted prompt injection as the sibling
-Rust [`corporate-agent`](../corporate-agent) demo — same binary, same thirteen
-tools, same data; the *only* variable is the defense. It exists to read one
-information-flow system against the other on an identical attack: OpenAPPA's
-**trust / audience** algebra there, FIDES's **integrity / confidentiality**
-labels here.
+This demo runs the **same** [`corp-systems`](../corp-systems) systems over the
+**same** corpus and the **same** planted prompt injection as the sibling Rust
+[`corporate-agent`](../corporate-agent) demo — same thirteen tools, same data;
+the *only* variable is the defense. (It reaches them by spawning the
+`corp-systems-mcp` server; the APPA agent links that crate as a library and runs
+the same code in-process. Either way the tool surface and semantics are
+identical.) It exists to read one information-flow system against the other on
+an identical attack: OpenAPPA's **trust / audience** algebra there, FIDES's
+**integrity / confidentiality** labels here.
 
 [FIDES]: https://devblogs.microsoft.com/agent-framework/fides/
 [Microsoft Agent Framework]: https://learn.microsoft.com/en-us/agent-framework/
@@ -42,10 +44,10 @@ deterministic backstop underneath that.
 
 ## The mapping (this is the demo)
 
-The sibling demo's guarded policy (`appa-policy.toml`) and this demo's labels
-are the same design expressed in two vocabularies:
+The sibling demo's guarded policy (`bench-corp/policies/appa.toml`) and this
+demo's labels are the same design expressed in two vocabularies:
 
-| Concept | OpenAPPA (`appa-policy.toml`) | FIDES (this demo) |
+| Concept | OpenAPPA (`bench-corp/policies/appa.toml`) | FIDES (this demo) |
 |---|---|---|
 | Taint axis | `trust`: `suspicious` → `internal` | `integrity`: `untrusted` → `trusted` |
 | Audience axis | `audience = { exactly = ["hr"] }` | `confidentiality`: `private` |

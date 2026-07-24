@@ -3,9 +3,11 @@
 The systems themselves — ``hr``, ``finance``, ``task_tracker``,
 ``public_forum`` folders with ``search``/``read``/``create`` verbs plus the
 ``send_email`` sink — live in the sibling Rust ``corp-systems`` crate as a
-stdio MCP server (``corp-systems-mcp``). Both demos spawn that *same* binary
-over the *same* corpus and the *same* planted injection; the only variable
-between them is the defense (OpenAPPA's policy engine there, FIDES here).
+stdio MCP server (``corp-systems-mcp``), which this demo spawns. The sibling
+APPA demo links that crate as a library and runs the same systems in-process;
+both act over the *same* corpus and the *same* planted injection, and the only
+variable between them is the defense (OpenAPPA's policy engine there, FIDES
+here).
 
 This module owns the plumbing: resolving the corpus/sink roots and the server
 binary (building it on demand via cargo), and :class:`CorpSystemsClient`, a

@@ -6,12 +6,15 @@
 //! The semantics live once, in [`systems`]; the crate's `data/` directory is the
 //! canonical corpus, including the planted prompt-injection thread.
 //!
-//! Two sibling demos spawn this server over the same corpus and differ only in
-//! the defense mediating the agent loop:
-//! - `../corporate-agent` — a Rust rig agent mediated by the embedded `appa-sdk`;
-//! - `../corporate-agent-fides` — a Python Agent Framework agent defended by FIDES.
+//! Two sibling demos act on the same corpus and differ only in the defense
+//! mediating the agent loop:
+//! - `../corporate-agent` — a Rust agent on the full `appa-agent` loop, defended
+//!   by OpenAPPA; it links this crate as a library and runs [`systems`]
+//!   in-process rather than spawning the server;
+//! - `../corporate-agent-fides` — a Python Agent Framework agent defended by
+//!   FIDES; it spawns `corp-systems-mcp`.
 //!
-//! Each demo passes its own `--sink-root`, so the shared corpus stays read-only
+//! Each demo passes its own sink root, so the shared corpus stays read-only
 //! and the observable `email/` side-effect lands per demo.
 
 pub mod server;

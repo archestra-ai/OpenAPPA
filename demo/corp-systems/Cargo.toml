@@ -7,9 +7,10 @@ description = "Mock corporate systems (hr, finance, task_tracker, public_forum) 
 autobins = false
 
 # Standalone on purpose, like the sibling demo crates — deliberately out of the
-# root workspace so the MCP stack stays out of `cargo test --workspace`. Both
-# corporate-agent (Rust/APPA) and corporate-agent-fides (Python/FIDES) spawn the
-# `corp-systems-mcp` binary built here, over the corpus in `data/`.
+# root workspace so the MCP stack stays out of `cargo test --workspace`.
+# corporate-agent-fides (Python/FIDES) spawns the `corp-systems-mcp` binary
+# built here; corporate-agent (Rust/APPA) links this crate as a library and runs
+# the same systems in-process. Both act on the corpus in `data/`.
 [workspace]
 
 [dependencies]

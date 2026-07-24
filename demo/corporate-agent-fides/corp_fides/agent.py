@@ -84,7 +84,7 @@ def build_agent(
     ``defend=True`` installs FIDES via :class:`SecureAgentConfig`; ``defend=False``
     is the unmediated contrast — the same binary, same loop, same prompt — that
     lets the planted injection reach ``send_email`` and leak, exactly like the
-    APPA demo's ``appa-policy-open.toml``.
+    APPA demo's open policy (``bench-corp/policies/open.toml``).
     """
     client = make_chat_client(model, api_key)
 

@@ -3,46 +3,34 @@ name = "corporate-agent-demo"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "A corporate assistant agent (mediated by the embedded appa-sdk) over mock internal systems (MCP), used to exercise OpenAPPA"
+description = "A corporate assistant agent on the full appa-agent loop over mock internal systems, used to exercise OpenAPPA"
 autobins = false
 
 # Standalone on purpose, like the sibling OpenAPPA crates — and deliberately out
-# of the root workspace, to keep the heavy demo deps (an MCP stack and an LLM
-# client) out of the workspace build. Test it separately from the root
-# `cargo test --workspace`.
+# of the root workspace, to keep the heavy demo deps (the LLM client) out of the
+# workspace build. Test it separately from the root `cargo test --workspace`.
 [workspace]
 
 [dependencies]
-appa-sdk = { path = "../../appa-sdk" }
 appa-runtime = { path = "../../appa-runtime" }
 appa-engine = { path = "../../appa-engine" }
 # The full agent loop (fork/submit_result) behind the `appa-corp-agent` binary.
 appa-agent = { path = "../../appa-agent" }
 # The corp systems' semantics, executed in-process by `appa-corp-agent` — the
-# same code the MCP server wraps, so both binaries act on identical systems.
+# same code the sibling MCP server wraps, so this agent and the FIDES demo act
+# on identical systems.
 corp-systems = { path = "../corp-systems" }
 # The loopback shim `appa-corp-agent` serves its policy tools on (the runtime's
 # tool backends are a closed set: builtin fixtures or HTTP).
 axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1"] }
 tokio-util = "0.7"
-# `rig` is the dep-rename of `rig-core`; it owns the agent loop and mediates tool
-# calls through the APPA hook. Pinned to 0.40 with `rmcp`.
-rig = { package = "rig-core", version = "0.40", features = ["rmcp"] }
-# rmcp 1.8 client side only: the server lives in the sibling `corp-systems`
-# crate; `transport-child-process` is the agent spawning it as a subprocess.
-rmcp = { version = "1.8", features = ["client", "transport-child-process"] }
-# Explicit features (not left to unification): the loop and tests need process
-# spawning, sockets, and timeouts.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "net", "io-util", "time"] }
+# Explicit features (not left to unification): the loop and tests need sockets
+# and timeouts.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
-thiserror = "2"
-
-[[bin]]
-name = "corp-agent"
-path = "src/bin/corp_agent.rs"
 
 [[bin]]
 name = "appa-corp-agent"

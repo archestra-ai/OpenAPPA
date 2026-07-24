@@ -5,15 +5,20 @@ server** (`corp-systems-mcp`) over fake company systems — `hr`, `finance`,
 `task_tracker`, and a `public_forum` — stored as folders of markdown files,
 plus a mocked `send_email` sink.
 
-Two sibling demos spawn this server over the **same corpus and the same
-planted prompt injection** (`data/public_forum/acme-forum-thread.md`) and
-differ only in the defense mediating the agent loop:
+Two sibling demos act on the **same corpus and the same planted prompt
+injection** (`data/public_forum/acme-forum-thread.md`) and differ only in the
+defense mediating the agent loop:
 
-- [`../corporate-agent`](../corporate-agent) — a Rust rig agent mediated by the
-  embedded `appa-sdk` (OpenAPPA's trust/audience algebra);
+- [`../corporate-agent`](../corporate-agent) — a Rust agent on the full
+  `appa-agent` loop, defended by OpenAPPA's trust/audience algebra. It links
+  this crate as a **library** and runs the systems in-process, so it does not
+  spawn the server;
 - [`../corporate-agent-fides`](../corporate-agent-fides) — a Python Agent
   Framework agent defended by Microsoft's FIDES (integrity/confidentiality
-  labels).
+  labels). It spawns `corp-systems-mcp`.
+
+Both routes execute the same `systems` code, so the tool surface and the
+semantics are identical whichever way a demo reaches them.
 
 Keeping the server and corpus here makes "same tool surface, same data, same
 attack — different defense" true by construction, not by porting discipline.
