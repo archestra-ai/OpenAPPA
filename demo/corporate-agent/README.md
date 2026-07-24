@@ -10,7 +10,7 @@ Its tools execute **in-process** (`fork_tools.rs`) behind a loopback HTTP shim,
 because the runtime's tool backends are a closed set (builtin fixtures or HTTP).
 That in-process code is the same [`corp-systems`](../corp-systems) crate the
 `corp-systems-mcp` server wraps — fake company systems (`hr`, `finance`,
-`task_tracker`, `public_forum`) as folders on disk, plus a mocked `send_email`.
+`task_tracker`, `public_forum`, `vendor`) as folders on disk, plus email tools.
 The sibling [`corporate-agent-fides`](../corporate-agent-fides) demo runs the
 *same* corpus and tool surface under Microsoft's FIDES instead (over the MCP
 server), so only the defense differs.
@@ -51,12 +51,13 @@ The systems and the corpus (with the planted injection) live in the sibling
 `send_email` writes to this demo's own `data/email/` (`--sink-root`), so the
 observable leak lands here.
 
-### Tools (13)
+### Shared tools (17)
 
 `search_`, `read_`, `create_` for each of `hr`, `finance`, `task_tracker`,
-`public_forum` (12), plus `send_email(to, subject, body)`. The policy registers
-all thirteen; the runtime additionally advertises the reserved `fork` and
-`submit_result` tools that make branching available to the model.
+`public_forum`, and `vendor` (15), plus `send_email(to, subject, body)` and the
+finance+email composite `share_legal_packet(file, to)`. The in-process shim
+supports all seventeen; the runtime advertises the subset registered by its
+policy, plus the reserved `fork` and `submit_result` tools.
 
 ## Prerequisites
 

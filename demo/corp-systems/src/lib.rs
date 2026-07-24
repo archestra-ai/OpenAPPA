@@ -1,8 +1,8 @@
 //! Mock corporate systems shared by the corporate-agent demos.
 //!
 //! One binary, `corp-systems-mcp` ([`server`]) — a stdio MCP server exposing
-//! mock internal systems (`hr`, `finance`, `task_tracker`, `public_forum`) as
-//! folders, with `search_`/`read_`/`create_` tools per system plus `send_email`.
+//! mock systems (`hr`, `finance`, `task_tracker`, `public_forum`, `vendor`) as
+//! folders, with generic file tools plus `send_email` and `share_legal_packet`.
 //! The semantics live once, in [`systems`]; the crate's `data/` directory is the
 //! canonical corpus, including the planted prompt-injection thread.
 //!

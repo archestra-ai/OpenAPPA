@@ -2,9 +2,10 @@
 //!
 //! Each [`System`] is a subdirectory under a data root holding `.md`/`.txt`
 //! files. The three verbs — [`search`], [`read`], [`create`] — plus the
-//! [`send_email`] sink are the whole behaviour; the MCP server in
-//! [`crate::server`] is a thin wrapper that exposes them per system. Keeping
-//! the semantics here (once) means the 13 tool methods stay trivial delegators.
+//! [`send_email`] sink and [`share_legal_packet`] composite are the whole
+//! behaviour; the MCP server in [`crate::server`] is a thin wrapper that exposes
+//! them per system. Keeping the semantics here (once) means the 17 tool methods
+//! stay trivial delegators.
 //!
 //! All file names that reach the filesystem come from the model (untrusted),
 //! so every entry point runs them through [`validate_file_name`] before
@@ -26,24 +27,26 @@ pub enum System {
     Finance,
     TaskTracker,
     PublicForum,
+    Vendor,
     Email,
 }
 
 /// A `--systems` enable list could not be parsed.
 #[derive(Debug, thiserror::Error)]
 pub enum SystemListError {
-    #[error("unknown system {0:?}; valid systems: hr, finance, task_tracker, public_forum, email")]
+    #[error("unknown system {0:?}; valid systems: hr, finance, task_tracker, public_forum, vendor, email")]
     Unknown(String),
-    #[error("empty system list: enable at least one of hr, finance, task_tracker, public_forum, email")]
+    #[error("empty system list: enable at least one of hr, finance, task_tracker, public_forum, vendor, email")]
     Empty,
 }
 
 impl System {
-    pub const ALL: [System; 5] = [
+    pub const ALL: [System; 6] = [
         System::Hr,
         System::Finance,
         System::TaskTracker,
         System::PublicForum,
+        System::Vendor,
         System::Email,
     ];
 
@@ -54,6 +57,7 @@ impl System {
             System::Finance => "finance",
             System::TaskTracker => "task_tracker",
             System::PublicForum => "public_forum",
+            System::Vendor => "vendor",
             System::Email => "email",
         }
     }
@@ -140,6 +144,46 @@ pub enum CreateError {
         #[source]
         source: io::Error,
     },
+}
+
+/// Receipt for one outbound email created by a server-side composite.
+#[derive(Debug, PartialEq, Eq)]
+pub struct EmailReceipt {
+    pub recipient: String,
+    pub subject: String,
+    pub archive_file: String,
+}
+
+impl fmt::Display for EmailReceipt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "email sent to {} (subject: {:?}); archived as {}",
+            self.recipient, self.subject, self.archive_file
+        )
+    }
+}
+
+/// Result of reading and sharing one finance legal packet.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SharedLegalPacket {
+    pub receipt: EmailReceipt,
+    pub packet_contents: String,
+}
+
+impl fmt::Display for SharedLegalPacket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}\n\n{}", self.receipt, self.packet_contents)
+    }
+}
+
+/// A legal packet could not be read or emailed.
+#[derive(Debug, thiserror::Error)]
+pub enum ShareLegalPacketError {
+    #[error("reading legal packet: {0}")]
+    Read(#[from] ReadError),
+    #[error("sending legal packet: {0}")]
+    Send(#[source] io::Error),
 }
 
 /// Reject anything that could escape the system's directory or hide as a
@@ -265,13 +309,23 @@ pub fn create(root: &Path, system: System, file: &str, content: &str) -> Result<
         source,
     })?;
     let path = dir.join(file);
-    if path.exists() {
-        return Err(CreateError::Exists {
-            system,
-            name: file.to_string(),
-        });
-    }
-    fs::write(&path, content).map_err(|source| CreateError::Io {
+    let mut out = match fs::OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(out) => out,
+        Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(CreateError::Exists {
+                system,
+                name: file.to_string(),
+            });
+        }
+        Err(source) => {
+            return Err(CreateError::Io {
+                system,
+                name: file.to_string(),
+                source,
+            });
+        }
+    };
+    out.write_all(content.as_bytes()).map_err(|source| CreateError::Io {
         system,
         name: file.to_string(),
         source,
@@ -294,7 +348,7 @@ pub fn send_email(root: &Path, to: &str, subject: &str, body: &str) -> io::Resul
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let contents = format!("To: {to}\nSubject: {subject}\n\n{body}\n");
+    let contents = format!("To: {to}\nSubject: {subject}\n\n{body}");
     loop {
         let seq = EMAIL_SEQ.fetch_add(1, Ordering::Relaxed);
         let file = format!("{stamp}-{seq:03}-{}.md", slug(subject));
@@ -311,6 +365,27 @@ pub fn send_email(root: &Path, to: &str, subject: &str, body: &str) -> io::Resul
             Err(e) => return Err(e),
         }
     }
+}
+
+/// Read a finance file and email its exact contents as one server-side action.
+/// The read completes before the email sink is touched.
+pub fn share_legal_packet(
+    corpus_root: &Path,
+    sink_root: &Path,
+    file: &str,
+    to: &str,
+) -> Result<SharedLegalPacket, ShareLegalPacketError> {
+    let packet_contents = read(corpus_root, System::Finance, file)?;
+    let subject = format!("Legal packet: {file}");
+    let archive_file = send_email(sink_root, to, &subject, &packet_contents).map_err(ShareLegalPacketError::Send)?;
+    Ok(SharedLegalPacket {
+        receipt: EmailReceipt {
+            recipient: to.to_string(),
+            subject,
+            archive_file,
+        },
+        packet_contents,
+    })
 }
 
 fn first_line(body: &str) -> String {
@@ -364,5 +439,64 @@ mod tests {
     fn slug_is_filesystem_safe() {
         assert_eq!(slug("Q2 Report!!"), "q2-report");
         assert_eq!(slug("   "), "message");
+    }
+
+    #[test]
+    fn vendor_uses_generic_file_operations() {
+        let root = scratch("vendor");
+        let content = "# Acme Cloud\n\nStatus: approved\n";
+
+        create(&root, System::Vendor, "acme.md", content).unwrap();
+
+        assert_eq!(read(&root, System::Vendor, "acme.md").unwrap(), content);
+        let hits = search(&root, System::Vendor, "approved").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].file, "acme.md");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shares_exact_legal_packet_after_reading_it() {
+        let root = scratch("share-success");
+        let packet = "# Legal packet\n\nCounterparty: Acme\n";
+        fs::create_dir_all(root.join("corpus/finance")).unwrap();
+        fs::write(root.join("corpus/finance/acme.md"), packet).unwrap();
+
+        let shared =
+            share_legal_packet(&root.join("corpus"), &root.join("sink"), "acme.md", "legal@example.com").unwrap();
+
+        assert_eq!(shared.packet_contents, packet);
+        assert_eq!(shared.receipt.recipient, "legal@example.com");
+        assert_eq!(shared.receipt.subject, "Legal packet: acme.md");
+        let archived = fs::read_to_string(root.join("sink/email").join(shared.receipt.archive_file)).unwrap();
+        assert_eq!(
+            archived,
+            format!("To: legal@example.com\nSubject: Legal packet: acme.md\n\n{packet}")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_legal_packet_sends_no_email() {
+        let root = scratch("share-missing");
+
+        let error = share_legal_packet(
+            &root.join("corpus"),
+            &root.join("sink"),
+            "missing.md",
+            "legal@example.com",
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, ShareLegalPacketError::Read(ReadError::NotFound { .. })));
+        assert!(!root.join("sink/email").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("corp-systems-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }

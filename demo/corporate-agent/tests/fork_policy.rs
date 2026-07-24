@@ -19,7 +19,7 @@ fn assemble(policy: &str) -> Mediator {
         .iter()
         .map(|contract| (contract.name.clone(), BuiltinTool::Echo(String::new())))
         .collect();
-    assert_eq!(backends.len(), 13, "the 13-tool corp surface");
+    assert_eq!(backends.len(), 17, "the 17-tool corp surface");
     Mediator::new(config, backends).expect("the mediator assembles")
 }
 

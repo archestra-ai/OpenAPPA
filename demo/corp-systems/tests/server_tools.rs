@@ -9,7 +9,7 @@ use rmcp::model::CallToolRequestParams;
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
 use tokio::process::Command;
 
-/// A throwaway data root seeded with two systems, cleaned up on drop.
+/// A throwaway data root seeded with representative systems, cleaned up on drop.
 struct TempData(PathBuf);
 
 impl TempData {
@@ -17,10 +17,22 @@ impl TempData {
         let dir = std::env::temp_dir().join(format!("corp-systems-test-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("hr")).unwrap();
+        std::fs::create_dir_all(dir.join("finance")).unwrap();
         std::fs::create_dir_all(dir.join("task_tracker")).unwrap();
+        std::fs::create_dir_all(dir.join("vendor")).unwrap();
         std::fs::write(
             dir.join("hr/alice-chen.md"),
             "# Alice Chen\nCompensation: $185,000\nSSN (last4): 4821\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("finance/acme-legal.md"),
+            "# Acme legal packet\n\nCounterparty: Acme Cloud Services\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("vendor/acme-cloud.md"),
+            "# Acme Cloud Services\n\nStatus: approved\n",
         )
         .unwrap();
         Self(dir)
@@ -92,12 +104,12 @@ async fn call(
 }
 
 #[tokio::test]
-async fn advertises_thirteen_tools() {
+async fn advertises_seventeen_tools() {
     let data = TempData::new("list");
     let server = spawn_server(data.path()).await;
     let tools = server.peer().list_all_tools().await.expect("list tools");
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
-    assert_eq!(names.len(), 13, "expected 13 tools, got: {names:?}");
+    assert_eq!(names.len(), 17, "expected 17 tools, got: {names:?}");
     for expected in [
         "search_hr",
         "read_hr",
@@ -111,10 +123,93 @@ async fn advertises_thirteen_tools() {
         "search_public_forum",
         "read_public_forum",
         "create_public_forum",
+        "search_vendor",
+        "read_vendor",
+        "create_vendor",
         "send_email",
+        "share_legal_packet",
     ] {
         assert!(names.contains(&expected), "missing tool {expected}; have {names:?}");
     }
+    server.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn vendor_search_read_and_create_use_the_vendor_folder() {
+    let data = TempData::new("vendor");
+    let server = spawn_server(data.path()).await;
+
+    let search = call(&server, "search_vendor", serde_json::json!({ "query": "Acme" })).await;
+    assert_ne!(search.is_error, Some(true));
+
+    let record = call(&server, "read_vendor", serde_json::json!({ "file": "acme-cloud.md" })).await;
+    assert_eq!(text_of(&record), "# Acme Cloud Services\n\nStatus: approved\n");
+
+    let created = call(
+        &server,
+        "create_vendor",
+        serde_json::json!({ "file": "northstar.md", "content": "# Northstar Legal\n" }),
+    )
+    .await;
+    assert_ne!(created.is_error, Some(true));
+    assert_eq!(
+        std::fs::read_to_string(data.path().join("vendor/northstar.md")).unwrap(),
+        "# Northstar Legal\n"
+    );
+
+    server.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn share_legal_packet_returns_content_and_sends_exact_body() {
+    let data = TempData::new("legal-packet");
+    let sink = TempData::new("legal-packet-sink");
+    let server = spawn_server_split(data.path(), sink.path()).await;
+    let packet = std::fs::read_to_string(data.path().join("finance/acme-legal.md")).unwrap();
+
+    let result = call(
+        &server,
+        "share_legal_packet",
+        serde_json::json!({ "file": "acme-legal.md", "to": "legal@example.com" }),
+    )
+    .await;
+
+    assert_ne!(result.is_error, Some(true));
+    let mut emails = std::fs::read_dir(sink.path().join("email")).unwrap();
+    let email = emails.next().unwrap().unwrap().path();
+    assert!(emails.next().is_none());
+    assert_eq!(
+        std::fs::read_to_string(email).unwrap(),
+        format!("To: legal@example.com\nSubject: Legal packet: acme-legal.md\n\n{packet}")
+    );
+    assert_eq!(
+        result
+            .content
+            .get(1)
+            .and_then(|content| content.as_text())
+            .map(|text| text.text.as_str()),
+        Some(packet.as_str())
+    );
+
+    server.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn share_legal_packet_read_failure_sends_no_email() {
+    let data = TempData::new("legal-packet-missing");
+    let sink = TempData::new("legal-packet-missing-sink");
+    let server = spawn_server_split(data.path(), sink.path()).await;
+
+    let result = call(
+        &server,
+        "share_legal_packet",
+        serde_json::json!({ "file": "missing.md", "to": "legal@example.com" }),
+    )
+    .await;
+
+    assert_eq!(result.is_error, Some(true));
+    assert!(!sink.path().join("email").exists());
+
     server.cancel().await.ok();
 }
 
@@ -223,14 +318,63 @@ async fn rejects_path_traversal() {
 #[tokio::test]
 async fn systems_flag_narrows_the_tool_surface() {
     let data = TempData::new("narrow");
-    let server = spawn_server_systems(data.path(), "hr, email").await;
+    let server = spawn_server_systems(data.path(), "hr, email, vendor").await;
     let tools = server.peer().list_all_tools().await.expect("list tools");
     let mut names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
     names.sort_unstable();
     assert_eq!(
         names,
-        vec!["create_hr", "read_hr", "search_hr", "send_email"],
-        "only hr + email tools should be listed"
+        vec![
+            "create_hr",
+            "create_vendor",
+            "read_hr",
+            "read_vendor",
+            "search_hr",
+            "search_vendor",
+            "send_email"
+        ],
+        "only hr + email + vendor tools should be listed"
+    );
+    server.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn share_legal_packet_filter_requires_finance_and_email() {
+    for (tag, systems) in [("finance-only", "finance"), ("email-only", "email")] {
+        let data = TempData::new(tag);
+        let server = spawn_server_systems(data.path(), systems).await;
+        let names: Vec<_> = server
+            .peer()
+            .list_all_tools()
+            .await
+            .expect("list tools")
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect();
+        assert!(!names.iter().any(|name| name == "share_legal_packet"));
+        server.cancel().await.ok();
+    }
+
+    let data = TempData::new("finance-and-email");
+    let server = spawn_server_systems(data.path(), "finance,email").await;
+    let mut names: Vec<_> = server
+        .peer()
+        .list_all_tools()
+        .await
+        .expect("list tools")
+        .into_iter()
+        .map(|tool| tool.name.into_owned())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec![
+            "create_finance",
+            "read_finance",
+            "search_finance",
+            "send_email",
+            "share_legal_packet"
+        ]
     );
     server.cancel().await.ok();
 }
@@ -249,6 +393,17 @@ async fn disabled_tool_is_refused_and_touches_nothing() {
         !data.path().join("task_tracker/TASK-999.md").exists(),
         "disabled create_task_tracker must not write"
     );
+
+    let mut params = CallToolRequestParams::new("share_legal_packet");
+    params.arguments = serde_json::json!({ "file": "acme-legal.md", "to": "legal@example.com" })
+        .as_object()
+        .cloned();
+    let result = server.peer().call_tool(params).await;
+    assert!(
+        result.is_err(),
+        "calling a disabled composite must fail, got: {result:?}"
+    );
+    assert!(!data.path().join("email").exists());
     server.cancel().await.ok();
 }
 

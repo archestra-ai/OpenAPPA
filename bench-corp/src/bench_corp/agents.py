@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -27,10 +28,18 @@ FIDES_BIN = FIDES_DIR / ".venv" / "bin" / "corp-agent-fides"
 DEFAULT_MODEL = "openai/gpt-5.6-luna"
 
 
+class PolicyTarget(Enum):
+    APPA_GUARDED = "appa-guarded"
+    APPA_OPEN = "appa-open"
+    FIDES = "fides"
+    NONE = "none"
+
+
 @dataclass(frozen=True)
 class Agent:
     name: str
     executable: Path
+    policy_target: PolicyTarget
     # Set only for APPA agents: the benchmark policy the runner prunes per episode.
     policy_file: Path | None = None
     # Set only for agents that spawn the MCP server (the appa agent runs the
@@ -38,22 +47,52 @@ class Agent:
     mcp_server: Path | None = None
     extra_args: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.policy_target, PolicyTarget):
+            raise TypeError(f"{self.name}: policy_target must be a PolicyTarget")
+        match self.policy_target:
+            case PolicyTarget.APPA_GUARDED | PolicyTarget.APPA_OPEN:
+                if self.policy_file is None:
+                    raise ValueError(f"{self.name}: APPA agents require a source policy")
+            case PolicyTarget.FIDES | PolicyTarget.NONE:
+                if self.policy_file is not None:
+                    raise ValueError(f"{self.name}: only APPA agents can declare policy_file")
+
 
 AGENTS: dict[str, Agent] = {
     # The appa agent is appa-corp-agent: the full appa-agent loop with the
     # reserved fork/submit_result tools live. The ablation arm proves
     # branching is what the fork scenarios pay for, and the open arm is the
     # undefended baseline on the same loop.
-    "appa": Agent(name="appa", executable=APPA_CORP_AGENT_BIN, policy_file=POLICIES_DIR / "appa.toml"),
+    "appa": Agent(
+        name="appa",
+        executable=APPA_CORP_AGENT_BIN,
+        policy_target=PolicyTarget.APPA_GUARDED,
+        policy_file=POLICIES_DIR / "appa.toml",
+    ),
     "appa-nofork": Agent(
         name="appa-nofork",
         executable=APPA_CORP_AGENT_BIN,
+        policy_target=PolicyTarget.APPA_GUARDED,
         policy_file=POLICIES_DIR / "appa.toml",
         extra_args=("--max-forks", "0"),
     ),
-    "appa-open": Agent(name="appa-open", executable=APPA_CORP_AGENT_BIN, policy_file=POLICIES_DIR / "open.toml"),
-    "fides": Agent(name="fides", executable=FIDES_BIN, mcp_server=CORP_SYSTEMS_BIN),
-    "fides-open": Agent(name="fides-open", executable=FIDES_BIN, mcp_server=CORP_SYSTEMS_BIN, extra_args=("--no-defense",)),
+    "appa-open": Agent(
+        name="appa-open",
+        executable=APPA_CORP_AGENT_BIN,
+        policy_target=PolicyTarget.APPA_OPEN,
+        policy_file=POLICIES_DIR / "open.toml",
+    ),
+    "fides": Agent(
+        name="fides", executable=FIDES_BIN, policy_target=PolicyTarget.FIDES, mcp_server=CORP_SYSTEMS_BIN
+    ),
+    "fides-open": Agent(
+        name="fides-open",
+        executable=FIDES_BIN,
+        policy_target=PolicyTarget.FIDES,
+        mcp_server=CORP_SYSTEMS_BIN,
+        extra_args=("--no-defense",),
+    ),
 }
 
 
@@ -94,11 +133,13 @@ def command_for(
     prompt: str,
     model: str,
     episode_dir: Path,
+    policy_path: Path | None,
 ) -> list[str]:
     """The subprocess argv for one episode. The episode dir already holds
     ``data/``, ``sink/``, and (for APPA agents) the pruned ``policy.toml``."""
     # No --quiet: stderr.txt is the episode's full mediation/audit log — the
     # diagnostics (blocked-call counts) and any post-hoc reading depend on it.
+    episode_dir = episode_dir.resolve()
     command = [
         str(agent.executable),
         prompt,
@@ -111,6 +152,15 @@ def command_for(
     ]
     if agent.mcp_server is not None:
         command += ["--server-bin", str(agent.mcp_server)]
-    if agent.policy_file is not None:
-        command += ["--policy", str(episode_dir / "policy.toml")]
+    match agent.policy_target:
+        case PolicyTarget.APPA_GUARDED | PolicyTarget.APPA_OPEN:
+            if policy_path is None:
+                raise ValueError(f"{agent.name}: APPA agents require a staged policy")
+            command += ["--policy", str(policy_path.resolve())]
+        case PolicyTarget.FIDES:
+            if policy_path is not None:
+                command += ["--profile", str(policy_path.resolve())]
+        case PolicyTarget.NONE:
+            if policy_path is not None:
+                raise ValueError(f"{agent.name}: policy-free agents cannot receive a staged policy")
     return [*command, *agent.extra_args]

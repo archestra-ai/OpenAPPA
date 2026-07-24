@@ -3,7 +3,7 @@ name = "corp-systems"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "Mock corporate systems (hr, finance, task_tracker, public_forum) as a stdio MCP server — the shared tool surface and corpus of the corporate-agent demos"
+description = "Mock corporate systems (hr, finance, task_tracker, public_forum, vendor) as a stdio MCP server — the shared tool surface and corpus of the corporate-agent demos"
 autobins = false
 
 # Standalone on purpose, like the sibling demo crates — deliberately out of the

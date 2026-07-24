@@ -20,7 +20,7 @@
 #   `send_email` (no authority may widen an audience — that block is terminal).
 
 version = 1
-trust_chain = ["suspicious", "internal"]
+trust_chain = ["suspicious", "vendor", "internal"]
 
 # User turns enter at internal trust with a public audience (also the loader's
 # default, spelled out because the boundary label is what forking preserves).
@@ -128,6 +128,23 @@ parameters = { type = "object", properties = { file = { type = "string", descrip
 requires = { trust = "internal" }
 delta = {}
 
+# --- vendor: externally supplied business records carry intermediate trust --
+
+[[tool]]
+name = "search_vendor"
+parameters = { type = "object", properties = { query = { type = "string", description = "Keyword or phrase to match against file names and contents." } }, required = ["query"], additionalProperties = false }
+delta = { trust = "vendor" }
+
+[[tool]]
+name = "read_vendor"
+parameters = { type = "object", properties = { file = { type = "string", description = "The exact file name to read, e.g. `alice-chen.md`." } }, required = ["file"], additionalProperties = false }
+delta = { trust = "vendor" }
+
+[[tool]]
+name = "create_vendor"
+parameters = { type = "object", properties = { file = { type = "string", description = "The file name to create, e.g. `TASK-103.md`." }, content = { type = "string", description = "The full contents to write." } }, required = ["file", "content"], additionalProperties = false }
+delta = {}
+
 # --- the outbound sink -------------------------------------------------------
 
 [[tool]]
@@ -136,6 +153,15 @@ parameters = { type = "object", properties = { to = { type = "string", descripti
 requires = { trust = "internal", audience = { includes = ["$to"] } }
 effects = ["egress"]
 delta = {}
+
+# The composite reads finance before its email side effect. Its finance delta
+# therefore participates in the pre-dispatch recipient check.
+[[tool]]
+name = "share_legal_packet"
+parameters = { type = "object", properties = { file = { type = "string", description = "The exact finance file name to share." }, to = { type = "string", description = "Recipient email address." } }, required = ["file", "to"], additionalProperties = false }
+requires = { trust = "internal", audience = { includes = ["$to"] } }
+effects = ["egress"]
+delta = { audience = { exactly = ["finance-lead@northwind.example", "ap@northwind.example"] } }
 
 # The one registered declassifier: the redaction service strips numeric
 # identifiers (SSNs, salaries, account digits) from an hr-audience derivation,

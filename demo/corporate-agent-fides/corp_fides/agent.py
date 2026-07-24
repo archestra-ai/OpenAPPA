@@ -94,18 +94,14 @@ def build_agent(
 
     # A second, tool-less client processes untrusted content in isolation.
     quarantine = make_chat_client(quarantine_model or model, api_key)
+    allow_untrusted_tools = {
+        candidate.name
+        for candidate in tools
+        if (candidate.additional_properties or {}).get("accepts_untrusted") is True
+    }
     config = SecureAgentConfig(
         auto_hide_untrusted=True,
-        allow_untrusted_tools={
-            "search_public_forum",
-            "read_public_forum",
-            "search_hr",
-            "read_hr",
-            "search_finance",
-            "read_finance",
-            "search_task_tracker",
-            "read_task_tracker",
-        },
+        allow_untrusted_tools=allow_untrusted_tools,
         block_on_violation=True,
         enable_policy_enforcement=True,
         enable_audit_log=True,

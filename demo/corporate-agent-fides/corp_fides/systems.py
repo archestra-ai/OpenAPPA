@@ -1,9 +1,10 @@
 """The connection to the shared mock corporate systems.
 
 The systems themselves — ``hr``, ``finance``, ``task_tracker``,
-``public_forum`` folders with ``search``/``read``/``create`` verbs plus the
-``send_email`` sink — live in the sibling Rust ``corp-systems`` crate as a
-stdio MCP server (``corp-systems-mcp``), which this demo spawns. The sibling
+``public_forum``, and ``vendor`` folders with ``search``/``read``/``create``
+verbs plus ``send_email`` and ``share_legal_packet`` — live in the sibling Rust
+``corp-systems`` crate as a stdio MCP server (``corp-systems-mcp``), which this
+demo spawns. The sibling
 APPA demo links that crate as a library and runs the same systems in-process;
 both act over the *same* corpus and the *same* planted injection, and the only
 variable between them is the defense (OpenAPPA's policy engine there, FIDES
@@ -43,6 +44,7 @@ class System(str, Enum):
     FINANCE = "finance"
     TASK_TRACKER = "task_tracker"
     PUBLIC_FORUM = "public_forum"
+    VENDOR = "vendor"
     EMAIL = "email"
 
     @property

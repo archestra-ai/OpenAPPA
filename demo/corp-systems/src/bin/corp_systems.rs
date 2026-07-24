@@ -21,7 +21,9 @@ use rmcp::transport::stdio;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(about = "MCP server exposing mock corporate systems (hr, finance, task_tracker, internet) as folders")]
+#[command(
+    about = "MCP server exposing mock corporate systems (hr, finance, task_tracker, public_forum, vendor) as folders"
+)]
 struct Args {
     /// Root directory holding the per-system folders. Defaults to `CORP_DATA_ROOT`
     /// or the crate's `data/` directory.
@@ -35,7 +37,7 @@ struct Args {
     sink_root: Option<PathBuf>,
 
     /// Comma-separated systems to enable, e.g. `hr,public_forum,email`.
-    /// Defaults to `CORP_ENABLED_SYSTEMS`, else all five. A disabled system's
+    /// Defaults to `CORP_ENABLED_SYSTEMS`, else all six. A disabled system's
     /// tools are absent from `list_tools` and refused when called.
     #[arg(long, env = "CORP_ENABLED_SYSTEMS")]
     systems: Option<String>,

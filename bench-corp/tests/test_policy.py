@@ -6,10 +6,10 @@ import tomllib
 
 import pytest
 
-from bench_corp.policy import SYSTEM_OF_TOOL, PolicyError, apply_tool_requires, prune_policy
 from bench_corp.agents import AGENTS
-from bench_corp.scenario import load_scenario
 from bench_corp.cli import SCENARIOS_DIR
+from bench_corp.policy import REQUIRED_SYSTEMS_OF_TOOL, PolicyError, apply_tool_requires, prune_policy
+from bench_corp.scenario import load_scenario
 
 
 def _tool_names(policy_toml: str) -> set[str]:
@@ -17,9 +17,9 @@ def _tool_names(policy_toml: str) -> set[str]:
 
 
 @pytest.mark.parametrize("agent_name", ["appa", "appa-open"])
-def test_demo_policies_cover_exactly_the_known_surface(agent_name: str) -> None:
+def test_demo_policies_cover_the_complete_surface(agent_name: str) -> None:
     policy = AGENTS[agent_name].policy_file.read_text()
-    assert _tool_names(policy) == set(SYSTEM_OF_TOOL)
+    assert _tool_names(policy) == set(REQUIRED_SYSTEMS_OF_TOOL)
 
 
 @pytest.mark.parametrize("agent_name", ["appa", "appa-open"])
@@ -47,6 +47,25 @@ def test_prune_preserves_tool_annotations() -> None:
 def test_unknown_tool_in_policy_is_refused() -> None:
     with pytest.raises(PolicyError, match="mystery_tool"):
         prune_policy('[[tool]]\nname = "mystery_tool"\n', ("hr",))
+
+
+@pytest.mark.parametrize(
+    ("systems", "expected"),
+    [
+        (("finance",), {"search_finance", "read_finance", "create_finance"}),
+        (("email",), {"send_email"}),
+        (
+            ("finance", "email"),
+            {"search_finance", "read_finance", "create_finance", "send_email", "share_legal_packet"},
+        ),
+        (("vendor",), {"search_vendor", "read_vendor", "create_vendor"}),
+    ],
+)
+def test_prune_keeps_tools_only_when_all_required_systems_are_enabled(
+    systems: tuple[str, ...], expected: set[str]
+) -> None:
+    policy = "\n".join(f'[[tool]]\nname = "{name}"' for name in REQUIRED_SYSTEMS_OF_TOOL)
+    assert _tool_names(prune_policy(policy, systems)) == expected
 
 
 def test_shared_policy_gates_the_ticket_on_trust_alone() -> None:

@@ -18,15 +18,17 @@ import tomli_w
 
 from .checks import KNOWN_SYSTEMS
 
-# The server's tool → system mapping — the `{verb}_{system}` naming convention
-# plus the one sink, pinned by a test against the demo policies (which declare
-# the full 13-tool surface).
-SYSTEM_OF_TOOL: dict[str, str] = {
-    f"{verb}_{system}": system
+# The systems each tool requires. Most tools belong to one system; composite
+# tools stay available only when their complete backing surface is enabled.
+REQUIRED_SYSTEMS_OF_TOOL: dict[str, frozenset[str]] = {
+    f"{verb}_{system}": frozenset({system})
     for system in KNOWN_SYSTEMS
     if system != "email"
     for verb in ("search", "read", "create")
-} | {"send_email": "email"}
+} | {
+    "send_email": frozenset({"email"}),
+    "share_legal_packet": frozenset({"finance", "email"}),
+}
 
 
 class PolicyError(ValueError):
@@ -37,13 +39,16 @@ class PolicyError(ValueError):
 def prune_policy(policy_toml: str, enabled_systems: tuple[str, ...]) -> str:
     """The policy text with only the enabled systems' ``[[tool]]`` entries."""
     data = tomllib.loads(policy_toml)
+    enabled = set(enabled_systems)
     kept = []
     for tool in data.get("tool", []):
         name = tool.get("name", "")
-        system = SYSTEM_OF_TOOL.get(name)
-        if system is None:
-            raise PolicyError(f"policy declares tool {name!r} with no known system; extend SYSTEM_OF_TOOL")
-        if system in enabled_systems:
+        required = REQUIRED_SYSTEMS_OF_TOOL.get(name)
+        if required is None:
+            raise PolicyError(
+                f"policy declares tool {name!r} with no known systems; extend REQUIRED_SYSTEMS_OF_TOOL"
+            )
+        if required <= enabled:
             kept.append(tool)
     data["tool"] = kept
     return tomli_w.dumps(data)

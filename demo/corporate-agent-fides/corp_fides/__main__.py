@@ -18,11 +18,19 @@ import sys
 from pathlib import Path
 
 from .agent import build_agent
+from .profile import DEFAULT_PROFILE, Profile, ProfileError, load_profile
 from .systems import CorpSystemsClient, System, resolve_corpus_root, resolve_sink_root
 from .tools import build_tools
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _CRATE_DIR = _PACKAGE_DIR.parent
+
+
+def _profile_arg(path: str) -> Profile:
+    try:
+        return load_profile(path)
+    except ProfileError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def _load_dotenv() -> Path | None:
@@ -121,6 +129,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", default=os.environ.get("FIDES_DEMO_MODEL", "anthropic/claude-sonnet-5"))
     parser.add_argument("--quarantine-model", default=os.environ.get("FIDES_QUARANTINE_MODEL") or None)
     parser.add_argument("--api-key", default=os.environ.get("OPENROUTER_API_KEY"))
+    parser.add_argument(
+        "--profile",
+        type=_profile_arg,
+        default=DEFAULT_PROFILE,
+        metavar="PATH",
+        help="Strict version 1 JSON overrides for FIDES result labels and tool policy metadata.",
+    )
     parser.add_argument("--data-root", type=Path, default=None, help="Corpus root (defaults to sibling corp-systems/data).")
     parser.add_argument("--sink-root", type=Path, default=None, help="Where send_email writes (defaults to this demo's data/).")
     parser.add_argument(
@@ -165,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
             built = build_agent(
                 api_key=api_key,
                 model=args.model,
-                tools=build_tools(client, available),
+                tools=build_tools(client, available, profile=args.profile),
                 sink_root=sink_root,
                 defend=args.defend,
                 quarantine_model=args.quarantine_model,

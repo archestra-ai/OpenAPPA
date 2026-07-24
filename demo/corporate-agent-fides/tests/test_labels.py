@@ -19,13 +19,14 @@ def _tools_by_name():
     return {t.name: t for t in build_tools(_OFFLINE_CLIENT)}
 
 
-def test_thirteen_tools_with_expected_names() -> None:
+def test_seventeen_tools_with_expected_names() -> None:
     tools = _tools_by_name()
-    assert len(tools) == 13
-    for system in ("hr", "finance", "task_tracker", "public_forum"):
+    assert len(tools) == 17
+    for system in ("hr", "finance", "task_tracker", "public_forum", "vendor"):
         for verb in ("search", "read", "create"):
             assert f"{verb}_{system}" in tools
     assert "send_email" in tools
+    assert "share_legal_packet" in tools
 
 
 def test_send_email_is_the_gated_egress_sink() -> None:
@@ -64,11 +65,20 @@ def test_forum_writes_are_public_egress_with_no_trust_floor() -> None:
 
 
 def test_ungated_writes_stay_ungated() -> None:
-    # No `requires` in the sibling policy for these two, so no gate here.
-    for name in ("create_hr", "create_finance"):
+    # No `requires` in the sibling policy for these tools, so no gate here.
+    for name in ("create_hr", "create_finance", "create_vendor"):
         props = _tools_by_name()[name].additional_properties
         assert props["accepts_untrusted"] is True
         assert "max_allowed_confidentiality" not in props
+
+
+def test_share_legal_packet_has_pre_call_gates() -> None:
+    props = _tools_by_name()["share_legal_packet"].additional_properties
+    assert props == {
+        "source_integrity": "trusted",
+        "accepts_untrusted": False,
+        "max_allowed_confidentiality": "public",
+    }
 
 
 def _label_of(server_bin: Path, corpus: Path, sink: Path, name: str, *args: str) -> dict:
@@ -95,6 +105,32 @@ def test_error_text_carries_the_neutral_label(server_bin: Path, corpus: Path, si
     # A not-found error is trusted framework text, not fetched content.
     label = _label_of(server_bin, corpus, sink, "read_public_forum", "missing.md")
     assert label == {"integrity": "trusted", "confidentiality": "public"}
+
+
+def test_vendor_result_carries_trusted_public_label(server_bin: Path, corpus: Path, sink: Path) -> None:
+    label = _label_of(server_bin, corpus, sink, "read_vendor", "legal-packet.md")
+    assert label == {"integrity": "trusted", "confidentiality": "public"}
+
+
+def test_share_result_is_private_and_error_is_neutral(server_bin: Path, corpus: Path, sink: Path) -> None:
+    success = _label_of(
+        server_bin,
+        corpus,
+        sink,
+        "share_legal_packet",
+        "legal-packet.md",
+        "legal@northwind.example",
+    )
+    assert success == {"integrity": "trusted", "confidentiality": "private"}
+    error = _label_of(
+        server_bin,
+        corpus,
+        sink,
+        "share_legal_packet",
+        "missing.md",
+        "legal@northwind.example",
+    )
+    assert error == {"integrity": "trusted", "confidentiality": "public"}
 
 
 def test_reduced_surface_builds_only_listed_tools() -> None:

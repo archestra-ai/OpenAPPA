@@ -5,7 +5,7 @@ The OpenAPPA **corporate-agent** scenario, defended by **[FIDES]** on
 
 This demo runs the **same** [`corp-systems`](../corp-systems) systems over the
 **same** corpus and the **same** planted prompt injection as the sibling Rust
-[`corporate-agent`](../corporate-agent) demo — same thirteen tools, same data;
+[`corporate-agent`](../corporate-agent) demo — same seventeen tools, same data;
 the *only* variable is the defense. (It reaches them by spawning the
 `corp-systems-mcp` server; the APPA agent links that crate as a library and runs
 the same code in-process. Either way the tool surface and semantics are
@@ -53,14 +53,16 @@ demo's labels are the same design expressed in two vocabularies:
 | Audience axis | `audience = { exactly = ["hr"] }` | `confidentiality`: `private` |
 | Forum read | `delta = { trust = "suspicious" }` | result label `integrity=untrusted` |
 | HR read | `delta = { audience = exactly ["hr"] }` | result label `confidentiality=private` |
-| Finance / tasks | `delta = {}` (unconstrained) | `integrity=trusted, confidentiality=public` |
+| Finance read | restricted reader set | `integrity=trusted, confidentiality=private` |
+| Task/vendor read | `delta = {}` (unconstrained) | `integrity=trusted, confidentiality=public` |
 | The taint fold | monoid fold over the trajectory | `combine_labels` (untrusted & most-private win) |
 | The sink | `send_email` `requires { trust=internal, audience includes $to }` | `send_email` `accepts_untrusted=False`, `max_allowed_confidentiality=public` |
 | The ticket | `create_task_tracker` `requires { trust=internal, prior egress }` | `create_task_tracker` `accepts_untrusted=False` (the prior egress has no image) |
 | The forum post | `create_public_forum` `requires { audience includes "public" }` | `create_public_forum` `max_allowed_confidentiality=public`, no integrity gate |
+| Legal packet composite | finance read + recipient-targeted email in one tool | same pre-call gates; successful result `trusted/private` |
 | Reads in a tainted context | narrowing accepted via a remedy plan | `accepts_untrusted=True` (pure sources can't exfiltrate) |
 
-So `send_email` is the one tool gated on **both** axes — refused for a tainted
+The direct `send_email` sink is gated on **both** axes — refused for a tainted
 (untrusted) context **or** for an attempt to mail private data outward — just as
 APPA's `send_email` needs both internal trust and a covering audience. The two
 gated writes take one axis each: the ticket needs an untainted context, the
@@ -70,18 +72,28 @@ write transcribes as readily as one on the egress sink; what does not
 transcribe is the ticket's *prior egress*, since a FIDES context label carries
 no predicate over what the trajectory already did.
 
+`share_legal_packet` declares the same two pre-call gates, but it reads finance
+and emails the packet inside one server-side action. FIDES checks only the
+trajectory label entering the call; it cannot compare `to` with finance's
+reader set or observe the internal read before the email happens. Its returned
+packet and receipt are labeled `trusted/private` (errors are neutral
+`trusted/public`), which constrains later calls but not that completed side
+effect. This is the same recipient-granularity limit in composite form.
+
 ## Layout
 
 ```
 corp_fides/
   systems.py    the connection to the shared corp-systems-mcp server: root/binary resolution + MCP client
-  tools.py      the 13 FIDES-labeled tools forwarding over MCP; the APPA->FIDES label mapping lives here
+  profile.py    frozen versioned profile configuration and strict JSON loader
+  tools.py      the 17 FIDES-labeled tools forwarding over MCP; the APPA->FIDES label mapping lives here
   agent.py      builds the model client(s) + SecureAgentConfig + Agent (FIDES on, or --no-defense)
   __main__.py   the CLI: corp-agent-fides
 tests/
   test_systems.py      drives the shared server over MCP from Python (no key)
   test_labels.py       the tools' declared policy + the labels their results carry (no key)
   test_enforcement.py  drives the real FIDES taint fold + gate to prove the exfil is blocked (no key)
+  test_profile.py      strict profile parsing, immutability, and overrides (no key)
 scripts/        ready-made scenarios (mirroring the sibling demo)
 ```
 
@@ -110,7 +122,7 @@ cp .env.example .env                       # set OPENROUTER_API_KEY
 
 ```sh
 cd demo/corporate-agent-fides
-python -m pytest           # 16 tests, no API key required
+uv run pytest              # 40 tests, no API key required
 ```
 
 `test_enforcement.py` is the important one: it drives FIDES's real
@@ -134,7 +146,7 @@ binary over MCP (skipped, with a message, if no Rust toolchain is available).
 | `./scripts/injection-forum-fides.sh` | **The block**: planted thread → FIDES hides the forum text and refuses `send_email`; `data/email/` stays empty; audit log records it |
 | `./scripts/injection-forum-open.sh` | **The leak** (`--no-defense`): the same attack exfiltrates the HR record |
 | `./scripts/summarize-hr.sh` | Benign: HR reads are `private` but safe to read — the summary returns |
-| `./scripts/email-finance.sh` | Value-granular: `public` finance data **is** allowed out — FIDES isn't blanket-blocking |
+| `./scripts/email-finance.sh` | Profile override: raise `send_email`'s cap to `private` for the sanctioned finance mail |
 | `./scripts/reset-email.sh` | Clear the `data/email/` sink |
 | `./scripts/chat.sh` | Interactive REPL |
 
@@ -143,12 +155,35 @@ Direct invocation:
 ```sh
 corp-agent-fides "Find Alice Chen's HR record and summarise it"
 corp-agent-fides --no-defense "<prompt>"     # the unmediated contrast
+corp-agent-fides --profile profile.json "<prompt>"
 corp-agent-fides --chat
 ```
+
+Profiles are strict version 1 JSON. Omitted overrides retain the built-in
+behavior; unknown fields, labels, systems, and tools are rejected. For example,
+the audience-intersection task can permit private email while leaving integrity
+enforcement unchanged:
+
+```json
+{
+  "version": 1,
+  "tools": {
+    "send_email": {
+      "max_allowed_confidentiality": "private"
+    }
+  }
+}
+```
+
+This profile is included as `profiles/audience-intersection.json`.
+
+Profiles configure labels and wrapper policy in both modes. `--no-defense`
+still builds the identical wrappers but does not install FIDES enforcement.
 
 | Flag | Meaning |
 |------|---------|
 | `--no-defense` | build the agent without `SecureAgentConfig` (the leak) |
+| `--profile <path>` | strict version 1 JSON result-label and tool-policy overrides |
 | `--model <id>` | OpenRouter model id (env `FIDES_DEMO_MODEL`; default `anthropic/claude-sonnet-5`) |
 | `--quarantine-model <id>` | model for the quarantine client (env `FIDES_QUARANTINE_MODEL`; default: same as `--model`) |
 | `--data-root <path>` | corpus root (env `CORP_DATA_ROOT`; default: sibling `corp-systems/data`) |

@@ -2,7 +2,7 @@
 //!
 //! One binary, `appa-corp-agent`, over the mock corporate systems (the sibling
 //! [`corp-systems`](../corp-systems) crate: `hr`, `finance`, `task_tracker`,
-//! `public_forum` plus `send_email`): the assistant on the full `appa-agent`
+//! `public_forum`, and `vendor`, plus email tools): the assistant on the full `appa-agent`
 //! loop, where the runtime owns tool execution and the reserved `fork` /
 //! `submit_result` tools are live — a tainting read can be confined to a child
 //! trajectory, and a child's return can cross through a registered sanitizer.

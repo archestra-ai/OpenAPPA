@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-KNOWN_SYSTEMS = ("hr", "finance", "task_tracker", "public_forum", "email")
+KNOWN_SYSTEMS = ("hr", "finance", "task_tracker", "public_forum", "vendor", "email")
 
 CHECK_KINDS = ("email_sent", "no_email", "file_created", "answer_contains")
 

@@ -17,8 +17,8 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::post;
-use corp_systems::server::{CreateArgs, ReadArgs, SearchArgs, SendEmailArgs};
-use corp_systems::systems::{self, CreateError, ReadError, System};
+use corp_systems::server::{CreateArgs, ReadArgs, SearchArgs, SendEmailArgs, ShareLegalPacketArgs};
+use corp_systems::systems::{self, CreateError, ReadError, ShareLegalPacketError, System};
 use serde::Deserialize;
 
 /// The corp world one episode acts on: the corpus root the `search`/`read`/
@@ -64,18 +64,44 @@ fn split_tool(name: &str) -> Option<(Verb, System)> {
     } else {
         (Verb::Create, name.strip_prefix("create_")?)
     };
-    System::parse(system).ok().map(|system| (verb, system))
+    match System::parse(system).ok()? {
+        System::Email => None,
+        system @ (System::Hr | System::Finance | System::TaskTracker | System::PublicForum | System::Vendor) => {
+            Some((verb, system))
+        }
+    }
 }
 
 /// Execute one rendered call against the world.
 ///
 /// Status codes carry the runtime contract: effects commit only on 2xx, and a
-/// non-2xx body never reaches the model. So a failed `create`/`send_email` is
-/// always non-2xx — a 200 "already exists" would commit the tool's declared
-/// effects for a write that never happened — while a `read`/`search` domain
-/// error (no effects to commit) returns its explanatory text, the same
-/// self-correction hint the MCP server delivers.
+/// non-2xx body never reaches the model. So a failed `create`, `send_email`, or
+/// `share_legal_packet` is always non-2xx — a false success would commit the
+/// tool's declared effects for a write that never happened — while a
+/// `read`/`search` domain error (no effects to commit) returns its explanatory
+/// text, the same self-correction hint the MCP server delivers.
 pub fn dispatch(world: &CorpWorld, call: &RenderedCall) -> (StatusCode, String) {
+    if call.tool.as_str() == "share_legal_packet" {
+        if !world.enabled.contains(&System::Finance) || !world.enabled.contains(&System::Email) {
+            return unknown_tool(call.tool.as_str());
+        }
+        return match parse::<ShareLegalPacketArgs>(&call.arguments) {
+            Err(reason) => (StatusCode::BAD_REQUEST, reason),
+            Ok(args) => match systems::share_legal_packet(&world.data_root, &world.sink_root, &args.file, &args.to) {
+                Ok(shared) => (StatusCode::OK, shared.to_string()),
+                Err(error @ ShareLegalPacketError::Read(ReadError::Name(_))) => {
+                    (StatusCode::BAD_REQUEST, error.to_string())
+                }
+                Err(error @ ShareLegalPacketError::Read(ReadError::NotFound { .. })) => {
+                    (StatusCode::NOT_FOUND, error.to_string())
+                }
+                Err(error @ ShareLegalPacketError::Read(ReadError::Io { .. })) => {
+                    (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+                }
+                Err(error @ ShareLegalPacketError::Send(_)) => (StatusCode::BAD_GATEWAY, error.to_string()),
+            },
+        };
+    }
     if call.tool.as_str() == "send_email" {
         if !world.enabled.contains(&System::Email) {
             return unknown_tool(call.tool.as_str());
@@ -204,6 +230,32 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let (status, _) = dispatch(&world, &call("create_public_forum", arguments));
         assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            std::fs::read_to_string(root.join("data/public_forum/post.md")).unwrap(),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn vendor_has_file_tools_but_email_remains_write_only() {
+        let root = scratch("vendor");
+        std::fs::create_dir_all(root.join("data/vendor")).unwrap();
+        std::fs::write(root.join("data/vendor/acme.md"), "Status: approved\n").unwrap();
+        std::fs::create_dir_all(root.join("sink/email")).unwrap();
+        std::fs::write(root.join("sink/email/message.md"), "secret archive").unwrap();
+        let world = world(&root);
+
+        let (status, body) = dispatch(&world, &call("read_vendor", serde_json::json!({"file": "acme.md"})));
+        assert_eq!((status, body.as_str()), (StatusCode::OK, "Status: approved\n"));
+
+        for tool in ["search_email", "read_email", "create_email"] {
+            let (status, _) = dispatch(&world, &call(tool, serde_json::json!({})));
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "{tool} must not expose the email archive"
+            );
+        }
     }
 
     #[test]
@@ -223,6 +275,82 @@ mod tests {
     }
 
     #[test]
+    fn share_legal_packet_dispatches_with_exact_email_body() {
+        let root = scratch("legal-packet");
+        let packet = "# Legal packet\n\nCounterparty: Acme\n";
+        std::fs::create_dir_all(root.join("data/finance")).unwrap();
+        std::fs::write(root.join("data/finance/acme.md"), packet).unwrap();
+        let world = world(&root);
+
+        let (status, body) = dispatch(
+            &world,
+            &call(
+                "share_legal_packet",
+                serde_json::json!({"file": "acme.md", "to": "legal@example.com"}),
+            ),
+        );
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.is_empty());
+        let mut emails = std::fs::read_dir(root.join("sink/email")).unwrap();
+        let email = emails.next().unwrap().unwrap().path();
+        assert!(emails.next().is_none());
+        assert_eq!(
+            std::fs::read_to_string(email).unwrap(),
+            format!("To: legal@example.com\nSubject: Legal packet: acme.md\n\n{packet}")
+        );
+    }
+
+    #[test]
+    fn share_legal_packet_failures_are_non_2xx_and_do_not_commit_effects() {
+        let root = scratch("legal-packet-failures");
+        let world = world(&root);
+
+        let (status, _) = dispatch(
+            &world,
+            &call(
+                "share_legal_packet",
+                serde_json::json!({"file": "missing.md", "to": "legal@example.com"}),
+            ),
+        );
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(!root.join("sink/email").exists());
+
+        std::fs::create_dir_all(root.join("data/finance")).unwrap();
+        std::fs::write(root.join("data/finance/acme.md"), "packet").unwrap();
+        std::fs::write(root.join("sink"), "not a directory").unwrap();
+        let (status, _) = dispatch(
+            &world,
+            &call(
+                "share_legal_packet",
+                serde_json::json!({"file": "acme.md", "to": "legal@example.com"}),
+            ),
+        );
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn share_legal_packet_requires_finance_and_email() {
+        let root = scratch("legal-packet-enabled");
+        std::fs::create_dir_all(root.join("data/finance")).unwrap();
+        std::fs::write(root.join("data/finance/acme.md"), "packet").unwrap();
+        let arguments = serde_json::json!({"file": "acme.md", "to": "legal@example.com"});
+
+        for enabled in [[System::Finance], [System::Email]] {
+            let mut world = world(&root);
+            world.enabled = enabled.into_iter().collect();
+            let (status, _) = dispatch(&world, &call("share_legal_packet", arguments.clone()));
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert!(!root.join("sink/email").exists());
+        }
+
+        let mut world = world(&root);
+        world.enabled = [System::Finance, System::Email].into_iter().collect();
+        let (status, _) = dispatch(&world, &call("share_legal_packet", arguments));
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[test]
     fn disabled_and_unknown_tools_answer_404() {
         let root = scratch("disabled");
         let mut world = world(&root);
@@ -231,6 +359,14 @@ mod tests {
         let (status, _) = dispatch(&world, &call("read_finance", serde_json::json!({"file": "x.md"})));
         assert_eq!(status, StatusCode::NOT_FOUND);
         let (status, _) = dispatch(&world, &call("send_email", serde_json::json!({})));
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = dispatch(
+            &world,
+            &call(
+                "share_legal_packet",
+                serde_json::json!({"file": "x.md", "to": "legal@example.com"}),
+            ),
+        );
         assert_eq!(status, StatusCode::NOT_FOUND);
         let (status, _) = dispatch(&world, &call("frobnicate", serde_json::json!({})));
         assert_eq!(status, StatusCode::NOT_FOUND);

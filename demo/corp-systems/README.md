@@ -2,8 +2,8 @@
 
 The mock corporate systems shared by the corporate-agent demos: a **stdio MCP
 server** (`corp-systems-mcp`) over fake company systems — `hr`, `finance`,
-`task_tracker`, and a `public_forum` — stored as folders of markdown files,
-plus a mocked `send_email` sink.
+`task_tracker`, `public_forum`, and `vendor` — stored as folders of markdown
+files, plus outbound email tools.
 
 Two sibling demos act on the **same corpus and the same planted prompt
 injection** (`data/public_forum/acme-forum-thread.md`) and differ only in the
@@ -31,20 +31,22 @@ data/
   finance/       invoices, Q2 budget, expense policy
   task_tracker/  a couple of tickets
   public_forum/  benign public posts + a planted prompt-injection thread
+  vendor/        supplier records and onboarding documents
 src/
-  systems.rs     the search/read/create/send_email primitives (semantics live here)
-  server.rs      13 #[tool] methods wrapping them  ->  the MCP server
+  systems.rs     generic file, email, and legal-packet primitives
+  server.rs      17 #[tool] methods wrapping them  ->  the MCP server
   bin/corp_systems.rs   the stdio server binary (corp-systems-mcp)
 tests/
   server_tools.rs   drives the real server over MCP; no API key needed
 ```
 
-### Tools (13)
+### Tools (17)
 
 `search_`, `read_`, `create_` for each of `hr`, `finance`, `task_tracker`,
-`public_forum` (12), plus `send_email(to, subject, body)`. The `email/` folder
-`send_email` writes to is a write-only side-effect — there is no read/search
-mate — and each demo points it at its own tree via `--sink-root`, so the shared
+`public_forum`, and `vendor` (15), plus `send_email(to, subject, body)` and
+`share_legal_packet(file, to)`. The composite reads the finance file before
+emailing its exact contents; it is enabled only when both finance and email are
+live. Each demo points email at its own tree via `--sink-root`, so the shared
 corpus stays read-only.
 
 ## Run
@@ -61,7 +63,7 @@ cargo run --bin corp-systems-mcp -- \
 |------|-----|---------|
 | `--data-root` | `CORP_DATA_ROOT` | this crate's `data/` |
 | `--sink-root` | `CORP_SINK_ROOT` | the data root |
-| `--systems` | `CORP_ENABLED_SYSTEMS` | all five |
+| `--systems` | `CORP_ENABLED_SYSTEMS` | all six |
 
 `--systems` takes a comma-separated enable list (e.g. `hr,public_forum,email`);
 a disabled system's tools are absent from `list_tools` and refused when called.

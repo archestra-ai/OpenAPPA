@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "tools": {
+    "send_email": {
+      "max_allowed_confidentiality": "private"
+    }
+  }
+}

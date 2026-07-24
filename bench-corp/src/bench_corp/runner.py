@@ -24,10 +24,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .agents import Agent, PolicyTarget, command_for
 from .checks import CheckResult, evaluate_check, parse_emails
 from .policy import apply_tool_requires, prune_policy
 from .scenario import Scenario
-from .agents import Agent, command_for
 
 # Best-effort stderr diagnostics (never score inputs): the APPA hook's
 # mediation log lines, the FIDES audit log's BLOCKED lines, and executed
@@ -86,6 +86,40 @@ def _terminate_group(process: subprocess.Popen) -> None:
             continue
 
 
+def _stage_policy(agent: Agent, scenario: Scenario, episode_dir: Path) -> Path | None:
+    """The policy this episode runs under, written into the episode directory.
+
+    An APPA arm gets the pruned TOML — the scenario's own profile when it ships
+    one, else the shared benchmark policy — with any `requires` the scenario's
+    deployment declares for that arm applied on top. FIDES gets the profile's
+    JSON, and nothing when the scenario ships no profile.
+    """
+    match agent.policy_target:
+        case PolicyTarget.APPA_GUARDED:
+            source = scenario.policy_profile.appa if scenario.policy_profile is not None else agent.policy_file
+        case PolicyTarget.APPA_OPEN:
+            source = agent.policy_file
+        case PolicyTarget.FIDES:
+            if scenario.policy_profile is None:
+                return None
+            destination = episode_dir / "fides.json"
+            shutil.copyfile(scenario.policy_profile.fides, destination)
+            return destination
+        case PolicyTarget.NONE:
+            return None
+
+    if source is None or agent.policy_file is None:
+        raise ValueError(f"{agent.name}: APPA agents require a source policy")
+    pruned = prune_policy(source.read_text(), scenario.systems)
+    # Keyed by the arm's shared policy stem even when a profile supplied the
+    # source: a scenario declares the gate for `appa`, not for whichever file
+    # the episode happened to read it from.
+    pruned = apply_tool_requires(pruned, scenario.policy_requires.get(agent.policy_file.stem, {}))
+    destination = episode_dir / "policy.toml"
+    destination.write_text(pruned)
+    return destination
+
+
 def run_episode(
     agent: Agent,
     scenario: Scenario,
@@ -95,18 +129,22 @@ def run_episode(
     episode_dir: Path,
     timeout_s: float,
 ) -> EpisodeResult:
+    episode_dir = episode_dir.resolve()
     episode_dir.mkdir(parents=True)
     shutil.copytree(scenario.data, episode_dir / "data")
     (episode_dir / "sink").mkdir()
-    if agent.policy_file is not None:
-        pruned = prune_policy(agent.policy_file.read_text(), scenario.systems)
-        pruned = apply_tool_requires(pruned, scenario.policy_requires.get(agent.policy_file.stem, {}))
-        (episode_dir / "policy.toml").write_text(pruned)
+    policy_path = _stage_policy(agent, scenario, episode_dir)
 
     env = os.environ.copy()
     env["CORP_ENABLED_SYSTEMS"] = ",".join(scenario.systems)
 
-    command = command_for(agent, prompt=scenario.prompt, model=model, episode_dir=episode_dir)
+    command = command_for(
+        agent,
+        prompt=scenario.prompt,
+        model=model,
+        episode_dir=episode_dir,
+        policy_path=policy_path,
+    )
     stdout_path = episode_dir / "stdout.txt"
     stderr_path = episode_dir / "stderr.txt"
     started = time.monotonic()

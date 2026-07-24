@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from bench_corp.cli import SCENARIOS_DIR
-from bench_corp.scenario import ScenarioError, discover_scenarios, load_scenario
+from bench_corp.scenario import PolicyProfile, ScenarioError, discover_scenarios, load_scenario
 
 
 def test_shipped_scenarios_load() -> None:
@@ -19,8 +19,14 @@ def test_shipped_scenarios_load() -> None:
         "follow-forum-steps",
         "hide-secret-in-status",
         "inspect-forum-post",
+        "joint-merger-brief",
+        "one-release-only",
+        "public-directory-card",
         "reply-and-file-ticket",
         "report-full-record",
+        "review-then-notify",
+        "share-legal-packet",
+        "vendor-trust-boundary",
     ]
     for scenario in scenarios:
         assert scenario.prompt
@@ -106,7 +112,106 @@ to = "a@b.example"
 def test_minimal_scenario_loads(tmp_path: Path) -> None:
     scenario = load_scenario(_write_scenario(tmp_path / "ok", _MINIMAL))
     assert scenario.systems == ("hr", "email")
+    assert scenario.policy_profile is None
     assert len(scenario.utility) == 1 and not scenario.security
+
+
+def _with_policy_profile(toml: str, declaration: str = '"policy"') -> str:
+    return toml.replace(
+        'systems = ["hr", "email"]\n',
+        f'systems = ["hr", "email"]\npolicy_profile = {declaration}\n',
+    )
+
+
+def test_scenario_local_policy_profile_loads(tmp_path: Path) -> None:
+    root = _write_scenario(tmp_path / "profiled", _with_policy_profile(_MINIMAL))
+    profile_root = root / "policy"
+    profile_root.mkdir()
+    (profile_root / "appa.toml").write_text("version = 1\n")
+    (profile_root / "fides.json").write_text('{}\n')
+
+    scenario = load_scenario(root)
+
+    assert scenario.policy_profile == PolicyProfile(
+        appa=(profile_root / "appa.toml").resolve(),
+        fides=(profile_root / "fides.json").resolve(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("declaration", "message"),
+    [
+        ("1", "must be a string"),
+        ('"/tmp/outside-policy"', "must be relative"),
+        ('"../policy"', "must not contain"),
+    ],
+)
+def test_policy_profile_rejects_unsafe_declarations(tmp_path: Path, declaration: str, message: str) -> None:
+    root = _write_scenario(tmp_path / "unsafe-profile", _with_policy_profile(_MINIMAL, declaration))
+    with pytest.raises(ScenarioError, match=message):
+        load_scenario(root)
+
+
+@pytest.mark.parametrize("missing", ["appa.toml", "fides.json"])
+def test_policy_profile_requires_both_policy_files(tmp_path: Path, missing: str) -> None:
+    root = _write_scenario(tmp_path / "missing-profile-file", _with_policy_profile(_MINIMAL))
+    profile_root = root / "policy"
+    profile_root.mkdir()
+    for filename in {"appa.toml", "fides.json"} - {missing}:
+        (profile_root / filename).write_text("{}\n")
+
+    with pytest.raises(ScenarioError, match=missing):
+        load_scenario(root)
+
+
+def test_policy_profile_rejects_symlink_escape(tmp_path: Path) -> None:
+    root = _write_scenario(tmp_path / "symlink-profile", _with_policy_profile(_MINIMAL))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "appa.toml").write_text("version = 1\n")
+    (outside / "fides.json").write_text("{}\n")
+    (root / "policy").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ScenarioError, match="escapes"):
+        load_scenario(root)
+
+
+def test_policy_profile_rejects_policy_file_symlink_escape(tmp_path: Path) -> None:
+    root = _write_scenario(tmp_path / "symlink-file", _with_policy_profile(_MINIMAL))
+    profile_root = root / "policy"
+    profile_root.mkdir()
+    (profile_root / "appa.toml").write_text("version = 1\n")
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}\n")
+    (profile_root / "fides.json").symlink_to(outside)
+
+    with pytest.raises(ScenarioError, match="fides.json escapes"):
+        load_scenario(root)
+
+
+def test_policy_profile_rejects_policy_file_outside_profile_directory(tmp_path: Path) -> None:
+    root = _write_scenario(tmp_path / "sibling-file", _with_policy_profile(_MINIMAL))
+    profile_root = root / "policy"
+    profile_root.mkdir()
+    (profile_root / "appa.toml").write_text("version = 1\n")
+    sibling = root / "fides.json"
+    sibling.write_text("{}\n")
+    (profile_root / "fides.json").symlink_to(sibling)
+
+    with pytest.raises(ScenarioError, match="fides.json escapes"):
+        load_scenario(root)
+
+
+def test_vendor_is_a_known_system(tmp_path: Path) -> None:
+    manifest = """
+prompt = "inspect the vendor record"
+systems = ["vendor"]
+[[utility.file_created]]
+system = "vendor"
+file = "review.md"
+"""
+    scenario = load_scenario(_write_scenario(tmp_path / "vendor", manifest, ("vendor",)))
+    assert scenario.systems == ("vendor",)
 
 
 @pytest.mark.parametrize(
@@ -140,5 +245,3 @@ def test_email_dir_in_data_refused(tmp_path: Path) -> None:
     root = _write_scenario(tmp_path / "bad-email", _MINIMAL, ("hr", "email"))
     with pytest.raises(ScenarioError, match="sink is per-episode"):
         load_scenario(root)
-
-

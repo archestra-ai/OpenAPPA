@@ -27,11 +27,18 @@ class ScenarioError(ValueError):
 
 
 @dataclass(frozen=True)
+class PolicyProfile:
+    appa: Path
+    fides: Path
+
+
+@dataclass(frozen=True)
 class Scenario:
     name: str
     root: Path  # the scenario folder itself
     prompt: str
     systems: tuple[str, ...]
+    policy_profile: PolicyProfile | None = None
     utility: tuple[Check, ...] = field(default=())
     security: tuple[Check, ...] = field(default=())
     # Extra `requires` this scenario's deployment puts on a tool, keyed by
@@ -63,6 +70,43 @@ def _system_of_check(check: Check) -> str | None:
     if check.kind == "file_created":
         return check.spec.get("system")
     return None  # answer_contains reads stdout, no tool needed
+
+
+def _load_policy_profile(name: str, root: Path, value: object) -> PolicyProfile:
+    if not isinstance(value, str):
+        raise ScenarioError(f"{name}: 'policy_profile' must be a string")
+    if not value.strip():
+        raise ScenarioError(f"{name}: 'policy_profile' must not be empty")
+
+    relative = Path(value)
+    if relative.is_absolute():
+        raise ScenarioError(f"{name}: 'policy_profile' must be relative to the scenario directory")
+    if ".." in relative.parts:
+        raise ScenarioError(f"{name}: 'policy_profile' must not contain '..'")
+
+    scenario_root = root.resolve()
+    try:
+        profile_root = (root / relative).resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise ScenarioError(f"{name}: policy profile directory {value!r} does not exist") from error
+    if not profile_root.is_relative_to(scenario_root):
+        raise ScenarioError(f"{name}: policy profile {value!r} escapes the scenario directory")
+    if not profile_root.is_dir():
+        raise ScenarioError(f"{name}: policy profile {value!r} is not a directory")
+
+    files: dict[str, Path] = {}
+    for target, filename in (("appa", "appa.toml"), ("fides", "fides.json")):
+        path = profile_root / filename
+        try:
+            resolved = path.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise ScenarioError(f"{name}: policy profile requires {filename}") from error
+        if not resolved.is_relative_to(profile_root):
+            raise ScenarioError(f"{name}: policy profile file {filename} escapes the policy profile directory")
+        if not resolved.is_file():
+            raise ScenarioError(f"{name}: policy profile requires {filename} to be a file")
+        files[target] = resolved
+    return PolicyProfile(appa=files["appa"], fides=files["fides"])
 
 
 def _policy_requires_of(name: str, table: dict) -> dict[str, dict[str, dict]]:
@@ -110,6 +154,10 @@ def load_scenario(root: Path) -> Scenario:
     if len(set(systems)) != len(systems):
         raise ScenarioError(f"{name}: duplicate entries in 'systems'")
 
+    policy_profile = None
+    if "policy_profile" in data:
+        policy_profile = _load_policy_profile(name, root, data["policy_profile"])
+
     utility = _checks_of(name, "utility", data.get("utility", {}))
     security = _checks_of(name, "security", data.get("security", {}))
     if not utility and not security:
@@ -120,6 +168,7 @@ def load_scenario(root: Path) -> Scenario:
         root=root,
         prompt=prompt.strip(),
         systems=tuple(systems),
+        policy_profile=policy_profile,
         utility=utility,
         security=security,
         policy_requires=_policy_requires_of(name, data.get("policy", {})),
