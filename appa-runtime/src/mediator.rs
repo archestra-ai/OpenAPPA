@@ -387,7 +387,7 @@ fn remedy_tool_schema(can_fork: bool) -> WireTool {
 fn reserved_tool_schema(name: &str) -> WireTool {
     let (description, parameters) = match name {
         FORK => (
-            "Run one self-contained task in an isolated child trajectory. Delegate actions that depend on restrictive data, but keep later actions requiring the parent's current label in the parent. Must be the only call in its assistant round. Child prose does not return; submit_result null finishes side-effect-only work.",
+            "Run one self-contained task in an isolated child trajectory. Scope the child to the restrictive read and the work that must sit beside it: every later call in that child runs under the label the read narrowed to, so a write the parent's current label still permits belongs in the parent, issued once the child returns. A child inherits the parent's label and can never widen it — forking again after the parent has narrowed changes nothing. Must be the only call in its assistant round. Child prose does not return; finish a child that did the work itself with submit_result null.",
             json!({
                 "type": "object",
                 "properties": { "task": { "type": "string", "minLength": 1 } },
@@ -396,7 +396,7 @@ fn reserved_tool_schema(name: &str) -> WireTool {
             }),
         ),
         SUBMIT_RESULT => (
-            "Finish this child. Return a value only when the parent needs that data; use null after side-effect-only work so the parent label stays unchanged.",
+            "Finish this child. `value` is data a later parent step consumes, not an account of what happened here — the parent is told this child finished either way. Use null when this child already performed the work, so the parent's label stays unchanged.",
             json!({
                 "type": "object",
                 "properties": { "value": { "type": ["string", "null"] } },

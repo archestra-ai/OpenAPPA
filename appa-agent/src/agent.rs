@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use crate::provider::OpenAiCompatible;
 
 const CANCELLED_BEFORE_BEGIN: &str = "This turn was cancelled.";
-const CHILD_FINISHING_NOTE: &str = "Finish this child session with submit_result. If you hold data the parent needs, return it — even when your own actions were blocked, the data may be all the parent is waiting for. Return null only when there is genuinely nothing to report.";
+const CHILD_FINISHING_NOTE: &str = "Finish this child session with submit_result. Return a value only when a later parent step still needs that data to run — including when your own actions were blocked and the data is all the parent is waiting for. When you already performed the work yourself, or all you have left is an account of what happened, return null: the parent is told this child finished either way, and a returned value costs the parent's label.";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Final(String),
