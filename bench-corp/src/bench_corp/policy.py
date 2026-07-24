@@ -47,3 +47,23 @@ def prune_policy(policy_toml: str, enabled_systems: tuple[str, ...]) -> str:
             kept.append(tool)
     data["tool"] = kept
     return tomli_w.dumps(data)
+
+
+def apply_tool_requires(policy_toml: str, overrides: dict[str, dict]) -> str:
+    """The policy text with each named tool's ``requires`` replaced.
+
+    A requirement only one scenario exercises is that scenario's deployment
+    posture, not the bench's: carrying it in the shared policy taxes every
+    other episode with a gate it never meant to test, and makes a failure
+    ambiguous between the mechanism under test and the tax.
+    """
+    if not overrides:
+        return policy_toml
+    data = tomllib.loads(policy_toml)
+    by_name = {tool.get("name", ""): tool for tool in data.get("tool", [])}
+    for name, requires in overrides.items():
+        tool = by_name.get(name)
+        if tool is None:
+            raise PolicyError(f"scenario overrides requires of tool {name!r}, absent from the pruned policy")
+        tool["requires"] = requires
+    return tomli_w.dumps(data)

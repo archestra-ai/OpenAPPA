@@ -34,6 +34,11 @@ class Scenario:
     systems: tuple[str, ...]
     utility: tuple[Check, ...] = field(default=())
     security: tuple[Check, ...] = field(default=())
+    # Extra `requires` this scenario's deployment puts on a tool, keyed by
+    # policy file stem then tool name (`[policy.appa.requires]`). A gate only
+    # one scenario exercises belongs to that scenario, not to every episode
+    # that happens to share the policy — see `policy.apply_tool_requires`.
+    policy_requires: dict[str, dict[str, dict]] = field(default_factory=dict)
 
     @property
     def data(self) -> Path:
@@ -58,6 +63,26 @@ def _system_of_check(check: Check) -> str | None:
     if check.kind == "file_created":
         return check.spec.get("system")
     return None  # answer_contains reads stdout, no tool needed
+
+
+def _policy_requires_of(name: str, table: dict) -> dict[str, dict[str, dict]]:
+    """Parse ``[policy.<policy-stem>.requires]``: per-tool `requires` this
+    scenario adds to that policy. The tool names are checked against the pruned
+    policy at episode setup, where the policy is in hand."""
+    if not isinstance(table, dict):
+        raise ScenarioError(f"{name}: 'policy' must be a table of policy-stem tables")
+    parsed: dict[str, dict[str, dict]] = {}
+    for stem, body in table.items():
+        if not isinstance(body, dict) or set(body) - {"requires"}:
+            raise ScenarioError(f"{name}: policy.{stem} takes exactly one key, 'requires'")
+        requires = body.get("requires", {})
+        if not isinstance(requires, dict) or not requires:
+            raise ScenarioError(f"{name}: policy.{stem}.requires must be a non-empty table keyed by tool name")
+        for tool, spec in requires.items():
+            if not isinstance(spec, dict) or not spec:
+                raise ScenarioError(f"{name}: policy.{stem}.requires.{tool} must be a non-empty table")
+        parsed[stem] = requires
+    return parsed
 
 
 def load_scenario(root: Path) -> Scenario:
@@ -97,6 +122,7 @@ def load_scenario(root: Path) -> Scenario:
         systems=tuple(systems),
         utility=utility,
         security=security,
+        policy_requires=_policy_requires_of(name, data.get("policy", {})),
     )
 
     data_dir = scenario.data

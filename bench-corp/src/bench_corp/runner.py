@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .checks import CheckResult, evaluate_check, parse_emails
-from .policy import prune_policy
+from .policy import apply_tool_requires, prune_policy
 from .scenario import Scenario
 from .agents import Agent, command_for
 
@@ -100,6 +100,7 @@ def run_episode(
     (episode_dir / "sink").mkdir()
     if agent.policy_file is not None:
         pruned = prune_policy(agent.policy_file.read_text(), scenario.systems)
+        pruned = apply_tool_requires(pruned, scenario.policy_requires.get(agent.policy_file.stem, {}))
         (episode_dir / "policy.toml").write_text(pruned)
 
     env = os.environ.copy()

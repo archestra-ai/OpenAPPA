@@ -6,8 +6,10 @@ import tomllib
 
 import pytest
 
-from bench_corp.policy import SYSTEM_OF_TOOL, PolicyError, prune_policy
+from bench_corp.policy import SYSTEM_OF_TOOL, PolicyError, apply_tool_requires, prune_policy
 from bench_corp.agents import AGENTS
+from bench_corp.scenario import load_scenario
+from bench_corp.cli import SCENARIOS_DIR
 
 
 def _tool_names(policy_toml: str) -> set[str]:
@@ -45,3 +47,41 @@ def test_prune_preserves_tool_annotations() -> None:
 def test_unknown_tool_in_policy_is_refused() -> None:
     with pytest.raises(PolicyError, match="mystery_tool"):
         prune_policy('[[tool]]\nname = "mystery_tool"\n', ("hr",))
+
+
+def test_shared_policy_gates_the_ticket_on_trust_alone() -> None:
+    """The prior-egress gate is one scenario's posture, not every episode's tax."""
+    policy = tomllib.loads(AGENTS["appa"].policy_file.read_text())
+    ticket = next(tool for tool in policy["tool"] if tool["name"] == "create_task_tracker")
+    assert ticket["requires"] == {"trust": "internal"}
+
+
+def test_scenario_requires_override_reaches_the_pruned_policy() -> None:
+    scenario = load_scenario(SCENARIOS_DIR / "reply-and-file-ticket")
+    pruned = prune_policy(AGENTS["appa"].policy_file.read_text(), scenario.systems)
+    applied = apply_tool_requires(pruned, scenario.policy_requires["appa"])
+
+    by_name = {tool["name"]: tool for tool in tomllib.loads(applied)["tool"]}
+    assert by_name["create_task_tracker"]["requires"] == {
+        "trust": "internal",
+        "effects": {"has": ["egress"]},
+    }
+    # The override is scoped to the tool it names and to the arm that declared
+    # it: the sibling emitter and the open baseline are untouched.
+    assert by_name["create_public_forum"]["requires"] == {"audience": {"includes": ["public"]}}
+    assert scenario.policy_requires.get("open") is None
+
+
+def test_scenarios_without_an_override_pay_no_gate() -> None:
+    scenario = load_scenario(SCENARIOS_DIR / "check-hr-record")
+    pruned = prune_policy(AGENTS["appa"].policy_file.read_text(), scenario.systems)
+    applied = apply_tool_requires(pruned, scenario.policy_requires.get("appa", {}))
+
+    by_name = {tool["name"]: tool for tool in tomllib.loads(applied)["tool"]}
+    assert by_name["create_task_tracker"]["requires"] == {"trust": "internal"}
+
+
+def test_overriding_an_absent_tool_is_refused() -> None:
+    pruned = prune_policy(AGENTS["appa"].policy_file.read_text(), ("hr", "email"))
+    with pytest.raises(PolicyError, match="create_task_tracker"):
+        apply_tool_requires(pruned, {"create_task_tracker": {"trust": "internal"}})
