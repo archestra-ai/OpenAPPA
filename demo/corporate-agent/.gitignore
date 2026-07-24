@@ -9,3 +9,6 @@
 
 # macOS
 .DS_Store
+
+# Custom target dirs (CARGO_TARGET_DIR from tooling)
+/target-*/

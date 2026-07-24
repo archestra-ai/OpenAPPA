@@ -45,6 +45,8 @@ def test_practical_slack_policy_reads_web_but_blocks_later_egress() -> None:
             "read and publish",
         )
         assert isinstance(sidecar.check("get_webpage", {"url": "www.example.com"}), Blocked)
+        # Informed acceptance: accept the read remedy in a later round than its offer.
+        sidecar.new_round()
         assert isinstance(sidecar.resolve_remedy("remedy-0"), AuthorizedCall)
         assert isinstance(sidecar.report_success("external content"), Admitted)
         assert isinstance(

@@ -102,6 +102,53 @@ pub enum AdmitError {
     NarrowingUnaccepted,
     #[error("the accepted narrowing does not match the live trajectory state")]
     AcceptanceMismatch,
+    #[error("the dispatch already recorded its success checkpoint")]
+    AlreadySucceeded,
+    #[error("the dispatch recorded success: a failure or indeterminate close contradicts it")]
+    SuccessContradicted,
+}
+
+/// Record observed success for a **still-open** dispatch whose value finalization is deferred (a
+/// pending-cast offer): the declared effects commit now — the spec's one append point at success —
+/// so a later call's `no_prior(k)` sees them while the raw result stays confined awaiting the
+/// agent's acceptance. The eventual close contributes no duplicate effects and must be
+/// success-family ([`admit_result`] refuses a contradictory `Failure`/`Indeterminate`). A dispatch
+/// checkpoints at most once — a repeat is refused, never silently absorbed.
+pub(crate) fn observe_success(
+    registry: &Registry,
+    views: &Views,
+    dispatch: &DispatchId,
+    call: &ResolvedCall,
+) -> Result<FactBatch, AdmitError> {
+    let contract = registry
+        .tool(call.tool())
+        .ok_or_else(|| AdmitError::UnknownTool(call.tool().as_str().to_string()))?;
+    // Only a pending-cast contract defers value finalization past its success; an ordinary
+    // dispatch closes in one step and a checkpoint would let a misusing embedder turn a later
+    // honest Failure close into a contradiction.
+    if contract.pending_cast_dim().is_none() {
+        return Err(AdmitError::NotPendingCast);
+    }
+    if dispatch.digest() != &call.digest() {
+        return Err(AdmitError::DigestMismatch);
+    }
+    if dispatch.trajectory() != views.trajectory() {
+        return Err(AdmitError::ForeignDispatch);
+    }
+    if !views.is_open(dispatch) {
+        return Err(AdmitError::NotOpen);
+    }
+    if views.is_succeeded(dispatch) {
+        return Err(AdmitError::AlreadySucceeded);
+    }
+    Ok(FactBatch::new(
+        views.revision(),
+        vec![Fact::DispatchSucceeded {
+            trajectory: views.trajectory().clone(),
+            dispatch: dispatch.clone(),
+            effects: contract.emits.clone(),
+        }],
+    ))
 }
 
 /// The narrowing admitting a cast-resolved value would fold into the **live** trajectory label, or
@@ -205,13 +252,23 @@ pub(crate) fn admit_result(
     if !views.is_open(dispatch) {
         return Err(AdmitError::NotOpen);
     }
+    // A checkpointed dispatch observed success already: only a success-family close may follow,
+    // and the close contributes no duplicate effects — the checkpoint committed them.
+    let checkpointed = views.is_succeeded(dispatch);
+    if checkpointed && matches!(admission, ResultAdmission::Failure | ResultAdmission::Indeterminate) {
+        return Err(AdmitError::SuccessContradicted);
+    }
 
     let trajectory = views.trajectory().clone();
     let close_success = || Fact::DispatchClosed {
         trajectory: trajectory.clone(),
         dispatch: dispatch.clone(),
         outcome: CloseOutcome::Success {
-            effects: contract.emits.clone(),
+            effects: if checkpointed {
+                Vec::new()
+            } else {
+                contract.emits.clone()
+            },
         },
     };
     let admit_value = |label: Label, body: ValueBody| Fact::ValueAdmitted {
@@ -1282,5 +1339,73 @@ mod tests {
             ),
             Err(AdmitError::NotPendingCast)
         );
+    }
+
+    #[test]
+    fn a_success_checkpoint_commits_effects_once_and_pins_the_close_family() {
+        let reg = registry();
+        let call = scan_call();
+        let (mut log, dispatch) = open_log(&call);
+        let t = traj();
+
+        // Only a pending-cast contract defers finalization: an ordinary dispatch cannot
+        // checkpoint (it would turn a later honest Failure close into a contradiction).
+        let plain = get_call();
+        let (plain_log, plain_dispatch) = open_log(&plain);
+        let p = views_of(&plain_log);
+        assert_eq!(
+            observe_success(&reg, &p.view(&t), &plain_dispatch, &plain),
+            Err(AdmitError::NotPendingCast)
+        );
+
+        // The checkpoint commits the declared effects while the dispatch stays open and confined.
+        let p = views_of(&log);
+        let batch = observe_success(&reg, &p.view(&t), &dispatch, &call).unwrap();
+        log.extend(batch.facts);
+        let p = views_of(&log);
+        assert!(p.view(&t).has_effect(&EffectKind::new("read")));
+        assert!(p.view(&t).is_open(&dispatch));
+
+        // At most once — a repeat checkpoint is refused, never silently absorbed.
+        assert_eq!(
+            observe_success(&reg, &p.view(&t), &dispatch, &call),
+            Err(AdmitError::AlreadySucceeded)
+        );
+
+        // Success was observed: a contradictory close is refused.
+        assert_eq!(
+            admit_result(&reg, &p.view(&t), &dispatch, &call, ResultAdmission::Failure),
+            Err(AdmitError::SuccessContradicted)
+        );
+        assert_eq!(
+            admit_result(&reg, &p.view(&t), &dispatch, &call, ResultAdmission::Indeterminate),
+            Err(AdmitError::SuccessContradicted)
+        );
+
+        // The success-family close lands with no duplicate effects: the checkpoint stays the one
+        // carrier, and the effect view still holds exactly what it held.
+        let batch = admit_result(
+            &reg,
+            &p.view(&t),
+            &dispatch,
+            &call,
+            ResultAdmission::SuccessCastLapsed {
+                body: ValueBody::new("mail"),
+                cast: CastName::new("paranoid"),
+                resolved: DimValue::Trust(SUSPICIOUS),
+            },
+        )
+        .unwrap();
+        assert!(batch.facts.iter().any(|fact| matches!(
+            fact,
+            Fact::DispatchClosed {
+                outcome: CloseOutcome::Success { effects },
+                ..
+            } if effects.is_empty()
+        )));
+        log.extend(batch.facts);
+        let p = views_of(&log);
+        assert!(p.view(&t).has_effect(&EffectKind::new("read")));
+        assert!(!p.view(&t).is_open(&dispatch));
     }
 }

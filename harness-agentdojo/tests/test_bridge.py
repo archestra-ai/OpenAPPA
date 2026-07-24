@@ -26,6 +26,8 @@ def test_sidecar_accepts_a_narrowing_then_blocks_the_sink() -> None:
         client.open(POLICY, ["read_external", "send_email"], "read and send")
 
         assert isinstance(client.check("read_external", {}), Blocked)
+        # Informed acceptance: accept the read remedy in a later round than its offer.
+        client.new_round()
         assert isinstance(client.resolve_remedy("remedy-0"), AuthorizedCall)
         assert isinstance(client.report_success("external content"), Admitted)
         assert isinstance(client.check("send_email", {"to": "attacker@example.com"}), Blocked)

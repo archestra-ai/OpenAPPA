@@ -14,7 +14,9 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
 
-const BINDING_IDENTITY: &str = "appa-agent-python-v2";
+// v3: mediation now advances an inference round per completion (informed acceptance), so
+// pre-fix cached benchmark episodes must not be reused.
+const BINDING_IDENTITY: &str = "appa-agent-python-v3";
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 const BRIDGE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -170,6 +172,14 @@ impl SessionInner {
         })
     }
 
+    fn new_round(&mut self) -> Result<(), String> {
+        self.session
+            .as_mut()
+            .ok_or_else(|| "the session is closed".to_string())?
+            .begin_round()
+            .map_err(|error| error.to_string())
+    }
+
     fn close(&mut self) -> Result<(), String> {
         if self.pending {
             return Err("cannot close while a call is pending".to_string());
@@ -208,6 +218,18 @@ impl Session {
                 .lock()
                 .map_err(|_| AppaError::new_err("the session lock is poisoned"))?
                 .dispatch(tool, arguments_json)
+                .map_err(AppaError::new_err)
+        })
+    }
+
+    /// Signal a new model completion so informed acceptance can advance: an acceptance-carrying
+    /// remedy executes only in a round after the one that surfaced its offer.
+    fn new_round(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| {
+            self.inner
+                .lock()
+                .map_err(|_| AppaError::new_err("the session lock is poisoned"))?
+                .new_round()
                 .map_err(AppaError::new_err)
         })
     }

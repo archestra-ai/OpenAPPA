@@ -11,3 +11,5 @@ appa.pdf
 *.fdb_latexmk
 *.synctex.gz
 *.toc
+# Custom target dirs (CARGO_TARGET_DIR from tooling)
+target-*/

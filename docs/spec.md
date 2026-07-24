@@ -601,7 +601,13 @@ it to the authority — the staged review, never value bytes (see Deployment
 staging) — and on approval dispatches it; the plan id, the ruling (carrying
 its review), and the dispatch land in the log together. (An acceptance plan is atomic trivially: accept and dispatch,
 one step, no authority round trip — the plan id and the dispatch are the
-whole record.) Consequences, by construction rather than bookkeeping:
+whole record. It is also **informed**: a plan carrying an acceptance —
+of a call's narrowing, of a child return's, or with an accepted residual —
+executes only in a round after the one that surfaced its offer; an
+acceptance authored in the same assistant response that triggered the
+offer predates it and is refused. Ruling-only plans are not so gated —
+the round discipline binds acceptances, not rulings.) Consequences, by
+construction rather than bookkeeping:
 
 - nothing can intervene between approval and dispatch;
 - an approval cannot cover a swapped call — it names the rendered call;
@@ -1140,11 +1146,16 @@ included, because the fold may have moved since the pre-dispatch check
 sanctioned them, and a composed narrowing nobody accepted must not fold.
 The raw result stays confined while the agent is offered exactly the
 narrowing the admission would fold; acceptance lands the cast record, the
-acceptance, and the admitted value in one atomic batch. An offer the turn
+acceptance, and the admitted value in one atomic batch. The call's
+effects never wait on the offer's fate: they append the moment success is
+observed — the same one append point at success as every other call, so
+a later call's history check sees them while the result stays confined —
+and the eventual close carries none. An offer the turn
 ends without accepting **lapses** — the dispatch closes successfully,
 effects standing and nothing admitted; the close and the unaccepted
 resolution are durable records, never only feedback. An
-acceptance is **informed**: it must arrive in a round after the one that
+acceptance is **informed**, here as at every acceptance site (see Atomic
+plan execution): it must arrive in a round after the one that
 surfaced the offer — an acceptance authored in the same assistant
 response that triggered the offer predates it and is refused. A
 resolution that moves nothing admits directly: the acceptance is owed for
@@ -1168,8 +1179,13 @@ store they already run; the decision core never sees IO.
 The invoke/append crash gap is deliberately out of scope in this version:
 effects append when the call succeeds, and a host that fails between a
 successful invoke and the append may lose effects — accepted for
-simplicity. Hardening (e.g. a durable outbox committing invocation and
-effects as one record) is future work for the outer layer.
+simplicity. Its confined-result cousin is accepted on the same terms: a
+pending-cast success appends its effect checkpoint durably before the
+confined offer exists only in the host's memory, so a crash between the
+two leaves an open, checkpointed dispatch whose lapse record never lands
+— effects stand honestly; the close is lost with the host. Hardening
+(e.g. a durable outbox committing invocation and effects as one record)
+is future work for the outer layer.
 
 Invariants on state changes are enforced through the type system, under the
 assumption that external labels and authority decisions are trusted inputs —
@@ -1214,8 +1230,9 @@ xor resolver-implemented**.
 - **Tag** — a routing-only name with no algebraic life: never folded,
   checked, or logged. The exclusive currency of authority scope.
 - **Narrowing** — a strict restriction of the label (fewer readers, lower
-  trust) that a proposed flow would commit — a call's delta, or a child
-  return's merge into the parent — shrinking the release frontier.
+  trust) that a proposed flow would commit — a call's delta, a child
+  return's merge into the parent, or a pending-Cast admission's fold move
+  against the live label — shrinking the release frontier.
   Soft-blocked until the agent accepts it; the block always carries the
   acceptance plan, so it is never terminal.
 - **Acceptance** — the agent's own free step acknowledging a narrowing
@@ -1223,7 +1240,9 @@ xor resolver-implemented**.
   clears no requirement. Three sites, each durably recorded: a call's
   dispatch, a child return's merge, and a pending-Cast admission
   (post-dispatch — the label is established only at admission; see
-  Unknown as a first-class citizen).
+  Unknown as a first-class citizen). Every acceptance is informed: it
+  executes only in a round after the one that surfaced its offer (see
+  Atomic plan execution).
 - **Remedy plan** — an executable object with an id; every engine-side plan
   runs atomically via `execute_remedy_plan(plan_id)`: render, rule (when
   the plan carries a ruling), dispatch, log. A plan for a failed `prior(k)`

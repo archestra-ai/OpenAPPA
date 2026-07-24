@@ -82,7 +82,10 @@ fn wire_plans(offers: &[(String, RemedyPlan)]) -> Vec<WirePlan<'_>> {
                 .collect(),
             // Derived from the plan itself — a denial re-listing has no block at hand, and a plan
             // that carries an Accept step accepts the narrowing wherever it is rendered.
-            accepts_narrowing: plan.steps.contains(&appa_engine::plan::RemedyStep::Accept),
+            accepts_narrowing: plan
+                .steps
+                .iter()
+                .any(|step| matches!(step, appa_engine::plan::RemedyStep::Accept(_))),
         })
         .collect()
 }
@@ -149,29 +152,31 @@ pub fn block_feedback(
             "blocked by policy; no remedy is available for this call"
         }
     } else if raw.requirement_gaps.is_empty() {
+        // A pure narrowing. Acceptance is informed — it executes only in a round after this offer
+        // ("in your next response") — and the surface's branch fact rides along.
         match surface {
             FeedbackSurface::Root { can_fork: true } => {
-                "narrowing: this call restricts the trajectory label; accept it with execute_remedy_plan, or fork the restricting work into a child session to keep this session's label"
+                "narrowing: this call restricts the trajectory label; accept it with execute_remedy_plan in your next response, or fork the restricting work into a child session to keep this session's label"
             }
             FeedbackSurface::Root { can_fork: false } => {
-                "narrowing: this call restricts the trajectory label; accept it with execute_remedy_plan"
+                "narrowing: this call restricts the trajectory label; accept it with execute_remedy_plan in your next response"
             }
             FeedbackSurface::Child => {
-                "narrowing: this call restricts this branch's label only — the parent session is unaffected; accept it with execute_remedy_plan"
+                "narrowing: this call restricts this branch's label only — the parent session is unaffected; accept it with execute_remedy_plan in your next response"
             }
         }
     } else if raw.narrowing.is_some() {
-        // Mixed block: every offered plan both covers the gaps and accepts the narrowing, so the
-        // branch fact rides along exactly as it does on a pure narrowing.
+        // Mixed block: every offered plan both covers the gaps and accepts the narrowing, so it is
+        // round-gated (next response) and the branch fact rides along as on a pure narrowing.
         match surface {
             FeedbackSurface::Root { can_fork: true } => {
-                "blocked by policy; execute one offered plan with execute_remedy_plan — it also accepts this call's narrowing — or fork the restricting work into a child session to keep this session's label"
+                "blocked by policy; execute one offered plan with execute_remedy_plan in your next response — it also accepts this call's narrowing — or fork the restricting work into a child session to keep this session's label"
             }
             FeedbackSurface::Root { can_fork: false } => {
-                "blocked by policy; execute one offered plan with execute_remedy_plan"
+                "blocked by policy; execute one offered plan with execute_remedy_plan in your next response"
             }
             FeedbackSurface::Child => {
-                "blocked by policy; execute one offered plan with execute_remedy_plan; its narrowing restricts this branch's label only — the parent session is unaffected"
+                "blocked by policy; execute one offered plan with execute_remedy_plan in your next response; its narrowing restricts this branch's label only — the parent session is unaffected"
             }
         }
     } else {
@@ -318,7 +323,7 @@ mod tests {
         };
         let accept_plan = RemedyPlan {
             id: PlanId::new(0),
-            steps: vec![RemedyStep::Accept],
+            steps: vec![RemedyStep::Accept(narrowing())],
             required: vec![],
         };
         let planned = PlannedBlock {
@@ -369,7 +374,7 @@ mod tests {
             narrowing: Some(narrowing()),
         };
         let mut plan = plan_with("officer", vec![floor]);
-        plan.steps.push(RemedyStep::Accept);
+        plan.steps.push(RemedyStep::Accept(narrowing()));
         let planned = PlannedBlock {
             raw: raw.clone(),
             plans: vec![plan.clone()],
@@ -430,6 +435,10 @@ mod tests {
                     tool: ToolName::new("backup"),
                     reason: "emit the prior".to_string(),
                 },
+                Recommendation::Redispatch {
+                    tool: ToolName::new("snapshot"),
+                    reason: "emit the prior".to_string(),
+                },
                 Recommendation::Fork {
                     reason: "advisory".to_string(),
                 },
@@ -453,7 +462,9 @@ mod tests {
         assert_eq!(payload["plans"][0]["rulings"][0]["authority"], "officer-a");
         assert_eq!(payload["plans"][1]["plan_id"], "remedy-1");
         assert_eq!(payload["plans"][1]["rulings"][0]["authority"], "officer-b");
+        // Every curative redispatch renders, in the engine's order.
         assert_eq!(payload["redispatch"][0]["tool"], "backup");
+        assert_eq!(payload["redispatch"][1]["tool"], "snapshot");
         assert!(payload.get("fork").is_none());
 
         // A redispatch-only block still renders the typed payload, with no plans.

@@ -98,6 +98,9 @@ async fn the_guarded_policy_keeps_the_email_sink_empty() {
         forum_block.contains("remedy-0"),
         "forum read should soft-block: {forum_block}"
     );
+    // Informed acceptance: the read remedy is accepted in the completion after the one that
+    // surfaced its offer (rig's CompletionCall drives this; the test drives it directly).
+    hook.begin_round().await;
     let forum = hook.decide("execute_remedy_plan", r#"{"plan_id":"remedy-0"}"#).await;
     assert!(
         forum.contains("mail-verify.example"),
@@ -106,6 +109,7 @@ async fn the_guarded_policy_keeps_the_email_sink_empty() {
 
     let hr_block = hook.decide("read_hr", r#"{"file":"alice-chen.md"}"#).await;
     assert!(hr_block.contains("remedy-1"), "hr read should soft-block: {hr_block}");
+    hook.begin_round().await;
     let hr = hook.decide("execute_remedy_plan", r#"{"plan_id":"remedy-1"}"#).await;
     assert!(
         hr.contains("SSN"),
@@ -147,6 +151,8 @@ async fn the_finance_read_confines_the_status_email() {
         read_block.contains("remedy-0"),
         "finance read should soft-block as a narrowing: {read_block}"
     );
+    // Informed acceptance: the read remedy is accepted in the completion after its offer.
+    hook.begin_round().await;
     let invoice = hook.decide("execute_remedy_plan", r#"{"plan_id":"remedy-0"}"#).await;
     assert!(
         invoice.contains("APPROVED"),

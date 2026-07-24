@@ -135,6 +135,12 @@ class SidecarClient:
             case status:
                 raise SidecarError(f"unexpected remedy response status: {status!r}")
 
+    def new_round(self) -> None:
+        """Signal a new model completion. Informed acceptance requires it: an acceptance-carrying
+        remedy executes only in a round after the one that surfaced its offer."""
+        response = self._request({"command": "new_round"})
+        self._require_status(response, "round_begun")
+
     def report_success(self, body: str) -> ReportedResult:
         return self._report({"kind": "success", "body": body})
 

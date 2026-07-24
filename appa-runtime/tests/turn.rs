@@ -539,6 +539,341 @@ constant = { trust = "suspicious" }
     );
 }
 
+/// Facts carrying the named committed effect — the checkpoint or a close, wherever it landed.
+fn effect_carriers(log: &[Fact], kind: &str) -> usize {
+    log.iter()
+        .filter(|fact| match fact {
+            Fact::DispatchSucceeded { effects, .. } => effects.iter().any(|effect| effect.as_str() == kind),
+            Fact::DispatchClosed {
+                outcome: CloseOutcome::Success { effects },
+                ..
+            } => effects.iter().any(|effect| effect.as_str() == kind),
+            _ => false,
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn a_pending_cast_success_commits_effects_before_its_offer_resolves() {
+    // The external effect happened the moment the tool succeeded; the success checkpoint commits
+    // it immediately, so a later call's no_prior(read) in the SAME round sees it — the raw body
+    // stays confined behind the offer. Acceptance later folds the value without a second effect.
+    let mediated = mediator(
+        r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+[[tool]]
+name = "scan"
+effects = ["read"]
+delta = { trust = "unknown" }
+
+[[tool]]
+name = "audit"
+delta = {}
+[tool.requires]
+effects = { has_no = ["read"] }
+
+[[cast]]
+name = "paranoid"
+constant = { trust = "suspicious" }
+"#,
+        &[
+            ("scan", BuiltinTool::Echo("mail body".to_string())),
+            ("audit", BuiltinTool::Echo("must not run".to_string())),
+        ],
+    );
+    let tenant = TenantId::new("tenant");
+    let session = mediated.create_session(tenant.clone());
+    let mut turn = begin(&mediated, &tenant, &session, "scan then audit").await;
+    let mut budget = RunBudget::default();
+
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call("scan", "scan", "{}"), call("audit", "audit", "{}")]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    let log = facts(&mediated, &tenant, &session);
+    // The checkpoint committed the effect while the dispatch stays open and the body confined...
+    assert_eq!(effect_carriers(&log, "read"), 1);
+    assert!(tool_values(&log).is_empty());
+    // ...so the same-round audit call failed its no_prior(read) and never dispatched.
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(fact, Fact::DispatchOpened { .. }))
+            .count(),
+        1
+    );
+    assert!(log.iter().any(|fact| matches!(
+        fact,
+        Fact::BlockFeedback { call_id, .. } if call_id.as_str() == "audit"
+    )));
+
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call("accept", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-0"}"#)]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    let log = facts(&mediated, &tenant, &session);
+    assert_eq!(
+        tool_values(&log).iter().map(|(body, _)| *body).collect::<Vec<_>>(),
+        ["mail body"]
+    );
+    // The close contributed no duplicate: the one effect carrier is still the checkpoint.
+    assert_eq!(effect_carriers(&log, "read"), 1);
+}
+
+#[tokio::test]
+async fn a_lapsed_pending_cast_leaves_its_checkpointed_effects_standing_once() {
+    let mediated = mediator(
+        r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+[[tool]]
+name = "scan"
+effects = ["read"]
+delta = { trust = "unknown" }
+
+[[cast]]
+name = "paranoid"
+constant = { trust = "suspicious" }
+"#,
+        &[("scan", BuiltinTool::Echo("mail body".to_string()))],
+    );
+    let tenant = TenantId::new("tenant");
+    let session = mediated.create_session(tenant.clone());
+    let mut turn = begin(&mediated, &tenant, &session, "scan").await;
+    let mut budget = RunBudget::default();
+
+    turn.mediate(calls(vec![call("scan", "scan", "{}")]), &mut budget)
+        .await
+        .unwrap();
+    assert!(matches!(
+        turn.mediate(final_answer("done"), &mut budget).await.unwrap(),
+        Step::Final(_)
+    ));
+    let log = facts(&mediated, &tenant, &session);
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(fact, Fact::OutputCastLapsed { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(effect_carriers(&log, "read"), 1);
+    assert!(tool_values(&log).is_empty());
+}
+
+#[tokio::test]
+async fn ordinary_narrowing_acceptance_requires_a_later_round() {
+    // Informed acceptance holds for ordinary soft blocks as for pending casts: an acceptance
+    // authored in the same assistant response that triggered the offer predates it and is
+    // refused; the same offer executes in the next round.
+    let mediated = mediator(
+        r#"
+version = 1
+[[tool]]
+name = "get"
+delta = { audience = { exactly = ["internal"] } }
+"#,
+        &[("get", BuiltinTool::Echo("secret".to_string()))],
+    );
+    let tenant = TenantId::new("tenant");
+    let session = mediated.create_session(tenant.clone());
+    let mut turn = begin(&mediated, &tenant, &session, "fetch").await;
+    let mut budget = RunBudget::default();
+
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![
+                call("blocked", "get", "{}"),
+                call("early-accept", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-0"}"#),
+            ]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    let log = facts(&mediated, &tenant, &session);
+    assert!(!log.iter().any(|fact| matches!(fact, Fact::DispatchOpened { .. })));
+    assert!(!log.iter().any(|fact| matches!(fact, Fact::Acceptance { .. })));
+
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call("accept", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-0"}"#)]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    let log = facts(&mediated, &tenant, &session);
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(fact, Fact::Acceptance { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        tool_values(&log).iter().map(|(body, _)| *body).collect::<Vec<_>>(),
+        ["secret"]
+    );
+}
+
+#[tokio::test]
+async fn an_authority_only_plan_executes_in_its_offering_round() {
+    // The round gate binds acceptances, not rulings: a plan with no Accept step is executable in
+    // the very round that offered it.
+    let mediated = mediator(
+        r#"
+version = 1
+[[tool]]
+name = "wire"
+effects = ["spend"]
+[tool.requires]
+attention = ["signoff"]
+
+[[authority]]
+name = "officer"
+mandate = { attends = ["signoff"] }
+implementation = { builtin = "approve" }
+"#,
+        &[("wire", BuiltinTool::Echo("paid".to_string()))],
+    );
+    let tenant = TenantId::new("tenant");
+    let session = mediated.create_session(tenant.clone());
+    let mut turn = begin(&mediated, &tenant, &session, "pay").await;
+    let mut budget = RunBudget::default();
+
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![
+                call("blocked", "wire", "{}"),
+                call("same-round", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-0"}"#),
+            ]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    let log = facts(&mediated, &tenant, &session);
+    assert_eq!(log.iter().filter(|fact| matches!(fact, Fact::Ruling { .. })).count(), 1);
+    assert!(log.iter().any(|fact| matches!(
+        fact,
+        Fact::DispatchClosed {
+            outcome: CloseOutcome::Success { effects },
+            ..
+        } if effects.iter().any(|effect| effect.as_str() == "spend")
+    )));
+}
+
+#[tokio::test]
+async fn return_acceptance_is_round_gated_but_a_residual_free_sanitize_is_not() {
+    // A child return's Accept plan (and Sanitize with a residual) carries an acceptance and is
+    // informed — next round only; a residual-free Sanitize accepts nothing and may execute in the
+    // offering round.
+    let mediated = mediator(
+        r#"
+version = 1
+[[tool]]
+name = "read"
+delta = { audience = { exactly = ["internal"] } }
+
+[[sanitizer]]
+name = "pii"
+on = ["tool_output"]
+[sanitizer.can_reduce]
+audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+[sanitizer.implementation]
+builtin = "redact-email"
+"#,
+        &[("read", BuiltinTool::Echo("ask eve@corp.com".to_string()))],
+    );
+    let tenant = TenantId::new("tenant");
+    let parent = mediated.create_session(tenant.clone());
+    let mut budget = RunBudget::default();
+    let mut parent_turn = begin(&mediated, &tenant, &parent, "parent").await;
+    parent_turn.mediate(final_answer("ready"), &mut budget).await.unwrap();
+    drop(parent_turn);
+
+    // Child A: the raw-accept plan named in the same response as the submit is refused; the same
+    // offer crosses in the next round.
+    let accepting_child = mediated.fork_session(&tenant, &parent).unwrap();
+    let mut accepting_turn = child_with_internal_read(&mediated, &tenant, &accepting_child, &mut budget).await;
+    assert!(matches!(
+        accepting_turn
+            .mediate(
+                calls(vec![
+                    call("submit", SUBMIT_RESULT, r#"{"value":"ask eve@corp.com"}"#),
+                    call("early-accept", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-1"}"#),
+                ]),
+                &mut budget,
+            )
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    assert!(
+        !facts(&mediated, &tenant, &parent)
+            .iter()
+            .any(|fact| matches!(fact, Fact::ChildReturn { .. }))
+    );
+    assert!(matches!(
+        accepting_turn
+            .mediate(
+                calls(vec![call(
+                    "accept-return",
+                    EXECUTE_REMEDY_PLAN,
+                    r#"{"plan_id":"remedy-1"}"#
+                )]),
+                &mut budget,
+            )
+            .await
+            .unwrap(),
+        Step::ChildFinished
+    ));
+    drop(accepting_turn);
+
+    // Child B: the residual-free sanitize plan executes in the round that offered it.
+    let sanitizing_child = mediated.fork_session(&tenant, &parent).unwrap();
+    let mut sanitizing_turn = child_with_internal_read(&mediated, &tenant, &sanitizing_child, &mut budget).await;
+    assert!(matches!(
+        sanitizing_turn
+            .mediate(
+                calls(vec![
+                    call("submit", SUBMIT_RESULT, r#"{"value":"ask eve@corp.com"}"#),
+                    call("same-round-sanitize", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-2"}"#),
+                ]),
+                &mut budget,
+            )
+            .await
+            .unwrap(),
+        Step::ChildFinished
+    ));
+
+    let log = facts(&mediated, &tenant, &parent);
+    let returned: Vec<_> = log
+        .iter()
+        .filter_map(|fact| match fact {
+            Fact::ValueAdmitted {
+                value,
+                provenance: Provenance::ChildReturn { .. },
+                ..
+            } => Some(value.body.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(returned, ["ask eve@corp.com", "ask [redacted-email]"]);
+}
+
 #[tokio::test]
 async fn every_unaccepted_pending_cast_lapses_before_the_turn_boundary() {
     let mediated = mediator(
@@ -775,21 +1110,23 @@ async fn child_context_stops_at_the_fork_and_raw_returns_cross_once() {
     assert!(parent_context.contains(&WireMessage::user("finding")));
     assert!(!parent_context.contains(&WireMessage::assistant("child free text")));
 
-    let mut second_child_turn = begin(&mediator, &tenant, &child, "return again").await;
+    // A value return ends the errand: the returned child cannot be re-driven — refused before any
+    // fact is admitted, so the family log and revision stay untouched.
+    let (log_before, revision_before) = mediator.snapshot(&tenant, &child).unwrap();
     assert!(matches!(
-        second_child_turn
-            .mediate(
-                calls(vec![call("again", SUBMIT_RESULT, r#"{"value":"second"}"#,)]),
-                &mut budget,
-            )
-            .await
-            .unwrap(),
-        Step::Continue
+        mediator
+            .begin_turn(tenant.clone(), child.clone(), "return again", CancellationToken::new())
+            .await,
+        Err(appa_runtime::BeginTurnError::SessionReturned)
     ));
-    second_child_turn
-        .mediate(final_answer("cannot return twice"), &mut budget)
-        .await
-        .unwrap();
+    let (log_after, revision_after) = mediator.snapshot(&tenant, &child).unwrap();
+    assert_eq!(log_before.len(), log_after.len());
+    assert_eq!(revision_before, revision_after);
+
+    // Nor can it become a fork parent, through either fork entry point.
+    assert!(mediator.fork_session(&tenant, &child).is_err());
+    assert!(mediator.fork_session_reserved(&tenant, &child).is_err());
+
     let log = facts(&mediator, &tenant, &parent);
     assert_eq!(
         log.iter()
@@ -948,6 +1285,134 @@ return_sanitizer = "pii"
             ..
         }
     )));
+}
+
+#[tokio::test]
+async fn a_residual_bearing_sanitize_return_plan_is_round_gated() {
+    // The sanitizer clears the audience narrowing but a trust narrowing survives (audience is the
+    // only sanitizer territory), so the offered plan carries an accepted residual — informed like
+    // any acceptance: refused in the offering round, executed in the next.
+    let mediated = mediator(
+        r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+[[tool]]
+name = "read"
+delta = { trust = "suspicious", audience = { exactly = ["internal"] } }
+
+[[sanitizer]]
+name = "pii"
+on = ["tool_output"]
+[sanitizer.can_reduce]
+audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+[sanitizer.implementation]
+builtin = "redact-email"
+"#,
+        &[("read", BuiltinTool::Echo("ask eve@corp.com".to_string()))],
+    );
+    let tenant = TenantId::new("tenant");
+    let parent = mediated.create_session(tenant.clone());
+    let mut budget = RunBudget::default();
+    let mut parent_turn = begin(&mediated, &tenant, &parent, "parent").await;
+    parent_turn.mediate(final_answer("ready"), &mut budget).await.unwrap();
+    drop(parent_turn);
+
+    let child = mediated.fork_session(&tenant, &parent).unwrap();
+    let mut turn = child_with_internal_read(&mediated, &tenant, &child, &mut budget).await;
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![
+                call("submit", SUBMIT_RESULT, r#"{"value":"ask eve@corp.com"}"#),
+                call("early-sanitize", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-2"}"#),
+            ]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    assert!(
+        !facts(&mediated, &tenant, &parent)
+            .iter()
+            .any(|fact| matches!(fact, Fact::ChildReturn { .. }))
+    );
+
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call(
+                "sanitize-return",
+                EXECUTE_REMEDY_PLAN,
+                r#"{"plan_id":"remedy-2"}"#
+            )]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::ChildFinished
+    ));
+    let log = facts(&mediated, &tenant, &parent);
+    // The sanitized value crossed with the residual trust narrowing accepted alongside.
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(fact, Fact::ChildReturnAcceptance { .. }))
+            .count(),
+        1
+    );
+    assert!(log.iter().any(|fact| matches!(
+        fact,
+        Fact::ValueAdmitted {
+            value,
+            provenance: Provenance::ChildReturn { .. },
+            ..
+        } if value.body.as_str() == "ask [redacted-email]"
+    )));
+}
+
+#[tokio::test]
+async fn a_voided_child_is_re_drivable_and_may_still_cross_its_one_value() {
+    // At-most-once binds value crossings, not endings: a void return writes no ChildReturn, so
+    // the child begins a later turn and crosses its one value then — unlike a value-returned
+    // child, which is closed.
+    let mediated = mediator("version = 1\n", &[]);
+    let tenant = TenantId::new("tenant");
+    let parent = mediated.create_session(tenant.clone());
+    let mut budget = RunBudget::default();
+    let mut parent_turn = begin(&mediated, &tenant, &parent, "parent").await;
+    parent_turn.mediate(final_answer("ready"), &mut budget).await.unwrap();
+    drop(parent_turn);
+
+    let child = mediated.fork_session(&tenant, &parent).unwrap();
+    let mut first = begin(&mediated, &tenant, &child, "look").await;
+    assert!(matches!(
+        first
+            .mediate(
+                calls(vec![call("void", SUBMIT_RESULT, r#"{"value":null}"#)]),
+                &mut budget
+            )
+            .await
+            .unwrap(),
+        Step::ChildFinished
+    ));
+    drop(first);
+
+    let mut second = begin(&mediated, &tenant, &child, "look again").await;
+    assert!(matches!(
+        second
+            .mediate(
+                calls(vec![call("return", SUBMIT_RESULT, r#"{"value":"finding"}"#)]),
+                &mut budget,
+            )
+            .await
+            .unwrap(),
+        Step::ChildFinished
+    ));
+    let log = facts(&mediated, &tenant, &parent);
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(fact, Fact::ChildReturn { .. }))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

@@ -100,6 +100,9 @@ def test_remedy_dispatches_only_the_underlying_tool_once() -> None:
     with ToolBridge() as bridge:
         with open_session(bridge, runtime, NARROWING_POLICY, ["read_external"]) as session:
             assert isinstance(session.dispatch("read_external", {}), Blocked)
+            # Informed acceptance: the read remedy is accepted in the completion after the one
+            # that surfaced its offer.
+            session.new_round()
             result = session.dispatch("execute_remedy_plan", {"plan_id": "remedy-0"})
 
         assert result == Delivered(

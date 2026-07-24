@@ -96,7 +96,13 @@ class AppaToolsExecutor(ToolsExecutor):
             return query, runtime, env, messages, extra_args
 
         if not any(message["role"] == "tool" for message in messages):
+            # The opening completion takes the episode's first round via begin_turn.
             self._open_episode(messages, runtime, env)
+        elif self.session is not None:
+            # Every later completion is a fresh inference round, so an acceptance-carrying remedy
+            # the model proposes here — after seeing the offer's block feedback last completion —
+            # is informed rather than a same-response guess.
+            self.session.new_round()
 
         results = []
         for tool_call in tool_calls:

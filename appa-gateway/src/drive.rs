@@ -20,6 +20,8 @@ pub enum DriveError {
     Store(#[from] StoreError),
     #[error("dispatch identity no longer matches its call/trajectory")]
     DispatchIdentity,
+    #[error("this session already returned its result — a returned child is closed to new turns")]
+    SessionReturned,
 }
 
 /// Drive an existing session through the canonical agent and runtime mediation loop.
@@ -52,6 +54,9 @@ fn map_agent_error(error: appa_agent::AgentError) -> DriveError {
         appa_agent::AgentError::Begin(
             appa_runtime::BeginTurnError::Cancelled | appa_runtime::BeginTurnError::ForeignFork,
         ) => DriveError::DispatchIdentity,
+        // An expected, externally reachable lifecycle refusal — a caller error, never an
+        // internal invariant failure.
+        appa_agent::AgentError::Begin(appa_runtime::BeginTurnError::SessionReturned) => DriveError::SessionReturned,
         appa_agent::AgentError::Turn(
             appa_runtime::TurnError::DispatchIdentity
             | appa_runtime::TurnError::Lifecycle { .. }

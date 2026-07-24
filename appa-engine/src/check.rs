@@ -68,6 +68,20 @@ pub enum CheckOutcome {
     Unresolved(Vec<UnresolvedFact>),
 }
 
+/// How an `includes` placeholder that cannot resolve from the call's arguments enters the gap set.
+/// The origin is carried structurally — never reconstructed from a gap's recipient value, which a
+/// static contract could legally collide with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlaceholderGaps {
+    /// A malformed placeholder fails closed as an unsatisfiable sentinel gap — the real-dispatch
+    /// path: a call that cannot name its recipient releases to no one.
+    FailClosed,
+    /// An unresolvable placeholder is waived — the planner's synthetic no-argument prerequisite
+    /// call cannot know the recipient the agent supplies at real dispatch, so the requirement is
+    /// not a gap there at all. Static `includes` requirements are untouched by this mode.
+    Waived,
+}
+
 /// The contribution a successful call would actually fold, on the check's clock. For an unbound
 /// tool that is its declared `delta`; a sanitizer-bound tool (RP4) folds the **bound derivation**
 /// instead, so its audience contribution is the sanitizer's declared `to` (trust untouched — never
@@ -110,7 +124,14 @@ pub(crate) fn evaluate(
     call: &ResolvedCall,
 ) -> CheckOutcome {
     let current = views.current_label();
-    match evaluate_state(registry, contract, &current, &|kind| views.has_effect(kind), call) {
+    match evaluate_state(
+        registry,
+        contract,
+        &current,
+        &|kind| views.has_effect(kind),
+        call,
+        PlaceholderGaps::FailClosed,
+    ) {
         // The state evaluation only signals that a requirement consumed an Unknown dimension; the
         // offending branch values are named here, where the views can enumerate them.
         CheckOutcome::Unresolved(_) => {
@@ -134,6 +155,7 @@ pub(crate) fn evaluate_state(
     current: &Label,
     has_effect: &impl Fn(&EffectKind) -> bool,
     call: &ResolvedCall,
+    placeholders: PlaceholderGaps,
 ) -> CheckOutcome {
     let committed = committed_label(registry, contract, current);
     if !consumed_unresolved(contract, &committed, call).is_empty() {
@@ -148,7 +170,7 @@ pub(crate) fn evaluate_state(
 
     // Clocks 2 and 3: label requirements on the committed label, history on the log as it stands.
     let mut gaps = Vec::new();
-    label_gaps(contract, &committed, call, &mut gaps);
+    label_gaps(contract, &committed, call, placeholders, &mut gaps);
     history_gaps(contract, has_effect, &mut gaps);
     for mark in &contract.requires.attention {
         gaps.push(Gap::Attention(mark.clone()));
@@ -232,7 +254,13 @@ fn unresolved_facts(views: &Views, dims: &[Dimension]) -> Vec<UnresolvedFact> {
     facts
 }
 
-fn label_gaps(contract: &ToolContract, committed: &Label, call: &ResolvedCall, gaps: &mut Vec<Gap>) {
+fn label_gaps(
+    contract: &ToolContract,
+    committed: &Label,
+    call: &ResolvedCall,
+    placeholders: PlaceholderGaps,
+    gaps: &mut Vec<Gap>,
+) {
     if let Some(floor) = contract.requires.label.trust_floor
         && committed.trust.meets_floor(floor) == Adequacy::Fails
         && let Dim::Known(actual) = committed.trust
@@ -250,11 +278,17 @@ fn label_gaps(contract: &ToolContract, committed: &Label, call: &ResolvedCall, g
                         gaps.push(Gap::Includes { recipients });
                     }
                 }
-                // A malformed placeholder (missing or non-string arg) fails closed even on a public
-                // trajectory: a call that cannot name its recipient releases to no one.
-                None => gaps.push(Gap::Includes {
-                    recipients: unresolved_recipient(spec),
-                }),
+                // A placeholder that cannot resolve: on the real-dispatch path it fails closed
+                // even on a public trajectory (a call that cannot name its recipient releases to
+                // no one); on the planner's synthetic prerequisite path it is waived — the agent
+                // supplies the recipient at real dispatch (only a Placeholder spec can reach this
+                // arm, so waiving never drops a static requirement).
+                None => match placeholders {
+                    PlaceholderGaps::FailClosed => gaps.push(Gap::Includes {
+                        recipients: unresolved_recipient(spec),
+                    }),
+                    PlaceholderGaps::Waived => {}
+                },
             },
             AudienceRequirement::Cap(cap) => {
                 if committed.audience.within_cap(cap) == Adequacy::Fails {
@@ -283,8 +317,8 @@ fn history_gaps(contract: &ToolContract, has_effect: &impl Fn(&EffectKind) -> bo
 }
 
 /// Resolve an `includes` requirement's recipients. A placeholder reads the named argument's string
-/// value as a reader identity; a missing or non-string argument yields `None` (the call is malformed
-/// — the caller decides how to fail, and [`label_gaps`] fails it closed).
+/// value as a reader identity; a missing or non-string argument yields `None` — [`label_gaps`]
+/// then fails it closed or waives it per its [`PlaceholderGaps`] mode.
 fn resolve_recipients(spec: &RecipientSpec, call: &ResolvedCall) -> Option<Audience> {
     match spec {
         RecipientSpec::Static(audience) => Some(audience.clone()),

@@ -37,6 +37,56 @@ trust_chain = ["suspicious", "internal"]
 name = "lookup"
 "#;
 
+const NARROWING_POLICY: &str = r#"
+version = 1
+trust_chain = ["suspicious", "internal"]
+[[tool]]
+name = "fetch"
+delta = { audience = { exactly = ["internal"] } }
+"#;
+
+#[tokio::test]
+async fn a_same_completion_narrowing_acceptance_is_refused_until_the_next_round() {
+    // The informed-acceptance rule is engine-wide: through the SDK facade too, an acceptance
+    // named in the same completion that surfaced the offer predates it and is refused; the
+    // framework signals the next completion with begin_round and the same handle then accepts.
+    let mut session = open(NARROWING_POLICY);
+    session
+        .bind_tools(vec![appa_runtime::WireTool {
+            kind: "function".into(),
+            function: appa_runtime::WireToolSchema {
+                name: "fetch".into(),
+                description: None,
+                parameters: None,
+            },
+        }])
+        .unwrap();
+    session.begin_turn("fetch it").unwrap();
+
+    let CallDecision::Block { feedback } = session.check_call(call("fetch", serde_json::json!({}))).unwrap() else {
+        panic!("the narrowing fetch should soft-block");
+    };
+    assert!(feedback.contains("remedy-0"));
+
+    // Same completion → refused, no dispatch.
+    let RemedyDecision::Declined { .. } = session.resolve_remedy(Some("remedy-0")).await.unwrap() else {
+        panic!("a same-round acceptance must be refused");
+    };
+
+    // Next completion → the same acceptance is informed and authorizes the fetch.
+    session.begin_round().unwrap();
+    let RemedyDecision::Authorized { handle, call: rendered } = session.resolve_remedy(Some("remedy-0")).await.unwrap()
+    else {
+        panic!("the acceptance authorizes in a later round");
+    };
+    assert_eq!(rendered.tool.as_str(), "fetch");
+    let result = session.report_outcome(handle, ok_body("internal secret")).unwrap();
+    assert!(
+        matches!(&result, AdmittedResult::Admitted { label, .. } if label.audience == Dim::Known(Audience::restricted([ReaderId::new("internal")])))
+    );
+    session.end_turn().unwrap();
+}
+
 fn ladder_policy(authority_url: &str) -> String {
     format!(
         r#"
@@ -132,12 +182,19 @@ async fn the_injection_ladder_blocks_the_email_when_the_authority_denies() {
     let mut session = open(&ladder_policy(&url));
     session.begin_turn("check the forum and act").unwrap();
 
-    // Forum read blocks (narrowing); the model executes the remedy, which the read accepts.
+    // Forum read blocks (narrowing). An acceptance in the same completion that surfaced the
+    // offer predates it and is refused — the framework signals the next completion, and the
+    // same offer then accepts (informed acceptance, as in the runtime).
     let CallDecision::Block { feedback } = session.check_call(call("read_forum", serde_json::json!({}))).unwrap()
     else {
         panic!("forum read should soft-block");
     };
     assert!(feedback.contains("remedy-0"));
+    let RemedyDecision::Declined { feedback } = session.resolve_remedy(Some("remedy-0")).await.unwrap() else {
+        panic!("a same-round acceptance must be refused");
+    };
+    assert!(feedback.contains("remedy-0"));
+    session.begin_round().unwrap();
     let RemedyDecision::Authorized { handle, call: rendered } = session.resolve_remedy(Some("remedy-0")).await.unwrap()
     else {
         panic!("the read remedy should authorize");
@@ -148,10 +205,11 @@ async fn the_injection_ladder_blocks_the_email_when_the_authority_denies() {
         .unwrap();
     assert!(matches!(&result, AdmittedResult::Admitted { label, .. } if label.trust == Dim::Known(SUSPICIOUS)));
 
-    // HR read blocks (audience), accepted the same way.
+    // HR read blocks (audience), accepted the same way in a later round.
     let CallDecision::Block { .. } = session.check_call(call("read_hr", serde_json::json!({}))).unwrap() else {
         panic!("hr read should soft-block");
     };
+    session.begin_round().unwrap();
     let RemedyDecision::Authorized { handle, .. } = session.resolve_remedy(Some("remedy-1")).await.unwrap() else {
         panic!("the hr remedy should authorize");
     };

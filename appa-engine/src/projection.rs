@@ -58,6 +58,9 @@ pub struct Projection {
     effects: Vec<EffectKind>,
     /// Family-wide dispatches currently open (opened, not yet closed).
     open: BTreeSet<DispatchId>,
+    /// Still-open dispatches whose success checkpoint already committed their effects (a
+    /// pending-cast offer): the eventual close must be success-family and contributes none.
+    succeeded: BTreeSet<DispatchId>,
     /// Every dispatch ever opened, for per-digest occurrence counting.
     opened: Vec<OpenedDispatch>,
     /// Boundaries per trajectory, in log order (punctuation, counted for audit views).
@@ -77,6 +80,7 @@ impl Projection {
         let mut values = Vec::new();
         let mut effects = Vec::new();
         let mut open = BTreeSet::new();
+        let mut succeeded = BTreeSet::new();
         let mut opened = Vec::new();
         let mut boundaries = Vec::new();
         let mut forks = Vec::new();
@@ -102,8 +106,20 @@ impl Projection {
                         digest: *dispatch.digest(),
                     });
                 }
+                // The success checkpoint commits effects while the dispatch stays open for value
+                // finalization — the one append point at success, moved to when success is
+                // observed. The eventual close carries none (enforced at admission).
+                Fact::DispatchSucceeded {
+                    dispatch,
+                    effects: committed,
+                    ..
+                } => {
+                    succeeded.insert(dispatch.clone());
+                    effects.extend(committed.iter().cloned());
+                }
                 Fact::DispatchClosed { dispatch, outcome, .. } => {
                     open.remove(dispatch);
+                    succeeded.remove(dispatch);
                     if let CloseOutcome::Success { effects: committed } = outcome {
                         effects.extend(committed.iter().cloned());
                     }
@@ -160,6 +176,7 @@ impl Projection {
             values,
             effects,
             open,
+            succeeded,
             opened,
             boundaries,
             forks,
@@ -336,6 +353,12 @@ impl Views<'_> {
     /// Is this dispatch currently open (opened, not yet closed) anywhere in the family?
     pub fn is_open(&self, dispatch: &DispatchId) -> bool {
         self.projection.open.contains(dispatch)
+    }
+
+    /// Has this still-open dispatch's success checkpoint already committed its effects? Gates the
+    /// close (success-family only, no duplicate effects) and the runtime's once-only checkpoint.
+    pub fn is_succeeded(&self, dispatch: &DispatchId) -> bool {
+        self.projection.succeeded.contains(dispatch)
     }
 
     /// How many boundaries this trajectory has recorded.

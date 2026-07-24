@@ -75,6 +75,11 @@ class NativeSession:
                     return Delivered(content, dispatched_tool, dispatched_arguments, disposition)
         raise NativeProtocolError("native response has an invalid result envelope")
 
+    def new_round(self) -> None:
+        """Signal a new model completion. Informed acceptance requires it: an acceptance-carrying
+        remedy executes only in a round after the one that surfaced its offer."""
+        self._session.new_round()
+
     def close(self) -> None:
         if self._closed:
             return

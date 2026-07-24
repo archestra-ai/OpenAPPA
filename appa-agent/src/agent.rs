@@ -172,6 +172,11 @@ impl Agent {
                                     BeginTurnError::ForeignFork => {
                                         return Err(AgentError::Begin(BeginTurnError::ForeignFork));
                                     }
+                                    // A just-forked child cannot have returned; reaching this is a
+                                    // protocol violation like a foreign fork.
+                                    BeginTurnError::SessionReturned => {
+                                        return Err(AgentError::Begin(BeginTurnError::SessionReturned));
+                                    }
                                 }
                             }
                         };

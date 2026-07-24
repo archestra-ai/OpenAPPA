@@ -247,7 +247,13 @@ pub(crate) fn execute_plan(
             reviewed: ruling.reviewed.clone(),
         });
     }
-    if let Some(narrowing) = block.narrowing {
+    // The acceptance records the narrowing the *chosen plan* carries — what the agent was shown
+    // and matched by value above — never a re-derived one. Post-match the two provably coincide
+    // (live plans embed the live narrowing), so this is the same value with the honest provenance.
+    if let Some(narrowing) = chosen.steps.iter().find_map(|step| match step {
+        plan::RemedyStep::Accept(narrowing) => Some(narrowing.clone()),
+        plan::RemedyStep::Authorize(_) => None,
+    }) {
         facts.push(Fact::Acceptance {
             trajectory: trajectory.clone(),
             dispatch: dispatch.clone(),
@@ -749,9 +755,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn narrowing_records_an_acceptance() {
-        // A pure narrowing (delta narrows audience, no requirement gap): the acceptance is recorded.
+    /// A tool whose delta narrows the audience to `internal` — the pure-narrowing fixture.
+    fn narrowing_registry() -> Registry {
         let get = ToolContract {
             name: ToolName::new("get"),
             tags: vec![],
@@ -763,16 +768,81 @@ mod tests {
             requires: Requires::default(),
             output_sanitizer: None,
         };
-        let registry = Registry::build(crate::registry::RegistryConfig {
+        Registry::build(crate::registry::RegistryConfig {
             trust_chain: chain(),
             tools: vec![get],
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
         })
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn narrowing_records_an_acceptance() {
+        // A pure narrowing (delta narrows audience, no requirement gap): the acceptance is recorded,
+        // and it carries exactly the narrowing the offered plan embedded — never a re-derived one.
+        let registry = narrowing_registry();
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let batch = run(&registry, &log, &call("get", json!({})), &[], Sink::Tool).unwrap();
-        assert!(batch.facts.iter().any(|f| matches!(f, Fact::Acceptance { .. })));
+        let offered = crate::check::Narrowing {
+            from: known(TRUSTED, Audience::Public),
+            to: known(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
+        };
+        assert!(
+            batch
+                .facts
+                .iter()
+                .any(|f| matches!(f, Fact::Acceptance { narrowing, .. } if *narrowing == offered))
+        );
+    }
+
+    #[test]
+    fn a_stale_acceptance_for_a_moved_narrowing_is_refused() {
+        // The offer embeds its narrowing, so after the fold moves (a later admitted value shrank
+        // the audience) the stale plan mismatches the re-derived live plans by value and is
+        // refused — it cannot silently accept the newly live narrowing nobody was shown.
+        let registry = narrowing_registry();
+        let trajectory = traj();
+        let offered_log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let projection = Projection::build(&offered_log, Revision::new(1));
+        let stale = offered_plan(&registry, &projection.view(&trajectory), &call("get", json!({})));
+        assert!(
+            stale
+                .steps
+                .iter()
+                .any(|step| matches!(step, plan::RemedyStep::Accept(_)))
+        );
+
+        let moved_log = vec![
+            user_value(known(TRUSTED, Audience::Public)),
+            user_value(known(
+                TRUSTED,
+                Audience::restricted([ReaderId::new("internal"), ReaderId::new("extra")]),
+            )),
+        ];
+        let projection = Projection::build(&moved_log, Revision::new(2));
+        let views = projection.view(&trajectory);
+        assert_eq!(
+            execute_plan(&registry, &views, &stale, &call("get", json!({})), &[], Sink::Tool),
+            Err(PlanError::UnknownPlan(0))
+        );
+
+        // The same acceptance re-derived at the live state executes and records the live narrowing.
+        let live = offered_plan(&registry, &views, &call("get", json!({})));
+        let batch = execute_plan(&registry, &views, &live, &call("get", json!({})), &[], Sink::Tool).unwrap();
+        let live_narrowing = crate::check::Narrowing {
+            from: known(
+                TRUSTED,
+                Audience::restricted([ReaderId::new("internal"), ReaderId::new("extra")]),
+            ),
+            to: known(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
+        };
+        assert!(
+            batch
+                .facts
+                .iter()
+                .any(|f| matches!(f, Fact::Acceptance { narrowing, .. } if *narrowing == live_narrowing))
+        );
     }
 }

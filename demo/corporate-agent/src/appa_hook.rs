@@ -82,6 +82,16 @@ impl AppaHook {
         }
     }
 
+    /// Signal a new model completion. Informed acceptance requires it: an acceptance-carrying
+    /// remedy executes only in a round after the one that surfaced its offer. Driven by
+    /// `on_event`'s `CompletionCall`; the demo test calls it directly for the same reason it calls
+    /// `decide` directly.
+    pub async fn begin_round(&self) {
+        if let Err(e) = self.session.lock().await.begin_round() {
+            self.log(format!("could not begin an inference round: {e}"));
+        }
+    }
+
     /// Mediate one proposed tool call and return the string the model must see in its place. Every
     /// call is intercepted (the return is delivered via `Flow::Skip`); the real tool runs here, over
     /// the MCP peer, only when policy allows it. Factored out of `on_event` so the demo test can
@@ -171,6 +181,13 @@ where
 {
     async fn on_event(&self, _ctx: &HookContext, event: StepEvent<'_, M>) -> Flow {
         match event {
+            // Each model completion is a fresh inference round: informed acceptance requires an
+            // acceptance-carrying remedy to land in a round after the one that surfaced its offer,
+            // so a same-completion guess at a predictable handle is refused.
+            StepEvent::CompletionCall { .. } => {
+                self.begin_round().await;
+                Flow::Continue
+            }
             StepEvent::ToolCall { tool_name, args, .. } => {
                 let reason = self.decide(tool_name, args).await;
                 Flow::Skip { reason }

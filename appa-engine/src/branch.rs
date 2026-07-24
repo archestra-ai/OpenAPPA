@@ -6,9 +6,10 @@
 //! its fork policy binds — the engine **derives** the label (a raw return carries the child fold; a
 //! sanitized return carries a mandate-validated audience relabel, trust preserved), never a caller
 //! assertion, and the child's free final text does not cross. The crossing records, admits into the
-//! direct parent at the engine-derived `parent.combine(returned)`, and lands its `Merge` boundary
-//! as **one atomic batch** — value-granular, structurally unable to widen the parent (min trust,
-//! ∩ audience), with no orphanable intermediate state. Reparenting and cross-family crossings are
+//! direct parent under the engine-derived returned label — the parent *fold* absorbs it like any
+//! other read (min trust, ∩ audience) — and lands its `Merge` boundary
+//! as **one atomic batch** — value-granular, structurally unable to widen the parent, with no
+//! orphanable intermediate state. Reparenting and cross-family crossings are
 //! refused, a child returns **at most once** (its first crossing consumes the errand —
 //! [`BranchError::AlreadyReturned`]), and a raw crossing that would narrow the parent exists only
 //! through an executed return plan.
@@ -36,6 +37,8 @@ pub enum BranchError {
     AlreadyForked,
     #[error("the parent's current label has an unresolved dimension — resolve it before forking")]
     ParentUnresolved,
+    #[error("the fork parent already returned its result — a returned child cannot fork")]
+    ParentReturned,
     #[error("the child has already returned — a child returns at most once")]
     AlreadyReturned,
     #[error("the child was not forked from this parent (reparenting/cross-family merge refused)")]
@@ -79,6 +82,13 @@ pub(crate) fn seed_child(
     if parent.parent_of(child).is_some() {
         return Err(BranchError::AlreadyForked);
     }
+    // A value return ends the errand: the fork's mandate covers one errand and one result, so a
+    // returned child is closed to new work — forking included. A void return does not consume the
+    // return channel and leaves the session forkable. Enforced here, inside the store's atomic
+    // seed, so every fork entry point shares the one gate.
+    if parent.returns_by(parent.trajectory()) > 0 {
+        return Err(BranchError::ParentReturned);
+    }
     match &return_policy {
         ReturnPolicy::Raw => {}
         ReturnPolicy::Sanitized(name) => {
@@ -106,7 +116,7 @@ pub(crate) fn seed_child(
 }
 
 /// Record a child's returned value at an **engine-derived** label AND merge it into the direct
-/// parent, as one atomic batch — record, parent admission at `parent.combine(returned)`, and the
+/// parent, as one atomic batch — record, parent admission under the returned label, and the
 /// `Merge` boundary commit together, so no recorded return can be orphaned between two commit
 /// points. The crossing path is the one the child's fork [`ReturnPolicy`] binds — a mismatched
 /// submission is refused, so the caller never selects it. A raw return carries the child fold
@@ -154,8 +164,12 @@ pub(crate) fn submit_child_return(
 }
 
 /// The one place a return's facts are assembled: the child's `ChildReturn` record, the optional
-/// return-scoped acceptance, the parent's `ValueAdmitted` at `parent.combine(returned)`, and the
-/// `Merge` boundary — always one batch, never split across commit points.
+/// return-scoped acceptance, the parent's `ValueAdmitted` under the returned value's own label,
+/// and the `Merge` boundary — always one batch, never split across commit points. The parent
+/// *fold* absorbs the crossing at projection (intersect readers, min trust) — identical to folding
+/// `parent.combine(returned)`, since `combine` is idempotent — while the stored per-value label
+/// stays the value's intrinsic one, so authority review context and cast targeting see what the
+/// value *is*, not the parent's unrelated restrictions.
 fn crossing_facts(
     parent: &Views,
     child: &TrajectoryId,
@@ -164,7 +178,6 @@ fn crossing_facts(
     acceptance: Option<Narrowing>,
 ) -> Vec<Fact> {
     let id = ChildReturnId::new(child.clone(), parent.returns_by(child));
-    let merged_label = parent.current_label().combine(&value.label);
     let mut facts = vec![Fact::ChildReturn {
         trajectory: child.clone(),
         id: id.clone(),
@@ -180,7 +193,7 @@ fn crossing_facts(
     }
     facts.push(Fact::ValueAdmitted {
         trajectory: parent.trajectory().clone(),
-        value: LabeledValue::new(value.body, merged_label),
+        value,
         provenance: Provenance::ChildReturn {
             child: child.clone(),
             id: id.clone(),
@@ -1193,6 +1206,27 @@ mod tests {
     }
 
     #[test]
+    fn a_returned_child_cannot_become_a_fork_parent() {
+        // A value return closes the errand: seeding a grandchild from the returned child is
+        // refused inside the store's atomic seed, whichever mediator entry point asked.
+        let mut log = forked(known(SUSPICIOUS, internal()));
+        let projection = build(&log);
+        let ret = submit_child_return(&registry(), &projection.view(&parent()), &child(), raw("finding")).unwrap();
+        log.extend(ret.facts);
+        let projection = build(&log);
+        assert_eq!(
+            seed_child(
+                &registry(),
+                &projection.view(&child()),
+                &TrajectoryId::new("grandchild"),
+                ReturnPolicy::Raw,
+            )
+            .map(|_| ()),
+            Err(BranchError::ParentReturned)
+        );
+    }
+
+    #[test]
     fn a_submission_off_the_fork_policy_is_refused() {
         // A derived submission under a Raw binding: the binding, not the caller, names the path.
         let log = forked(known(TRUSTED, internal()));
@@ -1304,11 +1338,11 @@ mod tests {
     }
 
     #[test]
-    fn merge_result_value_is_engine_derived_not_the_returned_label() {
+    fn merge_admits_the_returned_label_and_the_parent_fold_still_combines() {
         // Child seeded suspicious+internal declassifies to suspicious+public and returns it. The
-        // crossing must COMBINE into the internal parent (→ internal), never adopt the returned
-        // public label — the value-granular merge result is engine-derived as
-        // parent.combine(returned).
+        // admitted value's OWN label is the engine-derived returned label (what the value *is* —
+        // for authority review and cast targeting), while the parent FOLD absorbs it like any
+        // read: internal ∩ public = internal, so the fold never widens toward the returned label.
         let mut log = forked_bound(known(SUSPICIOUS, internal()), sanitized_policy());
         let values_before = log.iter().filter(|f| matches!(f, Fact::ValueAdmitted { .. })).count();
         let projection = build(&log);
@@ -1324,11 +1358,12 @@ mod tests {
         .unwrap();
         log.extend(ret.facts);
         let projection = build(&log);
-        // The merged value's OWN label is parent.combine(returned) = suspicious+internal, not public.
         assert_eq!(
             projection.value_label(ValueId::new(values_before as u64)),
-            Some(&known(SUSPICIOUS, internal()))
+            Some(&known(SUSPICIOUS, Audience::Public))
         );
+        // Fold invariance: combine is idempotent, so admitting under the returned label folds to
+        // exactly what admitting under parent.combine(returned) folded to.
         assert_eq!(
             projection.view(&parent()).current_label(),
             known(SUSPICIOUS, internal())

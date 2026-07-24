@@ -27,6 +27,7 @@ enum Request {
     Report {
         outcome: Outcome,
     },
+    NewRound,
     End,
 }
 
@@ -60,6 +61,7 @@ enum Response {
     Declined { feedback: String },
     Admitted { content: String },
     Sealed { token: String },
+    RoundBegun,
     Ended,
     Error { message: String },
 }
@@ -81,6 +83,7 @@ impl Sidecar {
             Request::Check { tool, arguments } => self.check(tool, arguments),
             Request::ResolveRemedy { plan_id } => self.resolve_remedy(plan_id.as_deref()).await,
             Request::Report { outcome } => self.report(outcome),
+            Request::NewRound => self.new_round(),
             Request::End => self.end(),
         }
     }
@@ -166,6 +169,17 @@ impl Sidecar {
             AdmittedResult::Admitted { content, .. } => Ok(Response::Admitted { content }),
             AdmittedResult::Sealed { token } => Ok(Response::Sealed { token }),
         }
+    }
+
+    /// Signal a new model completion so informed acceptance can advance: an acceptance-carrying
+    /// remedy executes only in a round after the one that surfaced its offer.
+    fn new_round(&mut self) -> Result<Response, String> {
+        let session = self
+            .session
+            .as_mut()
+            .ok_or_else(|| "no AgentDojo episode is open".to_string())?;
+        session.begin_round().map_err(|error| error.to_string())?;
+        Ok(Response::RoundBegun)
     }
 
     fn end(&mut self) -> Result<Response, String> {
@@ -260,6 +274,20 @@ delta = {}
             .await
             .unwrap();
         assert!(matches!(read, Response::Blocked { .. }));
+
+        // A same-round acceptance predates its offer and is refused; the next completion's round
+        // makes it informed.
+        let early = sidecar
+            .handle(Request::ResolveRemedy {
+                plan_id: Some("remedy-0".to_string()),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(early, Response::Declined { .. }));
+        assert!(matches!(
+            sidecar.handle(Request::NewRound).await.unwrap(),
+            Response::RoundBegun
+        ));
 
         let remedy = sidecar
             .handle(Request::ResolveRemedy {

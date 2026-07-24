@@ -33,11 +33,22 @@ pub(crate) const SEALED_INDETERMINATE: &str = "[tool call outcome unknown — it
 
 /// A blocked call's cohort: every offered plan for one blocked proposal, each keyed by an
 /// SDK-minted turn-unique handle (the engine's `PlanId` is block-local and never exposed to the
-/// model). Mirrors the runtime: a success consumes the whole cohort, a denial only its offer.
+/// model). Mirrors the runtime: a success consumes the whole cohort, a denial only its offer,
+/// and an acceptance-carrying plan is informed — executable only in a round after
+/// `offered_round` (the framework signals rounds through `begin_round`).
 #[derive(Debug)]
 pub(crate) struct PendingBlock {
     pub(crate) call: ResolvedCall,
     pub(crate) offers: Vec<(String, appa_engine::plan::RemedyPlan)>,
+    pub(crate) offered_round: u32,
+}
+
+/// The one refusal an uninformed acceptance gets, in the SDK as in the runtime — the wording must
+/// not drift between deployments.
+pub(crate) fn uninformed_acceptance_feedback(handle: &str) -> String {
+    format!(
+        "this acceptance predates the offer it names; read the offer, then call execute_remedy_plan with plan_id \"{handle}\" in your next response"
+    )
 }
 
 /// The compatibility facade's shared engine/store state.
@@ -52,6 +63,9 @@ pub(crate) struct Core {
     pub(crate) pending_blocks: Vec<PendingBlock>,
     pub(crate) remedy_attempts: BTreeMap<CanonicalDigest, u32>,
     pub(crate) tools: Option<Vec<WireTool>>,
+    /// The current inference round, advanced by the facade at each turn begin and each
+    /// framework-signalled model completion. Offers stamp it; informed acceptance compares it.
+    pub(crate) round: u32,
     next_remedy_handle: u32,
     next_handle_id: u64,
 }
@@ -102,6 +116,7 @@ impl Core {
             pending_blocks: Vec::new(),
             remedy_attempts: BTreeMap::new(),
             tools: None,
+            round: 0,
             next_remedy_handle: 0,
             next_handle_id: 0,
         })
@@ -203,7 +218,11 @@ impl Core {
                         })
                         .collect();
                     let feedback = crate::feedback::block_feedback(&raw, &planned, &offers, surface);
-                    self.pending_blocks.push(PendingBlock { call, offers });
+                    self.pending_blocks.push(PendingBlock {
+                        call,
+                        offers,
+                        offered_round: self.round,
+                    });
                     feedback
                 };
                 Ok(Checked::Feedback(feedback))
@@ -245,6 +264,18 @@ impl Core {
             .find(|(h, _)| h == plan_id)
             .map(|(_, plan)| plan.clone())
             .expect("the cohort was found by this handle");
+
+        // Informed acceptance, as in the runtime: a plan that accepts a narrowing executes only
+        // in a round after the one that surfaced its offer. The framework signals rounds through
+        // `begin_round`; one that never does cannot execute acceptance-carrying plans at all —
+        // fail-closed, never a same-response guess.
+        let accepts_narrowing = chosen
+            .steps
+            .iter()
+            .any(|step| matches!(step, appa_engine::plan::RemedyStep::Accept(_)));
+        if accepts_narrowing && self.pending_blocks[cohort_index].offered_round == self.round {
+            return Ok(Remedied::Feedback(uninformed_acceptance_feedback(plan_id)));
+        }
 
         let (log, rev) = self.store.snapshot(&self.tenant, &self.session)?;
         let projection = Projection::build(&log, rev);
@@ -415,9 +446,12 @@ impl Core {
                     | AdmitError::UnknownCast(_)
                     | AdmitError::ConstantMismatch
                     | AdmitError::CeilingExceeded
-                    // Unreachable through the SDK: pending-cast tools are refused at open.
+                    // Unreachable through the SDK: pending-cast tools are refused at open, and
+                    // only the pending-cast path checkpoints a dispatch.
                     | AdmitError::NarrowingUnaccepted
-                    | AdmitError::AcceptanceMismatch,
+                    | AdmitError::AcceptanceMismatch
+                    | AdmitError::AlreadySucceeded
+                    | AdmitError::SuccessContradicted,
                 ) => {
                     verdict = Admission::Refused;
                     None

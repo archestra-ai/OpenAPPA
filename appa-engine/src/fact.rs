@@ -141,7 +141,22 @@ pub enum Fact {
         proposed_label: Label,
         proposed_effects: Vec<EffectKind>,
     },
-    /// A dispatch closed. On [`CloseOutcome::Success`] its effects commit (family-wide history).
+    /// The runtime observed a still-open dispatch's success while its value finalization is
+    /// deferred (a pending-cast offer): the declared effects commit **now** — the one append point
+    /// at success (spec §The event log) — so a later call's history check sees them while the raw
+    /// result stays confined awaiting acceptance. The eventual [`Fact::DispatchClosed`] for a
+    /// checkpointed dispatch carries no effects, and only a success-family close may follow. A
+    /// host crash between this durable checkpoint and the in-memory offer loses the close — the
+    /// accepted confined-result cousin of the spec's invoke/append gap (spec §Implementation
+    /// shape); the committed effects stand honestly either way.
+    DispatchSucceeded {
+        trajectory: TrajectoryId,
+        dispatch: DispatchId,
+        effects: Vec<EffectKind>,
+    },
+    /// A dispatch closed. On [`CloseOutcome::Success`] its effects commit (family-wide history) —
+    /// unless a [`Fact::DispatchSucceeded`] checkpoint already committed them, in which case the
+    /// close carries none.
     DispatchClosed {
         trajectory: TrajectoryId,
         dispatch: DispatchId,
@@ -250,6 +265,7 @@ impl Fact {
             | Fact::AssistantMessage { trajectory, .. }
             | Fact::BlockFeedback { trajectory, .. }
             | Fact::DispatchOpened { trajectory, .. }
+            | Fact::DispatchSucceeded { trajectory, .. }
             | Fact::DispatchClosed { trajectory, .. }
             | Fact::Ruling { trajectory, .. }
             | Fact::Acceptance { trajectory, .. }
