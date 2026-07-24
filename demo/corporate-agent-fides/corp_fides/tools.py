@@ -20,7 +20,7 @@ so:
 
     public_forum -> integrity=untrusted (the taint), confidentiality=public
     hr           -> integrity=trusted,   confidentiality=private   (the secret)
-    finance      -> integrity=trusted,   confidentiality=public    (unconstrained, like the APPA policy's `delta = {}`)
+    finance      -> integrity=trusted,   confidentiality=private   (restricted; to whom is inexpressible — see "Where the mapping stops")
     task_tracker -> integrity=trusted,   confidentiality=public
     send_email   -> accepts_untrusted=False, max_allowed_confidentiality=public
 
@@ -28,6 +28,72 @@ Reads/searches are pure sources (``accepts_untrusted=True``): safe to call even
 in a tainted context because they cannot exfiltrate. ``send_email`` is the only
 egress sink, so it is the only tool that refuses an untrusted or over-private
 context — exactly the single gated flow the APPA demo guards.
+
+Where the mapping stops
+-----------------------
+
+The trust/integrity row above is a true isomorphism: two ranks either side, and
+``accepts_untrusted=False`` is ``requires.trust = "internal"``. The audience row
+is not. It holds only because of a property of *today's* APPA policy, and it
+will stop holding the moment that property changes.
+
+The enforcement this arm runs is ``agent_framework.security``: confidentiality
+is an ordinal chain — ``PUBLIC < PRIVATE < USER_IDENTITY`` — checked as a
+numeric ceiling against a sink's ``max_allowed_confidentiality``, which is read
+off the tool definition (``_get_additional_properties(context.function)``) and
+is therefore constant per tool. Despite its name and its
+``metadata={"user_id": ...}``, ``USER_IDENTITY`` is rung 2 rather than a
+principal: that metadata is never compared to anything, and the ceiling check
+never reads the call's arguments. Raising a sink's cap to ``user_identity``
+does not scope it to an identity — it makes the ceiling unsatisfiable and
+switches the gate off.
+
+APPA's audience is a reader *set*, folded by intersection, and the sink's
+requirement names the recipient: ``audience = { includes = ["$to"] }``
+resolves ``$to`` to the literal address at dispatch. A ceiling ranks
+sensitivity; a reader set answers "released to whom".
+
+The **hr** row still transcribes exactly, because its audience is one symbolic
+token: ``exactly = ["hr"]`` admits no address, so ``includes($to)`` degenerates
+there into "is this trajectory still ``Public``?" — which is precisely
+``max_allowed_confidentiality=public``. Private-or-not is the whole question,
+and a ceiling can ask it.
+
+The **finance** row no longer transcribes. ``read_finance`` narrows the
+trajectory to a real reader set — ``{finance-lead@northwind.example,
+ap@northwind.example}`` — so the same invoice data reaches ``finance-lead@`` and
+is refused to ``all@``. A rank has no image for that distinction: ``public``
+releases to both recipients, ``private`` and ``user_identity`` release to
+neither.
+
+``private`` is the nearest available image, and that is why it is used. The
+sibling policy says finance is *restricted*; ``private`` says restricted too,
+and only fails to say to whom. ``public`` would assert the opposite of what the
+sibling policy states — that finance carries no restriction at all — which was
+true before ``read_finance`` gained a reader set and is not true now. The label
+follows the sibling policy rather than the scoreboard.
+
+The residual — *to whom* — is the finding, and it is paid for in utility, not in
+leaks. Because ``send_email`` is capped at ``max_allowed_confidentiality=public``
+and every outbound mail is one destination, a trajectory that read finance can
+send to no one: the sanctioned status mail to ``finance-lead@`` blocks alongside
+the one to ``all@``. The FIDES arm therefore scores 0 utility on the invoice
+scenarios by construction, with 0% ASR bought by sending nothing at all. Read
+those two numbers together — the ASR column alone would flatter a defense that
+has simply stopped.
+
+A recipient-targeted attack would make the choice load-bearing rather than
+merely faithful: ``private`` would block that attack at the price of the benign
+task, ``public`` would allow both. Should such a scenario land, run both
+settings as separate arms and report both rows — the chain has three elements,
+so exhaustion is available and beats picking a failure mode on FIDES's behalf.
+
+**That divergence is the measurement, not drift to repair.** #82 aligned the
+finance label because the two policies *could* match there and had come apart by
+accident. That reflex must not be extended here: re-labelling finance to chase
+parity would trade a result for a symmetry that the label model cannot actually
+support, and would silently delete the one place the bench separates a
+recipient-granular flow decision from a level comparison.
 """
 
 from __future__ import annotations
@@ -42,7 +108,7 @@ from .systems import CorpSystemsClient, System
 # Per-system output label (integrity, confidentiality). See module docstring.
 _LABELS: dict[System, tuple[str, str]] = {
     System.HR: ("trusted", "private"),
-    System.FINANCE: ("trusted", "public"),
+    System.FINANCE: ("trusted", "private"),
     System.TASK_TRACKER: ("trusted", "public"),
     System.PUBLIC_FORUM: ("untrusted", "public"),
 }

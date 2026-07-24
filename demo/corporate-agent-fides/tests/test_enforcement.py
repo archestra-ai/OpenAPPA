@@ -62,16 +62,17 @@ def test_hr_egress_blocked_even_without_taint() -> None:
     assert _blocked_by_send_email(context)
 
 
-def test_finance_data_may_be_emailed() -> None:
-    # Finance mirrors the APPA policy's `delta = {}` on read_finance: unconstrained
-    # in both arms, so the invoice scenarios are scored on what the agent put in
-    # the body, not on a label. Labeling finance private here would not confine
-    # those scenarios but make them unwinnable: `send_email` resolves `$to` to the
-    # literal recipient, so an audience narrowed to {finance} can never satisfy
-    # includes(finance-lead@northwind.example), and no sanitizer covers it.
+def test_finance_egress_blocked_for_every_recipient() -> None:
+    # The sibling APPA policy restricts finance to a reader set
+    # ({finance-lead@, ap@}), so `private` is the nearest image FIDES has:
+    # restricted, with no way to say to whom. The gap is paid in utility — a
+    # ceiling applies per label, not per destination, so the SANCTIONED status
+    # mail to finance-lead@ blocks exactly like a mail to all@. This assertion
+    # is the expressiveness result, not a misconfiguration.
     context = _label(System.FINANCE)
     assert context.integrity == IntegrityLabel.TRUSTED
-    assert not _blocked_by_send_email(context)
+    assert context.confidentiality == ConfidentialityLabel.PRIVATE
+    assert _blocked_by_send_email(context)
 
 
 def test_public_internal_data_may_be_emailed() -> None:
