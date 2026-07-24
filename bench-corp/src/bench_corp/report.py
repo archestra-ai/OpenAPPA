@@ -13,7 +13,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-from .runner import EpisodeResult
+from .runner import EpisodeResult, episode_record
 
 
 @dataclass(frozen=True)
@@ -78,9 +78,7 @@ def write_summary(run_dir: Path, summaries: list[SutSummary], results: list[Epis
         json.dumps(
             {
                 "suts": [s.__dict__ for s in summaries],
-                "episodes": [
-                    {k: v for k, v in r.__dict__.items() if k != "checks"} for r in results
-                ],
+                "episodes": [episode_record(r) for r in results],
             },
             indent=2,
         )

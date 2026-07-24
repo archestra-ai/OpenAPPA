@@ -39,15 +39,34 @@ impl Drop for TempData {
 
 /// Spawn the built `corp-systems-mcp` binary pointed at `root` (corpus and sink alike).
 async fn spawn_server(root: &PathBuf) -> rmcp::service::RunningService<rmcp::RoleClient, ()> {
-    spawn_server_split(root, root).await
+    spawn_server_with(root, root, None).await
 }
 
 /// Spawn the server with a corpus root and a separate `send_email` sink root.
 async fn spawn_server_split(corpus: &PathBuf, sink: &PathBuf) -> rmcp::service::RunningService<rmcp::RoleClient, ()> {
+    spawn_server_with(corpus, sink, None).await
+}
+
+/// Spawn the server with a `--systems` enable list.
+async fn spawn_server_systems(
+    root: &PathBuf,
+    systems: &'static str,
+) -> rmcp::service::RunningService<rmcp::RoleClient, ()> {
+    spawn_server_with(root, root, Some(systems)).await
+}
+
+async fn spawn_server_with(
+    corpus: &PathBuf,
+    sink: &PathBuf,
+    systems: Option<&'static str>,
+) -> rmcp::service::RunningService<rmcp::RoleClient, ()> {
     let bin = env!("CARGO_BIN_EXE_corp-systems-mcp");
     let transport = TokioChildProcess::new(Command::new(bin).configure(|cmd| {
         cmd.arg("--data-root").arg(corpus);
         cmd.arg("--sink-root").arg(sink);
+        if let Some(list) = systems {
+            cmd.arg("--systems").arg(list);
+        }
     }))
     .expect("spawn corp-systems-mcp");
     ().serve(transport).await.expect("mcp handshake")
@@ -199,21 +218,6 @@ async fn rejects_path_traversal() {
         "traversal should be rejected, got: {out}"
     );
     server.cancel().await.ok();
-}
-
-/// Spawn the server with a `--systems` enable list.
-async fn spawn_server_systems(
-    root: &PathBuf,
-    systems: &'static str,
-) -> rmcp::service::RunningService<rmcp::RoleClient, ()> {
-    let bin = env!("CARGO_BIN_EXE_corp-systems-mcp");
-    let transport = TokioChildProcess::new(Command::new(bin).configure(|cmd| {
-        cmd.arg("--data-root").arg(root);
-        cmd.arg("--sink-root").arg(root);
-        cmd.arg("--systems").arg(systems);
-    }))
-    .expect("spawn corp-systems-mcp");
-    ().serve(transport).await.expect("mcp handshake")
 }
 
 #[tokio::test]

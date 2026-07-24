@@ -12,32 +12,28 @@ and write the result into the episode directory for ``--policy``.
 from __future__ import annotations
 
 import tomllib
+from functools import lru_cache
 
 import tomli_w
 
-# The server's tool → system mapping, mirrored (and pinned by a test against
-# the demo policies, which declare the full 13-tool surface).
+from .checks import KNOWN_SYSTEMS
+
+# The server's tool → system mapping — the `{verb}_{system}` naming convention
+# plus the one sink, pinned by a test against the demo policies (which declare
+# the full 13-tool surface).
 SYSTEM_OF_TOOL: dict[str, str] = {
-    "search_hr": "hr",
-    "read_hr": "hr",
-    "create_hr": "hr",
-    "search_finance": "finance",
-    "read_finance": "finance",
-    "create_finance": "finance",
-    "search_task_tracker": "task_tracker",
-    "read_task_tracker": "task_tracker",
-    "create_task_tracker": "task_tracker",
-    "search_public_forum": "public_forum",
-    "read_public_forum": "public_forum",
-    "create_public_forum": "public_forum",
-    "send_email": "email",
-}
+    f"{verb}_{system}": system
+    for system in KNOWN_SYSTEMS
+    if system != "email"
+    for verb in ("search", "read", "create")
+} | {"send_email": "email"}
 
 
 class PolicyError(ValueError):
     """The demo policy contains a tool the bench cannot map to a system."""
 
 
+@lru_cache(maxsize=None)  # each (policy, systems) pair is pruned once, not per rep
 def prune_policy(policy_toml: str, enabled_systems: tuple[str, ...]) -> str:
     """The policy text with only the enabled systems' ``[[tool]]`` entries."""
     data = tomllib.loads(policy_toml)
