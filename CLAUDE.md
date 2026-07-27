@@ -38,24 +38,83 @@ external authorities and transformers, never in the engine.
 
 ## Document precedence
 
-1. `docs/spec.md` — the specification draft: the two-monoid model as the
-   product, written for engineers. Takes priority over implementation details
-   where they conflict.
+1. `docs/spec.md` — normative. Every rule carries a stable id by family
+   (`POS`, `LBL`, `CHK`, `RMD`, `AUT`, `RUL`, `SAN`, `LOG`, `BRN`, `UNK`,
+   `CFG`, `EXT`, `IMP`, `THR`). Cite ids from code comments, tests and
+   issues; they outlive section numbers. Takes priority over implementation
+   details where they conflict.
 2. `paper/` — the LaTeX paper (AISec '26 draft, merged in #37): the same
    model with its formal claims, theorem scoping, and citation anchors.
+   Coding work is grounded in the spec, not the paper — coding never
+   changes the paper.
+3. `appa-engine/src/lib.rs` — concepts and semantics of the engine as
+   implemented.
 
-Spec vs paper: the spec is the human-readable account, the paper the
-academic one. Coding work is grounded in the spec, not the paper — coding
-never changes the paper.
-3. `core/src/lib.rs` — concepts and semantics of the engine as implemented.
-4. The "Core engine invariants" subsections of "Gotchas" below — the
-   invariants a core edit must not silently break. **Read them before
-   touching `core/`.**
+The rest of `docs/` is not normative and must not be cited as if it were.
+`guide.md` is the reader-facing introduction, `rationale.md` records why
+decisions went the way they did and settles nothing, `glossary.md` splits
+the vocabulary into surface terms (typed by users) and model terms,
+`contracts.md` is the policy-review guide, `engine.md` maps the spec onto
+the crates. `docs/README.md` is the map.
 
-The "Mental model" and "Gotchas" sections below describe the engine as
-implemented; where they diverge from `docs/spec.md`, the spec is design
-direction and the sections below remain the reference for editing `core/`
-today.
+Edits flow one way: spec → guide/contracts/website. A change that starts in
+a downstream doc has to land in the spec first.
+
+## Writing (reader-facing docs)
+
+Applies to `docs/` and anything else written for readers outside the
+project. `paper/` has its own register and these rules do not touch it.
+
+**Vocabulary**
+
+- Ordinary programming vocabulary stays — declarative, imperative,
+  append-only, idempotent. Field vocabulary is glossed at first use or cut:
+  semilattice, noninterference, taint, sink-side adequacy.
+- Terms appearing in the TOML surface or the API are mandatory. `delta`,
+  `requires`, `emits`, `attention`, `exactly`, `may_add` — teach them.
+  Never route around a term the reader will have to type.
+- Every term must be readable cold where it lands, or glossed by its own
+  sentence. "A sanitizer's declared transition" assumes prior knowledge;
+  "a sanitizer that can clean the data" carries itself.
+- Deflate words carrying more fear than content. "Serialized and durable"
+  reads as a platform project; "an append-only file" reads as an afternoon,
+  and the afternoon is the truth for a single process. Name the cost, not
+  the category.
+- Reader-facing prose may diverge from wire vocabulary on purpose. `block`
+  stays the wire tag; prose says the engine refuses the call and names what
+  would make it pass. The glossary bridges the two once.
+
+**Claims**
+
+- Attach every claim to its subject. "APPA is declarative" is three claims —
+  config, verdict, registered components — and only the first holds. The
+  same trap waits at "provable" and "deterministic".
+- Mechanical over comparative. "Without the second check the agent finds
+  out three steps later" beats "in every other system that cost is
+  invisible": same information, falsifiable, no swagger.
+- State the guarantee at guide level; the proof that earns it lives in the
+  spec.
+- State limits flat. A limitation in promise cadence reads as ad copy.
+
+**Rhythm**
+
+- No sentence fragments for emphasis, and no one-sentence paragraphs.
+  Paragraphs run three sentences or more.
+- Never announce importance. `deliberately`, `load-bearing`, "The point:",
+  "The central thesis:" all tell the reader that something matters instead
+  of letting it matter — and in a spec everything is deliberate.
+- Antithesis ("X, not Y") earns one instance per page. The 2026-07 spec
+  draft had 25.
+
+**Structure**
+
+- Headings assert the invariant — "Labels only move one way", not "How the
+  label moves" — so skimming collects the guarantees.
+- A paragraph's best sentence is usually its last. Move it to the front and
+  delete the warm-up.
+- Perceived reading cost decides whether a section is read at all. Prefer a
+  code line to a sentence describing code, a table to parallel prose, an
+  asserting heading to a topic heading.
 
 ## Rust guidelines
 
