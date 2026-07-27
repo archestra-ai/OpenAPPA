@@ -22,6 +22,13 @@
 \let\Bbbk\undefined
 \usepackage{amssymb}
 \usepackage{makecell}
+\usepackage{multirow}
+
+%% ---- Line breaking: let long identifiers and paths break in the narrow
+%% ACM column instead of running into the margin. ----
+\Urlmuskip=0mu plus 1mu\relax
+\def\UrlBreaks{\do\/\do\_\do\-\do\.\do\@\do\(\do\)\do\:\do\,}
+\emergencystretch=2em
 
 %% ---- Draft-note macros: TODOs, FIXMEs, and decision stubs ----
 \newcommand{\todo}[1]{\textcolor{red}{\textbf{[TODO:} #1\textbf{]}}}
@@ -44,7 +51,7 @@
 
 \title[APPA]{Agentic Permissions Policy Algebra for Taint Confinement in LLM Agents}
 %% Alternate titles (skeleton): "APPA: Branching for Taint Confinement in LLM
-%% Agents" / "Fork, Inspect, and Safely Return".
+%% Agents" / "Branch, Inspect, and Safely Return".
 
 %% Anonymized for submission (class option `anonymous').
 \author{Anonymous Author(s)}
@@ -94,9 +101,9 @@
 \input{sections/04-enforcement}
 \input{sections/05-rulings}
 \input{sections/06-branching}
-\input{sections/08-evaluation}
-\input{sections/09-limitations}
-\input{sections/10-conclusion}
+\input{sections/07-evaluation}
+\input{sections/08-limitations}
+\input{sections/09-conclusion}
 
 \bibliographystyle{ACM-Reference-Format}
 \bibliography{appa}

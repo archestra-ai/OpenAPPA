@@ -1,55 +1,53 @@
 \section{Related Work}\label{sec:related}
 
-Table~\ref{tab:systems} compares \appa{} with closely related agent safety and taint-tracking frameworks across key operational dimensions.
+Table~\ref{tab:systems} compares \appa{} with closely related online agent safety, capability, and information-flow control (IFC) frameworks across four key dimensions: the underlying security model, the trajectory taint strategy, the operational scope of state tracking, and the mechanism for policy overrides and declassification.
 
 \begin{table*}[t]
-  \caption{Trajectory-taint strategies of the closest systems.}
+  \caption{Comparison of online agent dynamic security and information-flow tracking frameworks.}
   \label{tab:systems}
   \small
-  \begin{tabularx}{\textwidth}{@{}lXXXXX@{}}
+  \begin{tabularx}{\textwidth}{@{}lXXXX@{}}
     \toprule
-    System & Role and timing & Flow basis & Trajectory-taint strategy &
-    Persistent lineage & Discretionary release \\
+    System & Flow / security basis & Trajectory-taint strategy &
+    State scope & Declassification \& overrides \\
     \midrule
-    \textsc{Fides}~\cite{fides} & Online prevention &
+    \textsc{Fides}~\cite{fides} &
     Dynamic conf./integ.\ labels &
-    Selectively hide restrictive fields after return &
+    Selectively hide restrictive fields in planner variables post-return &
     Per execution & High-integrity policy or constrained reveal \\
-    NeuroTaint~\cite{caiGhostAgentRedefining2026} & Offline detection, audit &
-    Semantic evidence, causal analysis, provenance graph &
-    Detect propagation after execution &
-    Across memory and sessions & None (auditor) \\
+    CaMeL~\cite{camel2025} &
+    Structural dual-LLM pipeline &
+    Strict prompt sandboxing; isolated data-control roles &
+    Per execution & Multi-role approval interface \\
+    ACE~\cite{li2026ace} &
+    Abstract-concrete two-phase execution &
+    Static flow graph verification over abstract plan before execution &
+    Per execution & Abstract plan re-verification \\
     MemLineage~\cite{ouyangMemLineageLineageGuidedEnforcement2026} &
-    Online memory-sensitive action gate &
     Signed entries and derivation DAG &
-    Preserve and gate on ancestry &
+    Gate action dispatch on memory ancestry DAG &
     Across memory and sessions & Deployment-configured deny/repair \\
-    \appa{} & Online prevention and remediation &
+    TACIT~\cite{odersky2026tracking} &
+    Static capabilities \& capture checking (Scala~3) &
+    Synthesize capability-safe agent code with local purity &
+    Per program compilation & Explicit capability delegation to sub-functions \\
+    \appa{} &
     Declared contracts, label fold, shared event log &
-    Prospective check; supports host-established isolated trajectory &
-    Per run; shared across branches &
+    Prospective check; engine-managed isolated child branches &
+    Per run; shared across context branches &
     Checked branch exit or atomic ruling over one rendered call \\
     \bottomrule
   \end{tabularx}
 \end{table*}
 
-\paragraph{Closest comparison: \textsc{Fides} and Agent IFC.}
-\textsc{Fides} is the primary antecedent for \appa{}, formalizing dynamic information-flow control (IFC) for agent planners~\cite{fides}. While both systems share the core premise of structural, label-based enforcement decoupled from the LLM, they differ in scope and timing. Other structural frameworks, such as ACE~\cite{li2026ace}, decouple planning into abstract and concrete phases to enforce information flow via static plan verification before execution. \textsc{Fides} mitigates label creep by evaluating tool outputs post-execution and selectively hiding restrictive fields in planner variables. In contrast, \appa{} operates dynamically at the trajectory level: prospective policy checks prevent restrictive acquisitions on the active path, while host-managed child branches isolate sensitive sub-computations under inherited label states. Furthermore, whereas \textsc{Fides}'s policy model permits confidentiality gaps when calls originate from high-integrity contexts~\cite{fides}, \appa{} manages discretionary exceptions via atomic authorization rulings over explicitly rendered tool calls while preserving underlying labels.
+\paragraph{Closest comparison: \textsc{Fides} and Agent IFC}
+\textsc{Fides} is the primary antecedent for \appa{}, formalizing dynamic information-flow control (IFC) for agent planners~\cite{fides}. While both share label-based enforcement decoupled from the LLM, they differ in mechanics (Table~\ref{tab:systems}). Structural frameworks like ACE~\cite{li2026ace} decouple planning into abstract and concrete phases for static verification. \textsc{Fides} mitigates label creep by evaluating tool outputs post-execution to hide restrictive fields in planner variables. In contrast, \appa{} evaluates acquisitions prospectively before data enters the trajectory, isolating sensitive sub-computations in disposable child branches and handling exceptions via single-call atomic rulings. By validating authority before execution, \appa{} prevents untrusted payloads from polluting the main planner context and triggering irreversible taint accumulation.
 
 \paragraph{Semantic, memory, and provenance systems.}
-As summarized in Table~\ref{tab:systems}, related frameworks address distinct operational scopes. NeuroTaint~\cite{caiGhostAgentRedefining2026} performs post-hoc causal analysis to reconstruct source-to-sink provenance offline across sessions, serving as a complementary auditor for semantic propagation. MemLineage~\cite{ouyangMemLineageLineageGuidedEnforcement2026} gates sensitive actions on signed memory entry derivation graphs across sessions. In contrast, \appa{}'s trajectory labels and append-only event log govern single execution runs, allowing MemLineage to provide persistent provenance at \appa{}'s boundary. Execution provenance taxonomies~\cite{wangAgentTracesTrust2026} model typed execution graphs; \appa{} captures the procedural subset via its append-only event log for auditing and policy checks without inferring claim-support dependencies. Existing evaluation suites like AgentDojo~\cite{debenedettiAgentDojoDynamicEnvironment2024}, InjecAgent~\cite{deng2024injecagent}, and ToolEmu~\cite{ruan2024identifying} benchmark prompt injection and tool misuse primarily in single-turn settings (a single prompt yielding a single tool call). However, single-turn setups cannot evaluate multi-turn label creep, trajectory taint accumulation, or branch isolation across sequential tool calls. Post-hoc benchmarks like TaintBench focus on detection rather than online prevention.
+Frameworks address distinct scopes across the agent lifecycle. MemLineage~\cite{ouyangMemLineageLineageGuidedEnforcement2026} gates actions on signed memory entry derivation graphs across sessions. In contrast, \appa{}'s trajectory labels and append-only event log govern single runs, enabling MemLineage to provide persistent provenance at \appa{}'s boundary. Offline tools like NeuroTaint~\cite{caiGhostAgentRedefining2026} perform post-hoc causal analysis across sessions, complementing \appa{}'s online enforcement. Execution provenance taxonomies~\cite{wangAgentTracesTrust2026} model typed graphs to trace semantic dependencies between inputs and output claims. In contrast, \appa{}'s event log records only operational tool actions and rulings, enforcing policy without tracking semantic claim attribution.
 
-\paragraph{Operating systems dynamic IFC and process isolation.}
-Classical operating system dynamic IFC frameworks—such as Flume~\cite{krohn2007information}, HiStar~\cite{zeldovich2006making}, and Asbestos~\cite{efstathopoulos2005labels}—introduced process-level label propagation and dynamic isolation under process creation (\texttt{fork}). \appa{} translates these OS-level dynamic IFC primitives to autonomous agent execution trajectories. Modern container and browser sandboxing runtimes—such as DeltaBox~\cite{dong2026deltabox}, Crab~\cite{wu2026crab}, and ceLLMate~\cite{meng2025cellmate}—provide OS-level checkpoint/restore and HTTP-layer authority sandboxing for agent environments. \appa{} operates orthogonally: while system sandboxes snapshot OS processes and filesystem layers, \appa{} establishes host-managed context branching with label inheritance ($L_c^0 := L_p^{\mathrm{fork}}$) and transcript isolation. This ensures that unvetted tool data acquired during sub-task execution narrows permissions only within the child branch, keeping the parent trajectory untainted without relying on retroactive memory rollback or hardware enclaves.
+\paragraph{Process isolation vs.\ trajectory branching.}
+Container and browser sandboxes — such as DeltaBox~\cite{dong2026deltabox}, Crab~\cite{wu2026crab}, and ceLLMate~\cite{meng2025cellmate} — provide OS-level checkpoint/restore and authority sandboxing, carrying classical OS dynamic IFC (Flume~\cite{krohn2007information}, HiStar~\cite{zeldovich2006making}) and floating-label IFC (LIO~\cite{stefan2011flexible}) into the agent setting. \appa{} operates orthogonally: while system sandboxes snapshot OS processes and filesystems, \appa{} confines label propagation at the LLM context trajectory layer, isolating unvetted tool data within child branches without memory rollback or hardware enclaves. Consequently, \appa{} can operate alongside process sandboxes to provide defense-in-depth across both OS environment and prompt context boundaries.
 
-\paragraph{Agent reasoning architectures vs.\ security branching.}
-Context branching and tree-structured exploration are standard patterns in LLM reasoning frameworks, including Tree of Thoughts~\cite{yao2023tree}, Language Agent Tree Search (LATS)~\cite{zhou2024language}, multi-agent systems like AutoGen~\cite{wu2023autogen}, and Branching Policy Optimization (BPO)~\cite{he2026bpo} for RL rollout variance reduction. While these architectures employ context branching to optimize problem-solving trajectories, evaluate candidate action branches, or improve sample efficiency, \appa{} repurposes context branching as a security-critical dynamic IFC primitive. Rather than exploring execution paths for utility optimization, \appa{}'s context branching enforces label containment ($L_p^{\mathrm{preservation}}$), governing child context initialization, local label folding, and audited merge exits to isolate sensitive sub-computations.
-
-\paragraph{Imperative guardrails and structural isolation.}
-Imperative guardrails and runtime toolkits—such as NeMo Guardrails~\cite{nvidia2023nemoguardrails}, Llama Guard~\cite{inan2023llama}, and adversarial prompt classifiers~\cite{zou2023universal}—primarily enforce content filtering and pattern matching. However, content filters do not track state lineage and remain vulnerable to paraphrasing or multi-turn context drift. Architectural patterns such as Dual LLMs~\cite{willison2023dual} and CaMeL~\cite{camel2025} establish structural isolation and prompt sandboxing. However, CaMeL requires fully reworking the execution harness to enforce rigid control-data pipelines and multi-role agent orchestrations. In contrast, \appa{} integrates with standard agent harnesses through pre-dispatch interceptor hooks and host-managed session interfaces to enforce prospective lattice checks. Concerns regarding approval fatigue in human-in-the-loop systems~\cite{akhawe2013alice} motivate \appa{}'s single-call atomic authorization rulings.
-
-\paragraph{Theoretical foundations and capability-safe harnesses.}
-\appa{} builds on foundational information-flow control (IFC) principles, including lattice models~\cite{denning1976lattice}, noninterference~\cite{goguen1982security}, least privilege~\cite{saltzer1975protection}, decentralized reader sets~\cite{myers1997dlm}, dynamic taint analysis~\cite{clause2007dytan,bell2014phosphor,schwartz2010all}, and robust declassification~\cite{sabelfeld2009declassification,zdancewic2001robust}. Its state dimensions draw structure from graded monads~\cite{katsumata2014graded}, authorization rulings act as linear resources~\cite{wadler1990linear}, and unclassified types (\emph{Unknown}) follow gradual information-flow typing~\cite{disney2011gradual,fennell2013gradual}.
-Recently, capability-safe programming language harnesses have been applied to agent safety. TACIT~\cite{odersky2026tracking} embeds agents in a capability-safe harness using Scala~3 with capture checking, static capability tracking, and local purity. However, TACIT requires agents to synthesize syntactically and semantically valid Scala~3 code. In contrast, \appa{} operates dynamically at the tool-dispatch layer of standard agent harnesses and protocol gateways (such as MCP~\cite{mcp2024spec}, SMCP~\cite{hou2026smcp}, and MCPShield~\cite{zhou2026mcpshield}) without code synthesis or compiler type-checking.
-
-
+\paragraph{Guardrails and structural isolation.}
+Imperative guardrails — such as NeMo Guardrails~\cite{nvidia2023nemoguardrails}, boundary sanitizers~\cite{bhagwatkarIndirectPromptInjections2025}, and Llama Guard~\cite{inan2023llama} — filter content without lineage tracking, leaving them vulnerable to paraphrasing or context drift. Structural patterns like Dual LLMs~\cite{willison2023dual} and CaMeL~\cite{camel2025} enforce isolation but require restructuring harnesses into multi-role architectures, while capability-safe harnesses like TACIT~\cite{odersky2026tracking} enforce static capabilities via code synthesis. In contrast, \appa{} operates dynamically at the tool-dispatch layer of standard harnesses via pre-dispatch hooks.

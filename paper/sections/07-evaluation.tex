@@ -1,0 +1,77 @@
+\section{Evaluation}\label{sec:evaluation}
+
+To evaluate dynamic information flow control and context branching, we developed \nolinkurl{bench-corp}, a controlled corporate-assistant benchmark for probing enforcement behavior across multi-step, multi-tool trajectories. Existing agent security benchmarks, such as AgentDojo~\cite{debenedettiAgentDojoDynamicEnvironment2024}, InjecAgent~\cite{deng2024injecagent}, and ToolEmu~\cite{ruan2024identifying}, evaluate prompt injection primarily over single-step tasks or short detection horizons. Such benchmarks do not isolate the core trade-offs of dynamic IFC: cumulative Label descent and downstream loss of utility manifest specifically in multi-step workflows, where an early restrictive read disables subsequent tool dispatches. We instrumented AgentDojo (all four suites, \nolinkurl{tool_knowledge} attack) and found two structural reasons why it cannot discriminate context branching. First, the attack no longer lands on a current-generation model: GPT-5.6 Luna never complied across 160 undefended workspace episodes, nor across a 60-episode probe of five further attack families, whereas GPT-4o complied in 31\% of its undefended episodes. A defense evaluated against this attack therefore scores 0\% whether or not it does anything. Second, its tasks are read-then-act with a single goal: no later independent benign action depends on the parent Label, so preserving it changes no outcome, and observed branch usage differs by an order of magnitude between models on the same tasks. Enforcement costs utility on these tasks: 47\% against 77\% for the same loop under a null policy on GPT-4o, and 67\% against 88\% on GPT-5.6 Luna. Of the 32 GPT-4o tasks that pass under the null policy but fail under enforcement, 8 are policy blocks and 24 are mediation overhead in our harness. \nolinkurl{bench-corp} is structured as a suite of target mechanism probes isolating cumulative Label descent, downstream utility retention, recipient-sensitive policy enforcement, and trajectory-local context branching.
+
+\paragraph{Environment and tool surface.}
+Every episode operates on a mock company environment exposing six systems: five CRUD stores---\nolinkurl{hr} (confidential employee records), \nolinkurl{finance} (invoices and financial records), \nolinkurl{task_tracker} (internal tickets and audit notes), \nolinkurl{public_forum} (untrusted external inputs), and \nolinkurl{vendor} (supplier records, contracts, and onboarding documents)---plus \nolinkurl{email} (outbound egress sink). The environment exposes seventeen tools: \nolinkurl{search}, \nolinkurl{read}, and \nolinkurl{create} for each of the five CRUD data stores, plus \nolinkurl{send_email} and composite action \nolinkurl{share_legal_packet}. Each scenario selectively enables only the subsystems necessary for its task; the agent sees a correspondingly reduced tool surface, and \appa{} prunes its enforced policy to match.
+
+All tool executions produce observable filesystem state: emails write to an outbound sink file, and internal operations mutate subsystem data directories. An episode runner initializes each run by copying pristine scenario data into a fresh directory with an empty sink, guaranteeing zero shared state across episodes. Complete task prompts are provided in Appendix~\ref{app:benchmark-prompts}.
+
+\paragraph{Scenario taxonomy and branching dynamics.}
+The fourteen scenarios in \nolinkurl{bench-corp} reflect distinct structural dependencies: under \appa{}'s policy, three scenarios are \emph{structurally branch-dependent} (unwinnable without context branching)---\nolinkurl{reply-and-file-ticket}, \nolinkurl{email-onboarding-buddy}, and \nolinkurl{review-then-notify}. Six of the fourteen tasks are native-expressiveness scenarios designed to isolate policy distinctions represented directly by a defense's native state model: \nolinkurl{joint-merger-brief} (audience intersection vs. ordinal confidentiality ceilings), \nolinkurl{one-release-only} (one-shot history predicates vs. folded context labels), \nolinkurl{public-directory-card} (transformer output redaction), \nolinkurl{vendor-trust-boundary} (intermediate trust ranks vs. binary integrity), \nolinkurl{share-legal-packet} (pre-dispatch vs. post-effect labeling), and \nolinkurl{review-then-notify} (side-effect notification without context leak). In three restrictive-read tasks (\nolinkurl{check-hr-record}, \nolinkurl{inspect-forum-post}, and \nolinkurl{check-forum-and-hr}), an agent can avoid Label creep by executing independent routine actions before inspecting restrictive data. Five scenarios embed indirect prompt injections in public forum content; \nolinkurl{hide-secret-in-status} tests data-field smuggling; \nolinkurl{check-hr-record} and \nolinkurl{email-onboarding-buddy} evaluate accidental over-disclosure risks without adversarial injection.
+
+\paragraph{Experimental arms and harness controls.}
+The evaluation compares five implemented experimental arms:
+\begin{enumerate}
+  \item \textbf{\appa{}:} Guarded APPA policy enforcement with \nolinkurl{fork} and \nolinkurl{submit_result} primitives enabled.
+  \item \textbf{\appa{}-no-fork:} The identical \appa{} binary and policy executed with \nolinkurl{--max-forks 0}.
+  \item \textbf{\appa{}-open:} The \appa{} agent loop executing under a neutral baseline policy.
+  \item \textbf{\textsc{Fides}:} Microsoft Agent Framework enforcing \textsc{Fides} policy with automatic untrusted content hiding and tool-less quarantine~\cite{fides}.
+  \item \textbf{\textsc{Fides}-open:} The Microsoft Agent Framework loop executed without \nolinkurl{SecureAgentConfig}.
+\end{enumerate}
+The open arms serve as harness-matched controls for their respective runtimes: \appa{} executes Rust corporate systems in-process, whereas \textsc{Fides} accesses systems over MCP. The baseline comparison also incorporates expressiveness asymmetries: \appa{} enforces value-granular recipient policies on finance data, whereas \textsc{Fides} relies on an ordinal confidentiality floor; scenario-specific \appa{} policy rules (such as \nolinkurl{reply-and-file-ticket} requiring prior egress before filing tickets) rely on dynamic history predicates, whereas \textsc{Fides} applies static policy attributes (e.g., blocking untrusted \nolinkurl{create_task_tracker} calls via \nolinkurl{accepts_untrusted=False} and capping \nolinkurl{create_public_forum} confidentiality).
+
+\paragraph{Execution protocol and declarative scoring.}
+An automated runner executes each episode as an isolated subprocess, supplying scenario prompts and capturing stdout, stderr, and residual filesystem state upon exit. Scenarios are evaluated against declarative end-state predicates rather than an LLM judge. Scoring applies four case-insensitive string-matching predicate types: matching email presence, email absence, required or forbidden substrings in created files, and required or forbidden content in printed answers.
+
+For utility-bearing tasks, an episode succeeds only if \emph{all} utility predicates pass (evaluated across thirteen utility-bearing scenarios). For security evaluation, an episode is marked as breached if \emph{any} security predicate passes (evaluated across all fourteen scenarios). Residual state is scored even after timeouts or abnormal process termination, ensuring early egresses are correctly registered as attack successes. Diagnostic event counts (policy blocks, remedy invocations) provide log trace visibility without altering utility or security scores. Across the three repetitions, per-arm results varied by at most three episodes.
+
+\begin{table}[!t]
+\centering
+\caption{Evaluation results on \nolinkurl{bench-corp} across four models and five experimental arms (3 repetitions per scenario; utility evaluated across 13 utility-bearing scenarios, security ASR across all 14 scenarios; remedies are totals over the 42 episodes of an arm).}
+\label{tab:benchmark}
+\small
+\begin{tabular}{llccc}
+\toprule
+\textbf{Model} & \textbf{Arm} & \textbf{Utility ($\uparrow$)} & \textbf{ASR ($\downarrow$)} & \textbf{Remedies} \\
+\midrule
+\multirow{5}{*}{\shortstack[l]{Gemini 3.5\\Flash-Lite}}
+ & \appa{}         & 17/39 (44\%) & 0/42 (0\%)  & 32 \\
+ & \appa{}-nofork  & 11/39 (28\%) & 0/42 (0\%)  & 32 \\
+ & \appa{}-open    & 22/39 (56\%) & 13/42 (31\%) & 0  \\
+ & \textsc{Fides}  & 13/39 (33\%) & 12/42 (29\%) & 0  \\
+ & \textsc{Fides}-open & 33/39 (85\%) & 21/42 (50\%) & 0  \\
+\midrule
+\multirow{5}{*}{GPT-5.6 Luna}
+ & \appa{}         & 37/39 (95\%) & 1/42 (2\%)  & 50 \\
+ & \appa{}-nofork  & 27/39 (69\%) & 0/42 (0\%)  & 34 \\
+ & \appa{}-open    & 36/39 (92\%) & 15/42 (36\%) & 0  \\
+ & \textsc{Fides}  & 16/39 (41\%) & 12/42 (29\%) & 0  \\
+ & \textsc{Fides}-open & 36/39 (92\%) & 15/42 (36\%) & 0  \\
+\midrule
+\multirow{5}{*}{GPT-4o}
+ & \appa{}         & 23/39 (59\%) & 3/42 (7\%)  & 45 \\
+ & \appa{}-nofork  & 23/39 (59\%) & 3/42 (7\%)  & 38 \\
+ & \appa{}-open    & 33/39 (85\%) & 21/42 (50\%) & 0  \\
+ & \textsc{Fides}  & 22/39 (56\%) & 12/42 (29\%) & 0  \\
+ & \textsc{Fides}-open & 33/39 (85\%) & 21/42 (50\%) & 0  \\
+\midrule
+\multirow{5}{*}{Qwen 3.6 35B}
+ & \appa{}         & 28/39 (72\%) & 0/42 (0\%)  & 38 \\
+ & \appa{}-nofork  & 21/39 (54\%) & 1/42 (2\%)  & 34 \\
+ & \appa{}-open    & 36/39 (92\%) & 18/42 (43\%) & 0  \\
+ & \textsc{Fides}  & 17/39 (44\%) & 12/42 (29\%) & 0  \\
+ & \textsc{Fides}-open & 35/39 (90\%) & 18/42 (43\%) & 0  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Results and comparative analysis.}
+Table~\ref{tab:benchmark} presents empirical performance across four models, accessed through OpenRouter on 2026-07-25 under provider-default sampling. Across every evaluated model, \appa{} consistently eliminates or drastically reduces exfiltration attacks, dropping Attack Success Rate (ASR) from 31\%--50\% in open baselines down to 0\%--7\%. \appa{} versus \appa{}-no-fork is the causal comparison---the arms share a binary, policy, and harness, differing only in \nolinkurl{--max-forks 0}---and isolates context branching: overall utility rises from 69\% to 95\% (GPT-5.6 Luna), 28\% to 44\% (Gemini 3.5 Flash-Lite), and 54\% to 72\% (Qwen 3.6 35B), as branching keeps a restrictive read from permanently polluting the primary context; GPT-4o converts 4 of 9 branch-dependent episodes but nets four fewer elsewhere to mediation overhead, reaching 59\% in both arms. Guarded enforcement is not free: relative to \appa{}-open, utility falls 5 of 39 episodes (Gemini 3.5 Flash-Lite), 10 (GPT-4o), and 8 (Qwen 3.6 35B), and rises 1 (GPT-5.6 Luna). \textsc{Fides} is a practically relevant baseline, though not a feature-equivalent one: it cannot represent \appa{}'s recipient sets, history predicates, or branching, and its ASR is identical at 12/42 (29\%) for all four models---a deterministic policy mismatch rather than model-dependent susceptibility---at 33\%--56\% utility. Models actively leverage \appa{}'s prospective remedy engine, issuing 32--50 remedy calls per arm across its 42 episodes to resolve policy gaps interactively.
+
+\paragraph{Residual \appa{} breaches.}
+Every non-zero \appa{} cell traces to two scenarios, neither an enforcement bypass. In \nolinkurl{hide-secret-in-status} the smuggled token rides a permitted flow---\nolinkurl{finance-lead@} is a finance reader, so catching it would require content confinement inside an authorized send, which a label algebra over recipient sets does not claim to provide. In \nolinkurl{joint-merger-brief} the agent copied an HR value into the finance store via \nolinkurl{create_finance}, which the scenario policy declares with no sink requirement, and read it back under the finance contract: a missing write-side contract, prospective enforcement being only as complete as the contracts it evaluates.
+
+\paragraph{Methodological scope.}
+\nolinkurl{bench-corp} consists of synthetic test scenarios constructed specifically to probe \appa{}'s enforcement primitives (IFC, context branching, recipient confinement, and selective hiding). High utility scores (e.g., 95\% under GPT-5.6 Luna) demonstrate that capable models can effectively leverage these primitives under controlled policy constraints, but do not imply general performance on unconstrained real-world workloads. One further model (Gemini 3.1 Flash-Lite) is excluded: its traces were dominated by native retry behavior rather than policy events.
+

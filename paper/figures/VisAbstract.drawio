@@ -13,7 +13,7 @@
         <mxCell id="2fDrw83GXGdloh82hjAQ-3" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="&lt;font style=&quot;font-size: 24px;&quot;&gt;Event log&lt;/font&gt;" vertex="1">
           <mxGeometry height="30" width="110" x="27" y="637" as="geometry" />
         </mxCell>
-        <mxCell id="2fDrw83GXGdloh82hjAQ-4" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="&lt;font style=&quot;font-size: 24px;&quot;&gt;Fork&lt;/font&gt;" vertex="1">
+        <mxCell id="2fDrw83GXGdloh82hjAQ-4" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="&lt;font style=&quot;font-size: 24px;&quot;&gt;Branching&lt;/font&gt;" vertex="1">
           <mxGeometry height="30" width="60" x="515" y="140" as="geometry" />
         </mxCell>
         <mxCell id="2fDrw83GXGdloh82hjAQ-5" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="&lt;font style=&quot;font-size: 24px;&quot;&gt;Restricted data&lt;/font&gt;" vertex="1">

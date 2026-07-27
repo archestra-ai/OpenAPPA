@@ -1,38 +1,37 @@
 \section{Branching for Taint Confinement}\label{sec:branching}
 
-\paragraph{Observation model.}
-\appa{} prevents parent context degradation by confining restrictive descents to disposable child branches, respecting the non-reversibility of trajectory taint once data enters an LLM context~\cite{caiGhostAgentRedefining2026}. Delegating restrictive data acquisitions to a child branch isolates label descents locally, leaving the primary parent trajectory untainted without claiming the child itself is untainted.
+By delegating restrictive data acquisitions to disposable child branches, \appa{} isolates label descents locally, preserving the parent trajectory's permissions without claiming the child itself is untainted~\cite{caiGhostAgentRedefining2026}. This adapts dynamic sub-computation confinement from floating-label systems like LIO~\cite{stefan2011flexible} to LLM agent transcript branching with post-branch isolation. Context branching requires an engine execution environment capable of isolating context trajectories (e.g., an application harness or proxy gateway). While baseline label enforcement (\S\ref{sec:enforcement}) operates in standard protocol gateways (e.g., MCP~\cite{mcp2024spec}, SMCP~\cite{hou2026smcp}, MCPShield~\cite{zhou2026mcpshield}), engine-managed context branching and output sanitization rely on runtime confinement.
 
-\paragraph{Deployment requirement.}
-While context branching and sub-agent orchestration are common operational capabilities in modern agent harnesses and tree-search reasoning architectures~\cite{wu2023autogen,yao2023tree,zhou2024language}, \appa{} introduces a governance protocol that repurposes context branching specifically for label-based taint confinement. Branching requires an execution environment capable of isolating context trajectories (e.g., an application harness or proxy gateway). While baseline label enforcement (\S\ref{sec:enforcement}) operates in standard gateways, features such as host-managed context branching and output sanitization rely on runtime context confinement.
 
-\subsection{Host branching protocol}
-\appa{} models branching as a host-managed protocol surrounding engine enforcement:
+
+
+\paragraph{Engine branching protocol.}
+Branching is orchestration: a narrowing check blocks the original call, the planner may only \emph{recommend} a branch (advisory, never a plan step), and the harness---not the \appa{} policy state machine---creates the child, on an agent \nolinkurl{fork} request or by deterministic orchestration. \appa{} then models branching as an engine-managed protocol surrounding engine enforcement:
 \begin{enumerate}
-  \item the host decides to create a child context;
-  \item the host identifies the active parent trajectory;
-  \item the \appa{} engine records a fork boundary and seeds the child from the parent's current label;
-  \item the host submits child-local work;
-  \item the child's calls are independently evaluated by the engine; and
-  \item any returned value crosses through the checked child-return and direct-parent merge path.
+  \item the harness requests a child context;
+  \item the engine identifies the active parent trajectory;
+  \item the \appa{} engine records a branch boundary and seeds the child from the parent's current label;
+  \item the engine submits child-local work;
+  \item the child's calls are evaluated independently; and
+  \item any returned value crosses through the checked child-return and parent merge path.
 \end{enumerate}
 
-\subsection{Inheritance-based forking}
-When creating a child trajectory, \appa{} combines security-critical label inheritance with transcript isolation:
+\paragraph{Branch initialization and label inheritance.}
+Spawning a child combines label inheritance with transcript isolation:
 \begin{itemize}
-  \item \textbf{Label inheritance}: The child inherits the parent's current Label state at the fork point, setting $L_c^0 := L_p^{\mathrm{fork}}$.
-  \item \textbf{Transcript isolation}: The child begins with a fresh, branch-local model transcript containing only the server-controlled system preamble and child-local facts; parent user turns, assistant reasoning, and prior tool results are not copied.
+  \item \textbf{Label inheritance}: The child inherits the parent's current Label state at branch creation, setting $L_c^0 := L_p^{\mathrm{init}}$.
+  \item \textbf{Branch-time transcript snapshot}: The child's model transcript begins with the server-controlled preamble followed by the completed model-visible prefix inherited from each ancestor at its branch boundary. The snapshot may contain prior user turns, assistant messages, and admitted tool results. Incomplete parent rounds, later ancestor activity, and sibling activity are excluded. After branch creation, additions to the child transcript are branch-local.
 \end{itemize}
 
-Preserving Label inheritance ($L_c^0 := L_p^{\mathrm{fork}}$) is security-essential: starting a fresh child context with an unconstrained initial label would establish a laundering path for sensitive information already reflected in the parent's Label---for instance, allowing internal context to be released to a public output. The \texttt{fork} boundary also invalidates pending rulings and plan executions, as these records are bound to specific invocations in the parent context and cannot be transferred to a child.
+Preserving Label inheritance ($L_c^0 := L_p^{\mathrm{init}}$) is security-essential: starting a child context with an unconstrained initial label would establish a laundering path for sensitive information already reflected in the parent's Label---for instance, allowing internal context to be released to a public output. The branch boundary also invalidates pending rulings and plan executions, as these records are bound to specific parent invocations and cannot transfer to a child.
 
-However, transcript isolation introduces an operational utility limitation. Because the child receives a fresh model context rather than a continuation of the parent's conversation, the host application must supply the child's task instructions and inputs explicitly. While conservative for confidentiality, this design requires host-level prompt construction and task orchestration.
+Snapshot inheritance preserves conversational continuity and reduces task-framing overhead. Because the child shares an exact token prefix with the parent up to the branch boundary, pre-branch snapshot inheritance is inherently prompt-cache friendly~\cite{kwon2023efficient,zheng2023sglang}: inference engines can reuse pre-computed Key-Value (KV) cache states, avoiding the prompt re-synthesis and token duplication required when instantiating isolated verifiers in Dual-LLM or multi-agent architectures~\cite{willison2023dual,camel2025}. The confinement boundary is directional: new child-local context cannot enter the parent transcript before an explicit, checked exit. The engine must still provide the child-local work instruction, while inherited context need not be reconstructed in that instruction.
 
-\subsection{Child-local execution}
-Child-local work is dispatched within the child context, where all subsequent actions are enforced against the evolving child label $L_c$. Updates to $L_c$ affect only the child label and never update $L_p$. The parent process may pause or proceed concurrently, but it remains isolated from child messages and tool outputs until an explicit exit occurs. This isolation guarantees the pre-merge properties of Proposition~\ref{prop:preservation}, regardless of the child's internal behavior.
+\paragraph{Child-local execution.}
+Child-local work is dispatched within the child context, where all subsequent actions are enforced against the evolving child label $L_c$. Updates to $L_c$ affect only the child label and never update $L_p$. The parent process remains isolated from post-branch child messages and tool outputs until an explicit exit occurs, guaranteeing the pre-merge properties of Theorem~\ref{thm:branch} regardless of child behavior.
 
-\subsection{Explicit branch exit}
-An execution branch yields one of three outcomes:
+\paragraph{Explicit branch exit.}
+An execution branch yields three outcomes:
 \begin{enumerate}
   \item an \texttt{abandon} signal;
   \item the return of a standard labeled value; or
@@ -41,17 +40,17 @@ An execution branch yields one of three outcomes:
 In all cases, APPA validates the actual result label prior to committing the merge. If the raw result would restrict permissions, it triggers the acquisition check in the parent context. The parent may explicitly accept the label reduction or reject the \texttt{merge}; however, accepting lower permissions does not achieve taint confinement. A declared exit bound can be verified prior to execution to enable planning, though the actual result label remains authoritative.
 
 \begin{theorem}[Branch taint confinement]\label{thm:branch}
-Given an explicitly created child seeded from a parent state $L_p^{\mathrm{fork}}$, admitted child actions do not modify the parent label $L_p$. If the child branch is abandoned, child execution does not change the parent's label. If the child returns a value $v$, merging combines the parent label with the engine-derived return label:
+Given an explicitly created child seeded from a parent state $L_p^{\mathrm{init}}$, admitted child actions do not modify the parent label $L_p$. If the child branch is abandoned, child execution does not change the parent's label. If the child returns $v$, merging combines the parent label with the return label:
 \[
   L_p' = L_p \wedge \mathit{label}(v).
 \]
 Hence no child action can widen or silently degrade its parent's label, and an exit satisfying $L_p \le \mathit{label}(v)$ preserves the parent label exactly.
 \end{theorem}
 
-This result establishes the correctness of the branch lifecycle once invoked. It follows directly from trajectory-local label folding and the algebraic properties of the meet operator, holding independently of child prompt, execution plan, or behavior. Proof in App.~\ref{app:proofs}.
+This result establishes the correctness of the branch lifecycle once invoked. It follows directly from trajectory-local label folding and meet operator properties, holding independently of child prompt, plan, or behavior. Proof in Appendix~\ref{app:proofs}.
 
-\paragraph{History is shared, not merged.}
-The parent and child process append to a single, real-time serialized event log. Any effect committed by a successfully closed child dispatch remains visible tree-wide across all branches after abandonment; context isolation cannot undo these actions nor clear them from future \texttt{no\_prior(egress)} policy checks~\cite{wangAgentTracesTrust2026}. A successful child egress therefore affects a parent's \texttt{no\_prior(egress)} check, whereas a failed or indeterminate child dispatch does not add committed effects to the shared projection. Forking and merging function as governance operations. A policy ruling granted to a child is consumed during its execution and does not grant authorization to the parent. Each branch terminates via return, failure, or abandonment, requiring no log reconciliation because physical event history is never branched.
+\paragraph{Shared event log.}
+The parent and child trajectory append to a single, real-time serialized event log. Any effect committed by a successfully closed child dispatch remains visible tree-wide across all branches after abandonment; context isolation cannot undo these actions nor clear them from future \texttt{no\_prior(egress)} policy checks~\cite{wangAgentTracesTrust2026}. A successful child egress therefore affects a parent's \texttt{no\_prior(egress)} check, whereas a failed or indeterminate child dispatch does not add committed effects to the shared projection. Branch creation and merging function as governance operations. A policy ruling granted to a child is consumed during its execution and does not grant authorization to the parent. Each branch terminates via return, failure, or abandonment, requiring no log reconciliation because the event log is never branched.
 
 \paragraph{Sanitized branch exits.}
-Following the Dual-LLM and CaMeL architectures~\cite{willison2023dual,camel2025}, sanitized branch exits pair a predeclared \texttt{submit\_result} schema with registered transformation functions. Schema validation alone never relaxes label restrictions, as structural compliance does not guarantee safe provenance~\cite{sabelfeld2003language}. Maintaining a parent process's trust level may require a verified transformation assertion~\cite{zdancewic2001robust}—for example, asserting that ``the returned integer represents a version number from the specified source and contains no unparsed text''—rather than simple parsing. Registering such a transformation incorporates its claim into the trusted computing base; this transformation assertion represents APPA's sole exception for structured label promotion without an explicit ruling.
+Following the Dual-LLM and CaMeL architectures~\cite{willison2023dual,camel2025}, sanitized branch exits pair a predeclared \nolinkurl{submit_result} schema with registered transformation functions. Schema validation alone never relaxes label restrictions, as structural compliance does not guarantee safe provenance~\cite{sabelfeld2003language}. Maintaining a parent process's trust level may require a verified transformation assertion~\cite{zdancewic2001robust}—for example, asserting that ``the returned integer represents a version number from the specified source and contains no unparsed text''—rather than simple parsing. Registering such a transformation incorporates its claim into the trusted computing base; this transformation assertion represents APPA's sole exception for structured label promotion without an explicit ruling.
