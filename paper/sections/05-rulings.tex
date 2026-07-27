@@ -21,7 +21,7 @@ Authority is bound to declarative mandates: (1)~\textbf{Cover mandates} (permitt
 No primary user ruling can authorize a predicate for a direct user response sink, irrespective of mandate privileges, preventing in-band self-approval vulnerabilities~\cite{saltzer1975protection}.
 
 \paragraph{Canonical rulings and robust release.}
-Authorities evaluate the engine's canonical representation of a tool call, eliminating semantic evasion vectors where a compromised model requests actions under misleading phrasing. Following established declassification models, sanitization regulates *what* information is released, whereas rulings govern *who* permits release~\cite{sabelfeld2009declassification,zdancewic2001robust}, establishing robust declassification over exact rendered calls.
+Authorities evaluate the engine's canonical representation of a tool call, eliminating semantic evasion vectors where a compromised model requests actions under misleading phrasing. Following established declassification models, sanitization regulates \emph{what} information is released, whereas rulings govern \emph{who} permits release~\cite{sabelfeld2009declassification,zdancewic2001robust}, establishing robust declassification over exact rendered calls.
 
 \paragraph{Sanitizers.}
 Registered sanitizers transform values according to authorized state transitions without altering execution trajectories~\cite{bhagwatkarIndirectPromptInjections2025,caiGhostAgentRedefining2026}. Sanitization adjusts audience scope exclusively and never elevates trust levels without an explicit ruling, cast, or exit transformation (\S\ref{sec:branching}).

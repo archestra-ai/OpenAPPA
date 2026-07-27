@@ -14,6 +14,11 @@ Second, \appa{} introduces \emph{prospective acquisition enforcement} to turn da
   \centering
   \includegraphics[width=\linewidth]{figures/VisAbstract.png}
   \caption{\appa{} architecture for taint confinement and prospective enforcement. When inspecting untrusted or restricted data, the harness spawns a speculative child branch with an inherited pre-branch transcript snapshot, post-branch isolation, and a descended Label. Raw returns that would narrow the parent are blocked pending explicit acceptance or remedy plans, while adequate raw values and validated sanitized derivatives may merge through the checked exit. All execution steps project in real time to a single append-only event log.}
+  \Description{A parent trajectory spawns a child branch that inherits the
+  pre-branch transcript and a descended Label; the child's own reads narrow only
+  the child's Label, and a checked exit admits either an adequate raw value or a
+  sanitized derivative back into the parent, whose Label is unchanged. Every
+  step of both trajectories appends to one shared event log.}
   \label{fig:concept}
 \end{figure}
 

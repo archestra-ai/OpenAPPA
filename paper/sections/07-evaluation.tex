@@ -14,7 +14,7 @@ The fourteen scenarios in \nolinkurl{bench-corp} reflect distinct structural dep
 The evaluation compares five implemented experimental arms:
 \begin{enumerate}
   \item \textbf{\appa{}:} Guarded APPA policy enforcement with \nolinkurl{fork} and \nolinkurl{submit_result} primitives enabled.
-  \item \textbf{\appa{}-no-fork:} The identical \appa{} binary and policy executed with \nolinkurl{--max-forks 0}.
+  \item \textbf{\appa{}-no-fork:} The identical \appa{} binary and policy executed with \texttt{-{}-max-forks 0}.
   \item \textbf{\appa{}-open:} The \appa{} agent loop executing under a neutral baseline policy.
   \item \textbf{\textsc{Fides}:} Microsoft Agent Framework enforcing \textsc{Fides} policy with automatic untrusted content hiding and tool-less quarantine~\cite{fides}.
   \item \textbf{\textsc{Fides}-open:} The Microsoft Agent Framework loop executed without \nolinkurl{SecureAgentConfig}.
@@ -37,28 +37,28 @@ For utility-bearing tasks, an episode succeeds only if \emph{all} utility predic
 \midrule
 \multirow{5}{*}{\shortstack[l]{Gemini 3.5\\Flash-Lite}}
  & \appa{}         & 17/39 (44\%) & 0/42 (0\%)  & 32 \\
- & \appa{}-nofork  & 11/39 (28\%) & 0/42 (0\%)  & 32 \\
+ & \appa{}-no-fork  & 11/39 (28\%) & 0/42 (0\%)  & 32 \\
  & \appa{}-open    & 22/39 (56\%) & 13/42 (31\%) & 0  \\
  & \textsc{Fides}  & 13/39 (33\%) & 12/42 (29\%) & 0  \\
  & \textsc{Fides}-open & 33/39 (85\%) & 21/42 (50\%) & 0  \\
 \midrule
 \multirow{5}{*}{GPT-5.6 Luna}
  & \appa{}         & 37/39 (95\%) & 1/42 (2\%)  & 50 \\
- & \appa{}-nofork  & 27/39 (69\%) & 0/42 (0\%)  & 34 \\
+ & \appa{}-no-fork  & 27/39 (69\%) & 0/42 (0\%)  & 34 \\
  & \appa{}-open    & 36/39 (92\%) & 15/42 (36\%) & 0  \\
  & \textsc{Fides}  & 16/39 (41\%) & 12/42 (29\%) & 0  \\
  & \textsc{Fides}-open & 36/39 (92\%) & 15/42 (36\%) & 0  \\
 \midrule
 \multirow{5}{*}{GPT-4o}
  & \appa{}         & 23/39 (59\%) & 3/42 (7\%)  & 45 \\
- & \appa{}-nofork  & 23/39 (59\%) & 3/42 (7\%)  & 38 \\
+ & \appa{}-no-fork  & 23/39 (59\%) & 3/42 (7\%)  & 38 \\
  & \appa{}-open    & 33/39 (85\%) & 21/42 (50\%) & 0  \\
  & \textsc{Fides}  & 22/39 (56\%) & 12/42 (29\%) & 0  \\
  & \textsc{Fides}-open & 33/39 (85\%) & 21/42 (50\%) & 0  \\
 \midrule
 \multirow{5}{*}{Qwen 3.6 35B}
  & \appa{}         & 28/39 (72\%) & 0/42 (0\%)  & 38 \\
- & \appa{}-nofork  & 21/39 (54\%) & 1/42 (2\%)  & 34 \\
+ & \appa{}-no-fork  & 21/39 (54\%) & 1/42 (2\%)  & 34 \\
  & \appa{}-open    & 36/39 (92\%) & 18/42 (43\%) & 0  \\
  & \textsc{Fides}  & 17/39 (44\%) & 12/42 (29\%) & 0  \\
  & \textsc{Fides}-open & 35/39 (90\%) & 18/42 (43\%) & 0  \\
@@ -67,7 +67,7 @@ For utility-bearing tasks, an episode succeeds only if \emph{all} utility predic
 \end{table}
 
 \paragraph{Results and comparative analysis.}
-Table~\ref{tab:benchmark} presents empirical performance across four models, accessed through OpenRouter on 2026-07-25 under provider-default sampling. Across every evaluated model, \appa{} consistently eliminates or drastically reduces exfiltration attacks, dropping Attack Success Rate (ASR) from 31\%--50\% in open baselines down to 0\%--7\%. \appa{} versus \appa{}-no-fork is the causal comparison---the arms share a binary, policy, and harness, differing only in \nolinkurl{--max-forks 0}---and isolates context branching: overall utility rises from 69\% to 95\% (GPT-5.6 Luna), 28\% to 44\% (Gemini 3.5 Flash-Lite), and 54\% to 72\% (Qwen 3.6 35B), as branching keeps a restrictive read from permanently polluting the primary context; GPT-4o converts 4 of 9 branch-dependent episodes but nets four fewer elsewhere to mediation overhead, reaching 59\% in both arms. Guarded enforcement is not free: relative to \appa{}-open, utility falls 5 of 39 episodes (Gemini 3.5 Flash-Lite), 10 (GPT-4o), and 8 (Qwen 3.6 35B), and rises 1 (GPT-5.6 Luna). \textsc{Fides} is a practically relevant baseline, though not a feature-equivalent one: it cannot represent \appa{}'s recipient sets, history predicates, or branching, and its ASR is identical at 12/42 (29\%) for all four models---a deterministic policy mismatch rather than model-dependent susceptibility---at 33\%--56\% utility. Models actively leverage \appa{}'s prospective remedy engine, issuing 32--50 remedy calls per arm across its 42 episodes to resolve policy gaps interactively.
+Table~\ref{tab:benchmark} presents empirical performance across four models, accessed through OpenRouter on 2026-07-25 under provider-default sampling. Across every evaluated model, \appa{} consistently eliminates or drastically reduces exfiltration attacks, dropping Attack Success Rate (ASR) from 31\%--50\% in open baselines down to 0\%--7\%. \appa{} versus \appa{}-no-fork is the causal comparison---the arms share a binary, policy, and harness, differing only in \texttt{-{}-max-forks 0}---and isolates context branching: overall utility rises from 69\% to 95\% (GPT-5.6 Luna), 28\% to 44\% (Gemini 3.5 Flash-Lite), and 54\% to 72\% (Qwen 3.6 35B), as branching keeps a restrictive read from permanently polluting the primary context; GPT-4o converts 4 of 9 branch-dependent episodes but nets four fewer elsewhere to mediation overhead, reaching 59\% in both arms. Guarded enforcement is not free: relative to \appa{}-open, utility falls 5 of 39 episodes (Gemini 3.5 Flash-Lite), 10 (GPT-4o), and 8 (Qwen 3.6 35B), and rises 1 (GPT-5.6 Luna). \textsc{Fides} is a practically relevant baseline, though not a feature-equivalent one: it cannot represent \appa{}'s recipient sets, history predicates, or branching, and its ASR is identical at 12/42 (29\%) for all four models---a deterministic policy mismatch rather than model-dependent susceptibility---at 33\%--56\% utility. Models actively leverage \appa{}'s prospective remedy engine, issuing 32--50 remedy calls per arm across its 42 episodes to resolve policy gaps interactively.
 
 \paragraph{Residual \appa{} breaches.}
 Every non-zero \appa{} cell traces to two scenarios, neither an enforcement bypass. In \nolinkurl{hide-secret-in-status} the smuggled token rides a permitted flow---\nolinkurl{finance-lead@} is a finance reader, so catching it would require content confinement inside an authorized send, which a label algebra over recipient sets does not claim to provide. In \nolinkurl{joint-merger-brief} the agent copied an HR value into the finance store via \nolinkurl{create_finance}, which the scenario policy declares with no sink requirement, and read it back under the finance contract: a missing write-side contract, prospective enforcement being only as complete as the contracts it evaluates.

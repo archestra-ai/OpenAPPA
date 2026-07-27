@@ -1,19 +1,20 @@
-%% AISec 2026 (co-located with ACM CCS) submission draft.
-%% Format: ACM sigconf, anonymized, <=10 pages excluding bibliography and
-%% well-marked appendices (<=2 extra pages; 12 pages total max).
-\documentclass[sigconf,anonymous,review]{acmart}
+%% Public preprint (arXiv) of the AISec 2026 submission.
+%% Format: ACM sigconf, non-anonymized, no ACM copyright block.
+%% To rebuild the anonymized submission version:
+%%   git show 6e27400:paper/appa.tex > appa-anon.tex
+\documentclass[sigconf,nonacm]{acmart}
 
-%% Workshop copyright/DOI placeholders -- fill at camera-ready.
-\setcopyright{acmlicensed}
-\copyrightyear{2026}
-\acmYear{2026}
-\acmConference[AISec '26]{19th ACM Workshop on Artificial Intelligence and
-  Security}{November 2026}{The Hague, Netherlands}
-\acmBooktitle{Proceedings of the 19th ACM Workshop on Artificial Intelligence
-  and Security (AISec '26)}
-\acmPrice{}
-\acmDOI{XXXXXXX.XXXXXXX}
-\acmISBN{978-x-xxxx-xxxx-x/YY/MM}
+%% Workshop copyright/DOI/venue metadata -- restore at camera-ready.
+%% \setcopyright{acmlicensed}
+%% \copyrightyear{2026}
+%% \acmYear{2026}
+%% \acmConference[AISec '26]{19th ACM Workshop on Artificial Intelligence and
+%%   Security}{November 2026}{The Hague, Netherlands}
+%% \acmBooktitle{Proceedings of the 19th ACM Workshop on Artificial Intelligence
+%%   and Security (AISec '26)}
+%% \acmPrice{}
+%% \acmDOI{XXXXXXX.XXXXXXX}
+%% \acmISBN{978-x-xxxx-xxxx-x/YY/MM}
 
 \usepackage{booktabs}
 \usepackage{tabularx}
@@ -53,15 +54,45 @@
 %% Alternate titles (skeleton): "APPA: Branching for Taint Confinement in LLM
 %% Agents" / "Branch, Inspect, and Safely Return".
 
-%% Anonymized for submission (class option `anonymous').
-\author{Anonymous Author(s)}
+\author{Arseny Kravchenko}
+\email{arseny@archestra.ai}
 \affiliation{%
-  \institution{Anonymous Institution}
+  \institution{Archestra AI}
   \city{}
   \country{}
 }
 
-\renewcommand{\shortauthors}{Anon.}
+\author{Vadim Liventsev}
+\email{hi@vadim.me}
+\affiliation{%
+  \institution{Archestra AI}
+  \city{}
+  \country{}
+}
+
+\author{Innokentii Konstantinov}
+\email{ikonstantinov@archestra.ai}
+\affiliation{%
+  \institution{Archestra AI}
+  \city{}
+  \country{}
+}
+
+\author{Ildar Iskhakov}
+\email{ildar@archestra.ai}
+\affiliation{%
+  \institution{Archestra AI}
+  \city{}
+  \country{}
+}
+
+\author{Matvey Kukuy}
+\email{matvey@archestra.ai}
+\affiliation{%
+  \institution{Archestra AI}
+  \city{}
+  \country{}
+}
 
 \begin{abstract}
 \input{sections/00-abstract}
