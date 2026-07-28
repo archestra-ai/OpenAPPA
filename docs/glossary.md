@@ -58,7 +58,7 @@ them. **Model terms** exist only in prose, and each has to earn its place.
 | `resolver.url` / `timeout_ms` / `channel` | how a dynamic external is reached; `channel = "hitl"` for human elicitation |
 | `requirement_gaps` | unmet entries of `requires`, returned on a refusal |
 | `narrowing` | the loss of reach a call would commit, returned on a refusal |
-| `remedy_plans` | the executable ways out, returned on a refusal |
+| `remedy_plans` | the ways out, returned on a refusal |
 
 ## Model terms
 
@@ -72,7 +72,7 @@ them. **Model terms** exist only in prose, and each has to earn its place.
 | **requirement gap** | an unmet entry of `requires`. Distinct from a narrowing, which fails no requirement |
 | **narrowing** | a strict loss of reach a proposed flow would commit. Soft-blocked until the agent accepts it, and never terminal |
 | **acceptance** | the agent's own step acknowledging a narrowing. No authority, no security power, clears no requirement. Always informed: it executes only in a round after the one that offered it |
-| **remedy plan** | an executable object with an id, run through `execute_remedy_plan(plan_id)` |
+| **remedy plan** | a way out of a refusal. One with an engine-side step is an executable object with an id, run through `execute_remedy_plan(plan_id)`; one without names a call the agent makes for itself and carries no id (`RMD-2`) |
 | **ruling** | one act of judgment by an authority, admitting one rendered call. Call-scoped, consumed by its dispatch, never touches the label |
 | **mandate** | the declaration of what an authority's rulings may cover |
 | **scope** | the tags an authority has jurisdiction over |

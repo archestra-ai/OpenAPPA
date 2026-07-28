@@ -81,11 +81,13 @@ not asking. Going down is free; coming back up needs an authority.
 ## A refusal comes with the ways out
 
 When APPA refuses a call it returns the remedies: get an approval, clean the
-data first, do a missing step first, accept the narrowing. Each is an
-executable object with an id, so the agent executes one directly. Every
-remedy comes from something you registered — an authority that can approve,
-a sanitizer that can clean, a tool that does the missing step — and the
-engine can therefore enumerate them all.
+data first, do a missing step first, accept the narrowing. Most are
+executable objects with an id, so the agent runs one directly rather than
+guessing at a sequence; the rest name a call the agent makes for itself and
+gets checked on like any other. Every remedy comes from something you
+registered — an authority that can approve, a sanitizer that can clean, a
+tool that does the missing step — and the engine can therefore enumerate
+them all.
 
 A nonempty list says a route exists. It does not promise the route works:
 the authority can still decline. An empty list is a proof: under this
@@ -124,7 +126,9 @@ gets the choice up front: accept the restriction, or run the fetch through
 the registered `remove_pii` sanitizer, which returns a scrubbed ticket and
 leaves the run public. That second plan needs a deployment that can hold the
 raw ticket back from the model; a deployment that can't will only offer the
-first.
+first. It is also the part of the model the reference implementation has not
+built yet — the planner enumerates the acceptance and leaves the sanitizer
+route out, and `spec.md` §10.2 marks it deferred.
 
 Say the job is to file the ticket publicly. The agent takes the sanitizer,
 the run stays public, `file_github_issue` passes with nothing to negotiate,
@@ -137,19 +141,29 @@ argument: the run's readers must include the auditor, and `internal` does
 not. This is a second and separate gate. Accepting the restriction was the
 agent's own call and granted no permission to disclose anything.
 
-The remedy is a ruling. APPA renders the exact send, the approver sees that
-rendering rather than the agent's summary of it, and on approval the mail
-goes and `egress` lands in the log. The run's label does not change, so a
-second auditor email needs a second approval.
+The remedy is a ruling. What reaches the approver is APPA's own account of
+the call rather than the agent's: which tool, bound to these exact arguments
+by a digest, going to this auditor, over data that came from the CRM at this
+label. The message body is not in it — an approver rules on the disclosure,
+and shipping the payload would hand every approval endpoint the data the
+policy is protecting. On approval the mail goes and `egress` lands in the
+log. The run's label does not change, so a second auditor email needs a
+second approval.
 
 ## You don't have to annotate every tool
 
 A real deployment has fifty tools, and you will not write fifty contracts
-before the first run. APPA is built for that: annotate the tools that matter
-and leave the rest alone. An unannotated tool returns data whose label is
+before the first run. APPA is built for that: every tool the agent may call
+is registered, but a registration can be a bare name. Annotate the ones that
+matter and leave the rest at a name. Such a tool returns data whose label is
 **Unknown** — not a low trust rank, but a fact you have not established
 yet — and Unknown spreads, so once the run has read one unknown value the
-run's label is unknown too.
+run's label is unknown too. A tool that is not registered at all is a
+different case: a call naming it is refused as unknown rather than run at
+Unknown. Whether the agent is even shown such a tool depends on the host —
+the gateway advertises from the registry, so the two lists cannot drift,
+while a framework embedding the SDK keeps its own tool list and has to keep
+them in step itself.
 
 That does not stop the agent. Calls that don't care about the dimension keep
 working, and the run stops only where it reaches a tool whose contract does
@@ -217,7 +231,7 @@ cannot exceed.
 
 | what you run today | what it becomes | its ceiling |
 |---|---|---|
-| a permission prompt, or an auto-approve mode | an authority on the `hitl` channel | its mandate: which gaps it may cover, up to what rank or reader set |
+| a permission prompt, or an auto-approve mode | an authority on the `hitl` channel — a resolver today, since the reference implementation has no queue to put a person in yet | its mandate: which gaps it may cover, up to what rank or reader set |
 | a model judging whether an action should proceed | an authority resolver | the same mandate |
 | a model or classifier judging whether content is trustworthy | a cast resolver | `may_cast` — the states it may resolve to |
 | a trained PII or injection detector that redacts | a sanitizer | its one declared audience transition |
@@ -229,11 +243,12 @@ exposed over HTTP becomes an authority by adding a block of TOML that names
 its endpoint and declares what its answers are allowed to do. The model
 stays, the prompt stays, the weights stay.
 
-What changes is the frame around it. The judge sees the call APPA rendered
-rather than the agent's description of it, so a steered model cannot ask it
-a flattering question. Its answer is bounded by a mandate, so a classifier
-that is wrong, or compromised, can approve at most what you declared it
-could approve. And every decision it makes lands in the log next to the
+What changes is the frame around it. The judge is asked about the call APPA
+identified rather than the one the agent described, so a steered model
+cannot put a flattering question to it. Its answer is bounded by a mandate,
+so a classifier that is wrong, or compromised, can approve at most what you
+declared it could approve. A judge that times out or errors abstains and the
+refusal stands. And every decision it makes lands in the log next to the
 context it saw.
 
 The last row is the one that shrinks a codebase. Rules that gate a flow
@@ -245,8 +260,8 @@ than migrated.
 ## What adoption costs
 
 Three things cost real effort. Tool contracts are the smallest of them: a
-first draft is generated from what you already have — tool descriptions,
-argument schemas, the ACLs behind them — and a person reviews it. Reviewing
+first draft comes from what you already have — tool descriptions, argument
+schemas, the ACLs behind them — and a person reviews it. Reviewing
 one is reading four lines and asking whether they describe the tool
 honestly, which is why `contracts.md` is written as a guide to reading
 contracts rather than writing them.

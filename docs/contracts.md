@@ -47,17 +47,31 @@ means unannotated, and results enter at Unknown on both dimensions
 (`UNK-5`). That fails closed, which is right, but it also blocks every
 annotated sink downstream until a cast resolves it. The explicit "this
 result carries nothing" annotation is `delta = {}`, which is a different
-statement.
+statement. An unannotated tool may not also declare label requirements: its
+own contribution would evaluate as identity and outrun its requirement, so
+the loader refuses the pair (`UNK-7`). History and attention requirements on
+the same tool are fine.
 
 **Are the `effects` complete?** A tool that sends mail and does not declare
 `egress` is invisible to every `no_prior(egress)` check in the policy. Under-
 declared effects are silent; the check that should have fired simply does
-not.
+not. Note the one gap a complete declaration still leaves: effects append on
+reported success, so a send that failed after reaching the inbox appends no
+`egress`, and a positive `prior(k)` proves the tool reported success and
+nothing about the outer world (`CHK-12`, `LOG-2`).
 
 **Does an `includes` use a placeholder where the recipient is an argument?**
 `includes = ["$recipient"]` reads the recipient from the call at check time.
 A static list where the recipient is really dynamic will pass calls it
-should stop.
+should stop. Where the argument is not itself a reader — a document id whose
+ACL names the readers, an address the directory maps to a group — a
+registered resolver does that mapping, and registering one puts it in your
+trusted base (`CFG-14`).
+
+**Does one contract cover two flows?** A tool whose action is itself a grant
+of access — `share_doc(doc, outsider)` reads the document, then opens its
+ACL — has to be split into a fetch and a release (`CHK-16`). Combined, there
+is no single question an authority can be asked.
 
 **Do the tags route where you think?** Wrong tags cannot make an unsound
 decision — an authority still cannot exceed its mandate — but they can route
@@ -119,7 +133,10 @@ effects  = ["email.sent", "finance.spend"]             # emits
 - **`requires.audience`** constrains the reader set from either side: an
   `includes` (`audience ⊇ recipients`, `CHK-9`) or a `cap` (`audience ⊆ C`,
   `CHK-10`). A recipient may be a literal reader, `public`, or an argument
-  placeholder `$arg`. A placeholder is valid only inside an `includes`.
+  placeholder `$arg`. A placeholder is valid only inside an `includes`. Both
+  evaluate *after* the call's own `delta`, so a read that narrows into its
+  own cap passes and surfaces as an ordinary narrowing rather than a
+  requirement gap.
 - **`requires.effects`** are history checks against the shared log: `has` is
   `prior(k)`, `has_no` is `no_prior(k)`.
 - **`requires.attention`** names per-call demands an authority must attend
@@ -127,8 +144,15 @@ effects  = ["email.sent", "finance.spend"]             # emits
 
 An absent `requires` bars nothing: the call runs as far as its `delta`
 allows. That differs from Unknown — an unestablished label dimension fails
-closed at every downstream check until a cast resolves it, while a tool with
-no requirements simply has nothing to fail.
+closed at every downstream check that *consumes* it, while calls whose
+requirements touch some other dimension carry on unaffected (`UNK-4`). A
+tool with no requirements simply has nothing to fail.
+
+A contract may trip both gates on one call. `search_and_share` narrows the
+run *and* releases to a recipient the narrowed audience no longer covers, so
+the agent accepts the narrowing and an authority covers the gap. Neither
+substitutes for the other (`CHK-15`), which means a contract shaped like
+this needs both paths open in the policy or it never dispatches at all.
 
 ## Authorities
 
@@ -224,8 +248,9 @@ trust narrowing survives every sanitizer, so it crosses only by acceptance
 or not at all (`BRN-13`).
 
 The child may always end its errand with `submit_result` `value: null`: an
-explicit void that records nothing, merges nothing, and propagates no label,
-indistinguishable from abandonment in the parent (`BRN-9`).
+explicit void that crosses no value, so nothing folds into the parent's
+label and the parent ends up where a dead branch would have left it
+(`BRN-9`).
 
 ## Casts
 
@@ -299,7 +324,10 @@ The run starts at `{audience: public, trust: trusted}`.
 nothing but costs the run its reach, so the engine stops the call and offers
 two remedies: run the fetch through `remove_pii` as a confined composite, so
 the raw ticket never joins the agent-visible run, or accept the narrowing
-and move to `{audience: internal, trust: trusted}`.
+and move to `{audience: internal, trust: trusted}`. Only the second is
+offered today — composites are deferred (`spec.md` §10.2) and the planner
+leaves them out, so reviewing a policy that leans on the first means
+reviewing against the model rather than against what runs.
 
 After accepting, `file_github_ticket` requires `public` — an unmet
 `includes`, and a second distinct gate, since accepting a restriction never

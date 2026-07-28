@@ -13,13 +13,16 @@ carry the detail, and duplicating them here would only produce drift.
 | crate | layer | role |
 |---|---|---|
 | `appa-engine` | inner | the pure decision core. No IO, no clock, a function of the log's cached views |
-| `appa-runtime` | outer | the canonical mediation assembly: owns policy, engine, trajectory families, and the durable log |
+| `appa-runtime` | outer | the canonical mediation assembly: owns policy, engine, trajectory families, and the log |
 | `appa-gateway` | host | OpenAI-compatible `/v1/chat/completions` adapter |
 | `appa-sdk` | host | narrow facade for frameworks that own their own inference and tool execution |
 | `appa-agent` | host | a provider and serial agent loop over the runtime's `Mediator` |
 
-A harness author embeds `appa-runtime` with whatever store they already run.
-They implement neither layer.
+A harness author embeds `appa-runtime` and implements neither layer. Note
+that `IMP-3` describes the outer layer as owning durable append with
+pluggable destinations; `appa-runtime` ships one in-memory store
+(`store.rs`) behind that surface, and a durable backend is a follow-up. A
+process that restarts loses its log, so history requirements start over.
 
 ## Where each rule family lives
 
@@ -33,23 +36,47 @@ They implement neither layer.
 | `LOG` | `fact.rs`, `projection.rs` |
 | `BRN` | `branch.rs` |
 | `UNK` | `admit.rs`, `label.rs` |
-| `CFG` | `contract.rs`, `registry.rs`, `names.rs` |
+| `CFG` | split three ways: `appa-runtime/src/config.rs` parses the TOML and refuses shape errors, `appa-engine/src/registry.rs` refuses the algebraic ones (empty mandate, unannotated tool with label requirements), `contract.rs` and `names.rs` hold the types. `CFG-13` block messages are runtime feedback |
+| `EXT` | `appa-runtime/src/external.rs` |
 
 ## Invariants the code carries that prose cannot
 
-Some spec rules are enforced by Rust's type system rather than by a runtime
-check, and a second implementation in another language has to find its own
-way to hold them:
+`IMP-4` asks for structural enforcement: the type system where it reaches,
+one refusal point where it does not. These are the places the shape of a
+type carries a spec rule, so a second implementation in another language has
+to find its own way to hold them. Most are covered by tests as well —
+`combine_never_widens`, the digest tests, the dangling-reference test, the
+stale-plan test — since a structural invariant in one crate still has to
+survive the boundary to the next.
 
-- **Linearity of values.** No `Clone`, no `Deserialize`, no public
-  constructor, consumed by value. Ownership and omitted derives do the
-  enforcement — there is no typestate anywhere.
-- **Lifecycle ordering** — no double release, no completion before release —
-  is refused at event admission, which is the single choke point. Encoding
-  it as typestate would infect every signature with generics, and that trade
-  was made once and stands.
-- **`ValueStore` mutators stay `pub(crate)`**, and read-only audit and
-  projection types are never hoisted into the root re-exports.
+- **`LBL-6`, no permissive delta.** `Label::combine` (`label.rs`) takes the
+  minimum trust and intersects the audience, and it is the only operation by
+  which one label affects another. A raise is therefore not expressible as a
+  fold: a sanitizer relabels a *new* derived value, a cast establishes a
+  dimension that was never set, and a ruling never touches a label at all
+  (`LBL-9` — `execute.rs` has no path that writes one).
+- **`SAN-7`, constant xor resolver.** `CastResolution` is an enum
+  (`authority.rs`), so a cast declaring both is unrepresentable *inside the
+  engine*. The TOML surface still carries two optional fields, so
+  `RawCast::convert` (`appa-runtime/src/config.rs`) rejects both-and-neither
+  at load — the type ends the question one layer in, not at the boundary.
+- **`RUL-3`, a ruling binds one rendered call.** `ResolvedCall` derives its
+  `CanonicalDigest` on demand and never stores it (`value.rs`), so a value
+  round-tripped through `serde` cannot carry a digest belonging to different
+  arguments.
+- **`RUL-8`, the staged review.** `AuthorityRequest` has private fields and a
+  validating constructor (`external.rs`), so a request naming a dangling or
+  foreign value reference cannot be built.
+- **`RMD-8`, offers die with their turn.** Plans re-derive and match by
+  value, so a stale handle mismatches rather than retargeting a live block.
+
+Type-level enforcement stops at the caller's signature, so lifecycle
+ordering is a runtime refusal instead — encoding it as typestate would put
+generics on every public function. `IMP-4` asks for that refusal at one
+choke point, and the crates do not yet manage it: at-most-once is checked in
+both `submit_child_return` and `check_child_return` (`branch.rs`), and the
+dispatch guard in both `observe_success` and `admit_result` (`admit.rs`).
+The store's append point validates revisions, not admission.
 
 ## What is not implemented
 
@@ -64,3 +91,7 @@ the document.
 | membership resolvers for named groups | `LBL`, design direction |
 | leaf-level provenance in the staged review | `RUL-9`, design direction |
 | external interface protocols | §13, placeholder |
+| a durable log — `SessionStore` is in-memory and `Mediator` owns it directly, so there is no pluggable destination either | `IMP-3`, `LOG-9` |
+| a live HITL queue — `AuthorityBackend::Hitl` abstains on every request, fail-closed per `EXT-1` | `AUT-11` |
+| dynamic contracts — `RecipientSpec` has only `Static` and `Placeholder`, and `RawTool` denies unknown fields, so the dialect cannot express a resolver-backed recipient | `CFG-14` |
+| one admission choke point — at-most-once and the dispatch guard are each enforced at two call sites | `IMP-4` |

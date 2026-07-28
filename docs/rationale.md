@@ -239,10 +239,12 @@ A child returns at most once, because the fork's mandate covers one errand
 and one result. A void return — `submit_result` with no value — ends the
 errand while crossing nothing.
 
-To the parent a void is indistinguishable from abandonment, and that is the
-point: a void carries zero bits of child-derived content. Preserving the
-indistinguishability means it leaves no family-visible record, and therefore
-cannot consume the channel. At-most-once binds value crossings, not endings.
+A void carries zero bits of child-derived content, so nothing folds into the
+parent's label — the same position the parent would be in had the branch
+simply died. That is about the label, not the log: a child's effects and
+rulings sit in the shared log either way, because one log per family is the
+whole design. Since nothing crossed, there is no value crossing to count,
+and at-most-once binds value crossings rather than endings.
 
 ## Deferred, and why
 

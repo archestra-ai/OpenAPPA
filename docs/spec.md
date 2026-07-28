@@ -5,8 +5,10 @@ what an implementation must do and nothing about why — the arguments live in
 `rationale.md`, and `guide.md` is the readable introduction.
 
 Rules carry stable ids by family. Cite them from tests, issues and the
-paper; ids outlive section numbers. MUST, MUST NOT, SHOULD and MAY are used
-in the RFC 2119 sense.
+paper; ids outlive section numbers. Numbers are assigned append-only and a
+rule keeps its id when it moves, so a family's numbering need not run in
+document order. Every normative statement carries an id. MUST, MUST NOT,
+SHOULD and MAY are used in the RFC 2119 sense.
 
 Families: `POS` position and capability · `LBL` labels · `CHK` the check ·
 `RMD` remedy plans · `AUT` authorities · `RUL` rulings · `SAN` sanitizers
@@ -35,6 +37,16 @@ that labels them.
 - **[POS-3]** Checks and label propagation MUST behave identically in
   confining and non-confining deployments. Capability affects which remedy
   plans exist, never which flows pass.
+- **[POS-4]** A deployment whose channel physically shows every message to a
+  fixed set of readers regardless of the label is out of scope. The label
+  cannot keep post-read content from readers the channel already exposes it
+  to. APPA governs agentic trajectories, not generic channels.
+- **[POS-5]** A deployment is **context-controlling** if it can determine
+  what enters a child's context and bound what leaves it. This is a weaker
+  capability than `POS-2`: it governs which messages a branch sees, not
+  whether a tool result can be withheld from the model. Branching exists
+  only in context-controlling deployments; quarantined branches additionally
+  require confinement.
 
 ## 2. Labels — `LBL`
 
@@ -59,6 +71,15 @@ that labels them.
 - **[LBL-8]** The starting label is engine configuration. The neutral,
   least restrictive value is `{audience: public, trust: trusted}`.
 - **[LBL-9]** A ruling MUST NOT change the label. See `RUL`.
+- **[LBL-10]** All data flows as a **labeled value**: one tool call plus its
+  result, carrying the label of the information it holds. Value and label
+  MUST NOT be separated; an operation takes both or neither.
+- **[LBL-11]** The label folds only from **admitted** values. A call that
+  succeeds but admits no value — an oversized body, a refused derivation —
+  appends its effects and folds nothing.
+- **[LBL-12]** Deriving a cleaner value from an admitted one MUST NOT undo
+  the fold. Sanitizing after the fact cannot clear a trajectory; the
+  derivation carries its own label and the run keeps the one it took.
 
 **Design direction.** Named, possibly nested reader groups with membership
 resolved at dispatch time are the intended shape for directory-backed
@@ -69,8 +90,9 @@ change reaches the engine only by reloading the configuration's id-lists.
 ## 3. The check — `CHK`
 
 - **[CHK-1]** Every proposed call MUST be checked before dispatch. The
-  outcome is `allow`, or `block` carrying the unmet requirements, the
-  narrowing where one fired, and the remedy plans.
+  outcome is `allow`; `block` carrying the unmet requirements, the narrowing
+  where one fired, and the remedy plans; or `unresolved` naming the values
+  whose dimension is not established.
 
 ```ts
 type CheckOutcome =
@@ -78,8 +100,16 @@ type CheckOutcome =
   | { outcome: "block";
       requirement_gaps: RequirementGap[];  // unmet entries of `requires`
       narrowing?: Narrowing;               // present when the call's own delta fired CHK-2
-      remedy_plans: RemedyPlan[] };
+      remedy_plans: RemedyPlan[] }
+  | { outcome: "unresolved";
+      unresolved: ValueRef[] };            // per UNK-3
 ```
+
+- **[CHK-17]** `unresolved` is a request for a missing fact, not a refusal.
+  The harness attempts a registered cast on the named values and checks
+  again; the engine casts nothing itself. A cast is never a remedy plan
+  (§5.1) and `unresolved` MUST NOT be reported as a block, since nothing in
+  `requires` failed and no remedy would clear it.
 
 ### 3.1 Ordering and clocks
 
@@ -130,6 +160,12 @@ type CheckOutcome =
 - **[CHK-15]** A single call MAY carry both a restrictive delta and a
   requirement gap. Both gates then apply, and neither substitutes for the
   other.
+- **[CHK-16]** A tool whose action is itself a grant of access —
+  `share_doc(doc, outsider)` reads the document, then opens its ACL — MUST
+  be declared as two contracts, a fetch and a release, each separately
+  checked. One contract covering both leaves nothing simple enough to rule
+  on. This is a contract-authoring rule and has no relation to the compiled
+  composites of §10.2.
 
 ## 4. Tool contracts
 
@@ -146,18 +182,22 @@ requirements and its routing tags.
 - **[CFG-5]** A contract MAY carry either of `delta` and `requires`, both,
   or neither. A call with both is checked on both.
 
-Contracts may be static, static with placeholders, or dynamic. A dynamic
-resolver mapping an argument to a reader set MUST be registered in advance
-and is part of the deployer's trusted base.
+- **[CFG-14]** Contracts may be **static**, **static with placeholders**, or
+  **dynamic**. A dynamic resolver mapping an argument to a reader set — a
+  document to its ACL's readers, a recipient to the readers behind it — MUST
+  be registered in advance and is part of the deployer's trusted base.
 
 ## 5. Remedy plans — `RMD`
 
 - **[RMD-1]** Every block MUST carry `remedy_plans`: the sound remedies
   available under the registered configuration and the deployment's
   capability.
-- **[RMD-2]** Plans are executable objects with ids. The engine MUST expose
-  `execute_remedy_plan(plan_id)` from the start of the run rather than
-  injecting a tool when a block occurs.
+- **[RMD-2]** Every plan with an **engine-side** step is an executable
+  object with an id. The engine MUST expose `execute_remedy_plan(plan_id)`
+  from the start of the run rather than injecting a tool when a block
+  occurs. A plan with no engine-side step — `RMD-13`, `RMD-14` — names a
+  call the agent makes for itself and carries no id, since there is nothing
+  for the engine to execute.
 - **[RMD-3]** On execution, the plan id, the ruling where the plan carries
   one, and the dispatch MUST all land in the log. For an acceptance plan the
   plan id is the record.
@@ -299,10 +339,14 @@ reply and how it enters the check pipeline. Only `AUT-12` is normative.
   time, each referenced value's label and provenance, and the gaps. The
   context MUST be persisted verbatim on the resulting ruling, so the log
   replays the review rather than a hash of hidden state.
-- **[RUL-9]** Argument bytes MUST NOT cross to an authority. The full
-  canonical rendered-call view requires leaf-level provenance discovery,
-  which no implementation performs; without it, showing literals would show
-  any admitted value bytes the model copied into them. *Design direction.*
+- **[RUL-9]** Argument **payload** bytes MUST NOT cross to an authority. The
+  one call-derived exception is the recipients of the proposed release,
+  which `RUL-8` requires to cross as a `Gap::Includes`: they are the subject
+  the authority authorizes, and without them no ruling could be made. The
+  full canonical rendered-call view requires leaf-level provenance
+  discovery, which no implementation performs; without it, showing literals
+  would show any admitted value bytes the model copied into them. *Design
+  direction.*
 - **[RUL-10]** No grant object appears in configuration or on any wire. The
   public vocabulary is mandates, rulings and log records.
 
@@ -347,8 +391,12 @@ reply and how it enters the check pipeline. Only `AUT-12` is normative.
   boundary events.
 - **[LOG-4]** A **boundary event** marks and never gates. The engine appends
   one at the end of each assistant turn, at fork, and at merge.
-- **[LOG-5]** The log is consulted in exactly three ways: history
-  requirements, ruling validity, and audit.
+- **[LOG-5]** The log is consulted in exactly four ways: history
+  requirements, ruling validity, **lifecycle validity** — whether a dispatch
+  is still open, whether a child has already returned — and audit. Every
+  other read is a projection rather than a consultation: the label and the
+  model-visible transcript are views of the log per `IMP-2`, the log's own
+  state in another shape.
 - **[LOG-6]** Every history check is **kind-containment only**. `prior(k)`
   and `no_prior(k)` ask whether a matching effect exists, never how many or
   how large.
@@ -361,15 +409,19 @@ reply and how it enters the check pipeline. Only `AUT-12` is normative.
   make them durable. A history check is only as sound as the log it has
   seen.
 
-An effect vocabulary is configurable, and a deployment MAY encode a bespoke
-gating ritual as an effect plus a dynamic authority. An authority whose
-decision needs an accumulated magnitude keeps that account in its own
-systems.
+- **[LOG-10]** The effect vocabulary is deployment configuration. A
+  deployment MAY encode a bespoke gating ritual as an effect plus a dynamic
+  authority. An authority whose decision needs an accumulated magnitude
+  keeps that account in its own systems.
 
 ## 10. Branching — `BRN`
 
-- **[BRN-1]** The core trajectory is linear. A host that branches MUST
-  implement this profile, or MUST NOT let branch results cross back.
+- **[BRN-1]** The core trajectory is linear. Branching is a host capability
+  requiring `POS-5`, because the snapshot of `BRN-4` and the single return
+  channel are both bounds on a child's context. A host that branches MUST
+  implement the rules of this section in full, or MUST NOT let branch
+  results cross back. Quarantined branches (§10.1) additionally require
+  confinement, since they withhold bytes.
 - **[BRN-2]** **Fork.** The child starts at the parent's *current* label,
   never at the neutral starting label.
 - **[BRN-3]** The child appends to the same shared log; the parent's history
@@ -378,7 +430,10 @@ systems.
   every completed ancestor message through the fork plus its child task. It
   receives neither an ancestor's incomplete tool-call round, later ancestor
   activity, nor sibling activity. Nested children inherit the corresponding
-  completed prefix from each ancestor.
+  completed prefix from each ancestor. `submit_result` is the only channel
+  carrying child-derived data back, and a host MUST NOT open another: the
+  snapshot bounds what enters a child, the single return bounds what leaves
+  it, and without both the merge rules govern nothing.
 - **[BRN-5]** **Merge.** The returned value's label folds into the parent
   like any other read. Nothing the child did can widen the parent, since
   intersection cannot add readers.
@@ -390,10 +445,12 @@ systems.
   shared log gives the parent nothing to reuse.
 - **[BRN-8]** A child returns **at most once**. The first value crossing
   consumes the return channel, and a later `submit_result` MUST be refused.
-- **[BRN-9]** A **void return** — `submit_result` with no value — crosses
-  nothing and propagates no label. It MUST leave no family-visible record,
-  so that it is indistinguishable from abandonment, and it MUST NOT consume
-  the return channel: at-most-once binds value crossings, not endings.
+- **[BRN-9]** A **void return** — `submit_result` with no value — crosses no
+  value, and so contributes nothing to the parent's label. The branch's own
+  effects and governance events are in the shared log as any branch's are;
+  what a void withholds is a label contribution, not a trace. It MUST NOT
+  consume the return channel: at-most-once binds value crossings, not
+  endings.
 - **[BRN-10]** Finalization is trivial for every started branch whatever its
   fate. Nothing was withheld, so nothing can be lost; a dead branch means no
   value crossed.
@@ -420,33 +477,46 @@ quarantine-exit **attestation** — is not in the current four-kind dialect,
 whose sanitizers are audience-only.
 
 A child handles suspicious content and returns through `submit_result` with
-a pre-declared structured output. Schema validation alone MUST NOT raise a
-label: structure is not provenance. The raise is claimed by a mandated
-transformer and only within its mandate — one covering the specific
-attestation, not a mere parser.
+a pre-declared structured output.
+
+- **[BRN-17]** Schema validation alone MUST NOT raise a label: structure is
+  not provenance. The raise is claimed by a mandated transformer and only
+  within its mandate — one covering the specific attestation, not a mere
+  parser.
 
 ### 10.2 Compiled composites
 
 **Deferred: no implementation compiles composites yet.** Until it lands, the
 planner's remedy space excludes composites and `RMD-10` says so.
 
-In confining deployments the engine compiles a multi-step plan into one
-synthesized invocation whose `requires` are the plan's entry conditions plus
-an attention demand attended by the plan's authority, and whose ordered body
-is part of the rendered object the authority rules on.
+A multi-step plan is not handed to the agent as steps. These rules bind an
+implementation that compiles composites; until one does, they bind nothing.
 
-- The body executes step-by-step inside the confining layer, each step
-  checked against the evolving internal state, intermediate values never
-  surfacing.
-- The composite's label `delta` is the returned value's contribution, not
-  the raw composition of the steps' deltas.
-- Execution is two-phase: the outer check runs against a declared bound on
-  the result's label; the body executes while the layer holds the result;
-  the actual result label is checked against the bound, and the value
-  commits only if it passes.
-- `emits` append per step as steps succeed. A mid-body failure halts the
-  composite with the successful prefix standing in the log. No undo is
-  promised.
+- **[RMD-15]** In confining deployments the engine compiles the plan into
+  one synthesized invocation whose `requires` are the plan's entry
+  conditions plus an attention demand attended by the plan's authority, and
+  whose ordered body is part of the rendered object the authority rules on.
+  A non-confining deployment MUST NOT compile composites: it can check and
+  block, but it cannot withhold.
+- **[RMD-16]** Both gates are exercised knowingly, each by its own party.
+  The authority's approval covers the body's enumerated internal
+  **requirement gaps**; executing the plan is the agent's recorded
+  acceptance of its enumerated internal **narrowings**. Neither substitutes
+  for the other. Because the agent never holds the steps, it cannot
+  cherry-pick them.
+- **[RMD-17]** The body executes step-by-step inside the confining layer,
+  each step checked against the evolving internal state, and intermediate
+  values MUST NOT surface.
+- **[RMD-18]** The composite's label `delta` is the returned value's
+  contribution, never the raw composition of the steps' deltas.
+- **[RMD-19]** Execution is two-phase: the outer check runs against a
+  declared bound on the result's label; the body executes while the layer
+  holds the result; the actual result label is checked against the bound,
+  and the value commits only if it passes.
+- **[RMD-20]** `emits` append per step as steps succeed. A mid-body failure
+  halts the composite with the successful prefix standing in the log. No
+  undo is promised; compensating stranded effects is the deployer's affair,
+  and an authority approving a composite rules knowing that.
 
 ## 11. Unknown — `UNK`
 
@@ -589,6 +659,23 @@ Whatever surface ships MUST keep:
   else. Tool and authority never name each other.
 - **[CFG-13]** Block messages MUST surface the applicable remedy plans,
   naming the eligible authorities where a plan carries a ruling.
+- **[CFG-15]** **Implementations are `builtin` or `resolver`**, a closed
+  set: in-process, or dynamic behind a registered endpoint. A sanitizer
+  declares where it may apply (`on`) and its audience-only transition
+  (`can_reduce`). Per `AUT-11`, HITL is a resolver channel rather than a
+  distinct kind of authority.
+- **[CFG-16]** The **preamble** is server-pinned and MUST NOT be client
+  input. Only `system` and `developer` roles are legal in it, and any other
+  role is a load error.
+- **[CFG-17]** At most **one dimension** may be declared pending-cast
+  (`delta = { trust = "unknown" }`), and a `requires` on that same dimension
+  is a load error — the requirement would evaluate before the resolution
+  that establishes it. `"unknown"` is reserved, so a trust rank of that name
+  is refused.
+- **[CFG-18]** An `output_sanitizer` binding is validated at load: the named
+  sanitizer MUST exist, MUST carry the `tool_output` point, and its `from`
+  MUST be satisfied by the tool's declared output label. It MUST NOT combine
+  with a pending-cast output dimension.
 
 Contract language leads with `requires` as a surface convention; a delta
 reads best as a stated consequence. Source deltas are derivable, so a
@@ -613,9 +700,15 @@ The interfaces that need specifying:
 | sanitizer resolver | a value, returns a derivation under the declared transition | unspecified |
 | membership resolver | a recipient or group, returns a reader set | design direction; see `LBL` |
 
-Each needs a request schema, a response schema, a timeout and failure
-semantics (a resolver that times out MUST be treated as an abstention rather
-than an approval), and a versioning rule.
+Each needs a request schema, a response schema, a versioning rule, and a
+timeout. Failure semantics are already fixed:
+
+- **[EXT-1]** An external that times out, answers with an error, or answers
+  malformed MUST contribute no decision: an abstention for an authority, a
+  failed derivation for a sanitizer, an unresolved dimension for a cast. The
+  block or the Unknown stands. No external failure may be read as an
+  approval, and an unreachable authority MUST be indistinguishable in effect
+  from one that abstained.
 
 ## 14. Implementation shape
 
@@ -633,12 +726,18 @@ The engine is two layers.
   destinations, serialization, and the durability obligations of `LOG-9`. A
   harness author embeds the outer layer with whatever store they already
   run; the decision core never sees IO.
-- **[IMP-4]** Invariants on state changes SHOULD be enforced through the
-  type system. External labels, authority decisions, sanitizers and dynamic
+- **[IMP-4]** External labels, authority decisions, sanitizers and dynamic
   resolvers are trusted inputs and together form the trusted base.
-- **[IMP-5]** The checker SHOULD stay free of ad-hoc conditionals. Every
+  Invariants on state changes MUST be enforced structurally: by the
+  implementation language's type system where it can express them, and
+  otherwise by refusal at one admission choke point. Enforcement scattered
+  across call sites satisfies neither branch.
+- **[IMP-5]** The checker MUST stay free of ad-hoc conditionals. Registered
+  contracts and authorities are the only sources of a decision, every
   decision reduces to label arithmetic or a log query, and anything
-  imperative belongs in a registered external.
+  imperative — an approval flow, a model that vets content, a lookup
+  resolving a recipient to readers — lives in a registered external and
+  never in the engine.
 
 ### 14.1 Accepted gaps
 
@@ -668,3 +767,7 @@ egress window.
 - **[THR-5]** Approval UX and the bootstrapping of contract coverage are
   adoption concerns and out of scope here. APPA is exactly as good as the
   authorities and contracts registered into it.
+- **[THR-6]** External identity machinery — OAuth, SAML, the directory that
+  says who sits behind an address — is outside APPA, which trusts what it
+  returns. A reader id is an opaque atom to the algebra; establishing that
+  the atom names the right person is the deployment's job.
