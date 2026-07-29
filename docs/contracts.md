@@ -7,7 +7,13 @@ person. It covers what each declaration means and what a wrong one looks
 like.
 
 `spec.md` is authoritative where the two differ; rule ids below point into
-it.
+it. The dialect here tracks the spec, and the reference implementation
+currently lags this revision in three spots: it still reads `can_reduce`
+where the surface says `mandate`, still parses a `[[preamble]]` table, and
+still accepts a per-tool `output_sanitizer` binding — `engine.md` keeps the
+full inventory of what is specified but not implemented. A policy written
+to this page does not load against the current binary until that catch-up
+lands.
 
 ```toml
 version = 1
@@ -17,19 +23,11 @@ version = 1
 trust_chain = ["suspicious", "trusted"]
 ```
 
-Every set mention carries its **operator** — `exactly`, `includes`, `cap`,
-`may_add` — because a bare list is ambiguous between "these readers exactly"
-and "at least these readers". A list without its operator is a load error
-(`CFG-8`).
-
-The server-pinned preamble heading every rebuilt model request is
-configuration too, never client input:
-
-```toml
-[[preamble]]
-role    = "system"          # only "system" and "developer" are legal here
-content = "You are a confined incident-response agent."
-```
+Every set mention carries its **operator**, because a bare list is
+ambiguous between "these readers exactly" and "at least these readers".
+`exactly` fixes the set, `includes` demands at least these members, `cap`
+bounds the set from above, and `may_add` bounds the readers an authority
+may vouch in. A list without its operator is a load error (`CFG-8`).
 
 ## What to check when reviewing
 
@@ -50,15 +48,19 @@ result carries nothing" annotation is `delta = {}`, which is a different
 statement. An unannotated tool may not also declare label requirements: its
 own contribution would evaluate as identity and outrun its requirement, so
 the loader refuses the pair (`UNK-7`). History and attention requirements on
-the same tool are fine.
+the same tool are fine. Annotation is also per-dimension: a declared delta
+naming only one dimension folds identity on the other (`UNK-6`) — the
+author's claim that the result carries nothing there, not an unestablished
+fact.
 
-**Are the `effects` complete?** A tool that sends mail and does not declare
-`egress` is invisible to every `no_prior(egress)` check in the policy. Under-
-declared effects are silent; the check that should have fired simply does
-not. Note the one gap a complete declaration still leaves: effects append on
-reported success, so a send that failed after reaching the inbox appends no
-`egress`, and a positive `prior(k)` proves the tool reported success and
-nothing about the outer world (`CHK-12`, `LOG-2`).
+**Are the `effects` complete?** Effects sequence a run; the label checks
+are what guard disclosure. A deploy tool that does not declare `deploy` is
+invisible to every `no_prior(deploy)` once-only check in the policy.
+Under-declared effects are silent; the check that should have fired simply
+does not. Note the one gap a complete declaration still leaves: effects
+append on reported success, so a deploy that failed after touching the
+cluster appends no `deploy`, and a positive `prior(k)` proves the tool
+reported success and nothing about the outer world (`CHK-12`, `LOG-2`).
 
 **Does an `includes` use a placeholder where the recipient is an argument?**
 `includes = ["$recipient"]` reads the recipient from the call at check time.
@@ -68,10 +70,27 @@ ACL names the readers, an address the directory maps to a group — a
 registered resolver does that mapping, and registering one puts it in your
 trusted base (`CFG-14`).
 
-**Does one contract cover two flows?** A tool whose action is itself a grant
-of access — `share_doc(doc, outsider)` reads the document, then opens its
-ACL — has to be split into a fetch and a release (`CHK-16`). Combined, there
-is no single question an authority can be asked.
+**Does one contract cover two flows?** `share_doc(doc, outsider)` reads the
+document *and* opens it to the outsider in one call. As one contract it
+carries a delta for the read and a release requirement for the outsider at
+once, so an authority asked to cover its gap answers two different
+questions — may the agent hold this document, and may the outsider see
+it — with one yes. Split it (`CHK-16`):
+
+```toml
+[[tool]]
+name  = "fetch_doc"                # the read: the run now holds legal's document
+delta = { audience = { exactly = ["legal"] } }
+
+[[tool]]
+name     = "grant_doc_access"      # the release: may this recipient see the run?
+requires = { audience = { includes = ["$recipient"] } }
+effects  = ["acl.opened"]
+delta    = {}                      # a grant receipt carries nothing
+```
+
+Now each call carries one question, and the release is checked against a
+run that already holds the read.
 
 **Do the tags route where you think?** Wrong tags cannot make an unsound
 decision — an authority still cannot exceed its mandate — but they can route
@@ -82,10 +101,11 @@ block with no remedy (`AUT-10`).
 ["public"] }` lets that authority vouch a release to anyone. Read mandates
 as the answer to "what is the worst this desk can approve".
 
-**Does a sanitizer claim more than its implementation does?** Registration
-is a trust decision, not verification (`SAN-6`). The engine enforces that a
-derivation came from the registered implementation and wears exactly the
-declared `to` audience. It cannot check that the content is clean.
+**Does a sanitizer claim more than its implementation does?** Registering
+one vouches for its implementation and verifies nothing (`SAN-6`). The
+engine enforces that a derivation came from the registered implementation
+and wears exactly the declared `to` audience. It cannot check that the
+content is clean.
 
 ## Tools
 
@@ -96,33 +116,25 @@ A `[[tool]]` declares what a successful call folds into the run's label
 
 ```toml
 [[tool]]
-name  = "fetch_ticket"
-tags  = ["finance"]                                    # routing for authority scope
-delta = { trust = "suspicious", audience = { exactly = ["finance"] } }
+name  = "fetch_support_ticket"
+tags  = ["support"]                                    # routing for authority scope
+# the CRM is trusted infrastructure; the ticket body is customer-written text
+delta = { trust = "suspicious", audience = { exactly = ["support"] } }
 
 [[tool]]
-name     = "send_report"
+name     = "apply_db_migration"
 requires = { trust     = "trusted",
-             audience  = { includes = ["finance"] },   # audience ⊇ recipients
-             effects   = { has    = ["backup.completed"],   # prior(k)
-                           has_no = ["email.sent"] },       # no_prior(k)
-             attention = ["finance-signoff"] }         # a per-call demand
-delta    = { trust = "trusted", audience = { exactly = ["finance"] } }
-effects  = ["email.sent", "finance.spend"]             # emits
+             effects   = { has    = ["backup.completed"],    # prior(k)
+                           has_no = ["migration.applied"] }, # no_prior(k)
+             attention = ["sre-signoff"] }             # a per-call demand
+effects  = ["migration.applied", "mutation"]           # emits
+delta    = {}                                          # a status string carries nothing
 ```
 
 - **`delta`** is restrictive: it can only lower trust and intersect the
   audience (`LBL-6`). Within a *declared* delta an omitted dimension folds
   the identity — the author annotated the tool and owns the shorthand
   (`UNK-6`).
-- **`output_sanitizer = "name"`** binds the tool's output to a registered
-  `tool_output` sanitizer: every successful result is confined raw and only
-  the derivation is admitted, at its declared label. The binding is
-  engine-enforced — a raw or differently-sanitized admission is refused —
-  and validated at load: the sanitizer must exist, carry the `tool_output`
-  point, and its `from` must be satisfied by the tool's declared raw output.
-  A failed derivation withholds the value while the call's effects stand. It
-  cannot combine with a pending-cast output dimension.
 - **`delta = { trust = "unknown" }`** declares the dimension pending-cast:
   the result carries no established state there until a registered cast
   resolves it at admission. The raw result is confined until then; if no
@@ -140,7 +152,11 @@ effects  = ["email.sent", "finance.spend"]             # emits
 - **`requires.effects`** are history checks against the shared log: `has` is
   `prior(k)`, `has_no` is `no_prior(k)`.
 - **`requires.attention`** names per-call demands an authority must attend
-  fresh on every dispatch, never satisfied by history (`CHK-13`).
+  fresh on every dispatch, never satisfied by history (`CHK-13`). A mark
+  belongs here because an *agent* is doing the calling; a gate the
+  downstream system already enforces for every caller — the payment
+  provider's own approval flow, say — stays in that system and is not
+  repeated in the contract.
 
 An absent `requires` bars nothing: the call runs as far as its `delta`
 allows. That differs from Unknown — an unestablished label dimension fails
@@ -200,18 +216,40 @@ you trust.
 ## Sanitizers
 
 A `[[sanitizer]]` declares an audience-only transition a value may take
-through a registered transform. Trust is never sanitizer territory and there
-is no field here to raise it (`SAN-4`). `on` says where it may apply, and
-the only live token is `tool_output`; `tool_input` names the de-scoped
-input-argument substitution, which the loader refuses rather than accept as
-dead configuration (`SAN-3`).
+through a registered transform. Trust is never sanitizer territory and
+there is no field here to raise it (`SAN-4`). The reason is what the
+interface hands the implementation, not doubt about the implementation: a
+sanitizer receives bytes and returns bytes, so its mandate can bind a
+claim about what the derivation discloses. Trust is a fact about
+provenance — what shaped the value — which no inspection of the bytes can
+witness, so trust moves only through the interfaces that see provenance: a
+cast at ingress, a ruling per dispatch, and one day the quarantine-exit
+attestation over declared structure (`spec.md` §10.1).
+
+The verifier that clears a shady fetch is therefore a cast, not a
+sanitizer: declare the source pending-cast (`delta = { trust = "unknown"
+}`) and register the verifier — a classifier or a human behind the
+resolver — with `trusted` inside its declared ceiling. The two externals
+answer different questions and neither displaces the other. A cast answers
+*what is this value*, filling a never-established dimension without
+changing a byte; a sanitizer answers *what may leave*, deriving a
+narrower-audience value at the crossing. They compose: a pending-cast
+fetch inside a child is cast-resolved at admission, and the child's return
+can still cross through a sanitizer.
+
+`on` says where a sanitizer may apply, and the only live token is
+`tool_output`: it applies where the host can withhold the raw output from
+the context that would receive it — today, the child-return crossing
+(`SAN-2`). `tool_input` names the de-scoped input-argument substitution,
+which the loader refuses rather than accept as dead configuration
+(`SAN-3`).
 
 ```toml
 [[sanitizer]]
 name = "pii-redactor"
 on   = ["tool_output"]
 
-[sanitizer.can_reduce]
+[sanitizer.mandate]
 # applies only when the source audience satisfies `from`; produces exactly `to`
 audience = { from = { includes = ["finance"] }, to = { exactly = ["public"] } }
 
@@ -220,10 +258,26 @@ builtin = "redact-email"
 ```
 
 Audit records "admitted under the transition declared by sanitizer X", never
-"verified clean". A sanitizer applies where policy binds it: on a tool's
-output via `output_sanitizer`, on every child return via the top-level child
-policy, or with no binding at all as a return plan the model may choose when
-a raw child return would narrow the parent.
+"verified clean". The engine knows which transform ran, not whether the
+transform works: a buggy redactor still produces a derivation wearing the
+declared label, so the record states exactly what was established and no
+more. A sanitizer applies at the child-return crossing — chosen at runtime
+as a return plan, or bound in policy for every return.
+
+## A child return negotiates its crossing
+
+The runtime path is the default. A child's raw `submit_result` runs the
+narrowing check against its parent: a non-narrowing return merges silently,
+and a narrowing one soft-blocks with return plans the model executes
+through `execute_remedy_plan` (`BRN-11`, `BRN-12`) — accept the narrowing
+and cross raw, or cross any registered `tool_output` sanitizer's derivation
+whose `from` the child fold satisfies, alone where its relabel fully clears
+the narrowing, composed with acceptance of exactly the residual otherwise.
+So "fetch the ticket in a branch" is a plan the model weighs at the merge,
+not a route wired into any tool. A trust narrowing survives every
+sanitizer, so it crosses only by acceptance or not at all (`BRN-13`).
+
+A deployment that never wants a raw crossing takes the choice away:
 
 ```toml
 [child]
@@ -234,18 +288,6 @@ With it set, a child's `submit_result` crosses to the parent only as the
 sanitizer's derivation, at its exact declared output label. The raw text
 stays in the child and the model never chooses the path (`BRN-15`). A failed
 derivation returns nothing.
-
-## Child returns without a binding
-
-With no `[child]` binding, a child's raw `submit_result` runs the narrowing
-check against its parent. A non-narrowing return merges silently. A
-narrowing one soft-blocks with return plans the model executes through
-`execute_remedy_plan` (`BRN-11`, `BRN-12`): accept the narrowing and cross
-raw, or cross any registered `tool_output` sanitizer's derivation whose
-`from` the child fold satisfies — alone where its relabel fully clears the
-narrowing, composed with acceptance of exactly the residual otherwise. A
-trust narrowing survives every sanitizer, so it crosses only by acceptance
-or not at all (`BRN-13`).
 
 The child may always end its errand with `submit_result` `value: null`: an
 explicit void that crosses no value, so nothing folds into the parent's
@@ -306,7 +348,7 @@ delta    = {}
 [[sanitizer]]
 name = "remove_pii"
 on   = ["tool_output"]
-[sanitizer.can_reduce]
+[sanitizer.mandate]
 audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
 [sanitizer.implementation]
 builtin = "redact-email"
@@ -321,13 +363,13 @@ resolver = { channel = "hitl" }
 
 The run starts at `{audience: public, trust: trusted}`.
 `get_ticket_from_crm()` would fold in the `internal` audience, which leaks
-nothing but costs the run its reach, so the engine stops the call and offers
-two remedies: run the fetch through `remove_pii` as a confined composite, so
-the raw ticket never joins the agent-visible run, or accept the narrowing
-and move to `{audience: internal, trust: trusted}`. Only the second is
-offered today — composites are deferred (`spec.md` §10.2) and the planner
-leaves them out, so reviewing a policy that leans on the first means
-reviewing against the model rather than against what runs.
+nothing but costs the run its reach, so the engine stops the call and
+offers the acceptance: move to `{audience: internal, trust: trusted}`. The
+route that keeps the run public is a branch instead — fetch in a child,
+whose return crosses through `remove_pii` as a return plan, so the raw
+ticket never joins the parent. Forking is the model's move, not a plan this
+block can offer, so a policy that leans on that route is reviewed knowing
+the model has to find it.
 
 After accepting, `file_github_ticket` requires `public` — an unmet
 `includes`, and a second distinct gate, since accepting a restriction never

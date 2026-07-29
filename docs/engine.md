@@ -32,7 +32,7 @@ process that restarts loses its log, so history requirements start over.
 | `CHK` | `check.rs`, `admit.rs` |
 | `RMD` | `plan.rs`, `execute.rs` |
 | `AUT`, `RUL` | `authority.rs` |
-| `SAN` | `authority.rs`, `admit.rs` |
+| `SAN` | `authority.rs`, `admit.rs`, `branch.rs` |
 | `LOG` | `fact.rs`, `projection.rs` |
 | `BRN` | `branch.rs` |
 | `UNK` | `admit.rs`, `label.rs` |
@@ -85,7 +85,6 @@ the document.
 
 | item | spec |
 |---|---|
-| compiled composites | §10.2, deferred |
 | input sanitizers | `SAN-3`, refused at load |
 | quarantine-exit attestation | §10.1, design direction |
 | membership resolvers for named groups | `LBL`, design direction |
@@ -95,3 +94,8 @@ the document.
 | a live HITL queue — `AuthorityBackend::Hitl` abstains on every request, fail-closed per `EXT-1` | `AUT-11` |
 | dynamic contracts — `RecipientSpec` has only `Static` and `Placeholder`, and `RawTool` denies unknown fields, so the dialect cannot express a resolver-backed recipient | `CFG-14` |
 | one admission choke point — at-most-once and the dispatch guard are each enforced at two call sites | `IMP-4` |
+
+The inverse gap — code the spec no longer describes, removal pending: the
+per-tool `output_sanitizer` binding, the `[[preamble]]` table (the
+transcript head is host configuration per `POS-6`), and the `can_reduce`
+key the surface now spells `mandate` (`CFG-15`).

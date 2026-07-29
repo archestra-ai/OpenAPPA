@@ -55,9 +55,10 @@ the agent discovers the cost three steps later, at a send that no longer
 works, with the data already in its context and nothing left to do about it.
 
 Stopping before the fetch turns that into a choice the agent makes while it
-still has options — and while a sanitizer plan is still available, which it
-will not be once the raw bytes are in context. The stop costs an
-acceptance, which is free, agent-side, and recorded.
+still has options — and while the clean route is still open, since a fetch
+can run in a child and cross back sanitized only while the raw bytes are
+not yet in the agent's context. The stop costs an acceptance, which is
+free, agent-side, and recorded.
 
 ## The check
 
@@ -205,8 +206,15 @@ invalidates prompt caches.
 
 ### Why a sanitizer moves audience and never trust
 
-A mechanical transform can bound who may read its derivative. "This content
-is now trustworthy" is a judgment, and judgment is a ruling or a cast.
+Registered externals are trusted to do their jobs; the question is what
+job each interface hands them. A sanitizer receives bytes and returns
+bytes, so its mandate can bind a claim about what the derivation
+discloses — an audience, a property of the output in its hands. Trust is a
+property of provenance — what shaped the value — and no inspection of the
+output can witness it, so the trust-moving decisions live on the
+interfaces that are handed provenance: a cast resolver establishing a
+never-labeled dimension at ingress, an authority ruling on one dispatch
+with the staged review in hand.
 
 The one structured exception is the quarantine exit, where a `submit_result`
 attestation carries a trust-bearing claim about extracted structure. It is
@@ -250,7 +258,6 @@ and at-most-once binds value crossings rather than endings.
 
 | item | status | why it isn't live |
 |---|---|---|
-| compiled composites | deferred | no implementation compiles a plan body yet; the planner's remedy space excludes them and its completeness claim says so |
 | input sanitizers (`tool_input`) | design direction | the loader refuses the registration rather than carry an inert one |
 | quarantine-exit attestation | design direction | needs a trust-bearing transformer, which the four-kind dialect does not have |
 | named audience groups with membership resolvers | design direction | trades revocation freshness for exactness of the set operations; the current dialect keeps exactness |

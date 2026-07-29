@@ -17,12 +17,12 @@ them. **Model terms** exist only in prose, and each has to earn its place.
 | `audience` | inside `delta`, the readers a result is limited to; inside `requires`, a condition on the run's readers |
 | `exactly` | the reader set is precisely this list |
 | `includes` | the run's readers must contain these — `audience ⊇ recipients` |
+| `cap` | the run's readers must stay within these — `audience ⊆ C` |
 | `effects` | as a list, the tool's `emits`: what a successful call appends to the log |
 | `effects.has` | `prior(k)` — a matching effect must already exist |
 | `effects.has_no` | `no_prior(k)` — no matching effect may exist |
 | `attention` | named marks demanding a fresh ruling on every dispatch |
 | `tags` | routing names with no algebraic life; the only currency of authority scope |
-| `output_sanitizer` | binds a sanitizer to this tool's result: the raw stays confined, the derivation admits |
 
 ### Authorities
 
@@ -43,7 +43,7 @@ them. **Model terms** exist only in prose, and each has to earn its place.
 |---|---|
 | `[[sanitizer]]` | a registered transformer that derives a new value under a mandated label |
 | `on` | where it may apply: `tool_output` is live, `tool_input` is refused at load |
-| `[sanitizer.can_reduce]` / `from` / `to` | the one transition it may claim. Audience only |
+| `[sanitizer.mandate]` / `from` / `to` | the one transition it may claim. Audience only |
 | `[[cast]]` | the registered resolution of an Unknown dimension |
 | `constant` | every Unknown on the dimension resolves to one declared state |
 | `resolver` / `may_cast` | decided per value by a service, bounded by a declared ceiling of targets |
@@ -53,7 +53,6 @@ them. **Model terms** exist only in prose, and each has to earn its place.
 | key | means |
 |---|---|
 | `version` | the configuration dialect version |
-| `[[preamble]]` / `role` / `content` | the server-pinned transcript head. Never client input |
 | `[child]` / `return_sanitizer` | every child return crosses only as this sanitizer's derivation |
 | `resolver.url` / `timeout_ms` / `channel` | how a dynamic external is reached; `channel = "hitl"` for human elicitation |
 | `requirement_gaps` | unmet entries of `requires`, returned on a refusal |
@@ -74,13 +73,13 @@ them. **Model terms** exist only in prose, and each has to earn its place.
 | **acceptance** | the agent's own step acknowledging a narrowing. No authority, no security power, clears no requirement. Always informed: it executes only in a round after the one that offered it |
 | **remedy plan** | a way out of a refusal. One with an engine-side step is an executable object with an id, run through `execute_remedy_plan(plan_id)`; one without names a call the agent makes for itself and carries no id (`RMD-2`) |
 | **ruling** | one act of judgment by an authority, admitting one rendered call. Call-scoped, consumed by its dispatch, never touches the label |
-| **mandate** | the declaration of what an authority's rulings may cover |
+| **mandate** | the declared bound on a registered component's power: for an authority, what its rulings may cover; for a sanitizer, the one transition it may claim |
 | **scope** | the tags an authority has jurisdiction over |
 | **attention mark** | a per-call demand for a fresh ruling, through which tools and authorities reference each other without naming each other |
 | **tag** | a routing-only name. Never folded, checked, or logged |
 | **branch** | one concurrently executing thread of the run. All branches append to one shared log |
 | **boundary event** | punctuation in the log — turn end, fork, merge. It marks and never gates |
-| **confining deployment** | one that can hold a raw tool result out of the model's context. Required for quarantined branches and compiled composites |
+| **confining deployment** | one that can hold a raw tool result out of the model's context. Required for quarantined branches and confined pending-cast results |
 | **Unknown** | "this label has not been established yet." Not a rank; absorbing under the fold |
 | **resolver** | the dynamic implementation of a registered external: authority rulings, cast decisions, sanitizer derivations, membership questions |
 | **staged review** | what an authority actually sees: the call's identity and typed context, persisted verbatim on the ruling |

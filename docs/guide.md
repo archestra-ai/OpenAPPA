@@ -53,9 +53,11 @@ context.
 The obvious objection is that the agent can then never mail an outsider. It
 can. An approval admits one specific call without touching the label — the
 mail goes, the run stays exactly as restricted as it was, and a second mail
-needs a second approval. For a whole ongoing exchange you fork a child to
-carry it; the child dies with the thread, and the parent's label never
-contains the outsider at all.
+needs a second approval. A whole ongoing exchange can run on that plan too,
+one ruling per message, and sometimes that is the right shape — each send is
+reviewed. When it isn't, you fork a child to carry the exchange: the child
+dies with the thread, and the parent's label never contains the outsider at
+all.
 
 ## Reading data costs the agent reach
 
@@ -118,21 +120,25 @@ requires = { audience = { includes = ["public"] } }
 effects  = ["egress", "mutation"]
 ```
 
-The run starts public and trusted, since nothing has been read yet. The
-agent's first call is `get_ticket_from_crm()`, and APPA stops it — nothing
-leaks by reading a ticket, but the run would go from public to internal, and
-after that the GitHub tool is closed for the rest of the run. So the agent
-gets the choice up front: accept the restriction, or run the fetch through
-the registered `remove_pii` sanitizer, which returns a scrubbed ticket and
-leaves the run public. That second plan needs a deployment that can hold the
-raw ticket back from the model; a deployment that can't will only offer the
-first. It is also the part of the model the reference implementation has not
-built yet — the planner enumerates the acceptance and leaves the sanitizer
-route out, and `spec.md` §10.2 marks it deferred.
+The run starts where the deployment says it starts — the starting label is
+configuration, and this one uses the neutral `{public, trusted}`, since
+nothing has been read yet. A deployment that expects users to paste customer
+names into the first prompt starts its runs restricted instead, because a
+secret typed directly at the agent enters before any contract can label it.
+The agent's first call is `get_ticket_from_crm()`, and APPA stops it —
+nothing leaks by reading a ticket, but the run would go from public to
+internal, and after that the GitHub tool is closed for the rest of the run.
+So the agent gets the choice up front: accept the restriction, or keep the
+ticket out of its own context by fetching in a child branch — the child
+reads the raw ticket, and its return crosses through the registered
+`remove_pii` sanitizer, so the parent stays public. The block itself lists
+only the acceptance; the branch is the agent's own move. That second route
+also needs a host that can branch and hold the child's raw return back — in
+a deployment that can't, the acceptance is all there is.
 
-Say the job is to file the ticket publicly. The agent takes the sanitizer,
-the run stays public, `file_github_issue` passes with nothing to negotiate,
-and `egress` and `mutation` land in the log.
+Say the job is to file the ticket publicly. The agent takes the child
+route, the parent stays public, `file_github_issue` passes with nothing to
+negotiate, and `egress` and `mutation` land in the log.
 
 Say instead the job is to email the raw ticket to an outside auditor. The
 agent accepts the restriction, the run becomes internal, and
@@ -172,17 +178,34 @@ the values it could not establish. So annotating five high-risk tools
 already buys you the obvious flows, and you extend coverage where a refusal
 tells you it's missing rather than guessing up front.
 
+The limit case makes the mechanics plain: with no annotations at all, no
+tool call ever blocks. Unknown fails closed only at a `requires` that
+consumes it, and a narrowing stop only fires on a declared `delta`, so a
+policy of bare names refuses exactly one thing — a call to a tool that is
+not registered. A host that branches adds one stall: a child's return
+carries Unknown, and an Unknown return holds as unresolved until a cast
+establishes it. The first requirement you write is the first place the
+engine can say no.
+
 To resolve an Unknown you register a **cast**: a rule for what unknown
 values become. It can be a constant — everything unknown is suspicious, or
 everything unknown is trusted — or a service you call per value, so a
-deployment can start blunt and get precise later.
+deployment can start blunt and get precise later. The per-value service is
+an ordinary registered external, which is where the surface stays small
+while the deployment grows: a resolver that remembers its own answers
+annotates your tools one value at a time, and swapping it in changes no
+engine, no spec, and no contract.
 
 ## Not every host can hold data back
 
 APPA has to sit where it can see the whole run and stop a call before it
 dispatches. That rules out a plain MCP gateway, which sees tool calls but
 not the conversation that gives them meaning, and leaves the harness itself
-or an inference proxy paired with a tool gateway.
+or an inference proxy paired with a tool gateway. The tool half of that
+pairing need not be a separate network hop: an inference proxy plus
+harness-level hooks that check each call before dispatch sits in the same
+position, and since hooks can withhold a result, such a deployment is
+confining in the sense below.
 
 Among those, one capability splits deployments in two: can the layer run a
 tool call and keep the result out of the model's context? A harness can,
@@ -190,17 +213,20 @@ since it decides what goes into the next request. Some proxy setups cannot.
 APPA calls the first kind a **confining** deployment.
 
 The split matters because once the model has read something, it has read it,
-and no later policy un-sees it. So every construction that depends on
-withholding bytes only exists on the confining side — running a fetch
-through a sanitizer and showing the model only the clean version, handing a
-suspicious page to a quarantined child and letting back only the version
-number it extracted. In a deployment that cannot withhold, those remedies
-are never offered.
+and no later policy un-sees it. Withholding comes in two strengths, and the
+constructions sort by which one they need. Holding a child's raw return
+back, so it crosses to the parent only as a sanitizer's scrubbed
+derivation, needs a host that can branch and bound what leaves the child —
+the weaker capability, which the spec calls context control. Holding bytes
+away from every model context — a pending-cast result confined until a cast
+establishes its label, a quarantined child handed a suspicious page and
+allowed to pass back only the version number it extracted — is confinement
+proper. A deployment with neither capability never offers those remedies.
 
 Everything else is unaffected. Checks run, labels propagate, refusals carry
-the remedies that remain. A non-confining deployment can stop a flow; it
-just cannot offer to clean one, so its agents hit more dead ends and its
-policies have to be written knowing that.
+the remedies that remain. A deployment that cannot withhold can still stop
+a flow; it just cannot offer to clean one, so its agents hit more dead ends
+and its policies have to be written knowing that.
 
 ## The guarantees hold under four assumptions
 

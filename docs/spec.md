@@ -32,8 +32,8 @@ that labels them.
   checked before dispatch and every admitted value is folded into the label.
 - **[POS-2]** A deployment is **confining** if it can run a tool call and
   hold the result out of the model's context. Constructions that depend on
-  withholding bytes — output sanitizers, quarantined branches, compiled
-  composites — exist only in confining deployments.
+  withholding a tool result — a pending-cast's confined raw body,
+  quarantined branches — exist only in confining deployments.
 - **[POS-3]** Checks and label propagation MUST behave identically in
   confining and non-confining deployments. Capability affects which remedy
   plans exist, never which flows pass.
@@ -47,6 +47,9 @@ that labels them.
   whether a tool result can be withheld from the model. Branching exists
   only in context-controlling deployments; quarantined branches additionally
   require confinement.
+- **[POS-6]** In a deployment that rebuilds model requests, the transcript
+  head — the system and developer messages opening every request — is host
+  configuration and MUST NOT be client input.
 
 ## 2. Labels — `LBL`
 
@@ -164,8 +167,7 @@ type CheckOutcome =
   `share_doc(doc, outsider)` reads the document, then opens its ACL — MUST
   be declared as two contracts, a fetch and a release, each separately
   checked. One contract covering both leaves nothing simple enough to rule
-  on. This is a contract-authoring rule and has no relation to the compiled
-  composites of §10.2.
+  on.
 
 ## 4. Tool contracts
 
@@ -232,7 +234,6 @@ requirements and its routing tags.
 | narrowing | the acceptance plan | live |
 | unresolved Unknown | registered casts whose declared targets could resolve it | live, never surfaced as a plan object |
 | any gap curable by a redacted argument | input-sanitizer substitutions | design direction |
-| any gap curable by confined acquisition | output-sanitizer-backed composites | deferred |
 
 - **[RMD-9]** A **nonempty** list asserts that a plan exists relative to the
   registered configuration and, where dynamic resolvers contribute, their
@@ -355,9 +356,12 @@ reply and how it enters the check pipeline. Only `AUT-12` is normative.
 - **[SAN-1]** A **sanitizer** is a registered transformer deriving a new
   value under the label its mandate authorizes. The raw source keeps its own
   label.
-- **[SAN-2]** At **tool output**, the derivation is what the trajectory
-  admits and the raw result stays confined. This protects the context and
-  requires a confining deployment.
+- **[SAN-2]** At **tool output**, the derivation is admitted by the context
+  that would otherwise receive the raw value, and the raw value is withheld
+  from it. That takes a host able to withhold — today the child-return
+  crossing in a context-controlling deployment (`POS-5`), where the raw
+  stays behind in the child and the derivation is what crosses to the
+  parent.
 - **[SAN-3]** At **tool input**, the derivation is substituted into the
   engine-rendered call, so the harness dispatches exactly the redacted
   bytes. The substituted call is checked with the derivation's declared
@@ -371,8 +375,8 @@ reply and how it enters the check pipeline. Only `AUT-12` is normative.
   sanitizer.
 - **[SAN-5]** A mandate binds a transition, not the information it is
   claimed over. Scoping mandates by information type is open work.
-- **[SAN-6]** Registration is a trust decision about the sanitizer, not a
-  verification of its output.
+- **[SAN-6]** Registering a sanitizer vouches for its implementation. It
+  verifies nothing about its output.
 - **[SAN-7]** A **cast** resolves an Unknown dimension to a concrete state.
   It is either **constant** or **resolver-implemented**, never both.
 - **[SAN-8]** A resolver-implemented cast MUST declare the set of states it
@@ -484,40 +488,6 @@ a pre-declared structured output.
   within its mandate — one covering the specific attestation, not a mere
   parser.
 
-### 10.2 Compiled composites
-
-**Deferred: no implementation compiles composites yet.** Until it lands, the
-planner's remedy space excludes composites and `RMD-10` says so.
-
-A multi-step plan is not handed to the agent as steps. These rules bind an
-implementation that compiles composites; until one does, they bind nothing.
-
-- **[RMD-15]** In confining deployments the engine compiles the plan into
-  one synthesized invocation whose `requires` are the plan's entry
-  conditions plus an attention demand attended by the plan's authority, and
-  whose ordered body is part of the rendered object the authority rules on.
-  A non-confining deployment MUST NOT compile composites: it can check and
-  block, but it cannot withhold.
-- **[RMD-16]** Both gates are exercised knowingly, each by its own party.
-  The authority's approval covers the body's enumerated internal
-  **requirement gaps**; executing the plan is the agent's recorded
-  acceptance of its enumerated internal **narrowings**. Neither substitutes
-  for the other. Because the agent never holds the steps, it cannot
-  cherry-pick them.
-- **[RMD-17]** The body executes step-by-step inside the confining layer,
-  each step checked against the evolving internal state, and intermediate
-  values MUST NOT surface.
-- **[RMD-18]** The composite's label `delta` is the returned value's
-  contribution, never the raw composition of the steps' deltas.
-- **[RMD-19]** Execution is two-phase: the outer check runs against a
-  declared bound on the result's label; the body executes while the layer
-  holds the result; the actual result label is checked against the bound,
-  and the value commits only if it passes.
-- **[RMD-20]** `emits` append per step as steps succeed. A mid-body failure
-  halts the composite with the successful prefix standing in the log. No
-  undo is promised; compensating stranded effects is the deployer's affair,
-  and an authority approving a composite rules knowing that.
-
 ## 11. Unknown — `UNK`
 
 - **[UNK-1]** Both dimensions support **Unknown**, meaning "this label has
@@ -570,10 +540,6 @@ documents is written in it.
 ```toml
 version = 1
 
-[[preamble]]                 # the server-pinned transcript head; never client input
-role    = "system"           # only "system"/"developer"
-content = "You are a confined agent."
-
 [[tool]]
 name  = "fetch_ticket"
 tags  = ["finance"]
@@ -583,11 +549,6 @@ delta = { trust = "suspicious", audience = { exactly = ["finance"] } }
 name  = "scan_inbox"
 delta = { trust = "unknown" }   # pending-cast; "unknown" is reserved, never a rank
                                 # name, and at most one dimension
-
-[[tool]]
-name             = "export_ticket"
-delta            = { audience = { exactly = ["finance"] } }
-output_sanitizer = "pii-redactor"
 
 [child]
 return_sanitizer = "pii-redactor"
@@ -624,7 +585,7 @@ resolver = { url = "https://approver.corp/rule", timeout_ms = 30000 }
 name = "pii-redactor"
 on   = ["tool_output"]
 
-[sanitizer.can_reduce]
+[sanitizer.mandate]
 audience = { from = { includes = ["finance"] }, to = { exactly = ["public"] } }
 
 [sanitizer.implementation]
@@ -646,9 +607,9 @@ Whatever surface ships MUST keep:
   wire.
 - **[CFG-7]** **The no-empty-mandate rule** of `AUT-6`.
 - **[CFG-8]** **Explicit set relations.** Every audience mention carries its
-  operator — `includes`, `exactly`, `may_add` — because a bare list is
-  ambiguous between narrow and wide. A list without its operator is a load
-  error.
+  operator — `includes`, `exactly`, `cap`, `may_add` — because a bare list
+  is ambiguous between narrow and wide. A list without its operator is a
+  load error.
 - **[CFG-9]** **Scope routed by tags only**, per `AUT-7`.
 - **[CFG-10]** **Casts declared constant xor resolver-implemented**, per
   `SAN-7`.
@@ -662,20 +623,15 @@ Whatever surface ships MUST keep:
 - **[CFG-15]** **Implementations are `builtin` or `resolver`**, a closed
   set: in-process, or dynamic behind a registered endpoint. A sanitizer
   declares where it may apply (`on`) and its audience-only transition
-  (`can_reduce`). Per `AUT-11`, HITL is a resolver channel rather than a
+  (`mandate`). Per `AUT-11`, HITL is a resolver channel rather than a
   distinct kind of authority.
-- **[CFG-16]** The **preamble** is server-pinned and MUST NOT be client
-  input. Only `system` and `developer` roles are legal in it, and any other
-  role is a load error.
 - **[CFG-17]** At most **one dimension** may be declared pending-cast
   (`delta = { trust = "unknown" }`), and a `requires` on that same dimension
   is a load error — the requirement would evaluate before the resolution
   that establishes it. `"unknown"` is reserved, so a trust rank of that name
   is refused.
-- **[CFG-18]** An `output_sanitizer` binding is validated at load: the named
-  sanitizer MUST exist, MUST carry the `tool_output` point, and its `from`
-  MUST be satisfied by the tool's declared output label. It MUST NOT combine
-  with a pending-cast output dimension.
+- **[CFG-19]** A `[child] return_sanitizer` binding is validated at load:
+  the named sanitizer MUST exist and MUST carry the `tool_output` point.
 
 Contract language leads with `requires` as a surface convention; a delta
 reads best as a stated consequence. Source deltas are derivable, so a
