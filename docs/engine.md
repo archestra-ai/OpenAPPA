@@ -86,16 +86,21 @@ the document.
 | item | spec |
 |---|---|
 | input sanitizers | `SAN-3`, refused at load |
+| the two-outcome check with runtime-driven resolution — the shipped check still returns a third `unresolved` outcome and leaves casting to the host | `CHK-1`, `CHK-16` |
+| a sanitizer mandate on the trust dimension — `Sanitizer::can_reduce` is audience-typed on both ends, and `admit.rs` copies the raw's trust through | `SAN-4` |
 | quarantine-exit attestation | §10.1, design direction |
 | membership resolvers for named groups | `LBL`, design direction |
-| leaf-level provenance in the staged review | `RUL-9`, design direction |
+| argument payload in the staged review — `AuthorityRequest` carries identity and typed context only | `RUL-9` |
+| remedy-plan ordering and sticky denials | `RMD-15`, `RMD-16` |
 | external interface protocols | §13, placeholder |
 | a durable log — `SessionStore` is in-memory and `Mediator` owns it directly, so there is no pluggable destination either | `IMP-3`, `LOG-9` |
-| a live HITL queue — `AuthorityBackend::Hitl` abstains on every request, fail-closed per `EXT-1` | `AUT-11` |
+| a live HITL queue — `AuthorityBackend::Hitl` abstains on every request, fail-closed per `EXT-1` | `CFG-15` |
 | dynamic contracts — `RecipientSpec` has only `Static` and `Placeholder`, and `RawTool` denies unknown fields, so the dialect cannot express a resolver-backed recipient | `CFG-14` |
 | one admission choke point — at-most-once and the dispatch guard are each enforced at two call sites | `IMP-4` |
 
 The inverse gap — code the spec no longer describes, removal pending: the
 per-tool `output_sanitizer` binding, the `[[preamble]]` table (the
-transcript head is host configuration per `POS-6`), and the `can_reduce`
-key the surface now spells `mandate` (`CFG-15`).
+transcript head is host configuration per `POS-6`), the `can_reduce`
+key the surface now spells `mandate` (`CFG-15`), and the
+`resolver = { channel = "hitl" }` spelling HITL now writes as
+`builtin = "hitl"` (`CFG-15`).

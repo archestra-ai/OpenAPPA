@@ -18,8 +18,8 @@ because no step raises anything.
 
 The price is that a genuine widening has nowhere to live in the label. That
 is paid by rulings, which admit one dispatch without moving the label, and
-by branching, which carries a persistent widening inside a child that dies
-with it.
+by branching, which quarantines the narrowing in a child that dies with it
+so the parent keeps its width.
 
 ### Why the epoch-wide raise was rejected
 
@@ -168,6 +168,17 @@ the rendered call, or fails to route it at all and produces a spuriously
 terminal block. A misdeclared effect or audience, by contrast, perturbs the
 checks themselves.
 
+### Why APPA does not police who may hold a power
+
+A loader that refused an in-process auto-approver holding a covering
+mandate would be protecting the deployer from their own configuration.
+Configuration is the trusted base per `THR-3`: an open gate declared there
+is legitimate and voids its guarantees auditably, and the policy review —
+reading mandates beside their implementations — is where a rubber stamp is
+caught. So no rule constrains which implementation may hold which mandate,
+and a human approver is the builtin `"hitl"` on the same terms as any
+other.
+
 ### Why the user cannot approve their own sight of restricted data
 
 When a run is restricted enough that showing content to the user is itself a
@@ -177,6 +188,23 @@ whatever mandate the user otherwise holds.
 The reason is structural rather than a matter of trust. The approval request
 would arrive on the very channel being released, so an in-band
 self-confirmation is not a check at all.
+
+The bar has a precondition worth naming: it bites only where tool
+credentials outrun the user's own read rights — a service account, a
+confining harness — so that the run's audience can exclude the user. Where
+the agent's tools act with the user's credentials, nothing the run fetches
+can exclude the user, and the bar is vacuous rather than wrong.
+
+### Why the staged review carries the argument payload
+
+An authority asked to release `send_email(text, recipient)` cannot judge
+the release without the text, and a review stripped to labels and
+provenance pushes the real decision back onto whoever can see the bytes.
+Authorities are already the deployer's trusted base per `THR-3`: a reviewer
+the deployer would not show the data to has no business holding a mandate
+over its release. The rejected alternative — label-checking the review
+itself, with the authority standing as a reader — added a second flow check
+for no gain the trusted-base assumption does not already provide.
 
 ### Why remedies are safe to hand to a steered agent
 
@@ -193,10 +221,12 @@ archive?" while omitting that the address is attacker-derived is the
 remaining social-engineering channel, and rendering the exact checked call
 closes it.
 
-### Why plans are executable objects with stable ids
+### Why engine-side plans are executable objects with ids
 
 A plan handed over as prose has to be interpreted, and interpretation is
-exactly the surface a steered model exploits. An id executes.
+exactly the surface a steered model exploits. An id executes. Plans with
+no engine-side step — do-this-call-first remedies — carry no id and are
+ordinary separately checked calls (`RMD-2`).
 
 The tool that executes them is present from the start of the run rather than
 injected when a block occurs, because introducing tools mid-conversation
@@ -204,26 +234,41 @@ invalidates prompt caches.
 
 ## Sanitizers
 
-### Why a sanitizer moves audience and never trust
+### Why a sanitizer's mandate binds either dimension
 
-Registered externals are trusted to do their jobs; the question is what
-job each interface hands them. A sanitizer receives bytes and returns
-bytes, so its mandate can bind a claim about what the derivation
-discloses — an audience, a property of the output in its hands. Trust is a
-property of provenance — what shaped the value — and no inspection of the
-output can witness it, so the trust-moving decisions live on the
-interfaces that are handed provenance: a cast resolver establishing a
-never-labeled dimension at ingress, an authority ruling on one dispatch
-with the staged review in hand.
+Registered externals are trusted to do their jobs, and the interface decides
+which job each one is handed. A sanitizer receives bytes and returns bytes,
+so its mandate is a claim fixed at registration about every derivation it
+will ever produce: that the output discloses only what a declared audience
+may see, or that it carries none of the steering a suspicious source might
+have planted. Both claims are unconditional in the same way, because the
+transformer acts on the value rather than ruling on it, and a failure to act
+is a defect in the transformer that `SAN-6` puts on whoever registered it.
 
-The one structured exception is the quarantine exit, where a `submit_result`
-attestation carries a trust-bearing claim about extracted structure. It is
-the only unruled trust up-move in the system and it is registered as such.
+Trust looks like the harder of the two claims, because trust is a fact about
+provenance and bytes do not carry their own history. What settles it is that
+a transformer need not read provenance in order to change it. A reviewer who
+deletes the paragraph addressed to the agent has edited the value, so the
+derivation that comes back is clean by construction of the edit rather than
+by a judgment about where the page came from, and nothing in the algebra
+separates that from a redactor stripping account numbers.
+
+What the two dimensions do not share is the record. A sanitizer's
+application names a registered transition and the digest it ran on, and that
+is the whole entry; an authority's ruling persists the staged review
+verbatim (`RUL-8`) and reaches the call through a declared scope (`AUT-7`).
+A deployment that needs to know which person cleared which value still wants
+an authority, and one that wants a value cleared once for all downstream use
+wants a sanitizer. Permission to raise trust does not merge the two
+instruments, and a policy review has to read the sanitizer table to know
+which one a deployment chose.
 
 A mandate binds a transition, not the information the transition is claimed
 over. `remove_pii` is a sound remedy for CRM tickets and a laundering
-machine for data that is all PII. Scoping mandates by information type is
-open work.
+machine for data that is all PII, and the same gap runs on the trust
+dimension, where a transform registered against the injections found in
+fetched pages makes the identical claim over every other value routed to
+it. Scoping mandates by information type is open work.
 
 ## Branching
 
@@ -259,9 +304,8 @@ and at-most-once binds value crossings rather than endings.
 | item | status | why it isn't live |
 |---|---|---|
 | input sanitizers (`tool_input`) | design direction | the loader refuses the registration rather than carry an inert one |
-| quarantine-exit attestation | design direction | needs a trust-bearing transformer, which the four-kind dialect does not have |
+| quarantine-exit attestation | design direction | a sanitizer's transition is claimed over the bytes it derives; an attestation is claimed over extracted structure, and no registered kind makes that claim |
 | named audience groups with membership resolvers | design direction | trades revocation freshness for exactness of the set operations; the current dialect keeps exactness |
-| leaf-level provenance in the staged review | design direction | without it, showing argument literals would show admitted Value bytes the model copied in, so bytes never cross today |
 | the response sink's contract | out of scope | only the structural bar on user self-approval is normative in this version |
 | external interface protocols | placeholder | see `EXT` in `spec.md` |
 

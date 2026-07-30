@@ -11,7 +11,7 @@ them. **Model terms** exist only in prose, and each has to earn its place.
 |---|---|
 | `[[tool]]` | one tool's contract |
 | `name` | the tool's identifier, matched against the proposed call |
-| `delta` | what a successful call folds into the run's label. Always restrictive |
+| `delta` | what a call's admitted result folds into the run's label. Always restrictive |
 | `requires` | what must hold before the call may run: label, history and attention conditions |
 | `trust` | inside `delta`, the rank a result carries; inside `requires`, the floor a call demands |
 | `audience` | inside `delta`, the readers a result is limited to; inside `requires`, a condition on the run's readers |
@@ -35,7 +35,7 @@ them. **Model terms** exist only in prose, and each has to earn its place.
 | `can_waive` | the effect kinds a ruling may waive for one dispatch |
 | `attends` | the attention marks this authority's rulings satisfy |
 | `[authority.scope]` / `tags` | jurisdiction. Omitted scope covers every call |
-| `[authority.implementation]` | `builtin` for in-process, `resolver` for dynamic |
+| `[authority.implementation]` | `builtin` for in-process, `resolver` for dynamic; `builtin = "hitl"` is human elicitation hosted by the harness |
 
 ### Sanitizers and casts
 
@@ -43,7 +43,7 @@ them. **Model terms** exist only in prose, and each has to earn its place.
 |---|---|
 | `[[sanitizer]]` | a registered transformer that derives a new value under a mandated label |
 | `on` | where it may apply: `tool_output` is live, `tool_input` is refused at load |
-| `[sanitizer.mandate]` / `from` / `to` | the one transition it may claim. Audience only |
+| `[sanitizer.mandate]` / `from` / `to` | the one transition it may claim, on either dimension |
 | `[[cast]]` | the registered resolution of an Unknown dimension |
 | `constant` | every Unknown on the dimension resolves to one declared state |
 | `resolver` / `may_cast` | decided per value by a service, bounded by a declared ceiling of targets |
@@ -54,7 +54,7 @@ them. **Model terms** exist only in prose, and each has to earn its place.
 |---|---|
 | `version` | the configuration dialect version |
 | `[child]` / `return_sanitizer` | every child return crosses only as this sanitizer's derivation |
-| `resolver.url` / `timeout_ms` / `channel` | how a dynamic external is reached; `channel = "hitl"` for human elicitation |
+| `resolver.url` / `timeout_ms` | how a dynamic external is reached |
 | `requirement_gaps` | unmet entries of `requires`, returned on a refusal |
 | `narrowing` | the loss of reach a call would commit, returned on a refusal |
 | `remedy_plans` | the ways out, returned on a refusal |
@@ -80,9 +80,10 @@ them. **Model terms** exist only in prose, and each has to earn its place.
 | **branch** | one concurrently executing thread of the run. All branches append to one shared log |
 | **boundary event** | punctuation in the log — turn end, fork, merge. It marks and never gates |
 | **confining deployment** | one that can hold a raw tool result out of the model's context. Required for quarantined branches and confined pending-cast results |
+| **context-controlling deployment** | one that chooses what a child branch sees and receives what it returns. The weaker capability branching requires (`POS-5`) |
 | **Unknown** | "this label has not been established yet." Not a rank; absorbing under the fold |
 | **resolver** | the dynamic implementation of a registered external: authority rulings, cast decisions, sanitizer derivations, membership questions |
-| **staged review** | what an authority actually sees: the call's identity and typed context, persisted verbatim on the ruling |
+| **staged review** | what an authority actually sees: the call's identity, its rendered arguments, and typed context, persisted verbatim on the ruling |
 | **release frontier** | what the run may still release, and to whom, without a further ruling. What a narrowing shrinks |
 
 ## Prose and wire

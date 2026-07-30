@@ -4,11 +4,11 @@
 what an implementation must do and nothing about why — the arguments live in
 `rationale.md`, and `guide.md` is the readable introduction.
 
-Rules carry stable ids by family. Cite them from tests, issues and the
-paper; ids outlive section numbers. Numbers are assigned append-only and a
-rule keeps its id when it moves, so a family's numbering need not run in
-document order. Every normative statement carries an id. MUST, MUST NOT,
-SHOULD and MAY are used in the RFC 2119 sense.
+Rules carry ids by family. Cite them from tests, issues and the paper —
+ids, not section numbers. A rule keeps its id when it moves, so a family's
+numbering need not run in document order. Every normative statement
+carries an id. MUST, MUST NOT, SHOULD and MAY are used in the RFC 2119
+sense.
 
 Families: `POS` position and capability · `LBL` labels · `CHK` the check ·
 `RMD` remedy plans · `AUT` authorities · `RUL` rulings · `SAN` sanitizers
@@ -31,22 +31,22 @@ that labels them.
 - **[POS-1]** The engine MUST be positioned so that every tool call is
   checked before dispatch and every admitted value is folded into the label.
 - **[POS-2]** A deployment is **confining** if it can run a tool call and
-  hold the result out of the model's context. Constructions that depend on
-  withholding a tool result — a pending-cast's confined raw body,
-  quarantined branches — exist only in confining deployments.
+  keep the result out of the model's context. Pending-cast admission
+  (§11.1) and quarantined branches (§10.1) depend on exactly that and
+  exist only in confining deployments.
 - **[POS-3]** Checks and label propagation MUST behave identically in
   confining and non-confining deployments. Capability affects which remedy
   plans exist, never which flows pass.
-- **[POS-4]** A deployment whose channel physically shows every message to a
-  fixed set of readers regardless of the label is out of scope. The label
-  cannot keep post-read content from readers the channel already exposes it
-  to. APPA governs agentic trajectories, not generic channels.
-- **[POS-5]** A deployment is **context-controlling** if it can determine
-  what enters a child's context and bound what leaves it. This is a weaker
-  capability than `POS-2`: it governs which messages a branch sees, not
-  whether a tool result can be withheld from the model. Branching exists
-  only in context-controlling deployments; quarantined branches additionally
-  require confinement.
+- **[POS-4]** A channel that already shows every message to a fixed reader
+  set regardless of the label is out of scope: the label cannot un-show
+  what the channel exposes.
+- **[POS-5]** A deployment is **context-controlling** if it chooses what a
+  child branch sees and takes delivery of what the branch returns.
+  Branching (§10) exists only in context-controlling deployments. The
+  capability is weaker than confinement: a host can bound a child's
+  context while still showing its own model every tool result; quarantined
+  branches need both capabilities.
+
 - **[POS-6]** In a deployment that rebuilds model requests, the transcript
   head — the system and developer messages opening every request — is host
   configuration and MUST NOT be client input.
@@ -84,18 +84,22 @@ that labels them.
   the fold. Sanitizing after the fact cannot clear a trajectory; the
   derivation carries its own label and the run keeps the one it took.
 
-**Design direction.** Named, possibly nested reader groups with membership
-resolved at dispatch time are the intended shape for directory-backed
-deployments. The current dialect trades revocation freshness for exactness
-of the set operations; until a membership resolver exists, a directory
-change reaches the engine only by reloading the configuration's id-lists.
+**Design direction.** Today an audience is a literal list of reader ids:
+a group such as `finance` is written out member by member in configuration,
+and a directory change reaches the engine only when that configuration is
+reloaded. The intended future shape for directory-backed deployments is
+named groups resolved against the directory at dispatch time, which keeps
+membership fresh at the cost of making every subset and intersection
+depend on a resolver's answer. Until that membership resolver exists, the
+id-list dialect stands.
 
 ## 3. The check — `CHK`
 
 - **[CHK-1]** Every proposed call MUST be checked before dispatch. The
-  outcome is `allow`; `block` carrying the unmet requirements, the narrowing
-  where one fired, and the remedy plans; or `unresolved` naming the values
-  whose dimension is not established.
+  outcome is `allow`, or `block` carrying what stopped the call — the
+  unmet requirements, the narrowing where one fired, the values whose
+  needed dimension no registered cast could establish — and the remedy
+  plans.
 
 ```ts
 type CheckOutcome =
@@ -103,16 +107,21 @@ type CheckOutcome =
   | { outcome: "block";
       requirement_gaps: RequirementGap[];  // unmet entries of `requires`
       narrowing?: Narrowing;               // present when the call's own delta fired CHK-2
-      remedy_plans: RemedyPlan[] }
-  | { outcome: "unresolved";
-      unresolved: ValueRef[] };            // per UNK-3
+      unestablished?: ValueRef[];          // facts no registered cast could establish (CHK-16)
+      remedy_plans: RemedyPlan[] };
 ```
 
-- **[CHK-17]** `unresolved` is a request for a missing fact, not a refusal.
-  The harness attempts a registered cast on the named values and checks
-  again; the engine casts nothing itself. A cast is never a remedy plan
-  (§5.1) and `unresolved` MUST NOT be reported as a block, since nothing in
-  `requires` failed and no remedy would clear it.
+- **[CHK-16]** APPA turns unknowns into knowns before it decides. When a
+  check consumes an Unknown dimension, the runtime MUST attempt the
+  registered casts on the unestablished values and re-check before
+  returning an outcome; resolution is automatic, never an agent choice and
+  never a remedy plan (§5.1). `unestablished` therefore names only values
+  no registered cast could establish — none is registered, or its resolver
+  abstained per `EXT-1` — and no ruling clears such an entry: a fact does,
+  or the configuration changes. The pure core performs no IO; the runtime
+  drives resolution and the engine admits the results (`UNK-8`). A runtime
+  MAY attempt casts as early as admission, and a §11.1 pending-cast tool
+  declares exactly that.
 
 ### 3.1 Ordering and clocks
 
@@ -130,8 +139,9 @@ type CheckOutcome =
 - **[CHK-5]** **History requirements** evaluate on the log as it stands at
   check time. A call's own `emits` MUST NOT satisfy its own precondition.
 - **[CHK-6]** Neither label check is a configuration entity. Both derive
-  from the contract's `requires` and `delta`, and the configuration surface
-  MUST NOT expose timing knobs.
+  from the contract's `requires` and `delta`, and the evaluation order of
+  §3.1 is fixed: the configuration surface MUST NOT offer a way to
+  reorder the checks or defer one.
 - **[CHK-7]** Effects append when the call succeeds. The delta commits at
   admission of the result value or its registered derivation.
 
@@ -163,11 +173,6 @@ type CheckOutcome =
 - **[CHK-15]** A single call MAY carry both a restrictive delta and a
   requirement gap. Both gates then apply, and neither substitutes for the
   other.
-- **[CHK-16]** A tool whose action is itself a grant of access —
-  `share_doc(doc, outsider)` reads the document, then opens its ACL — MUST
-  be declared as two contracts, a fetch and a release, each separately
-  checked. One contract covering both leaves nothing simple enough to rule
-  on.
 
 ## 4. Tool contracts
 
@@ -183,7 +188,6 @@ requirements and its routing tags.
   check, or reach the log. Their sole use is authority routing.
 - **[CFG-5]** A contract MAY carry either of `delta` and `requires`, both,
   or neither. A call with both is checked on both.
-
 - **[CFG-14]** Contracts may be **static**, **static with placeholders**, or
   **dynamic**. A dynamic resolver mapping an argument to a reader set — a
   document to its ACL's readers, a recipient to the readers behind it — MUST
@@ -210,12 +214,27 @@ requirements and its routing tags.
 - **[RMD-5]** Enumeration MUST be total. The alternative bound is enforced
   at load: a registry whose worst case would exceed the planner's cap is
   refused as a configuration-shape error. Runtime truncation is forbidden.
+- **[RMD-15]** The list MUST be ordered least-mandate-first: a plan whose
+  authorities' ceilings barely cover the gap precedes one drawing on
+  broader power, so the agent reaches the least powerful entity that can
+  help before a stronger one. Where two plans' mandates are incomparable
+  the relative order is unspecified. Ordering is presentation only, and
+  the enumeration stays total per `RMD-4`.
 - **[RMD-6]** An authority's denial or abstention consumes only the plan it
   was consulted for. Sibling plans stay offered, so an advertised
   alternative is always executable.
 - **[RMD-7]** Re-proposal is bounded by the harness's blocked-proposal
-  budget per rendered call, charged when a block's offers are minted. It
-  MUST NOT be bounded by denials.
+  budget per rendered call, charged when a block's offers are minted. The
+  budget is spam control on the agent, not a count of denials: a denial
+  bites through `RMD-16`, by excluding the denying authority's plan, and
+  never by shrinking the budget.
+- **[RMD-16]** A denial is sticky for exactly its rendered call: once an
+  authority has denied a plan for a rendered call — tool plus canonical
+  digest — no later block of that same rendered call in the trajectory may
+  offer that authority's plan again. Sibling plans stay offered per
+  `RMD-6`; changed arguments change the digest and lift the exclusion. An
+  abstention — including the timeout and error cases of `EXT-1` — is not a
+  denial and does not stick.
 - **[RMD-8]** Pending offers die with their turn. A plan execution MUST be
   re-validated against the live state it lands in: an offer whose block
   re-derives unchanged executes, one the state has moved past is refused by
@@ -232,15 +251,19 @@ requirements and its routing tags.
 | failed cap | registered tools whose restrictive delta drops the offending readers | live |
 | unmet attention mark | authorities attending the mark | live |
 | narrowing | the acceptance plan | live |
-| unresolved Unknown | registered casts whose declared targets could resolve it | live, never surfaced as a plan object |
+| an Unknown a check consumes | registered casts, attempted by the runtime per `CHK-16` | live, never surfaced as a plan object |
 | any gap curable by a redacted argument | input-sanitizer substitutions | design direction |
 
 - **[RMD-9]** A **nonempty** list asserts that a plan exists relative to the
   registered configuration and, where dynamic resolvers contribute, their
   answers at check time. It does not assert that execution succeeds.
-- **[RMD-10]** An **empty** list asserts that no plan exists, on the same
-  clock. The assertion is relative to the registered configuration and
-  current resolver answers.
+- **[RMD-10]** An **empty** list asserts that no plan exists — evaluated
+  at the same instant as `RMD-9`, against the registered configuration,
+  the resolver answers current at check time, and the denials recorded
+  for this rendered call (`RMD-16`). A resolver answering differently
+  later does not retroactively falsify it. The assertion concerns
+  requirement gaps: an `unestablished` entry offers no plan by design,
+  since a fact rather than a plan clears it (`CHK-16`).
 - **[RMD-11]** The acceptance plan is always available for a narrowing, from
   no registry entry, because it grants nothing. A narrowing block is
   therefore never terminal, and the emptiness assertion of `RMD-10` concerns
@@ -275,9 +298,10 @@ requirements and its routing tags.
   - **attends** — the attention marks whose demands this authority's rulings
     satisfy.
 - **[AUT-4]** A single ruling by an attending authority MAY cover both a
-  label or history gap and an attention demand on the same call. A deployer
-  wanting two independent reviews declares two marks attended by different
-  authorities.
+  label or history gap and an attention demand on the same call. One
+  reviewer therefore means one review: forcing a second, independent pair
+  of eyes on the same call takes a second attention mark attended by a
+  different authority.
 - **[AUT-5]** Accepting a narrowing MUST NOT be a mandate power. A deployer
   wanting a human on expensive narrowings attaches an attention mark to the
   narrowing tool.
@@ -291,20 +315,18 @@ requirements and its routing tags.
   consulted.
 - **[AUT-9]** Trust, audience and effects are checked currencies and MUST
   NOT double as routing keys.
-- **[AUT-10]** Soundness is tag-independent; only completeness is
-  tag-dependent. A mis-tagged catalog may route a gap to the wrong authority
-  — who still cannot exceed their mandate — or fail to route it, producing a
-  spuriously terminal block.
-- **[AUT-11]** An in-process `builtin` implementation is legal only for a
-  mandate with no cover ceilings. HITL is a resolver channel, not a distinct
-  kind of authority.
-- **[AUT-12]** **The response-sink bar.** Where the trajectory is restricted
-  enough that showing content to the user is itself a release, no ruling
-  issued by the end user may cover any requirement gap of that release,
-  whatever mandate the user otherwise holds.
-
-**Out of scope in this version.** The contract governing the assistant's
-reply and how it enters the check pipeline. Only `AUT-12` is normative.
+- **[AUT-10]** Tags cannot break soundness, only coverage. A mis-tagged
+  catalog may route a gap to an authority that cannot help — who still
+  cannot exceed their mandate — or route it to no one, so the worst a
+  mis-tagging produces is a block reported terminal while a competent
+  authority sits unconsulted.
+- **[AUT-11]** **The response-sink bar.** Where tool credentials are
+  broader than the end user's own read rights — a service account, a
+  confining harness — the run's audience can exclude the user, and showing
+  content to the user is then itself a release. No ruling issued by the
+  end user may cover any requirement gap of that release, whatever mandate
+  the user otherwise holds. Where tool credentials equal the user's
+  rights, the audience never excludes the user and the bar is vacuous.
 
 ## 7. Rulings — `RUL`
 
@@ -328,26 +350,35 @@ reply and how it enters the check pipeline. Only `AUT-12` is normative.
   together. Consequently nothing can intervene between approval and
   dispatch, an approval cannot cover a swapped call, an approval cannot be
   replayed, and the decision trail is reconstructible from the log alone.
-- **[RUL-6]** An acceptance is **informed**: a plan carrying an acceptance
-  MUST execute only in a round after the one that surfaced its offer. An
-  acceptance authored in the same assistant response that triggered the
-  offer predates it and MUST be refused. Ruling-only plans are not so gated.
+[review] we need to finalize the branch vs atomic plan situation. it is blurry now 
+- **[RUL-6]** An acceptance is **informed**: the agent must have seen the
+  offer before accepting it. A plan carrying an acceptance therefore MUST
+  execute in a later round than the one that surfaced its offer; an
+  acceptance written in the same assistant response that triggered the
+  block was authored before the offer existed and MUST be refused. Plans
+  carrying only rulings are not gated this way — the deciding authority
+  saw the staged review either way.
 - **[RUL-7]** Authorities MUST rule on the engine-rendered call plus
-  provenance, never on the agent's paraphrase.
+  provenance, never on the agent's paraphrase. Concretely, an approval UI
+  or resolver payload presents the tool name and resolved arguments as the
+  engine will dispatch them, with each referenced value's label and
+  origin; the agent's own account of what it is doing — the sentence a
+  confused agent writes under injected instructions — never reaches the
+  authority as the thing to approve.
 - **[RUL-8]** **The staged review.** What crosses to the authority is the
   call's identity — tool plus canonical digest, binding the resolved
   arguments — and its typed context: the trajectory label fold at review
   time, each referenced value's label and provenance, and the gaps. The
   context MUST be persisted verbatim on the resulting ruling, so the log
   replays the review rather than a hash of hidden state.
-- **[RUL-9]** Argument **payload** bytes MUST NOT cross to an authority. The
-  one call-derived exception is the recipients of the proposed release,
-  which `RUL-8` requires to cross as a `Gap::Includes`: they are the subject
-  the authority authorizes, and without them no ruling could be made. The
-  full canonical rendered-call view requires leaf-level provenance
-  discovery, which no implementation performs; without it, showing literals
-  would show any admitted value bytes the model copied into them. *Design
-  direction.*
+- **[RUL-9]** The staged review carries the rendered call's argument
+  payload: an authority judging `send_email(text, recipient)` sees the
+  text it is asked to release. Authorities sit in the deployer's trusted
+  base per `THR-3`, so the review crossing to its authority is disclosure
+  to a trusted judge, not a flow the algebra checks; a deployer unwilling
+  to show an authority the bytes it judges should not register that
+  authority over those calls. The recipients of a proposed release cross
+  typed as the `Gap::Includes` subject of `RUL-8` in any case.
 - **[RUL-10]** No grant object appears in configuration or on any wire. The
   public vocabulary is mandates, rulings and log records.
 
@@ -367,21 +398,35 @@ reply and how it enters the check pipeline. Only `AUT-12` is normative.
   bytes. The substituted call is checked with the derivation's declared
   label standing in for the raw argument's contribution; the trajectory
   label is untouched and the application is logged as a governance event.
-  This protects the sink and cannot un-leak the context. *Design direction:
-  the loader MUST refuse a `tool_input` registration rather than carry an
-  inert one.*
-- **[SAN-4]** A sanitizer's mandate binds the one transition it may claim.
-  The transition MUST move audience only; trust never rises through a
-  sanitizer.
+  This protects the sink and cannot un-leak the context. *Design
+  direction*: tool-input application is not implemented yet. Until it is,
+  the loader MUST refuse a configuration registering `on = ["tool_input"]`
+  rather than accept a sanitizer it would never apply.
+- **[SAN-4]** A sanitizer's mandate binds the one transition it may claim,
+  declared on one dimension as a `from` and a `to`. The raw value MUST satisfy
+  the transition's `from` before the `to` applies. The `to` is fixed at
+  registration: a sanitizer does not decide its derivation's label per
+  value, as a resolver-implemented cast does under `SAN-8`, so the declared
+  `to` is the transition's own ceiling. Trust and audience are bound on the
+  same terms.
 - **[SAN-5]** A mandate binds a transition, not the information it is
   claimed over. Scoping mandates by information type is open work.
 - **[SAN-6]** Registering a sanitizer vouches for its implementation. It
   verifies nothing about its output.
+
+Implementations are `builtin` or `resolver` per `CFG-15`. The builtins to
+expect are the boring ones: a scrubber that drops API keys and tokens from
+a fetched body, an email-address redactor. Registering either kind is the
+vouching act of `SAN-6`.
+
+### 8.1 Casts
+
 - **[SAN-7]** A **cast** resolves an Unknown dimension to a concrete state.
   It is either **constant** or **resolver-implemented**, never both.
 - **[SAN-8]** A resolver-implemented cast MUST declare the set of states it
   may cast to. The ceiling keeps a sloppy or compromised classifier from
   becoming a laundering endpoint.
+
 
 ## 9. Effects and history — `LOG`
 
@@ -393,14 +438,19 @@ reply and how it enters the check pipeline. Only `AUT-12` is normative.
 - **[LOG-3]** **Governance events** are authority rulings, the dispatches
   that consume them, acceptances, sanitizer applications, casts, and
   boundary events.
-- **[LOG-4]** A **boundary event** marks and never gates. The engine appends
-  one at the end of each assistant turn, at fork, and at merge.
+- **[LOG-4]** A **boundary event** is a mark the engine appends at the end
+  of each assistant turn, at fork, and at merge. It never gates a flow
+  itself; it lets later reads — offer expiry per `RMD-8`, the informed
+  acceptance of `RUL-6`, audit — tell which events fell inside which turn
+  and branch.
 - **[LOG-5]** The log is consulted in exactly four ways: history
   requirements, ruling validity, **lifecycle validity** — whether a dispatch
   is still open, whether a child has already returned — and audit. Every
   other read is a projection rather than a consultation: the label and the
   model-visible transcript are views of the log per `IMP-2`, the log's own
-  state in another shape.
+  state in another shape. Lifecycle state is recomputable from the log
+  exactly as a view is; it sits on the consultation side because its reads
+  refuse admissions, and a projection never gates anything.
 - **[LOG-6]** Every history check is **kind-containment only**. `prior(k)`
   and `no_prior(k)` ask whether a matching effect exists, never how many or
   how large.
@@ -465,20 +515,22 @@ reply and how it enters the check pipeline. Only `AUT-12` is normative.
   its relabel fully clears the narrowing, or the sanitizer composed with
   acceptance of exactly the residual narrowing. A sanitizer whose relabel
   changes nothing about the merged outcome MUST NOT be offered.
-- **[BRN-13]** A trust narrowing crosses only by acceptance, since audience
-  is the only sanitizer territory.
-- **[BRN-14]** A return whose label has an Unknown dimension is
-  **unresolved** rather than narrowing. The check names the values to cast
-  and offers no plans until they resolve.
+- **[BRN-13]** A narrowing on a dimension that no applicable sanitizer's
+  mandate transitions crosses only by acceptance.
+- **[BRN-14]** A return whose label has an Unknown dimension resolves
+  before it merges, per `CHK-16`: the runtime attempts the registered
+  casts, and what cannot be established blocks the merge with the values
+  named `unestablished` and no plans offered.
 - **[BRN-15]** A policy-bound `return_sanitizer` crosses every return
   unconditionally and is not part of the plan choice.
 - **[BRN-16]** A raw return that narrows nothing merges without a block.
 
 ### 10.1 Structured quarantined branches
 
-**Design direction.** The trust-bearing transformer this needs — the
-quarantine-exit **attestation** — is not in the current four-kind dialect,
-whose sanitizers are audience-only.
+**Design direction.** A sanitizer's transition is claimed over the bytes it
+derives. The quarantine-exit **attestation** claims something else — that
+extracted structure stands for what it was extracted from — and no
+registered kind makes that claim today.
 
 A child handles suspicious content and returns through `submit_result` with
 a pre-declared structured output.
@@ -496,9 +548,10 @@ a pre-declared structured output.
 - **[UNK-2]** Unknown is absorbing under the fold. One Unknown value makes
   the run's dimension Unknown.
 - **[UNK-3]** A requirement that **consumes** an Unknown dimension MUST NOT
-  pass. The check MUST report which values are unresolved, and MUST NOT
-  return a blanket Unknown result or a failure verdict: an unresolved
-  dimension is a missing fact.
+  pass. Resolution is attempted first per `CHK-16`; what remains
+  unestablished is reported by value in the block's `unestablished` slot,
+  never as a blanket Unknown result or a bare failure verdict: an
+  unestablished dimension is a missing fact, and the report names it.
 - **[UNK-4]** A call whose requirements consume no Unknown dimension
   proceeds. An Unknown run fails closed at the sinks that care and nowhere
   else.
@@ -578,15 +631,16 @@ tags = ["finance"]           # jurisdiction; omitted scope = every call
 
 [authority.implementation]
 resolver = { url = "https://approver.corp/rule", timeout_ms = 30000 }
-# resolver = { channel = "hitl" }  # same authority, human elicitation
-# builtin  = "approve"             # in-process; cover-free mandates only
+# builtin = "hitl"                 # same authority, human elicitation
+# builtin = "approve"              # in-process auto-approval
 
 [[sanitizer]]
 name = "pii-redactor"
 on   = ["tool_output"]
 
-[sanitizer.mandate]
+[sanitizer.mandate]                       # one transition, keyed by dimension
 audience = { from = { includes = ["finance"] }, to = { exactly = ["public"] } }
+# trust  = { from = "suspicious", to = "trusted" }   # same terms, other dimension
 
 [sanitizer.implementation]
 builtin = "redact-email"
@@ -622,15 +676,18 @@ Whatever surface ships MUST keep:
   naming the eligible authorities where a plan carries a ruling.
 - **[CFG-15]** **Implementations are `builtin` or `resolver`**, a closed
   set: in-process, or dynamic behind a registered endpoint. A sanitizer
-  declares where it may apply (`on`) and its audience-only transition
-  (`mandate`). Per `AUT-11`, HITL is a resolver channel rather than a
-  distinct kind of authority.
-- **[CFG-17]** At most **one dimension** may be declared pending-cast
+  declares where it may apply (`on`) and its transition (`mandate`). HITL
+  is the reserved builtin `"hitl"` — the harness hosts the elicitation,
+  and no channel concept exists. A mandate's powers do not depend on the
+  implementation behind them: wiring `builtin = "approve"` to a covering
+  mandate is a deliberately open gate, legitimate per `THR-3` and visible
+  in review.
+- **[CFG-16]** At most **one dimension** may be declared pending-cast
   (`delta = { trust = "unknown" }`), and a `requires` on that same dimension
   is a load error — the requirement would evaluate before the resolution
   that establishes it. `"unknown"` is reserved, so a trust rank of that name
   is refused.
-- **[CFG-19]** A `[child] return_sanitizer` binding is validated at load:
+- **[CFG-17]** A `[child] return_sanitizer` binding is validated at load:
   the named sanitizer MUST exist and MUST carry the `tool_output` point.
 
 Contract language leads with `requires` as a surface convention; a delta
@@ -651,7 +708,7 @@ The interfaces that need specifying:
 | interface | carries | today |
 |---|---|---|
 | authority resolver | a staged review (`RUL-8`), returns a ruling or an abstention | `url` + `timeout_ms` in config; payload unspecified |
-| HITL channel | the same staged review, through human elicitation | `channel = "hitl"`; transport unspecified |
+| HITL elicitation | the same staged review, through human elicitation | `builtin = "hitl"`; transport unspecified |
 | cast resolver | a value's identity and provenance, returns a state within `may_cast` | `url` + `timeout_ms`; payload unspecified |
 | sanitizer resolver | a value, returns a derivation under the declared transition | unspecified |
 | membership resolver | a recipient or group, returns a reader set | design direction; see `LBL` |
@@ -661,7 +718,7 @@ timeout. Failure semantics are already fixed:
 
 - **[EXT-1]** An external that times out, answers with an error, or answers
   malformed MUST contribute no decision: an abstention for an authority, a
-  failed derivation for a sanitizer, an unresolved dimension for a cast. The
+  failed derivation for a sanitizer, an unestablished dimension for a cast. The
   block or the Unknown stands. No external failure may be read as an
   approval, and an unreachable authority MUST be indistinguishable in effect
   from one that abstained.

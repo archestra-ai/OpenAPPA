@@ -8,12 +8,7 @@ like.
 
 `spec.md` is authoritative where the two differ; rule ids below point into
 it. The dialect here tracks the spec, and the reference implementation
-currently lags this revision in three spots: it still reads `can_reduce`
-where the surface says `mandate`, still parses a `[[preamble]]` table, and
-still accepts a per-tool `output_sanitizer` binding — `engine.md` keeps the
-full inventory of what is specified but not implemented. A policy written
-to this page does not load against the current binary until that catch-up
-lands.
+currently lags this revision.
 
 ```toml
 version = 1
@@ -71,11 +66,11 @@ registered resolver does that mapping, and registering one puts it in your
 trusted base (`CFG-14`).
 
 **Does one contract cover two flows?** `share_doc(doc, outsider)` reads the
-document *and* opens it to the outsider in one call. As one contract it
-carries a delta for the read and a release requirement for the outsider at
-once, so an authority asked to cover its gap answers two different
-questions — may the agent hold this document, and may the outsider see
-it — with one yes. Split it (`CHK-16`):
+document *and* opens it to the outsider in one call. That is legal as one
+contract — both gates apply per `CHK-15` — but the authority then covers a
+release whose content the call has not fetched yet, so its ruling is over
+a promise rather than bytes the staged review can show. Splitting is the
+reviewable shape:
 
 ```toml
 [[tool]]
@@ -104,12 +99,16 @@ as the answer to "what is the worst this desk can approve".
 **Does a sanitizer claim more than its implementation does?** Registering
 one vouches for its implementation and verifies nothing (`SAN-6`). The
 engine enforces that a derivation came from the registered implementation
-and wears exactly the declared `to` audience. It cannot check that the
-content is clean.
+and wears exactly the declared `to`. It cannot check that the content is
+clean. Read a `trust` transition with the most suspicion of anything on
+this page: `trust = { from = "suspicious", to = "trusted" }` says every
+value routed through this transform comes out trusted, whoever routed it
+and whatever it contained, and the log will record the transition rather
+than a reviewer.
 
 ## Tools
 
-A `[[tool]]` declares what a successful call folds into the run's label
+A `[[tool]]` declares what its admitted result folds into the run's label
 (`delta`), what outer-world effects it commits (`effects`, the tool's
 `emits`), and what must already hold before it may run (`requires`). Only
 `name` is required.
@@ -193,49 +192,55 @@ tags = ["finance"]                             # omitted scope = every call
 
 [authority.implementation]
 resolver = { url = "https://approver.corp/rule", timeout_ms = 30000 }
-# resolver = { channel = "hitl" }   # same authority, human elicitation
-# builtin  = "approve"              # in-process; cover-free mandates only
+# builtin = "hitl"                  # same authority, human elicitation
+# builtin = "approve"               # in-process auto-approval
 ```
 
 A mandate that grants no power is a loud load error (`AUT-6`), and an
 `implementation` is required, since an authority that cannot rule is inert.
-The in-process `builtin = "approve"` is legal only for a mandate with no
-cover ceiling (`AUT-11`): the one competence a policy may grant itself is
-clearing what it can fully see, not vouching trust or readers it cannot.
+What a mandate may hold does not depend on the implementation behind it:
+`builtin = "approve"` wired to a covering mandate is an auto-approved gate
+the deployer opened on purpose, and reading mandates beside their
+implementations is exactly what this review is for.
 
 A `resolver` endpoint is a privileged sink. It receives the call's identity
-— tool name and canonical digest — and the typed review context: the label
-fold at review time, each referenced argument value's label and provenance,
-and the gaps it would clear, including the recipients of the proposed
-release. It never receives the tool result body or the non-recipient
-argument payload (`RUL-8`, `RUL-9`). The context is persisted verbatim on
-the ruling it produces, so the log replays the review itself. Its answer is
-authorization data, so point it only at a service you trust, over a network
-you trust.
+— tool name and canonical digest — the rendered argument payload, and the
+typed review context: the label fold at review time, each referenced
+argument value's label and provenance, and the gaps it would clear,
+including the recipients of the proposed release (`RUL-8`, `RUL-9`). The
+context is persisted verbatim on the ruling it produces, so the log replays
+the review itself. Its answer is authorization data and the review shows it
+the bytes it judges, so point it only at a service you trust with both,
+over a network you trust.
 
 ## Sanitizers
 
-A `[[sanitizer]]` declares an audience-only transition a value may take
-through a registered transform. Trust is never sanitizer territory and
-there is no field here to raise it (`SAN-4`). The reason is what the
-interface hands the implementation, not doubt about the implementation: a
-sanitizer receives bytes and returns bytes, so its mandate can bind a
-claim about what the derivation discloses. Trust is a fact about
-provenance — what shaped the value — which no inspection of the bytes can
-witness, so trust moves only through the interfaces that see provenance: a
-cast at ingress, a ruling per dispatch, and one day the quarantine-exit
-attestation over declared structure (`spec.md` §10.1).
+A `[[sanitizer]]` declares one transition a value may take through a
+registered transform, written as a `from` and a `to` on a single dimension
+(`SAN-4`). The raw value has to satisfy the `from` before the `to` applies,
+and the `to` is whatever you registered, so a sanitizer never picks its
+derivation's label per value the way a cast resolver does. Trust and
+audience are declared on the same terms: `audience = { from = ..., to = ...
+}` for a redactor, `trust = { from = "suspicious", to = "trusted" }` for a
+transform that strips the steering out of a fetched page.
 
-The verifier that clears a shady fetch is therefore a cast, not a
-sanitizer: declare the source pending-cast (`delta = { trust = "unknown"
-}`) and register the verifier — a classifier or a human behind the
-resolver — with `trusted` inside its declared ceiling. The two externals
-answer different questions and neither displaces the other. A cast answers
-*what is this value*, filling a never-established dimension without
-changing a byte; a sanitizer answers *what may leave*, deriving a
-narrower-audience value at the crossing. They compose: a pending-cast
-fetch inside a child is cast-resolved at admission, and the child's return
-can still cross through a sanitizer.
+That second form is a real power and reviewing it is the point of this
+page. Registering it says every derivation this transform produces is
+trusted — for any value anyone routes through it, and whatever the
+transform missed on that value (`SAN-5`, `SAN-6`). It also buys a thinner
+record than a ruling does: the log names the transition and the sanitizer,
+so a deployment that has to show which person cleared which value wants an
+authority instead, and one that wants a value cleared once for all
+downstream use wants the sanitizer.
+
+A cast is the other instrument that establishes trust, and it answers a
+different question. A cast fills a never-established dimension without
+changing a byte — declare the source pending-cast (`delta = { trust =
+"unknown" }`) and register a classifier or a human behind the resolver,
+with `trusted` inside its declared ceiling — while a sanitizer derives a
+new value at a crossing. They compose: a pending-cast fetch inside a child
+is cast-resolved at admission, and the child's return can still cross
+through a sanitizer.
 
 `on` says where a sanitizer may apply, and the only live token is
 `tool_output`: it applies where the host can withhold the raw output from
@@ -250,8 +255,9 @@ name = "pii-redactor"
 on   = ["tool_output"]
 
 [sanitizer.mandate]
-# applies only when the source audience satisfies `from`; produces exactly `to`
+# applies only when the source label satisfies `from`; produces exactly `to`
 audience = { from = { includes = ["finance"] }, to = { exactly = ["public"] } }
+# trust  = { from = "suspicious", to = "trusted" }   # the other dimension
 
 [sanitizer.implementation]
 builtin = "redact-email"
@@ -274,8 +280,9 @@ and cross raw, or cross any registered `tool_output` sanitizer's derivation
 whose `from` the child fold satisfies, alone where its relabel fully clears
 the narrowing, composed with acceptance of exactly the residual otherwise.
 So "fetch the ticket in a branch" is a plan the model weighs at the merge,
-not a route wired into any tool. A trust narrowing survives every
-sanitizer, so it crosses only by acceptance or not at all (`BRN-13`).
+not a route wired into any tool. A narrowing on a dimension none of the
+registered sanitizers transitions survives all of them, so it crosses only
+by acceptance or not at all (`BRN-13`).
 
 A deployment that never wants a raw crossing takes the choice away:
 
@@ -358,7 +365,7 @@ name = "human_in_the_loop_approver"                     # audience-cover, no sco
 [authority.mandate]
 can_add_readers = { may_add = ["public"] }
 [authority.implementation]
-resolver = { channel = "hitl" }
+builtin = "hitl"
 ```
 
 The run starts at `{audience: public, trust: trusted}`.

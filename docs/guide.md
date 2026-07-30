@@ -32,8 +32,8 @@ sanitizer's names the one label transition it may claim.
 
 More restrictive, never less.
 
-A tool's contract declares its `delta` — what a successful call does to the
-run's label. Every delta restricts: it intersects the readers, lowers the
+A tool's contract declares its `delta` — what taking the call's result
+into the run does to the label. Every delta restricts: it intersects the readers, lowers the
 trust, or both. No delta widens. So reading the internal CRM makes the run
 internal, and reading something suspicious makes the run suspicious. Nothing
 afterwards makes it public or trusted again — no tool, no approval, no
@@ -61,15 +61,15 @@ all.
 
 ## Reading data costs the agent reach
 
-APPA runs two checks on every call. The first asks whether the flow is
-legal. The second asks whether it is worth it.
+APPA runs two checks on every call. One asks whether the flow is legal.
+The other asks whether it is worth it.
 
 Nothing leaks when an agent reads the internal CRM. But the run is internal
 from that moment on, and it stays internal — so every later step negotiates
 from a worse position. Sends that would have gone through now need approval.
 Some sinks are closed for good.
 
-Without the second check the agent finds that out three steps later, at a
+Without the worth-it check the agent finds that out three steps later, at a
 send that no longer works, with the data already in its context and nothing
 to be done about it. So APPA stops the call *before* the fetch and tells the
 agent exactly what it is about to give up. APPA calls this a **narrowing**.
@@ -86,16 +86,19 @@ When APPA refuses a call it returns the remedies: get an approval, clean the
 data first, do a missing step first, accept the narrowing. Most are
 executable objects with an id, so the agent runs one directly rather than
 guessing at a sequence; the rest name a call the agent makes for itself and
-gets checked on like any other. Every remedy comes from something you
-registered — an authority that can approve, a sanitizer that can clean, a
-tool that does the missing step — and the engine can therefore enumerate
-them all.
+gets checked on like any other. Every remedy but one comes from something
+you registered — an authority that can approve, a sanitizer that can
+clean, a tool that does the missing step — so the engine can enumerate
+them all; the exception is accepting the narrowing, which grants nothing
+and needs no registration.
 
 A nonempty list says a route exists. It does not promise the route works:
 the authority can still decline. An empty list is a proof: under this
 configuration, no route exists, and the agent can stop and say so instead of
 burning turns on the same call. The proof is scoped to the configuration in
-force, and says nothing about what a different one would allow.
+force, to what the registered resolvers answered at that moment, and to any
+denial already on record for this exact call; it says nothing about what a
+different configuration would allow.
 
 ## One fetch, two endings
 
@@ -150,11 +153,12 @@ agent's own call and granted no permission to disclose anything.
 The remedy is a ruling. What reaches the approver is APPA's own account of
 the call rather than the agent's: which tool, bound to these exact arguments
 by a digest, going to this auditor, over data that came from the CRM at this
-label. The message body is not in it — an approver rules on the disclosure,
-and shipping the payload would hand every approval endpoint the data the
-policy is protecting. On approval the mail goes and `egress` lands in the
-log. The run's label does not change, so a second auditor email needs a
-second approval.
+label — the message body included, since an approver asked to release a
+text has to read it. An approver is part of the deployment's trusted base:
+register one you would show the data to, because ruling on a disclosure
+means seeing it. On approval the mail goes and `egress` lands in the log.
+The run's label does not change, so a second auditor email needs a second
+approval.
 
 ## You don't have to annotate every tool
 
@@ -183,8 +187,8 @@ tool call ever blocks. Unknown fails closed only at a `requires` that
 consumes it, and a narrowing stop only fires on a declared `delta`, so a
 policy of bare names refuses exactly one thing — a call to a tool that is
 not registered. A host that branches adds one stall: a child's return
-carries Unknown, and an Unknown return holds as unresolved until a cast
-establishes it. The first requirement you write is the first place the
+carries Unknown, and the merge holds until a registered cast establishes
+it — or blocks naming the value, where no cast can. The first requirement you write is the first place the
 engine can say no.
 
 To resolve an Unknown you register a **cast**: a rule for what unknown
@@ -257,10 +261,10 @@ cannot exceed.
 
 | what you run today | what it becomes | its ceiling |
 |---|---|---|
-| a permission prompt, or an auto-approve mode | an authority on the `hitl` channel — a resolver today, since the reference implementation has no queue to put a person in yet | its mandate: which gaps it may cover, up to what rank or reader set |
+| a permission prompt, or an auto-approve mode | an authority implemented as `builtin = "hitl"` — abstaining today, since the reference implementation has no queue to put a person in yet | its mandate: which gaps it may cover, up to what rank or reader set |
 | a model judging whether an action should proceed | an authority resolver | the same mandate |
 | a model or classifier judging whether content is trustworthy | a cast resolver | `may_cast` — the states it may resolve to |
-| a trained PII or injection detector that redacts | a sanitizer | its one declared audience transition |
+| a trained PII or injection detector that redacts | a sanitizer | its one declared transition — the audience the derivation may reach, or the trust it may carry |
 | a regex or allowlist output filter | a sanitizer | the same |
 | ifs that gate a flow between two systems | a tool contract | none needed; the algebra does it |
 
