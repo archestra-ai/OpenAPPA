@@ -94,13 +94,10 @@ the document.
 | remedy-plan ordering and sticky denials | `RMD-15`, `RMD-16` |
 | external interface protocols | §13, placeholder |
 | a durable log — `SessionStore` is in-memory and `Mediator` owns it directly, so there is no pluggable destination either | `IMP-3`, `LOG-9` |
-| a live HITL queue — `AuthorityBackend::Hitl` abstains on every request, fail-closed per `EXT-1` | `CFG-15` |
+| a live HITL queue — the `hitl` builtin abstains on every request, fail-closed per `EXT-1` | `CFG-15` |
 | dynamic contracts — `RecipientSpec` has only `Static` and `Placeholder`, and `RawTool` denies unknown fields, so the dialect cannot express a resolver-backed recipient | `CFG-14` |
 | one admission choke point — at-most-once and the dispatch guard are each enforced at two call sites | `IMP-4` |
 
 The inverse gap — code the spec no longer describes, removal pending: the
-per-tool `output_sanitizer` binding, the `[[preamble]]` table (the
-transcript head is host configuration per `POS-6`), the `can_reduce`
-key the surface now spells `mandate` (`CFG-15`), and the
-`resolver = { channel = "hitl" }` spelling HITL now writes as
-`builtin = "hitl"` (`CFG-15`).
+per-tool `output_sanitizer` binding and the `[[preamble]]` table (the
+transcript head is host configuration per `POS-6`).

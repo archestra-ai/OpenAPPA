@@ -121,11 +121,15 @@ impl AuthorityRequest {
     }
 }
 
-/// The in-process `approve` builtin — the one competence a policy grants itself. It approves the
-/// gaps put to it (cover-free by construction: the load lint refuses it a cover-bearing mandate).
+/// The compiled-in authority implementations (spec `CFG-15`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuiltinAuthority {
+    /// The one competence a policy grants itself: it approves the gaps put to it (cover-free by
+    /// construction — the load lint refuses it a cover-bearing mandate).
     Approve,
+    /// Human elicitation, hosted by the harness. v1 has no live queue, so it fails closed (a
+    /// bounded async queue is a follow-up); it never silently approves.
+    Hitl,
 }
 
 impl BuiltinAuthority {
@@ -133,6 +137,7 @@ impl BuiltinAuthority {
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "approve" => Some(BuiltinAuthority::Approve),
+            "hitl" => Some(BuiltinAuthority::Hitl),
             _ => None,
         }
     }
@@ -147,9 +152,6 @@ pub enum AuthorityBackend {
         timeout: Duration,
         client: HttpClient,
     },
-    /// Human elicitation. v1 has no live queue, so it fails closed (a bounded async queue is a
-    /// follow-up); it never silently approves.
-    Hitl,
 }
 
 /// The wire answer a resolver returns: `{"ruling": "approve"|"deny", "reason": "..."}`.
@@ -178,7 +180,7 @@ impl AuthorityBackend {
                     None => AuthorityAnswer::Abstain,
                 }
             }
-            AuthorityBackend::Hitl => AuthorityAnswer::Abstain,
+            AuthorityBackend::Builtin(BuiltinAuthority::Hitl) => AuthorityAnswer::Abstain,
         }
     }
 }
@@ -531,7 +533,9 @@ mod tests {
     #[tokio::test]
     async fn hitl_fails_closed() {
         assert_eq!(
-            AuthorityBackend::Hitl.rule(&authority_request()).await,
+            AuthorityBackend::Builtin(BuiltinAuthority::Hitl)
+                .rule(&authority_request())
+                .await,
             AuthorityAnswer::Abstain
         );
     }

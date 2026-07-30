@@ -40,4 +40,4 @@ delta = {}
 name = "pii-redactor"
 on = ["tool_output"]
 implementation = { builtin = "redact-numbers" }
-can_reduce = { audience = { from = { includes = ["hr"] }, to = { exactly = ["public"] } } }
+mandate = { audience = { from = { includes = ["hr"] }, to = { exactly = ["public"] } } }

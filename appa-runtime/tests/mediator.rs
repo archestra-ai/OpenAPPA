@@ -103,7 +103,7 @@ builtin = "approve"
 [[sanitizer]]
 name = "redact"
 on = ["tool_output"]
-[sanitizer.can_reduce]
+[sanitizer.mandate]
 audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
 [sanitizer.implementation]
 builtin = "redact-email"
@@ -297,7 +297,7 @@ audience = { exactly = ["internal"] }
 [[sanitizer]]
 name = "redact"
 on = ["tool_output"]
-[sanitizer.can_reduce]
+[sanitizer.mandate]
 audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
 [sanitizer.implementation]
 builtin = "redact-email"

@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crate::config::{AuthorityImpl, Config};
-use crate::external::AuthorityBackend;
+use crate::external::{AuthorityBackend, BuiltinAuthority};
 use crate::tool::HttpClient;
 use appa_engine::names::AuthorityName;
 
@@ -26,7 +26,7 @@ pub(crate) fn authority_backends(config: &Config) -> BTreeMap<AuthorityName, Aut
                 timeout: Duration::from_millis(*timeout_ms),
                 client: client.clone(),
             },
-            Some(AuthorityImpl::Hitl) | None => AuthorityBackend::Hitl,
+            None => AuthorityBackend::Builtin(BuiltinAuthority::Hitl),
         };
         backends.insert(authority.name.clone(), backend);
     }
