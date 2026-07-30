@@ -17,7 +17,7 @@ pub use appa_engine::label::Label;
 pub use appa_engine::value::{ToolName, TrajectoryId};
 pub use call::{CallDecision, CallError, CallSession, RemedyDecision};
 pub use config::Config;
-pub use mediator::{ForkedSession, InitError, Mediator, SessionForkError};
+pub use mediator::{ForkedSession, InitError, Mediator, SessionForkError, TranscriptHead};
 pub use tool::{BodyDisposition, RenderedCall, ToolOutcome};
 pub use turn::{
     BeginTurnError, BudgetExhausted, Completion, ForkRequest, Limits, RunBudget, Step, StopReason, Turn, TurnError,

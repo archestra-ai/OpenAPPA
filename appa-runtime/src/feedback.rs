@@ -2,7 +2,7 @@
 //! runtime turn-drive and the SDK so both surfaces are byte-identical.
 
 use appa_engine::check::{Gap, Narrowing, RawBlock};
-use appa_engine::plan::{PlannedBlock, Recommendation, RemedyPlan};
+use appa_engine::plan::{ExecutableRemedyPlan, PlannedBlock, RedispatchEffect, RemedyPlan};
 use serde::Serialize;
 
 /// The trajectory a block's feedback addresses. It fixes two things: how far an acceptance reaches
@@ -30,7 +30,16 @@ struct WireRuling<'a> {
 #[derive(Serialize)]
 struct WireRedispatch<'a> {
     tool: &'a str,
-    reason: &'a str,
+    clears: &'a [Gap],
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    enables_path: bool,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum WireRemedyPlan<'a> {
+    Executable(WirePlan<'a>),
+    Redispatch(WireRedispatch<'a>),
 }
 
 #[derive(Serialize)]
@@ -38,14 +47,12 @@ struct WireBlock<'a> {
     requirement_gaps: &'a [Gap],
     #[serde(skip_serializing_if = "Option::is_none")]
     narrowing: Option<&'a Narrowing>,
-    plans: Vec<WirePlan<'a>>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    redispatch: Vec<WireRedispatch<'a>>,
+    remedy_plans: Vec<WireRemedyPlan<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fork: Option<&'a str>,
 }
 
-fn wire_plans(offers: &[(String, RemedyPlan)]) -> Vec<WirePlan<'_>> {
+fn wire_plans(offers: &[(String, ExecutableRemedyPlan)]) -> Vec<WirePlan<'_>> {
     offers
         .iter()
         .map(|(handle, plan)| WirePlan {
@@ -69,37 +76,38 @@ fn wire_plans(offers: &[(String, RemedyPlan)]) -> Vec<WirePlan<'_>> {
 fn fork_advice<'a>(
     raw: &RawBlock,
     planned: &'a PlannedBlock,
-    offers: &[(String, RemedyPlan)],
+    offers: &[(String, ExecutableRemedyPlan)],
     surface: FeedbackSurface,
 ) -> Option<&'a str> {
     if !matches!(surface, FeedbackSurface::Root { can_fork: true }) || raw.narrowing.is_none() || offers.is_empty() {
         return None;
     }
-    planned
-        .recommendations
-        .iter()
-        .find_map(|recommendation| match recommendation {
-            Recommendation::Fork { reason } => Some(reason.as_str()),
-            Recommendation::Redispatch { .. } => None,
-        })
+    planned.fork_advice.as_deref()
 }
 
-fn payload(raw: &RawBlock, planned: &PlannedBlock, offers: &[(String, RemedyPlan)], fork: Option<&str>) -> String {
+fn payload(
+    raw: &RawBlock,
+    planned: &PlannedBlock,
+    offers: &[(String, ExecutableRemedyPlan)],
+    fork: Option<&str>,
+) -> String {
+    let mut remedy_plans: Vec<WireRemedyPlan> =
+        wire_plans(offers).into_iter().map(WireRemedyPlan::Executable).collect();
+    remedy_plans.extend(planned.plans.iter().filter_map(|plan| match plan {
+        RemedyPlan::Redispatch { tool, effect } => Some(WireRemedyPlan::Redispatch(WireRedispatch {
+            tool: tool.as_str(),
+            clears: match effect {
+                RedispatchEffect::Clears(gaps) => gaps.as_slice(),
+                RedispatchEffect::EnablesPath => &[],
+            },
+            enables_path: matches!(effect, RedispatchEffect::EnablesPath),
+        })),
+        RemedyPlan::Executable(_) => None,
+    }));
     let block = WireBlock {
         requirement_gaps: &raw.requirement_gaps,
         narrowing: raw.narrowing.as_ref(),
-        plans: wire_plans(offers),
-        redispatch: planned
-            .recommendations
-            .iter()
-            .filter_map(|recommendation| match recommendation {
-                Recommendation::Redispatch { tool, reason } => Some(WireRedispatch {
-                    tool: tool.as_str(),
-                    reason,
-                }),
-                Recommendation::Fork { .. } => None,
-            })
-            .collect(),
+        remedy_plans,
         fork,
     };
     serde_json::to_string(&block).expect("the block payload serializes: engine types are Serialize")
@@ -111,12 +119,16 @@ fn payload(raw: &RawBlock, planned: &PlannedBlock, offers: &[(String, RemedyPlan
 pub fn block_feedback(
     raw: &RawBlock,
     planned: &PlannedBlock,
-    offers: &[(String, RemedyPlan)],
+    offers: &[(String, ExecutableRemedyPlan)],
     surface: FeedbackSurface,
 ) -> String {
     let fork = fork_advice(raw, planned, offers, surface);
     let lead = if offers.is_empty() {
-        if planned.recommendations.iter().any(Recommendation::is_curative) {
+        if planned
+            .plans
+            .iter()
+            .any(|plan| matches!(plan, RemedyPlan::Redispatch { .. }))
+        {
             "blocked by policy; run a redispatch prerequisite first, then re-propose this call"
         } else {
             match surface {
@@ -170,17 +182,17 @@ fn acceptance_cost(surface: FeedbackSurface) -> &'static str {
 /// Render the feedback after an authority declined one offer: the denial, then the remaining
 /// sibling plans as the same typed payload shape (no gaps re-listed — the block is unchanged). A
 /// sibling that carries an acceptance re-offers the narrowing, so its cost is named again here.
-pub fn denial_feedback(remaining: &[(String, RemedyPlan)], surface: FeedbackSurface) -> String {
+pub fn denial_feedback(remaining: &[(String, ExecutableRemedyPlan)], surface: FeedbackSurface) -> String {
     if remaining.is_empty() {
         return "the authority declined to authorize this call; no alternative plan remains".to_string();
     }
     #[derive(Serialize)]
     struct WireRemaining<'a> {
-        plans: Vec<WirePlan<'a>>,
+        remedy_plans: Vec<WirePlan<'a>>,
     }
     let plans = wire_plans(remaining);
     let accepts = plans.iter().any(|plan| plan.accepts_narrowing);
-    let payload = serde_json::to_string(&WireRemaining { plans })
+    let payload = serde_json::to_string(&WireRemaining { remedy_plans: plans })
         .expect("the plan payload serializes: engine types are Serialize");
     let cost = if accepts {
         format!(
@@ -247,8 +259,8 @@ mod tests {
         }
     }
 
-    fn plan_with(authority: &str, covers: Vec<Gap>) -> RemedyPlan {
-        RemedyPlan {
+    fn plan_with(authority: &str, covers: Vec<Gap>) -> ExecutableRemedyPlan {
+        ExecutableRemedyPlan {
             id: PlanId::new(0),
             steps: vec![RemedyStep::Authorize(AuthorityName::new(authority))],
             required: vec![RequiredRuling {
@@ -271,10 +283,10 @@ mod tests {
         };
         let planned = PlannedBlock {
             raw: raw.clone(),
-            plans: vec![plan_with("officer", every_gap())],
-            recommendations: vec![],
+            plans: vec![RemedyPlan::Executable(plan_with("officer", every_gap()))],
+            fork_advice: None,
         };
-        let offers = vec![("remedy-7".to_string(), planned.plans[0].clone())];
+        let offers = vec![("remedy-7".to_string(), plan_with("officer", every_gap()))];
         let payload = parsed(&block_feedback(
             &raw,
             &planned,
@@ -296,10 +308,16 @@ mod tests {
         assert!(gaps.iter().any(|g| g["Prior"] == "backup"));
         assert!(gaps.iter().any(|g| g["NoPrior"] == "egress"));
         assert!(gaps.iter().any(|g| g["Attention"] == "signoff"));
-        assert_eq!(payload["plans"][0]["plan_id"], "remedy-7");
-        assert_eq!(payload["plans"][0]["rulings"][0]["authority"], "officer");
-        assert_eq!(payload["plans"][0]["rulings"][0]["covers"].as_array().unwrap().len(), 6);
-        assert_eq!(payload["plans"][0]["accepts_narrowing"], false);
+        assert_eq!(payload["remedy_plans"][0]["plan_id"], "remedy-7");
+        assert_eq!(payload["remedy_plans"][0]["rulings"][0]["authority"], "officer");
+        assert_eq!(
+            payload["remedy_plans"][0]["rulings"][0]["covers"]
+                .as_array()
+                .unwrap()
+                .len(),
+            6
+        );
+        assert_eq!(payload["remedy_plans"][0]["accepts_narrowing"], false);
     }
 
     #[test]
@@ -308,17 +326,15 @@ mod tests {
             requirement_gaps: vec![],
             narrowing: Some(narrowing()),
         };
-        let accept_plan = RemedyPlan {
+        let accept_plan = ExecutableRemedyPlan {
             id: PlanId::new(0),
             steps: vec![RemedyStep::Accept(narrowing())],
             required: vec![],
         };
         let planned = PlannedBlock {
             raw: raw.clone(),
-            plans: vec![accept_plan.clone()],
-            recommendations: vec![Recommendation::Fork {
-                reason: "confine the loss".to_string(),
-            }],
+            plans: vec![RemedyPlan::Executable(accept_plan.clone())],
+            fork_advice: Some("confine the loss".to_string()),
         };
         let offers = vec![("remedy-0".to_string(), accept_plan)];
         let feedback = block_feedback(&raw, &planned, &offers, FeedbackSurface::Root { can_fork: true });
@@ -330,8 +346,8 @@ mod tests {
             payload["narrowing"]["to"]["audience"]["Known"]["Restricted"][0],
             "internal"
         );
-        assert_eq!(payload["plans"][0]["accepts_narrowing"], true);
-        assert_eq!(payload["plans"][0]["rulings"].as_array().unwrap().len(), 0);
+        assert_eq!(payload["remedy_plans"][0]["accepts_narrowing"], true);
+        assert_eq!(payload["remedy_plans"][0]["rulings"].as_array().unwrap().len(), 0);
         assert_eq!(payload["fork"], "confine the loss");
         let payload = parsed(&block_feedback(
             &raw,
@@ -358,10 +374,8 @@ mod tests {
         plan.steps.push(RemedyStep::Accept(narrowing()));
         let planned = PlannedBlock {
             raw: raw.clone(),
-            plans: vec![plan.clone()],
-            recommendations: vec![Recommendation::Fork {
-                reason: "confine the loss".to_string(),
-            }],
+            plans: vec![RemedyPlan::Executable(plan.clone())],
+            fork_advice: Some("confine the loss".to_string()),
         };
         let offers = vec![("remedy-0".to_string(), plan)];
         let payload = parsed(&block_feedback(
@@ -371,7 +385,7 @@ mod tests {
             FeedbackSurface::Root { can_fork: true },
         ));
         assert_eq!(payload["fork"], "confine the loss");
-        assert_eq!(payload["plans"][0]["accepts_narrowing"], true);
+        assert_eq!(payload["remedy_plans"][0]["accepts_narrowing"], true);
         let payload = parsed(&block_feedback(
             &raw,
             &planned,
@@ -403,26 +417,22 @@ mod tests {
         let planned = PlannedBlock {
             raw: raw.clone(),
             plans: vec![
-                plan_with("officer-a", vec![floor.clone()]),
-                plan_with("officer-b", vec![floor.clone()]),
-            ],
-            recommendations: vec![
-                Recommendation::Redispatch {
+                RemedyPlan::Executable(plan_with("officer-a", vec![floor.clone()])),
+                RemedyPlan::Executable(plan_with("officer-b", vec![floor.clone()])),
+                RemedyPlan::Redispatch {
                     tool: ToolName::new("backup"),
-                    reason: "emit the prior".to_string(),
+                    effect: RedispatchEffect::Clears(vec![floor.clone()]),
                 },
-                Recommendation::Redispatch {
+                RemedyPlan::Redispatch {
                     tool: ToolName::new("snapshot"),
-                    reason: "emit the prior".to_string(),
-                },
-                Recommendation::Fork {
-                    reason: "advisory".to_string(),
+                    effect: RedispatchEffect::EnablesPath,
                 },
             ],
+            fork_advice: Some("advisory".to_string()),
         };
         let offers = vec![
-            ("remedy-0".to_string(), planned.plans[0].clone()),
-            ("remedy-1".to_string(), planned.plans[1].clone()),
+            ("remedy-0".to_string(), plan_with("officer-a", vec![floor.clone()])),
+            ("remedy-1".to_string(), plan_with("officer-b", vec![floor.clone()])),
         ];
         let payload = parsed(&block_feedback(
             &raw,
@@ -430,19 +440,28 @@ mod tests {
             &offers,
             FeedbackSurface::Root { can_fork: true },
         ));
-        assert_eq!(payload["plans"].as_array().unwrap().len(), 2);
-        assert_eq!(payload["plans"][0]["plan_id"], "remedy-0");
-        assert_eq!(payload["plans"][0]["rulings"][0]["authority"], "officer-a");
-        assert_eq!(payload["plans"][1]["plan_id"], "remedy-1");
-        assert_eq!(payload["plans"][1]["rulings"][0]["authority"], "officer-b");
-        assert_eq!(payload["redispatch"][0]["tool"], "backup");
-        assert_eq!(payload["redispatch"][1]["tool"], "snapshot");
+        let plans = payload["remedy_plans"].as_array().unwrap();
+        assert_eq!(plans.len(), 4);
+        assert_eq!(plans[0]["plan_id"], "remedy-0");
+        assert_eq!(plans[0]["rulings"][0]["authority"], "officer-a");
+        assert_eq!(plans[1]["plan_id"], "remedy-1");
+        assert_eq!(plans[1]["rulings"][0]["authority"], "officer-b");
+        assert_eq!(plans[2]["tool"], "backup");
+        assert_eq!(plans[2]["clears"].as_array().unwrap().len(), 1);
+        assert!(plans[2].get("enables_path").is_none());
+        assert_eq!(plans[3]["tool"], "snapshot");
+        assert_eq!(plans[3]["enables_path"], true);
         assert!(payload.get("fork").is_none());
 
         let none_planned = PlannedBlock {
             raw: raw.clone(),
-            plans: vec![],
-            recommendations: planned.recommendations.clone(),
+            plans: planned
+                .plans
+                .iter()
+                .filter(|plan| plan.executable().is_none())
+                .cloned()
+                .collect(),
+            fork_advice: planned.fork_advice.clone(),
         };
         let payload = parsed(&block_feedback(
             &raw,
@@ -450,8 +469,9 @@ mod tests {
             &[],
             FeedbackSurface::Root { can_fork: true },
         ));
-        assert_eq!(payload["plans"].as_array().unwrap().len(), 0);
-        assert_eq!(payload["redispatch"][0]["tool"], "backup");
+        let plans = payload["remedy_plans"].as_array().unwrap();
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans[0]["tool"], "backup");
     }
 
     #[test]
@@ -462,8 +482,8 @@ mod tests {
         };
         let remaining = vec![("remedy-1".to_string(), plan_with("officer-b", vec![floor]))];
         let payload = parsed(&denial_feedback(&remaining, FeedbackSurface::Root { can_fork: false }));
-        assert_eq!(payload["plans"].as_array().unwrap().len(), 1);
-        assert_eq!(payload["plans"][0]["plan_id"], "remedy-1");
+        assert_eq!(payload["remedy_plans"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["remedy_plans"][0]["plan_id"], "remedy-1");
         assert!(!denial_feedback(&[], FeedbackSurface::Root { can_fork: false }).contains('\n'));
     }
 

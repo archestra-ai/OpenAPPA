@@ -5,9 +5,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use appa_agent::Agent;
+pub use appa_runtime::TranscriptHead;
 use appa_runtime::store::SessionStore;
 use appa_runtime::tool::{BuiltinTool, DEFAULT_BODY_CAP_BYTES};
-use appa_runtime::wire::{WireMessage, WireTool};
+use appa_runtime::wire::WireTool;
+
 use appa_runtime::{Config, Limits, Mediator, ToolName};
 
 use crate::inference::Inference;
@@ -19,7 +21,7 @@ pub use appa_runtime::tool::{EXECUTE_REMEDY_PLAN, FORK, SUBMIT_RESULT};
 pub struct Budgets {
     pub max_inference_rounds: u32,
     pub max_tool_invocations: u32,
-    pub max_remedy_attempts_per_gap: u32,
+    pub max_blocked_proposals_per_call: u32,
     pub per_external_timeout: Duration,
     pub turn_deadline: Duration,
     pub body_cap_bytes: usize,
@@ -33,7 +35,7 @@ impl Default for Budgets {
         Budgets {
             max_inference_rounds: 16,
             max_tool_invocations: 32,
-            max_remedy_attempts_per_gap: 2,
+            max_blocked_proposals_per_call: 2,
             per_external_timeout: Duration::from_secs(30),
             turn_deadline: Duration::from_secs(120),
             body_cap_bytes: DEFAULT_BODY_CAP_BYTES,
@@ -46,7 +48,7 @@ impl From<Budgets> for Limits {
         Limits {
             max_inference_rounds: budgets.max_inference_rounds,
             max_tool_invocations: budgets.max_tool_invocations,
-            max_remedy_attempts_per_gap: budgets.max_remedy_attempts_per_gap,
+            max_blocked_proposals_per_call: budgets.max_blocked_proposals_per_call,
             per_external_timeout: budgets.per_external_timeout,
             run_deadline: budgets.turn_deadline,
             body_cap_bytes: budgets.body_cap_bytes,
@@ -63,13 +65,17 @@ pub struct Runtime {
 }
 
 impl Runtime {
+    /// `head` is this host's transcript head — the system/developer messages opening
+    /// every model request. It is host configuration, so the gateway takes it from its embedder
+    /// rather than reading it out of the policy.
     pub fn new(
         config: Config,
         inference: Inference,
         builtin_tools: BTreeMap<ToolName, BuiltinTool>,
+        head: TranscriptHead,
     ) -> Result<Runtime, InitError> {
         Ok(Runtime {
-            mediator: Arc::new(Mediator::new(config, builtin_tools)?),
+            mediator: Arc::new(Mediator::new(config, builtin_tools)?.with_transcript_head(head)),
             inference,
             budgets: Budgets::default(),
         })
@@ -93,10 +99,6 @@ impl Runtime {
 
     pub fn budgets(&self) -> &Budgets {
         &self.budgets
-    }
-
-    pub fn preamble(&self) -> &[WireMessage] {
-        self.mediator.preamble()
     }
 
     /// Compatibility tool surface for a root or direct child role.
@@ -132,6 +134,7 @@ mod tests {
                 HttpClient::new(),
             ),
             BTreeMap::new(),
+            TranscriptHead::none(),
         )
         .expect("runtime assembles");
         let names = |is_child| {

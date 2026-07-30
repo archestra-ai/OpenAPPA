@@ -222,51 +222,9 @@ delta = {}
 }
 
 #[tokio::test]
-async fn sanitizer_and_pending_cast_outputs_keep_raw_bodies_confined() {
-    let sanitizer = mediator(
-        r#"
-version = 1
-[[tool]]
-name = "export"
-delta = { audience = { exactly = ["internal"] } }
-output_sanitizer = "pii"
-
-[[sanitizer]]
-name = "pii"
-on = ["tool_output"]
-[sanitizer.mandate]
-audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
-[sanitizer.implementation]
-builtin = "redact-email"
-"#,
-        &[("export", BuiltinTool::Echo("contact bob@corp.com".to_string()))],
-    );
+async fn a_pending_cast_output_keeps_its_raw_body_confined() {
     let tenant = TenantId::new("tenant");
-    let session = sanitizer.create_session(tenant.clone());
-    let mut turn = begin(&sanitizer, &tenant, &session, "export").await;
     let mut budget = RunBudget::default();
-    assert!(matches!(
-        turn.mediate(calls(vec![call("s", "export", "{}")]), &mut budget)
-            .await
-            .unwrap(),
-        Step::Continue
-    ));
-    let log = facts(&sanitizer, &tenant, &session);
-    let admitted = tool_values(&log);
-    assert_eq!(admitted.len(), 1);
-    assert_eq!(admitted[0].0, "contact [redacted-email]");
-    assert_eq!(admitted[0].1.audience, Dim::Known(Audience::Public));
-    assert!(log.iter().any(|fact| matches!(
-        fact,
-        Fact::SanitizerApplied { raw_digest, .. }
-            if raw_digest == &RawResultDigest::of(b"contact bob@corp.com")
-    )));
-    assert_eq!(
-        turn.transcript().unwrap().last(),
-        Some(&WireMessage::tool_result("s", "contact [redacted-email]"))
-    );
-    turn.stop(StopReason::Cancelled).unwrap();
-
     let pending_cast = mediator(
         r#"
 version = 1
@@ -389,6 +347,86 @@ implementation = {{ resolver = {{ url = "{url}" }} }}
     assert!(!log.iter().any(|fact| matches!(fact, Fact::Ruling { .. })));
     assert!(!log.iter().any(|fact| matches!(fact, Fact::DispatchOpened { .. })));
     turn.stop(StopReason::Cancelled).unwrap();
+}
+
+#[tokio::test]
+async fn a_denial_consumes_every_offer_naming_the_denying_authority() {
+    // `RMD-6`: a denial consumes every offered plan naming the denying authority for this rendered
+    // call, so an advertised alternative is always executable. `broad` covers both gaps, so it is
+    // named by both offered plans; denying it must retire both, not just the one consulted.
+    // (An abstention is the complement and stays plan-local — the sibling test above covers it.)
+    let (deny_url, consults, deny_server) = spawn_counting_authority("deny");
+    let policy = format!(
+        r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+[boundary]
+trust = "suspicious"
+[[tool]]
+name = "wire"
+effects = ["spend"]
+delta = {{}}
+[tool.requires]
+trust = "trusted"
+attention = ["signoff"]
+
+[[authority]]
+name = "broad"
+mandate = {{ can_raise_trust_to = "trusted", attends = ["signoff"] }}
+implementation = {{ resolver = {{ url = "{deny_url}" }} }}
+
+[[authority]]
+name = "mark-only"
+mandate = {{ attends = ["signoff"] }}
+implementation = {{ builtin = "approve" }}
+"#
+    );
+    let mediated = mediator(&policy, &[("wire", BuiltinTool::Echo("paid".to_string()))]);
+    let tenant = TenantId::new("tenant");
+    let session = mediated.create_session(tenant.clone());
+    let mut turn = begin(&mediated, &tenant, &session, "pay").await;
+    let mut budget = RunBudget::default();
+
+    // The block offers two plans: {broad: floor+mark} and {broad: floor, mark-only: mark}.
+    assert!(matches!(
+        turn.mediate(calls(vec![call("blocked", "wire", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+
+    // Executing the first consults `broad`, which denies.
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call("denied", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-0"}"#)]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    assert_eq!(consults.load(Ordering::SeqCst), 1);
+
+    // remedy-1 also names `broad`, so the denial retired it too: the handle no longer resolves.
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call("stale", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-1"}"#)]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    // The denier is never consulted again — which is the whole of `RMD-6`. Retiring only the
+    // consulted offer would have left remedy-1 live and sent a second request here.
+    // Reverting the Deny arm takes this count from 1 to 2, which is what makes the assertion
+    // discriminating rather than merely true.
+    assert_eq!(consults.load(Ordering::SeqCst), 1);
+    let log = facts(&mediated, &tenant, &session);
+    assert!(!log.iter().any(|fact| matches!(fact, Fact::DispatchOpened { .. })));
+    assert!(!log.iter().any(|fact| matches!(fact, Fact::Ruling { .. })));
+    turn.stop(StopReason::Cancelled).unwrap();
+    deny_server.abort();
 }
 
 #[tokio::test]
@@ -1867,7 +1905,7 @@ resolver = {{ url = "{beta_url}", timeout_ms = 1000 }}
     let mediator = mediator(&policy, &[("read", BuiltinTool::Echo("internal".to_string()))]);
     let tenant = TenantId::new("tenant");
     let mut budget = RunBudget::new(Limits {
-        max_remedy_attempts_per_gap: 2,
+        max_blocked_proposals_per_call: 2,
         ..Limits::default()
     });
     let parent = parent_with_completed_turn(&mediator, &tenant, &mut budget).await;
@@ -2285,6 +2323,31 @@ async fn read_request_headers(socket: &mut tokio::net::TcpStream) {
             return;
         }
     }
+}
+
+fn spawn_counting_authority(
+    ruling: &'static str,
+) -> (String, std::sync::Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let consults = std::sync::Arc::new(AtomicUsize::new(0));
+    let counter = consults.clone();
+    let handle = tokio::spawn(async move {
+        let listener = TcpListener::from_std(listener).unwrap();
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            counter.fetch_add(1, Ordering::SeqCst);
+            read_request_headers(&mut socket).await;
+            let body = format!(r#"{{"ruling":"{ruling}"}}"#);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    (format!("http://{address}/rule"), consults, handle)
 }
 
 async fn spawn_authority(ruling: &'static str) -> (String, tokio::task::JoinHandle<()>) {

@@ -30,6 +30,42 @@ pub enum InitError {
     UnexpectedSuppliedBackend(String),
     #[error("registered tool {0} collides with a runtime-owned reserved tool name")]
     ReservedToolConflict(String),
+    #[error("the transcript head may carry only content-bearing system/developer messages, found {0}")]
+    BadTranscriptHead(String),
+}
+
+/// The system and developer messages opening every model request. Host configuration, never client
+/// input and never policy: the head instructs the model, while the policy
+/// surface declares what may flow. Validated on construction, so a head carrying a tool call, a
+/// tool-call id, or any other role is unrepresentable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TranscriptHead(Vec<WireMessage>);
+
+impl TranscriptHead {
+    /// No head at all. `CFG-18` settles who owns the head, not whether one exists — the SDK never
+    /// builds a transcript, and a harness may open every request with the trajectory itself. This
+    /// is a named constructor rather than a `Default` so that running headless is legible at the
+    /// call site instead of being what you get by forgetting.
+    pub fn none() -> Self {
+        TranscriptHead(Vec::new())
+    }
+
+    /// Build a head from ordered system/developer messages. Each must carry content and nothing
+    /// else — the shape `RawPreamble` used to guarantee at the policy boundary.
+    pub fn new(messages: Vec<WireMessage>) -> Result<Self, InitError> {
+        for message in &messages {
+            let content_only =
+                message.tool_calls.is_none() && message.tool_call_id.is_none() && message.content.is_some();
+            if !matches!(message.role.as_str(), "system" | "developer") || !content_only {
+                return Err(InitError::BadTranscriptHead(message.role.clone()));
+            }
+        }
+        Ok(TranscriptHead(messages))
+    }
+
+    pub fn messages(&self) -> &[WireMessage] {
+        &self.0
+    }
 }
 
 #[derive(Debug, Error)]
@@ -62,7 +98,7 @@ pub struct Mediator {
     authority_backends: BTreeMap<AuthorityName, AuthorityBackend>,
     sanitizer_backends: BTreeMap<SanitizerName, SanitizerBackend>,
     cast_backends: BTreeMap<CastName, CastBackend>,
-    preamble: Vec<WireMessage>,
+    transcript_head: TranscriptHead,
 }
 
 impl Mediator {
@@ -81,7 +117,6 @@ impl Mediator {
         config: Config,
         mut supplied_tool_backends: BTreeMap<ToolName, ToolBackend>,
     ) -> Result<Mediator, InitError> {
-        let preamble = config.preamble().to_vec();
         let client = HttpClient::new();
         let engine = Engine::new(config.registry().clone());
 
@@ -163,7 +198,7 @@ impl Mediator {
             authority_backends,
             sanitizer_backends,
             cast_backends,
-            preamble,
+            transcript_head: TranscriptHead::none(),
         })
     }
 
@@ -179,8 +214,15 @@ impl Mediator {
         &self.store
     }
 
-    pub fn preamble(&self) -> &[WireMessage] {
-        &self.preamble
+    /// Install the transcript head this deployment opens every model request with. Replaces any
+    /// previously installed head; it never appends.
+    pub fn with_transcript_head(mut self, head: TranscriptHead) -> Self {
+        self.transcript_head = head;
+        self
+    }
+
+    pub fn transcript_head(&self) -> &[WireMessage] {
+        self.transcript_head.messages()
     }
 
     pub fn tool_backend(&self, name: &ToolName) -> Option<&ToolBackend> {
@@ -413,5 +455,39 @@ fn reserved_tool_schema(name: &str) -> WireTool {
             description: Some(description.to_string()),
             parameters: Some(parameters),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_transcript_head_admits_only_content_bearing_system_and_developer_messages() {
+        let head = TranscriptHead::new(vec![
+            WireMessage::system("you are confined"),
+            WireMessage::developer("cite sources"),
+        ])
+        .expect("system and developer content messages are a head");
+        assert_eq!(head.messages().len(), 2);
+
+        assert!(matches!(
+            TranscriptHead::new(vec![WireMessage::user("hi")]),
+            Err(InitError::BadTranscriptHead(role)) if role == "user"
+        ));
+
+        let mut with_call = WireMessage::system("you are confined");
+        with_call.tool_calls = Some(vec![]);
+        assert!(matches!(
+            TranscriptHead::new(vec![with_call]),
+            Err(InitError::BadTranscriptHead(_))
+        ));
+
+        let mut without_content = WireMessage::system("you are confined");
+        without_content.content = None;
+        assert!(matches!(
+            TranscriptHead::new(vec![without_content]),
+            Err(InitError::BadTranscriptHead(_))
+        ));
     }
 }

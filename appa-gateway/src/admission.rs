@@ -88,7 +88,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_client_system_and_developer_preamble() {
+    fn rejects_a_client_supplied_transcript_head() {
         for role in ["system", "developer"] {
             let mut msg = WireMessage::user("hi");
             msg.role = role.to_string();

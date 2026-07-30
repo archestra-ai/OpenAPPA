@@ -8,12 +8,12 @@ use appa_engine::value::{Provenance, ToolCallId, TrajectoryId};
 
 use crate::wire::{WireFunctionCall, WireMessage, WireToolCall};
 
-/// Build the ordered model-visible messages for one branch: the server preamble followed by its
+/// Build the ordered model-visible messages for one branch: the host transcript head followed by its
 /// inherited ancestor snapshots and branch-local turns. Each ancestor snapshot ends at the last
 /// complete message before the descendant's fork, so a pending tool-call round never enters a child
 /// context and later ancestor activity cannot become a cross-branch channel.
-pub fn model_transcript(preamble: &[WireMessage], log: &[Fact], trajectory: &TrajectoryId) -> Vec<WireMessage> {
-    let mut messages: Vec<WireMessage> = preamble.to_vec();
+pub fn model_transcript(head: &[WireMessage], log: &[Fact], trajectory: &TrajectoryId) -> Vec<WireMessage> {
+    let mut messages: Vec<WireMessage> = head.to_vec();
     let mut pending: VecDeque<ToolCallId> = VecDeque::new();
     let mut deferred: Vec<WireMessage> = Vec::new();
 
@@ -233,10 +233,10 @@ mod tests {
     }
 
     #[test]
-    fn preamble_then_a_bare_user_turn() {
-        let preamble = vec![WireMessage::system("you are a confined agent")];
+    fn transcript_head_then_a_bare_user_turn() {
+        let head = vec![WireMessage::system("you are a confined agent")];
         let log = vec![user("investigate the pod")];
-        let out = model_transcript(&preamble, &log, &traj());
+        let out = model_transcript(&head, &log, &traj());
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].role, "system");
         assert_eq!(out[1], WireMessage::user("investigate the pod"));

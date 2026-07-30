@@ -33,7 +33,6 @@ use appa_engine::registry::{LoadError, Registry, RegistryConfig, TrustChain};
 use appa_engine::value::ToolName;
 
 use crate::external::{BuiltinAuthority, BuiltinSanitizer};
-use crate::wire::WireMessage;
 
 const SUPPORTED_VERSION: u32 = 1;
 const DEFAULT_TRUST_CHAIN: [&str; 2] = ["suspicious", "trusted"];
@@ -72,8 +71,6 @@ pub enum ConfigError {
     TimeoutOutOfRange { found: u64, context: String },
     #[error("unknown {kind} builtin {name:?} (not a compiled-in implementation)")]
     UnknownBuiltin { kind: &'static str, name: String },
-    #[error("bad preamble role {found:?}: only \"system\" and \"developer\" may head the transcript")]
-    BadPreambleRole { found: String },
     #[error("tool {tool}: `parameters` must be a JSON-Schema object (a TOML table)")]
     ToolParametersNotAnObject { tool: String },
     #[error("registry rejected: {0}")]
@@ -123,7 +120,6 @@ pub struct Config {
     tool_impls: BTreeMap<ToolName, ToolImpl>,
     tool_parameters: BTreeMap<ToolName, serde_json::Value>,
     child_return: ReturnPolicy,
-    preamble: Vec<WireMessage>,
 }
 
 impl Config {
@@ -232,12 +228,6 @@ impl Config {
             }
         };
 
-        let preamble = raw
-            .preamble
-            .into_iter()
-            .map(RawPreamble::convert)
-            .collect::<Result<Vec<_>, _>>()?;
-
         Ok(Config {
             registry,
             registry_config,
@@ -248,7 +238,6 @@ impl Config {
             tool_impls,
             tool_parameters,
             child_return,
-            preamble,
         })
     }
 
@@ -278,10 +267,6 @@ impl Config {
     /// binding when one is declared, else raw returns under the narrowing check.
     pub fn child_return_policy(&self) -> ReturnPolicy {
         self.child_return.clone()
-    }
-
-    pub fn preamble(&self) -> &[WireMessage] {
-        &self.preamble
     }
 
     pub fn cast_impl(&self, name: &CastName) -> Option<&CastImpl> {
@@ -314,27 +299,6 @@ struct RawConfig {
     #[serde(default)]
     cast: Vec<RawCast>,
     child: Option<RawChild>,
-    #[serde(default)]
-    preamble: Vec<RawPreamble>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawPreamble {
-    role: String,
-    content: String,
-}
-
-impl RawPreamble {
-    fn convert(self) -> Result<WireMessage, ConfigError> {
-        match self.role.as_str() {
-            "system" => Ok(WireMessage::system(self.content)),
-            "developer" => Ok(WireMessage::developer(self.content)),
-            other => Err(ConfigError::BadPreambleRole {
-                found: other.to_string(),
-            }),
-        }
-    }
 }
 
 #[derive(Deserialize)]
@@ -383,7 +347,6 @@ struct RawTool {
     #[serde(default)]
     effects: Vec<String>,
     implementation: Option<RawToolImpl>,
-    output_sanitizer: Option<String>,
     parameters: Option<serde_json::Value>,
 }
 
@@ -414,7 +377,6 @@ impl RawTool {
                 delta,
                 emits: self.effects.into_iter().map(EffectKind::new).collect(),
                 requires,
-                output_sanitizer: self.output_sanitizer.map(SanitizerName::new),
             },
             imp,
             self.parameters,
@@ -569,7 +531,7 @@ impl RawAuthority {
     fn convert(self, chain: &TrustChain) -> Result<(Authority, AuthorityImpl), ConfigError> {
         let ctx = format!("authority {}", self.name);
         let mandate = self.mandate.convert(chain, &ctx)?;
-        let imp = self.implementation.convert(&self.name, &mandate)?;
+        let imp = self.implementation.convert(&self.name)?;
         Ok((
             Authority {
                 name: AuthorityName::new(self.name),
@@ -632,21 +594,13 @@ struct RawAuthorityImpl {
 }
 
 impl RawAuthorityImpl {
-    fn convert(self, name: &str, mandate: &Mandate) -> Result<AuthorityImpl, ConfigError> {
+    fn convert(self, name: &str) -> Result<AuthorityImpl, ConfigError> {
         match (self.builtin, self.resolver) {
             (Some(builtin), None) => {
                 let builtin = BuiltinAuthority::from_name(&builtin).ok_or(ConfigError::UnknownBuiltin {
                     kind: "authority",
                     name: builtin,
                 })?;
-                // `approve` may clear only what it can fully see — never a cover ceiling.
-                if matches!(builtin, BuiltinAuthority::Approve) && mandate.has_cover_ceiling() {
-                    return Err(bad_impl(
-                        "authority",
-                        name,
-                        "builtin `approve` may back only a cover-free mandate",
-                    ));
-                }
                 Ok(AuthorityImpl::Builtin(builtin))
             }
             (None, Some(resolver)) => resolver.convert_authority(name),
@@ -1201,21 +1155,6 @@ builtin = "redact-email"
 "#;
 
     #[test]
-    fn tool_output_sanitizer_binding_parses_and_validates() {
-        let cfg = Config::from_toml_str(&format!(
-            "version = 1\n[[tool]]\nname = \"export\"\ndelta = {{ audience = {{ exactly = [\"internal\"] }} }}\noutput_sanitizer = \"pii\"\n{PII}"
-        ))
-        .unwrap();
-        let export = cfg.registry().tool(&ToolName::new("export")).unwrap();
-        assert_eq!(export.output_sanitizer, Some(SanitizerName::new("pii")));
-
-        assert!(matches!(
-            err("version = 1\n[[tool]]\nname = \"export\"\noutput_sanitizer = \"ghost\"\n"),
-            ConfigError::Registry(LoadError::UnknownOutputSanitizer { .. })
-        ));
-    }
-
-    #[test]
     fn child_return_sanitizer_must_be_a_registered_output_sanitizer() {
         let cfg = Config::from_toml_str(&format!("version = 1\n[child]\nreturn_sanitizer = \"pii\"\n{PII}")).unwrap();
         assert!(matches!(
@@ -1241,27 +1180,6 @@ builtin = "redact-email"
 
         let cfg = Config::from_toml_str("version = 1\n").unwrap();
         assert!(matches!(cfg.child_return_policy(), ReturnPolicy::Raw));
-    }
-
-    #[test]
-    fn preamble_parses_ordered_system_and_developer_messages() {
-        let cfg = Config::from_toml_str(
-            "version = 1\n[[preamble]]\nrole = \"system\"\ncontent = \"you are confined\"\n\
-             [[preamble]]\nrole = \"developer\"\ncontent = \"cite sources\"\n",
-        )
-        .unwrap();
-        assert_eq!(
-            cfg.preamble(),
-            &[
-                WireMessage::system("you are confined"),
-                WireMessage::developer("cite sources")
-            ]
-        );
-
-        assert!(matches!(
-            err("version = 1\n[[preamble]]\nrole = \"user\"\ncontent = \"hi\"\n"),
-            ConfigError::BadPreambleRole { found } if found == "user"
-        ));
     }
 
     #[test]
@@ -1324,18 +1242,14 @@ resolver = { url = "x", may_cast = { trust = ["suspicious"] } }
     }
 
     #[test]
-    fn builtin_approve_rejected_for_cover_bearing_mandate() {
-        assert!(matches!(
-            err(r#"version = 1
-[[authority]]
-name = "self"
-[authority.mandate]
-can_raise_trust_to = "trusted"
-[authority.implementation]
-builtin = "approve"
-"#),
-            ConfigError::BadImplementation { kind: "authority", .. }
-        ));
+    fn builtin_approve_may_back_a_cover_bearing_mandate() {
+        let cfg = config(
+            "version = 1\n[[authority]]\nname = \"self\"\n[authority.mandate]\ncan_raise_trust_to = \"trusted\"\n[authority.implementation]\nbuiltin = \"approve\"\n",
+        );
+        assert_eq!(
+            cfg.authority_impl(&AuthorityName::new("self")),
+            Some(&AuthorityImpl::Builtin(BuiltinAuthority::Approve))
+        );
     }
 
     #[test]

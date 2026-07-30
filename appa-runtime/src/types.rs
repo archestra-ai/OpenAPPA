@@ -9,17 +9,18 @@ use crate::store::StoreError;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SdkOptions {
-    /// How many **blocked-proposal rounds** one call (by digest) may open per turn — each round is
-    /// one cohort of offered plans, every plan in it consultable once; a denial consumes only its
-    /// own offer, never this budget. Mirrors the runtime's semantics.
-    pub max_remedy_attempts_per_gap: u32,
+    /// The blocked-proposal budget of `RMD-7`: how many blocked-proposal rounds one **rendered
+    /// call** (by digest) may open per turn. Each round is one cohort of offered plans, every plan
+    /// in it consultable once. It is spam control on the agent, not a count of denials — a denial
+    /// bites by excluding the denying authority's plans, never by shrinking this budget.
+    pub max_blocked_proposals_per_call: u32,
     pub per_external_timeout: std::time::Duration,
 }
 
 impl Default for SdkOptions {
     fn default() -> Self {
         SdkOptions {
-            max_remedy_attempts_per_gap: 2,
+            max_blocked_proposals_per_call: 2,
             per_external_timeout: std::time::Duration::from_secs(30),
         }
     }

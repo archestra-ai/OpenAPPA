@@ -9,11 +9,11 @@ use appa_engine::admit::{AdmitError, CastAnswer, ResultAdmission};
 use appa_engine::authority::CastResolution;
 use appa_engine::branch::{ReturnCheck, ReturnPlan, ReturnSubmission};
 use appa_engine::check::{CheckOutcome, Narrowing, UnresolvedFact};
-use appa_engine::execute::{Issuer, Ruling, Sink};
+use appa_engine::execute::Ruling;
 use appa_engine::fact::{BoundaryKind, Fact, FactBatch, ProposedCall, ReturnPolicy, Revision};
 use appa_engine::label::{DimValue, Dimension};
 use appa_engine::names::{CastName, SanitizerName};
-use appa_engine::plan::RemedyPlan;
+use appa_engine::plan::{ExecutableRemedyPlan, RemedyPlan};
 use appa_engine::projection::Projection;
 use appa_engine::value::{
     CanonicalDigest, DispatchId, LabeledValue, Provenance, RawResultDigest, ResolvedCall, ToolCallId, ToolName,
@@ -37,7 +37,6 @@ use crate::wire::{WireMessage, WireTool, WireToolCall};
 
 const SEALED_WITHHELD: &str = "[tool result withheld: exceeds the size the policy admits]";
 const SEALED_UNRESOLVED: &str = "[tool result withheld: its label could not be established]";
-const SEALED_UNSANITIZED: &str = "[tool result withheld: the bound sanitizer produced no derivation]";
 const SEALED_UNAVAILABLE: &str = "[tool result unavailable]";
 const SEALED_FAILED: &str = "[tool call failed]";
 const SEALED_INDETERMINATE: &str = "[tool call outcome unknown — it may or may not have run]";
@@ -66,7 +65,7 @@ pub struct Completion {
 pub struct Limits {
     pub max_inference_rounds: u32,
     pub max_tool_invocations: u32,
-    pub max_remedy_attempts_per_gap: u32,
+    pub max_blocked_proposals_per_call: u32,
     pub per_external_timeout: Duration,
     pub run_deadline: Duration,
     pub body_cap_bytes: usize,
@@ -79,7 +78,7 @@ impl Default for Limits {
         Limits {
             max_inference_rounds: 16,
             max_tool_invocations: 32,
-            max_remedy_attempts_per_gap: 2,
+            max_blocked_proposals_per_call: 2,
             per_external_timeout: Duration::from_secs(30),
             run_deadline: Duration::from_secs(120),
             body_cap_bytes: DEFAULT_BODY_CAP_BYTES,
@@ -257,7 +256,7 @@ impl Lifecycle {
 
 struct PendingBlock {
     call: ResolvedCall,
-    offers: Vec<(String, RemedyPlan)>,
+    offers: Vec<(String, ExecutableRemedyPlan)>,
     offered_round: u32,
 }
 
@@ -468,7 +467,7 @@ impl Turn {
     pub fn transcript(&self) -> Result<Vec<WireMessage>, TurnError> {
         self.require(Lifecycle::Ready, "build a transcript")?;
         let (log, _) = self.mediator.store().snapshot(&self.tenant, &self.session)?;
-        Ok(model_transcript(self.mediator.preamble(), &log, &self.session))
+        Ok(model_transcript(self.mediator.transcript_head(), &log, &self.session))
     }
 
     pub async fn mediate(&mut self, completion: Completion, budget: &mut RunBudget) -> Result<Step, TurnError> {
@@ -697,19 +696,21 @@ impl Turn {
                             can_fork: budget.allows_fork_from_depth(self.depth),
                         }
                     };
-                    let feedback = if planned.plans.is_empty() {
+                    let has_offers = planned.plans.iter().any(|plan| plan.executable().is_some());
+                    let feedback = if !has_offers {
                         crate::feedback::block_feedback(&raw, &planned, &[], surface)
                     } else {
                         drop(projection);
                         let attempts = self.remedy_attempts.entry(call.digest()).or_insert(0);
                         *attempts += 1;
-                        if *attempts > budget.limits.max_remedy_attempts_per_gap {
+                        if *attempts > budget.limits.max_blocked_proposals_per_call {
                             self.feedback(call_id, "the remedy attempt limit for this call was reached")?;
                             return Ok(CallProgress::Go);
                         }
                         let offers = planned
                             .plans
                             .iter()
+                            .filter_map(RemedyPlan::executable)
                             .map(|plan| {
                                 let handle = format!("remedy-{}", self.next_handle);
                                 self.next_handle += 1;
@@ -789,7 +790,9 @@ impl Turn {
                 .plan(&views, &call, &raw)
                 .expect("pending call is registered")
                 .plans
-                .contains(&chosen),
+                .iter()
+                .filter_map(appa_engine::plan::RemedyPlan::executable)
+                .any(|offered| offered == &chosen),
             _ => false,
         };
         if !still_offered {
@@ -828,19 +831,25 @@ impl Turn {
                 AuthorityAnswer::Approve => rulings.push(Ruling {
                     dispatch: dispatch.clone(),
                     authority: requirement.authority.clone(),
-                    issuer: Issuer::Authority,
                     covers: requirement.covers.clone(),
                     reviewed: request.review(),
                 }),
-                AuthorityAnswer::Deny | AuthorityAnswer::Abstain => {
+                answer @ (AuthorityAnswer::Deny | AuthorityAnswer::Abstain) => {
                     let surface = self.acceptance_surface();
-                    let cohort = &mut self.pending[cohort_index];
-                    cohort.offers.retain(|(offer, _)| offer != handle);
-                    let exhausted = cohort.offers.is_empty();
-                    let feedback = crate::feedback::denial_feedback(&cohort.offers, surface);
-                    if exhausted {
-                        self.pending.remove(cohort_index);
+                    match answer {
+                        AuthorityAnswer::Deny => {
+                            let denier = requirement.authority.clone();
+                            let digest = self.pending[cohort_index].call.digest();
+                            for cohort in &mut self.pending {
+                                if cohort.call.digest() == digest {
+                                    cohort.offers.retain(|(_, plan)| !plan.names_authority(&denier));
+                                }
+                            }
+                        }
+                        _ => self.pending[cohort_index].offers.retain(|(offer, _)| offer != handle),
                     }
+                    let feedback = crate::feedback::denial_feedback(&self.pending[cohort_index].offers, surface);
+                    self.pending.retain(|cohort| !cohort.offers.is_empty());
                     self.feedback(call_id, &feedback)?;
                     return Ok(CallProgress::Go);
                 }
@@ -850,7 +859,7 @@ impl Turn {
         let batch = match self
             .mediator
             .engine()
-            .execute_plan(&views, &chosen, &call, &rulings, Sink::Tool)
+            .execute_remedy_plan(&views, &chosen, &call, &rulings)
         {
             Ok(batch) => batch,
             Err(_) => {
@@ -1101,7 +1110,7 @@ impl Turn {
                 let key = (self.pending_returns[index].raw_digest, sanitizer.clone());
                 let attempts = self.return_derivation_attempts.entry(key).or_insert(0);
                 *attempts += 1;
-                if *attempts > budget.limits.max_remedy_attempts_per_gap {
+                if *attempts > budget.limits.max_blocked_proposals_per_call {
                     self.feedback(call_id, "the remedy attempt limit for this return was reached")?;
                     return Ok(CallProgress::Go);
                 }
@@ -1536,17 +1545,16 @@ impl Turn {
 
         let contract = self.mediator.engine().registry().tool(call.tool());
         let pending_cast = contract.and_then(|contract| contract.pending_cast_dim());
-        let bound_sanitizer = contract.and_then(|contract| contract.output_sanitizer.clone());
         let mut withheld = None;
         let mut cast_offer: Option<(CastName, DimValue, String)> = None;
         let admission = match &outcome {
             ToolOutcome::Success {
                 body: BodyDisposition::Available(body),
-            } => match (pending_cast, bound_sanitizer) {
-                (None, None) => ResultAdmission::SuccessRaw {
+            } => match pending_cast {
+                None => ResultAdmission::SuccessRaw {
                     body: ValueBody::new(body.clone()),
                 },
-                (Some(dimension), _) => match self.resolve_output_cast(body, dimension, budget).await {
+                Some(dimension) => match self.resolve_output_cast(body, dimension, budget).await {
                     Err(TurnCancelled) => return Ok(CallProgress::Cancelled),
                     Ok(Some((cast, resolved))) => {
                         let narrowing = {
@@ -1578,18 +1586,6 @@ impl Turn {
                     }
                     Ok(None) => {
                         withheld = Some(SEALED_UNRESOLVED);
-                        ResultAdmission::SuccessNoValue
-                    }
-                },
-                (None, Some(sanitizer)) => match self.derive_sanitized(&sanitizer, body, budget).await {
-                    Err(TurnCancelled) => return Ok(CallProgress::Cancelled),
-                    Ok(Some(derived)) => ResultAdmission::SuccessSanitized {
-                        body: ValueBody::new(derived),
-                        sanitizer,
-                        raw_digest: RawResultDigest::of(body.as_bytes()),
-                    },
-                    Ok(None) => {
-                        withheld = Some(SEALED_UNSANITIZED);
                         ResultAdmission::SuccessNoValue
                     }
                 },
@@ -1671,7 +1667,6 @@ impl Turn {
         let value_carrying = matches!(
             admission,
             ResultAdmission::SuccessRaw { .. }
-                | ResultAdmission::SuccessSanitized { .. }
                 | ResultAdmission::SuccessCast { .. }
                 | ResultAdmission::SuccessCastAccepted { .. }
         );
@@ -1707,12 +1702,7 @@ impl Turn {
                         None
                     }
                     Err(
-                        error @ (AdmitError::UnknownSanitizer(_)
-                        | AdmitError::SanitizerNotOutput(_)
-                        | AdmitError::TransitionSourceUnmet
-                        | AdmitError::OutputPendingCast
-                        | AdmitError::OutputSanitizerBound
-                        | AdmitError::NotBoundSanitizer
+                        error @ (AdmitError::OutputPendingCast
                         | AdmitError::NotPendingCast
                         | AdmitError::UnknownCast(_)
                         | AdmitError::ConstantMismatch

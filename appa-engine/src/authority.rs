@@ -26,12 +26,6 @@ impl Mandate {
             && self.waivers.is_empty()
             && self.attends.is_empty()
     }
-
-    /// A mandate with a cover ceiling (trust or readers) — the one thing a self-granted in-process
-    /// `approve` builtin may not carry (it may clear only what it can fully see).
-    pub fn has_cover_ceiling(&self) -> bool {
-        self.trust_ceiling.is_some() || self.reader_ceiling.is_some()
-    }
 }
 
 /// An authority's jurisdiction: the tags it covers. Empty = every call (small configs stay small).

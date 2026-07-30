@@ -5,8 +5,8 @@ use thiserror::Error;
 use crate::authority::CastResolution;
 use crate::check::{Narrowing, UnresolvedFact};
 use crate::fact::{CloseOutcome, Fact, FactBatch};
-use crate::label::{Adequacy, Dim, DimValue, Label};
-use crate::names::{CastName, SanitizerName};
+use crate::label::{Dim, DimValue, Label};
+use crate::names::CastName;
 use crate::projection::Views;
 use crate::registry::Registry;
 use crate::value::{DispatchId, LabeledValue, Provenance, RawResultDigest, ResolvedCall, ValueBody};
@@ -16,11 +16,6 @@ pub enum ResultAdmission {
     Indeterminate,
     SuccessNoValue,
     SuccessRaw { body: ValueBody },
-    SuccessSanitized {
-        body: ValueBody,
-        sanitizer: SanitizerName,
-        raw_digest: RawResultDigest,
-    },
     SuccessCast {
         body: ValueBody,
         cast: CastName,
@@ -49,18 +44,8 @@ pub enum AdmitError {
     ForeignDispatch,
     #[error("dispatch is not open")]
     NotOpen,
-    #[error("no sanitizer registered as {0}")]
-    UnknownSanitizer(String),
-    #[error("sanitizer {0} is not registered for tool output")]
-    SanitizerNotOutput(String),
-    #[error("raw result does not satisfy the sanitizer's `from` precondition")]
-    TransitionSourceUnmet,
     #[error("the contract declares a pending-cast output: only a cast-resolved admission may carry a value")]
     OutputPendingCast,
-    #[error("the contract binds an output sanitizer: a raw value may not enter")]
-    OutputSanitizerBound,
-    #[error("the sanitizer is not the contract's bound output sanitizer")]
-    NotBoundSanitizer,
     #[error("the contract declares no pending-cast output on the resolved dimension")]
     NotPendingCast,
     #[error("no cast registered as {0}")]
@@ -245,9 +230,6 @@ pub(crate) fn admit_result(
             if contract.pending_cast_dim().is_some() {
                 return Err(AdmitError::OutputPendingCast);
             }
-            if contract.output_sanitizer.is_some() {
-                return Err(AdmitError::OutputSanitizerBound);
-            }
             vec![close_success(), admit_value(contract.output_label(), body)]
         }
         ResultAdmission::SuccessCast { body, cast, resolved } => {
@@ -313,42 +295,6 @@ pub(crate) fn admit_result(
                     resolved,
                     raw_digest,
                 },
-            ]
-        }
-        ResultAdmission::SuccessSanitized {
-            body,
-            sanitizer,
-            raw_digest,
-        } => {
-            if contract.pending_cast_dim().is_some() {
-                return Err(AdmitError::OutputPendingCast);
-            }
-            if contract.output_sanitizer.as_ref() != Some(&sanitizer) {
-                return Err(AdmitError::NotBoundSanitizer);
-            }
-            let san = registry
-                .sanitizer(&sanitizer)
-                .ok_or_else(|| AdmitError::UnknownSanitizer(sanitizer.as_str().to_string()))?;
-            if !san.on.output {
-                return Err(AdmitError::SanitizerNotOutput(sanitizer.as_str().to_string()));
-            }
-            let raw = contract.output_label();
-            if raw.audience.covers(&san.can_reduce.from_includes) != Adequacy::Holds {
-                return Err(AdmitError::TransitionSourceUnmet);
-            }
-            // Audience-only: trust is preserved from the raw, audience becomes the declared `to`.
-            let sanitized = Label::new(raw.trust.clone(), Dim::Known(san.can_reduce.to.clone()));
-            vec![
-                close_success(),
-                Fact::SanitizerApplied {
-                    trajectory: trajectory.clone(),
-                    dispatch: dispatch.clone(),
-                    sanitizer,
-                    raw_digest,
-                    from: san.can_reduce.from_includes.clone(),
-                    to: san.can_reduce.to.clone(),
-                },
-                admit_value(sanitized, body),
             ]
         }
     };
@@ -435,7 +381,6 @@ mod tests {
             }),
             emits: vec![EffectKind::new("read")],
             requires: Default::default(),
-            output_sanitizer: None,
         };
         let out_san = Sanitizer {
             name: crate::names::SanitizerName::new("declassify"),
@@ -485,7 +430,6 @@ mod tests {
             }),
             emits: vec![EffectKind::new("read")],
             requires: Default::default(),
-            output_sanitizer: None,
         };
         let poll = ToolContract {
             name: ToolName::new("poll_room"),
@@ -496,31 +440,15 @@ mod tests {
             }),
             emits: vec![EffectKind::new("read")],
             requires: Default::default(),
-            output_sanitizer: None,
-        };
-        let export = ToolContract {
-            name: ToolName::new("export_ticket"),
-            tags: vec![],
-            delta: Some(Delta {
-                trust: Some(Dim::Known(SUSPICIOUS)),
-                audience: Some(Dim::Known(internal())),
-            }),
-            emits: vec![EffectKind::new("read")],
-            requires: Default::default(),
-            output_sanitizer: Some(crate::names::SanitizerName::new("declassify")),
         };
         Registry::build(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![get, scan, poll, export],
+            tools: vec![get, scan, poll],
             authorities: vec![],
             sanitizers: vec![out_san, finance_san],
             casts: vec![const_cast, audience_cast, resolver_cast],
         })
         .unwrap()
-    }
-
-    fn export_call() -> ResolvedCall {
-        ResolvedCall::new(ToolName::new("export_ticket"), json!({}), vec![])
     }
 
     fn scan_call() -> ResolvedCall {
@@ -628,87 +556,6 @@ mod tests {
                 ..
             }
         ));
-    }
-
-    #[test]
-    fn sanitized_preserves_trust_relabels_audience() {
-        let reg = registry();
-        let call = export_call();
-        let (log, dispatch) = open_log(&call);
-        let p = views_of(&log);
-        let t = traj();
-        let batch = admit_result(
-            &reg,
-            &p.view(&t),
-            &dispatch,
-            &call,
-            ResultAdmission::SuccessSanitized {
-                body: ValueBody::new("redacted"),
-                sanitizer: SanitizerName::new("declassify"),
-                raw_digest: RawResultDigest::of(b"ticket #7"),
-            },
-        )
-        .unwrap();
-        match batch.facts.last().unwrap() {
-            Fact::ValueAdmitted { value, .. } => {
-                assert_eq!(value.label.trust, Dim::Known(SUSPICIOUS));
-                assert_eq!(value.label.audience, Dim::Known(Audience::Public));
-            }
-            other => panic!("expected ValueAdmitted, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_bound_tool_confines_raw_and_refuses_an_unbound_transformer() {
-        let reg = registry();
-        let t = traj();
-        let call = export_call();
-        let (log, dispatch) = open_log(&call);
-        let p = views_of(&log);
-        assert_eq!(
-            admit_result(
-                &reg,
-                &p.view(&t),
-                &dispatch,
-                &call,
-                ResultAdmission::SuccessRaw {
-                    body: ValueBody::new("ticket #7"),
-                },
-            ),
-            Err(AdmitError::OutputSanitizerBound)
-        );
-        let p = views_of(&log);
-        assert_eq!(
-            admit_result(
-                &reg,
-                &p.view(&t),
-                &dispatch,
-                &call,
-                ResultAdmission::SuccessSanitized {
-                    body: ValueBody::new("redacted"),
-                    sanitizer: SanitizerName::new("finance-only"),
-                    raw_digest: RawResultDigest::of(b"ticket #7"),
-                },
-            ),
-            Err(AdmitError::NotBoundSanitizer)
-        );
-        let plain = get_call();
-        let (plain_log, plain_dispatch) = open_log(&plain);
-        let p = views_of(&plain_log);
-        assert_eq!(
-            admit_result(
-                &reg,
-                &p.view(&t),
-                &plain_dispatch,
-                &plain,
-                ResultAdmission::SuccessSanitized {
-                    body: ValueBody::new("redacted"),
-                    sanitizer: SanitizerName::new("declassify"),
-                    raw_digest: RawResultDigest::of(b"ticket #7"),
-                },
-            ),
-            Err(AdmitError::NotBoundSanitizer)
-        );
     }
 
     #[test]
@@ -911,7 +758,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_cast_confines_raw_and_sanitized_admission() {
+    fn pending_cast_confines_raw_admission() {
         let reg = registry();
         let call = scan_call();
         let (log, dispatch) = open_log(&call);
@@ -925,21 +772,6 @@ mod tests {
                 &call,
                 ResultAdmission::SuccessRaw {
                     body: ValueBody::new("raw bytes"),
-                },
-            ),
-            Err(AdmitError::OutputPendingCast)
-        );
-        let p = views_of(&log);
-        assert_eq!(
-            admit_result(
-                &reg,
-                &p.view(&t),
-                &dispatch,
-                &call,
-                ResultAdmission::SuccessSanitized {
-                    body: ValueBody::new("redacted"),
-                    sanitizer: SanitizerName::new("declassify"),
-                    raw_digest: RawResultDigest::of(b"raw bytes"),
                 },
             ),
             Err(AdmitError::OutputPendingCast)

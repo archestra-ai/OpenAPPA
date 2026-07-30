@@ -2,13 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::contract::Delta;
 use crate::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec, ToolContract};
 use crate::fact::EffectKind;
 use crate::label::{Adequacy, Audience, Dim, Dimension, Label, ReaderId, Trust};
 use crate::names::MarkName;
 use crate::projection::Views;
-use crate::registry::Registry;
 use crate::value::{ResolvedCall, ValueId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,42 +53,21 @@ pub(crate) enum PlaceholderGaps {
     Waived,
 }
 
-pub(crate) fn effective_delta(registry: &Registry, contract: &ToolContract) -> Option<Delta> {
-    match (&contract.delta, &contract.output_sanitizer) {
-        (delta, None) => delta.clone(),
-        (Some(delta), Some(name)) => {
-            let sanitizer = registry
-                .sanitizer(name)
-                .expect("load validation: bound output sanitizer is registered");
-            Some(Delta {
-                trust: delta.trust.clone(),
-                audience: Some(Dim::Known(sanitizer.can_reduce.to.clone())),
-            })
-        }
-        (None, Some(_)) => unreachable!("load validation: a sanitizer-bound tool declares a delta"),
-    }
-}
-
-/// The label the trajectory would hold after this call commits, on the check's clock (see
-/// [`effective_delta`] — an unannotated tool contributes identity here, Unknown at admission).
-pub(crate) fn committed_label(registry: &Registry, contract: &ToolContract, current: &Label) -> Label {
-    match effective_delta(registry, contract) {
+/// The label the trajectory would hold after this call commits, on the check's clock. An
+/// unannotated tool contributes identity here — like a pending-cast dimension, its Unknown
+/// contribution folds only at admission.
+pub(crate) fn committed_label(contract: &ToolContract, current: &Label) -> Label {
+    match &contract.delta {
         Some(delta) => delta.apply(current),
         None => current.clone(),
     }
 }
 
-/// Evaluate one call against the branch views. Pure: a function of the registry, the contract, the
-/// views, and the resolved arguments.
-pub(crate) fn evaluate(
-    registry: &Registry,
-    contract: &ToolContract,
-    views: &Views,
-    call: &ResolvedCall,
-) -> CheckOutcome {
+/// Evaluate one call against the branch views. Pure: a function of the contract, the views, and
+/// the resolved arguments.
+pub(crate) fn evaluate(contract: &ToolContract, views: &Views, call: &ResolvedCall) -> CheckOutcome {
     let current = views.current_label();
     match evaluate_state(
-        registry,
         contract,
         &current,
         &|kind| views.has_effect(kind),
@@ -98,7 +75,7 @@ pub(crate) fn evaluate(
         PlaceholderGaps::FailClosed,
     ) {
         CheckOutcome::Unresolved(_) => {
-            let committed = committed_label(registry, contract, &current);
+            let committed = committed_label(contract, &current);
             let dims = consumed_unresolved(contract, &committed, call);
             CheckOutcome::Unresolved(unresolved_facts(views, &dims))
         }
@@ -113,14 +90,13 @@ pub(crate) fn evaluate(
 /// search treats it as a dead end (unresolved resolution is a cast path, outside the reachability
 /// subset). An Unknown dimension nothing requires blocks nothing.
 pub(crate) fn evaluate_state(
-    registry: &Registry,
     contract: &ToolContract,
     current: &Label,
     has_effect: &impl Fn(&EffectKind) -> bool,
     call: &ResolvedCall,
     placeholders: PlaceholderGaps,
 ) -> CheckOutcome {
-    let committed = committed_label(registry, contract, current);
+    let committed = committed_label(contract, current);
     if !consumed_unresolved(contract, &committed, call).is_empty() {
         return CheckOutcome::Unresolved(Vec::new());
     }

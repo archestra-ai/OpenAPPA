@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use appa_gateway::inference::Inference;
-use appa_gateway::runtime::Runtime;
+use appa_gateway::runtime::{Runtime, TranscriptHead};
 use appa_runtime::ToolName;
 use appa_runtime::config::Config;
 use appa_runtime::tool::{BuiltinTool, HttpClient};
@@ -107,7 +107,7 @@ name = "get_logs"
         BuiltinTool::Echo("CrashLoopBackOff".to_string()),
     );
     let inference = Inference::new(model_base, "k", "m", Duration::from_secs(5), HttpClient::new());
-    Runtime::new(config, inference, builtins).unwrap()
+    Runtime::new(config, inference, builtins, TranscriptHead::none()).unwrap()
 }
 
 fn user_request(text: &str) -> serde_json::Value {
@@ -353,7 +353,7 @@ builtin = "redact-email"
         BuiltinTool::Echo("contact eve@corp.com".to_string()),
     );
     let inference = Inference::new(model_base, "k", "m", Duration::from_secs(5), HttpClient::new());
-    Runtime::new(config, inference, builtins).unwrap()
+    Runtime::new(config, inference, builtins, TranscriptHead::none()).unwrap()
 }
 
 #[tokio::test]
@@ -535,7 +535,7 @@ async fn a_client_disconnect_cancels_the_turn_and_frees_the_session() {
     ))
     .unwrap();
     let inference = Inference::new(model, "k", "m", Duration::from_secs(30), HttpClient::new());
-    let runtime = Runtime::new(config, inference, BTreeMap::new()).unwrap();
+    let runtime = Runtime::new(config, inference, BTreeMap::new(), TranscriptHead::none()).unwrap();
     let base = spawn_server(runtime).await;
 
     let client = reqwest::Client::new();

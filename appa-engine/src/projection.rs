@@ -105,10 +105,7 @@ impl Projection {
                 }
                 Fact::Ruling { .. } | Fact::Acceptance { .. } | Fact::ChildReturnAcceptance { .. } => {}
                 Fact::AssistantMessage { .. } | Fact::BlockFeedback { .. } => {}
-                Fact::SanitizerApplied { .. }
-                | Fact::OutputCastApplied { .. }
-                | Fact::OutputCastAccepted { .. }
-                | Fact::OutputCastLapsed { .. } => {}
+                Fact::OutputCastApplied { .. } | Fact::OutputCastAccepted { .. } | Fact::OutputCastLapsed { .. } => {}
                 Fact::ChildReturn { id, value, .. } => child_returns.push(ReturnedChild {
                     id: id.clone(),
                     value: value.clone(),

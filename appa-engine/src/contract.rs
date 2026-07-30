@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::fact::EffectKind;
 use crate::label::{Audience, Dim, Dimension, Label, Trust};
-use crate::names::{MarkName, SanitizerName, TagName};
+use crate::names::{MarkName, TagName};
 use crate::value::ToolName;
 
 /// A **declared** restrictive label contribution: what a successful call folds into the trajectory.
@@ -119,13 +119,6 @@ pub struct ToolContract {
     pub delta: Option<Delta>,
     pub emits: Vec<EffectKind>,
     pub requires: Requires,
-    /// The policy-bound output sanitizer (RP4): every successful result of this tool is confined
-    /// raw and admitted only as the named sanitizer's derivation, at its declared transition label.
-    /// Load validation guarantees the name resolves to a registered `tool_output` sanitizer whose
-    /// `from` the declared raw output satisfies; admission refuses a raw or differently-sanitized
-    /// value for a bound tool, so the binding is engine-enforced, not runtime courtesy.
-    #[serde(default)]
-    pub output_sanitizer: Option<SanitizerName>,
 }
 
 impl ToolContract {

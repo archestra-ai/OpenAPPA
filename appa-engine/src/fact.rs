@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::check::{Gap, Narrowing};
-use crate::execute::{AuthorityReview, Issuer};
+use crate::execute::AuthorityReview;
 use crate::label::{Audience, DimValue, Dimension, Label};
 use crate::names::{AuthorityName, CastName, SanitizerName};
 use crate::plan::PlanId;
@@ -131,7 +131,6 @@ pub enum Fact {
         dispatch: DispatchId,
         plan: PlanId,
         authority: AuthorityName,
-        issuer: Issuer,
         covers: Vec<Gap>,
         reviewed: AuthorityReview,
     },
@@ -145,14 +144,6 @@ pub enum Fact {
         trajectory: TrajectoryId,
         child_return: ChildReturnId,
         narrowing: Narrowing,
-    },
-    SanitizerApplied {
-        trajectory: TrajectoryId,
-        dispatch: DispatchId,
-        sanitizer: SanitizerName,
-        raw_digest: RawResultDigest,
-        from: Audience,
-        to: Audience,
     },
     CastApplied {
         trajectory: TrajectoryId,
@@ -206,7 +197,6 @@ impl Fact {
             | Fact::Ruling { trajectory, .. }
             | Fact::Acceptance { trajectory, .. }
             | Fact::ChildReturnAcceptance { trajectory, .. }
-            | Fact::SanitizerApplied { trajectory, .. }
             | Fact::CastApplied { trajectory, .. }
             | Fact::OutputCastApplied { trajectory, .. }
             | Fact::OutputCastAccepted { trajectory, .. }

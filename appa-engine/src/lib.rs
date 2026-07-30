@@ -6,8 +6,8 @@
 //! never mutates a store — the outer [`appa-runtime`] layer owns state and appends the batch.
 //!
 //! This crate is the reference for engine concepts and semantics (per `CLAUDE.md` document
-//! precedence). It implements `docs/spec.md`; where the two disagree, the spec is design
-//! direction and this crate is what runs today.
+//! precedence). It implements `docs/spec.md`, which is normative: where the two disagree, the
+//! spec is right and this crate has drift to close.
 //!
 //! The model is two monoids (see `docs/spec.md`): a **checked** monoid of label actions
 //! (audience × trust) and a **free** monoid of events. Propagation folds the label

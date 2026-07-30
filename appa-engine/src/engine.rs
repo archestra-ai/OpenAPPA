@@ -6,7 +6,7 @@ use crate::admit::{self, AdmitError, CastAnswer, CastError, ResultAdmission};
 use crate::branch::{self, BranchError, ReturnSubmission};
 use crate::check::{self, CheckOutcome, Narrowing, RawBlock, UnresolvedFact};
 use crate::contract::ToolContract;
-use crate::execute::{self, PlanError, Ruling, Sink};
+use crate::execute::{self, PlanError, Ruling};
 use crate::fact::{Fact, FactBatch, ReturnPolicy};
 use crate::label::DimValue;
 use crate::plan::{self, PlannedBlock};
@@ -40,18 +40,18 @@ impl Engine {
     /// facts to resolve first.
     pub fn check(&self, views: &Views, call: &ResolvedCall) -> Result<CheckOutcome, EngineError> {
         let contract = self.contract(call)?;
-        Ok(check::evaluate(&self.registry, contract, views, call))
+        Ok(check::evaluate(contract, views, call))
     }
 
     /// Open a dispatch for a call that **passes the check as-is**. Re-checks and refuses anything
-    /// blocked or unresolved (a narrowing is accepted through [`Engine::execute_plan`], not here), so
+    /// blocked or unresolved (a narrowing is accepted through [`Engine::execute_remedy_plan`], not here), so
     /// the engine never emits an appendable dispatch for a call it would not allow. Folds nothing —
     /// the label folds only when the result value is admitted.
     pub fn open_dispatch(&self, views: &Views, call: &ResolvedCall) -> Result<FactBatch, EngineError> {
         let contract = self.contract(call)?;
-        match check::evaluate(&self.registry, contract, views, call) {
+        match check::evaluate(contract, views, call) {
             CheckOutcome::Allow => {
-                let (_, fact) = opened_dispatch(&self.registry, contract, views, call);
+                let (_, fact) = opened_dispatch(contract, views, call);
                 Ok(FactBatch::new(views.revision(), vec![fact]))
             }
             _ => Err(EngineError::NotAllowed),
@@ -59,21 +59,19 @@ impl Engine {
     }
 
     /// Execute a remedy plan: land the covering rulings, the narrowing acceptance, and the dispatch
-    /// as one atomic batch, enforcing the plan's exact grouped assignment, mandate coverage, and
-    /// the response-sink issuer bar. The chosen plan is matched by value against the live offers —
-    /// the return-path staleness story. See [`crate::execute`].
-    pub fn execute_plan(
+    /// as one atomic batch, enforcing the plan's exact grouped assignment and mandate coverage. The
+    /// chosen plan is matched by value against the live offers — the return-path staleness story.
+    pub fn execute_remedy_plan(
         &self,
         views: &Views,
-        chosen: &plan::RemedyPlan,
+        chosen: &plan::ExecutableRemedyPlan,
         call: &ResolvedCall,
         rulings: &[Ruling],
-        sink: Sink,
     ) -> Result<FactBatch, PlanError> {
-        execute::execute_plan(&self.registry, views, chosen, call, rulings, sink)
+        execute::execute_remedy_plan(&self.registry, views, chosen, call, rulings)
     }
 
-    /// Close a dispatch and admit its result — raw, sanitized, or withheld. The label folds only
+    /// Close a dispatch and admit its result — raw, cast-resolved, or withheld. The label folds only
     /// from an admitted value, never from the close.
     pub fn admit_result(
         &self,
@@ -186,12 +184,7 @@ impl Engine {
 /// Build the `DispatchOpened` fact for a call: its proposed committed label, the effects it would
 /// commit on success, and its occurrence (a repeat identical call is a new dispatch). Shared by the
 /// clean-allow path ([`Engine::open_dispatch`]) and atomic plan execution ([`crate::execute`]).
-pub(crate) fn opened_dispatch(
-    registry: &Registry,
-    contract: &ToolContract,
-    views: &Views,
-    call: &ResolvedCall,
-) -> (DispatchId, Fact) {
+pub(crate) fn opened_dispatch(contract: &ToolContract, views: &Views, call: &ResolvedCall) -> (DispatchId, Fact) {
     let dispatch = DispatchId::new(
         views.trajectory().clone(),
         call.digest(),
@@ -200,7 +193,7 @@ pub(crate) fn opened_dispatch(
     let fact = Fact::DispatchOpened {
         trajectory: views.trajectory().clone(),
         dispatch: dispatch.clone(),
-        proposed_label: check::committed_label(registry, contract, &views.current_label()),
+        proposed_label: check::committed_label(contract, &views.current_label()),
         proposed_effects: contract.emits.clone(),
     };
     (dispatch, fact)
@@ -277,7 +270,6 @@ mod tests {
                 },
                 ..Requires::default()
             },
-            output_sanitizer: None,
         }
     }
 
@@ -303,45 +295,6 @@ mod tests {
     }
 
     #[test]
-    fn a_bound_tool_folds_its_derivation_not_its_raw_delta() {
-        use crate::authority::{AudienceTransition, Sanitizer, SanitizerPoints};
-        use crate::names::SanitizerName;
-
-        let internal = Audience::restricted([ReaderId::new("internal")]);
-        let export = ToolContract {
-            name: ToolName::new("export"),
-            tags: vec![],
-            delta: Some(Delta {
-                trust: None,
-                audience: Some(Dim::Known(internal.clone())),
-            }),
-            emits: vec![],
-            requires: Requires::default(),
-            output_sanitizer: Some(SanitizerName::new("declassify")),
-        };
-        let cfg = RegistryConfig {
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![export],
-            authorities: vec![],
-            sanitizers: vec![Sanitizer {
-                name: SanitizerName::new("declassify"),
-                on: SanitizerPoints {
-                    input: false,
-                    output: true,
-                },
-                can_reduce: AudienceTransition {
-                    from_includes: internal,
-                    to: Audience::Public,
-                },
-            }],
-            casts: vec![],
-        };
-        let e = Engine::new(Registry::build(cfg).unwrap());
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
-        assert_eq!(check(&e, &log, &call("export", json!({}))), CheckOutcome::Allow);
-    }
-
-    #[test]
     fn pending_cast_output_dispatches_before_resolution() {
         let scan = ToolContract {
             name: ToolName::new("scan_inbox"),
@@ -352,7 +305,6 @@ mod tests {
             }),
             emits: vec![],
             requires: Requires::default(),
-            output_sanitizer: None,
         };
         let e = engine(vec![scan]);
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
@@ -387,7 +339,6 @@ mod tests {
                 },
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let e = engine(vec![send]);
         let internal = Audience::restricted([ReaderId::new("auditor")]);
@@ -419,7 +370,6 @@ mod tests {
                 ],
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let e = engine(vec![del]);
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
@@ -442,7 +392,6 @@ mod tests {
                 attention: vec![MarkName::new("signoff")],
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let e = engine(vec![tool]);
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
@@ -474,7 +423,6 @@ mod tests {
             delta: None,
             emits: vec![],
             requires: Requires::default(),
-            output_sanitizer: None,
         }
     }
 
@@ -560,7 +508,6 @@ mod tests {
                 },
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let e = engine(vec![send]);
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
@@ -596,7 +543,6 @@ mod tests {
                 },
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let officer = Authority {
             name: AuthorityName::new("officer"),
@@ -624,7 +570,7 @@ mod tests {
         };
         let planned = e.plan(&p.view(&t), &wire_call, &raw).unwrap();
         assert_eq!(planned.plans.len(), 1);
-        let required = &planned.plans[0].required;
+        let required = &planned.plans[0].executable().expect("an authority plan").required;
         assert_eq!(required.len(), 1);
         assert_eq!(required[0].authority, AuthorityName::new("officer"));
         assert_eq!(
