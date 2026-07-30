@@ -189,11 +189,11 @@ The reason is structural rather than a matter of trust. The approval request
 would arrive on the very channel being released, so an in-band
 self-confirmation is not a check at all.
 
-The bar has a precondition worth naming: it bites only where tool
-credentials outrun the user's own read rights — a service account, a
-confining harness — so that the run's audience can exclude the user. Where
-the agent's tools act with the user's credentials, nothing the run fetches
-can exclude the user, and the bar is vacuous rather than wrong.
+The bar has a precondition. It bites only where tool credentials outrun
+the user's own read rights — an agent on service-account credentials — so
+that the run's audience can exclude the user. Where the agent's tools act
+with the user's credentials, nothing the run fetches excludes the user,
+and the bar is vacuous rather than wrong.
 
 ### Why the staged review carries the argument payload
 
@@ -255,8 +255,9 @@ separates that from a redactor stripping account numbers.
 
 What the two dimensions do not share is the record. A sanitizer's
 application names a registered transition and the digest it ran on, and that
-is the whole entry; an authority's ruling persists the staged review
-verbatim (`RUL-8`) and reaches the call through a declared scope (`AUT-7`).
+is the whole entry; an authority's ruling persists the review's typed
+context verbatim (`RUL-8`) and reaches the call through a declared scope
+(`AUT-7`).
 A deployment that needs to know which person cleared which value still wants
 an authority, and one that wants a value cleared once for all downstream use
 wants a sanitizer. Permission to raise trust does not merge the two

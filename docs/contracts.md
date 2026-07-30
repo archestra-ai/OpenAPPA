@@ -4,11 +4,9 @@ OpenAPPA reads its policy from one TOML file. Most of it will be generated —
 from tool descriptions, argument schemas, and the ACLs already behind your
 systems — and then reviewed by a person. This document is written for that
 person. It covers what each declaration means and what a wrong one looks
-like.
-
-`spec.md` is authoritative where the two differ; rule ids below point into
-it. The dialect here tracks the spec, and the reference implementation
-currently lags this revision.
+like. `spec.md` is authoritative where the two differ — rule ids below
+point into it — and the reference implementation currently lags this
+revision.
 
 ```toml
 version = 1
@@ -320,12 +318,13 @@ resolver = { url = "https://classifier.corp/resolve", timeout_ms = 10000,
              may_cast = { trust = ["suspicious"] } }
 ```
 
-Casts fire where a tool declares a pending-cast output dimension. On a
-successful call the runtime consults the registered casts in registration
-order — a constant answers immediately, a resolver is asked with the
-confined raw body — and the engine re-validates the winning answer against
-the cast's declaration before any value is admitted, so a misbehaving
-resolver can never widen a label past its ceiling (`SAN-8`).
+Casts fire wherever a check consumes an Unknown dimension; a pending-cast
+output moves the same resolution to admission time (`CHK-16`). The runtime
+consults the registered casts in registration order — a constant answers
+immediately, a resolver is asked per value — and the first answer that
+establishes the dimension stands. The engine re-validates that answer
+against the cast's declaration before any value is admitted, so a
+misbehaving resolver can never widen a label past its ceiling (`SAN-8`).
 
 ## Worked example
 

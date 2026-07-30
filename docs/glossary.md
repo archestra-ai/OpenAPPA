@@ -57,6 +57,7 @@ them. **Model terms** exist only in prose, and each has to earn its place.
 | `resolver.url` / `timeout_ms` | how a dynamic external is reached |
 | `requirement_gaps` | unmet entries of `requires`, returned on a refusal |
 | `narrowing` | the loss of reach a call would commit, returned on a refusal |
+| `unestablished` | values whose needed dimension no registered cast could establish, returned on a refusal |
 | `remedy_plans` | the ways out, returned on a refusal |
 
 ## Model terms
@@ -83,7 +84,7 @@ them. **Model terms** exist only in prose, and each has to earn its place.
 | **context-controlling deployment** | one that chooses what a child branch sees and receives what it returns. The weaker capability branching requires (`POS-5`) |
 | **Unknown** | "this label has not been established yet." Not a rank; absorbing under the fold |
 | **resolver** | the dynamic implementation of a registered external: authority rulings, cast decisions, sanitizer derivations, membership questions |
-| **staged review** | what an authority actually sees: the call's identity, its rendered arguments, and typed context, persisted verbatim on the ruling |
+| **staged review** | what an authority actually sees: the call's identity, its rendered arguments, and typed context. The typed context is persisted verbatim on the ruling; the arguments stay bound by the digest |
 | **release frontier** | what the run may still release, and to whom, without a further ruling. What a narrowing shrinks |
 
 ## Prose and wire

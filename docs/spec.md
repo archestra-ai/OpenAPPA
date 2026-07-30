@@ -115,13 +115,16 @@ type CheckOutcome =
   check consumes an Unknown dimension, the runtime MUST attempt the
   registered casts on the unestablished values and re-check before
   returning an outcome; resolution is automatic, never an agent choice and
-  never a remedy plan (§5.1). `unestablished` therefore names only values
+  never a remedy plan (§5.1). Casts are attempted in registration order
+  and the first resolution that establishes the dimension stands, each
+  re-validated against the cast's declaration (`SAN-8`) before admission.
+  `unestablished` therefore names only values
   no registered cast could establish — none is registered, or its resolver
   abstained per `EXT-1` — and no ruling clears such an entry: a fact does,
   or the configuration changes. The pure core performs no IO; the runtime
   drives resolution and the engine admits the results (`UNK-8`). A runtime
   MAY attempt casts as early as admission, and a §11.1 pending-cast tool
-  declares exactly that.
+  declares exactly that. *Deferred.*
 
 ### 3.1 Ordering and clocks
 
@@ -214,15 +217,19 @@ requirements and its routing tags.
 - **[RMD-5]** Enumeration MUST be total. The alternative bound is enforced
   at load: a registry whose worst case would exceed the planner's cap is
   refused as a configuration-shape error. Runtime truncation is forbidden.
-- **[RMD-15]** The list MUST be ordered least-mandate-first: a plan whose
-  authorities' ceilings barely cover the gap precedes one drawing on
-  broader power, so the agent reaches the least powerful entity that can
-  help before a stronger one. Where two plans' mandates are incomparable
-  the relative order is unspecified. Ordering is presentation only, and
-  the enumeration stays total per `RMD-4`.
-- **[RMD-6]** An authority's denial or abstention consumes only the plan it
-  was consulted for. Sibling plans stay offered, so an advertised
-  alternative is always executable.
+- **[RMD-15]** The list MUST be ordered least-mandate-first, so the agent
+  reaches the least powerful entity that can help before a stronger one.
+  Plans compare gap by gap on the mandate power assigned to each gap,
+  within that gap's own currency: trust ceilings by rank order, audience
+  ceilings and waiver sets by inclusion, attention by identity. Plan A
+  precedes plan B when every gap's assigned power in A is at most B's and
+  at least one is strictly less; plans incomparable under that order may
+  appear in any relative order. Ordering is presentation only, and the
+  enumeration stays total per `RMD-4`. *Deferred.*
+- **[RMD-6]** An abstention consumes only the plan it was consulted for; a
+  denial consumes every offered plan naming the denying authority for this
+  rendered call (`RMD-16`). Plans naming other authorities stay offered,
+  so an advertised alternative is always executable.
 - **[RMD-7]** Re-proposal is bounded by the harness's blocked-proposal
   budget per rendered call, charged when a block's offers are minted. The
   budget is spam control on the agent, not a count of denials: a denial
@@ -231,10 +238,11 @@ requirements and its routing tags.
 - **[RMD-16]** A denial is sticky for exactly its rendered call: once an
   authority has denied a plan for a rendered call — tool plus canonical
   digest — no later block of that same rendered call in the trajectory may
-  offer that authority's plan again. Sibling plans stay offered per
-  `RMD-6`; changed arguments change the digest and lift the exclusion. An
-  abstention — including the timeout and error cases of `EXT-1` — is not a
-  denial and does not stick.
+  offer a plan naming that authority. The denial is a recorded governance
+  event (`LOG-3`), so the exclusion replays from the log. Plans naming
+  other authorities stay offered per `RMD-6`; changed arguments change the
+  digest and lift the exclusion. An abstention — including the timeout and
+  error cases of `EXT-1` — is not a denial and does not stick. *Deferred.*
 - **[RMD-8]** Pending offers die with their turn. A plan execution MUST be
   re-validated against the live state it lands in: an offer whose block
   re-derives unchanged executes, one the state has moved past is refused by
@@ -321,12 +329,13 @@ requirements and its routing tags.
   mis-tagging produces is a block reported terminal while a competent
   authority sits unconsulted.
 - **[AUT-11]** **The response-sink bar.** Where tool credentials are
-  broader than the end user's own read rights — a service account, a
-  confining harness — the run's audience can exclude the user, and showing
-  content to the user is then itself a release. No ruling issued by the
-  end user may cover any requirement gap of that release, whatever mandate
-  the user otherwise holds. Where tool credentials equal the user's
-  rights, the audience never excludes the user and the bar is vacuous.
+  broader than the end user's own read rights — an agent running on
+  service-account credentials — the run's audience can exclude the user,
+  and showing content to the user is then itself a release. No ruling
+  issued by the end user may cover any requirement gap of that release,
+  whatever mandate the user otherwise holds. Where tool credentials equal
+  the user's rights, showing the user what its tools fetched releases
+  nothing the user could not fetch alone, and the bar is vacuous.
 
 ## 7. Rulings — `RUL`
 
@@ -378,7 +387,10 @@ requirements and its routing tags.
   to a trusted judge, not a flow the algebra checks; a deployer unwilling
   to show an authority the bytes it judges should not register that
   authority over those calls. The recipients of a proposed release cross
-  typed as the `Gap::Includes` subject of `RUL-8` in any case.
+  typed as the `Gap::Includes` subject of `RUL-8` in any case. The payload
+  is persisted once: the ruling binds it by canonical digest, the
+  dispatched call in the log carries the bytes, and the ruling's persisted
+  context stays the typed context of `RUL-8`. *Deferred.*
 - **[RUL-10]** No grant object appears in configuration or on any wire. The
   public vocabulary is mandates, rulings and log records.
 
@@ -408,7 +420,8 @@ requirements and its routing tags.
   registration: a sanitizer does not decide its derivation's label per
   value, as a resolver-implemented cast does under `SAN-8`, so the declared
   `to` is the transition's own ceiling. Trust and audience are bound on the
-  same terms.
+  same terms. The undeclared dimension is untouched: the derivation
+  carries the raw value's label on it unchanged.
 - **[SAN-5]** A mandate binds a transition, not the information it is
   claimed over. Scoping mandates by information type is open work.
 - **[SAN-6]** Registering a sanitizer vouches for its implementation. It
@@ -435,9 +448,9 @@ vouching act of `SAN-6`.
 - **[LOG-2]** **Effects** are declared by contracts as `emits` and appended
   when the call succeeds — one append point. A call that dispatched and
   failed appends nothing.
-- **[LOG-3]** **Governance events** are authority rulings, the dispatches
-  that consume them, acceptances, sanitizer applications, casts, and
-  boundary events.
+- **[LOG-3]** **Governance events** are authority rulings and denials, the
+  dispatches that consume rulings, acceptances, sanitizer applications,
+  casts, and boundary events.
 - **[LOG-4]** A **boundary event** is a mark the engine appends at the end
   of each assistant turn, at fork, and at merge. It never gates a flow
   itself; it lets later reads — offer expiry per `RMD-8`, the informed
@@ -680,8 +693,8 @@ Whatever surface ships MUST keep:
   is the reserved builtin `"hitl"` — the harness hosts the elicitation,
   and no channel concept exists. A mandate's powers do not depend on the
   implementation behind them: wiring `builtin = "approve"` to a covering
-  mandate is a deliberately open gate, legitimate per `THR-3` and visible
-  in review.
+  mandate is an open gate the deployer chose, legitimate per `THR-3` and
+  visible in review.
 - **[CFG-16]** At most **one dimension** may be declared pending-cast
   (`delta = { trust = "unknown" }`), and a `requires` on that same dimension
   is a load error — the requirement would evaluate before the resolution

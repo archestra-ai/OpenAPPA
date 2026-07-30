@@ -69,7 +69,7 @@ from that moment on, and it stays internal — so every later step negotiates
 from a worse position. Sends that would have gone through now need approval.
 Some sinks are closed for good.
 
-Without the worth-it check the agent finds that out three steps later, at a
+Without that check the agent finds that out three steps later, at a
 send that no longer works, with the data already in its context and nothing
 to be done about it. So APPA stops the call *before* the fetch and tells the
 agent exactly what it is about to give up. APPA calls this a **narrowing**.
@@ -188,8 +188,8 @@ consumes it, and a narrowing stop only fires on a declared `delta`, so a
 policy of bare names refuses exactly one thing — a call to a tool that is
 not registered. A host that branches adds one stall: a child's return
 carries Unknown, and the merge holds until a registered cast establishes
-it — or blocks naming the value, where no cast can. The first requirement you write is the first place the
-engine can say no.
+it — or blocks naming the value, where no cast can. Past those, the first
+requirement you write is the first place the engine can say no.
 
 To resolve an Unknown you register a **cast**: a rule for what unknown
 values become. It can be a constant — everything unknown is suspicious, or
