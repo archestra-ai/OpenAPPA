@@ -7,7 +7,7 @@ call it answers one question: may this data go there?
 
 | you are | read |
 |---|---|
-| deciding whether APPA fits | `guide.md` — one sitting |
+| deciding whether APPA fits | `../website/content/docs/how-it-works.md` — one sitting |
 | implementing the engine, or handing it to a model | `spec.md` with `glossary.md` |
 | writing or reviewing a policy | `contracts.md` |
 | asking why it works this way | `rationale.md` |
@@ -15,10 +15,13 @@ call it answers one question: may this data go there?
 
 ## Precedence
 
-`spec.md` is normative. Where the guide simplifies, the spec governs; where
-the spec and an implementation disagree, the spec governs. `rationale.md`
-explains decisions and settles none of them. The website is not a source of
-truth and never feeds back into these files.
+`spec.md` is normative. Where `how-it-works.md` simplifies, the spec
+governs; where the spec and an implementation disagree, the spec governs.
+`rationale.md` explains decisions and settles none of them.
+`how-it-works.md`, the reader-facing introduction, lives with the website
+at `../website/content/docs/how-it-works.md` and is golden: a change here
+that touches its claims updates it in the same commit. The rest of the
+website is not a source of truth and never feeds back into these files.
 
 ## Conventions
 
@@ -32,4 +35,5 @@ the paper — ids outlive section numbers.
 Sections that are not live carry a status: **design direction** for agreed
 but unspecified, **deferred** for specified but unimplemented.
 
-Prose in `docs/` follows the writing rules in the root `CLAUDE.md`.
+Prose in `docs/` and in `how-it-works.md` follows the writing rules in the
+root `CLAUDE.md`.

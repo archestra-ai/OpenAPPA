@@ -317,4 +317,4 @@ and at-most-once binds value crossings rather than endings.
 | invoke/append crash | effects append on success, so a host failing between a successful invoke and the append may lose effects. A durable outbox committing invocation and effects as one record is future work for the outer layer. |
 | failed send, real egress | a call that dispatched and failed appends nothing, so `no_prior(egress)` can pass after a send that reached an inbox. A positive `prior(k)` proves the tool reported success and nothing more about the outer world. |
 | confined-result crash | a pending-cast success checkpoints its effects durably before the confined offer exists in host memory, so a crash between the two leaves an open dispatch whose lapse record never lands. Effects stand honestly; the close is lost with the host. |
-| approval fatigue | a deployment concern rather than an engine one, and the real attack surface of any human-in-the-loop scheme. `guide.md` states the operational cost. |
+| approval fatigue | a deployment concern rather than an engine one, and the real attack surface of any human-in-the-loop scheme. `how-it-works.md` states the operational cost. |

@@ -9,7 +9,14 @@ filtering, no bespoke `if`s; any imperative judgment lives in registered
 external authorities and transformers, never in the engine.
 
 ## IMPORTANT
-docs/ is a current state of truth. Code and website can be harshly outdated.
+The golden set is `docs/` plus `website/content/docs/how-it-works.md`.
+Golden
+files must agree with each other in every commit: a change that alters
+what another golden file also states lands together with the matching
+update, and a commit that leaves two golden files contradicting each
+other is not allowed. Non-golden
+files — the code and the rest of the website, for now — can be harshly
+outdated.
 
 ## Naming
 
@@ -49,19 +56,27 @@ docs/ is a current state of truth. Code and website can be harshly outdated.
 2. `paper/` — the LaTeX paper (AISec '26 draft, merged in #37): the same
    model with its formal claims, theorem scoping, and citation anchors.
    Coding work is grounded in the spec, not the paper — coding never
-   changes the paper.
+   changes the paper. It stays as published, so the golden set's
+   same-commit rule does not reach it.
 3. `appa-engine/src/lib.rs` — concepts and semantics of the engine as
    implemented.
 
-The rest of `docs/` is not normative and must not be cited as if it were.
-`guide.md` is the reader-facing introduction, `rationale.md` records why
-decisions went the way they did and settles nothing, `glossary.md` splits
-the vocabulary into surface terms (typed by users) and model terms,
+The rest of the golden set is not normative and must not be cited as if it
+were; non-normative still means consistent — normativity decides who wins
+an interpretive dispute, never which file may lag.
+`website/content/docs/how-it-works.md` is the reader-facing introduction
+(golden, though it lives with the website), `rationale.md` records why
+decisions
+went the way they did and settles nothing, `glossary.md` splits the
+vocabulary into surface terms (typed by users) and model terms,
 `contracts.md` is the policy-review guide, `engine.md` maps the spec onto
 the crates. `docs/README.md` is the map.
 
-Edits flow one way: spec → guide/contracts/website. A change that starts in
-a downstream doc has to land in the spec first.
+Edits flow one way: spec → how-it-works/contracts/website. A change that
+starts in
+a downstream doc has to land in the spec first; the flow decides where a
+change starts, not when the rest catches up — within the golden set, the
+downstream update lands in the same commit.
 
 ## Pre-public: no history, no compatibility
 

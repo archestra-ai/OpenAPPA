@@ -1,16 +1,22 @@
 # CLAUDE.md — website
 
-This directory is the marketing/docs website (Next.js, pnpm). Its content —
-especially `website/content/docs/` — drifts from the actual project and is
-**not** a source of truth.
+This directory is the marketing/docs website (Next.js, pnpm). One file in
+it is golden: `content/docs/how-it-works.md`, the reader-facing
+introduction to the model, part of the same consistency set as `docs/`
+(see the root `CLAUDE.md`). A change that touches its claims lands
+together with the matching change in the rest of the golden set, and a
+commit that leaves it contradicting another golden file is not allowed.
+
+Everything else under `website/content/` drifts from the actual project
+and is **not** a source of truth.
 
 **When working on anything APPA-related (spec, paper, engine semantics,
-terminology, contracts), do not take website content into account.** The
-authoritative sources are, in order: `docs/spec.md`, the `paper/` LaTeX
-draft, and the
-root `CLAUDE.md`. If the website contradicts them, the website is wrong —
-never propagate its wording, claims, or terminology back into the spec,
-paper, or any APPA discussion.
+terminology, contracts), do not take website content other than
+`how-it-works.md` into account.** The authoritative sources are those of the root
+`CLAUDE.md`'s Document precedence. If the website
+contradicts them, the website is wrong — never propagate its wording,
+claims, or terminology back into the spec, paper, or any APPA discussion.
 
 Edits flow one way only: from the spec/paper into the website, never the
-reverse.
+reverse. For `how-it-works.md` that flow is same-commit; for the rest of
+the content it is whenever someone gets to it.

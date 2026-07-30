@@ -2,7 +2,8 @@
 
 **Status: draft.** This is the normative account of the APPA model. It says
 what an implementation must do and nothing about why — the arguments live in
-`rationale.md`, and `guide.md` is the readable introduction.
+`rationale.md`, and `../website/content/docs/how-it-works.md` is the
+readable introduction.
 
 Rules carry ids by family. Cite them from tests, issues and the paper —
 ids, not section numbers. A rule keeps its id when it moves, so a family's

@@ -1,7 +1,8 @@
 # The reference implementation
 
 For people working on the engine itself, or building a second one. Most
-readers want `guide.md` or `spec.md` instead.
+readers want `../website/content/docs/how-it-works.md` or `spec.md`
+instead.
 
 This file maps the spec onto the shipped code and stays thin. The crate docs
 carry the detail, and duplicating them here would only produce drift.
