@@ -234,7 +234,7 @@ output_sanitizer = "pii"
 [[sanitizer]]
 name = "pii"
 on = ["tool_output"]
-[sanitizer.can_reduce]
+[sanitizer.mandate]
 audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
 [sanitizer.implementation]
 builtin = "redact-email"
@@ -828,7 +828,7 @@ delta = { audience = { exactly = ["internal"] } }
 [[sanitizer]]
 name = "pii"
 on = ["tool_output"]
-[sanitizer.can_reduce]
+[sanitizer.mandate]
 audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
 [sanitizer.implementation]
 builtin = "redact-email"
@@ -894,7 +894,7 @@ delta = { audience = { exactly = ["internal"] } }
 [[sanitizer]]
 name = "pii"
 on = ["tool_output"]
-[sanitizer.can_reduce]
+[sanitizer.mandate]
 audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
 [sanitizer.implementation]
 builtin = "redact-email"
@@ -1354,7 +1354,7 @@ version = 1
 [[sanitizer]]
 name = "pii"
 on = ["tool_output"]
-[sanitizer.can_reduce]
+[sanitizer.mandate]
 audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
 [sanitizer.implementation]
 builtin = "redact-email"
@@ -1462,7 +1462,7 @@ delta = { trust = "suspicious", audience = { exactly = ["internal"] } }
 [[sanitizer]]
 name = "pii"
 on = ["tool_output"]
-[sanitizer.can_reduce]
+[sanitizer.mandate]
 audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
 [sanitizer.implementation]
 builtin = "redact-email"
@@ -1582,7 +1582,7 @@ delta = { audience = { exactly = ["internal"] } }
 [[sanitizer]]
 name = "pii"
 on = ["tool_output"]
-[sanitizer.can_reduce]
+[sanitizer.mandate]
 audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
 [sanitizer.implementation]
 builtin = "redact-email"
@@ -1718,7 +1718,7 @@ delta = { audience = { exactly = ["internal"] } }
 [[sanitizer]]
 name = "pii"
 on = ["tool_output"]
-[sanitizer.can_reduce]
+[sanitizer.mandate]
 audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
 [sanitizer.implementation]
 builtin = "redact-email"
@@ -1850,7 +1850,7 @@ delta = {{ audience = {{ exactly = ["internal"] }} }}
 [[sanitizer]]
 name = "alpha"
 on = ["tool_output"]
-[sanitizer.can_reduce]
+[sanitizer.mandate]
 audience = {{ from = {{ includes = ["internal"] }}, to = {{ exactly = ["public"] }} }}
 [sanitizer.implementation]
 resolver = {{ url = "{alpha_url}", timeout_ms = 1000 }}
@@ -1858,7 +1858,7 @@ resolver = {{ url = "{alpha_url}", timeout_ms = 1000 }}
 [[sanitizer]]
 name = "beta"
 on = ["tool_output"]
-[sanitizer.can_reduce]
+[sanitizer.mandate]
 audience = {{ from = {{ includes = ["internal"] }}, to = {{ exactly = ["public"] }} }}
 [sanitizer.implementation]
 resolver = {{ url = "{beta_url}", timeout_ms = 1000 }}

@@ -87,7 +87,6 @@ pub enum ConfigError {
 pub enum AuthorityImpl {
     Builtin(BuiltinAuthority),
     HttpResolver { url: String, timeout_ms: u64 },
-    Hitl,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -662,40 +661,18 @@ impl RawAuthorityImpl {
 struct RawResolver {
     url: Option<String>,
     timeout_ms: Option<u64>,
-    channel: Option<String>,
 }
 
 impl RawResolver {
     fn convert_authority(self, name: &str) -> Result<AuthorityImpl, ConfigError> {
-        match (self.url, self.channel) {
-            (Some(url), None) => Ok(AuthorityImpl::HttpResolver {
-                url,
-                timeout_ms: check_timeout(self.timeout_ms, &format!("authority {name}"))?,
-            }),
-            // A HITL channel has its own elicitation path — an http `timeout_ms` here is ambiguous.
-            (None, Some(channel)) if channel == "hitl" => match self.timeout_ms {
-                Some(_) => Err(bad_impl(
-                    "authority",
-                    name,
-                    "the `hitl` channel does not take `timeout_ms`",
-                )),
-                None => Ok(AuthorityImpl::Hitl),
-            },
-            (None, Some(other)) => Err(bad_impl(
-                "authority",
-                name,
-                &format!("unknown resolver channel {other:?}"),
-            )),
-            _ => Err(bad_impl("authority", name, "resolver needs `url` xor `channel`")),
-        }
+        let (url, timeout_ms) = self.convert_transform("authority", name)?;
+        Ok(AuthorityImpl::HttpResolver { url, timeout_ms })
     }
 
     fn convert_transform(self, kind: &'static str, name: &str) -> Result<(String, u64), ConfigError> {
         match self.url {
-            Some(url) if self.channel.is_none() => {
-                Ok((url, check_timeout(self.timeout_ms, &format!("{kind} {name}"))?))
-            }
-            _ => Err(bad_impl(kind, name, "resolver needs `url`")),
+            Some(url) => Ok((url, check_timeout(self.timeout_ms, &format!("{kind} {name}"))?)),
+            None => Err(bad_impl(kind, name, "resolver needs `url`")),
         }
     }
 }
@@ -705,14 +682,14 @@ impl RawResolver {
 struct RawSanitizer {
     name: String,
     on: Vec<String>,
-    can_reduce: RawCanReduce,
+    mandate: RawSanitizerMandate,
     implementation: RawTransformImpl,
 }
 
 impl RawSanitizer {
     fn convert(self) -> Result<(Sanitizer, SanitizerImpl), ConfigError> {
         let on = parse_points(&self.on, &self.name)?;
-        let can_reduce = self.can_reduce.convert(&self.name)?;
+        let can_reduce = self.mandate.convert(&self.name)?;
         let imp = match (self.implementation.builtin, self.implementation.resolver) {
             (Some(builtin), None) => SanitizerImpl::Builtin(BuiltinSanitizer::from_name(&builtin).ok_or(
                 ConfigError::UnknownBuiltin {
@@ -740,11 +717,11 @@ impl RawSanitizer {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawCanReduce {
+struct RawSanitizerMandate {
     audience: RawTransition,
 }
 
-impl RawCanReduce {
+impl RawSanitizerMandate {
     fn convert(self, name: &str) -> Result<AudienceTransition, ConfigError> {
         Ok(AudienceTransition {
             from_includes: parse_audience(&self.audience.from.includes, &format!("sanitizer {name} from"))?,
@@ -989,7 +966,7 @@ delta    = {}
 [[sanitizer]]
 name = "remove_pii"
 on   = ["tool_output"]
-[sanitizer.can_reduce]
+[sanitizer.mandate]
 audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
 [sanitizer.implementation]
 builtin = "redact-email"
@@ -999,7 +976,7 @@ name = "human_in_the_loop_approver"
 [authority.mandate]
 can_add_readers = { may_add = ["public"] }
 [authority.implementation]
-resolver = { channel = "hitl" }
+builtin = "hitl"
 "#;
 
     fn config(s: &str) -> Config {
@@ -1054,7 +1031,7 @@ resolver = { channel = "hitl" }
         assert!(matches!(
             err(
                 "version = 1\n[[sanitizer]]\nname = \"pii\"\non = [\"tool_input\", \"tool_output\"]\n\
-                 [sanitizer.can_reduce]\naudience = { from = { includes = [\"internal\"] }, to = { exactly = [\"public\"] } }\n\
+                 [sanitizer.mandate]\naudience = { from = { includes = [\"internal\"] }, to = { exactly = [\"public\"] } }\n\
                  [sanitizer.implementation]\nbuiltin = \"redact-email\"\n"
             ),
             ConfigError::InputSanitizerPoint { name } if name == "pii"
@@ -1065,7 +1042,10 @@ resolver = { channel = "hitl" }
     fn hitl_authority_impl_and_reader_ceiling() {
         let cfg = config(WORKED);
         let name = AuthorityName::new("human_in_the_loop_approver");
-        assert_eq!(cfg.authority_impl(&name), Some(&AuthorityImpl::Hitl));
+        assert_eq!(
+            cfg.authority_impl(&name),
+            Some(&AuthorityImpl::Builtin(BuiltinAuthority::Hitl))
+        );
         let reg = cfg.registry();
         assert_eq!(
             reg.authority(&name).unwrap().mandate.reader_ceiling,
@@ -1214,7 +1194,7 @@ resolver = { url = "https://c/resolve", timeout_ms = 10000, may_cast = { trust =
 [[sanitizer]]
 name = "pii"
 on   = ["tool_output"]
-[sanitizer.can_reduce]
+[sanitizer.mandate]
 audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
 [sanitizer.implementation]
 builtin = "redact-email"
@@ -1377,7 +1357,7 @@ builtin = "approve"
 [[sanitizer]]
 name = "s"
 on = ["tool_output"]
-[sanitizer.can_reduce]
+[sanitizer.mandate]
 audience = { from = { includes = ["a"] }, to = { exactly = ["public"] } }
 [sanitizer.implementation]
 builtin = "scrub-everything"
@@ -1387,13 +1367,24 @@ builtin = "scrub-everything"
     }
 
     #[test]
-    fn hitl_channel_rejects_a_timeout() {
+    fn a_resolver_without_an_endpoint_is_rejected() {
         assert!(matches!(
             err(
-                "version = 1\n[[authority]]\nname = \"a\"\n[authority.mandate]\ncan_waive = [\"x\"]\n[authority.implementation]\nresolver = { channel = \"hitl\", timeout_ms = 5000 }\n"
+                "version = 1\n[[authority]]\nname = \"a\"\n[authority.mandate]\ncan_waive = [\"x\"]\n[authority.implementation]\nresolver = { timeout_ms = 5000 }\n"
             ),
             ConfigError::BadImplementation { kind: "authority", .. }
         ));
+    }
+
+    #[test]
+    fn builtin_hitl_may_back_a_cover_bearing_mandate() {
+        let cfg = config(
+            "version = 1\n[[authority]]\nname = \"a\"\n[authority.mandate]\ncan_raise_trust_to = \"trusted\"\n[authority.implementation]\nbuiltin = \"hitl\"\n",
+        );
+        assert_eq!(
+            cfg.authority_impl(&AuthorityName::new("a")),
+            Some(&AuthorityImpl::Builtin(BuiltinAuthority::Hitl))
+        );
     }
 
     #[test]
@@ -1487,7 +1478,7 @@ http = { url = "https://tools/fetch", timeout_ms = 5000 }
 [[sanitizer]]
 name = "s"
 on = ["tool_stdin"]
-[sanitizer.can_reduce]
+[sanitizer.mandate]
 audience = { from = { includes = ["a"] }, to = { exactly = ["public"] } }
 [sanitizer.implementation]
 builtin = "redact-email"

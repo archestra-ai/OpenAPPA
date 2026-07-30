@@ -17,7 +17,7 @@ use thiserror::Error;
 use tokio::sync::OwnedMutexGuard;
 
 use crate::config::{AuthorityImpl, CastImpl, Config, SanitizerImpl, ToolImpl};
-use crate::external::{AuthorityBackend, CastBackend, SanitizerBackend};
+use crate::external::{AuthorityBackend, BuiltinAuthority, CastBackend, SanitizerBackend};
 use crate::store::{SessionStore, StoreError, StoreIdentity, TenantId};
 use crate::tool::{BuiltinTool, EXECUTE_REMEDY_PLAN, FORK, HttpClient, HttpTool, SUBMIT_RESULT, ToolBackend};
 use crate::wire::{WireMessage, WireTool, WireToolSchema};
@@ -121,7 +121,7 @@ impl Mediator {
                     timeout: Duration::from_millis(*timeout_ms),
                     client: client.clone(),
                 },
-                Some(AuthorityImpl::Hitl) | None => AuthorityBackend::Hitl,
+                None => AuthorityBackend::Builtin(BuiltinAuthority::Hitl),
             };
             authority_backends.insert(authority.name.clone(), backend);
         }
