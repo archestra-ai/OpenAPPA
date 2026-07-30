@@ -2,7 +2,7 @@
 //! facts** (CC2), never from the north request.
 //!
 //! Every internal inference's context is this projection: the server-pinned `system`/`developer`
-//! preamble, then — walking the branch's facts in log order — each user turn (a user-origin
+//! transcript head, then — walking the branch's facts in log order — each user turn (a user-origin
 //! `ValueAdmitted`), each assistant round (`AssistantMessage`, its proposed tool calls rendered), and
 //! per proposed call exactly one `tool` response. The response text is the admitted result's body for
 //! an available result (`ValueAdmitted` with tool-result provenance) or the sealed feedback the runtime
@@ -11,7 +11,7 @@
 //! call order, so the N responses following an assistant round zip to its N calls.
 //!
 //! The builder reads bodies, so it lives here, not in the engine's algebra-only projection. It trusts
-//! nothing from the client: the preamble and tools are server config, and the history is the log.
+//! nothing from the client: the head and tools are host config, and the history is the log.
 
 use std::collections::VecDeque;
 
@@ -20,12 +20,12 @@ use appa_engine::value::{Provenance, ToolCallId, TrajectoryId};
 
 use crate::wire::{WireFunctionCall, WireMessage, WireToolCall};
 
-/// Build the ordered model-visible messages for one branch: the server preamble followed by its
+/// Build the ordered model-visible messages for one branch: the host transcript head followed by its
 /// inherited ancestor snapshots and branch-local turns. Each ancestor snapshot ends at the last
 /// complete message before the descendant's fork, so a pending tool-call round never enters a child
 /// context and later ancestor activity cannot become a cross-branch channel.
-pub fn model_transcript(preamble: &[WireMessage], log: &[Fact], trajectory: &TrajectoryId) -> Vec<WireMessage> {
-    let mut messages: Vec<WireMessage> = preamble.to_vec();
+pub fn model_transcript(head: &[WireMessage], log: &[Fact], trajectory: &TrajectoryId) -> Vec<WireMessage> {
+    let mut messages: Vec<WireMessage> = head.to_vec();
     // Call ids proposed by the current/most-recent assistant round still awaiting their responses. The
     // drive appends one terminal response per proposed call, in order, so popping the front pairs a
     // response to its call without a stored dispatch↔id map.
@@ -266,10 +266,10 @@ mod tests {
     }
 
     #[test]
-    fn preamble_then_a_bare_user_turn() {
-        let preamble = vec![WireMessage::system("you are a confined agent")];
+    fn transcript_head_then_a_bare_user_turn() {
+        let head = vec![WireMessage::system("you are a confined agent")];
         let log = vec![user("investigate the pod")];
-        let out = model_transcript(&preamble, &log, &traj());
+        let out = model_transcript(&head, &log, &traj());
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].role, "system");
         assert_eq!(out[1], WireMessage::user("investigate the pod"));

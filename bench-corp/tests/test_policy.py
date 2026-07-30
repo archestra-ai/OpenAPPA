@@ -28,7 +28,7 @@ def test_prune_keeps_only_enabled_systems(agent_name: str) -> None:
     pruned = prune_policy(policy, ("hr", "email"))
     assert _tool_names(pruned) == {"search_hr", "read_hr", "create_hr", "send_email"}
     # Everything but the tool list survives the round trip — for the fork
-    # policy that includes the sanitizer, boundary, and preamble tables its
+    # policy that includes the sanitizer and boundary tables its
     # child-return declassification depends on.
     original, result = tomllib.loads(policy), tomllib.loads(pruned)
     assert {k: v for k, v in result.items() if k != "tool"} == {k: v for k, v in original.items() if k != "tool"}

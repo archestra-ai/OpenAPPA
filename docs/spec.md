@@ -703,6 +703,11 @@ Whatever surface ships MUST keep:
   is refused.
 - **[CFG-17]** A `[child] return_sanitizer` binding is validated at load:
   the named sanitizer MUST exist and MUST carry the `tool_output` point.
+- **[CFG-18]** The transcript head is not part of this configuration surface.
+  It is host configuration per `POS-6`, and a field declaring it is a load
+  error. The head instructs the model while this surface declares what may
+  flow, so a deployment that keeps them in one file gives its prompt text
+  the same review path as its contracts.
 
 Contract language leads with `requires` as a surface convention; a delta
 reads best as a stated consequence. Source deltas are derivable, so a

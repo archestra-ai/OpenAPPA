@@ -12,7 +12,7 @@ use thiserror::Error;
 
 use crate::authority::{Authority, Cast, CastResolution, CastTarget, Sanitizer};
 use crate::contract::ToolContract;
-use crate::label::{Adequacy, Dim, Dimension, Trust};
+use crate::label::{Dim, Dimension, Trust};
 use crate::names::{AuthorityName, CastName, SanitizerName};
 use crate::value::ToolName;
 
@@ -113,16 +113,6 @@ pub enum LoadError {
         "tool {0} is unannotated (no delta) but declares label requirements: declare its delta (`delta = {{}}` for a deliberately neutral output) so the committed label the requirements check is established"
     )]
     UnannotatedWithLabelRequirement(String),
-    #[error("tool {tool} binds output sanitizer {sanitizer}, which is not registered")]
-    UnknownOutputSanitizer { tool: String, sanitizer: String },
-    #[error("tool {tool} binds {sanitizer}, which is not registered for tool output")]
-    OutputSanitizerNotOutput { tool: String, sanitizer: String },
-    #[error(
-        "tool {0} binds an output sanitizer and declares a pending-cast output (the two Phase-2 disciplines do not compose)"
-    )]
-    OutputSanitizerWithPendingCast(String),
-    #[error("tool {tool}'s declared raw output does not satisfy sanitizer {sanitizer}'s `from` precondition")]
-    OutputSanitizerSourceUnmet { tool: String, sanitizer: String },
     #[error(
         "tool {tool}: {count} worst-case alternative remedy assignments exceed the {max} the planner enumerates — reduce the requirement entries or the competent authorities"
     )]
@@ -229,7 +219,7 @@ impl Registry {
     pub fn build(config: RegistryConfig) -> Result<Registry, LoadError> {
         config.trust_chain.validate()?;
 
-        // Sanitizers index first: tool output-sanitizer bindings validate against them.
+        // Sanitizers index first: the child return-sanitizer binding validates against them.
         let mut sanitizers = BTreeMap::new();
         for sanitizer in config.sanitizers {
             if sanitizers.insert(sanitizer.name.clone(), sanitizer.clone()).is_some() {
@@ -250,7 +240,6 @@ impl Registry {
                 format!("tool {} trust floor", tool.name.as_str())
             })?;
             validate_pending_cast(&tool)?;
-            validate_output_binding(&tool, &sanitizers)?;
             if tools.insert(tool.name.clone(), tool.clone()).is_some() {
                 return Err(LoadError::DuplicateTool(tool.name.as_str().to_string()));
             }
@@ -269,10 +258,17 @@ impl Registry {
             }
         }
 
-        // Bound alternative-plan enumeration: per tool, the worst case (every requirement unmet)
-        // multiplies each requirement entry's competent-authority count. Static except `includes`,
-        // whose recipients are call arguments — upper-bounded by every scope-covering authority
-        // with a reader ceiling. Refused at load, so enumeration never truncates at runtime.
+        // Bound `remedy_plans` enumeration per tool (`RMD-5`). Only the executable kind needs a
+        // cap: its worst case is a *product* over the competent authorities of every unmet
+        // requirement entry, so it grows combinatorially. Static except `includes`, whose
+        // recipients are call arguments — upper-bounded by every scope-covering authority with a
+        // reader ceiling. Refused at load, so enumeration never truncates at runtime.
+        //
+        // The id-less redispatch kind needs none. It is linear: at most one entry per registered
+        // tool, which the registry itself bounds, and the two kinds never appear together — a
+        // prior/cap gap has no covering mandate, so a block carrying one has no executable plan.
+        // A cap over the tool count would refuse ordinary catalogues (bench-corp registers 17)
+        // without any enumeration blow-up to prevent.
         for tool in tools.values() {
             let count = worst_case_plan_alternatives(tool, &config.authorities);
             if count > MAX_PLAN_ALTERNATIVES {
@@ -395,44 +391,6 @@ fn validate_pending_cast(tool: &ToolContract) -> Result<(), LoadError> {
     }
 }
 
-/// The output-sanitizer binding load rules (RP4). The bound name must resolve to a registered
-/// `tool_output` sanitizer; the tool's declared raw output must satisfy the transition's `from`
-/// (both sides are static, so an inapplicable transition is refused here, never at admission); and
-/// the binding cannot pair with a pending-cast output (the two Phase-2 disciplines don't compose).
-/// An unannotated tool cannot bind a sanitizer either: its raw output label is Unknown, which
-/// never satisfies the `from` — the source-unmet arm below refuses it.
-fn validate_output_binding(
-    tool: &ToolContract,
-    sanitizers: &BTreeMap<SanitizerName, Sanitizer>,
-) -> Result<(), LoadError> {
-    let Some(name) = &tool.output_sanitizer else {
-        return Ok(());
-    };
-    let sanitizer = sanitizers.get(name).ok_or_else(|| LoadError::UnknownOutputSanitizer {
-        tool: tool.name.as_str().to_string(),
-        sanitizer: name.as_str().to_string(),
-    })?;
-    if !sanitizer.on.output {
-        return Err(LoadError::OutputSanitizerNotOutput {
-            tool: tool.name.as_str().to_string(),
-            sanitizer: name.as_str().to_string(),
-        });
-    }
-    if tool.pending_cast_dim().is_some() {
-        return Err(LoadError::OutputSanitizerWithPendingCast(
-            tool.name.as_str().to_string(),
-        ));
-    }
-    let raw = tool.output_label();
-    if raw.audience.covers(&sanitizer.can_reduce.from_includes) != Adequacy::Holds {
-        return Err(LoadError::OutputSanitizerSourceUnmet {
-            tool: tool.name.as_str().to_string(),
-            sanitizer: name.as_str().to_string(),
-        });
-    }
-    Ok(())
-}
-
 fn check_rank(chain: &TrustChain, rank: Option<Trust>, context: impl Fn() -> String) -> Result<(), LoadError> {
     match rank {
         Some(t) if !chain.contains_rank(t) => Err(LoadError::RankOutOfChain {
@@ -472,7 +430,6 @@ mod tests {
             delta: Some(Delta::NONE),
             emits: vec![],
             requires: Requires::default(),
-            output_sanitizer: None,
         }
     }
 
@@ -538,7 +495,6 @@ mod tests {
                 trust: Some(Dim::Known(Trust::new(9))),
                 audience: None,
             }),
-            output_sanitizer: None,
             ..tool("over")
         }];
         assert!(matches!(
@@ -590,7 +546,6 @@ mod tests {
                 trust: Some(Dim::Unknown),
                 audience: Some(Dim::Unknown),
             }),
-            output_sanitizer: None,
             ..tool("scan")
         }];
         assert!(matches!(
@@ -617,7 +572,6 @@ mod tests {
                 },
                 ..Requires::default()
             },
-            output_sanitizer: None,
             ..tool("scan")
         }];
         assert!(matches!(
@@ -641,7 +595,6 @@ mod tests {
                 },
                 ..Requires::default()
             },
-            output_sanitizer: None,
             ..tool("scan")
         }];
         assert!(matches!(
@@ -666,7 +619,6 @@ mod tests {
                 },
                 ..Requires::default()
             },
-            output_sanitizer: None,
             ..tool("scan")
         }];
         assert!(Registry::build(cfg).is_ok());
@@ -723,82 +675,6 @@ mod tests {
             },
             ..tool("send")
         }];
-        assert!(Registry::build(cfg).is_ok());
-    }
-
-    #[test]
-    fn validates_the_output_sanitizer_binding() {
-        use crate::authority::{AudienceTransition, SanitizerPoints};
-        use crate::label::{Audience, ReaderId};
-
-        let sanitizer = |name: &str, output: bool, from: Audience| Sanitizer {
-            name: SanitizerName::new(name),
-            on: SanitizerPoints { input: !output, output },
-            can_reduce: AudienceTransition {
-                from_includes: from,
-                to: Audience::Public,
-            },
-        };
-        let internal = || Audience::restricted([ReaderId::new("internal")]);
-        let bound_tool = |sanitizer: &str| ToolContract {
-            delta: Some(Delta {
-                trust: None,
-                audience: Some(Dim::Known(internal())),
-            }),
-            output_sanitizer: Some(SanitizerName::new(sanitizer)),
-            ..tool("export")
-        };
-
-        // An unregistered binding is refused.
-        let mut cfg = base();
-        cfg.tools = vec![bound_tool("ghost")];
-        assert!(matches!(
-            Registry::build(cfg),
-            Err(LoadError::UnknownOutputSanitizer { .. })
-        ));
-
-        // A binding to an input-only sanitizer is refused.
-        let mut cfg = base();
-        cfg.sanitizers = vec![sanitizer("input-only", false, internal())];
-        cfg.tools = vec![bound_tool("input-only")];
-        assert!(matches!(
-            Registry::build(cfg),
-            Err(LoadError::OutputSanitizerNotOutput { .. })
-        ));
-
-        // A binding whose `from` the declared raw output cannot satisfy is refused at load — both
-        // sides are static, so the inapplicable transition never reaches admission.
-        let mut cfg = base();
-        cfg.sanitizers = vec![sanitizer(
-            "finance-only",
-            true,
-            Audience::restricted([ReaderId::new("finance")]),
-        )];
-        cfg.tools = vec![bound_tool("finance-only")];
-        assert!(matches!(
-            Registry::build(cfg),
-            Err(LoadError::OutputSanitizerSourceUnmet { .. })
-        ));
-
-        // A binding on a pending-cast output is refused (the two disciplines don't compose).
-        let mut cfg = base();
-        cfg.sanitizers = vec![sanitizer("declassify", true, internal())];
-        cfg.tools = vec![ToolContract {
-            delta: Some(Delta {
-                trust: Some(Dim::Unknown),
-                audience: Some(Dim::Known(internal())),
-            }),
-            ..bound_tool("declassify")
-        }];
-        assert!(matches!(
-            Registry::build(cfg),
-            Err(LoadError::OutputSanitizerWithPendingCast(name)) if name == "export"
-        ));
-
-        // The applicable binding loads.
-        let mut cfg = base();
-        cfg.sanitizers = vec![sanitizer("declassify", true, internal())];
-        cfg.tools = vec![bound_tool("declassify")];
         assert!(Registry::build(cfg).is_ok());
     }
 

@@ -20,7 +20,7 @@ use appa_engine::projection::Projection;
 use appa_engine::value::{Provenance, ResolvedCall, ToolName, TrajectoryId};
 use appa_runtime::tool::BuiltinTool;
 use appa_runtime::wire::{ChatCompletionResponse, WireFunctionCall, WireMessage, WireToolCall};
-use appa_runtime::{Config, Limits, Mediator};
+use appa_runtime::{Config, Limits, Mediator, TranscriptHead};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
@@ -65,7 +65,11 @@ fn mediator_for(policy: &str) -> Arc<Mediator> {
             (contract.name.clone(), BuiltinTool::Echo(body))
         })
         .collect();
-    Arc::new(Mediator::new(config, builtins).expect("the mediator assembles"))
+    Arc::new(
+        Mediator::new(config, builtins)
+            .expect("the mediator assembles")
+            .with_transcript_head(head()),
+    )
 }
 
 async fn run(mediator: Arc<Mediator>, rounds: Vec<WireMessage>) -> (TenantId, TrajectoryId, Outcome, Vec<Fact>) {
@@ -391,4 +395,10 @@ async fn read_request(socket: &mut TcpStream) {
             }
         }
     }
+}
+
+/// The host's transcript head, as the binary supplies it (`CFG-18`).
+fn head() -> TranscriptHead {
+    TranscriptHead::new(vec![WireMessage::system(include_str!("../src/system_prompt.txt"))])
+        .expect("the head is content-only system messages")
 }

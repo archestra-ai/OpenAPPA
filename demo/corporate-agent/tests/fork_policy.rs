@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use appa_engine::names::SanitizerName;
 use appa_runtime::tool::BuiltinTool;
-use appa_runtime::{Config, Mediator};
+use appa_runtime::{Config, Mediator, TranscriptHead, WireMessage};
 
 const FORK_POLICY: &str = include_str!("../../../bench-corp/policies/appa.toml");
 const FORK_OPEN_POLICY: &str = include_str!("../../../bench-corp/policies/open.toml");
@@ -20,7 +20,9 @@ fn assemble(policy: &str) -> Mediator {
         .map(|contract| (contract.name.clone(), BuiltinTool::Echo(String::new())))
         .collect();
     assert_eq!(backends.len(), 17, "the 17-tool corp surface");
-    Mediator::new(config, backends).expect("the mediator assembles")
+    Mediator::new(config, backends)
+        .expect("the mediator assembles")
+        .with_transcript_head(head())
 }
 
 #[test]
@@ -38,4 +40,10 @@ fn fork_policy_assembles_with_a_backend_per_tool_and_a_live_sanitizer() {
 #[test]
 fn fork_open_policy_assembles_over_the_same_surface() {
     assemble(FORK_OPEN_POLICY);
+}
+
+/// The host's transcript head, as the binary supplies it (`CFG-18`).
+fn head() -> TranscriptHead {
+    TranscriptHead::new(vec![WireMessage::system(include_str!("../src/system_prompt.txt"))])
+        .expect("the head is content-only system messages")
 }

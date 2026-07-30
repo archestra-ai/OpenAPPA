@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use appa_engine::admit::{AdmitError, ResultAdmission};
 use appa_engine::check::CheckOutcome;
 use appa_engine::engine::Engine;
-use appa_engine::execute::{Issuer, Ruling, Sink};
+use appa_engine::execute::Ruling;
 use appa_engine::fact::{BoundaryKind, Fact, FactBatch, ReturnPolicy};
 use appa_engine::label::Label;
 use appa_engine::names::AuthorityName;
@@ -33,13 +33,14 @@ pub(crate) const SEALED_INDETERMINATE: &str = "[tool call outcome unknown — it
 
 /// A blocked call's cohort: every offered plan for one blocked proposal, each keyed by an
 /// SDK-minted turn-unique handle (the engine's `PlanId` is block-local and never exposed to the
-/// model). Mirrors the runtime: a success consumes the whole cohort, a denial only its offer,
-/// and an acceptance-carrying plan is informed — executable only in a round after
+/// model). Mirrors the runtime: a success consumes the whole cohort, an abstention only the offer
+/// it was consulted for, a denial every offer naming that authority for this rendered call
+/// (`RMD-6`), and an acceptance-carrying plan is informed — executable only in a round after
 /// `offered_round` (the framework signals rounds through `begin_round`).
 #[derive(Debug)]
 pub(crate) struct PendingBlock {
     pub(crate) call: ResolvedCall,
-    pub(crate) offers: Vec<(String, appa_engine::plan::RemedyPlan)>,
+    pub(crate) offers: Vec<(String, appa_engine::plan::ExecutableRemedyPlan)>,
     pub(crate) offered_round: u32,
 }
 
@@ -201,21 +202,27 @@ impl Core {
                     .plan(&views, &call, &raw)
                     .expect("checked tool is registered");
                 let surface = self.surface()?;
-                let feedback = if planned.plans.is_empty() {
+                // Gate on *executable* plans, not the whole list: an id-less redispatch mints no
+                // handle, so a redispatch-only block has no cohort to open and charges nothing.
+                let has_offers = planned.plans.iter().any(|plan| plan.executable().is_some());
+                let feedback = if !has_offers {
                     crate::feedback::block_feedback(&raw, &planned, &[], surface)
                 } else {
                     // The remedy budget bounds blocked-proposal rounds per digest: each cohort of
                     // offers is one round, within which every plan is consultable once.
                     let attempts = self.remedy_attempts.entry(call.digest()).or_insert(0);
                     *attempts += 1;
-                    if *attempts > self.options.max_remedy_attempts_per_gap {
+                    if *attempts > self.options.max_blocked_proposals_per_call {
                         return Ok(Checked::Feedback(
                             "the remedy attempt limit for this call was reached".to_string(),
                         ));
                     }
-                    let offers: Vec<(String, appa_engine::plan::RemedyPlan)> = planned
+                    // Handles are for engine-side plans only: an id-less redispatch names a call
+                    // the agent makes for itself (`RMD-2`), so there is nothing to execute.
+                    let offers: Vec<(String, appa_engine::plan::ExecutableRemedyPlan)> = planned
                         .plans
                         .iter()
+                        .filter_map(appa_engine::plan::RemedyPlan::executable)
                         .map(|plan| {
                             let handle = format!("remedy-{}", self.next_remedy_handle);
                             self.next_remedy_handle += 1;
@@ -293,7 +300,9 @@ impl Core {
                 .plan(&views, &call, &raw)
                 .expect("pending call is registered")
                 .plans
-                .contains(&chosen),
+                .iter()
+                .filter_map(appa_engine::plan::RemedyPlan::executable)
+                .any(|offered| offered == &chosen),
             _ => false,
         };
         if !still_offered {
@@ -335,25 +344,38 @@ impl Core {
                 AuthorityAnswer::Approve => rulings.push(Ruling {
                     dispatch: dispatch.clone(),
                     authority: req.authority.clone(),
-                    issuer: Issuer::Authority,
                     covers: req.covers.clone(),
                     reviewed: request.review(),
                 }),
-                AuthorityAnswer::Deny | AuthorityAnswer::Abstain => {
-                    // The denial consumes only this offer; siblings stay live and are re-listed.
+                // `RMD-6`: an abstention consumes only the plan it was consulted for, while a
+                // denial consumes every offered plan naming the denying authority for this
+                // rendered call, so an advertised alternative is always executable. (`RMD-16`'s
+                // durable, cross-turn stickiness is deferred: nothing here survives the turn.)
+                answer @ (AuthorityAnswer::Deny | AuthorityAnswer::Abstain) => {
                     let surface = self.surface()?;
-                    let cohort = &mut self.pending_blocks[cohort_index];
-                    cohort.offers.retain(|(h, _)| h != plan_id);
-                    let feedback = crate::feedback::denial_feedback(&cohort.offers, surface);
-                    if cohort.offers.is_empty() {
-                        self.pending_blocks.remove(cohort_index);
+                    match answer {
+                        // `RMD-6` binds the *rendered call*, not one cohort: the same tool plus
+                        // canonical digest may have several cohorts live at once, and a denied
+                        // authority must not stay advertised in any of them.
+                        AuthorityAnswer::Deny => {
+                            let denier = req.authority.clone();
+                            let digest = self.pending_blocks[cohort_index].call.digest();
+                            for cohort in &mut self.pending_blocks {
+                                if cohort.call.digest() == digest {
+                                    cohort.offers.retain(|(_, plan)| !plan.names_authority(&denier));
+                                }
+                            }
+                        }
+                        _ => self.pending_blocks[cohort_index].offers.retain(|(h, _)| h != plan_id),
                     }
+                    let feedback = crate::feedback::denial_feedback(&self.pending_blocks[cohort_index].offers, surface);
+                    self.pending_blocks.retain(|cohort| !cohort.offers.is_empty());
                     return Ok(Remedied::Feedback(feedback));
                 }
             }
         }
 
-        let batch = match self.engine.execute_plan(&views, &chosen, &call, &rulings, Sink::Tool) {
+        let batch = match self.engine.execute_remedy_plan(&views, &chosen, &call, &rulings) {
             Ok(batch) => batch,
             Err(_) => {
                 return Ok(Remedied::Feedback(
@@ -442,12 +464,7 @@ impl Core {
                 // Value-policy refusals, exhaustively — a future identity-class error must be
                 // classified deliberately, not absorbed by a wildcard.
                 Err(
-                    AdmitError::UnknownSanitizer(_)
-                    | AdmitError::SanitizerNotOutput(_)
-                    | AdmitError::TransitionSourceUnmet
-                    | AdmitError::OutputPendingCast
-                    | AdmitError::OutputSanitizerBound
-                    | AdmitError::NotBoundSanitizer
+                    AdmitError::OutputPendingCast
                     | AdmitError::NotPendingCast
                     | AdmitError::UnknownCast(_)
                     | AdmitError::ConstantMismatch
@@ -539,9 +556,6 @@ fn validate_policy(config: &Config) -> Result<(), OpenError> {
         let name = tool.name.as_str();
         if matches!(name, EXECUTE_REMEDY_PLAN | FORK | SUBMIT_RESULT) {
             return Err(OpenError::ReservedToolConflict(name.to_string()));
-        }
-        if tool.output_sanitizer.is_some() {
-            return Err(OpenError::UnsupportedPolicy(format!("tool {name} output_sanitizer")));
         }
         if tool.pending_cast_dim().is_some() {
             return Err(OpenError::UnsupportedPolicy(format!(

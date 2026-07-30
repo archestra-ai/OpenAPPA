@@ -92,7 +92,7 @@ impl CanonicalDigest {
     }
 }
 
-/// A digest of a raw tool result. Binds an output sanitizer/cast derivation to the exact bytes it
+/// A digest of a raw tool result. Binds a cast resolution or a child-return derivation to the bytes it
 /// derived from, so a later differing result cannot silently reuse an old derivative.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RawResultDigest([u8; 32]);
@@ -170,25 +170,8 @@ pub enum Provenance {
     UserInput,
     /// The result of a successful tool dispatch.
     ToolResult { dispatch: DispatchId },
-    /// A new value derived from an existing one by a registered transform (sanitizer/cast/
-    /// authority raise). The source is never mutated — derivation mints a fresh value.
-    Derived { source: ValueId, via: Derivation },
     /// A value a child branch returned, absorbed into the parent at merge (server-derived label).
     ChildReturn { child: TrajectoryId, id: ChildReturnId },
-}
-
-/// The registered transform that produced a [`Provenance::Derived`] value.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Derivation {
-    pub kind: DerivationKind,
-    pub name: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DerivationKind {
-    Sanitizer,
-    Cast,
-    Endorsed,
 }
 
 /// A value's body — opaque to the engine, which checks labels, never content. Content robustness

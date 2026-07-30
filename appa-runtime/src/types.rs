@@ -10,10 +10,11 @@ use crate::store::StoreError;
 /// Session tuning. The remedy bound mirrors the runtime's default budget.
 #[derive(Clone, Copy, Debug)]
 pub struct SdkOptions {
-    /// How many **blocked-proposal rounds** one call (by digest) may open per turn — each round is
-    /// one cohort of offered plans, every plan in it consultable once; a denial consumes only its
-    /// own offer, never this budget. Mirrors the runtime's semantics.
-    pub max_remedy_attempts_per_gap: u32,
+    /// The blocked-proposal budget of `RMD-7`: how many blocked-proposal rounds one **rendered
+    /// call** (by digest) may open per turn. Each round is one cohort of offered plans, every plan
+    /// in it consultable once. It is spam control on the agent, not a count of denials — a denial
+    /// bites by excluding the denying authority's plans (`RMD-6`), never by shrinking this budget.
+    pub max_blocked_proposals_per_call: u32,
     /// The most one authority consultation may take; a timeout fails closed (Abstain).
     pub per_external_timeout: std::time::Duration,
 }
@@ -21,7 +22,7 @@ pub struct SdkOptions {
 impl Default for SdkOptions {
     fn default() -> Self {
         SdkOptions {
-            max_remedy_attempts_per_gap: 2,
+            max_blocked_proposals_per_call: 2,
             per_external_timeout: std::time::Duration::from_secs(30),
         }
     }
@@ -30,8 +31,8 @@ impl Default for SdkOptions {
 /// Why a session could not be opened on this policy.
 #[derive(Debug, Error)]
 pub enum OpenError {
-    /// The policy uses a feature the SDK v0 defers (sanitizers, casts, output bindings,
-    /// pending-cast deltas, child config, or tool execution backends — SDK tools are host-executed).
+    /// The policy uses a feature the SDK v0 defers (sanitizers, casts, pending-cast deltas, child
+    /// config, or tool execution backends — SDK tools are host-executed).
     #[error("unsupported policy for the embedded SDK: {0}")]
     UnsupportedPolicy(String),
     #[error("registered tool {0} collides with a reserved tool name")]

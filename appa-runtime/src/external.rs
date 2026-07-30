@@ -124,8 +124,8 @@ impl AuthorityRequest {
 /// The compiled-in authority implementations (spec `CFG-15`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuiltinAuthority {
-    /// The one competence a policy grants itself: it approves the gaps put to it (cover-free by
-    /// construction — the load lint refuses it a cover-bearing mandate).
+    /// The one competence a policy grants itself: it approves the gaps put to it, within whatever
+    /// mandate it is wired to (`CFG-15` leaves that pairing to the deployer).
     Approve,
     /// Human elicitation, hosted by the harness. v1 has no live queue, so it fails closed (a
     /// bounded async queue is a follow-up); it never silently approves.

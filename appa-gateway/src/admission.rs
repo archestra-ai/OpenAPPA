@@ -4,7 +4,7 @@
 //! every inference's context from server-held facts, never from the request. So the north request may
 //! carry **exactly one new trailing `user` message** and nothing else — no `assistant`/`tool`/
 //! `tool_calls` (there is no channel for the harness to inject tool data or forge history), no client
-//! `system`/`developer` (the preamble is server config), no `tools` (server-owned), no multiple user
+//! `system`/`developer` (the transcript head is host config), no `tools` (server-owned), no multiple user
 //! turns, no streaming. Anything else is a 400. This profile is applied identically to new and
 //! existing sessions.
 
@@ -97,7 +97,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_client_system_and_developer_preamble() {
+    fn rejects_a_client_supplied_transcript_head() {
         for role in ["system", "developer"] {
             let mut msg = WireMessage::user("hi");
             msg.role = role.to_string();

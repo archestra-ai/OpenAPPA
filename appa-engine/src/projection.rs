@@ -141,10 +141,7 @@ impl Projection {
                 Fact::AssistantMessage { .. } | Fact::BlockFeedback { .. } => {}
                 // Transformer applications are audit only — the labels they establish ride the
                 // ValueAdmitted appended beside them, so the fold reads nothing here.
-                Fact::SanitizerApplied { .. }
-                | Fact::OutputCastApplied { .. }
-                | Fact::OutputCastAccepted { .. }
-                | Fact::OutputCastLapsed { .. } => {}
+                Fact::OutputCastApplied { .. } | Fact::OutputCastAccepted { .. } | Fact::OutputCastLapsed { .. } => {}
                 Fact::ChildReturn { id, value, .. } => child_returns.push(ReturnedChild {
                     id: id.clone(),
                     value: value.clone(),

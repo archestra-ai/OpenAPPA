@@ -26,12 +26,16 @@ use appa_engine::fact::{BoundaryKind, CloseOutcome, Fact, ReturnDerivation};
 use appa_engine::label::{Dim, Label};
 use appa_engine::registry::TrustChain;
 use appa_runtime::tool::{HttpClient, HttpTool, ToolBackend};
-use appa_runtime::{Config, Limits, Mediator};
+use appa_runtime::{Config, Limits, Mediator, TranscriptHead, WireMessage};
 use clap::Parser;
 use corp_systems::systems::System;
 use corporate_agent_demo::fork_tools::{self, CorpWorld};
 use corporate_agent_demo::{clean_key, load_dotenv, resolve_data_root, resolve_sink_root};
 use tokio_util::sync::CancellationToken;
+
+/// This host's transcript head (`CFG-18`). Held as a file so the bytes stay exactly what the
+/// policy files carried before the head moved out of them.
+const SYSTEM_PROMPT: &str = include_str!("../system_prompt.txt");
 
 #[derive(Parser)]
 #[command(about = "The corporate assistant on the full appa-agent loop (fork/submit_result live), tools in-process")]
@@ -135,7 +139,14 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let mediator = Arc::new(Mediator::with_tool_backends(config, backends).context("assembling the mediator")?);
+    // The transcript head is this host's configuration, not the policy's (`CFG-18`). The bytes are
+    // the ones the policy files carried before they moved here, unchanged.
+    let head = TranscriptHead::new(vec![WireMessage::system(SYSTEM_PROMPT)]).context("the transcript head")?;
+    let mediator = Arc::new(
+        Mediator::with_tool_backends(config, backends)
+            .context("assembling the mediator")?
+            .with_transcript_head(head),
+    );
     let limits = Limits {
         max_inference_rounds: 24,
         run_deadline: Duration::from_secs(240),

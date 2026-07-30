@@ -70,6 +70,14 @@ survive the boundary to the next.
   foreign value reference cannot be built.
 - **`RMD-8`, offers die with their turn.** Plans re-derive and match by
   value, so a stale handle mismatches rather than retargeting a live block.
+- **`RMD-2`, only an engine-side plan is executable.** `RemedyPlan` splits
+  into `Executable(ExecutableRemedyPlan)` and the id-less `Redispatch`
+  (`plan.rs`), and `execute_remedy_plan` takes the struct rather than the
+  enum, so an id-less plan cannot be handed to the executor at all.
+- **`CFG-18`, the transcript head is host configuration.** `TranscriptHead`
+  (`mediator.rs`) validates on construction and the policy loader has no
+  field for it, so a head carrying a tool call — or a policy file trying to
+  supply one — is unrepresentable.
 
 Type-level enforcement stops at the caller's signature, so lifecycle
 ordering is a runtime refusal instead — encoding it as typestate would put
@@ -92,13 +100,14 @@ the document.
 | quarantine-exit attestation | §10.1, design direction |
 | membership resolvers for named groups | `LBL`, design direction |
 | argument payload in the staged review — `AuthorityRequest` carries identity and typed context only | `RUL-9` |
-| remedy-plan ordering and sticky denials | `RMD-15`, `RMD-16` |
+| remedy-plan ordering, and denials that stick across turns — a denial consumes every offered plan naming its authority (`RMD-6`), but only within the turn's live cohorts | `RMD-15`, `RMD-16` |
 | external interface protocols | §13, placeholder |
 | a durable log — `SessionStore` is in-memory and `Mediator` owns it directly, so there is no pluggable destination either | `IMP-3`, `LOG-9` |
 | a live HITL queue — the `hitl` builtin abstains on every request, fail-closed per `EXT-1` | `CFG-15` |
 | dynamic contracts — `RecipientSpec` has only `Static` and `Placeholder`, and `RawTool` denies unknown fields, so the dialect cannot express a resolver-backed recipient | `CFG-14` |
 | one admission choke point — at-most-once and the dispatch guard are each enforced at two call sites | `IMP-4` |
+| the response-sink bar — `AUT-11` is conditional on tool credentials exceeding the user's read rights, and nothing declares that; there is also no response sink, since the assistant's answer leaves without a check | `AUT-11` |
+| the direct form of the id-less remedies — `RMD-13`/`RMD-14` name a tool that clears the gap, while the planner offers the reachability-derived first hop and marks the indirect case `EnablesPath` | `RMD-13`, `RMD-14` |
 
-The inverse gap — code the spec no longer describes, removal pending: the
-per-tool `output_sanitizer` binding and the `[[preamble]]` table (the
-transcript head is host configuration per `POS-6`).
+There is no inverse gap left: the per-tool `output_sanitizer` binding and the
+`[[preamble]]` table are both gone, the latter behind `CFG-18`.

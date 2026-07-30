@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::check::{Gap, Narrowing};
-use crate::execute::{AuthorityReview, Issuer};
+use crate::execute::AuthorityReview;
 use crate::label::{Audience, DimValue, Dimension, Label};
 use crate::names::{AuthorityName, CastName, SanitizerName};
 use crate::plan::PlanId;
@@ -172,7 +172,6 @@ pub enum Fact {
         dispatch: DispatchId,
         plan: PlanId,
         authority: AuthorityName,
-        issuer: Issuer,
         covers: Vec<Gap>,
         reviewed: AuthorityReview,
     },
@@ -190,16 +189,6 @@ pub enum Fact {
         trajectory: TrajectoryId,
         child_return: ChildReturnId,
         narrowing: Narrowing,
-    },
-    /// An output sanitizer relabeled a confined tool result before admission — audit of the
-    /// declared transition, bound to the raw result's digest.
-    SanitizerApplied {
-        trajectory: TrajectoryId,
-        dispatch: DispatchId,
-        sanitizer: SanitizerName,
-        raw_digest: RawResultDigest,
-        from: Audience,
-        to: Audience,
     },
     /// A cast resolved an Unknown dimension of an admitted value. The projection applies this
     /// override in the fold; the value's body is untouched.
@@ -244,7 +233,7 @@ pub enum Fact {
     /// A child branch returned a value through `submit_result`. The label is the returned value's
     /// own (the child fold for a raw return, or a mandate-validated sanitizer's output); trust never
     /// rises. Only this crosses to the parent — the child's free final text does not. `derivation`
-    /// audits how the value crossed, mirroring [`Fact::SanitizerApplied`] for tool results.
+    /// audits how the value crossed.
     ChildReturn {
         trajectory: TrajectoryId,
         id: ChildReturnId,
@@ -270,7 +259,6 @@ impl Fact {
             | Fact::Ruling { trajectory, .. }
             | Fact::Acceptance { trajectory, .. }
             | Fact::ChildReturnAcceptance { trajectory, .. }
-            | Fact::SanitizerApplied { trajectory, .. }
             | Fact::CastApplied { trajectory, .. }
             | Fact::OutputCastApplied { trajectory, .. }
             | Fact::OutputCastAccepted { trajectory, .. }

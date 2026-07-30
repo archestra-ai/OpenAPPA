@@ -45,8 +45,7 @@
 //! post-resolution *narrowing* is
 //! conversely never counted as a cap cure, which is covered by the cast de-scope below, not a
 //! completeness hole. **De-scoped — each spec-marked, so the claim and the spec's enumeration
-//! coincide:** sanitizer-backed compiled composites (spec: deferred, confining deployments only)
-//! and input-sanitizer argument substitution (spec: design direction, refused at load) and cast
+//! coincide:** input-sanitizer argument substitution (spec: design direction, refused at load) and cast
 //! resolution of an Unknown (spec: attempted by the harness itself at check and at admission,
 //! never surfaced as a plan object). The empty-proof is complete over exactly this subset.
 //!
@@ -104,46 +103,66 @@ pub enum RemedyStep {
 /// grouping that was offered — overlapping mandates cannot silently reroute it, and a stale handle
 /// cannot retarget a different assignment (plans re-derive and match by value).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RemedyPlan {
+pub struct ExecutableRemedyPlan {
     pub id: PlanId,
     pub steps: Vec<RemedyStep>,
     pub required: Vec<RequiredRuling>,
 }
 
-/// A prose remedy the agent carries out itself as ordinary, separately-checked calls — never atomic
-/// with the blocked call.
+/// What running a redispatch does for the blocked call.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Recommendation {
-    /// Run `tool` first (satisfying a `prior(k)` or narrowing within a cap), then re-propose. Emitted
-    /// **only when curative**: the named tool is itself curable and running it makes the call curable.
-    Redispatch { tool: ToolName, reason: String },
-    /// Handle the work in a subagent. Advisory only — a child begins at the same label, so a fork
-    /// cures no requirement. **Never counts toward curability.**
-    Fork { reason: String },
+pub enum RedispatchEffect {
+    /// Running the tool clears these gaps of the block outright — the `RMD-13`/`RMD-14` shapes.
+    Clears(Vec<Gap>),
+    /// Running the tool clears no gap by itself but opens a path that reaches one. The reachability
+    /// search admits such a first hop, so naming the case beats implying a direct cure.
+    EnablesPath,
 }
 
-impl Recommendation {
-    /// Does this recommendation, if followed, actually lift the block? `Fork` never does.
-    pub fn is_curative(&self) -> bool {
-        matches!(self, Recommendation::Redispatch { .. })
+/// One way out of a block (`RMD-1`). A plan with an engine-side step is an executable object with
+/// an id, run through `execute_remedy_plan`; one without names a call the agent makes for itself
+/// and carries no id (`RMD-2`, `RMD-13`, `RMD-14`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RemedyPlan {
+    Executable(ExecutableRemedyPlan),
+    Redispatch { tool: ToolName, effect: RedispatchEffect },
+}
+
+impl RemedyPlan {
+    /// The executable form, if this is one.
+    pub fn executable(&self) -> Option<&ExecutableRemedyPlan> {
+        match self {
+            RemedyPlan::Executable(plan) => Some(plan),
+            RemedyPlan::Redispatch { .. } => None,
+        }
     }
 }
 
-/// A block with its remedies attached: the raw gaps/narrowing, the executable plans, and the prose
-/// recommendations. [`PlannedBlock::is_curable`] is the security-relevant verdict.
+impl ExecutableRemedyPlan {
+    /// Does executing this plan consult `authority`? The one home of the `RMD-6` predicate: a
+    /// denial consumes every offered plan naming the denying authority for this rendered call.
+    pub fn names_authority(&self, authority: &AuthorityName) -> bool {
+        self.required.iter().any(|required| &required.authority == authority)
+    }
+}
+
+/// A block with its remedies attached: the raw gaps/narrowing, the one remedy list, and the
+/// advisory fork hint. [`PlannedBlock::is_curable`] is the security-relevant verdict.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlannedBlock {
     pub raw: RawBlock,
     pub plans: Vec<RemedyPlan>,
-    pub recommendations: Vec<Recommendation>,
+    /// Advice, never a remedy: a child begins at the same label, so a fork cures no requirement.
+    /// Kept out of `plans` so the `RMD-10` emptiness assertion stays about remedies.
+    pub fork_advice: Option<String>,
 }
 
 impl PlannedBlock {
-    /// Is any remedy available? An executable plan, or a curative recommendation. **Empty is a proof
-    /// the block is unliftable** over the implemented remedy subset — the agent should not spend
-    /// turns on it.
+    /// Is any remedy available? **Empty is a proof the block is unliftable** over the implemented
+    /// remedy subset — the agent should not spend turns on it. Fork advice is not a remedy and
+    /// never enters this verdict.
     pub fn is_curable(&self) -> bool {
-        !self.plans.is_empty() || self.recommendations.iter().any(Recommendation::is_curative)
+        !self.plans.is_empty()
     }
 }
 
@@ -154,24 +173,29 @@ struct State {
     effects: BTreeSet<EffectKind>,
 }
 
-/// Plan the remedies for a raw block. Emits the executable plans when the block clears in one atomic
-/// step, and every curative `Redispatch` when only a prior tool call unlocks it; `Fork` is always
-/// advisory. See the module docs for the curability model.
+/// Plan the remedies for a raw block. Emits the executable plans when the block clears in one
+/// atomic step, and every curative redispatch when only a prior tool call unlocks it. Both land in
+/// the one `plans` list (`RMD-1`); fork advice is separate and never a remedy. See the module docs
+/// for the curability model.
 pub(crate) fn plan(registry: &Registry, views: &Views, call: &ResolvedCall, raw: &RawBlock) -> PlannedBlock {
     let start = State {
         label: views.current_label(),
         effects: views.present_effects(),
     };
 
-    let plans = enumerate_plans(registry, &start, call);
+    let mut plans: Vec<RemedyPlan> = enumerate_plans(registry, &start, call)
+        .into_iter()
+        .map(RemedyPlan::Executable)
+        .collect();
 
-    let mut recommendations = Vec::new();
     // Only when the block does not clear atomically do we look for curative first redispatches — the
     // first edge of a curative path is a tool directly clearable *at the start state*, so running it
     // skips no prerequisite (this is what keeps the planner's verdict identical to the oracle's).
+    // A prior/cap gap has no covering mandate, so a block carrying one never has an executable
+    // plan: the two kinds are mutually exclusive, not truncated against each other.
     if plans.is_empty() {
-        for (tool, reason) in curative_redispatches(registry, &start, call, raw) {
-            recommendations.push(Recommendation::Redispatch { tool, reason });
+        for (tool, effect) in curative_redispatches(registry, &start, call, raw) {
+            plans.push(RemedyPlan::Redispatch { tool, effect });
         }
     }
     // Fork advice is context-sensitive. Whenever the call narrows it is genuinely actionable: the
@@ -189,14 +213,10 @@ pub(crate) fn plan(registry: &Registry, views: &Views, call: &ResolvedCall, raw:
             "handle in a subagent (advisory: a child begins at the same label, so a fork cures no requirement)"
         }
     };
-    recommendations.push(Recommendation::Fork {
-        reason: fork_reason.to_string(),
-    });
-
     PlannedBlock {
         raw: raw.clone(),
         plans,
-        recommendations,
+        fork_advice: Some(fork_reason.to_string()),
     }
 }
 
@@ -209,7 +229,6 @@ fn directly_clearable(registry: &Registry, state: &State, call: &ResolvedCall) -
     let contract = registry.tool(call.tool())?;
     let has_effect = |kind: &EffectKind| state.effects.contains(kind);
     match check::evaluate_state(
-        registry,
         contract,
         &state.label,
         &has_effect,
@@ -242,13 +261,12 @@ fn directly_clearable(registry: &Registry, state: &State, call: &ResolvedCall) -
 /// registry's load lint bounds the worst-case assignment count, so there is no runtime truncation
 /// and "every sound alternative" holds literally. Empty when a gap has no competent authority, the
 /// state is unresolved, or the block needs no atomic plan.
-fn enumerate_plans(registry: &Registry, state: &State, call: &ResolvedCall) -> Vec<RemedyPlan> {
+fn enumerate_plans(registry: &Registry, state: &State, call: &ResolvedCall) -> Vec<ExecutableRemedyPlan> {
     let Some(contract) = registry.tool(call.tool()) else {
         return Vec::new();
     };
     let has_effect = |kind: &EffectKind| state.effects.contains(kind);
     let block = match check::evaluate_state(
-        registry,
         contract,
         &state.label,
         &has_effect,
@@ -275,7 +293,7 @@ fn enumerate_plans(registry: &Registry, state: &State, call: &ResolvedCall) -> V
         choices.push(competent);
     }
 
-    let mut plans: Vec<RemedyPlan> = Vec::new();
+    let mut plans: Vec<ExecutableRemedyPlan> = Vec::new();
     let mut assignment = vec![0usize; choices.len()];
     loop {
         // Group this combination's per-gap choices into per-authority covers, in gap order.
@@ -298,7 +316,7 @@ fn enumerate_plans(registry: &Registry, state: &State, call: &ResolvedCall) -> V
             if let Some(narrowing) = &block.narrowing {
                 steps.push(RemedyStep::Accept(narrowing.clone()));
             }
-            plans.push(RemedyPlan {
+            plans.push(ExecutableRemedyPlan {
                 id: PlanId(plans.len() as u32),
                 steps,
                 required,
@@ -334,14 +352,7 @@ fn enumerate_plans(registry: &Registry, state: &State, call: &ResolvedCall) -> V
 fn prerequisite_runnable(registry: &Registry, state: &State, tool: &ToolContract) -> bool {
     let call = synthetic_call(tool);
     let has_effect = |kind: &EffectKind| state.effects.contains(kind);
-    match check::evaluate_state(
-        registry,
-        tool,
-        &state.label,
-        &has_effect,
-        &call,
-        check::PlaceholderGaps::Waived,
-    ) {
+    match check::evaluate_state(tool, &state.label, &has_effect, &call, check::PlaceholderGaps::Waived) {
         CheckOutcome::Allow => true,
         CheckOutcome::Unresolved(_) => false,
         CheckOutcome::Block(block) => block
@@ -354,8 +365,8 @@ fn prerequisite_runnable(registry: &Registry, state: &State, tool: &ToolContract
 /// The rulings a block's remedy plan needs gathered: for each authority the block routes to, the gaps
 /// its ruling must cover. The mandate routing (which authority covers which gap) stays here in the
 /// engine; the runtime only gathers a ruling from each named authority for its gaps and hands them to
-/// `execute_plan`. A gap with no covering authority is omitted — the plan is then not executable and
-/// `execute_plan` reports the gap uncovered.
+/// `execute_remedy_plan`. A gap with no covering authority is omitted — the plan is then not executable and
+/// `execute_remedy_plan` reports the gap uncovered.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequiredRuling {
     pub authority: AuthorityName,
@@ -393,15 +404,14 @@ pub(crate) fn covers_gap(authority: &Authority, gap: &Gap, tags: &[TagName]) -> 
     }
 }
 
-/// The state a tool's success would produce: its effects added, its **effective** contribution
-/// folded in (a sanitizer-bound tool folds its bound derivation's label, matching the check; a
-/// pending-cast dimension or an unannotated tool folds identity — the module-doc
-/// over-approximation).
-fn transition(registry: &Registry, state: &State, tool: &ToolContract) -> State {
+/// The state a tool's success would produce: its effects added and its declared delta folded in,
+/// matching the check. A pending-cast dimension or an unannotated tool folds identity — the
+/// module-doc over-approximation.
+fn transition(state: &State, tool: &ToolContract) -> State {
     let mut effects = state.effects.clone();
     effects.extend(tool.emits.iter().cloned());
     State {
-        label: check::committed_label(registry, tool, &state.label),
+        label: check::committed_label(tool, &state.label),
         effects,
     }
 }
@@ -435,7 +445,7 @@ fn curable(registry: &Registry, state: &State, call: &ResolvedCall, visiting: &m
         if !prerequisite_runnable(registry, state, tool) {
             return false;
         }
-        let next = transition(registry, state, tool);
+        let next = transition(state, tool);
         next != *state && curable(registry, &next, call, visiting)
     });
     visiting.pop();
@@ -449,7 +459,6 @@ fn is_unresolved(registry: &Registry, state: &State, call: &ResolvedCall) -> boo
             let has_effect = |kind: &EffectKind| state.effects.contains(kind);
             matches!(
                 check::evaluate_state(
-                    registry,
                     contract,
                     &state.label,
                     &has_effect,
@@ -463,53 +472,66 @@ fn is_unresolved(registry: &Registry, state: &State, call: &ResolvedCall) -> boo
 }
 
 /// Find every curative first redispatch: each tool directly clearable at `start` whose success makes
-/// `call` curable, in registry (name) order — "every sound alternative" holds for redispatch
-/// recommendations as it does for executable plans. Ties each recommendation's prose to the gap the
-/// tool addresses.
+/// `call` curable, in registry (name) order — "every sound alternative" holds for redispatch plans
+/// as it does for executable ones. Each carries the gaps it clears outright, or `EnablesPath` when
+/// it only opens the way to one.
 fn curative_redispatches(
     registry: &Registry,
     start: &State,
     call: &ResolvedCall,
     raw: &RawBlock,
-) -> Vec<(ToolName, String)> {
+) -> Vec<(ToolName, RedispatchEffect)> {
     let mut curative = Vec::new();
     for tool in registry.tools() {
         if !prerequisite_runnable(registry, start, tool) {
             continue;
         }
-        let next = transition(registry, start, tool);
+        let next = transition(start, tool);
         if next == *start {
             continue;
         }
         let mut visiting = Vec::new();
         if curable(registry, &next, call, &mut visiting) {
-            curative.push((tool.name.clone(), redispatch_reason(tool, raw)));
+            curative.push((tool.name.clone(), redispatch_effect(registry, tool, call, &next, raw)));
         }
     }
     curative
 }
 
-fn redispatch_reason(tool: &ToolContract, raw: &RawBlock) -> String {
-    let name = tool.name.as_str();
-    for gap in &raw.requirement_gaps {
-        match gap {
-            Gap::Prior(kind) if tool.emits.contains(kind) => {
-                return format!("run {name} first to satisfy prior({})", kind.as_str());
-            }
-            // Only an established audience delta is a narrowing the redispatch can promise; a
-            // pending-cast or unannotated one contributes nothing until resolved.
-            Gap::Cap { .. }
-                if tool
-                    .delta
-                    .as_ref()
-                    .is_some_and(|d| matches!(d.audience, Some(Dim::Known(_)))) =>
-            {
-                return format!("run {name} first to narrow the audience within the cap");
-            }
-            _ => {}
-        }
+/// The gaps running this tool clears **outright**, per `RMD-13` (it emits the missing effect) and
+/// `RMD-14` (its restrictive delta drops the readers the cap excludes). The cap arm is decided by
+/// applying the tool's own transition and re-asking the relation, not by the tool merely having an
+/// audience delta: `public → {a,b}` is a curative first hop toward cap `{a}` without clearing it,
+/// and claiming otherwise would put a false assertion on the wire. The relation is asked on the
+/// label the *retried target* would commit — `CHK-10`'s clock — so a prerequisite that lands
+/// outside the cap still counts when the target's own delta carries the rest of the way. A hop
+/// that clears nothing here still reaches a cure through the reachability search, and says so.
+fn redispatch_effect(
+    registry: &Registry,
+    tool: &ToolContract,
+    call: &ResolvedCall,
+    next: &State,
+    raw: &RawBlock,
+) -> RedispatchEffect {
+    let retried = registry
+        .tool(call.tool())
+        .map(|target| check::committed_label(target, &next.label));
+    let cleared: Vec<Gap> = raw
+        .requirement_gaps
+        .iter()
+        .filter(|gap| match gap {
+            Gap::Prior(kind) => tool.emits.contains(kind),
+            Gap::Cap { cap } => retried
+                .as_ref()
+                .is_some_and(|label| label.audience.within_cap(cap) == Adequacy::Holds),
+            _ => false,
+        })
+        .cloned()
+        .collect();
+    match cleared.is_empty() {
+        true => RedispatchEffect::EnablesPath,
+        false => RedispatchEffect::Clears(cleared),
     }
-    format!("run {name} first, then re-propose")
 }
 
 #[cfg(test)]
@@ -527,6 +549,11 @@ mod tests {
     use crate::value::{LabeledValue, Provenance, ToolName, TrajectoryId, ValueBody};
     use proptest::prelude::*;
     use serde_json::json;
+
+    /// Test helper: the executable form of an offered plan.
+    fn exec(plan: &RemedyPlan) -> &ExecutableRemedyPlan {
+        plan.executable().expect("an executable plan")
+    }
 
     const SUSPICIOUS: Trust = Trust::new(0);
     const TRUSTED: Trust = Trust::new(1);
@@ -561,7 +588,7 @@ mod tests {
         let trajectory = traj();
         let views = projection.view(&trajectory);
         let contract = registry.tool(call.tool()).unwrap();
-        let raw = match check::evaluate(registry, contract, &views, call) {
+        let raw = match check::evaluate(contract, &views, call) {
             CheckOutcome::Block(raw) => raw,
             other => panic!("expected a block, got {other:?}"),
         };
@@ -570,6 +597,72 @@ mod tests {
 
     fn call(tool: &str, args: serde_json::Value) -> ResolvedCall {
         ResolvedCall::new(ToolName::new(tool), args, vec![])
+    }
+
+    #[test]
+    fn a_cap_redispatch_claims_only_what_it_actually_clears() {
+        // `send` may release only to `a`, and carries a neutral delta, so the cap is asked on the
+        // audience as the prerequisite leaves it. The trajectory is public, so the gap is open.
+        // `narrow_all` restricts straight to {a} and clears it; `narrow_some` restricts to {a,b},
+        // which reaches a cure — `narrow_all` still runs afterwards — without itself putting the
+        // audience inside the cap. Claiming otherwise puts a false assertion on a wire the agent
+        // reads.
+        let a = || Audience::restricted([ReaderId::new("a")]);
+        let ab = || Audience::restricted([ReaderId::new("a"), ReaderId::new("b")]);
+        let narrowing_tool = |name: &str, to: Audience| ToolContract {
+            name: ToolName::new(name),
+            tags: vec![],
+            delta: Some(Delta {
+                trust: None,
+                audience: Some(Dim::Known(to)),
+            }),
+            emits: vec![],
+            requires: Requires::default(),
+        };
+        let send = ToolContract {
+            name: ToolName::new("send"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![],
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![AudienceRequirement::Cap(a())],
+                },
+                ..Requires::default()
+            },
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![
+                send,
+                narrowing_tool("narrow_all", a()),
+                narrowing_tool("narrow_some", ab()),
+            ],
+            authorities: vec![],
+            sanitizers: vec![],
+            casts: vec![],
+        });
+        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let planned = plan_of(&registry, &log, &call("send", json!({})));
+
+        // A cap gap has no covering mandate, so both remedies are id-less.
+        assert!(planned.plans.iter().all(|plan| plan.executable().is_none()));
+        let effect_of = |tool: &str| {
+            planned
+                .plans
+                .iter()
+                .find_map(|plan| match plan {
+                    RemedyPlan::Redispatch { tool: name, effect } if name == &ToolName::new(tool) => Some(effect),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{tool} is offered"))
+        };
+        assert_eq!(
+            effect_of("narrow_all"),
+            &RedispatchEffect::Clears(vec![Gap::Cap { cap: a() }])
+        );
+        assert_eq!(effect_of("narrow_some"), &RedispatchEffect::EnablesPath);
     }
 
     #[test]
@@ -586,7 +679,6 @@ mod tests {
                 },
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let officer = Authority {
             name: AuthorityName::new("officer"),
@@ -607,7 +699,7 @@ mod tests {
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         assert!(planned.is_curable());
         assert_eq!(
-            planned.plans[0].steps,
+            exec(&planned.plans[0]).steps,
             vec![RemedyStep::Authorize(AuthorityName::new("officer"))]
         );
     }
@@ -630,7 +722,6 @@ mod tests {
                 attention: vec![MarkName::new("signoff")],
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let officer = |name: &str| Authority {
             name: AuthorityName::new(name),
@@ -663,9 +754,9 @@ mod tests {
         };
         let mark = Gap::Attention(MarkName::new("signoff"));
         assert_eq!(planned.plans.len(), 2);
-        assert_eq!(planned.plans[0].id, PlanId::new(0));
+        assert_eq!(exec(&planned.plans[0]).id, PlanId::new(0));
         assert_eq!(
-            planned.plans[0].required,
+            exec(&planned.plans[0]).required,
             vec![
                 RequiredRuling {
                     authority: AuthorityName::new("officer-a"),
@@ -677,9 +768,9 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(planned.plans[1].id, PlanId::new(1));
+        assert_eq!(exec(&planned.plans[1]).id, PlanId::new(1));
         assert_eq!(
-            planned.plans[1].required,
+            exec(&planned.plans[1]).required,
             vec![
                 RequiredRuling {
                     authority: AuthorityName::new("officer-b"),
@@ -707,7 +798,6 @@ mod tests {
                 attention: vec![MarkName::new("signoff"), MarkName::new("signoff")],
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let attester = |name: &str| Authority {
             name: AuthorityName::new(name),
@@ -728,8 +818,11 @@ mod tests {
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         assert_eq!(planned.plans.len(), 2);
         for plan in &planned.plans {
-            assert_eq!(plan.required.len(), 1);
-            assert_eq!(plan.required[0].covers, vec![Gap::Attention(MarkName::new("signoff"))]);
+            assert_eq!(exec(plan).required.len(), 1);
+            assert_eq!(
+                exec(plan).required[0].covers,
+                vec![Gap::Attention(MarkName::new("signoff"))]
+            );
         }
     }
 
@@ -737,7 +830,7 @@ mod tests {
     fn one_authority_covering_both_gaps_is_one_grouped_ruling() {
         // A single authority legitimately attending the mark AND holding the trust ceiling covers
         // both gaps with one ruling — one plan, one required entry, both covers (the sound
-        // single-Ruling assignment; distinct-issuer constraints are policy-language future work).
+        // single-Ruling assignment; distinct-reviewer constraints are policy-language future work).
         let tool = ToolContract {
             name: ToolName::new("wire"),
             tags: vec![],
@@ -751,7 +844,6 @@ mod tests {
                 attention: vec![MarkName::new("signoff")],
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let officer = Authority {
             name: AuthorityName::new("officer"),
@@ -772,9 +864,12 @@ mod tests {
         let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         assert_eq!(planned.plans.len(), 1);
-        assert_eq!(planned.plans[0].required.len(), 1);
-        assert_eq!(planned.plans[0].required[0].authority, AuthorityName::new("officer"));
-        assert_eq!(planned.plans[0].required[0].covers.len(), 2);
+        assert_eq!(exec(&planned.plans[0]).required.len(), 1);
+        assert_eq!(
+            exec(&planned.plans[0]).required[0].authority,
+            AuthorityName::new("officer")
+        );
+        assert_eq!(exec(&planned.plans[0]).required[0].covers.len(), 2);
     }
 
     #[test]
@@ -792,7 +887,6 @@ mod tests {
                 },
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let registry = build(RegistryConfig {
             trust_chain: chain(),
@@ -805,8 +899,8 @@ mod tests {
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         assert!(!planned.is_curable());
         assert!(planned.plans.is_empty());
-        // Fork is present but excluded from curability.
-        assert!(planned.recommendations.iter().all(|r| !r.is_curative()));
+        // Fork advice is offered but is not a remedy, so it never lifts the verdict.
+        assert!(planned.fork_advice.is_some());
     }
 
     #[test]
@@ -820,7 +914,6 @@ mod tests {
             }),
             emits: vec![],
             requires: Requires::default(),
-            output_sanitizer: None,
         };
         let registry = build(RegistryConfig {
             trust_chain: chain(),
@@ -835,7 +928,7 @@ mod tests {
         // plan embeds exactly the offered narrowing, so a stale acceptance mismatches by value.
         assert!(planned.is_curable());
         assert_eq!(
-            planned.plans[0].steps,
+            exec(&planned.plans[0]).steps,
             vec![RemedyStep::Accept(Narrowing {
                 from: known(TRUSTED, Audience::Public),
                 to: known(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
@@ -855,7 +948,6 @@ mod tests {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let backup = ToolContract {
             name: ToolName::new("backup"),
@@ -863,7 +955,6 @@ mod tests {
             delta: Some(Delta::NONE),
             emits: vec![EffectKind::new("backup.done")],
             requires: Requires::default(),
-            output_sanitizer: None,
         };
         let registry = build(RegistryConfig {
             trust_chain: chain(),
@@ -875,10 +966,10 @@ mod tests {
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("delete_db", json!({})));
         assert!(planned.is_curable());
-        assert!(planned.plans.is_empty()); // a prior gap has no engine-side step
+        // A prior gap has no engine-side step: the remedy is an id-less redispatch plan.
         assert!(matches!(
-            planned.recommendations.iter().find(|r| r.is_curative()),
-            Some(Recommendation::Redispatch { tool, .. }) if tool == &ToolName::new("backup")
+            planned.plans.as_slice(),
+            [RemedyPlan::Redispatch { tool, .. }] if tool == &ToolName::new("backup")
         ));
     }
 
@@ -895,7 +986,6 @@ mod tests {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let backup = |name: &str| ToolContract {
             name: ToolName::new(name),
@@ -903,7 +993,6 @@ mod tests {
             delta: Some(Delta::NONE),
             emits: vec![EffectKind::new("backup.done")],
             requires: Requires::default(),
-            output_sanitizer: None,
         };
         // Registered in reverse name order, so the assertion below pins name-order iteration —
         // not an accident of registration order.
@@ -918,11 +1007,11 @@ mod tests {
         let planned = plan_of(&registry, &log, &call("delete_db", json!({})));
         assert!(planned.is_curable());
         let curative: Vec<&ToolName> = planned
-            .recommendations
+            .plans
             .iter()
-            .filter_map(|r| match r {
-                Recommendation::Redispatch { tool, .. } => Some(tool),
-                Recommendation::Fork { .. } => None,
+            .filter_map(|plan| match plan {
+                RemedyPlan::Redispatch { tool, .. } => Some(tool),
+                RemedyPlan::Executable(_) => None,
             })
             .collect();
         assert_eq!(
@@ -945,7 +1034,6 @@ mod tests {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let backup = ToolContract {
             name: ToolName::new("backup"),
@@ -961,7 +1049,6 @@ mod tests {
                 },
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let registry = build(RegistryConfig {
             trust_chain: chain(),
@@ -976,7 +1063,7 @@ mod tests {
         ))];
         let planned = plan_of(&registry, &log, &call("delete_db", json!({})));
         assert!(!planned.is_curable());
-        assert!(planned.recommendations.iter().all(|r| !r.is_curative()));
+        assert!(planned.plans.is_empty());
     }
 
     #[test]
@@ -992,7 +1079,6 @@ mod tests {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let backup = ToolContract {
             name: ToolName::new("backup"),
@@ -1008,7 +1094,6 @@ mod tests {
                 },
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let voucher = Authority {
             name: AuthorityName::new("voucher"),
@@ -1032,8 +1117,8 @@ mod tests {
         let planned = plan_of(&registry, &log, &call("delete_db", json!({})));
         assert!(planned.is_curable());
         assert!(matches!(
-            planned.recommendations.iter().find(|r| r.is_curative()),
-            Some(Recommendation::Redispatch { tool, .. }) if tool == &ToolName::new("backup")
+            planned.plans.first(),
+            Some(RemedyPlan::Redispatch { tool, .. }) if tool == &ToolName::new("backup")
         ));
     }
 
@@ -1052,7 +1137,6 @@ mod tests {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("email.sent"))],
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let send = ToolContract {
             name: ToolName::new("send"),
@@ -1071,7 +1155,6 @@ mod tests {
                 },
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let registry = build(RegistryConfig {
             trust_chain: chain(),
@@ -1104,7 +1187,6 @@ mod tests {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("email.sent"))],
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let send = ToolContract {
             name: ToolName::new("send"),
@@ -1118,7 +1200,6 @@ mod tests {
                 },
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let registry = build(RegistryConfig {
             trust_chain: chain(),
@@ -1131,8 +1212,8 @@ mod tests {
         let planned = plan_of(&registry, &log, &call("archive", json!({})));
         assert!(planned.is_curable());
         assert!(matches!(
-            planned.recommendations.iter().find(|r| r.is_curative()),
-            Some(Recommendation::Redispatch { tool, .. }) if tool == &ToolName::new("send")
+            planned.plans.first(),
+            Some(RemedyPlan::Redispatch { tool, .. }) if tool == &ToolName::new("send")
         ));
     }
 
@@ -1147,7 +1228,6 @@ mod tests {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let registry = build(RegistryConfig {
             trust_chain: chain(),
@@ -1173,7 +1253,6 @@ mod tests {
                 attention: vec![MarkName::new("signoff")],
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let officer = Authority {
             name: AuthorityName::new("officer"),
@@ -1195,7 +1274,7 @@ mod tests {
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         assert_eq!(
-            planned.plans[0].steps,
+            exec(&planned.plans[0]).steps,
             vec![RemedyStep::Authorize(AuthorityName::new("officer"))]
         );
     }
@@ -1211,7 +1290,6 @@ mod tests {
                 attention: vec![MarkName::new("signoff")],
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let officer = Authority {
             name: AuthorityName::new("officer"),
@@ -1246,7 +1324,6 @@ mod tests {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("kb"))],
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let b = ToolContract {
             name: ToolName::new("b"),
@@ -1257,7 +1334,6 @@ mod tests {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("ka"))],
                 ..Requires::default()
             },
-            output_sanitizer: None,
         };
         let registry = build(RegistryConfig {
             trust_chain: chain(),
@@ -1284,7 +1360,7 @@ mod tests {
                 for state in states.clone() {
                     for tool in registry.tools() {
                         if prerequisite_runnable(registry, &state, tool) {
-                            let next = transition(registry, &state, tool);
+                            let next = transition(&state, tool);
                             if !states.contains(&next) {
                                 states.push(next);
                                 grew = true;
@@ -1393,7 +1469,6 @@ mod tests {
                     delta,
                     emits,
                     requires,
-                    output_sanitizer: None,
                 }
             },
         )
@@ -1478,7 +1553,7 @@ mod tests {
             // Only blocks carry a planned remedy set; passing/unresolved calls are a genuine scope
             // filter for this property, not lost coverage (their behavior is pinned elsewhere).
             let has_effect = |kind: &EffectKind| state.effects.contains(kind);
-            let raw = match check::evaluate_state(&registry, contract, &state.label, &has_effect, &call, check::PlaceholderGaps::FailClosed) {
+            let raw = match check::evaluate_state(contract, &state.label, &has_effect, &call, check::PlaceholderGaps::FailClosed) {
                 CheckOutcome::Block(raw) => raw,
                 _ => return Ok(()),
             };
@@ -1533,7 +1608,7 @@ mod tests {
             let contract = registry.tool(&target).expect("target is modulo the re-keyed tool count");
             let call = synthetic_call(contract);
             let has_effect = |kind: &EffectKind| state.effects.contains(kind);
-            let raw = match check::evaluate_state(&registry, contract, &state.label, &has_effect, &call, check::PlaceholderGaps::FailClosed) {
+            let raw = match check::evaluate_state(contract, &state.label, &has_effect, &call, check::PlaceholderGaps::FailClosed) {
                 CheckOutcome::Block(raw) => raw,
                 _ => return Ok(()),
             };
@@ -1590,7 +1665,10 @@ mod tests {
                 }
                 unique
             };
+            // Executables only: the reference enumerates grouped *authority assignments*, and the
+            // id-less redispatch plans that share this list carry no assignment to compare.
             let actual: Vec<Vec<(AuthorityName, Vec<Gap>)>> = planned.plans.iter()
+                .filter_map(RemedyPlan::executable)
                 .map(|p| p.required.iter().map(|r| (r.authority.clone(), r.covers.clone())).collect())
                 .collect();
             prop_assert_eq!(actual, expected);
