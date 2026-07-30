@@ -36,4 +36,5 @@ OpenAPPA's checks are legible: when a flow can't happen, the agent learns why *b
 
 ## Where next
 
+- [How OpenAPPA works](/docs/how-it-works) — the whole model in one sitting.
 - [AgentDojo harness](/docs/agentdojo) — run the benchmark yourself.
