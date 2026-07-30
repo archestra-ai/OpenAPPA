@@ -8,8 +8,12 @@ import { CodeBlock } from "@/components/CodeBlock";
 import { ConnectedAgentFigure } from "@/components/figures/ConnectedAgentFigure";
 import { ExfiltrationFigure } from "@/components/figures/ExfiltrationFigure";
 import { GuardrailFigure } from "@/components/figures/GuardrailFigure";
+import { LabelFoldFigure } from "@/components/figures/LabelFoldFigure";
 import { NegotiationFigure } from "@/components/figures/NegotiationFigure";
+import { TwoEndingsFigure } from "@/components/figures/TwoEndingsFigure";
 import { LogoGallery } from "@/components/LogoGallery";
+import { Term } from "@/components/Term";
+import { termDefinition } from "@/lib/terms";
 
 /* Block directives: a line of the form :::name::: in the markdown renders
    the mapped component in place. */
@@ -18,7 +22,9 @@ const DIRECTIVES: Record<string, () => ReactNode> = {
   "fig-connected-agent": () => <ConnectedAgentFigure />,
   "fig-exfiltration": () => <ExfiltrationFigure />,
   "fig-guardrail": () => <GuardrailFigure />,
+  "fig-label-fold": () => <LabelFoldFigure />,
   "fig-negotiation": () => <NegotiationFigure />,
+  "fig-two-endings": () => <TwoEndingsFigure />,
 };
 
 const DIRECTIVE_SPLIT = /^:::([a-z-]+):::$/m;
@@ -42,6 +48,16 @@ function AnchoredHeading({
   );
 }
 
+/* Inline code whose text names a glossary term gets a definition popover;
+   block code (array children after highlighting) falls through untouched. */
+function MarkdownCode({ children, ...props }: HTMLAttributes<HTMLElement> & { children?: ReactNode }) {
+  if (typeof children === "string") {
+    const definition = termDefinition(children);
+    if (definition !== undefined) return <Term chip={children} definition={definition} />;
+  }
+  return <code {...props}>{children}</code>;
+}
+
 function MarkdownLink({ href, children, ...props }: AnchorHTMLAttributes<HTMLAnchorElement>) {
   const isExternal = href?.startsWith("http");
   return (
@@ -62,6 +78,7 @@ function Markdown({ content }: { content: string }) {
       rehypePlugins={[rehypeSlug, rehypeHighlight]}
       components={{
         pre: (props) => <CodeBlock {...props} />,
+        code: MarkdownCode,
         a: MarkdownLink,
         h2: (props) => <AnchoredHeading level={2} {...props} />,
         h3: (props) => <AnchoredHeading level={3} {...props} />,

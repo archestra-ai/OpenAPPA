@@ -20,7 +20,9 @@ governs; where the spec and an implementation disagree, the spec governs.
 `rationale.md` explains decisions and settles none of them.
 `how-it-works.md`, the reader-facing introduction, lives with the website
 at `../website/content/docs/how-it-works.md` and is golden: a change here
-that touches its claims updates it in the same commit. The rest of the
+that touches its claims updates it in the same commit. So is
+`../website/lib/terms.ts`, which restates `glossary.md` entries as the
+website's term-popover definitions. The rest of the
 website is not a source of truth and never feeds back into these files.
 
 ## Conventions
