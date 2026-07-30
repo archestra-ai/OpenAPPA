@@ -2365,3 +2365,413 @@ async fn spawn_authority(ruling: &'static str) -> (String, tokio::task::JoinHand
     });
     (format!("http://{address}/rule"), handle)
 }
+
+fn feedback_payload(log: &[Fact], call_id: &str) -> serde_json::Value {
+    let content = log
+        .iter()
+        .rev()
+        .find_map(|fact| match fact {
+            Fact::BlockFeedback {
+                call_id: id, content, ..
+            } if id.as_str() == call_id => Some(content.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{call_id} has no block feedback"));
+    let (_, json) = content
+        .split_once('\n')
+        .unwrap_or_else(|| panic!("{call_id}'s feedback has no payload line: {content}"));
+    serde_json::from_str(json).unwrap_or_else(|error| panic!("{call_id}'s payload is not JSON ({error}): {json}"))
+}
+
+#[tokio::test]
+async fn a_landed_cast_clears_the_check_and_the_call_dispatches() {
+    let policy = r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+
+[[tool]]
+name = "scan"
+
+[[tool]]
+name = "send"
+delta = {}
+[tool.requires]
+trust = "suspicious"
+
+[[cast]]
+name = "assume-suspicious"
+constant = { trust = "suspicious" }
+"#;
+    let mediated = mediator(
+        policy,
+        &[
+            ("scan", BuiltinTool::Echo("mail body".to_string())),
+            ("send", BuiltinTool::Echo("sent".to_string())),
+        ],
+    );
+    let tenant = TenantId::new("tenant");
+    let session = mediated.create_session(tenant.clone());
+    let mut turn = begin(&mediated, &tenant, &session, "go").await;
+    let mut budget = RunBudget::default();
+    assert!(matches!(
+        turn.mediate(calls(vec![call("scan-call", "scan", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    assert!(matches!(
+        turn.mediate(calls(vec![call("send-call", "send", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+
+    let log = facts(&mediated, &tenant, &session);
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(fact, Fact::CastApplied { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        tool_values(&log).iter().any(|(body, _)| *body == "sent"),
+        "send dispatched after the cast landed"
+    );
+    assert!(
+        !log.iter()
+            .any(|fact| matches!(fact, Fact::BlockFeedback { call_id, .. } if call_id.as_str() == "send-call")),
+        "no residual block reached the model"
+    );
+    turn.stop(StopReason::Cancelled).unwrap();
+}
+
+#[tokio::test]
+async fn every_unestablished_fact_is_attempted_and_the_residual_is_named() {
+    let policy = r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+
+[[tool]]
+name = "scan"
+
+[[tool]]
+name = "send"
+delta = {}
+[tool.requires]
+trust = "suspicious"
+audience = { includes = ["alice"] }
+
+[[cast]]
+name = "assume-suspicious"
+constant = { trust = "suspicious" }
+"#;
+    let mediated = mediator(
+        policy,
+        &[
+            ("scan", BuiltinTool::Echo("mail body".to_string())),
+            ("send", BuiltinTool::Echo("must not run".to_string())),
+        ],
+    );
+    let tenant = TenantId::new("tenant");
+    let session = mediated.create_session(tenant.clone());
+    let mut turn = begin(&mediated, &tenant, &session, "go").await;
+    let mut budget = RunBudget::default();
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call("scan-1", "scan", "{}"), call("scan-2", "scan", "{}")]),
+            &mut budget
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    assert!(matches!(
+        turn.mediate(calls(vec![call("send-call", "send", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+
+    let log = facts(&mediated, &tenant, &session);
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(fact, Fact::CastApplied { .. }))
+            .count(),
+        2,
+        "the cast lands on both values, not only the first fact"
+    );
+    assert!(!tool_values(&log).iter().any(|(body, _)| *body == "must not run"));
+    let payload = feedback_payload(&log, "send-call");
+    let residual = payload["unestablished"].as_array().expect("unestablished entries");
+    assert_eq!(residual.len(), 2, "both audience residuals are named");
+    for entry in residual {
+        assert_eq!(entry["dimension"], "Audience");
+        assert_eq!(entry["source_kind"], "tool_result");
+        assert!(entry.get("value").is_none(), "no internal id crosses to the model");
+    }
+    turn.stop(StopReason::Cancelled).unwrap();
+}
+
+#[tokio::test]
+async fn a_declining_resolver_leaves_the_residual_named_not_blanket() {
+    let (resolver_url, requests, server) = spawn_repeating_response(r#"{}"#).await;
+    let policy = format!(
+        r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+
+[[tool]]
+name = "scan"
+
+[[tool]]
+name = "send"
+delta = {{}}
+[tool.requires]
+trust = "trusted"
+
+[[cast]]
+name = "classifier"
+resolver = {{ url = "{resolver_url}", may_cast = {{ trust = ["trusted"] }} }}
+"#
+    );
+    let mediated = mediator(
+        &policy,
+        &[
+            ("scan", BuiltinTool::Echo("mail body".to_string())),
+            ("send", BuiltinTool::Echo("must not run".to_string())),
+        ],
+    );
+    let tenant = TenantId::new("tenant");
+    let session = mediated.create_session(tenant.clone());
+    let mut turn = begin(&mediated, &tenant, &session, "go").await;
+    let mut budget = RunBudget::default();
+    assert!(matches!(
+        turn.mediate(calls(vec![call("scan-call", "scan", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    assert!(matches!(
+        turn.mediate(calls(vec![call("send-call", "send", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    server.abort();
+    assert_eq!(requests.load(Ordering::SeqCst), 1, "one resolution pass per proposal");
+
+    let log = facts(&mediated, &tenant, &session);
+    assert!(!log.iter().any(|fact| matches!(fact, Fact::CastApplied { .. })));
+    assert!(!tool_values(&log).iter().any(|(body, _)| *body == "must not run"));
+    let payload = feedback_payload(&log, "send-call");
+    let residual = payload["unestablished"].as_array().expect("unestablished entries");
+    assert_eq!(residual.len(), 1);
+    assert_eq!(residual[0]["dimension"], "Trust");
+    assert_eq!(residual[0]["source_kind"], "tool_result");
+    turn.stop(StopReason::Cancelled).unwrap();
+}
+
+#[tokio::test]
+async fn an_offer_stays_gated_on_missing_facts_before_any_gate_or_authority() {
+    let (officer_url, consults, officer_server) = spawn_counting_authority("approve");
+    let policy = format!(
+        r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+
+[[tool]]
+name = "scan"
+
+[[tool]]
+name = "restrict"
+delta = {{ trust = "suspicious" }}
+[tool.requires]
+trust = "suspicious"
+audience = {{ includes = ["alice"] }}
+attention = ["signoff"]
+
+[[authority]]
+name = "officer"
+mandate = {{ attends = ["signoff"] }}
+implementation = {{ resolver = {{ url = "{officer_url}" }} }}
+
+[[cast]]
+name = "assume-trusted"
+constant = {{ trust = "trusted" }}
+"#
+    );
+    let mediated = mediator(
+        &policy,
+        &[
+            ("scan", BuiltinTool::Echo("mail body".to_string())),
+            ("restrict", BuiltinTool::Echo("must not run".to_string())),
+        ],
+    );
+    let tenant = TenantId::new("tenant");
+    let session = mediated.create_session(tenant.clone());
+    let mut turn = begin(&mediated, &tenant, &session, "go").await;
+    let mut budget = RunBudget::default();
+    assert!(matches!(
+        turn.mediate(calls(vec![call("scan-call", "scan", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![
+                call("restrict-call", "restrict", "{}"),
+                call("exec-call", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-0"}"#),
+            ]),
+            &mut budget
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+
+    let log = facts(&mediated, &tenant, &session);
+    let offer = feedback_payload(&log, "restrict-call");
+    assert!(offer["narrowing"].is_object(), "the trust narrowing is offered");
+    assert!(!offer["unestablished"].as_array().unwrap().is_empty());
+
+    let gated = feedback_payload(&log, "exec-call");
+    assert_eq!(gated["unestablished"].as_array().unwrap()[0]["dimension"], "Audience");
+    assert!(
+        !log.iter()
+            .any(|fact| matches!(fact, Fact::Acceptance { .. } | Fact::Ruling { .. })),
+        "nothing was accepted or ruled"
+    );
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(fact, Fact::DispatchOpened { .. }))
+            .count(),
+        1,
+        "only scan's own dispatch opened — restrict never did"
+    );
+    officer_server.abort();
+    assert_eq!(
+        consults.load(Ordering::SeqCst),
+        0,
+        "no authority heard of the gated plan"
+    );
+    turn.stop(StopReason::Cancelled).unwrap();
+}
+
+#[tokio::test]
+async fn a_sanitizer_bound_return_resolves_its_fold_before_crossing() {
+    let resolved = r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+
+[[tool]]
+name = "scan"
+
+[[sanitizer]]
+name = "pii"
+on = ["tool_output"]
+[sanitizer.mandate]
+audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+[sanitizer.implementation]
+builtin = "redact-email"
+
+[child]
+return_sanitizer = "pii"
+
+[[cast]]
+name = "assume-suspicious"
+constant = { trust = "suspicious" }
+
+[[cast]]
+name = "assume-internal"
+constant = { audience = { exactly = ["internal"] } }
+"#;
+    let mediated = mediator(resolved, &[("scan", BuiltinTool::Echo("ask eve@corp.com".to_string()))]);
+    let tenant = TenantId::new("tenant");
+    let parent = mediated.create_session(tenant.clone());
+    let child = mediated.fork_session(&tenant, &parent).unwrap();
+    let mut child_turn = begin(&mediated, &tenant, &child, "inspect").await;
+    let mut budget = RunBudget::default();
+    assert!(matches!(
+        child_turn
+            .mediate(calls(vec![call("scan-call", "scan", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    assert!(matches!(
+        child_turn
+            .mediate(
+                calls(vec![call("return", SUBMIT_RESULT, r#"{"value":"ask eve@corp.com"}"#)]),
+                &mut budget
+            )
+            .await
+            .unwrap(),
+        Step::ChildFinished
+    ));
+    let log = facts(&mediated, &tenant, &parent);
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(fact, Fact::CastApplied { .. }))
+            .count(),
+        2,
+        "both fold dimensions were established before the crossing"
+    );
+    assert!(log.iter().any(|fact| matches!(
+        fact,
+        Fact::ChildReturn {
+            derivation: appa_engine::fact::ReturnDerivation::Sanitized { .. },
+            ..
+        }
+    )));
+
+    let unresolvable = r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+
+[[tool]]
+name = "scan"
+
+[[sanitizer]]
+name = "pii"
+on = ["tool_output"]
+[sanitizer.mandate]
+audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+[sanitizer.implementation]
+builtin = "redact-email"
+
+[child]
+return_sanitizer = "pii"
+"#;
+    let mediated = mediator(
+        unresolvable,
+        &[("scan", BuiltinTool::Echo("ask eve@corp.com".to_string()))],
+    );
+    let parent = mediated.create_session(tenant.clone());
+    let child = mediated.fork_session(&tenant, &parent).unwrap();
+    let mut child_turn = begin(&mediated, &tenant, &child, "inspect").await;
+    assert!(matches!(
+        child_turn
+            .mediate(calls(vec![call("scan-call", "scan", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    assert!(matches!(
+        child_turn
+            .mediate(
+                calls(vec![call("return", SUBMIT_RESULT, r#"{"value":"ask eve@corp.com"}"#)]),
+                &mut budget
+            )
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    let log = facts(&mediated, &tenant, &child);
+    assert!(!log.iter().any(|fact| matches!(fact, Fact::ChildReturn { .. })));
+    let payload = feedback_payload(&log, "return");
+    let residual = payload["unestablished"].as_array().expect("unestablished entries");
+    assert_eq!(residual.len(), 2, "both fold dimensions are named");
+    assert!(residual.iter().all(|entry| entry["source_kind"] == "tool_result"));
+    child_turn.stop(StopReason::Cancelled).unwrap();
+}

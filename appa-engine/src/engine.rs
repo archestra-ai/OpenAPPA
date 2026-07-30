@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::admit::{self, AdmitError, CastAnswer, CastError, ResultAdmission};
 use crate::branch::{self, BranchError, ReturnSubmission};
-use crate::check::{self, CheckOutcome, Narrowing, RawBlock, UnresolvedFact};
+use crate::check::{self, CheckOutcome, Narrowing, RawBlock, UnestablishedFact};
 use crate::contract::ToolContract;
 use crate::execute::{self, PlanError, Ruling};
 use crate::fact::{Fact, FactBatch, ReturnPolicy};
@@ -36,15 +36,18 @@ impl Engine {
         &self.registry
     }
 
-    /// Evaluate a proposed call: allow, block with the raw gaps/narrowing, or report the Unknown
-    /// facts to resolve first.
+    /// Evaluate a proposed call: allow, or block carrying everything that stopped it at once —
+    /// the requirement gaps, the narrowing where one fired, and the values whose consumed
+    /// dimension no cast has established. Resolution is the runtime's job;
+    /// the runtime re-checks after each landed cast, so a surfaced block is the residual.
     pub fn check(&self, views: &Views, call: &ResolvedCall) -> Result<CheckOutcome, EngineError> {
         let contract = self.contract(call)?;
         Ok(check::evaluate(contract, views, call))
     }
 
-    /// Open a dispatch for a call that **passes the check as-is**. Re-checks and refuses anything
-    /// blocked or unresolved (a narrowing is accepted through [`Engine::execute_remedy_plan`], not here), so
+    /// Open a dispatch for a call that **passes the check as-is**. Re-checks and refuses any
+    /// block — unestablished values included (a narrowing is accepted through
+    /// [`Engine::execute_remedy_plan`], not here), so
     /// the engine never emits an appendable dispatch for a call it would not allow. Folds nothing —
     /// the label folds only when the result value is admitted.
     pub fn open_dispatch(&self, views: &Views, call: &ResolvedCall) -> Result<FactBatch, EngineError> {
@@ -124,7 +127,7 @@ impl Engine {
     pub fn admit_cast(
         &self,
         views: &Views,
-        target: &UnresolvedFact,
+        target: &UnestablishedFact,
         answer: CastAnswer,
     ) -> Result<FactBatch, CastError> {
         admit::admit_cast(&self.registry, views, target, answer)
@@ -159,6 +162,13 @@ impl Engine {
     /// See [`crate::branch`].
     pub fn check_child_return(&self, parent: &Views, child: &TrajectoryId) -> Result<branch::ReturnCheck, BranchError> {
         branch::check_child_return(&self.registry, parent, child)
+    }
+
+    /// The child fold's unestablished facts — what a cast must establish before this child's
+    /// return can merge. Policy-independent: the runtime drives resolution *before*
+    /// the return-policy split, so raw and sanitizer-bound returns resolve alike.
+    pub fn child_fold_unestablished(&self, parent: &Views, child: &TrajectoryId) -> Vec<check::UnestablishedFact> {
+        branch::child_fold_unestablished(parent, child)
     }
 
     /// Execute one offered return plan as a single atomic batch: crossing, acceptance where the
@@ -404,15 +414,49 @@ mod tests {
     }
 
     #[test]
-    fn unknown_label_is_unresolved() {
+    fn unknown_label_is_unestablished_not_a_gap() {
         let e = engine(vec![crm_tool()]);
         let log = vec![user_value(Label::new(Dim::Unknown, Dim::Known(Audience::Public)))];
         match check(&e, &log, &call("get_ticket", json!({}))) {
-            CheckOutcome::Unresolved(facts) => {
-                assert_eq!(facts.len(), 1);
-                assert_eq!(facts[0].dimension, Dimension::Trust);
+            CheckOutcome::Block(b) => {
+                assert!(b.requirement_gaps.is_empty());
+                assert!(b.narrowing.is_some(), "the audience narrowing reports alongside");
+                assert_eq!(b.unestablished.len(), 1);
+                assert_eq!(b.unestablished[0].dimension, Dimension::Trust);
             }
-            other => panic!("expected unresolved, got {other:?}"),
+            other => panic!("expected an unestablished block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn all_three_block_slots_coexist() {
+        let vault = ToolContract {
+            name: ToolName::new("vault"),
+            tags: vec![],
+            delta: Some(Delta {
+                trust: None,
+                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")]))),
+            }),
+            emits: vec![],
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(TRUSTED),
+                    audience: vec![],
+                },
+                attention: vec![MarkName::new("signoff")],
+                ..Requires::default()
+            },
+        };
+        let e = engine(vec![vault]);
+        let log = vec![user_value(Label::new(Dim::Unknown, Dim::Known(Audience::Public)))];
+        match check(&e, &log, &call("vault", json!({}))) {
+            CheckOutcome::Block(b) => {
+                assert_eq!(b.requirement_gaps, vec![Gap::Attention(MarkName::new("signoff"))]);
+                assert!(b.narrowing.is_some());
+                assert_eq!(b.unestablished.len(), 1);
+                assert_eq!(b.unestablished[0].dimension, Dimension::Trust);
+            }
+            other => panic!("expected a three-slot block, got {other:?}"),
         }
     }
 
@@ -462,11 +506,12 @@ mod tests {
         let log = vec![user_value(Label::new(Dim::Unknown, Dim::Unknown))];
         assert_eq!(check(&e, &log, &call("noop", json!({}))), CheckOutcome::Allow);
         match check(&e, &log, &call("get_ticket", json!({}))) {
-            CheckOutcome::Unresolved(facts) => {
-                assert_eq!(facts.len(), 1);
-                assert_eq!(facts[0].dimension, Dimension::Trust);
+            CheckOutcome::Block(b) => {
+                assert!(b.requirement_gaps.is_empty());
+                assert_eq!(b.unestablished.len(), 1);
+                assert_eq!(b.unestablished[0].dimension, Dimension::Trust);
             }
-            other => panic!("expected unresolved, got {other:?}"),
+            other => panic!("expected an unestablished block, got {other:?}"),
         }
     }
 
@@ -518,11 +563,12 @@ mod tests {
 
         let log = vec![user_value(Label::new(Dim::Known(TRUSTED), Dim::Unknown))];
         match check(&e, &log, &call("send_email", json!({}))) {
-            CheckOutcome::Unresolved(facts) => {
-                assert_eq!(facts.len(), 1);
-                assert_eq!(facts[0].dimension, Dimension::Audience);
+            CheckOutcome::Block(b) => {
+                assert!(b.requirement_gaps.is_empty(), "the sentinel gap must be masked");
+                assert_eq!(b.unestablished.len(), 1);
+                assert_eq!(b.unestablished[0].dimension, Dimension::Audience);
             }
-            other => panic!("expected unresolved on an Unknown audience, got {other:?}"),
+            other => panic!("expected an unestablished block on an Unknown audience, got {other:?}"),
         }
     }
 

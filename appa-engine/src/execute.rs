@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::check::{self, CheckOutcome, Gap};
+use crate::check::{self, CheckOutcome, Gap, UnestablishedFact};
 use crate::engine::opened_dispatch;
 use crate::fact::{Fact, FactBatch};
 use crate::label::Label;
@@ -45,8 +45,8 @@ pub enum PlanError {
     UnknownTool(String),
     #[error("the call is not blocked — dispatch it directly")]
     NotBlocked,
-    #[error("the call has an unresolved dimension — cast it first")]
-    Unresolved,
+    #[error("the call has an unestablished dimension — a fact clears it, never a plan")]
+    Unestablished(Vec<UnestablishedFact>),
     #[error("no plan {0} is offered for this block")]
     UnknownPlan(u32),
     #[error("a ruling was approved for a different dispatch (call or occurrence)")]
@@ -81,8 +81,10 @@ pub(crate) fn execute_remedy_plan(
     let block = match check::evaluate(contract, views, call) {
         CheckOutcome::Block(block) => block,
         CheckOutcome::Allow => return Err(PlanError::NotBlocked),
-        CheckOutcome::Unresolved(_) => return Err(PlanError::Unresolved),
     };
+    if !block.unestablished.is_empty() {
+        return Err(PlanError::Unestablished(block.unestablished));
+    }
 
     let planned = plan::plan(registry, views, call, &block);
     if !planned
@@ -325,6 +327,62 @@ mod tests {
         let batch = run(&registry, &log, &call("wire", json!({})), &[ruling]).unwrap();
         assert!(matches!(batch.facts[0], Fact::Ruling { .. }));
         assert!(matches!(batch.facts.last().unwrap(), Fact::DispatchOpened { .. }));
+    }
+
+    #[test]
+    fn a_valid_ruling_cannot_clear_an_unestablished_fact() {
+        let vault = ToolContract {
+            name: ToolName::new("vault"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![],
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(TRUSTED),
+                    audience: vec![],
+                },
+                attention: vec![MarkName::new("signoff")],
+                ..Requires::default()
+            },
+        };
+        let steward = Authority {
+            name: AuthorityName::new("steward"),
+            mandate: Mandate {
+                attends: vec![MarkName::new("signoff")],
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+        };
+        let registry = Registry::build(crate::registry::RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![vault],
+            authorities: vec![steward],
+            sanitizers: vec![],
+            casts: vec![],
+        })
+        .unwrap();
+        let log = vec![
+            user_value(known(SUSPICIOUS, Audience::Public)),
+            user_value(Label::new(Dim::Unknown, Dim::Known(Audience::Public))),
+        ];
+        let vault_call = call("vault", json!({}));
+        let ruling = Ruling {
+            dispatch: DispatchId::new(traj(), vault_call.digest(), 0),
+            authority: AuthorityName::new("steward"),
+            reviewed: AuthorityReview {
+                tool: ToolName::new("vault"),
+                trajectory_label: Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
+                arg_refs: vec![],
+            },
+            covers: vec![Gap::Attention(MarkName::new("signoff"))],
+        };
+        match run(&registry, &log, &vault_call, &[ruling]) {
+            Err(PlanError::Unestablished(facts)) => {
+                assert_eq!(facts.len(), 1);
+                assert_eq!(facts[0].dimension, crate::label::Dimension::Trust);
+            }
+            other => panic!("expected the unestablished refusal, got {other:?}"),
+        }
     }
 
     #[test]

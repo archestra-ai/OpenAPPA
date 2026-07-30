@@ -299,3 +299,68 @@ delta = {}
         Ok(CallDecision::Block { .. })
     ));
 }
+
+#[tokio::test]
+async fn an_unestablished_block_names_its_values_and_gates_offers_through_the_facade() {
+    let policy = r#"
+version = 1
+trust_chain = ["suspicious", "internal"]
+[[tool]]
+name = "scan"
+[[tool]]
+name = "vault"
+delta = {}
+[tool.requires]
+trust = "suspicious"
+attention = ["signoff"]
+
+[[authority]]
+name = "steward"
+mandate = { attends = ["signoff"] }
+implementation = { builtin = "approve" }
+"#;
+    let mut session = open(policy);
+    session
+        .bind_tools(
+            ["scan", "vault"]
+                .into_iter()
+                .map(|name| appa_runtime::WireTool {
+                    kind: "function".into(),
+                    function: appa_runtime::WireToolSchema {
+                        name: name.into(),
+                        description: None,
+                        parameters: None,
+                    },
+                })
+                .collect(),
+        )
+        .unwrap();
+    session.begin_turn("go").unwrap();
+
+    let CallDecision::Allow { handle } = session.check_call(call("scan", serde_json::json!({}))).unwrap() else {
+        panic!("expected Allow for the unannotated read");
+    };
+    session.report_outcome(handle, ok_body("mail body")).unwrap();
+
+    let CallDecision::Block { feedback } = session.check_call(call("vault", serde_json::json!({}))).unwrap() else {
+        panic!("expected a block naming the unestablished value");
+    };
+    let (_, json) = feedback.split_once('\n').expect("a prose lead then the payload line");
+    let payload: serde_json::Value = serde_json::from_str(json).expect("the payload line is JSON");
+    let residual = payload["unestablished"].as_array().expect("unestablished entries");
+    assert_eq!(residual.len(), 1);
+    assert_eq!(residual[0]["dimension"], "Trust");
+    assert_eq!(residual[0]["source_kind"], "tool_result");
+    assert!(
+        !payload["remedy_plans"].as_array().unwrap().is_empty(),
+        "the attention offer stands"
+    );
+
+    session.begin_round().unwrap();
+    let RemedyDecision::Declined { feedback } = session.resolve_remedy(Some("remedy-0")).await.unwrap() else {
+        panic!("expected the gated refusal, not an authorization");
+    };
+    let (_, json) = feedback.split_once('\n').expect("the gated refusal carries a payload");
+    let payload: serde_json::Value = serde_json::from_str(json).expect("the gate payload is JSON");
+    assert_eq!(payload["unestablished"].as_array().unwrap()[0]["dimension"], "Trust");
+}

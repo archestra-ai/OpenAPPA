@@ -3,7 +3,7 @@
 use thiserror::Error;
 
 use crate::authority::CastResolution;
-use crate::check::{Narrowing, UnresolvedFact};
+use crate::check::{Narrowing, UnestablishedFact};
 use crate::fact::{CloseOutcome, Fact, FactBatch};
 use crate::label::{Dim, DimValue, Label};
 use crate::names::CastName;
@@ -305,7 +305,7 @@ pub(crate) fn admit_result(
 pub(crate) fn admit_cast(
     registry: &Registry,
     views: &Views,
-    target: &UnresolvedFact,
+    target: &UnestablishedFact,
     answer: CastAnswer,
 ) -> Result<FactBatch, CastError> {
     let cast = registry
@@ -497,7 +497,7 @@ mod tests {
             admit_cast(
                 &reg,
                 &p2.view(&sibling),
-                &UnresolvedFact {
+                &UnestablishedFact {
                     value: ValueId::new(0),
                     dimension: Dimension::Trust,
                 },
@@ -594,7 +594,7 @@ mod tests {
         let log = unknown_value_log();
         let p = views_of(&log);
         let t = traj();
-        let target = UnresolvedFact {
+        let target = UnestablishedFact {
             value: ValueId::new(0),
             dimension: Dimension::Trust,
         };
@@ -620,7 +620,7 @@ mod tests {
         let log = unknown_value_log();
         let p = views_of(&log);
         let t = traj();
-        let target = UnresolvedFact {
+        let target = UnestablishedFact {
             value: ValueId::new(0),
             dimension: Dimension::Trust,
         };
@@ -648,7 +648,7 @@ mod tests {
             admit_cast(
                 &reg,
                 &p.view(&t),
-                &UnresolvedFact {
+                &UnestablishedFact {
                     value: ValueId::new(0),
                     dimension: Dimension::Trust,
                 },
@@ -663,7 +663,7 @@ mod tests {
             admit_cast(
                 &reg,
                 &p.view(&t),
-                &UnresolvedFact {
+                &UnestablishedFact {
                     value: ValueId::new(0),
                     dimension: Dimension::Audience,
                 },

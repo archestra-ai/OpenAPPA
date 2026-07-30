@@ -68,8 +68,9 @@ pub(crate) struct Core {
 }
 
 /// How a check resolved for the caller: a clean-allow dispatch to surface, or model-visible feedback
-/// (a block with its remedy offer, an unresolved label, an unknown tool, or a lost race). The facade
-/// decides how the feedback reaches the model — a `BlockFeedback` fact (turn) or a hook skip (call).
+/// (a block with its remedy offer and any unestablished values named, an unknown tool, or a lost
+/// race). The facade decides how the feedback reaches the model — a `BlockFeedback` fact (turn) or
+/// a hook skip (call).
 pub(crate) enum Checked {
     Allow(DispatchId),
     Feedback(String),
@@ -183,10 +184,6 @@ impl Core {
         let views = projection.view(&self.session);
         match self.engine.check(&views, &call) {
             Err(_) => Ok(Checked::Feedback("no such tool is registered".to_string())),
-            // Casts are refused at open, so an Unresolved label has no resolver — fail closed.
-            Ok(CheckOutcome::Unresolved(_)) => Ok(Checked::Feedback(
-                "the call has an unresolved label that no cast could resolve".to_string(),
-            )),
             Ok(CheckOutcome::Block(raw)) => {
                 let planned = self
                     .engine
@@ -195,7 +192,7 @@ impl Core {
                 let surface = self.surface()?;
                 let has_offers = planned.plans.iter().any(|plan| plan.executable().is_some());
                 let feedback = if !has_offers {
-                    crate::feedback::block_feedback(&raw, &planned, &[], surface)
+                    crate::feedback::block_feedback(&raw, &planned, &[], surface, &views)
                 } else {
                     let attempts = self.remedy_attempts.entry(call.digest()).or_insert(0);
                     *attempts += 1;
@@ -214,7 +211,7 @@ impl Core {
                             (handle, plan.clone())
                         })
                         .collect();
-                    let feedback = crate::feedback::block_feedback(&raw, &planned, &offers, surface);
+                    let feedback = crate::feedback::block_feedback(&raw, &planned, &offers, surface, &views);
                     self.pending_blocks.push(PendingBlock {
                         call,
                         offers,
@@ -262,6 +259,18 @@ impl Core {
             .map(|(_, plan)| plan.clone())
             .expect("the cohort was found by this handle");
 
+        let (log, rev) = self.store.snapshot(&self.tenant, &self.session)?;
+        let projection = Projection::build(&log, rev);
+        let views = projection.view(&self.session);
+        let outcome = self.engine.check(&views, &call);
+        if let Ok(CheckOutcome::Block(raw)) = &outcome
+            && !raw.unestablished.is_empty()
+        {
+            return Ok(Remedied::Feedback(crate::feedback::unestablished_gate_feedback(
+                &raw.unestablished,
+                &views,
+            )));
+        }
         let accepts_narrowing = chosen
             .steps
             .iter()
@@ -270,13 +279,10 @@ impl Core {
             return Ok(Remedied::Feedback(uninformed_acceptance_feedback(plan_id)));
         }
 
-        let (log, rev) = self.store.snapshot(&self.tenant, &self.session)?;
-        let projection = Projection::build(&log, rev);
-        let views = projection.view(&self.session);
-        let still_offered = match self.engine.check(&views, &call) {
+        let still_offered = match &outcome {
             Ok(CheckOutcome::Block(raw)) => self
                 .engine
-                .plan(&views, &call, &raw)
+                .plan(&views, &call, raw)
                 .expect("pending call is registered")
                 .plans
                 .iter()
@@ -343,6 +349,11 @@ impl Core {
 
         let batch = match self.engine.execute_remedy_plan(&views, &chosen, &call, &rulings) {
             Ok(batch) => batch,
+            Err(appa_engine::execute::PlanError::Unestablished(facts)) => {
+                return Ok(Remedied::Feedback(crate::feedback::unestablished_gate_feedback(
+                    &facts, &views,
+                )));
+            }
             Err(_) => {
                 return Ok(Remedied::Feedback(
                     "the remedy plan could not be executed on the current state".to_string(),

@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use appa_engine::admit::{AdmitError, CastAnswer, ResultAdmission};
 use appa_engine::authority::CastResolution;
-use appa_engine::branch::{ReturnCheck, ReturnPlan, ReturnSubmission};
-use appa_engine::check::{CheckOutcome, Narrowing, UnresolvedFact};
+use appa_engine::branch::{ReturnBlock, ReturnCheck, ReturnPlan, ReturnSubmission};
+use appa_engine::check::{CheckOutcome, Narrowing, UnestablishedFact};
 use appa_engine::execute::Ruling;
 use appa_engine::fact::{BoundaryKind, Fact, FactBatch, ProposedCall, ReturnPolicy, Revision};
 use appa_engine::label::{DimValue, Dimension};
@@ -645,6 +645,7 @@ impl Turn {
         call: ResolvedCall,
         budget: &mut RunBudget,
     ) -> Result<CallProgress, TurnError> {
+        let mut casts_exhausted = false;
         loop {
             let (log, revision) = self.mediator.store().snapshot(&self.tenant, &self.session)?;
             let projection = Projection::build(&log, revision);
@@ -670,20 +671,19 @@ impl Turn {
                     }
                     return Ok(CallProgress::Go);
                 }
-                Ok(CheckOutcome::Unresolved(facts)) => {
-                    drop(projection);
-                    match self.resolve_unknown(&log, &facts, budget).await {
-                        Err(TurnCancelled) => return Ok(CallProgress::Cancelled),
-                        Ok(resolved) => {
-                            if resolved? {
+                Ok(CheckOutcome::Block(raw)) => {
+                    if !raw.unestablished.is_empty() && !casts_exhausted {
+                        drop(projection);
+                        match self.resolve_unknown(&log, &raw.unestablished, budget).await {
+                            Err(TurnCancelled) => return Ok(CallProgress::Cancelled),
+                            Ok(resolved) => {
+                                if !resolved? {
+                                    casts_exhausted = true;
+                                }
                                 continue;
                             }
                         }
                     }
-                    self.feedback(call_id, "the call has an unresolved label that no cast could resolve")?;
-                    return Ok(CallProgress::Go);
-                }
-                Ok(CheckOutcome::Block(raw)) => {
                     let planned = self
                         .mediator
                         .engine()
@@ -698,9 +698,8 @@ impl Turn {
                     };
                     let has_offers = planned.plans.iter().any(|plan| plan.executable().is_some());
                     let feedback = if !has_offers {
-                        crate::feedback::block_feedback(&raw, &planned, &[], surface)
+                        crate::feedback::block_feedback(&raw, &planned, &[], surface, &views)
                     } else {
-                        drop(projection);
                         let attempts = self.remedy_attempts.entry(call.digest()).or_insert(0);
                         *attempts += 1;
                         if *attempts > budget.limits.max_blocked_proposals_per_call {
@@ -717,7 +716,7 @@ impl Turn {
                                 (handle, plan.clone())
                             })
                             .collect::<Vec<_>>();
-                        let feedback = crate::feedback::block_feedback(&raw, &planned, &offers, surface);
+                        let feedback = crate::feedback::block_feedback(&raw, &planned, &offers, surface, &views);
                         self.pending.push(PendingBlock {
                             call,
                             offers,
@@ -772,6 +771,17 @@ impl Turn {
             .find(|(offer, _)| offer == handle)
             .map(|(_, plan)| plan.clone())
             .expect("the cohort was found by this handle");
+        let (log, revision) = self.mediator.store().snapshot(&self.tenant, &self.session)?;
+        let projection = Projection::build(&log, revision);
+        let views = projection.view(&self.session);
+        let outcome = self.mediator.engine().check(&views, &call);
+        if let Ok(CheckOutcome::Block(raw)) = &outcome
+            && !raw.unestablished.is_empty()
+        {
+            let facts = crate::feedback::unestablished_gate_feedback(&raw.unestablished, &views);
+            self.feedback(call_id, &facts)?;
+            return Ok(CallProgress::Go);
+        }
         let accepts_narrowing = chosen
             .steps
             .iter()
@@ -780,14 +790,11 @@ impl Turn {
             self.feedback(call_id, &uninformed_acceptance_feedback(handle))?;
             return Ok(CallProgress::Go);
         }
-        let (log, revision) = self.mediator.store().snapshot(&self.tenant, &self.session)?;
-        let projection = Projection::build(&log, revision);
-        let views = projection.view(&self.session);
-        let still_offered = match self.mediator.engine().check(&views, &call) {
+        let still_offered = match &outcome {
             Ok(CheckOutcome::Block(raw)) => self
                 .mediator
                 .engine()
-                .plan(&views, &call, &raw)
+                .plan(&views, &call, raw)
                 .expect("pending call is registered")
                 .plans
                 .iter()
@@ -862,6 +869,11 @@ impl Turn {
             .execute_remedy_plan(&views, &chosen, &call, &rulings)
         {
             Ok(batch) => batch,
+            Err(appa_engine::execute::PlanError::Unestablished(facts)) => {
+                let gated = crate::feedback::unestablished_gate_feedback(&facts, &views);
+                self.feedback(call_id, &gated)?;
+                return Ok(CallProgress::Go);
+            }
             Err(_) => {
                 self.feedback(call_id, "the remedy plan could not be executed on the current state")?;
                 return Ok(CallProgress::Go);
@@ -922,6 +934,30 @@ impl Turn {
                     "this session already returned its result — a child returns at most once",
                 )?;
                 return Ok(CallProgress::Go);
+            }
+            drop(projection);
+
+            loop {
+                let (log, revision) = self.mediator.store().snapshot(&self.tenant, &self.session)?;
+                let projection = Projection::build(&log, revision);
+                let facts = self
+                    .mediator
+                    .engine()
+                    .child_fold_unestablished(&projection.view(&parent), &self.session);
+                if facts.is_empty() {
+                    break;
+                }
+                let residual = crate::feedback::unestablished_return_feedback(&facts, &projection.view(&self.session));
+                drop(projection);
+                match self.resolve_unknown(&log, &facts, budget).await {
+                    Err(TurnCancelled) => return Ok(CallProgress::Cancelled),
+                    Ok(progressed) => {
+                        if !progressed? {
+                            self.feedback(call_id, &residual)?;
+                            return Ok(CallProgress::Go);
+                        }
+                    }
+                }
             }
         }
 
@@ -1002,14 +1038,12 @@ impl Turn {
         let views = projection.view(&parent);
         match self.mediator.engine().check_child_return(&views, &self.session) {
             Ok(ReturnCheck::Allow) => Ok(RawReturnGo::Merge),
-            Ok(ReturnCheck::Unresolved(_)) => {
-                self.feedback(
-                    call_id,
-                    "the return cannot be decided: a label dimension is unresolved; resolve it first or return null",
-                )?;
+            Ok(ReturnCheck::Block(ReturnBlock::Unestablished(facts))) => {
+                let feedback = crate::feedback::unestablished_return_feedback(&facts, &views);
+                self.feedback(call_id, &feedback)?;
                 Ok(RawReturnGo::Answered)
             }
-            Ok(ReturnCheck::Block { plans, .. }) => {
+            Ok(ReturnCheck::Block(ReturnBlock::Narrowing { plans, .. })) => {
                 let mut plans = plans;
                 plans.sort_by_key(return_plan_cost);
                 let offers: Vec<(String, ReturnPlan)> = plans
@@ -1201,64 +1235,74 @@ impl Turn {
     async fn resolve_unknown(
         &self,
         log: &[Fact],
-        facts: &[UnresolvedFact],
+        facts: &[UnestablishedFact],
         budget: &RunBudget,
     ) -> Result<Result<bool, TurnError>, TurnCancelled> {
-        let Some(target) = facts.first() else {
-            return Ok(Ok(false));
-        };
-        let body = value_body(log, target.value).unwrap_or_default().to_string();
+        let mut landed = false;
+        for target in facts {
+            if self.cancel.is_cancelled() {
+                return Err(TurnCancelled);
+            }
+            let body = value_body(log, target.value).unwrap_or_default().to_string();
 
-        for cast in &self.mediator.config().registry_config().casts {
-            let resolved: Option<DimValue> = match &cast.resolution {
-                CastResolution::Constant(declared) if declared.dimension() == target.dimension => {
-                    Some(declared.clone())
-                }
-                CastResolution::Constant(_) => None,
-                CastResolution::Resolver { .. } => match self.mediator.cast_backend(&cast.name) {
-                    Some(backend) => {
-                        let input = CastInput { body: body.clone() };
-                        let resolve = backend.resolve(&input, self.mediator.engine().registry().trust_chain());
-                        match self.wait(budget, resolve).await? {
-                            Some(BackendCast::Resolved(dimension)) if dimension.dimension() == target.dimension => {
-                                Some(dimension)
-                            }
-                            _ => None,
-                        }
+            for cast in &self.mediator.config().registry_config().casts {
+                let resolved: Option<DimValue> = match &cast.resolution {
+                    CastResolution::Constant(declared) if declared.dimension() == target.dimension => {
+                        Some(declared.clone())
                     }
-                    None => None,
-                },
-            };
-            let Some(resolved) = resolved else {
-                continue;
-            };
+                    CastResolution::Constant(_) => None,
+                    CastResolution::Resolver { .. } => match self.mediator.cast_backend(&cast.name) {
+                        Some(backend) => {
+                            let input = CastInput { body: body.clone() };
+                            let resolve = backend.resolve(&input, self.mediator.engine().registry().trust_chain());
+                            match self.wait(budget, resolve).await? {
+                                Some(BackendCast::Resolved(dimension)) if dimension.dimension() == target.dimension => {
+                                    Some(dimension)
+                                }
+                                _ => None,
+                            }
+                        }
+                        None => None,
+                    },
+                };
+                let Some(resolved) = resolved else {
+                    continue;
+                };
 
-            let (fresh, revision) = match self.mediator.store().snapshot(&self.tenant, &self.session) {
-                Ok(snapshot) => snapshot,
-                Err(error) => return Ok(Err(TurnError::Store(error))),
-            };
-            let projection = Projection::build(&fresh, revision);
-            let answer = CastAnswer {
-                cast: cast.name.clone(),
-                resolved,
-            };
-            if let Ok(batch) = self
-                .mediator
-                .engine()
-                .admit_cast(&projection.view(&self.session), target, answer)
-            {
-                drop(projection);
-                match self
+                let answer = CastAnswer {
+                    cast: cast.name.clone(),
+                    resolved,
+                };
+                let mut admitted = false;
+                let outcome = self
                     .mediator
                     .store()
-                    .conditional_append(&self.tenant, &self.session, batch)
-                {
-                    Ok(_) | Err(StoreError::Stale { .. }) => return Ok(Ok(true)),
-                    Err(error) => return Ok(Err(TurnError::Store(error))),
+                    .finalize(&self.tenant, &self.session, |facts, revision| {
+                        if self.cancel.is_cancelled() {
+                            return None;
+                        }
+                        let projection = Projection::build(facts, revision);
+                        let batch = self
+                            .mediator
+                            .engine()
+                            .admit_cast(&projection.view(&self.session), target, answer)
+                            .ok()?;
+                        admitted = true;
+                        Some(batch)
+                    });
+                if let Err(error) = outcome {
+                    return Ok(Err(TurnError::Store(error)));
+                }
+                if self.cancel.is_cancelled() {
+                    return Err(TurnCancelled);
+                }
+                if admitted {
+                    landed = true;
+                    break;
                 }
             }
         }
-        Ok(Ok(false))
+        Ok(Ok(landed))
     }
 
     async fn derive_sanitized(
