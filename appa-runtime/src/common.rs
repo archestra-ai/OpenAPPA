@@ -72,8 +72,9 @@ pub(crate) struct Core {
 }
 
 /// How a check resolved for the caller: a clean-allow dispatch to surface, or model-visible feedback
-/// (a block with its remedy offer, an unresolved label, an unknown tool, or a lost race). The facade
-/// decides how the feedback reaches the model — a `BlockFeedback` fact (turn) or a hook skip (call).
+/// (a block with its remedy offer and any unestablished values named, an unknown tool, or a lost
+/// race). The facade decides how the feedback reaches the model — a `BlockFeedback` fact (turn) or
+/// a hook skip (call).
 pub(crate) enum Checked {
     Allow(DispatchId),
     Feedback(String),
@@ -192,10 +193,9 @@ impl Core {
         let views = projection.view(&self.session);
         match self.engine.check(&views, &call) {
             Err(_) => Ok(Checked::Feedback("no such tool is registered".to_string())),
-            // Casts are refused at open, so an Unresolved label has no resolver — fail closed.
-            Ok(CheckOutcome::Unresolved(_)) => Ok(Checked::Feedback(
-                "the call has an unresolved label that no cast could resolve".to_string(),
-            )),
+            // Casts are refused at open on this profile, so there is nothing to attempt
+            // (`CHK-16` is vacuous here): a block's `unestablished` slot goes straight to the
+            // feedback, values named per `UNK-3`.
             Ok(CheckOutcome::Block(raw)) => {
                 let planned = self
                     .engine
@@ -206,7 +206,7 @@ impl Core {
                 // handle, so a redispatch-only block has no cohort to open and charges nothing.
                 let has_offers = planned.plans.iter().any(|plan| plan.executable().is_some());
                 let feedback = if !has_offers {
-                    crate::feedback::block_feedback(&raw, &planned, &[], surface)
+                    crate::feedback::block_feedback(&raw, &planned, &[], surface, &views)
                 } else {
                     // The remedy budget bounds blocked-proposal rounds per digest: each cohort of
                     // offers is one round, within which every plan is consultable once.
@@ -229,7 +229,7 @@ impl Core {
                             (handle, plan.clone())
                         })
                         .collect();
-                    let feedback = crate::feedback::block_feedback(&raw, &planned, &offers, surface);
+                    let feedback = crate::feedback::block_feedback(&raw, &planned, &offers, surface, &views);
                     self.pending_blocks.push(PendingBlock {
                         call,
                         offers,
@@ -277,6 +277,22 @@ impl Core {
             .map(|(_, plan)| plan.clone())
             .expect("the cohort was found by this handle");
 
+        let (log, rev) = self.store.snapshot(&self.tenant, &self.session)?;
+        let projection = Projection::build(&log, rev);
+        let views = projection.view(&self.session);
+        let outcome = self.engine.check(&views, &call);
+        // Preflight, before any gate and before any authority hears of this (in lockstep with the
+        // runtime): while a consumed dimension stays unestablished, no ruling or acceptance may
+        // land (`CHK-16`). The offers stay put, gated on the named facts; precedence over the
+        // same-round gate so the agent hears the real reason.
+        if let Ok(CheckOutcome::Block(raw)) = &outcome
+            && !raw.unestablished.is_empty()
+        {
+            return Ok(Remedied::Feedback(crate::feedback::unestablished_gate_feedback(
+                &raw.unestablished,
+                &views,
+            )));
+        }
         // Informed acceptance, as in the runtime: a plan that accepts a narrowing executes only
         // in a round after the one that surfaced its offer. The framework signals rounds through
         // `begin_round`; one that never does cannot execute acceptance-carrying plans at all —
@@ -289,15 +305,12 @@ impl Core {
             return Ok(Remedied::Feedback(uninformed_acceptance_feedback(plan_id)));
         }
 
-        let (log, rev) = self.store.snapshot(&self.tenant, &self.session)?;
-        let projection = Projection::build(&log, rev);
-        let views = projection.view(&self.session);
         // Validate the chosen plan against the live offers BEFORE consulting anyone (in lockstep
         // with the runtime): a stale cohort is consumed, never a repeated authority prompt.
-        let still_offered = match self.engine.check(&views, &call) {
+        let still_offered = match &outcome {
             Ok(CheckOutcome::Block(raw)) => self
                 .engine
-                .plan(&views, &call, &raw)
+                .plan(&views, &call, raw)
                 .expect("pending call is registered")
                 .plans
                 .iter()
@@ -377,6 +390,14 @@ impl Core {
 
         let batch = match self.engine.execute_remedy_plan(&views, &chosen, &call, &rulings) {
             Ok(batch) => batch,
+            // Same-snapshot-redundant here — the preflight above evaluated these very views, so
+            // this arm cannot fire through the runtime; the engine guard itself is load-bearing
+            // for direct hosts, and if state ever diverges the agent still hears the named facts.
+            Err(appa_engine::execute::PlanError::Unestablished(facts)) => {
+                return Ok(Remedied::Feedback(crate::feedback::unestablished_gate_feedback(
+                    &facts, &views,
+                )));
+            }
             Err(_) => {
                 return Ok(Remedied::Feedback(
                     "the remedy plan could not be executed on the current state".to_string(),

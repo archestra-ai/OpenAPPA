@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use appa_engine::admit::{AdmitError, CastAnswer, ResultAdmission};
 use appa_engine::authority::CastResolution;
-use appa_engine::branch::{ReturnCheck, ReturnPlan, ReturnSubmission};
-use appa_engine::check::{CheckOutcome, Narrowing, UnresolvedFact};
+use appa_engine::branch::{ReturnBlock, ReturnCheck, ReturnPlan, ReturnSubmission};
+use appa_engine::check::{CheckOutcome, Narrowing, UnestablishedFact};
 use appa_engine::execute::Ruling;
 use appa_engine::fact::{BoundaryKind, Fact, FactBatch, ProposedCall, ReturnPolicy, Revision};
 use appa_engine::label::{DimValue, Dimension};
@@ -687,6 +687,9 @@ impl Turn {
         call: ResolvedCall,
         budget: &mut RunBudget,
     ) -> Result<CallProgress, TurnError> {
+        // One resolution pass per proposal: once no cast lands, the residual block is final for
+        // this loop — re-attempting on an unchanged state would spin.
+        let mut casts_exhausted = false;
         loop {
             let (log, revision) = self.mediator.store().snapshot(&self.tenant, &self.session)?;
             let projection = Projection::build(&log, revision);
@@ -712,20 +715,22 @@ impl Turn {
                     }
                     return Ok(CallProgress::Go);
                 }
-                Ok(CheckOutcome::Unresolved(facts)) => {
-                    drop(projection);
-                    match self.resolve_unknown(&log, &facts, budget).await {
-                        Err(TurnCancelled) => return Ok(CallProgress::Cancelled),
-                        Ok(resolved) => {
-                            if resolved? {
+                Ok(CheckOutcome::Block(raw)) => {
+                    // `CHK-16`: attempt the registered casts on the unestablished values and
+                    // re-check before surfacing an outcome — resolution is automatic, never an
+                    // agent choice. What the agent eventually hears is the residual.
+                    if !raw.unestablished.is_empty() && !casts_exhausted {
+                        drop(projection);
+                        match self.resolve_unknown(&log, &raw.unestablished, budget).await {
+                            Err(TurnCancelled) => return Ok(CallProgress::Cancelled),
+                            Ok(resolved) => {
+                                if !resolved? {
+                                    casts_exhausted = true;
+                                }
                                 continue;
                             }
                         }
                     }
-                    self.feedback(call_id, "the call has an unresolved label that no cast could resolve")?;
-                    return Ok(CallProgress::Go);
-                }
-                Ok(CheckOutcome::Block(raw)) => {
                     let planned = self
                         .mediator
                         .engine()
@@ -745,9 +750,8 @@ impl Turn {
                     // handle, so a redispatch-only block has no cohort to open and charges nothing.
                     let has_offers = planned.plans.iter().any(|plan| plan.executable().is_some());
                     let feedback = if !has_offers {
-                        crate::feedback::block_feedback(&raw, &planned, &[], surface)
+                        crate::feedback::block_feedback(&raw, &planned, &[], surface, &views)
                     } else {
-                        drop(projection);
                         // The budget counts blocked-proposal cohorts, not executions or denials, so
                         // every advertised alternative in one cohort remains independently usable.
                         let attempts = self.remedy_attempts.entry(call.digest()).or_insert(0);
@@ -768,7 +772,7 @@ impl Turn {
                                 (handle, plan.clone())
                             })
                             .collect::<Vec<_>>();
-                        let feedback = crate::feedback::block_feedback(&raw, &planned, &offers, surface);
+                        let feedback = crate::feedback::block_feedback(&raw, &planned, &offers, surface, &views);
                         self.pending.push(PendingBlock {
                             call,
                             offers,
@@ -823,6 +827,21 @@ impl Turn {
             .find(|(offer, _)| offer == handle)
             .map(|(_, plan)| plan.clone())
             .expect("the cohort was found by this handle");
+        let (log, revision) = self.mediator.store().snapshot(&self.tenant, &self.session)?;
+        let projection = Projection::build(&log, revision);
+        let views = projection.view(&self.session);
+        let outcome = self.mediator.engine().check(&views, &call);
+        // Preflight, before any gate and before any authority hears of this: while a consumed
+        // dimension stays unestablished, no ruling or acceptance may land (`CHK-16` — a fact
+        // clears it, not a plan). The offers stay put, gated on the named facts; precedence over
+        // the same-round gate so the agent hears the real reason.
+        if let Ok(CheckOutcome::Block(raw)) = &outcome
+            && !raw.unestablished.is_empty()
+        {
+            let facts = crate::feedback::unestablished_gate_feedback(&raw.unestablished, &views);
+            self.feedback(call_id, &facts)?;
+            return Ok(CallProgress::Go);
+        }
         // Informed acceptance, as for pending casts: a plan that accepts a narrowing executes only
         // in a round after the one that surfaced its offer. Authority-only plans are not gated.
         let accepts_narrowing = chosen
@@ -833,16 +852,13 @@ impl Turn {
             self.feedback(call_id, &uninformed_acceptance_feedback(handle))?;
             return Ok(CallProgress::Go);
         }
-        let (log, revision) = self.mediator.store().snapshot(&self.tenant, &self.session)?;
-        let projection = Projection::build(&log, revision);
-        let views = projection.view(&self.session);
         // Refuse stale offers before asking an authority. Execution validates again under the
         // append revision, but the external review itself must never be spent on obsolete state.
-        let still_offered = match self.mediator.engine().check(&views, &call) {
+        let still_offered = match &outcome {
             Ok(CheckOutcome::Block(raw)) => self
                 .mediator
                 .engine()
-                .plan(&views, &call, &raw)
+                .plan(&views, &call, raw)
                 .expect("pending call is registered")
                 .plans
                 .iter()
@@ -924,6 +940,14 @@ impl Turn {
             .execute_remedy_plan(&views, &chosen, &call, &rulings)
         {
             Ok(batch) => batch,
+            // Same-snapshot-redundant here — the preflight above evaluated these very views, so
+            // this arm cannot fire through the runtime; the engine guard itself is load-bearing
+            // for direct hosts, and if state ever diverges the agent still hears the named facts.
+            Err(appa_engine::execute::PlanError::Unestablished(facts)) => {
+                let gated = crate::feedback::unestablished_gate_feedback(&facts, &views);
+                self.feedback(call_id, &gated)?;
+                return Ok(CallProgress::Go);
+            }
             Err(_) => {
                 self.feedback(call_id, "the remedy plan could not be executed on the current state")?;
                 return Ok(CallProgress::Go);
@@ -984,6 +1008,34 @@ impl Turn {
                     "this session already returned its result — a child returns at most once",
                 )?;
                 return Ok(CallProgress::Go);
+            }
+            drop(projection);
+
+            // `BRN-14`: a return resolves before it merges, whatever its policy — the split
+            // below chooses how content crosses, while a label fact is established the same way
+            // on both paths. Attempt the registered casts on the fold's unestablished values;
+            // a residual blocks the merge with the values named and no plans offered.
+            loop {
+                let (log, revision) = self.mediator.store().snapshot(&self.tenant, &self.session)?;
+                let projection = Projection::build(&log, revision);
+                let facts = self
+                    .mediator
+                    .engine()
+                    .child_fold_unestablished(&projection.view(&parent), &self.session);
+                if facts.is_empty() {
+                    break;
+                }
+                let residual = crate::feedback::unestablished_return_feedback(&facts, &projection.view(&self.session));
+                drop(projection);
+                match self.resolve_unknown(&log, &facts, budget).await {
+                    Err(TurnCancelled) => return Ok(CallProgress::Cancelled),
+                    Ok(progressed) => {
+                        if !progressed? {
+                            self.feedback(call_id, &residual)?;
+                            return Ok(CallProgress::Go);
+                        }
+                    }
+                }
             }
         }
 
@@ -1064,14 +1116,14 @@ impl Turn {
         let views = projection.view(&parent);
         match self.mediator.engine().check_child_return(&views, &self.session) {
             Ok(ReturnCheck::Allow) => Ok(RawReturnGo::Merge),
-            Ok(ReturnCheck::Unresolved(_)) => {
-                self.feedback(
-                    call_id,
-                    "the return cannot be decided: a label dimension is unresolved; resolve it first or return null",
-                )?;
+            Ok(ReturnCheck::Block(ReturnBlock::Unestablished(facts))) => {
+                // The pre-split resolution pass already ran (`BRN-14`), so this residual means no
+                // registered cast could establish the fold: name the values, offer nothing.
+                let feedback = crate::feedback::unestablished_return_feedback(&facts, &views);
+                self.feedback(call_id, &feedback)?;
                 Ok(RawReturnGo::Answered)
             }
-            Ok(ReturnCheck::Block { plans, .. }) => {
+            Ok(ReturnCheck::Block(ReturnBlock::Narrowing { plans, .. })) => {
                 // Offer the plans cheapest-first, so the lowest handle is the one that costs the
                 // parent least. A child reads the menu as "how do I return this" and takes the
                 // first entry; ordering by cost makes that reflex land on the free crossing
@@ -1276,67 +1328,88 @@ impl Turn {
         Ok(())
     }
 
+    /// Attempt the registered casts on **every** unestablished fact (`CHK-16`): casts in
+    /// registration order per value, the first resolution that establishes the dimension
+    /// standing, each re-validated against the cast's declaration at admission (`SAN-8`).
+    /// `Ok(true)` when at least one fact landed — the caller re-checks the fresh state —
+    /// `Ok(false)` when nothing did, so the residual block is what the agent hears.
     async fn resolve_unknown(
         &self,
         log: &[Fact],
-        facts: &[UnresolvedFact],
+        facts: &[UnestablishedFact],
         budget: &RunBudget,
     ) -> Result<Result<bool, TurnError>, TurnCancelled> {
-        let Some(target) = facts.first() else {
-            return Ok(Ok(false));
-        };
-        let body = value_body(log, target.value).unwrap_or_default().to_string();
+        let mut landed = false;
+        for target in facts {
+            // Unconditional checkpoint: a pass whose casts produce no candidate would otherwise
+            // never consult cancellation (constants that miss the dimension await nothing).
+            if self.cancel.is_cancelled() {
+                return Err(TurnCancelled);
+            }
+            let body = value_body(log, target.value).unwrap_or_default().to_string();
 
-        for cast in &self.mediator.config().registry_config().casts {
-            let resolved: Option<DimValue> = match &cast.resolution {
-                CastResolution::Constant(declared) if declared.dimension() == target.dimension => {
-                    Some(declared.clone())
-                }
-                CastResolution::Constant(_) => None,
-                CastResolution::Resolver { .. } => match self.mediator.cast_backend(&cast.name) {
-                    Some(backend) => {
-                        let input = CastInput { body: body.clone() };
-                        let resolve = backend.resolve(&input, self.mediator.engine().registry().trust_chain());
-                        match self.wait(budget, resolve).await? {
-                            Some(BackendCast::Resolved(dimension)) if dimension.dimension() == target.dimension => {
-                                Some(dimension)
-                            }
-                            _ => None,
-                        }
+            for cast in &self.mediator.config().registry_config().casts {
+                let resolved: Option<DimValue> = match &cast.resolution {
+                    CastResolution::Constant(declared) if declared.dimension() == target.dimension => {
+                        Some(declared.clone())
                     }
-                    None => None,
-                },
-            };
-            let Some(resolved) = resolved else {
-                continue;
-            };
+                    CastResolution::Constant(_) => None,
+                    CastResolution::Resolver { .. } => match self.mediator.cast_backend(&cast.name) {
+                        Some(backend) => {
+                            let input = CastInput { body: body.clone() };
+                            let resolve = backend.resolve(&input, self.mediator.engine().registry().trust_chain());
+                            match self.wait(budget, resolve).await? {
+                                Some(BackendCast::Resolved(dimension)) if dimension.dimension() == target.dimension => {
+                                    Some(dimension)
+                                }
+                                _ => None,
+                            }
+                        }
+                        None => None,
+                    },
+                };
+                let Some(resolved) = resolved else {
+                    continue;
+                };
 
-            let (fresh, revision) = match self.mediator.store().snapshot(&self.tenant, &self.session) {
-                Ok(snapshot) => snapshot,
-                Err(error) => return Ok(Err(TurnError::Store(error))),
-            };
-            let projection = Projection::build(&fresh, revision);
-            let answer = CastAnswer {
-                cast: cast.name.clone(),
-                resolved,
-            };
-            if let Ok(batch) = self
-                .mediator
-                .engine()
-                .admit_cast(&projection.view(&self.session), target, answer)
-            {
-                drop(projection);
-                match self
+                let answer = CastAnswer {
+                    cast: cast.name.clone(),
+                    resolved,
+                };
+                // Admit under the family lock: siblings append to the same family revision, so a
+                // CAS append could go stale forever under contention. The closure derives from
+                // the live facts, so only a real append counts as landed — the callers' loops
+                // then iterate on a strictly shrinking fact set.
+                let mut admitted = false;
+                let outcome = self
                     .mediator
                     .store()
-                    .conditional_append(&self.tenant, &self.session, batch)
-                {
-                    Ok(_) | Err(StoreError::Stale { .. }) => return Ok(Ok(true)),
-                    Err(error) => return Ok(Err(TurnError::Store(error))),
+                    .finalize(&self.tenant, &self.session, |facts, revision| {
+                        if self.cancel.is_cancelled() {
+                            return None;
+                        }
+                        let projection = Projection::build(facts, revision);
+                        let batch = self
+                            .mediator
+                            .engine()
+                            .admit_cast(&projection.view(&self.session), target, answer)
+                            .ok()?;
+                        admitted = true;
+                        Some(batch)
+                    });
+                if let Err(error) = outcome {
+                    return Ok(Err(TurnError::Store(error)));
+                }
+                if self.cancel.is_cancelled() {
+                    return Err(TurnCancelled);
+                }
+                if admitted {
+                    landed = true;
+                    break;
                 }
             }
         }
-        Ok(Ok(false))
+        Ok(Ok(landed))
     }
 
     async fn derive_sanitized(

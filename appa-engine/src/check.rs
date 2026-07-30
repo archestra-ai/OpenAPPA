@@ -1,15 +1,21 @@
-//! The two-fold check: the pure evaluation of a proposed call against the trajectory.
+//! The two-outcome check: the pure evaluation of a proposed call against the trajectory.
 //!
 //! Ordered by the spec's clocks: **narrowing** first (on the label the dispatch would commit),
 //! then **label requirements** (on that same committed label), then **history requirements** (on
 //! the log as it stands — a call's own `emits` never trips its own precondition). Attention demands
-//! are per-call gaps, never satisfied by history. If a label requirement **consumes** an `Unknown`
-//! dimension, the check is [`CheckOutcome::Unresolved`] — it names the values to cast, never a
-//! blanket Unknown. A call with no requirement on an Unknown dimension proceeds: an Unknown
+//! are per-call gaps, never satisfied by history. The outcome is `allow`, or `block` carrying
+//! everything that stopped the call at once (`CHK-1`): the unmet requirements, the narrowing where
+//! one fired, and — where a label requirement **consumes** an `Unknown` dimension — the values
+//! whose dimension no cast has established yet, named per value in the block's `unestablished`
+//! slot (`UNK-3`), never as a blanket Unknown. A requirement that consumes an Unknown is reported
+//! there and only there: its gap evaluation is masked, so one missing fact is never double-billed
+//! as a coverable gap. A call with no requirement on an Unknown dimension proceeds: an Unknown
 //! trajectory does not brick unannotated flows, it fails closed exactly at the sinks whose
 //! requirements consume it (the gradual-annotation story).
 //!
 //! This module is pure and has no ad-hoc judgment: every branch is label arithmetic or a log query.
+//! Resolution is the runtime's job (`CHK-16`): it attempts the registered casts on the
+//! unestablished values and re-checks; what lands here is only the residual.
 
 use serde::{Deserialize, Serialize};
 
@@ -20,9 +26,10 @@ use crate::names::MarkName;
 use crate::projection::Views;
 use crate::value::{ResolvedCall, ValueId};
 
-/// A value whose dimension is Unknown and must be cast before the check can decide.
+/// A value whose consumed dimension no registered cast has established — a missing fact, cleared
+/// by a cast landing (`CHK-16`), never by a ruling or a plan.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UnresolvedFact {
+pub struct UnestablishedFact {
     pub value: ValueId,
     pub dimension: Dimension,
 }
@@ -51,19 +58,33 @@ pub struct Narrowing {
     pub to: Label,
 }
 
-/// The block as the check finds it — gaps and/or a narrowing — before remedy planning.
+/// The block as the check finds it — gaps, a narrowing, and/or unestablished values — before
+/// remedy planning. The slots are independent and may coexist (`CHK-1`); `unestablished` entries
+/// offer no plan by design (`RMD-10`), since a fact rather than a plan clears them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RawBlock {
     pub requirement_gaps: Vec<Gap>,
     pub narrowing: Option<Narrowing>,
+    pub unestablished: Vec<UnestablishedFact>,
 }
 
-/// The check's verdict.
+/// The check's verdict: two outcomes (`CHK-1`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CheckOutcome {
     Allow,
     Block(RawBlock),
-    Unresolved(Vec<UnresolvedFact>),
+}
+
+/// The state-only evaluation shared by [`evaluate`] and the remedy reachability search: the gaps
+/// and narrowing as the clocks find them, plus the dimensions whose Unknown a label requirement
+/// consumes. The state path cannot name values — the views path ([`evaluate`]) enumerates them
+/// into the block's `unestablished` slot. Plans are gap-scoped, so the search reads only the
+/// gaps and narrowing for the target; `consumed` matters where a call must actually *run* — a
+/// redispatch prerequisite whose own requirements consume an Unknown is not runnable.
+pub(crate) struct StateEval {
+    pub(crate) requirement_gaps: Vec<Gap>,
+    pub(crate) narrowing: Option<Narrowing>,
+    pub(crate) consumed: Vec<Dimension>,
 }
 
 /// How an `includes` placeholder that cannot resolve from the call's arguments enters the gap set.
@@ -91,44 +112,44 @@ pub(crate) fn committed_label(contract: &ToolContract, current: &Label) -> Label
 }
 
 /// Evaluate one call against the branch views. Pure: a function of the contract, the views, and
-/// the resolved arguments.
+/// the resolved arguments. The block carries every slot at once: the evaluable gaps, the
+/// narrowing, and the consumed-Unknown dimensions named per value.
 pub(crate) fn evaluate(contract: &ToolContract, views: &Views, call: &ResolvedCall) -> CheckOutcome {
     let current = views.current_label();
-    match evaluate_state(
+    let eval = evaluate_state(
         contract,
         &current,
         &|kind| views.has_effect(kind),
         call,
         PlaceholderGaps::FailClosed,
-    ) {
-        // The state evaluation only signals that a requirement consumed an Unknown dimension; the
-        // offending branch values are named here, where the views can enumerate them.
-        CheckOutcome::Unresolved(_) => {
-            let committed = committed_label(contract, &current);
-            let dims = consumed_unresolved(contract, &committed, call);
-            CheckOutcome::Unresolved(unresolved_facts(views, &dims))
-        }
-        outcome => outcome,
+    );
+    // Allow demands `consumed` empty, not merely no enumerated facts: a consumed dimension with no
+    // nameable value (unreachable while Unknown enters only through admitted values) still refuses.
+    if eval.requirement_gaps.is_empty() && eval.narrowing.is_none() && eval.consumed.is_empty() {
+        return CheckOutcome::Allow;
     }
+    let unestablished = unestablished_facts(views, &eval.consumed);
+    CheckOutcome::Block(RawBlock {
+        requirement_gaps: eval.requirement_gaps,
+        narrowing: eval.narrowing,
+        unestablished,
+    })
 }
 
 /// The gap logic on an abstract `(current label, effect predicate)` state — the one place the two
 /// clocks live, shared by [`evaluate`] and the remedy reachability search (`plan`). A label
-/// requirement that consumes an `Unknown` dimension yields [`CheckOutcome::Unresolved`] with no
-/// listed facts: the caller that has the values (the view path) details them; the state-only
-/// search treats it as a dead end (unresolved resolution is a cast path, outside the reachability
-/// subset). An Unknown dimension nothing requires blocks nothing.
+/// requirement that consumes an `Unknown` dimension lands in `consumed`, never in the gaps
+/// (masked — one missing fact is not also a coverable gap); requirements on established
+/// dimensions evaluate as always. An Unknown dimension nothing requires blocks nothing.
 pub(crate) fn evaluate_state(
     contract: &ToolContract,
     current: &Label,
     has_effect: &impl Fn(&EffectKind) -> bool,
     call: &ResolvedCall,
     placeholders: PlaceholderGaps,
-) -> CheckOutcome {
+) -> StateEval {
     let committed = committed_label(contract, current);
-    if !consumed_unresolved(contract, &committed, call).is_empty() {
-        return CheckOutcome::Unresolved(Vec::new());
-    }
+    let consumed = consumed_unknown(contract, &committed, call);
 
     // Clock 1: narrowing, on the committed label.
     let narrowing = (&committed != current).then(|| Narrowing {
@@ -152,23 +173,20 @@ pub(crate) fn evaluate_state(
             seen.push(gap);
         }
     }
-    let gaps = seen;
 
-    if gaps.is_empty() && narrowing.is_none() {
-        CheckOutcome::Allow
-    } else {
-        CheckOutcome::Block(RawBlock {
-            requirement_gaps: gaps,
-            narrowing,
-        })
+    StateEval {
+        requirement_gaps: seen,
+        narrowing,
+        consumed,
     }
 }
 
-/// The dimensions whose Unknown state a label requirement of this call consumes — the ones a cast
-/// must resolve before the check can decide. Requirement-scoped by design; a malformed `includes`
-/// placeholder consumes the dimension only when the audience is Unknown (unresolved-first), and
-/// on a Known audience stays the hard fail-closed gap `label_gaps` reports.
-fn consumed_unresolved(contract: &ToolContract, committed: &Label, call: &ResolvedCall) -> Vec<Dimension> {
+/// The dimensions whose Unknown state a label requirement of this call consumes — the ones only a
+/// cast can establish. Requirement-scoped by design; a malformed `includes` placeholder consumes
+/// the dimension only when the audience is Unknown (`label_gaps` masks its sentinel gap for
+/// exactly that case), and on a Known audience stays the hard fail-closed gap `label_gaps`
+/// reports.
+fn consumed_unknown(contract: &ToolContract, committed: &Label, call: &ResolvedCall) -> Vec<Dimension> {
     let mut dims = Vec::new();
     if let Some(floor) = contract.requires.label.trust_floor
         && committed.trust.meets_floor(floor) == Adequacy::Unresolved
@@ -197,8 +215,8 @@ fn consumed_unresolved(contract: &ToolContract, committed: &Label, call: &Resolv
     dims
 }
 
-/// The branch values with an Unknown in a consumed-unresolved dimension.
-fn unresolved_facts(views: &Views, dims: &[Dimension]) -> Vec<UnresolvedFact> {
+/// The branch values with an Unknown in a consumed dimension — the block's `unestablished` slot.
+fn unestablished_facts(views: &Views, dims: &[Dimension]) -> Vec<UnestablishedFact> {
     let mut facts = Vec::new();
     let trust_unknown = dims.contains(&Dimension::Trust);
     let audience_unknown = dims.contains(&Dimension::Audience);
@@ -207,13 +225,13 @@ fn unresolved_facts(views: &Views, dims: &[Dimension]) -> Vec<UnresolvedFact> {
     }
     for (id, label) in views.branch_values() {
         if trust_unknown && matches!(label.trust, Dim::Unknown) {
-            facts.push(UnresolvedFact {
+            facts.push(UnestablishedFact {
                 value: id,
                 dimension: Dimension::Trust,
             });
         }
         if audience_unknown && matches!(label.audience, Dim::Unknown) {
-            facts.push(UnresolvedFact {
+            facts.push(UnestablishedFact {
                 value: id,
                 dimension: Dimension::Audience,
             });
@@ -250,12 +268,17 @@ fn label_gaps(
                 // even on a public trajectory (a call that cannot name its recipient releases to
                 // no one); on the planner's synthetic prerequisite path it is waived — the agent
                 // supplies the recipient at real dispatch (only a Placeholder spec can reach this
-                // arm, so waiving never drops a static requirement).
+                // arm, so waiving never drops a static requirement). On an Unknown audience the
+                // requirement consumes the dimension instead (see `consumed_unknown`) and the
+                // sentinel gap is masked: reporting it too would let a reader-ceiling authority
+                // cover it and open the dispatch with the Unknown never resolved.
                 None => match placeholders {
-                    PlaceholderGaps::FailClosed => gaps.push(Gap::Includes {
-                        recipients: unresolved_recipient(spec),
-                    }),
-                    PlaceholderGaps::Waived => {}
+                    PlaceholderGaps::FailClosed if !matches!(committed.audience, Dim::Unknown) => {
+                        gaps.push(Gap::Includes {
+                            recipients: unresolved_recipient(spec),
+                        })
+                    }
+                    PlaceholderGaps::FailClosed | PlaceholderGaps::Waived => {}
                 },
             },
             AudienceRequirement::Cap(cap) => {

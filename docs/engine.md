@@ -78,6 +78,10 @@ survive the boundary to the next.
   (`mediator.rs`) validates on construction and the policy loader has no
   field for it, so a head carrying a tool call — or a policy file trying to
   supply one — is unrepresentable.
+- **`BRN-14`, a return block has one cause.** `ReturnCheck::Block` wraps a
+  two-variant `ReturnBlock` (`branch.rs`): a narrowing with its plans, or
+  the unestablished values with none — an Unknown dimension can never form
+  a narrowing, and the enum keeps a block claiming both unrepresentable.
 
 Type-level enforcement stops at the caller's signature, so lifecycle
 ordering is a runtime refusal instead — encoding it as typestate would put
@@ -95,7 +99,7 @@ the document.
 | item | spec |
 |---|---|
 | input sanitizers | `SAN-3`, refused at load |
-| the two-outcome check with runtime-driven resolution — the shipped check still returns a third `unresolved` outcome and leaves casting to the host | `CHK-1`, `CHK-16` |
+| cast resolution on the SDK profile — `CallSession` refuses `[[cast]]` at open, so `CHK-16`'s resolution never runs there; the turn path drives it in full, and the check itself is two-outcome everywhere | `CHK-16`, `POS-3` |
 | a sanitizer mandate on the trust dimension — `Sanitizer::can_reduce` is audience-typed on both ends, and `admit.rs` copies the raw's trust through | `SAN-4` |
 | quarantine-exit attestation | §10.1, design direction |
 | membership resolvers for named groups | `LBL`, design direction |

@@ -20,7 +20,7 @@
 
 use thiserror::Error;
 
-use crate::check::{Narrowing, UnresolvedFact};
+use crate::check::{Narrowing, UnestablishedFact};
 use crate::fact::{BoundaryKind, Fact, FactBatch, ReturnDerivation, ReturnPolicy};
 use crate::label::{Adequacy, Dim, Dimension, Label};
 use crate::names::SanitizerName;
@@ -59,8 +59,8 @@ pub enum BranchError {
     NotForked,
     #[error("the submission does not match the child's fork return policy")]
     ReturnPolicyMismatch,
-    #[error("the child fold has an unresolved dimension — cast it before returning")]
-    ReturnFoldUnresolved,
+    #[error("the child fold has an unestablished dimension — a cast establishes it, then the return crosses")]
+    ReturnFoldUnestablished,
     #[error("a raw return that narrows the parent merges only through an executed return plan")]
     ReturnNarrowsParent,
 }
@@ -147,8 +147,8 @@ pub(crate) fn submit_child_return(
             // never merged silently, whoever the embedder is — it takes an executed return plan.
             match check_child_return(registry, parent, child)? {
                 ReturnCheck::Allow => {}
-                ReturnCheck::Unresolved(_) => return Err(BranchError::ReturnFoldUnresolved),
-                ReturnCheck::Block { .. } => return Err(BranchError::ReturnNarrowsParent),
+                ReturnCheck::Block(ReturnBlock::Unestablished(_)) => return Err(BranchError::ReturnFoldUnestablished),
+                ReturnCheck::Block(ReturnBlock::Narrowing { .. }) => return Err(BranchError::ReturnNarrowsParent),
             }
             (LabeledValue::new(body, fold.clone()), ReturnDerivation::Raw)
         }
@@ -223,24 +223,32 @@ pub enum ReturnPlan {
     },
 }
 
-/// The verdict on a proposed raw child return. Decided from the parent's [`Views`] alone — both
-/// folds and the fork linkage come from one projection snapshot, so mixed-snapshot checks are
-/// unrepresentable.
+/// The verdict on a proposed raw child return: two outcomes, like the tool path's
+/// [`crate::check::CheckOutcome`]. Decided from the parent's [`Views`] alone — both folds and the
+/// fork linkage come from one projection snapshot, so mixed-snapshot checks are unrepresentable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReturnCheck {
     /// Merging the raw return leaves the parent's label untouched: merge as today.
     Allow,
-    /// A consumed label dimension is Unknown — Unknown is absorbing under `combine` but is not an
-    /// ordered restriction, so it can never form a narrowing. Cast these values first; no plans
-    /// until resolved (mirrors the tool path's `CheckOutcome::Unresolved`).
-    Unresolved(Vec<UnresolvedFact>),
+    Block(ReturnBlock),
+}
+
+/// What blocked the return. The two causes are structurally disjoint: an Unknown dimension is
+/// absorbing under `combine` but not an ordered restriction, so it can never form a narrowing —
+/// a block is one or the other, never both.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReturnBlock {
     /// The raw return would narrow the parent: the merge is blocked. `plans` is non-empty by
     /// construction (`Accept` is always offered), in deterministic order — `Accept` first, then
     /// sanitizer plans in registry name order.
-    Block {
+    Narrowing {
         narrowing: Narrowing,
         plans: Vec<ReturnPlan>,
     },
+    /// The return's label has a dimension no cast has established (`BRN-14`): the merge blocks
+    /// with the values named and no plans offered — a fact clears the entry, nothing the agent
+    /// executes.
+    Unestablished(Vec<UnestablishedFact>),
 }
 
 /// Decide whether a raw return by `child` may merge silently into the parent, and if not, which
@@ -270,11 +278,11 @@ pub(crate) fn check_child_return(
     let fold = parent.branch_label(child);
     let current = parent.current_label();
 
-    let mut unresolved = Vec::new();
-    unresolved_dims(parent, child, &fold, &mut unresolved);
-    unresolved_dims(parent, parent.trajectory(), &current, &mut unresolved);
-    if !unresolved.is_empty() {
-        return Ok(ReturnCheck::Unresolved(unresolved));
+    // Only the return's own label must be established (BRN-14): a parent-side Unknown absorbs
+    // under the fold (UNK-2), so the merge is well-defined and blocks nothing here.
+    let unestablished = child_fold_unestablished(parent, child);
+    if !unestablished.is_empty() {
+        return Ok(ReturnCheck::Block(ReturnBlock::Unestablished(unestablished)));
     }
 
     let candidate = current.combine(&fold);
@@ -313,7 +321,18 @@ pub(crate) fn check_child_return(
         }
         // merged == candidate: the relabel buys nothing over the raw crossing — not offered.
     }
-    Ok(ReturnCheck::Block { narrowing, plans })
+    Ok(ReturnCheck::Block(ReturnBlock::Narrowing { narrowing, plans }))
+}
+
+/// The child fold's unestablished facts — the values a cast must establish before this child's
+/// return can merge (`BRN-14`). Policy-independent by design: the runtime resolves them *before*
+/// the return-policy split, so a bound sanitizer's crossing gets the same resolution a raw one
+/// does (a sanitizer transforms content, never establishes a label fact).
+pub(crate) fn child_fold_unestablished(parent: &Views, child: &TrajectoryId) -> Vec<UnestablishedFact> {
+    let fold = parent.branch_label(child);
+    let mut unestablished = Vec::new();
+    unestablished_dims(parent, child, &fold, &mut unestablished);
+    unestablished
 }
 
 /// What a child submits through `submit_result`, or the runtime submits for a chosen return
@@ -347,9 +366,11 @@ pub(crate) fn execute_child_return_plan(
     submission: ReturnSubmission,
 ) -> Result<FactBatch, BranchError> {
     let plans = match check_child_return(registry, parent, child)? {
-        ReturnCheck::Block { plans, .. } => plans,
-        // Allow or Unresolved: the state moved since the offer — nothing here to execute.
-        ReturnCheck::Allow | ReturnCheck::Unresolved(_) => return Err(BranchError::ReturnOfferStale),
+        ReturnCheck::Block(ReturnBlock::Narrowing { plans, .. }) => plans,
+        // Allow or unestablished: the state moved since the offer — nothing here to execute.
+        ReturnCheck::Allow | ReturnCheck::Block(ReturnBlock::Unestablished(_)) => {
+            return Err(BranchError::ReturnOfferStale);
+        }
     };
     if !plans.contains(&chosen) {
         return Err(BranchError::ReturnPlanNotOffered);
@@ -391,10 +412,11 @@ fn sanitized_crossing(
     let registered = registry
         .sanitizer(sanitizer)
         .ok_or_else(|| BranchError::UnknownSanitizer(sanitizer.as_str().to_string()))?;
-    // Unresolved-first: an Unknown fold dimension (trust rides through this crossing) would
-    // absorb into the parent via `combine` — refuse, never fail open.
+    // An unestablished fold dimension (trust rides through this crossing) would absorb into the
+    // parent via `combine` — refuse, never fail open. The runtime resolves before this split, so
+    // reaching here means no registered cast could establish it.
     if matches!(fold.trust, Dim::Unknown) || matches!(fold.audience, Dim::Unknown) {
-        return Err(BranchError::ReturnFoldUnresolved);
+        return Err(BranchError::ReturnFoldUnestablished);
     }
     if !registered.on.output {
         return Err(BranchError::SanitizerNotOutput(sanitizer.as_str().to_string()));
@@ -416,8 +438,8 @@ fn sanitized_crossing(
 }
 
 /// The `trajectory`'s values with an Unknown in a dimension its fold leaves Unknown — the values a
-/// cast must resolve before the return check can decide.
-fn unresolved_dims(views: &Views, trajectory: &TrajectoryId, fold: &Label, out: &mut Vec<UnresolvedFact>) {
+/// cast must establish before the return check can decide.
+fn unestablished_dims(views: &Views, trajectory: &TrajectoryId, fold: &Label, out: &mut Vec<UnestablishedFact>) {
     let trust_unknown = matches!(fold.trust, Dim::Unknown);
     let audience_unknown = matches!(fold.audience, Dim::Unknown);
     if !trust_unknown && !audience_unknown {
@@ -425,13 +447,13 @@ fn unresolved_dims(views: &Views, trajectory: &TrajectoryId, fold: &Label, out: 
     }
     for (id, label) in views.branch_values_of(trajectory) {
         if trust_unknown && matches!(label.trust, Dim::Unknown) {
-            out.push(UnresolvedFact {
+            out.push(UnestablishedFact {
                 value: id,
                 dimension: Dimension::Trust,
             });
         }
         if audience_unknown && matches!(label.audience, Dim::Unknown) {
-            out.push(UnresolvedFact {
+            out.push(UnestablishedFact {
                 value: id,
                 dimension: Dimension::Audience,
             });
@@ -705,7 +727,7 @@ mod tests {
         let mut log = forked(known(TRUSTED, Audience::Public));
         log.push(admit(child(), known(SUSPICIOUS, internal())));
         match check(&registry(), &log) {
-            ReturnCheck::Block { narrowing, plans } => {
+            ReturnCheck::Block(ReturnBlock::Narrowing { narrowing, plans }) => {
                 assert_eq!(narrowing.from, known(TRUSTED, Audience::Public));
                 assert_eq!(narrowing.to, known(SUSPICIOUS, internal()));
                 // declassify clears the audience but trust remains → composed, never standalone.
@@ -738,7 +760,7 @@ mod tests {
         let mut log = forked(known(SUSPICIOUS, Audience::Public));
         log.push(admit(child(), known(SUSPICIOUS, internal())));
         match check(&menu_registry(), &log) {
-            ReturnCheck::Block { plans, .. } => {
+            ReturnCheck::Block(ReturnBlock::Narrowing { plans, .. }) => {
                 assert_eq!(
                     plans,
                     vec![
@@ -773,7 +795,7 @@ mod tests {
         let mut log = forked(known(TRUSTED, internal()));
         log.push(admit(child(), known(SUSPICIOUS, internal())));
         match check(&registry(), &log) {
-            ReturnCheck::Block { plans, .. } => assert_eq!(
+            ReturnCheck::Block(ReturnBlock::Narrowing { plans, .. }) => assert_eq!(
                 plans,
                 vec![ReturnPlan::Accept(Narrowing {
                     from: known(TRUSTED, internal()),
@@ -793,13 +815,15 @@ mod tests {
             known(SUSPICIOUS, Audience::restricted([ReaderId::new("finance")])),
         ));
         match check(&registry(), &log) {
-            ReturnCheck::Block { plans, .. } => assert!(matches!(plans.as_slice(), [ReturnPlan::Accept(_)])),
+            ReturnCheck::Block(ReturnBlock::Narrowing { plans, .. }) => {
+                assert!(matches!(plans.as_slice(), [ReturnPlan::Accept(_)]))
+            }
             other => panic!("expected Block, got {other:?}"),
         }
     }
 
     #[test]
-    fn an_unknown_dimension_is_unresolved_not_a_narrowing() {
+    fn an_unknown_dimension_is_unestablished_not_a_narrowing() {
         // A child value with Unknown trust: absorbing under combine, but never a narrowing.
         let mut log = forked(known(TRUSTED, Audience::Public));
         log.push(Fact::ValueAdmitted {
@@ -812,19 +836,21 @@ mod tests {
         });
         let unknown_value = ValueId::new(1);
         match check(&registry(), &log) {
-            ReturnCheck::Unresolved(facts) => {
+            ReturnCheck::Block(ReturnBlock::Unestablished(facts)) => {
                 assert_eq!(
                     facts,
-                    vec![UnresolvedFact {
+                    vec![UnestablishedFact {
                         value: unknown_value,
                         dimension: Dimension::Trust,
                     }]
                 );
             }
-            other => panic!("expected Unresolved, got {other:?}"),
+            other => panic!("expected the unestablished block, got {other:?}"),
         }
 
-        // Audience-Unknown and mixed report per dimension; a parent-side Unknown reports too.
+        // Mixed dimensions report per dimension — and only for the return's own values: the
+        // parent-side Unknown admitted below is absent from the report (BRN-14 scopes
+        // establishment to the return's label).
         let mut log = forked(known(TRUSTED, Audience::Public));
         log.push(Fact::ValueAdmitted {
             trajectory: child(),
@@ -837,23 +863,54 @@ mod tests {
             provenance: Provenance::UserInput,
         });
         match check(&registry(), &log) {
-            ReturnCheck::Unresolved(facts) => {
-                assert_eq!(facts.len(), 3);
-                assert!(facts.contains(&UnresolvedFact {
-                    value: ValueId::new(1),
-                    dimension: Dimension::Trust,
-                }));
-                assert!(facts.contains(&UnresolvedFact {
-                    value: ValueId::new(1),
-                    dimension: Dimension::Audience,
-                }));
-                assert!(facts.contains(&UnresolvedFact {
-                    value: ValueId::new(2),
-                    dimension: Dimension::Audience,
-                }));
+            ReturnCheck::Block(ReturnBlock::Unestablished(facts)) => {
+                assert_eq!(
+                    facts,
+                    vec![
+                        UnestablishedFact {
+                            value: ValueId::new(1),
+                            dimension: Dimension::Trust,
+                        },
+                        UnestablishedFact {
+                            value: ValueId::new(1),
+                            dimension: Dimension::Audience,
+                        },
+                    ]
+                );
             }
-            other => panic!("expected Unresolved, got {other:?}"),
+            other => panic!("expected the unestablished block, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_known_return_merges_into_an_unknown_parent() {
+        // UNK-2: Unknown is absorbing under the fold, so a parent whose own label went Unknown
+        // after the fork still receives an established return — the merge leaves the parent's
+        // label untouched and the parent simply stays Unknown where it was.
+        let mut log = forked(known(TRUSTED, Audience::Public));
+        log.push(Fact::ValueAdmitted {
+            trajectory: parent(),
+            value: LabeledValue::new(ValueBody::new("body"), Label::new(Dim::Known(TRUSTED), Dim::Unknown)),
+            provenance: Provenance::UserInput,
+        });
+        assert_eq!(check(&registry(), &log), ReturnCheck::Allow);
+
+        let projection = build(&log);
+        let batch = submit_child_return(&registry(), &projection.view(&parent()), &child(), raw("result"))
+            .expect("a known return merges into an Unknown parent");
+        assert!(
+            batch
+                .facts
+                .iter()
+                .any(|fact| matches!(fact, Fact::ChildReturn { trajectory, .. } if *trajectory == child()))
+        );
+        assert!(batch.facts.iter().any(|fact| matches!(
+            fact,
+            Fact::Boundary {
+                kind: BoundaryKind::Merge { .. },
+                ..
+            }
+        )));
     }
 
     #[test]

@@ -3,7 +3,8 @@
 //!
 //! A block's feedback is one fixed prose lead (what kind of decision this is and which reserved
 //! tool acts on it) followed on its own line by a JSON payload carrying the engine's exact typed
-//! state: every requirement gap with its values, the narrowing's from/to labels, every offered
+//! state: every requirement gap with its values, the narrowing's from/to labels, the
+//! unestablished values named by ordinal and origin kind (`UNK-3`), every offered
 //! remedy plan — the engine-side ones with their handle and grouped ruling requirements, the
 //! id-less ones with the tool to run and the gaps it clears. The payload is **derived, never
 //! stored** — feedback is re-renderable from the
@@ -30,8 +31,11 @@
 //! moves are its still-legal work and a `submit_result` finish — the return crossing stays
 //! checked, so the lead names mechanism, never permission.
 
-use appa_engine::check::{Gap, Narrowing, RawBlock};
+use appa_engine::check::{Gap, Narrowing, RawBlock, UnestablishedFact};
+use appa_engine::label::Dimension;
 use appa_engine::plan::{ExecutableRemedyPlan, PlannedBlock, RedispatchEffect, RemedyPlan};
+use appa_engine::projection::Views;
+use appa_engine::value::Provenance;
 use serde::Serialize;
 
 /// The trajectory a block's feedback addresses. It fixes two things: how far an acceptance reaches
@@ -83,9 +87,46 @@ struct WireBlock<'a> {
     requirement_gaps: &'a [Gap],
     #[serde(skip_serializing_if = "Option::is_none")]
     narrowing: Option<&'a Narrowing>,
+    /// The values whose consumed dimension no registered cast could establish (`UNK-3`), named
+    /// by a **feedback-local ordinal** plus the coarse origin kind. Deliberately non-correlating:
+    /// the transcript stores no dispatch↔tool-call map, so no internal id (`ValueId`,
+    /// `DispatchId`) crosses to the model — the ordinal indexes this rendered list and nothing
+    /// else.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unestablished: Vec<WireUnestablished>,
     remedy_plans: Vec<WireRemedyPlan<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fork: Option<&'a str>,
+}
+
+/// One unestablished entry on the wire: which rendered entry (ordinal), which dimension is
+/// missing, and what kind of value carries it. A value Unknown in both dimensions renders as two
+/// entries, each with its own ordinal. The ordinal duplicates the array index deliberately — it
+/// is the stable key the model can quote back, and the only identity the entry carries.
+#[derive(Serialize)]
+struct WireUnestablished {
+    ordinal: usize,
+    dimension: Dimension,
+    source_kind: &'static str,
+}
+
+fn wire_unestablished(facts: &[UnestablishedFact], views: &Views) -> Vec<WireUnestablished> {
+    facts
+        .iter()
+        .enumerate()
+        .map(|(ordinal, fact)| WireUnestablished {
+            ordinal,
+            dimension: fact.dimension,
+            source_kind: match views
+                .value_provenance(fact.value)
+                .expect("unestablished facts name admitted values of this append-only family")
+            {
+                Provenance::UserInput => "user_input",
+                Provenance::ToolResult { .. } => "tool_result",
+                Provenance::ChildReturn { .. } => "child_return",
+            },
+        })
+        .collect()
 }
 
 fn wire_plans(offers: &[(String, ExecutableRemedyPlan)]) -> Vec<WirePlan<'_>> {
@@ -124,6 +165,11 @@ fn fork_advice<'a>(
     offers: &[(String, ExecutableRemedyPlan)],
     surface: FeedbackSurface,
 ) -> Option<&'a str> {
+    // No fork advice while a fact is missing: fork seeding refuses an Unknown parent, so the
+    // advice would name a move the engine then refuses.
+    if !raw.unestablished.is_empty() {
+        return None;
+    }
     if !matches!(surface, FeedbackSurface::Root { can_fork: true }) || raw.narrowing.is_none() || offers.is_empty() {
         return None;
     }
@@ -135,6 +181,7 @@ fn payload(
     planned: &PlannedBlock,
     offers: &[(String, ExecutableRemedyPlan)],
     fork: Option<&str>,
+    views: &Views,
 ) -> String {
     // One list, per `RMD-1`: the executable offers as the runtime handed them out, then the id-less
     // redispatch plans the block also carries.
@@ -154,6 +201,7 @@ fn payload(
     let block = WireBlock {
         requirement_gaps: &raw.requirement_gaps,
         narrowing: raw.narrowing.as_ref(),
+        unestablished: wire_unestablished(&raw.unestablished, views),
         remedy_plans,
         fork,
     };
@@ -170,9 +218,21 @@ pub fn block_feedback(
     planned: &PlannedBlock,
     offers: &[(String, ExecutableRemedyPlan)],
     surface: FeedbackSurface,
+    views: &Views,
 ) -> String {
     let fork = fork_advice(raw, planned, offers, surface);
-    let lead = if offers.is_empty() {
+    let lead = if !raw.unestablished.is_empty() {
+        // A missing fact, not a refusal to be argued with (`UNK-3`): a registered cast
+        // establishes the dimension — never a ruling, never a plan (`CHK-16`). Casting already
+        // ran; the payload names the residual. The pure-narrowing and fork wordings are
+        // suppressed here — they would advise moves the engine refuses while the fact is
+        // missing.
+        if offers.is_empty() {
+            "blocked: a value this call depends on has a label dimension no registered cast could establish. No plan applies — a fact clears this, not a ruling. The unestablished values are named in the payload; work that does not consume them still flows"
+        } else {
+            "blocked: some values carry a label dimension no registered cast could establish, and the offered plans stay gated until those facts land. The unestablished values are named in the payload alongside the plans for the block's other gaps"
+        }
+    } else if offers.is_empty() {
         // Three distinct emptinesses: no executable offer, no redispatch plan, and no remedy at
         // all. Only the last is terminal.
         if planned
@@ -234,7 +294,39 @@ pub fn block_feedback(
     } else {
         "blocked by policy; execute one offered plan with execute_remedy_plan"
     };
-    format!("{lead}\n{}", payload(raw, planned, offers, fork))
+    format!("{lead}\n{}", payload(raw, planned, offers, fork, views))
+}
+
+/// Render the executor's preflight refusal: an offered plan was invoked while a consumed
+/// dimension stays unestablished. Nothing is consumed and no authority is consulted — the offers
+/// stand, gated until the named facts land (`CHK-16`: a fact clears them, never a plan).
+pub fn unestablished_gate_feedback(facts: &[UnestablishedFact], views: &Views) -> String {
+    format!(
+        "this plan stays gated: values the call depends on have a label dimension no registered cast could establish, and no ruling or acceptance may land until those facts do. The offer remains available; the unestablished values are named in the payload\n{}",
+        unestablished_payload(facts, views)
+    )
+}
+
+/// The one-key payload both unestablished refusals carry: the named entries and nothing else.
+fn unestablished_payload(facts: &[UnestablishedFact], views: &Views) -> String {
+    #[derive(Serialize)]
+    struct WireUnestablishedOnly {
+        unestablished: Vec<WireUnestablished>,
+    }
+    serde_json::to_string(&WireUnestablishedOnly {
+        unestablished: wire_unestablished(facts, views),
+    })
+    .expect("the unestablished payload serializes: engine types are Serialize")
+}
+
+/// Render the merge refusal for a child return whose fold has unestablished dimensions
+/// (`BRN-14`): the values are named, and no plans are offered — a fact clears the entry, nothing
+/// the child executes. The child keeps its structural moves, as on its terminal block.
+pub fn unestablished_return_feedback(facts: &[UnestablishedFact], views: &Views) -> String {
+    format!(
+        "the return cannot merge: a label dimension of this branch's result is one no registered cast could establish — a fact clears this, nothing you execute, so no plans are offered. The unestablished values are named in the payload. Complete what this branch still can, then return null after side-effect-only work\n{}",
+        unestablished_payload(facts, views)
+    )
 }
 
 /// The cost an acceptance carries, per the surface it lands on: a root folds the restriction into
@@ -294,11 +386,19 @@ pub fn cast_offer_feedback(handle: &str, narrowing: &Narrowing, surface: Feedbac
 #[cfg(test)]
 mod tests {
     use super::*;
-    use appa_engine::fact::EffectKind;
+    use appa_engine::fact::{EffectKind, Revision};
     use appa_engine::label::{Audience, Dim, Label, ReaderId, Trust};
     use appa_engine::names::{AuthorityName, MarkName};
     use appa_engine::plan::{PlanId, RemedyStep, RequiredRuling};
-    use appa_engine::value::ToolName;
+    use appa_engine::projection::Projection;
+    use appa_engine::value::{ToolName, TrajectoryId};
+
+    /// Most rendering tests carry no unestablished entries, so an empty family suffices for the
+    /// provenance lookup the payload builder makes.
+    fn with_empty_views<R>(render: impl FnOnce(&Views) -> R) -> R {
+        let projection = Projection::build(&[], Revision::ZERO);
+        render(&projection.view(&TrajectoryId::new("session")))
+    }
 
     fn every_gap() -> Vec<Gap> {
         vec![
@@ -350,6 +450,7 @@ mod tests {
         let raw = RawBlock {
             requirement_gaps: every_gap(),
             narrowing: None,
+            unestablished: Vec::new(),
         };
         let planned = PlannedBlock {
             raw: raw.clone(),
@@ -357,12 +458,15 @@ mod tests {
             fork_advice: None,
         };
         let offers = vec![("remedy-7".to_string(), plan_with("officer", every_gap()))];
-        let payload = parsed(&block_feedback(
-            &raw,
-            &planned,
-            &offers,
-            FeedbackSurface::Root { can_fork: true },
-        ));
+        let payload = with_empty_views(|views| {
+            parsed(&block_feedback(
+                &raw,
+                &planned,
+                &offers,
+                FeedbackSurface::Root { can_fork: true },
+                views,
+            ))
+        });
 
         let gaps = payload["requirement_gaps"].as_array().expect("gaps array");
         assert_eq!(gaps.len(), 6);
@@ -398,6 +502,7 @@ mod tests {
         let raw = RawBlock {
             requirement_gaps: vec![],
             narrowing: Some(narrowing()),
+            unestablished: Vec::new(),
         };
         let accept_plan = ExecutableRemedyPlan {
             id: PlanId::new(0),
@@ -410,7 +515,9 @@ mod tests {
             fork_advice: Some("confine the loss".to_string()),
         };
         let offers = vec![("remedy-0".to_string(), accept_plan)];
-        let feedback = block_feedback(&raw, &planned, &offers, FeedbackSurface::Root { can_fork: true });
+        let feedback = with_empty_views(|views| {
+            block_feedback(&raw, &planned, &offers, FeedbackSurface::Root { can_fork: true }, views)
+        });
         // The decision kind is in the payload, not pinned prose: no requirement gaps, a present
         // narrowing, and an offer that accepts it — an acceptance, never an authorization ("0
         // requirement gaps … authorize" was the G12 defect).
@@ -427,15 +534,19 @@ mod tests {
         // A pure narrowing on a forking root carries the branch alternative...
         assert_eq!(payload["fork"], "confine the loss");
         // ...a root that cannot fork never has it, whatever the planner attached...
-        let payload = parsed(&block_feedback(
-            &raw,
-            &planned,
-            &offers,
-            FeedbackSurface::Root { can_fork: false },
-        ));
+        let payload = with_empty_views(|views| {
+            parsed(&block_feedback(
+                &raw,
+                &planned,
+                &offers,
+                FeedbackSurface::Root { can_fork: false },
+                views,
+            ))
+        });
         assert!(payload.get("fork").is_none());
         // ...and a child hears confinement, never further delegation.
-        let payload = parsed(&block_feedback(&raw, &planned, &offers, FeedbackSurface::Child));
+        let payload =
+            with_empty_views(|views| parsed(&block_feedback(&raw, &planned, &offers, FeedbackSurface::Child, views)));
         assert!(payload.get("fork").is_none());
     }
 
@@ -448,6 +559,7 @@ mod tests {
         let raw = RawBlock {
             requirement_gaps: vec![floor.clone()],
             narrowing: Some(narrowing()),
+            unestablished: Vec::new(),
         };
         let mut plan = plan_with("officer", vec![floor]);
         plan.steps.push(RemedyStep::Accept(narrowing()));
@@ -459,32 +571,42 @@ mod tests {
         let offers = vec![("remedy-0".to_string(), plan)];
         // The narrowing makes the fork actionable despite the gaps: they follow the child, but
         // the label loss stays confined there.
-        let payload = parsed(&block_feedback(
-            &raw,
-            &planned,
-            &offers,
-            FeedbackSurface::Root { can_fork: true },
-        ));
+        let payload = with_empty_views(|views| {
+            parsed(&block_feedback(
+                &raw,
+                &planned,
+                &offers,
+                FeedbackSurface::Root { can_fork: true },
+                views,
+            ))
+        });
         assert_eq!(payload["fork"], "confine the loss");
         assert_eq!(payload["remedy_plans"][0]["accepts_narrowing"], true);
         // A root that cannot fork and a child hear no delegation advice...
-        let payload = parsed(&block_feedback(
-            &raw,
-            &planned,
-            &offers,
-            FeedbackSurface::Root { can_fork: false },
-        ));
+        let payload = with_empty_views(|views| {
+            parsed(&block_feedback(
+                &raw,
+                &planned,
+                &offers,
+                FeedbackSurface::Root { can_fork: false },
+                views,
+            ))
+        });
         assert!(payload.get("fork").is_none());
-        let payload = parsed(&block_feedback(&raw, &planned, &offers, FeedbackSurface::Child));
+        let payload =
+            with_empty_views(|views| parsed(&block_feedback(&raw, &planned, &offers, FeedbackSurface::Child, views)));
         assert!(payload.get("fork").is_none());
         // ...and an unliftable mixed block (no executable plan) advises no fork anywhere: the
         // child would face the same gaps, so the narrowing never lands.
-        let payload = parsed(&block_feedback(
-            &raw,
-            &planned,
-            &[],
-            FeedbackSurface::Root { can_fork: true },
-        ));
+        let payload = with_empty_views(|views| {
+            parsed(&block_feedback(
+                &raw,
+                &planned,
+                &[],
+                FeedbackSurface::Root { can_fork: true },
+                views,
+            ))
+        });
         assert!(payload.get("fork").is_none());
     }
 
@@ -497,6 +619,7 @@ mod tests {
         let raw = RawBlock {
             requirement_gaps: vec![floor.clone()],
             narrowing: None,
+            unestablished: Vec::new(),
         };
         let planned = PlannedBlock {
             raw: raw.clone(),
@@ -518,12 +641,15 @@ mod tests {
             ("remedy-0".to_string(), plan_with("officer-a", vec![floor.clone()])),
             ("remedy-1".to_string(), plan_with("officer-b", vec![floor.clone()])),
         ];
-        let payload = parsed(&block_feedback(
-            &raw,
-            &planned,
-            &offers,
-            FeedbackSurface::Root { can_fork: true },
-        ));
+        let payload = with_empty_views(|views| {
+            parsed(&block_feedback(
+                &raw,
+                &planned,
+                &offers,
+                FeedbackSurface::Root { can_fork: true },
+                views,
+            ))
+        });
         // One list (`RMD-1`): the executable offers with their handles, then the id-less
         // redispatch plans. The advisory fork is absent even on a forking root — this call narrows
         // nothing, so there is no label loss a branch could confine.
@@ -553,12 +679,15 @@ mod tests {
                 .collect(),
             fork_advice: planned.fork_advice.clone(),
         };
-        let payload = parsed(&block_feedback(
-            &raw,
-            &none_planned,
-            &[],
-            FeedbackSurface::Root { can_fork: true },
-        ));
+        let payload = with_empty_views(|views| {
+            parsed(&block_feedback(
+                &raw,
+                &none_planned,
+                &[],
+                FeedbackSurface::Root { can_fork: true },
+                views,
+            ))
+        });
         let plans = payload["remedy_plans"].as_array().unwrap();
         assert_eq!(plans.len(), 2);
         assert_eq!(plans[0]["tool"], "backup");
@@ -591,5 +720,88 @@ mod tests {
             payload["narrowing"]["to"]["audience"]["Known"]["Restricted"][0],
             "internal"
         );
+    }
+
+    #[test]
+    fn unestablished_entries_serialize_ordinals_and_origins_and_nothing_internal() {
+        use appa_engine::check::UnestablishedFact;
+        use appa_engine::fact::Fact;
+        use appa_engine::label::Dimension;
+        use appa_engine::value::{
+            ChildReturnId, DispatchId, LabeledValue, Provenance, ResolvedCall, ToolName, ValueBody, ValueId,
+        };
+
+        let session = TrajectoryId::new("session");
+        let child = TrajectoryId::new("child");
+        let unknown = Label::new(Dim::Unknown, Dim::Known(Audience::Public));
+        let admit = |provenance: Provenance| Fact::ValueAdmitted {
+            trajectory: session.clone(),
+            value: LabeledValue::new(ValueBody::new("body"), unknown.clone()),
+            provenance,
+        };
+        let dispatch = DispatchId::new(
+            session.clone(),
+            ResolvedCall::new(ToolName::new("scan"), serde_json::json!({}), vec![]).digest(),
+            0,
+        );
+        let log = vec![
+            admit(Provenance::UserInput),
+            admit(Provenance::ToolResult { dispatch }),
+            admit(Provenance::ChildReturn {
+                child: child.clone(),
+                id: ChildReturnId::new(child, 0),
+            }),
+        ];
+        let projection = Projection::build(&log, Revision::new(log.len() as u64));
+        let views = projection.view(&session);
+        let facts: Vec<UnestablishedFact> = (0..3)
+            .map(|id| UnestablishedFact {
+                value: ValueId::new(id),
+                dimension: Dimension::Trust,
+            })
+            .collect();
+
+        let raw = RawBlock {
+            requirement_gaps: Vec::new(),
+            narrowing: None,
+            unestablished: facts,
+        };
+        let planned = PlannedBlock {
+            raw: raw.clone(),
+            plans: vec![],
+            fork_advice: None,
+        };
+        let payload = parsed(&block_feedback(
+            &raw,
+            &planned,
+            &[],
+            FeedbackSurface::Root { can_fork: false },
+            &views,
+        ));
+        let entries = payload["unestablished"].as_array().expect("unestablished entries");
+        assert_eq!(entries.len(), 3);
+        for (ordinal, kind) in ["user_input", "tool_result", "child_return"].iter().enumerate() {
+            assert_eq!(entries[ordinal]["ordinal"], ordinal);
+            assert_eq!(entries[ordinal]["dimension"], "Trust");
+            assert_eq!(entries[ordinal]["source_kind"], *kind);
+            // Non-correlating by contract: the ordinal indexes this rendered list and nothing
+            // else; no engine id reaches the model.
+            assert!(entries[ordinal].get("value").is_none());
+            assert!(entries[ordinal].get("dispatch").is_none());
+        }
+
+        // Skip-if-empty: a block with nothing unestablished carries no such key at all.
+        let raw = RawBlock {
+            requirement_gaps: Vec::new(),
+            narrowing: Some(narrowing()),
+            unestablished: Vec::new(),
+        };
+        let planned = PlannedBlock {
+            raw: raw.clone(),
+            plans: vec![],
+            fork_advice: None,
+        };
+        let payload = parsed(&block_feedback(&raw, &planned, &[], FeedbackSurface::Child, &views));
+        assert!(payload.get("unestablished").is_none());
     }
 }
