@@ -9,7 +9,8 @@ filtering, no bespoke `if`s; any imperative judgment lives in registered
 external authorities and transformers, never in the engine.
 
 ## IMPORTANT
-The golden set is `docs/` plus `website/content/docs/how-it-works.md`.
+The golden set is `docs/` plus two website files:
+`website/content/docs/how-it-works.md` and `website/lib/terms.ts`.
 Golden
 files must agree with each other in every commit: a change that alters
 what another golden file also states lands together with the matching
@@ -69,6 +70,8 @@ an interpretive dispute, never which file may lag.
 decisions
 went the way they did and settles nothing, `glossary.md` splits the
 vocabulary into surface terms (typed by users) and model terms,
+`website/lib/terms.ts` restates glossary entries as the website's
+term-popover definitions,
 `contracts.md` is the policy-review guide, `engine.md` maps the spec onto
 the crates. `docs/README.md` is the map.
 

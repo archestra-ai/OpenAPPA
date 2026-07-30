@@ -636,3 +636,51 @@ body {
 .site-footer a:hover {
   color: var(--text-strong);
 }
+
+/* ————————————————————————————————————————————————
+   Term popovers — hover/tap definitions on inline code
+   ———————————————————————————————————————————————— */
+.term {
+  position: relative;
+  display: inline-block;
+}
+
+.term-trigger {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  cursor: help;
+}
+
+.term-trigger code {
+  border-bottom: 1px dashed var(--text-weak);
+}
+
+.term-trigger:hover code,
+.term-trigger[aria-expanded="true"] code {
+  border-bottom-color: var(--accent);
+}
+
+.term-popover {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  transform: translateX(-50%);
+  display: block;
+  width: max-content;
+  max-width: min(320px, 78vw);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-family: inherit;
+  line-height: 1.55;
+  color: var(--text);
+  text-align: left;
+  white-space: normal;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+  z-index: 40;
+}
