@@ -8,6 +8,9 @@ into this sink?* It is declarative and algebraic — no guardrails, no prompt
 filtering, no bespoke `if`s; any imperative judgment lives in registered
 external authorities and transformers, never in the engine.
 
+## IMPORTANT
+docs/ is a current state of truth. Code and website can be harshly outdated.
+
 ## Naming
 
 - Use the `appa` prefix for new OpenAPPA-owned crates, binaries, environment
@@ -59,6 +62,14 @@ the crates. `docs/README.md` is the map.
 
 Edits flow one way: spec → guide/contracts/website. A change that starts in
 a downstream doc has to land in the spec first.
+
+## Pre-public: no history, no compatibility
+
+Until explicitly declared public, APPA owes nothing to its own past. Docs
+describe the current model only — no retired rules, no "formerly", no
+migration notes. Rule ids may be renumbered and freed numbers reused; keep
+each family contiguous. Config and wire surfaces may break without shims
+or deprecation paths. The paper is the exception: it stays as published.
 
 ## Writing (reader-facing docs)
 
@@ -182,4 +193,3 @@ Mechanics:
   level).
 - Public domain structs own their data; cloning small IDs/config is fine,
   cloning hot-path buffers is not.
-
