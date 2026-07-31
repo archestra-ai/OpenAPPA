@@ -1,0 +1,50 @@
+name: Deploy to Vercel
+
+# Deploys production via the Vercel CLI on pushes to main, instead of the
+# Vercel Git integration, so commit authors do not need to be members of the
+# Vercel team (which is billed per-seat). Git-triggered deployments are
+# disabled in website/vercel.json.
+#
+# We intentionally use plain `vercel deploy` (source upload + remote build)
+# rather than `vercel pull`/`vercel build`/`deploy --prebuilt`: the token is
+# scoped to the team for least privilege, and team-scoped tokens cannot call
+# the team-metadata endpoint that `pull`/`build` require (403
+# team_unauthorized). `deploy` is the only CLI command with an owner-lookup
+# fallback for this. Builds therefore run on Vercel's infra, same as the Git
+# integration did. The CLI runs from the repository root; the project's Root
+# Directory setting (website) is applied server-side.
+#
+# Required repository secrets:
+#   VERCEL_TOKEN      - Vercel API token scoped to the team
+#   VERCEL_ORG_ID     - "orgId" from `vercel link` (.vercel/project.json)
+#   VERCEL_PROJECT_ID - "projectId" from `vercel link` (.vercel/project.json)
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-production:
+    name: Deploy Production
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: "vercel-production"
+      cancel-in-progress: false
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Deploy production
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: npx vercel@latest deploy --prod --yes --token="$VERCEL_TOKEN"
