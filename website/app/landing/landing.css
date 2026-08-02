@@ -1,0 +1,151 @@
+/* Design-system tokens and base styles for /landing, scoped so they override
+   the site globals inside the page and leak nowhere else. Values are verbatim
+   from the design project's styles.css (they differ slightly from the site's
+   own tokens, e.g. --text and the dark-mode backgrounds). */
+
+.appa-landing {
+  --bg: hsl(40, 25%, 99%);
+  --bg-weak: hsl(42, 18%, 96%);
+  --bg-weak-hover: hsl(42, 15%, 93%);
+  --bg-strong: hsl(30, 8%, 12%);
+  --text: hsl(30, 5%, 29%);
+  --text-weak: hsl(32, 4%, 45%);
+  --text-strong: hsl(30, 8%, 11%);
+  --text-inverted: hsl(40, 25%, 99%);
+  --border: hsl(36, 8%, 79%);
+  --border-weak: hsl(38, 8%, 86%);
+  --icon: hsl(32, 4%, 51%);
+  --accent: hsl(151, 55%, 28%);
+  --accent-hover: hsl(152, 62%, 21%);
+  --accent-bg: hsl(148, 42%, 93%);
+  --accent-border: hsl(150, 28%, 68%);
+  --warn: hsl(36, 80%, 33%);
+  --warn-bg: hsl(42, 75%, 93%);
+  --danger: hsl(4, 60%, 42%);
+  --danger-bg: hsl(6, 70%, 95%);
+  --info: hsl(215, 60%, 40%);
+  --info-bg: hsl(215, 55%, 93%);
+
+  font-family: var(--font-plex-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1.85;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-variant-ligatures: none;
+  text-wrap: pretty;
+  background: var(--bg);
+  color: var(--text);
+}
+
+@media (prefers-color-scheme: dark) {
+  .appa-landing {
+    --bg: hsl(30, 6%, 13%);
+    --bg-weak: hsl(30, 5%, 17%);
+    --bg-weak-hover: hsl(30, 5%, 21%);
+    --bg-strong: hsl(40, 12%, 92%);
+    --text: hsl(35, 9%, 83%);
+    --text-weak: hsl(35, 9%, 74%);
+    --text-strong: hsl(40, 11%, 91%);
+    --text-inverted: hsl(30, 6%, 13%);
+    --border: hsl(32, 5%, 42%);
+    --border-weak: hsl(32, 5%, 30%);
+    --icon: hsl(34, 8%, 70%);
+    --accent: hsl(146, 45%, 62%);
+    --accent-hover: hsl(146, 52%, 72%);
+    --accent-bg: hsl(150, 28%, 13%);
+    --accent-border: hsl(150, 22%, 32%);
+    --warn: hsl(40, 70%, 62%);
+    --warn-bg: hsl(40, 40%, 12%);
+    --danger: hsl(5, 70%, 68%);
+    --danger-bg: hsl(6, 40%, 14%);
+    --info: hsl(212, 55%, 65%);
+    --info-bg: hsl(215, 30%, 14%);
+
+    -webkit-font-smoothing: auto;
+    -moz-osx-font-smoothing: auto;
+  }
+
+  .appa-landing code,
+  .appa-landing pre {
+    letter-spacing: 0.005em;
+  }
+}
+
+/* the page owns the viewport; keep the overscroll area on-tone too */
+body:has(.appa-landing) {
+  background: hsl(40, 25%, 99%);
+}
+
+@media (prefers-color-scheme: dark) {
+  body:has(.appa-landing) {
+    background: hsl(30, 6%, 13%);
+  }
+}
+
+.appa-landing code,
+.appa-landing pre {
+  font-family: inherit;
+  letter-spacing: 0;
+}
+
+.appa-landing h1,
+.appa-landing h2,
+.appa-landing h3 {
+  letter-spacing: -0.03em;
+}
+
+.appa-landing a {
+  color: var(--accent);
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.appa-landing a:hover {
+  color: var(--accent-hover);
+}
+
+.appa-landing ::selection {
+  background: var(--accent-bg);
+  color: var(--text-strong);
+}
+
+.appa-landing :focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@keyframes appa-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Hover states from the template's style-hover attributes. The dc runtime
+   swaps inline styles on hover, so !important is needed here to outrank the
+   inline base styles the same way. */
+.appa-landing .lp-replay:hover {
+  color: var(--text-strong) !important;
+  border-color: var(--border) !important;
+}
+
+.appa-landing .lp-card:hover {
+  border-color: var(--border) !important;
+}
+
+.appa-landing .lp-chip:hover {
+  border-color: var(--border) !important;
+  color: var(--text-strong) !important;
+}
+
+.appa-landing .lp-copy:hover {
+  color: var(--text-strong) !important;
+  border-color: var(--text-weak) !important;
+}
