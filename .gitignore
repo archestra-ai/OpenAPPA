@@ -14,3 +14,4 @@ appa.pdf
 appa-arxiv.tar.gz
 # Custom target dirs (CARGO_TARGET_DIR from tooling)
 target-*/
+.envrc
