@@ -177,4 +177,3 @@ Adopting OpenAPPA shifts your security model from manual code checks to formal a
 - [Evaluating OpenAPPA](/docs/evaluation): Empirical paper results on multi-step workflows and bench-corp.
 - `docs/spec.md`: Normative specification containing all formal rule identifiers.
 - `docs/rationale.md`: Design rationales behind algebraic invariants and label dimensions.
-- [OpenAPPA Paper (arXiv:2607.24625)](https://arxiv.org/pdf/2607.24625): Formal paper detailing core algebraic invariants and label dimensions.

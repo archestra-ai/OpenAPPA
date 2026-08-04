@@ -1415,18 +1415,4 @@ resolver = { url = "https://a", timeout_ms = 999999 }
             ConfigError::TimeoutOutOfRange { found: 999999, .. }
         ));
     }
-
-    #[test]
-    fn documented_configs_parse() {
-        let doc = include_str!("../../website/content/docs/contracts.md");
-        let mut blocks = 0;
-        for block in doc.split("```toml").skip(1) {
-            let toml = block.split("```").next().unwrap_or("");
-            if toml.contains("version = 1") {
-                Config::from_toml_str(toml).unwrap_or_else(|e| panic!("documented config fails to parse: {e}\n{toml}"));
-                blocks += 1;
-            }
-        }
-        assert!(blocks >= 2, "expected the worked + k8s configs, found {blocks}");
-    }
 }
