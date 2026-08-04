@@ -55,7 +55,7 @@ Tool execution errors are distinct from successful tool invocations whose return
 
 ## Publication runs freeze every effective setting
 
-The default agent is OpenRouter's GPT-5.2 at `reasoning_effort=high`, matching the current Tau GPT-5.2 leaderboard configuration. The user simulator is explicitly fixed to the leaderboard-recommended GPT-5.2 at `reasoning_effort=low`; it never changes when `--model` changes. GPT-4.1 at temperature zero performs task 102's score-bearing NL judgment and the separate user-simulator review.
+The default agent is OpenRouter's GPT-5.2 at `reasoning_effort=high`, matching the current Tau GPT-5.2 leaderboard configuration. The user simulator is explicitly fixed to the leaderboard-recommended GPT-5.2 at `reasoning_effort=low`; it never changes when `--model` changes. GPT-4.1 at temperature zero performs task 102's score-bearing NL judgment and the separate user-simulator review. The audit records both requested and provider-resolved model identifiers, but OpenRouter's aliases do not establish a stronger immutable snapshot identity.
 
 ```sh
 # Validate the exact 388-simulation guarded plan without model calls.
