@@ -281,6 +281,7 @@ def test_task_102_atomic_audit_is_separate_from_scoring(monkeypatch, tmp_path) -
 
     def generate(**kwargs):
         captured.update(kwargs)
+        captured["calls"] = captured.get("calls", 0) + 1
         results = [
             {
                 "expectedOutcome": assertion,
@@ -306,8 +307,10 @@ def test_task_102_atomic_audit_is_separate_from_scoring(monkeypatch, tmp_path) -
     monkeypatch.setattr(evaluation_module, "_audit_dir", tmp_path)
 
     evaluation_module.audit_task_102_atomic(results, "requested/judge", {"temperature": 0})
+    evaluation_module.audit_task_102_atomic(results, "requested/judge", {"temperature": 0})
 
     assert captured["call_name"] == "nl_assertions_atomic_audit"
+    assert captured["calls"] == 1
     assert all(
         assertion in captured["messages"][1].content for assertion in evaluation_module.TASK_102_ATOMIC_ASSERTIONS
     )
