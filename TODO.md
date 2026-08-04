@@ -44,3 +44,7 @@ cost, model errors, user-simulator errors, and evaluator errors. Do not buy the
   verify four directly correlated trials per task with no infrastructure
   errors, and prepare the custom-scaffold disclosure. Describe Tau Knowledge
   as a utility evaluation; security claims require a separate attack set.
+
+- [ ] **Make sure the user is control by a standard model so that we don't give ourselves an unfair handicap/advantage** To the best of my knowledge, the standard user model is gpt-4o
+
+- [ ] **Take a look at the related work review** found here: https://chatgpt.com/share/6a721b0f-c6cc-83eb-85d0-1ea16a4da2e6 If anything about our benchmark implementation is very different from how others evaluate, this can be a comparison issue and should be fixed.
