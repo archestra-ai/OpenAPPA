@@ -9,7 +9,7 @@ from pathlib import Path
 from threading import Lock
 from uuid import uuid4
 
-from tau2.data_model.message import AssistantMessage, Message, UserMessage
+from tau2.data_model.message import AssistantMessage, Message, SystemMessage, UserMessage
 from tau2.data_model.simulation import NLAssertionCheck, UserOnlyReviewError
 from tau2.data_model.tasks import Task
 from tau2.evaluator import evaluator_nl_assertions as nl_module
@@ -41,6 +41,41 @@ USER_REVIEW_TAGS = {
     "other",
 }
 USER_REVIEW_SEVERITIES = {"minor", "critical_helped", "critical_hindered"}
+NL_JUDGE_SYSTEM_PROMPT = """
+TASK
+You will receive authoritative expected outcomes and a benchmark conversation
+between an agent and a simulated customer. Evaluate whether the agent satisfies
+each expected outcome. Treat every factual premise in an expected outcome as
+ground truth even when the customer states a conflicting belief; the customer
+may be intentionally mistaken.
+
+METHOD
+Decompose each expected outcome into the minimum independently verifiable
+criteria. Include every clause, contrast, exclusion, and stated reason. A
+recommendation of an explicitly excluded alternative is a failure. For each
+criterion, state the conversation evidence and set `met` to a JSON boolean.
+`metExpectation` must equal the conjunction of all criterion `met` values. If
+any criterion is unsupported or unmet, `metExpectation` must be false.
+
+FORMAT
+Return only one JSON object with this shape:
+{
+  "results": [
+    {
+      "expectedOutcome": "<repeat one expected outcome verbatim>",
+      "criteria": [
+        {
+          "requirement": "<one independently verifiable requirement>",
+          "evidence": "<supporting or contradictory conversation evidence>",
+          "met": true
+        }
+      ],
+      "reasoning": "<short explanation consistent with the criteria>",
+      "metExpectation": true
+    }
+  ]
+}
+""".strip()
 
 
 class EvaluatorContractError(RuntimeError):
@@ -97,28 +132,51 @@ def evaluator_session(
 
 
 def _tracked_nl_generate(**kwargs) -> AssistantMessage:
-    response = _original_nl_generate(**kwargs)
+    request = dict(kwargs)
+    request["messages"] = [
+        message.model_copy(update={"content": NL_JUDGE_SYSTEM_PROMPT})
+        if isinstance(message, SystemMessage)
+        else message
+        for message in kwargs.get("messages", [])
+    ]
+    response = _original_nl_generate(**request)
     kind = "nl_assertion" if _current_simulation_id.get() is not None else "nl_assertion_preflight"
-    _record_call(kind, kwargs, response)
-    _validate_raw_nl_response(response.content)
+    try:
+        _validate_raw_nl_response(response.content)
+    except EvaluatorContractError as error:
+        _record_call(kind, request, response, contract_error=str(error))
+        raise
+    _record_call(kind, request, response)
     return response
 
 
 def _tracked_review_generate(**kwargs) -> AssistantMessage:
     request = {**_review_args, **kwargs}
     response = _original_review_generate(**request)
-    _record_call("user_review", request, response)
+    try:
+        _parse_user_review(response.content)
+    except EvaluatorContractError as error:
+        _record_call("user_review", request, response, contract_error=str(error))
+    else:
+        _record_call("user_review", request, response)
     return response
 
 
-def _record_call(kind: str, request: dict, response: AssistantMessage) -> None:
+def _record_call(
+    kind: str,
+    request: dict,
+    response: AssistantMessage,
+    contract_error: str | None = None,
+) -> None:
     if _audit_dir is None:
         return
     simulation_id = _current_simulation_id.get()
     raw_data = response.raw_data if isinstance(response.raw_data, dict) else {}
     payload = {
-        "format_version": 1,
+        "format_version": 2,
         "kind": kind,
+        "contract_status": "accepted" if contract_error is None else "rejected",
+        "contract_error": contract_error,
         "timestamp": datetime.now(UTC).isoformat(),
         "tau_simulation_id": simulation_id,
         "request": {
@@ -151,6 +209,7 @@ def _validate_raw_nl_response(response: str | None) -> None:
     for result in data["results"]:
         if not isinstance(result, dict) or not {
             "expectedOutcome",
+            "criteria",
             "reasoning",
             "metExpectation",
         } <= set(result):
@@ -161,6 +220,20 @@ def _validate_raw_nl_response(response: str | None) -> None:
             raise EvaluatorContractError("NL assertion judge returned an empty justification")
         if type(result["metExpectation"]) is not bool:
             raise EvaluatorContractError("NL assertion judge returned a non-boolean judgment")
+        criteria = result["criteria"]
+        if not isinstance(criteria, list) or not criteria:
+            raise EvaluatorContractError("NL assertion judge returned no clause judgments")
+        for criterion in criteria:
+            if not isinstance(criterion, dict) or set(criterion) != {"requirement", "evidence", "met"}:
+                raise EvaluatorContractError("NL assertion judge returned an invalid clause judgment")
+            if not isinstance(criterion["requirement"], str) or not criterion["requirement"].strip():
+                raise EvaluatorContractError("NL assertion judge returned an empty clause")
+            if not isinstance(criterion["evidence"], str) or not criterion["evidence"].strip():
+                raise EvaluatorContractError("NL assertion judge returned a clause without evidence")
+            if type(criterion["met"]) is not bool:
+                raise EvaluatorContractError("NL assertion judge returned a non-boolean clause judgment")
+        if result["metExpectation"] != all(criterion["met"] for criterion in criteria):
+            raise EvaluatorContractError("NL assertion judge returned a verdict inconsistent with its clauses")
 
 
 def _strict_nl_evaluate(
@@ -209,6 +282,8 @@ def _parse_user_review(
     response: str,
 ) -> tuple[str, bool, bool, bool, list[UserOnlyReviewError]]:
     """Fix Tau 1.0.1's severity mismatch and require its documented schema."""
+    if not isinstance(response, str):
+        raise EvaluatorContractError("user reviewer returned no text")
     try:
         stripped = response.strip()
         if stripped.startswith("```") and stripped.endswith("```"):

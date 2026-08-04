@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tau2.data_model.message import AssistantMessage, SystemMessage, ToolCall, ToolMessage, UserMessage
 from tau2.data_model.simulation import NLAssertionCheck, UserOnlyReview, UserOnlyReviewError
 from tau2.environment.toolkit import MUTATES_STATE_ATTR
 
@@ -14,12 +15,14 @@ from appa_taubench.cli import build_parser
 from appa_taubench.evaluation import (
     EvaluatorContractError,
     _parse_user_review,
+    _tracked_nl_generate,
     _validate_raw_nl_response,
     evaluator_session,
     validate_nl_checks,
 )
 from appa_taubench.knowledge import SUPPORTED_RETRIEVAL_CONFIGS, _plain_toolkit, policy_tool_names
 from appa_taubench.policies import Policy, load_policy
+from appa_taubench.report import _trajectory_diagnostics
 
 
 def run_spec(**overrides) -> bench.RunSpec:
@@ -180,7 +183,15 @@ def test_evaluator_rejects_task_102_empty_pass_and_fixes_critical_review_severit
 def test_evaluator_rejects_coerced_judgments_and_incomplete_user_reviews() -> None:
     with pytest.raises(EvaluatorContractError, match="non-boolean"):
         _validate_raw_nl_response(
-            '{"results":[{"expectedOutcome":"recommend TechFlow","reasoning":"yes","metExpectation":"true"}]}'
+            '{"results":[{"expectedOutcome":"recommend TechFlow","criteria":['
+            '{"requirement":"recommend TechFlow","evidence":"agent did","met":true}],'
+            '"reasoning":"yes","metExpectation":"true"}]}'
+        )
+    with pytest.raises(EvaluatorContractError, match="inconsistent with its clauses"):
+        _validate_raw_nl_response(
+            '{"results":[{"expectedOutcome":"recommend TechFlow","criteria":['
+            '{"requirement":"exclude Ember","evidence":"agent recommended Ember","met":false}],'
+            '"reasoning":"Ember was not excluded","metExpectation":true}]}'
         )
     with pytest.raises(EvaluatorContractError, match="empty user message"):
         _parse_user_review(
@@ -228,6 +239,36 @@ def test_evaluator_session_restores_tau_globals(tmp_path) -> None:
         NLAssertionsEvaluator.__dict__["evaluate_nl_assertions"],
         review_module.UserOnlyReviewer.__dict__["review_user_simulation"],
     ) == original
+
+
+def test_nl_judge_receives_authoritative_expectation_rules_and_records_acceptance(monkeypatch, tmp_path) -> None:
+    captured = {}
+
+    def generate(**kwargs):
+        captured.update(kwargs)
+        return AssistantMessage.text(
+            '{"results":[{"expectedOutcome":"recommend TechFlow","criteria":['
+            '{"requirement":"recommend TechFlow","evidence":"agent did","met":true}],'
+            '"reasoning":"all clauses met","metExpectation":true}]}',
+            raw_data={"model": "provider/judge"},
+            cost=0.01,
+        )
+
+    monkeypatch.setattr(evaluation_module, "_original_nl_generate", generate)
+    monkeypatch.setattr(evaluation_module, "_audit_dir", tmp_path)
+    response = _tracked_nl_generate(
+        model="requested/judge",
+        messages=[SystemMessage(role="system", content="Grade the result.")],
+    )
+
+    assert response.cost == 0.01
+    assert "authoritative expected outcomes" in captured["messages"][0].content
+    assert "must equal the conjunction" in captured["messages"][0].content
+    [audit_path] = list(tmp_path.glob("*.json"))
+    audit = __import__("json").loads(audit_path.read_text())
+    assert audit["format_version"] == 2
+    assert audit["contract_status"] == "accepted"
+    assert audit["contract_error"] is None
 
 
 def test_user_reviewer_retries_malformed_judgments(monkeypatch) -> None:
@@ -299,6 +340,53 @@ def test_user_reviewer_fails_after_three_malformed_judgments(monkeypatch) -> Non
     with pytest.raises(EvaluatorContractError, match="parse failed 3"):
         evaluation_module._strict_user_review(object)
     assert attempts == evaluation_module.MAX_USER_REVIEW_ATTEMPTS
+
+
+def test_trajectory_diagnostics_separate_model_calls_failures_and_context_growth() -> None:
+    retrieval = AssistantMessage(
+        role="assistant",
+        content=None,
+        tool_calls=[ToolCall(id="search", name="KB_search_bm25", arguments={"query": "referrals", "k": 2})],
+        raw_data={"model": "provider/agent"},
+        usage={"prompt_tokens": 100, "completion_tokens": 10},
+        generation_time_seconds=1.5,
+    )
+    user = UserMessage(
+        role="user",
+        content=None,
+        tool_calls=[ToolCall(id="submit", name="submit_referral", arguments={})],
+        raw_data={"model": "provider/user"},
+        usage={"prompt_tokens": 50, "completion_tokens": 5},
+        generation_time_seconds=0.5,
+    )
+    messages = [
+        AssistantMessage.text("Welcome"),
+        retrieval,
+        ToolMessage(
+            id="search",
+            role="tool",
+            requestor="assistant",
+            content="1. First\n   ID: doc_one\n2. Again\n   ID: doc_one",
+        ),
+        user,
+        ToolMessage(
+            id="submit",
+            role="tool",
+            requestor="user",
+            content="Failed to submit referral: duplicate",
+        ),
+    ]
+
+    diagnostics = _trajectory_diagnostics(SimpleNamespace(get_messages=lambda: messages))
+
+    assert diagnostics["visible_agent_model_calls"] == 1
+    assert diagnostics["user_model_calls"] == 1
+    assert diagnostics["max_agent_prompt_tokens"] == 100
+    assert diagnostics["max_user_prompt_tokens"] == 50
+    assert diagnostics["cumulative_token_usage"]["prompt_tokens"] == 150
+    assert diagnostics["repeated_retrieved_document_hits"] == 1
+    assert diagnostics["user_tool_execution_errors"] == 0
+    assert diagnostics["user_reported_tool_failures"] == 1
 
 
 def test_run_bench_passes_submission_shape_to_tau_without_task_filter(monkeypatch, tmp_path) -> None:

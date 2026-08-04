@@ -49,7 +49,9 @@ The three arms expose different associations. Guarded versus permissive holds th
 | `permissive` | same OpenAPPA scaffold | valid no-op contract |
 | `stock` | Tau `LLMAgent` | none |
 
-Each arm writes `run-summary.json`, and the parent run directory receives a matched task/trial/seed comparison. The summary separates policy blocks, terminal refusals, hidden replanning completions, retrieval calls, participant failures, evaluator evidence, and participant/evaluator costs. User-review findings remain diagnostics attached to the scheduled result; the harness does not discard a run merely because a stochastic reviewer flags the user simulator.
+Each arm writes `run-summary.json`, and the parent run directory receives a matched task/trial/seed comparison. The summary separates policy blocks, terminal refusals, hidden replanning completions, retrieval calls, participant failures, evaluator evidence, and participant/evaluator costs. Retrieval diagnostics distinguish exact duplicate calls from repeated returned documents and report cumulative billing tokens separately from the largest prompt in one model call. Tau's stock 200-step limit remains the only call ceiling so the custom evaluation does not silently make the official retrieval task easier.
+
+Tool execution errors are distinct from successful tool invocations whose returned content reports an operational failure such as a duplicate referral. Both are counted by requestor and retained verbatim. User-review findings and reported tool failures remain diagnostics attached to the scheduled result; the harness does not discard a run merely because a stochastic reviewer flags the user simulator.
 
 ## Publication runs freeze every effective setting
 
@@ -69,7 +71,7 @@ Every output directory name includes a digest of the run settings. `run-config.j
 
 ## Audits retain the evidence Tau trajectories omit
 
-Tau's `results.json` remains the scored trajectory source. `evaluator-audit/` retains each judge request and raw response, requested and provider-resolved model, simulation ID, and cost; a malformed score judgment or user review receives up to three evaluator-only attempts before the simulation fails validation. `appa-audit/` retains raw agent completions, hidden replanning costs, logical policy calls, rewritten Tau dispatches, original tool results, delivery dispositions, and the final Tau task/trial/seed/reward identity.
+Tau's `results.json` remains the scored trajectory source. `evaluator-audit/` retains each judge request and raw response, requested and provider-resolved model, simulation ID, cost, and whether the strict response contract accepted the attempt. A malformed score judgment or user review receives up to three evaluator-only attempts before the simulation fails validation. The task-102 judge treats the expected outcome's factual premises as authoritative because that task intentionally gives the simulated customer incorrect information; a pass requires every clause, exclusion, and stated reason. `appa-audit/` retains raw agent completions, hidden replanning costs, logical policy calls, rewritten Tau dispatches, original tool results, delivery dispositions, and the final Tau task/trial/seed/reward identity.
 
 Verbose per-simulation Tau artifacts are enabled because the pinned Tau runner exposes its simulation correlation context through that lifecycle. Final validation requires one directly correlated OpenAPPA sidecar for every guarded or permissive result and the exact evaluator calls required by each task. Failed attempts remain separate from scored simulations and their auditable costs are reported separately.
 

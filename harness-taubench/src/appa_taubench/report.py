@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -10,6 +11,8 @@ from tau2.data_model.message import AssistantMessage, ToolMessage, UserMessage
 from tau2.data_model.simulation import Results, TerminationReason
 
 RETRIEVAL_TOOLS = {"KB_search_bm25", "KB_search_dense", "shell"}
+RETRIEVAL_DOCUMENT_ID = re.compile(r"^\s*ID:\s*(\S+)\s*$", re.MULTILINE)
+REPORTED_FAILURE_PREFIXES = ("Error:", "Error (", "Failed to ", "Failed: ")
 FAILED_TERMINATIONS = {
     TerminationReason.INFRASTRUCTURE_ERROR,
     TerminationReason.UNEXPECTED_ERROR,
@@ -85,12 +88,16 @@ def _evaluator_records(audit_dir: Path) -> list[dict]:
             record = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
             raise ValueError(f"invalid evaluator audit: {path}") from error
-        if record.get("format_version") != 1 or record.get("kind") not in {
+        if record.get("format_version") != 2 or record.get("kind") not in {
             "nl_assertion",
             "nl_assertion_preflight",
             "user_review",
         }:
             raise ValueError(f"invalid evaluator audit envelope: {path}")
+        status = record.get("contract_status")
+        contract_error = record.get("contract_error")
+        if status not in {"accepted", "rejected"} or (status == "rejected") != isinstance(contract_error, str):
+            raise ValueError(f"evaluator audit has invalid contract status: {path}")
         request = record.get("request")
         if not isinstance(request, dict) or not isinstance(request.get("model"), str):
             raise ValueError(f"evaluator audit lacks its requested model: {path}")
@@ -123,20 +130,23 @@ def validate_evaluator_audits(
         elif isinstance(simulation_id, str):
             by_call[(simulation_id, kind)].append(record)
 
-    if not preflights:
+    accepted_preflights = [record for record in preflights if record["contract_status"] == "accepted"]
+    if not accepted_preflights:
         raise ValueError("run lacks a successful NL-judge preflight audit")
     for run in results.simulations:
         expected_nl = 1 if str(run.task_id) == "task_102" else 0
         review_records = sorted(by_call[(run.id, "user_review")], key=lambda record: record["timestamp"])
-        if not review_records:
-            raise ValueError(f"simulation {run.id} has no user_review audit")
+        accepted_reviews = [record for record in review_records if record["contract_status"] == "accepted"]
+        if len(accepted_reviews) != 1:
+            raise ValueError(f"simulation {run.id} has {len(accepted_reviews)} accepted user_review audits")
         nl_records = sorted(by_call[(run.id, "nl_assertion")], key=lambda record: record["timestamp"])
-        if expected_nl and not nl_records:
-            raise ValueError(f"simulation {run.id} has no nl_assertion audit")
-        if not expected_nl and nl_records:
+        accepted_nl = [record for record in nl_records if record["contract_status"] == "accepted"]
+        if expected_nl and len(accepted_nl) != 1:
+            raise ValueError(f"simulation {run.id} has {len(accepted_nl)} accepted nl_assertion audits")
+        if not expected_nl and accepted_nl:
             raise ValueError(f"simulation {run.id} has unexpected nl_assertion audits")
         review = run.user_only_review
-        review_cost = review_records[-1].get("cost")
+        review_cost = accepted_reviews[0].get("cost")
         if review is not None and review.cost != review_cost:
             raise ValueError(f"simulation {run.id} review cost disagrees with its evaluator audit")
 
@@ -148,44 +158,88 @@ def validate_evaluator_audits(
 
 def _trajectory_diagnostics(simulation) -> dict:
     calls = []
-    user_tool_errors = 0
-    usage = Counter()
-    generation_seconds = 0.0
+    retrieval_call_ids = set()
+    retrieved_document_ids = []
+    tool_execution_errors = Counter()
+    reported_tool_failures = Counter()
+    reported_failure_details = []
+    usage = {"agent": Counter(), "user": Counter()}
+    max_prompt_tokens = Counter()
+    generation_seconds = Counter()
     agent_calls = 0
     user_calls = 0
     agent_models = set()
     user_models = set()
     for message in simulation.get_messages():
         if isinstance(message, AssistantMessage):
-            agent_calls += 1
-            if isinstance(message.raw_data, dict) and isinstance(message.raw_data.get("model"), str):
-                agent_models.add(message.raw_data["model"])
+            if isinstance(message.raw_data, dict):
+                agent_calls += 1
+                if isinstance(message.raw_data.get("model"), str):
+                    agent_models.add(message.raw_data["model"])
             for call in message.tool_calls or []:
                 if call.name in RETRIEVAL_TOOLS:
                     calls.append((call.name, json.dumps(call.arguments, sort_keys=True)))
+                    retrieval_call_ids.add(call.id)
+            participant = "agent"
         elif isinstance(message, UserMessage):
-            user_calls += 1
-            if isinstance(message.raw_data, dict) and isinstance(message.raw_data.get("model"), str):
-                user_models.add(message.raw_data["model"])
-        elif isinstance(message, ToolMessage) and message.requestor == "user" and message.error:
-            user_tool_errors += 1
-        if isinstance(getattr(message, "usage", None), dict):
+            if isinstance(message.raw_data, dict):
+                user_calls += 1
+                if isinstance(message.raw_data.get("model"), str):
+                    user_models.add(message.raw_data["model"])
+            participant = "user"
+        elif isinstance(message, ToolMessage):
+            participant = None
+            if message.id in retrieval_call_ids and isinstance(message.content, str):
+                retrieved_document_ids.extend(RETRIEVAL_DOCUMENT_ID.findall(message.content))
+            if message.error:
+                tool_execution_errors[message.requestor] += 1
+            stripped = message.content.lstrip() if isinstance(message.content, str) else ""
+            if stripped.startswith(REPORTED_FAILURE_PREFIXES):
+                reported_tool_failures[message.requestor] += 1
+                reported_failure_details.append(
+                    {
+                        "requestor": message.requestor,
+                        "content": stripped[:500],
+                    }
+                )
+        else:
+            participant = None
+        if participant is not None and isinstance(getattr(message, "usage", None), dict):
             for key, value in message.usage.items():
                 if isinstance(value, int | float):
-                    usage[key] += value
-        generation_seconds += getattr(message, "generation_time_seconds", None) or 0.0
+                    usage[participant][key] += value
+            prompt_tokens = message.usage.get("prompt_tokens")
+            if isinstance(prompt_tokens, int | float):
+                max_prompt_tokens[participant] = max(max_prompt_tokens[participant], prompt_tokens)
+        if participant is not None:
+            generation_seconds[participant] += getattr(message, "generation_time_seconds", None) or 0.0
     counts = Counter(calls)
+    document_counts = Counter(retrieved_document_ids)
+    total_usage = usage["agent"] + usage["user"]
     return {
         "retrieval_calls": len(calls),
         "dense_retrieval_calls": sum(name == "KB_search_dense" for name, _ in calls),
-        "repeated_retrieval_calls": sum(count - 1 for count in counts.values()),
-        "user_tool_errors": user_tool_errors,
+        "exact_duplicate_retrieval_calls": sum(count - 1 for count in counts.values()),
+        "retrieved_document_hits": len(retrieved_document_ids),
+        "unique_retrieved_documents": len(document_counts),
+        "repeated_retrieved_document_hits": sum(count - 1 for count in document_counts.values()),
+        "assistant_tool_execution_errors": tool_execution_errors["assistant"],
+        "user_tool_execution_errors": tool_execution_errors["user"],
+        "assistant_reported_tool_failures": reported_tool_failures["assistant"],
+        "user_reported_tool_failures": reported_tool_failures["user"],
+        "reported_tool_failure_details": reported_failure_details,
         "visible_agent_model_calls": agent_calls,
         "user_model_calls": user_calls,
         "agent_provider_models": sorted(agent_models),
         "user_provider_models": sorted(user_models),
-        "token_usage": dict(usage),
-        "generation_seconds": generation_seconds,
+        "cumulative_token_usage": dict(total_usage),
+        "agent_token_usage": dict(usage["agent"]),
+        "user_token_usage": dict(usage["user"]),
+        "max_agent_prompt_tokens": max_prompt_tokens["agent"],
+        "max_user_prompt_tokens": max_prompt_tokens["user"],
+        "agent_generation_seconds": generation_seconds["agent"],
+        "user_generation_seconds": generation_seconds["user"],
+        "generation_seconds": generation_seconds.total(),
     }
 
 
@@ -240,6 +294,7 @@ def build_run_summary(
                 "review_cost": None if review is None else review.cost,
                 "user_review_errors": None if review is None else len(review.errors),
                 "critical_user_error": None if review is None else review.critical_user_error,
+                "user_review": None if review is None else review.model_dump(mode="json"),
                 "policy_checks": stats.get("checks", 0),
                 "policy_blocks": stats.get("policy_blocks", 0),
                 "hidden_agent_completions": stats.get("hidden_completions", 0),
@@ -293,15 +348,46 @@ def build_run_summary(
         "retrieval": {
             "calls": sum(outcome["retrieval_calls"] for outcome in outcomes),
             "dense_calls": sum(outcome["dense_retrieval_calls"] for outcome in outcomes),
-            "repeated_calls": sum(outcome["repeated_retrieval_calls"] for outcome in outcomes),
+            "exact_duplicate_calls": sum(outcome["exact_duplicate_retrieval_calls"] for outcome in outcomes),
+            "retrieved_document_hits": sum(outcome["retrieved_document_hits"] for outcome in outcomes),
+            "repeated_retrieved_document_hits": sum(
+                outcome["repeated_retrieved_document_hits"] for outcome in outcomes
+            ),
             "embedding_cost_usd": None,
             "embedding_cost_note": "Tau 1.0.1 does not expose embedding response usage or cost",
         },
+        "tool_results": {
+            "assistant_execution_errors": sum(outcome["assistant_tool_execution_errors"] for outcome in outcomes),
+            "user_execution_errors": sum(outcome["user_tool_execution_errors"] for outcome in outcomes),
+            "assistant_reported_failures": sum(outcome["assistant_reported_tool_failures"] for outcome in outcomes),
+            "user_reported_failures": sum(outcome["user_reported_tool_failures"] for outcome in outcomes),
+        },
         "user_simulator": {
-            "tool_errors": sum(outcome["user_tool_errors"] for outcome in outcomes),
+            "tool_execution_errors": sum(outcome["user_tool_execution_errors"] for outcome in outcomes),
+            "reported_tool_failures": sum(outcome["user_reported_tool_failures"] for outcome in outcomes),
             "reviewed": sum(outcome["user_review_errors"] is not None for outcome in outcomes),
             "episodes_with_errors": sum(bool(outcome["user_review_errors"]) for outcome in outcomes),
             "critical_errors": sum(outcome["critical_user_error"] is True for outcome in outcomes),
+        },
+        "tokens": {
+            "cumulative_agent_prompt": sum(
+                outcome["agent_token_usage"].get("prompt_tokens", 0) for outcome in outcomes
+            ),
+            "cumulative_user_prompt": sum(outcome["user_token_usage"].get("prompt_tokens", 0) for outcome in outcomes),
+            "cumulative_agent_completion": sum(
+                outcome["agent_token_usage"].get("completion_tokens", 0) for outcome in outcomes
+            ),
+            "cumulative_user_completion": sum(
+                outcome["user_token_usage"].get("completion_tokens", 0) for outcome in outcomes
+            ),
+            "max_agent_prompt_per_call": max(
+                (outcome["max_agent_prompt_tokens"] for outcome in outcomes),
+                default=0,
+            ),
+            "max_user_prompt_per_call": max(
+                (outcome["max_user_prompt_tokens"] for outcome in outcomes),
+                default=0,
+            ),
         },
         "model_calls": {
             "visible_agent": sum(outcome["visible_agent_model_calls"] for outcome in outcomes),
@@ -336,6 +422,19 @@ def build_run_summary(
         "duration_seconds": sum(outcome["duration_seconds"] for outcome in outcomes),
         "outcomes": outcomes,
     }
+    costs = payload["cost_usd"]
+    costs["recorded_total"] = sum(
+        costs[key]
+        for key in {
+            "agent",
+            "user",
+            "user_review",
+            "nl_assertion_judge",
+            "nl_assertion_preflight",
+            "discarded_attempt_evaluators",
+            "discarded_agent_attempts",
+        }
+    )
     _atomic_json(output_dir / "run-summary.json", payload)
     return payload
 
