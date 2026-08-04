@@ -26,7 +26,7 @@ const DIRECTIVES: Record<string, () => ReactNode> = {
   "fig-remedy-plan": () => <RemedyPlanFigure />,
   "fig-two-endings": () => <TwoEndingsFigure />,
   "details-7pc-leak": () => (
-    <details className="leak-details my-6 rounded-lg border border-[var(--border)] bg-[var(--bg-subtle,#18181b)] p-4 text-sm text-[var(--text)]">
+    <details className="leak-details my-6 rounded-lg border border-[var(--border)] bg-[var(--bg-weak)] p-4 text-sm text-[var(--text)]">
       <summary className="cursor-pointer font-semibold text-[var(--text-strong)] hover:text-[var(--accent)]">
         Why the 7% leak occurred under GPT-4o (and why the algebra held)
       </summary>
