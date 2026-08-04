@@ -16,3 +16,5 @@ appa-arxiv.tar.gz
 target-*/
 .envrc
 harness-taubench/runs/
+__pycache__/
+*.py[cod]
