@@ -5,34 +5,34 @@ order: 1
 description: A deterministic policy engine for LLM agents — tracking data origins and enforcing information flow before tool calls dispatch.
 ---
 
-OpenAPPA brings deterministic data protection to LLM agents. Instead of relying on prompt filters or classifiers—asking "does this text look malicious?"—it tracks data origins and answers a question with a provable answer: **can data derived from these sources legally flow into this destination?**
+OpenAPPA is open-source, deterministic security for real-world agentic applications.
 
-## The more the agent knows, the better it works
+The more tools and data sources an agent is connected to, the more it can do. Capability, however, arrives together with risk — the risk of data exfiltration. Put plainly, an agent can pick up something sensitive and publish it, whether through a hallucination or an outright prompt injection.
 
-Here is an agent doing a routine job: email the client an update on their project. Connect Salesforce, so it knows the account and the renewal at stake. Connect GitHub, so "almost done" means an approved PR sitting in final CI, not a guess. Connect Granola, so the update answers what the client actually raised on the last call.
+The problem has reached epidemic scale. A partial list of published exfiltration attacks against production assistants: [ChatGPT](https://simonwillison.net/2023/Apr/14/new-prompt-injection-attack-on-chatgpt-web-version-markdown-imag/) (Apr 2023), [Google Bard](https://simonwillison.net/2023/Nov/4/hacking-google-bard-from-prompt-injection-to-data-exfiltration/) (Nov 2023), [GitHub Copilot Chat](https://simonwillison.net/2024/Jun/16/github-copilot-chat-prompt-injection/) (Jun 2024), [Microsoft Copilot](https://simonwillison.net/2024/Aug/14/living-off-microsoft-copilot/) (Aug 2024), [Slack AI](https://simonwillison.net/2024/Aug/20/data-exfiltration-from-slack-ai/) (Aug 2024), [ChatGPT Operator](https://simonwillison.net/2025/Feb/17/chatgpt-operator-prompt-injection/) (Feb 2025), [Microsoft 365 Copilot "EchoLeak"](https://www.hackthebox.com/blog/cve-2025-32711-echoleak-copilot-vulnerability) (Jun 2025), [ChatGPT Deep Research "ShadowLeak"](https://thehackernews.com/2025/09/shadowleak-zero-click-flaw-leaks-gmail.html) (Sep 2025), [Notion AI and Claude Cowork](https://breached.company/the-lethal-trifecta-strikes-four-major-ai-agent-vulnerabilities-in-five-days/) (Jan 2026).
 
-:::fig-connected-agent:::
+By now there is plenty of research on how to build agents that cannot leak sensitive data even in principle — not "cannot with 99.99% probability," but deterministically constrained. Simon Willison's excellent posts come to mind — the [Dual LLM pattern](https://simonwillison.net/2023/Apr/25/dual-llm-pattern/), the [lethal trifecta](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/) framing, and his coverage of [CaMeL](https://simonwillison.net/2025/Apr/11/camel/) — as does Microsoft's [FIDES](https://arxiv.org/abs/2505.23643).
 
-## Non-determinism is a data exfiltration risk
+And yet a gap remains between these ideas on paper and the ability to apply them in a concrete environment, in a concrete product or company. Four questions stand between the two:
 
-Nobody attacked anything in this next run. The task is the same, the connections are the same, the agent is the same. But the agent is a language model — helpful, eager, and non-deterministic. On some fraction of runs it decides a persuasive update needs *comparison context*, and nothing tells it that other clients' calls are not its material to use.
+- How do I describe agent security in plain language at scale in my organization?
+- How do I enforce it on the agents I already have?
+- How do I monitor it in production?
+- How do I act based on observability I get?
 
-:::fig-exfiltration:::
+OpenAPPA answers all four.
 
-## OpenAPPA is a deterministic policy boundary
+## OpenAPPA tracks data flows deterministically instead of classifying data
 
-OpenAPPA wraps the agent in a boundary where data origins and access rights carry clear, mathematical weight. Every piece of data that crosses in carries a label—where it came from and who may read it. Everything the agent derives inherits the labels of what it read. And every outbound action—a tool call, an email—is checked against a declared contract *before it happens*. The check is deterministic: same labels, same contract, same verdict, on run 1 and run 40. The agent stays free to be creative inside the boundary; the policy decides what leaves it.
+Plenty of PII detectors and prompt-injection classifiers exist today — OpenAI's [moderation models](https://platform.openai.com/docs/guides/moderation), Meta's [Llama Prompt Guard](https://www.llama.com/docs/model-cards-and-prompt-formats/prompt-guard/), Microsoft's [Prompt Shields](https://learn.microsoft.com/en-us/azure/ai-services/content-safety/concepts/jailbreak-detection), and [Lakera Guard](https://www.lakera.ai/lakera-guard) among them. We believe real agent security is deterministic: it holds on every run, not on 99% of them. Only then can you genuinely trust agents in real applications — say, around medical or financial data.
 
-:::fig-guardrail:::
+The foundation of OpenAPPA is data-flow tracking. In other words, it lets you state — and enforce — the answer to one question: *can this value, derived from these sources, legally flow into this sink?* 
 
-## OpenAPPA keeps agents productive instead of just blocking
-
-OpenAPPA's checks are legible and actionable: when a flow cannot proceed directly, the agent learns why *before* execution and receives exact, sound remedy plans. Instead of getting stuck or silently failing, the language model can request policy approvals, sanitize sensitive fields, or accept necessary reach restrictions to safely complete its task.
-
-:::fig-negotiation:::
+And where it is genuinely unavoidable, OpenAPPA also lets you plug in non-deterministic agent-security tools.
 
 ## Where next
 
+- [Explainer](/docs/explainer) — the problem and the boundary, one figure at a time.
 - [How OpenAPPA works](/docs/how-it-works) — the whole model in one sitting.
 - [Reading a policy](/docs/contracts) — what each declaration means, and what a wrong one looks like.
 - [AgentDojo harness](/docs/agentdojo) — run the benchmark yourself.

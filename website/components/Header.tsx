@@ -1,13 +1,11 @@
 import Link from "next/link";
 
-import { AppaMark } from "@/components/AppaMark";
 import { Logo } from "@/components/Logo";
 
 export function Header() {
   return (
     <header className="site-header">
       <Link href="/" className="wordmark">
-        <AppaMark size={52} />
         <Logo height={15} />
       </Link>
       <nav>

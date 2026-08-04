@@ -20,13 +20,13 @@ const SOURCES = [
   { title: "Granola", item: "Call · Acme Corp", colorKey: "warn" as const },
 ];
 
-const sourceBox = (i: number) => ({ x: 40, y: 28 + i * 96, w: 185, h: 86 });
-const itemHome = (i: number) => ({ x: 56, y: sourceBox(i).y + 36, w: 153, h: 38 });
+const sourceBox = (i: number) => ({ x: 2, y: 28 + i * 96, w: 185, h: 86 });
+const itemHome = (i: number) => ({ x: 18, y: sourceBox(i).y + 36, w: 153, h: 38 });
 
 const BOUNDARY = { x: 250, y: 60, w: 420, h: 406 };
 const AGENT = { x: 254, y: 92, w: 120, h: 44 };
 const RAIL_Y = AGENT.y + AGENT.h / 2;
-const CLIENT = { x: 690, y: 40, w: 190, h: 150 };
+const CLIENT = { x: 708, y: 40, w: 190, h: 150 };
 
 const MESSAGES: { from: "agent" | "appa"; lines: string[] }[] = [
   { from: "agent", lines: ["Hey, I want to pull Beta's", "call recording"] },

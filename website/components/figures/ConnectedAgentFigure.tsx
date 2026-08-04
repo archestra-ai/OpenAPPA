@@ -17,12 +17,12 @@ const SOURCES = [
   { title: "Granola", item: "Call 07/12 · notes", colorKey: "warn" as const },
 ];
 
-const sourceBox = (i: number) => ({ x: 40, y: 28 + i * 96, w: 185, h: 86 });
-const itemHome = (i: number) => ({ x: 56, y: sourceBox(i).y + 36, w: 153, h: 38 });
+const sourceBox = (i: number) => ({ x: 2, y: 28 + i * 96, w: 185, h: 86 });
+const itemHome = (i: number) => ({ x: 18, y: sourceBox(i).y + 36, w: 153, h: 38 });
 
 const AGENT = { x: 390, y: 177, w: 130, h: 56 };
 const AGENT_C: [number, number] = [AGENT.x + AGENT.w / 2, AGENT.y + AGENT.h / 2];
-const CLIENT = { x: 615, y: 80, w: 265, h: 250 };
+const CLIENT = { x: 633, y: 80, w: 265, h: 250 };
 
 const cardStack = (i: number) => ({ x: 398 + i * 12, y: 262 + i * 6, rot: (i - 1.5) * 0.04 });
 

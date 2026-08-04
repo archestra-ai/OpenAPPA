@@ -21,14 +21,14 @@ const SOURCES = [
   { title: "Granola", item: "Call · Acme Corp", colorKey: "warn" as const },
 ];
 
-const sourceBox = (i: number) => ({ x: 40, y: 28 + i * 96, w: 185, h: 86 });
-const itemHome = (i: number) => ({ x: 56, y: sourceBox(i).y + 36, w: 153, h: 38 });
+const sourceBox = (i: number) => ({ x: 2, y: 28 + i * 96, w: 185, h: 86 });
+const itemHome = (i: number) => ({ x: 18, y: sourceBox(i).y + 36, w: 153, h: 38 });
 
 const RAIL_Y = 215;
 const BOUNDARY = { x: 355, y: 140, w: 270, h: 280 };
 const AGENT = { x: 405, y: 190, w: 130, h: 50 };
 const AGENT_C: [number, number] = [AGENT.x + AGENT.w / 2, RAIL_Y];
-const CLIENT = { x: 640, y: 90, w: 240, h: 250 };
+const CLIENT = { x: 658, y: 90, w: 240, h: 250 };
 
 const cardStack = (i: number) => ({ x: 402 + i * 10, y: 255 + i * 6, rot: (i - 2) * 0.04 });
 

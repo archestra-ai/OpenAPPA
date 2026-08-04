@@ -10,10 +10,14 @@
   --bg-weak-hover: hsl(42, 15%, 93%);
   --bg-strong: hsl(30, 8%, 12%);
 
-  --text: hsl(30, 4%, 34%);
+  --text: hsl(30, 5%, 26%);
   --text-weak: hsl(32, 3%, 54%);
   --text-strong: hsl(30, 8%, 11%);
   --text-inverted: hsl(40, 25%, 99%);
+
+  /* type — sans for prose, mono for code/headings/chrome */
+  --font-mono: var(--font-plex-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-sans: var(--font-plex-sans), system-ui, sans-serif;
 
   --border: hsl(36, 8%, 79%);
   --border-weak: hsl(38, 8%, 86%);
@@ -48,7 +52,7 @@
     --bg-weak-hover: hsl(30, 5%, 15%);
     --bg-strong: hsl(40, 12%, 92%);
 
-    --text: hsl(35, 6%, 72%);
+    --text: hsl(35, 7%, 80%);
     --text-weak: hsl(33, 4%, 50%);
     --text-strong: hsl(40, 12%, 93%);
     --text-inverted: hsl(30, 6%, 8%);
@@ -89,6 +93,20 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* code is always mono, whatever the surrounding face */
+code,
+pre,
+kbd,
+samp {
+  font-family: var(--font-mono);
+}
+
+/* chrome keeps the mono identity */
+.site-header,
+.toc {
+  font-family: var(--font-mono);
+}
+
 ::selection {
   background: var(--accent-bg);
   color: var(--text-strong);
@@ -97,6 +115,46 @@ body {
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+/* ————————————————————————————————————————————————
+   Brand mark (mascot) — float + blink, as on /landing
+   ———————————————————————————————————————————————— */
+@keyframes appa-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-2%);
+  }
+}
+
+@keyframes appa-blink {
+  0%,
+  92%,
+  100% {
+    transform: scaleY(1);
+  }
+  96% {
+    transform: scaleY(0.08);
+  }
+}
+
+.appa-mark-float {
+  animation: appa-float 5.5s ease-in-out infinite;
+}
+
+.appa-mark-eyes {
+  transform-origin: 12px 7.5px;
+  animation: appa-blink 6.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .appa-mark-float,
+  .appa-mark-eyes {
+    animation: none;
+  }
 }
 
 /* ————————————————————————————————————————————————
@@ -278,16 +336,22 @@ body {
 /* ————————————————————————————————————————————————
    Prose (rendered markdown)
    ———————————————————————————————————————————————— */
+.prose {
+  font-size: 15px;
+}
+
 .prose h1 {
-  font-size: 26px;
-  font-weight: 500;
+  font-family: var(--font-mono);
+  font-size: 28px;
+  font-weight: 600;
   color: var(--text-strong);
   line-height: 1.3;
 }
 
 .prose h2 {
+  font-family: var(--font-mono);
   font-size: 22px;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--text-strong);
   margin: 2.5rem 0 0.75rem;
   padding-top: 2rem;
@@ -296,15 +360,17 @@ body {
 }
 
 .prose h3 {
-  font-size: 18px;
-  font-weight: 500;
+  font-family: var(--font-mono);
+  font-size: 17px;
+  font-weight: 600;
   color: var(--text-strong);
   margin: 2rem 0 0.5rem;
 }
 
 .prose h4 {
-  font-size: 16px;
-  font-weight: 500;
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 600;
   color: var(--text-strong);
   margin: 1.5rem 0 0.5rem;
 }
@@ -381,7 +447,7 @@ body {
   border: 1px solid var(--border-weak);
   border-radius: 3px;
   padding: 0.1em 0.35em;
-  font-size: 13px;
+  font-size: 0.875em;
   color: var(--text-strong);
 }
 
@@ -555,9 +621,6 @@ body {
    ———————————————————————————————————————————————— */
 .flow-figure {
   margin: 1.5rem 0 2rem;
-  border: 1px solid var(--border-weak);
-  border-radius: 6px;
-  padding: 16px;
 }
 
 .flow-controls {

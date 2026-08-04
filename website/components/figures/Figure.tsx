@@ -39,7 +39,7 @@ export function Figure({ draw, designW, designH, durationMs = 16000 }: FigurePro
 
     let scale = 1;
     const resize = () => {
-      const cssW = wrap.clientWidth - 32; // wrapper padding
+      const cssW = wrap.clientWidth;
       const dpr = window.devicePixelRatio || 1;
       scale = cssW / designW;
       canvas.width = Math.round(cssW * dpr);

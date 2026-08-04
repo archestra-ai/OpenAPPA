@@ -12,14 +12,12 @@ import { LabelFoldFigure } from "@/components/figures/LabelFoldFigure";
 import { NegotiationFigure } from "@/components/figures/NegotiationFigure";
 import { RemedyPlanFigure } from "@/components/figures/RemedyPlanFigure";
 import { TwoEndingsFigure } from "@/components/figures/TwoEndingsFigure";
-import { LogoGallery } from "@/components/LogoGallery";
 import { Term } from "@/components/Term";
 import { termDefinition } from "@/lib/terms";
 
 /* Block directives: a line of the form :::name::: in the markdown renders
    the mapped component in place. */
 const DIRECTIVES: Record<string, () => ReactNode> = {
-  "logo-gallery": () => <LogoGallery />,
   "fig-connected-agent": () => <ConnectedAgentFigure />,
   "fig-exfiltration": () => <ExfiltrationFigure />,
   "fig-guardrail": () => <GuardrailFigure />,
