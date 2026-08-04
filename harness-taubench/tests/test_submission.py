@@ -7,15 +7,19 @@ import pytest
 from appa_taubench import submission
 
 
-def audit_record(task_id: str, episode_id: str) -> dict:
+def audit_record(task_id: str, simulation_id: str, trial: int = 0, seed: int = 42) -> dict:
     return {
-        "format_version": 1,
-        "episode_id": episode_id,
+        "format_version": 2,
+        "episode_id": simulation_id,
+        "tau_simulation_id": simulation_id,
         "task_id": task_id,
+        "trial": trial,
+        "seed": seed,
         "model": "model",
-        "model_args": {"seed": 42},
+        "model_args": {"seed": seed},
         "stats": {},
         "events": [],
+        "tau_outcome": {"simulation_id": simulation_id},
     }
 
 
@@ -72,11 +76,16 @@ def write_run_manifest(path, results) -> None:
 
 def test_audit_coverage_requires_every_task_trial(tmp_path) -> None:
     (tmp_path / "one.json").write_text(json.dumps(audit_record("1", "one")))
-    results = SimpleNamespace(simulations=[SimpleNamespace(task_id="1"), SimpleNamespace(task_id="1")])
+    results = SimpleNamespace(
+        simulations=[
+            SimpleNamespace(id="one", task_id="1", trial=0, seed=42),
+            SimpleNamespace(id="two", task_id="1", trial=1, seed=43),
+        ]
+    )
     with pytest.raises(ValueError, match="do not cover"):
         submission.validate_audit_coverage(tmp_path, results)
 
-    (tmp_path / "two.json").write_text(json.dumps(audit_record("1", "two")))
+    (tmp_path / "two.json").write_text(json.dumps(audit_record("1", "two", trial=1, seed=43)))
     submission.validate_audit_coverage(tmp_path, results)
 
 
@@ -118,7 +127,7 @@ def test_submission_wrapper_prepares_copies_disclosure_and_validates(monkeypatch
             seed=300,
             retrieval_config="alltools-qwen",
         ),
-        simulations=[SimpleNamespace(task_id="1")],
+        simulations=[SimpleNamespace(id="one", task_id="1", trial=0, seed=42)],
     )
     write_run_manifest(run_path / submission.RUN_MANIFEST, results)
     calls = []

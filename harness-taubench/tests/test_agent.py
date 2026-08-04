@@ -96,7 +96,7 @@ def test_allowed_call_executes_in_taubench_then_reports_before_the_next_completi
 def test_block_feedback_stays_inside_the_agent_and_only_an_allowed_call_reaches_taubench(monkeypatch) -> None:
     FakeSession.decisions = iter(
         [
-            Blocked("need a safer path"),
+            Blocked("need a safer path", recoverable=True),
             Allowed("lookup", {"value": "safe"}),
         ]
     )
@@ -122,7 +122,7 @@ def test_logical_dispatch_and_hidden_retry_are_correlated_in_the_audit(monkeypat
     }
     FakeSession.decisions = iter(
         [
-            Blocked("use the remedy"),
+            Blocked("use the remedy", recoverable=True),
             Allowed(DISCOVERABLE_WRAPPER, wrapped_arguments),
         ]
     )
@@ -192,3 +192,63 @@ def test_mismatched_tau_result_still_closes_the_session_and_audit(monkeypatch, t
     assert FakeSession.instance.closed
     assert not agent.pending
     assert len(list(tmp_path.glob("*.json"))) == 1
+
+
+def test_irrecoverable_block_is_terminal_without_hidden_retry(monkeypatch, tmp_path) -> None:
+    FakeSession.decisions = iter([Blocked("no remedy")])
+    calls = []
+    monkeypatch.setattr("appa_taubench.agent.FrameworkSession", FakeSession)
+    monkeypatch.setattr(
+        "appa_taubench.agent.generate",
+        lambda **kwargs: calls.append(kwargs) or response("lookup", 0.2),
+    )
+    agent = AppaAgent(
+        [as_tool(lookup)],
+        "domain policy",
+        "appa policy",
+        "model",
+        audit_dir=str(tmp_path),
+    )
+
+    final, _ = agent.generate_next_message(UserMessage.text("find one"), agent.get_init_state())
+    agent.stop()
+
+    assert final.content == "I cannot complete that request because OpenAPPA refused the proposed action."
+    assert final.cost == pytest.approx(0.2)
+    assert len(calls) == 1
+    [audit_path] = list(tmp_path.glob("*.json"))
+    events = json.loads(audit_path.read_text())["events"]
+    assert next(event for event in events if event["kind"] == "policy_block")["recoverable"] is False
+    assert next(event for event in events if event["kind"] == "terminal_refusal")["reason"] == "no_remedy_available"
+
+
+def test_model_cannot_claim_success_after_a_failed_tau_result(monkeypatch) -> None:
+    FakeSession.decisions = iter([Allowed("lookup", {"value": "one"})])
+    responses = iter(
+        [
+            response("lookup"),
+            AssistantMessage.text("That succeeded!", cost=0.2),
+            AssistantMessage.text("I can still answer your question.", cost=0.1),
+        ]
+    )
+    monkeypatch.setattr("appa_taubench.agent.FrameworkSession", FakeSession)
+    monkeypatch.setattr("appa_taubench.agent.generate", lambda **kwargs: next(responses))
+    agent = AppaAgent([as_tool(lookup)], "domain policy", "appa policy", "model")
+    proposed, state = agent.generate_next_message(UserMessage.text("find one"), agent.get_init_state())
+
+    final, _ = agent.generate_next_message(
+        ToolMessage(
+            id=proposed.tool_calls[0].id,
+            role="tool",
+            content="lookup failed",
+            error=True,
+        ),
+        state,
+    )
+    assert final.content == "I could not complete that request because the attempted action did not succeed."
+    assert final.cost == pytest.approx(0.2)
+
+    next_turn, _ = agent.generate_next_message(UserMessage.text("Can you explain?"), state)
+    agent.stop()
+
+    assert next_turn.content == "I can still answer your question."

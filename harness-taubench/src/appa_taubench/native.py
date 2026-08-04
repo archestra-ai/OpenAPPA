@@ -21,6 +21,7 @@ class NativeProtocolError(RuntimeError):
 @dataclass(frozen=True)
 class Blocked:
     feedback: str
+    recoverable: bool = False
 
 
 @dataclass(frozen=True)
@@ -80,7 +81,7 @@ class FrameworkSession:
             case "blocked" if set(response) == {"kind", "feedback"}:
                 feedback = response["feedback"]
                 if isinstance(feedback, str):
-                    return Blocked(feedback)
+                    return Blocked(feedback, self._has_remedy(feedback))
             case "allowed" if set(response) == {
                 "kind",
                 "dispatched_tool",
@@ -173,3 +174,19 @@ class FrameworkSession:
         if not isinstance(response, dict):
             raise NativeProtocolError("native response is not an object")
         return response
+
+    @staticmethod
+    def _has_remedy(feedback: str) -> bool:
+        """Return whether block feedback contains an executable remedy plan."""
+        for line in reversed(feedback.splitlines()):
+            try:
+                details = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(details, dict):
+                continue
+            plans = details.get("remedy_plans")
+            return isinstance(plans, list) and any(
+                isinstance(plan, dict) and isinstance(plan.get("plan_id"), str) for plan in plans
+            )
+        return False

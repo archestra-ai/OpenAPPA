@@ -1,50 +1,34 @@
-# The full Tau Knowledge run has seven blockers
+# The paid Tau pilot has four remaining gates
 
-The 2026-08-04 diagnostic showed that the current result mixes policy utility
-cost, model errors, user-simulator errors, and evaluator errors. Do not buy the
-388-simulation run until these blockers are cleared.
+The contract/task inventory, terminal block behavior, direct audit correlation,
+strict evaluator path, standard user model, stock control, and related-work
+comparison are implemented and covered by preflight or a live task-102 smoke.
+Do not launch the 388-simulation run until the remaining gates are cleared.
 
-- [ ] **Resolve the contract/task mismatch.** Inventory the 97 tasks for
-  customer-data reads followed by effects, then define and test the
-  spec-grounded path for successful verification and each intentionally
-  supported mutation, user-tool grant, or human transfer. The current contract
-  makes Tau's normal read-then-`log_verification` sequence impossible.
+- [ ] **Run and scrutinize the matched ten-task pilot.** Run tasks 001, 004,
+  010, 026, 032, 046, 050, 055, 072, and 102 once under guarded OpenAPPA,
+  the scaffold-matched permissive contract, and stock Tau. Review all 30
+  trajectories, evaluator calls, user reviews, APPA sidecars, retrieval calls,
+  terminal states, and costs. Explain every reward difference rather than
+  attributing any matched stochastic difference to policy by default.
 
-- [ ] **Make terminal policy blocks terminal and auditable.** Stop hidden
-  retries when no remedy can recover the required trust, reject stale remedy
-  IDs clearly, and prevent success claims without a successful Tau result.
-  Correlate every audit directly with Tau's simulation ID, task, trial, and
-  seed.
+- [ ] **Stabilize anything the pilot exposes.** Reject benchmark
+  implementation defects, infrastructure errors, malformed evaluator evidence,
+  uncorrelated audits, excessive or repeated retrieval loops, runaway context
+  growth, and unreported hidden completions. Keep user-simulator deviations such
+  as invented tools, extra mutations, role impersonation, premature actions, or
+  treating tool errors as success in the scheduled result, but identify them
+  separately from agent and policy failures.
 
-- [ ] **Make Tau's score trustworthy.** Configure and preflight the
-  NL-assertion judge, require one valid judgment per assertion, add the task 102
-  regression, and fail preflight when any golden action cannot be replayed.
-  Record the judge request, response, model, provider, and cost.
+- [ ] **Freeze and budget the final configuration.** Confirm the requested and
+  provider-resolved agent, user, judge, and reviewer models; retrieval identity;
+  all 388 task/trial seeds and limits; and every runtime override. Use the pilot
+  to estimate participant, hidden replanning, embedding, evaluator, total
+  dollar cost, model-call count, and duration for the full run.
 
-- [ ] **Stabilize the agent, retrieval, and user simulator.** Select exact
-  agent and user models, validate that retrieval produces the required
-  procedures without the diagnostic's search explosion, and reject material
-  user deviations such as invented tools, extra mutations, role impersonation,
-  or treating tool errors as success.
-
-- [ ] **Run the paired pilot.** Run tasks 001, 004, and 102 for four matched
-  trials under the current contract and a permissive OpenAPPA control contract.
-  Review all 24 trajectories and proceed only if the pilot separates
-  policy-caused failures from model/retrieval failures with acceptable
-  variance.
-
-- [ ] **Freeze and budget the final configuration.** Manifest the exact model
-  and provider routes, user model, judge, Tau revision, policy, retrieval-index
-  digest, task/trial seeds, limits, and every run-time override. Account for
-  agent, hidden retry, user, embedding, judge, and review costs, then estimate
-  the full run's spend and duration.
-
-- [ ] **Prove the submission workflow before launch.** Pass preflight with the
-  frozen configuration, exercise checkpoint interruption and exact resume,
-  verify four directly correlated trials per task with no infrastructure
-  errors, and prepare the custom-scaffold disclosure. Describe Tau Knowledge
-  as a utility evaluation; security claims require a separate attack set.
-
-- [ ] **Make sure the user is control by a standard model so that we don't give ourselves an unfair handicap/advantage** To the best of my knowledge, the standard user model is gpt-4o
-
-- [ ] **Take a look at the related work review** found here: https://chatgpt.com/share/6a721b0f-c6cc-83eb-85d0-1ea16a4da2e6 If anything about our benchmark implementation is very different from how others evaluate, this can be a comparison issue and should be fixed.
+- [ ] **Prove exact resume and submission validation.** Exercise an interrupted
+  checkpoint and exact resume without duplicate scored simulations or missing
+  audits. Verify four directly correlated trials per task and no infrastructure
+  errors, then prepare the custom-scaffold disclosure. Describe Tau Knowledge
+  as a utility evaluation; information-flow security claims require a separate
+  attack set and security oracle.

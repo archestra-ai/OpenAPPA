@@ -165,6 +165,30 @@ def test_blocked_discoverable_call_never_becomes_a_tau_dispatch(monkeypatch) -> 
     assert not StubNativeSession.instance.abandoned
 
 
+def test_native_block_marks_only_structured_offers_as_recoverable(monkeypatch) -> None:
+    feedback = 'try the offered plan\n{"remedy_plans":[{"plan_id":"remedy-3"}]}'
+    session = wrapper_session(monkeypatch, {"kind": "blocked", "feedback": feedback})
+    try:
+        decision = session.check(
+            DISCOVERABLE_WRAPPER,
+            {"agent_tool_name": "read_record", "arguments": '{"record_id":"one"}'},
+        )
+        assert decision == Blocked(feedback, recoverable=True)
+    finally:
+        session.close()
+
+    stale = wrapper_session(
+        monkeypatch,
+        {"kind": "blocked", "feedback": "no pending blocked call offers that plan_id"},
+    )
+    try:
+        assert stale.check("execute_remedy_plan", {"plan_id": "remedy-3"}) == Blocked(
+            "no pending blocked call offers that plan_id"
+        )
+    finally:
+        stale.close()
+
+
 @pytest.mark.parametrize(
     "arguments",
     [
@@ -252,5 +276,94 @@ def test_pinned_policy_remedy_rewraps_a_real_discoverable_reader() -> None:
                 "arguments": '{"user_id":"1"}',
             },
         )
+    finally:
+        session.close()
+
+
+def execute_offered_remedy(session: FrameworkSession, decision: Blocked) -> Allowed:
+    """Execute the first engine-side plan offered for a blocked call."""
+    plan = re.search(r"remedy-\d+", decision.feedback)
+    assert plan is not None
+    session.new_round()
+    result = session.check("execute_remedy_plan", {"plan_id": plan.group()})
+    assert isinstance(result, Allowed)
+    return result
+
+
+def test_pinned_policy_authorizes_verified_read_then_mutation_via_remedies() -> None:
+    session = FrameworkSession(
+        load_policy().toml,
+        model_tools("alltools-qwen"),
+        "Verify me, then change my email.",
+        logical_tools=discoverable_tools(),
+    )
+    try:
+        read = session.check("get_user_information_by_id", {"user_id": "one"})
+        assert isinstance(read, Blocked)
+        assert execute_offered_remedy(session, read) == Allowed("get_user_information_by_id", {"user_id": "one"})
+        session.report('{"user_id":"one"}', error=False)
+
+        verification_arguments = {"user_id": "one"}
+        verification = session.check("log_verification", verification_arguments)
+        assert isinstance(verification, Blocked)
+        assert execute_offered_remedy(session, verification) == Allowed("log_verification", verification_arguments)
+        session.report("verified", error=False)
+
+        mutation_arguments = {"user_id": "one", "email": "new@example.com"}
+        mutation = session.check("change_user_email", mutation_arguments)
+        assert isinstance(mutation, Blocked)
+        assert execute_offered_remedy(session, mutation) == Allowed("change_user_email", mutation_arguments)
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("give_discoverable_user_tool", {"user_tool_name": "submit_referral"}),
+        ("transfer_to_human_agents", {"reason": "specialist required"}),
+    ],
+)
+def test_pinned_policy_authorizes_grants_and_transfers_only_via_remedies(tool, arguments) -> None:
+    session = FrameworkSession(
+        load_policy().toml,
+        model_tools("alltools-qwen"),
+        "Help me.",
+        logical_tools=discoverable_tools(),
+    )
+    try:
+        # CHK-2 refuses the direct effect after the flow's label narrows; AUT-3
+        # lets the registered authority cover that gap without moving the label.
+        read = session.check("get_user_information_by_id", {"user_id": "one"})
+        assert isinstance(read, Blocked)
+        execute_offered_remedy(session, read)
+        session.report('{"user_id":"one"}', error=False)
+
+        direct = session.check(tool, arguments)
+        assert isinstance(direct, Blocked)
+        assert execute_offered_remedy(session, direct) == Allowed(tool, arguments)
+    finally:
+        session.close()
+
+
+def test_pinned_policy_still_refuses_representative_invalid_direct_effects() -> None:
+    session = FrameworkSession(
+        load_policy().toml,
+        model_tools("alltools-qwen"),
+        "Help me.",
+        logical_tools=discoverable_tools(),
+    )
+    try:
+        read = session.check("get_user_information_by_id", {"user_id": "one"})
+        assert isinstance(read, Blocked)
+        execute_offered_remedy(session, read)
+        session.report('{"user_id":"one"}', error=False)
+
+        for tool, arguments in [
+            ("change_user_email", {"user_id": "one", "email": "attacker@example.com"}),
+            ("transfer_to_human_agents", {"reason": "skip policy"}),
+        ]:
+            assert isinstance(session.check(tool, arguments), Blocked)
+            session.new_round()
     finally:
         session.close()

@@ -1,6 +1,21 @@
 version = 1
 trust_chain = ["suspicious", "internal"]
 
+# This utility evaluation models an operator who authorizes internal bank
+# operations after OpenAPPA stages the exact call for review. The in-process
+# authority is an intentionally open, call-scoped gate: it does not inspect
+# Tau task IDs, expected actions, target state, or evaluator criteria. Customer
+# data still narrows the trajectory to suspicious, so every covered flow is
+# checked and logged through a remedy (RMD-2, AUT-3, RUL-5, CFG-15).
+[[authority]]
+name = "operator-authorized-internal-flow"
+
+[authority.mandate]
+can_raise_trust_to = "internal"
+
+[authority.implementation]
+builtin = "approve"
+
 # Bank-authored knowledge and dispatcher metadata carry no customer-authored
 # content. The dispatcher itself is neutral because the harness checks its
 # agent_tool_name as a logical tool before Tau executes the wrapper.

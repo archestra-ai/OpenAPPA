@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from importlib.resources import files
 
 CONTRACTS = files("appa_taubench").joinpath("contracts")
+POLICY_MODES = ("guarded", "permissive", "stock")
 
 
 @dataclass(frozen=True)
@@ -22,7 +23,18 @@ class Policy:
             )
 
 
-def load_policy() -> Policy:
+def load_policy(mode: str = "guarded", tool_names: set[str] | frozenset[str] | None = None) -> Policy:
+    if mode not in POLICY_MODES:
+        raise ValueError(f"unsupported policy mode: {mode}")
+    if mode in {"permissive", "stock"}:
+        if not tool_names:
+            raise ValueError(f"{mode} policy construction requires the Tau tool surface")
+        declarations = "\n".join(f"[[tool]]\nname = {name!r}\ndelta = {{}}\n" for name in sorted(tool_names))
+        return Policy(
+            name=f"banking_knowledge_{mode}_control",
+            toml=f'version = 1\ntrust_chain = ["neutral"]\n\n{declarations}',
+            tools=frozenset(tool_names),
+        )
     name = "banking_knowledge"
     resource = CONTRACTS.joinpath("banking_knowledge.toml")
     source = resource.read_text(encoding="utf-8")

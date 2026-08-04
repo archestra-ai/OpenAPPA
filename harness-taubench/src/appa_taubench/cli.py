@@ -6,8 +6,11 @@ import os
 from pathlib import Path
 
 from appa_taubench import SUPPORTED_RETRIEVAL_CONFIGS
+from appa_taubench.policies import POLICY_MODES
 
-DEFAULT_MODEL = "openrouter/openai/gpt-4.1-mini"
+DEFAULT_MODEL = "openrouter/openai/gpt-5.2"
+DEFAULT_USER_MODEL = "openrouter/openai/gpt-5.2"
+DEFAULT_JUDGE_MODEL = "openrouter/openai/gpt-4.1"
 
 
 def configure_tau2_data_dir(explicit: str | None, parser: argparse.ArgumentParser) -> None:
@@ -42,7 +45,18 @@ def add_data_argument(parser: argparse.ArgumentParser) -> None:
 def add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--retrieval-config", choices=SUPPORTED_RETRIEVAL_CONFIGS, default="alltools-qwen")
     parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--user-model", default=None)
+    parser.add_argument("--user-model", default=DEFAULT_USER_MODEL)
+    parser.add_argument("--judge-model", default=DEFAULT_JUDGE_MODEL)
+    parser.add_argument("--review-model", default=None)
+
+
+def add_execution_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--logdir", default="runs")
+    parser.add_argument("--run-name", default=None)
+    parser.add_argument("--seed", type=int, default=300)
+    parser.add_argument("--max-steps", type=integer_at_least(1), default=200)
+    parser.add_argument("--max-concurrency", type=integer_at_least(1), default=3)
+    parser.add_argument("--dry-run", action="store_true", help="validate and print the plan without invoking Tau")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -59,13 +73,15 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = commands.add_parser("run", help="run the complete Knowledge base split")
     add_data_argument(run_parser)
     add_model_arguments(run_parser)
-    run_parser.add_argument("--logdir", default="runs")
-    run_parser.add_argument("--run-name", default=None)
-    run_parser.add_argument("--seed", type=int, default=300)
-    run_parser.add_argument("--max-steps", type=integer_at_least(1), default=200)
-    run_parser.add_argument("--max-concurrency", type=integer_at_least(1), default=3)
+    add_execution_arguments(run_parser)
     run_parser.add_argument("--num-trials", type=integer_at_least(4), default=4)
-    run_parser.add_argument("--dry-run", action="store_true", help="validate and print the plan without invoking Tau")
+    run_parser.add_argument("--policy-mode", choices=POLICY_MODES, default="guarded")
+
+    pilot_parser = commands.add_parser("pilot", help="run matched ten-task guarded, permissive, and stock arms")
+    add_data_argument(pilot_parser)
+    add_model_arguments(pilot_parser)
+    add_execution_arguments(pilot_parser)
+    pilot_parser.set_defaults(run_name="tau-knowledge-pilot")
 
     submit_parser = commands.add_parser("submit", help="prepare and validate a completed custom submission")
     add_data_argument(submit_parser)
@@ -88,26 +104,52 @@ def main() -> None:
         print(f"submission: {submission_dir}")
         return
 
-    from appa_taubench.bench import preflight, run_bench
+    from appa_taubench.bench import preflight, run_bench, run_pilot
 
-    user_model = args.user_model or args.model
+    user_model = args.user_model
+    review_model = args.review_model or args.judge_model
     if args.command == "preflight":
         try:
-            preflight(args.retrieval_config, args.model, user_model)
+            preflight(
+                args.retrieval_config,
+                args.model,
+                user_model,
+                args.judge_model,
+                review_model,
+            )
         except (RuntimeError, ValueError) as error:
             parser.exit(1, f"error: {error}\n")
         return
+    if args.command == "pilot":
+        raise SystemExit(
+            run_pilot(
+                retrieval_config=args.retrieval_config,
+                model=args.model,
+                user_model=user_model,
+                judge_model=args.judge_model,
+                review_model=review_model,
+                logdir=args.logdir,
+                run_name=args.run_name,
+                seed=args.seed,
+                max_steps=args.max_steps,
+                max_concurrency=args.max_concurrency,
+                dry_run=args.dry_run,
+            )
+        )
     raise SystemExit(
         run_bench(
             retrieval_config=args.retrieval_config,
             model=args.model,
             user_model=user_model,
+            judge_model=args.judge_model,
+            review_model=review_model,
             logdir=args.logdir,
             run_name=args.run_name,
             seed=args.seed,
             max_steps=args.max_steps,
             max_concurrency=args.max_concurrency,
             num_trials=args.num_trials,
+            policy_mode=args.policy_mode,
             dry_run=args.dry_run,
         )
     )

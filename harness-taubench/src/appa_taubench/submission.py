@@ -3,7 +3,6 @@
 import hashlib
 import json
 import shutil
-from collections import Counter
 from pathlib import Path
 
 from tau2.data_model.simulation import Results
@@ -28,8 +27,12 @@ OPENAPPA_REFERENCE = "https://github.com/archestra-ai/OpenAPPA"
 DISCLOSURE = (
     "Custom OpenAPPA scaffold: each proposed call is checked before Tau executes it, and the real result is "
     "reported to OpenAPPA before the next completion. The agent prompt adds sequential-call and policy-feedback "
-    "instructions, exposes execute_remedy_plan, and may make hidden retry completions after a block. Submitted Tau "
-    "trajectories contain the actual dispatched calls and delivered results; the accompanying appa-audit directory "
+    "instructions and exposes execute_remedy_plan. The scaffold may make hidden replanning completions after a "
+    "multi-call response or when a policy block offers an executable remedy; each is counted and costed separately. "
+    "Irrecoverable and stale-remedy blocks terminate with a fixed refusal. The scaffold also replaces a model "
+    "success claim after an errored Tau tool result and a text response that abandons a recoverable policy block "
+    "with fixed refusals. Submitted Tau trajectories contain the actual dispatched calls and delivered results; "
+    "the accompanying appa-audit directory "
     "retains raw completions, policy decisions, pre-rewrite calls, and original tool results."
 )
 
@@ -72,8 +75,8 @@ def enforce_custom_metadata(submission_dir: Path) -> None:
 
 
 def validate_audit_coverage(audit_path: Path, results: Results) -> None:
-    """Require readable APPA sidecars covering every scored task's trial count."""
-    audit_task_counts: Counter[str] = Counter()
+    """Require one directly correlated APPA sidecar for every scored simulation."""
+    audit_simulations: dict[str, dict] = {}
     episode_ids: set[str] = set()
     for path in audit_path.glob("*.json"):
         try:
@@ -81,26 +84,40 @@ def validate_audit_coverage(audit_path: Path, results: Results) -> None:
         except (OSError, json.JSONDecodeError) as error:
             raise ValueError(f"invalid APPA audit sidecar: {path}") from error
         episode_id = record.get("episode_id")
-        if record.get("format_version") != 1 or not isinstance(episode_id, str):
+        if record.get("format_version") != 2 or not isinstance(episode_id, str):
             raise ValueError(f"invalid APPA audit sidecar envelope: {path}")
         if episode_id in episode_ids:
             raise ValueError(f"duplicate APPA audit episode ID: {episode_id}")
         episode_ids.add(episode_id)
+        simulation_id = record.get("tau_simulation_id")
         task_id = record.get("task_id")
         if (
-            not isinstance(task_id, str)
+            not isinstance(simulation_id, str)
+            or not isinstance(task_id, str)
+            or not isinstance(record.get("trial"), int)
+            or not isinstance(record.get("seed"), int)
             or not isinstance(record.get("model"), str)
             or not isinstance(record.get("model_args"), dict)
             or not isinstance(record.get("stats"), dict)
             or not isinstance(record.get("events"), list)
+            or not isinstance(record.get("tau_outcome"), dict)
         ):
             raise ValueError(f"invalid APPA audit sidecar payload: {path}")
-        audit_task_counts[task_id] += 1
+        if simulation_id in audit_simulations:
+            raise ValueError(f"duplicate APPA audit Tau simulation ID: {simulation_id}")
+        audit_simulations[simulation_id] = record
 
-    simulation_task_counts = Counter(str(simulation.task_id) for simulation in results.simulations)
-    missing = simulation_task_counts - audit_task_counts
+    missing = []
+    for simulation in results.simulations:
+        record = audit_simulations.get(simulation.id)
+        if record is None:
+            missing.append(simulation.id)
+            continue
+        expected = (str(simulation.task_id), simulation.trial, simulation.seed)
+        if (record["task_id"], record["trial"], record["seed"]) != expected:
+            raise ValueError(f"APPA audit identity disagrees with Tau simulation {simulation.id}")
     if missing:
-        raise ValueError(f"APPA audit sidecars do not cover submitted task trials: {dict(missing)}")
+        raise ValueError(f"APPA audit sidecars do not cover submitted simulations: {missing}")
 
 
 def validate_run_manifest(manifest_path: Path, results: Results) -> None:
