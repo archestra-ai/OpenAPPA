@@ -1,0 +1,8 @@
+[project]
+name = "appa-taubench"
+version = "0.1.0"
+description = "TauBench evaluation harness for OpenAPPA"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "tau2 @ git+https://github.com/sierra-research/tau2-bench.git@93ee97b8303ce0e89e0ad17e6207591a1846f84b",
+]
