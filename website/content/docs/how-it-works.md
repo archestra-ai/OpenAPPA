@@ -9,7 +9,7 @@ description: The whole model in one sitting — what OpenAPPA guarantees and wha
 
 OpenAPPA sits between an agent and its tools to answer one question before every action: *is this data allowed to go to this destination?*
 
-Rather than just blocking unsafe calls, OpenAPPA keeps agents productive. It tracks everything an agent ingests into a mathematically proven security label, warns the agent *before* it reads data that would restrict its reach, and when a call is refused, returns exact remedy plans—such as requesting a policy approval or redacting sensitive fields with a sanitizer—so the agent can safely find a path forward.
+OpenAPPA keeps agents productive without making policy probabilistic. It catches restrictive reads before they consume the agent's reach and makes every refusal actionable: approve the exact call, sanitize the data, satisfy a prerequisite, accept a narrower Label, or learn that no modeled path can clear the policy.
 
 | Runtime State | Scope | Engine Semantics |
 |---|---|---|
@@ -44,25 +44,7 @@ By evaluating the step before dispatch, OpenAPPA prevents scenarios where an age
 
 Child trajectories isolate label modifications within host-managed sub-executions. A child starts with the parent trajectory's current label, but any data read within the child narrows the child's label exclusively. When the child completes, it returns a single value across its boundary that folds into the parent trajectory like any other tool read. If that raw return would narrow the parent, the merge stops at the boundary until accepted directly or cleaned through a registered sanitizer. Parent and child branches share a single append-only log so that all sends and approvals remain globally auditable.
 
-## Engine refusals enumerate every sound remedy
-
-When OpenAPPA refuses a flow, it doesn't leave the agent stranded. An empty remedy list in a refusal is a mathematical proof that no legal flow exists under the active policy configuration and log. When candidate paths exist, OpenAPPA returns a structured object enumerating every sound way forward: requesting a policy approval, cleaning data with a sanitizer, executing a prerequisite tool call, or accepting a narrowing prompt.
-
-:::fig-remedy-plan:::
-
-Because every remedy except narrowing acceptance derives from a registered component, the engine presents all valid options in a single refusal object:
-
-```ts
-{ outcome: "block",
-  requirement_gaps: [...],  // unmet entries from `requires`
-  narrowing: {...},         // present when the call's own delta narrows
-  unestablished: [...],     // values whose labels could not be established
-  remedy_plans: [...] }     // sound remedy plans executable by id or tool call
-```
-
-A non-empty remedy list indicates that candidate paths exist, though external components may still decline a requested ruling. When an authority denies a request, that denial is appended to the log. The refusal proof remains scoped to the current configuration, active component responses, and recorded denials for that specific call.
-
-## Branching in a child isolates label narrowing
+## Worked example: preserve reach or approve the exact call
 
 To illustrate policy enforcement, consider an agent configured with three tools: `get_ticket_from_crm`, `send_email`, and `file_github_issue`. The CRM tool contract declares a `delta` that restricts the trajectory to internal reach, `send_email` requires the recipient to match the trajectory audience, and `file_github_issue` requires public reach.
 
@@ -115,6 +97,24 @@ The trajectory begins at `{public, trusted}` unless pre-existing context or user
 If the goal is publishing the ticket on GitHub, the agent executes the child branch, passes the result through `remove_pii`, and files the public issue without modifying the parent label. If the goal is emailing raw CRM data to an external auditor, the agent accepts the narrowing in the parent trajectory. When `send_email(ticket, auditor@…)` subsequently runs, the engine checks whether `auditor@…` is in the `internal` audience. Because it is not, OpenAPPA blocks the call and generates an authority remedy plan for `disclosure-officer`.
 
 The authority ruling receives a complete cryptographic manifest of the call, including argument digests, source labels, and message content. If `disclosure-officer` approves the request, the email dispatches and the egress event enters the log. The trajectory label remains `internal`, ensuring that subsequent emails to unapproved recipients require separate authority rulings.
+
+## Engine refusals enumerate every sound remedy
+
+When OpenAPPA refuses a flow, it doesn't leave the agent stranded. An empty remedy list proves that the call is unreachable within the planner's modeled transitions under the active policy configuration and log. When candidate paths exist, OpenAPPA returns a structured object enumerating every sound alternative available from the registered components and deployment capabilities: requesting a policy approval, cleaning data with a sanitizer, executing a prerequisite tool call, or accepting a narrowing prompt.
+
+:::fig-remedy-plan:::
+
+Because every remedy except narrowing acceptance derives from a registered component, the engine presents all valid options in a single refusal object:
+
+```ts
+{ outcome: "block",
+  requirement_gaps: [...],  // unmet entries from `requires`
+  narrowing: {...},         // present when the call's own delta narrows
+  unestablished: [...],     // values whose labels could not be established
+  remedy_plans: [...] }     // sound remedy plans executable by id or tool call
+```
+
+A non-empty remedy list indicates that candidate paths exist, though external components may still decline a requested ruling. When an authority denies a request, that denial is appended to the log. The refusal proof remains scoped to the current configuration, active component responses, and recorded denials for that specific call.
 
 ## Unknown labels propagate until a requirement checks them
 

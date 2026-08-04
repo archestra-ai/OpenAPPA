@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-OpenAPPA (formerly **Baton**; APPA = Agentic Permissions Policy Algebra)
+OpenAPPA (APPA = Agentic Permissions Policy Algebra)
 is a value-granular information-flow policy engine for LLM agents. It sits
 between the agent and its tools/inference and answers one question before
 every proposed flow: *can this value, derived from these sources, legally flow
@@ -27,23 +27,17 @@ outdated.
   deliberate, not violations: core's internal module names (`engine`, `plan`,
   `turn`, …), `DOJO_MODEL`, the demo-owned `notify-mcp`, the reserved
   `assistant.response` sink. Never introduce new `baton`-named
-  identifiers: `baton` was the earlier name and survives only in stale spots
-  (e.g. `website/content/docs/agentdojo.md` still says `baton-dojo` where the
-  package is `appa-dojo`).
+  identifiers: `baton` was the earlier name and can happen only in stale spots.
 - "Engine", "Trajectory", "Value", "Label", "Dimension", "Authority",
   "Transformer", "Remedy plan" are defined terms — use them as the glossary in
   `docs/spec.md` and `appa-engine/src/lib.rs` define them, not colloquially.
-- **Agentic terminology first, IFC/security names as anchors.** In comments,
-  docs, and identifiers, lead with the agentic vocabulary — *trajectory* (not
-  execution trace / session history), *flow* (not information transfer /
-  operation), *turn*, *tool call*, *emission*, *actor/agent*, *harness* — and
-  reference the classical IFC or security term alongside where it grounds the
-  concept: "the flow's label (the taint fold)", "the trajectory (the agent
-  run's append-only history)", "a sink's requirements (sink-side adequacy)",
-  "declassification via a registered transformer". The IFC lineage
-  (Sabelfeld/Myers, taint, sink, label, noninterference, declassification) is
-  the anchor readers map onto — cite it, but never let it displace the
-  agentic term as the primary name for a concept that has one.
+- **Agentic terminology first.** In comments, docs, and identifiers, lead with
+  the agentic vocabulary: *trajectory* (not execution trace or session
+  history), *flow* (not information transfer or operation), *turn*, *tool
+  call*, *emission*, *actor/agent*, and *harness*. Use the classical IFC or
+  security term when it adds precision or establishes lineage, and gloss it
+  for public readers at first use. Never let it displace the agentic term as
+  the primary name for a concept that has one.
 - Do not invent new terms, especially when working with spec. Try to use 
   existing definitions. If you want to introduce a new one - ask a user and 
   explain why.
@@ -91,67 +85,88 @@ migration notes. Rule ids may be renumbered and freed numbers reused; keep
 each family contiguous. Config and wire surfaces may break without shims
 or deprecation paths. The paper is the exception: it stays as published.
 
-## Writing (reader-facing docs)
+## Collaboration
 
-Applies to `docs/` and anything else written for readers outside the
-project. `paper/` has its own register and these rules do not touch it.
+Applies to discussion and work in this repository.
 
-**Audience & Register**
+- Lead with the result, finding, or decision the user needs. Report progress
+  when it exposes a discovery, tradeoff, or blocker rather than narrating
+  routine tool use.
+- Assume the reader writes software but may not know this codebase or have a
+  complete AI or security background. Explain repository and domain context
+  needed to evaluate a decision; do not explain standard programming concepts
+  unless asked.
+- Surface decisions when reasonable interpretations would produce materially
+  different work. Recommend one option and state the tradeoff; decide routine
+  implementation details without asking.
+- Match depth to the task. Keep routine implementation updates concise, but
+  show the reasoning behind changes to the model, spec, architecture, or
+  security guarantees.
+- Use concrete references such as paths, rule ids, types, and commands. Mark
+  uncertainty as uncertainty rather than smoothing it into confident prose.
 
-- **Target Audience:** Smart, busy tech leaders who are not security or AI specialists.
-- **Register:** Plain technical English that respects intelligence without requiring domain jargon. Avoid alienating readers with academic or field terms ("semilattice", "sink-side adequacy", "trajectory laundering"). Retain mathematical rigor and confidence ("provable", "mathematically proven", "deterministic") to highlight the solid math behind OpenAPPA.
-- **Value Proposition Framing:** Emphasize that OpenAPPA keeps agents productive rather than just blocking calls. Highlight exact, sound remedy plans (e.g. policy approvals, sanitizers) and proactive warnings before reading data that restricts reach (narrowing).
+## Writing (public docs)
+
+Applies to `docs/` and other material written for readers outside the project.
+`paper/` has its own register. Except for correctness, defined terminology,
+and claim scope, these are defaults rather than lint rules; depart from them
+when the document reads better as a result.
+
+**Audience and purpose**
+
+- Write for senior engineers and technology leaders. Assume technical
+  fluency, but not complete or current knowledge of both AI and security.
+- Do not require prior training in information-flow control. Introduce the
+  minimum specialized vocabulary needed to state the idea accurately.
+- Match the presentation to the document. The spec is normative and precise;
+  guides build a usable mental model; glossaries and references optimize for
+  lookup. Product framing belongs in introductions and guides, not in
+  normative or reference material.
+- In guides, show how remedy plans and narrowing keep an agent productive when
+  those behaviors are relevant. Do not force the value proposition into every
+  section.
 
 **Vocabulary**
 
-- Ordinary programming vocabulary stays — declarative, imperative,
-  append-only, idempotent. Field vocabulary is glossed at first use or cut:
-  semilattice, noninterference, taint, sink-side adequacy.
-- Terms appearing in the TOML surface or the API are mandatory. `delta`,
-  `requires`, `emits`, `attention`, `exactly`, `may_add` — teach them.
-  Never route around a term the reader will have to type.
-- Every term must be readable cold where it lands, or glossed by its own
-  sentence. "A sanitizer's declared transition" assumes prior knowledge;
-  "a sanitizer that can clean the data" carries itself.
-- Deflate words carrying more fear than content. "Serialized and durable"
-  reads as a platform project; "an append-only file" reads as an afternoon,
-  and the afternoon is the truth for a single process. Name the cost, not
-  the category.
-- Reader-facing prose may diverge from wire vocabulary on purpose. `block`
-  stays the wire tag; prose says the engine refuses the call and names what
-  would make it pass. The glossary bridges the two once.
+- Use APPA's defined terms consistently. Terms that readers must type in TOML
+  or use through an API, including `delta`, `requires`, `emits`, `attention`,
+  `exactly`, and `may_add`, must be taught rather than paraphrased away.
+- Prefer plain technical English and the shortest accurate term. Gloss
+  specialized IFC or security vocabulary at first use; omit it when it adds
+  no precision.
+- Reader-facing prose may explain a wire term in ordinary language. Show the
+  exact wire term where readers need to recognize or type it.
+- Name concrete behavior and cost instead of relying on broad category words.
 
 **Claims**
 
-- Attach every claim to its subject. "APPA is declarative" is three claims —
-  config, verdict, registered components — and only the first holds. The
-  same trap waits at "provable" and "deterministic".
-- Mechanical over comparative. "Without the second check the agent finds
-  out three steps later" beats "in every other system that cost is
-  invisible": same information, falsifiable, no swagger.
-- State the guarantee at guide level; the proof that earns it lives in the
-  spec.
-- State limits flat. A limitation in promise cadence reads as ad copy.
+- Lead with the strongest consequence the spec supports. Do not weaken a
+  guarantee with `helps`, `aims to`, or `is designed to` when APPA actually
+  enforces or proves the property.
+- Headlines and introductions may compress formal scope for clarity, provided
+  nearby text names the exact property and its boundary. "APPA makes declared
+  flow decisions deterministic" is stronger and more accurate than a broad
+  claim that APPA makes agents safe.
+- Use `proven`, `provable`, and `deterministic` only for a specific property
+  with support in the spec or its cited proof. Translate the formal property
+  into its operational consequence rather than relying on the adjective.
+- State a claim's assumptions and limits once, plainly and nearby. Do not
+  repeat caveats until they obscure the guarantee.
+- Prefer mechanical, falsifiable comparisons over claims about entire product
+  categories. Name what APPA checks, prevents, or preserves.
+- State guarantees at guide level and keep the rules or proof that support
+  them in the spec.
 
-**Rhythm**
+**Style and structure**
 
-- No sentence fragments for emphasis, and no one-sentence paragraphs.
-  Paragraphs run three sentences or more.
-- Never announce importance. `deliberately`, `load-bearing`, "The point:",
-  "The central thesis:" all tell the reader that something matters instead
-  of letting it matter — and in a spec everything is deliberate.
-- Antithesis ("X, not Y") earns one instance per page. The 2026-07 spec
-  draft had 25.
-
-**Structure**
-
-- Headings assert the invariant — "Labels only move one way", not "How the
-  label moves" — so skimming collects the guarantees.
-- A paragraph's best sentence is usually its last. Move it to the front and
-  delete the warm-up.
-- Perceived reading cost decides whether a section is read at all. Prefer a
-  code line to a sentence describing code, a table to parallel prose, an
-  asserting heading to a topic heading.
+- Prefer direct, complete sentences and paragraphs with one clear job. A
+  one-sentence paragraph is fine when another sentence would be filler.
+- Use headings that make the document easy to scan. Assert invariants in
+  explanatory material; use topic headings where lookup is the purpose.
+- Avoid repeated antithesis, sentence fragments used only for emphasis, and
+  phrases that announce importance instead of showing it.
+- Prefer code, tables, or lists when they communicate the same information
+  with lower reading cost. Treat rhythm as an editing judgment, not a quota.
 
 ## Rust guidelines
 
