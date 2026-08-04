@@ -22,7 +22,12 @@ from tau2.runner import get_tasks, run_tasks
 from tau2.scripts.leaderboard.verify_trajectories_public import check_num_trials, check_tasks
 
 from appa_taubench.agent import create_appa_agent, drain_stats
-from appa_taubench.evaluation import evaluator_session, preflight_nl_judge
+from appa_taubench.evaluation import (
+    TASK_102_ASSERTION,
+    audit_task_102_atomic,
+    evaluator_session,
+    preflight_nl_judge,
+)
 from appa_taubench.knowledge import DOMAIN, discoverable_tools, model_tools, policy_tool_names
 from appa_taubench.native import BINDING_IDENTITY, Allowed, Blocked, FrameworkSession
 from appa_taubench.policies import Policy, load_policy
@@ -265,8 +270,8 @@ def validate_task_inventory(tasks: list) -> None:
         raise RuntimeError("the pinned Tau task/action inventory changed")
     if [str(task.id) for task in nl_tasks] != ["task_102"]:
         raise RuntimeError("the pinned Tau NL-assertion inventory changed")
-    if len(nl_tasks[0].evaluation_criteria.nl_assertions or []) != 1:
-        raise RuntimeError("task_102 must contain its single NL assertion")
+    if (nl_tasks[0].evaluation_criteria.nl_assertions or []) != [TASK_102_ASSERTION]:
+        raise RuntimeError("the pinned task-102 NL assertion changed")
     if any(task.initial_state is not None and task.initial_state.message_history for task in tasks):
         raise RuntimeError("APPA's text agent requires the pinned tasks to begin without message history")
 
@@ -558,6 +563,7 @@ def _execute_bench(
             save_path=output_dir / "results.json",
             save_dir=output_dir,
         )
+        audit_task_102_atomic(results, judge_model, dict(spec.judge_model_args))
 
     validate_run_integrity(results, len(tasks), num_trials)
     evaluator_records = validate_evaluator_audits(output_dir, results, judge_model, review_model)

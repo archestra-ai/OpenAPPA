@@ -90,6 +90,7 @@ def _evaluator_records(audit_dir: Path) -> list[dict]:
             raise ValueError(f"invalid evaluator audit: {path}") from error
         if record.get("format_version") != 2 or record.get("kind") not in {
             "nl_assertion",
+            "nl_assertion_atomic_audit",
             "nl_assertion_preflight",
             "user_review",
         }:
@@ -141,10 +142,18 @@ def validate_evaluator_audits(
             raise ValueError(f"simulation {run.id} has {len(accepted_reviews)} accepted user_review audits")
         nl_records = sorted(by_call[(run.id, "nl_assertion")], key=lambda record: record["timestamp"])
         accepted_nl = [record for record in nl_records if record["contract_status"] == "accepted"]
+        atomic_records = sorted(by_call[(run.id, "nl_assertion_atomic_audit")], key=lambda record: record["timestamp"])
+        accepted_atomic = [record for record in atomic_records if record["contract_status"] == "accepted"]
         if expected_nl and len(accepted_nl) != 1:
             raise ValueError(f"simulation {run.id} has {len(accepted_nl)} accepted nl_assertion audits")
+        if expected_nl and len(accepted_atomic) != 1:
+            raise ValueError(
+                f"simulation {run.id} has {len(accepted_atomic)} accepted nl_assertion_atomic_audit records"
+            )
         if not expected_nl and accepted_nl:
             raise ValueError(f"simulation {run.id} has unexpected nl_assertion audits")
+        if not expected_nl and accepted_atomic:
+            raise ValueError(f"simulation {run.id} has unexpected nl_assertion_atomic_audit records")
         review = run.user_only_review
         review_cost = accepted_reviews[0].get("cost")
         if review is not None and review.cost != review_cost:
@@ -395,6 +404,9 @@ def build_run_summary(
             "user": sum(outcome["user_model_calls"] for outcome in outcomes),
             "user_review": sum(record["kind"] == "user_review" for record in evaluator_records),
             "nl_assertion_judge": sum(record["kind"] == "nl_assertion" for record in evaluator_records),
+            "nl_assertion_atomic_audit": sum(
+                record["kind"] == "nl_assertion_atomic_audit" for record in evaluator_records
+            ),
             "nl_assertion_preflight": sum(record["kind"] == "nl_assertion_preflight" for record in evaluator_records),
             "discarded_agent_attempts": sum(
                 record.get("stats", {}).get("completions", 0)
@@ -409,6 +421,7 @@ def build_run_summary(
             "user": sum(outcome["user_cost"] or 0 for outcome in outcomes),
             "user_review": evaluator_costs["user_review"],
             "nl_assertion_judge": evaluator_costs["nl_assertion"],
+            "nl_assertion_atomic_audit": evaluator_costs["nl_assertion_atomic_audit"],
             "nl_assertion_preflight": evaluator_costs["nl_assertion_preflight"],
             "discarded_attempt_evaluators": sum(
                 value for key, value in evaluator_costs.items() if key.startswith("discarded_")
@@ -430,6 +443,7 @@ def build_run_summary(
             "user",
             "user_review",
             "nl_assertion_judge",
+            "nl_assertion_atomic_audit",
             "nl_assertion_preflight",
             "discarded_attempt_evaluators",
             "discarded_agent_attempts",

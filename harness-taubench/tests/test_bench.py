@@ -1,3 +1,4 @@
+import json
 import tomllib
 from contextlib import nullcontext
 from dataclasses import replace
@@ -187,12 +188,18 @@ def test_evaluator_rejects_coerced_judgments_and_incomplete_user_reviews() -> No
             '{"requirement":"recommend TechFlow","evidence":"agent did","met":true}],'
             '"reasoning":"yes","metExpectation":"true"}]}'
         )
+    atomic_results = [
+        {
+            "expectedOutcome": assertion,
+            "criteria": [{"requirement": assertion, "evidence": "evidence", "met": True}],
+            "reasoning": "met",
+            "metExpectation": True,
+        }
+        for assertion in evaluation_module.TASK_102_ATOMIC_ASSERTIONS
+    ]
+    atomic_results[0]["metExpectation"] = False
     with pytest.raises(EvaluatorContractError, match="inconsistent with its clauses"):
-        _validate_raw_nl_response(
-            '{"results":[{"expectedOutcome":"recommend TechFlow","criteria":['
-            '{"requirement":"exclude Ember","evidence":"agent recommended Ember","met":false}],'
-            '"reasoning":"Ember was not excluded","metExpectation":true}]}'
-        )
+        evaluation_module._validate_raw_atomic_response(json.dumps({"results": atomic_results}))
     with pytest.raises(EvaluatorContractError, match="empty user message"):
         _parse_user_review(
             '{"summary":"deviated","errors":[{"turn_idx":2,"severity":"critical_hindered",'
@@ -241,15 +248,14 @@ def test_evaluator_session_restores_tau_globals(tmp_path) -> None:
     ) == original
 
 
-def test_nl_judge_receives_authoritative_expectation_rules_and_records_acceptance(monkeypatch, tmp_path) -> None:
+def test_score_judge_preserves_tau_prompt_and_records_acceptance(monkeypatch, tmp_path) -> None:
     captured = {}
 
     def generate(**kwargs):
         captured.update(kwargs)
         return AssistantMessage.text(
-            '{"results":[{"expectedOutcome":"recommend TechFlow","criteria":['
-            '{"requirement":"recommend TechFlow","evidence":"agent did","met":true}],'
-            '"reasoning":"all clauses met","metExpectation":true}]}',
+            '{"results":[{"expectedOutcome":"recommend TechFlow",'
+            '"reasoning":"the agent recommended it","metExpectation":true}]}',
             raw_data={"model": "provider/judge"},
             cost=0.01,
         )
@@ -262,13 +268,74 @@ def test_nl_judge_receives_authoritative_expectation_rules_and_records_acceptanc
     )
 
     assert response.cost == 0.01
-    assert "authoritative expected outcomes" in captured["messages"][0].content
-    assert "must equal the conjunction" in captured["messages"][0].content
+    assert captured["messages"][0].content == "Grade the result."
     [audit_path] = list(tmp_path.glob("*.json"))
-    audit = __import__("json").loads(audit_path.read_text())
+    audit = json.loads(audit_path.read_text())
     assert audit["format_version"] == 2
     assert audit["contract_status"] == "accepted"
     assert audit["contract_error"] is None
+
+
+def test_task_102_atomic_audit_is_separate_from_scoring(monkeypatch, tmp_path) -> None:
+    captured = {}
+
+    def generate(**kwargs):
+        captured.update(kwargs)
+        results = [
+            {
+                "expectedOutcome": assertion,
+                "criteria": [{"requirement": assertion, "evidence": f"evidence {index}", "met": index != 2}],
+                "reasoning": f"evidence {index}",
+                "metExpectation": index != 2,
+            }
+            for index, assertion in enumerate(evaluation_module.TASK_102_ATOMIC_ASSERTIONS)
+        ]
+        return AssistantMessage.text(
+            json.dumps({"results": results}),
+            raw_data={"model": "provider/judge"},
+            cost=0.02,
+        )
+
+    simulation = SimpleNamespace(
+        id="simulation-102",
+        task_id="task_102",
+        get_messages=lambda: [UserMessage.text("Ember is three years old."), AssistantMessage.text("Use TechFlow.")],
+    )
+    results = SimpleNamespace(simulations=[simulation])
+    monkeypatch.setattr(evaluation_module, "_original_nl_generate", generate)
+    monkeypatch.setattr(evaluation_module, "_audit_dir", tmp_path)
+
+    evaluation_module.audit_task_102_atomic(results, "requested/judge", {"temperature": 0})
+
+    assert captured["call_name"] == "nl_assertions_atomic_audit"
+    assert all(
+        assertion in captured["messages"][1].content for assertion in evaluation_module.TASK_102_ATOMIC_ASSERTIONS
+    )
+    [audit_path] = list(tmp_path.glob("*.json"))
+    audit = json.loads(audit_path.read_text())
+    assert audit["kind"] == "nl_assertion_atomic_audit"
+    assert audit["tau_simulation_id"] == simulation.id
+    assert audit["contract_status"] == "accepted"
+
+
+def test_task_102_score_passes_the_compound_assertion_to_tau_unchanged(monkeypatch) -> None:
+    captured = []
+
+    def evaluate(cls, trajectory, assertions):
+        captured.extend(assertions)
+        return [NLAssertionCheck(nl_assertion=assertions[0], met=False, justification="stock judgment")]
+
+    monkeypatch.setattr(
+        evaluation_module,
+        "_original_nl_evaluate",
+        SimpleNamespace(__func__=evaluate),
+    )
+
+    checks = evaluation_module._strict_nl_evaluate(object, [], [evaluation_module.TASK_102_ASSERTION])
+
+    assert captured == [evaluation_module.TASK_102_ASSERTION]
+    assert checks[0].nl_assertion == evaluation_module.TASK_102_ASSERTION
+    assert checks[0].met is False
 
 
 def test_user_reviewer_retries_malformed_judgments(monkeypatch) -> None:

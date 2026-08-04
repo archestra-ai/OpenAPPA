@@ -1,16 +1,17 @@
-# The first paid Tau pilot leaves three remaining gates
+# The corrected Tau pilot found two evaluator defects
 
-The 30-trajectory matched pilot completed without an infrastructure or audit
-failure. Its contradictory task-102 judgments and ambiguous retrieval,
-tool-failure, and context metrics are fixed and validated against the original
-pilot artifacts. Do not launch the 388-simulation run until these gates clear.
+The corrected 30-trajectory matched pilot completed without an infrastructure
+or audit failure. Guarded scored 6/10, permissive 4/10, and stock 4/10 at the
+same task/trial/seed identities. Retrieval and context growth remained
+heavy-tailed in every arm. Do not launch the 388-simulation run until these
+gates clear.
 
-- [ ] **Rerun and scrutinize the matched ten-task pilot.** Re-run tasks 001,
-  004, 010, 026, 032, 046, 050, 055, 072, and 102 under guarded, permissive, and
-  stock Tau. Review all 30 trajectories and require complete evaluator/APPA
-  evidence. Keep user deviations in their scheduled results, including
-  premature actions, post-transfer continuation, invented facts or tools, and
-  continuing after a tool result reports failure.
+- [ ] **Rerun and scrutinize the matched ten-task pilot after the fix.**
+  Re-run tasks 001, 004, 010, 026, 032, 046, 050, 055, 072, and 102 under
+  guarded, permissive, and stock Tau. Review all 30 trajectories and require
+  complete evaluator/APPA evidence and exact atomic task-102 audits. Preserve
+  Tau's diagnostic user reviews unchanged and manually classify their known
+  provenance and conditional-instruction false positives.
 
 - [ ] **Freeze and budget the final configuration.** Confirm the requested and
   provider-resolved agent, user, judge, and reviewer models; retrieval identity;

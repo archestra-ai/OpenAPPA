@@ -10,7 +10,7 @@ from threading import Lock
 from uuid import uuid4
 
 from tau2.data_model.message import AssistantMessage, Message, SystemMessage, UserMessage
-from tau2.data_model.simulation import NLAssertionCheck, UserOnlyReviewError
+from tau2.data_model.simulation import NLAssertionCheck, Results, UserOnlyReviewError
 from tau2.data_model.tasks import Task
 from tau2.evaluator import evaluator_nl_assertions as nl_module
 from tau2.evaluator import review_llm_judge_user_only as review_module
@@ -41,7 +41,20 @@ USER_REVIEW_TAGS = {
     "other",
 }
 USER_REVIEW_SEVERITIES = {"minor", "critical_helped", "critical_hindered"}
-NL_JUDGE_SYSTEM_PROMPT = """
+TASK_102_ASSERTION = (
+    "The agent should recommend TechFlow Labs (not Ember Analytics) for the Sky Blue Account referral, "
+    "recognizing that Ember Analytics exceeds the 4-year company age limit for Sky Blue eligibility."
+)
+TASK_102_ATOMIC_ASSERTIONS = (
+    "The agent should recommend TechFlow Labs for the Sky Blue Account referral, regardless of the agent's "
+    "stated reason.",
+    "The agent should not recommend Ember Analytics for the Sky Blue Account referral; recommending Ember "
+    "Analytics for a different account does not violate this outcome.",
+    "The agent should recognize that Ember Analytics exceeds Sky Blue's 4-year company age limit. For this "
+    "evaluation, Ember Analytics incorporated in 2020 and is 5 years old; the customer's conflicting claim is "
+    "intentionally mistaken.",
+)
+TASK_102_AUDIT_SYSTEM_PROMPT = """
 TASK
 You will receive authoritative expected outcomes and a benchmark conversation
 between an agent and a simulated customer. Evaluate whether the agent satisfies
@@ -50,6 +63,9 @@ ground truth even when the customer states a conflicting belief; the customer
 may be intentionally mistaken.
 
 METHOD
+Evaluate every provided expected outcome independently. Do not make one outcome
+conditional on another or import a reason from another outcome. The caller may
+have already split a compound benchmark outcome into atomic outcomes.
 Decompose each expected outcome into the minimum independently verifiable
 criteria. Include every clause, contrast, exclusion, and stated reason. A
 recommendation of an explicitly excluded alternative is a failure. For each
@@ -132,21 +148,14 @@ def evaluator_session(
 
 
 def _tracked_nl_generate(**kwargs) -> AssistantMessage:
-    request = dict(kwargs)
-    request["messages"] = [
-        message.model_copy(update={"content": NL_JUDGE_SYSTEM_PROMPT})
-        if isinstance(message, SystemMessage)
-        else message
-        for message in kwargs.get("messages", [])
-    ]
-    response = _original_nl_generate(**request)
+    response = _original_nl_generate(**kwargs)
     kind = "nl_assertion" if _current_simulation_id.get() is not None else "nl_assertion_preflight"
     try:
         _validate_raw_nl_response(response.content)
     except EvaluatorContractError as error:
-        _record_call(kind, request, response, contract_error=str(error))
+        _record_call(kind, kwargs, response, contract_error=str(error))
         raise
-    _record_call(kind, request, response)
+    _record_call(kind, kwargs, response)
     return response
 
 
@@ -209,7 +218,6 @@ def _validate_raw_nl_response(response: str | None) -> None:
     for result in data["results"]:
         if not isinstance(result, dict) or not {
             "expectedOutcome",
-            "criteria",
             "reasoning",
             "metExpectation",
         } <= set(result):
@@ -220,20 +228,44 @@ def _validate_raw_nl_response(response: str | None) -> None:
             raise EvaluatorContractError("NL assertion judge returned an empty justification")
         if type(result["metExpectation"]) is not bool:
             raise EvaluatorContractError("NL assertion judge returned a non-boolean judgment")
+
+
+def _validate_raw_atomic_response(response: str | None) -> None:
+    if not isinstance(response, str):
+        raise EvaluatorContractError("atomic NL audit returned no text")
+    try:
+        data = json.loads(response)
+    except json.JSONDecodeError as error:
+        raise EvaluatorContractError("atomic NL audit did not return JSON") from error
+    if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+        raise EvaluatorContractError("atomic NL audit returned an invalid result envelope")
+    expected = list(TASK_102_ATOMIC_ASSERTIONS)
+    actual = [result.get("expectedOutcome") for result in data["results"] if isinstance(result, dict)]
+    if actual != expected:
+        raise EvaluatorContractError(
+            f"atomic NL audit returned {len(actual)} ordered judgments for {len(expected)} assertions"
+        )
+    for result in data["results"]:
+        if not {"expectedOutcome", "criteria", "reasoning", "metExpectation"} <= set(result):
+            raise EvaluatorContractError("atomic NL audit returned an invalid judgment")
+        if not isinstance(result["reasoning"], str) or not result["reasoning"].strip():
+            raise EvaluatorContractError("atomic NL audit returned an empty justification")
+        if type(result["metExpectation"]) is not bool:
+            raise EvaluatorContractError("atomic NL audit returned a non-boolean judgment")
         criteria = result["criteria"]
         if not isinstance(criteria, list) or not criteria:
-            raise EvaluatorContractError("NL assertion judge returned no clause judgments")
+            raise EvaluatorContractError("atomic NL audit returned no clause judgments")
         for criterion in criteria:
             if not isinstance(criterion, dict) or set(criterion) != {"requirement", "evidence", "met"}:
-                raise EvaluatorContractError("NL assertion judge returned an invalid clause judgment")
+                raise EvaluatorContractError("atomic NL audit returned an invalid clause judgment")
             if not isinstance(criterion["requirement"], str) or not criterion["requirement"].strip():
-                raise EvaluatorContractError("NL assertion judge returned an empty clause")
+                raise EvaluatorContractError("atomic NL audit returned an empty clause")
             if not isinstance(criterion["evidence"], str) or not criterion["evidence"].strip():
-                raise EvaluatorContractError("NL assertion judge returned a clause without evidence")
+                raise EvaluatorContractError("atomic NL audit returned a clause without evidence")
             if type(criterion["met"]) is not bool:
-                raise EvaluatorContractError("NL assertion judge returned a non-boolean clause judgment")
+                raise EvaluatorContractError("atomic NL audit returned a non-boolean clause judgment")
         if result["metExpectation"] != all(criterion["met"] for criterion in criteria):
-            raise EvaluatorContractError("NL assertion judge returned a verdict inconsistent with its clauses")
+            raise EvaluatorContractError("atomic NL audit returned a verdict inconsistent with its clauses")
 
 
 def _strict_nl_evaluate(
@@ -250,6 +282,57 @@ def _strict_nl_evaluate(
         except EvaluatorContractError as error:
             last_error = error
     raise last_error
+
+
+def _has_accepted_atomic_audit(simulation_id: str) -> bool:
+    if _audit_dir is None:
+        return False
+    for path in _audit_dir.glob(f"{simulation_id}-nl_assertion_atomic_audit-*.json"):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if record.get("contract_status") == "accepted":
+            return True
+    return False
+
+
+def audit_task_102_atomic(results: Results, judge_model: str, judge_args: dict) -> None:
+    """Audit task 102's atomic clauses without changing Tau's scored judgment."""
+    simulations = [simulation for simulation in results.simulations if str(simulation.task_id) == "task_102"]
+    for simulation in simulations:
+        if _has_accepted_atomic_audit(simulation.id):
+            continue
+        trajectory = "\n".join(f"{message.role}: {message.content}" for message in simulation.get_messages())
+        request = {
+            "model": judge_model,
+            "messages": [
+                SystemMessage(role="system", content=TASK_102_AUDIT_SYSTEM_PROMPT),
+                UserMessage(
+                    role="user",
+                    content=f"conversation:\n{trajectory}\n\nexpectedOutcomes:\n{list(TASK_102_ATOMIC_ASSERTIONS)}",
+                ),
+            ],
+            "call_name": "nl_assertions_atomic_audit",
+            **judge_args,
+        }
+        token = _current_simulation_id.set(simulation.id)
+        try:
+            last_error = EvaluatorContractError("atomic NL audit returned an invalid result")
+            for _ in range(MAX_NL_ASSERTION_ATTEMPTS):
+                response = _original_nl_generate(**request)
+                try:
+                    _validate_raw_atomic_response(response.content)
+                except EvaluatorContractError as error:
+                    last_error = error
+                    _record_call("nl_assertion_atomic_audit", request, response, contract_error=str(error))
+                    continue
+                _record_call("nl_assertion_atomic_audit", request, response)
+                break
+            else:
+                raise last_error
+        finally:
+            _current_simulation_id.reset(token)
 
 
 def _strict_user_review(cls, *args, **kwargs):
@@ -349,8 +432,8 @@ def preflight_nl_judge(task: Task) -> None:
     """Obtain one valid positive task judgment before starting simulations."""
     criteria = task.evaluation_criteria
     assertions = [] if criteria is None else criteria.nl_assertions or []
-    if len(assertions) != 1:
-        raise EvaluatorContractError("judge preflight task must contain exactly one NL assertion")
+    if assertions != [TASK_102_ASSERTION]:
+        raise EvaluatorContractError("judge preflight task does not contain the pinned task-102 assertion")
     trajectory = [
         UserMessage.text("Which startup should receive the one available referral?"),
         AssistantMessage.text(

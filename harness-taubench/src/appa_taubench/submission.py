@@ -33,7 +33,10 @@ DISCLOSURE = (
     "success claim after an errored Tau tool result and a text response that abandons a recoverable policy block "
     "with fixed refusals. Submitted Tau trajectories contain the actual dispatched calls and delivered results; "
     "the accompanying appa-audit directory "
-    "retains raw completions, policy decisions, pre-rewrite calls, and original tool results."
+    "retains raw completions, policy decisions, pre-rewrite calls, and original tool results. Tau's score-bearing "
+    "prompt and verdict logic are unchanged. Its diagnostic user-review prompt is retained, with schema validation "
+    "and normalization recorded in the audit. A separate task-102 audit evaluates three pinned atomic outcomes "
+    "without altering the reward."
 )
 
 
