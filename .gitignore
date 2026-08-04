@@ -17,5 +17,6 @@ target-*/
 .envrc
 harness-taubench/runs/
 harness-taubench/.tau2-bench/
+harness-taubench/data/.embeddings_cache/
 __pycache__/
 *.py[cod]
