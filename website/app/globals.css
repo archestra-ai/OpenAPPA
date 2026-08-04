@@ -101,10 +101,10 @@ samp {
   font-family: var(--font-mono);
 }
 
-/* chrome keeps the mono identity */
+/* chrome and navigation use sans font for consistency */
 .site-header,
 .toc {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
 }
 
 ::selection {

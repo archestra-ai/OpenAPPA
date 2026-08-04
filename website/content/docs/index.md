@@ -32,7 +32,6 @@ And where it is genuinely unavoidable, OpenAPPA also lets you plug in non-determ
 
 ## Where next
 
-- [Explainer](/docs/explainer) — the problem and the boundary, one figure at a time.
 - [How OpenAPPA works](/docs/how-it-works) — the whole model in one sitting.
 - [Reading a policy](/docs/contracts) — what each declaration means, and what a wrong one looks like.
 - [Evaluating OpenAPPA](/docs/evaluation) — empirical paper results and running bench-corp.

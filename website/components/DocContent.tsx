@@ -1,3 +1,5 @@
+"use client";
+
 import { Fragment, type AnchorHTMLAttributes, type HTMLAttributes, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
