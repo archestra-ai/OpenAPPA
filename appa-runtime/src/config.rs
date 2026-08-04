@@ -1418,7 +1418,7 @@ resolver = { url = "https://a", timeout_ms = 999999 }
 
     #[test]
     fn documented_configs_parse() {
-        let doc = include_str!("../../docs/contracts.md");
+        let doc = include_str!("../../website/content/docs/contracts.md");
         let mut blocks = 0;
         for block in doc.split("```toml").skip(1) {
             let toml = block.split("```").next().unwrap_or("");

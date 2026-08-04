@@ -1,0 +1,6 @@
+# pnpm refuses to install until every dependency with a build script has a
+# recorded decision (pnpm 11 errors, pnpm 10 warns). Next pulls sharp in for
+# image optimization; the lockfile carries its prebuilt binaries, so approving
+# it verifies a binary rather than compiling one.
+allowBuilds:
+  sharp: true

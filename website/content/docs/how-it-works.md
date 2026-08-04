@@ -5,120 +5,58 @@ order: 2
 description: The whole model in one sitting — what OpenAPPA guarantees and what it costs.
 ---
 
-## What OpenAPPA does
+## OpenAPPA enforces information-flow policy before tool dispatch
 
-OpenAPPA sits between an agent and its tools and answers one question before
-every call: may this data go there? It either allows the call, or refuses it
-and names what would make it pass. To answer, the engine does not look at
-the call alone: everything the agent has read so far folds into one running
-label, and the tool's contract is checked against that — so the same call is
-legal early in a run and refused once the agent has touched a customer
-record.
+OpenAPPA sits between an agent and its tools to answer one question before every call: may this data go there? The engine either allows the proposed tool dispatch or refuses it with the exact steps that would make it pass. Rather than evaluating the call in isolation, OpenAPPA folds everything the agent has read so far into a running label and evaluates tool contracts against that state. As a result, a tool call that is legal early in a trajectory is refused once the agent touches sensitive data.
 
-**The label** travels with the data and has two dimensions: an audience —
-the set of readers it may reach, `public` meaning everyone — and a trust
-rank, `suspicious` below `trusted`. Reading anything folds its label into
-the run's — the audiences intersect, the lower trust wins — and it stays
-folded for the rest of the run.
+| Runtime State | Scope | Engine Semantics |
+|---|---|---|
+| **Label** | Trajectory | Tracks audience (allowed reader set) and trust rank (`suspicious` vs `trusted`). Reading data intersects audiences and takes the lowest trust rank. |
+| **Log** | Trajectory | Append-only record of execution history, recording tool dispatches, narrowing acceptances, authority approvals, and denials. |
 
-**The log** travels with the run: an append-only record of what already
-happened — sends, approvals, denials.
-
-Policy is declarative — contracts, authorities, sanitizers and casts are
-data, never code. Judgment isn't, so it lives outside the engine — whether
-a fetched page is trustworthy, whether this send may go — in components you
-register: a regex, a classifier, a human on a pager. Registration fixes
-what an answer may do: an authority's mandate names which gaps its rulings
-cover and how far, a sanitizer's the one label transition it may claim.
+Policy rules stay strictly declarative: contracts, authorities, sanitizers, and casts are data configurations rather than imperative code. Imperative judgment lives outside the engine in registered external components like regex filters, classification models, or human approval queues. Component registration bounds what an answer can grant: an authority mandate limits which policy gaps its rulings cover, while a sanitizer mandate bounds the single label transition its derivations can claim.
 
 ## Labels only move one way
 
-A tool's contract declares its `delta` — what taking the call's result
-into the run does to the label. Every delta restricts: it intersects the
-readers, lowers the trust, or both. No delta widens. So reading the
-internal CRM makes the run internal, reading something suspicious makes the
-run suspicious, and nothing afterwards makes it public or trusted again —
-no tool, no approval, no clever sequence of steps.
+A tool contract declares its `delta` to define how consuming a call result modifies the trajectory label. Every `delta` restricts access by intersecting audiences, lowering trust ranks, or both. Because no `delta` can widen permissions, reading an internal system permanently marks the trajectory as internal, and touching suspicious content permanently drops trust. No subsequent tool dispatch, authority approval, or sequence of steps can restore public or trusted status to that trajectory label.
 
 :::fig-label-fold:::
 
-You never replay a run to know where it stands; the current label is a fold
-over every delta so far:
+The current label is calculated directly as a functional fold over all preceding deltas, eliminating the need to replay trajectory history:
 
 ```ts
 label = deltasSoFar.reduce(narrow, startingLabel)   // narrow only ever restricts
 ```
 
-And a run cannot be laundered: no step in the system moves a label up, so
-there is no sequence of calls that walks a secret back into a public
-context. The obvious objection is that the agent can then never mail an
-outsider. It can — an approval admits one specific call without touching
-the label, and a second mail needs a second approval; a whole ongoing
-exchange forks into a child instead, where the outsider's replies narrow
-only the child and die with the thread.
+Trajectories cannot be laundered because no step in the system can increase label permissions. While this rule prevents an agent from sending internal data to an outside recipient directly, the agent can still complete external interactions. A registered authority can approve a single external call without altering the trajectory label, or an interactive exchange can fork into a child trajectory where external responses narrow only the isolated child context.
 
 ## Reading data costs the agent reach
 
-OpenAPPA runs two checks on every call. One asks whether the flow is legal.
-The other asks whether it is worth it.
+OpenAPPA stops an agent *before* a fetch that restricts its label, informing it of lost reach before data enters its context. Reading internal data does not leak information by itself, but it restricts all future steps in the trajectory to an internal context. Sinks requiring public reach become permanently unavailable, and previously unconstrained dispatches require explicit approval.
 
-Nothing leaks when an agent reads the internal CRM. But the run is internal
-from that moment on, and it stays internal — so every later step negotiates
-from a worse position. Sends that would have gone through now need approval.
-Some sinks are closed for good.
-
-Without that check the agent finds that out three steps later, at a send
-that no longer works, with the data already in its context and nothing to
-be done about it. So OpenAPPA stops the call *before* the fetch and tells
-the agent exactly what it is about to give up — a stop it calls a
-**narrowing**. If the agent still wants the data, it accepts on the record
-and the call proceeds; a later call that restricts nothing further passes
-without stopping, so the question is asked once per step down, not once per
-call. No approver is involved and nothing is granted here — going down is
-free, and reaching above the label takes an authority, one call at a time.
+By evaluating the step before dispatch, OpenAPPA prevents scenarios where an agent ingests data only to discover three steps later that outbound dispatches are blocked. The engine presents this pre-fetch choice as a **narrowing** stop. If the agent accepts the narrowing, the acceptance is recorded in the log and the call proceeds. Subsequent steps that cause no additional restriction pass without stopping, so narrowing prompts occur once per level of increased restriction.
 
 ## A child's narrowing dies with it
 
-The fork that carried the outsider exchange is a host capability with
-fixed rules. A child starts at the parent's current label, and everything
-it reads narrows the child alone. It returns at most one value, over one
-channel, and the return folds into the parent like any other read — so a
-raw return that would narrow the parent stops at the merge, to be accepted
-or passed through a registered sanitizer that clears it. The branches
-share one log throughout: the child's sends and approvals sit on the
-parent's record, and the fork scopes only the label.
+Child trajectories isolate label modifications within host-managed sub-executions. A child starts with the parent trajectory's current label, but any data read within the child narrows the child's label exclusively. When the child completes, it returns a single value across its boundary that folds into the parent trajectory like any other tool read. If that raw return would narrow the parent, the merge stops at the boundary until accepted directly or cleaned through a registered sanitizer. Parent and child branches share a single append-only log so that all sends and approvals remain globally auditable.
 
-## A refusal comes with the ways out
+## Engine refusals enumerate every sound remedy
 
-When OpenAPPA refuses a flow it returns the remedies: get an approval,
-clean the data first, run a step the contract requires first, accept the
-narrowing. Every remedy but the acceptance comes from something you
-registered — an authority that can approve, a sanitizer that can clean, a
-tool that does the missing step — so the engine can enumerate them all, and
-the refusal the agent sees is one object:
+An empty remedy list in a refusal is a proof that no legal flow exists under the active policy configuration and execution log. When OpenAPPA blocks a flow, it returns a structured object containing every sound path forward: requesting an authority approval, cleaning data with a sanitizer, executing a prerequisite tool call, or accepting a narrowing prompt. Because every remedy except narrowing acceptance derives from a registered component, the engine enumerates all valid options in a single refusal object:
 
 ```ts
 { outcome: "block",
-  requirement_gaps: [...],  // the unmet entries of `requires`
-  narrowing: {...},         // present when the call's own delta fired
-  unestablished: [...],     // values whose label could not be established
-  remedy_plans: [...] }     // every sound way out: most run by id,
-                            // the rest name a call the agent makes itself
+  requirement_gaps: [...],  // unmet entries from `requires`
+  narrowing: {...},         // present when the call's own delta narrows
+  unestablished: [...],     // values whose labels could not be established
+  remedy_plans: [...] }     // sound remedy plans executable by id or tool call
 ```
 
-A nonempty list says a route exists — not that it works: the
-authority can still decline, and the denial is recorded. An empty list is a
-proof that under this configuration no route exists, so the agent can stop
-and say so instead of burning turns on the same call — a proof scoped to
-the configuration in force, to what the registered components answered at
-that moment, and to any denial already on record for this exact call.
+A non-empty remedy list indicates that candidate paths exist, though external components may still decline a requested ruling. When an authority denies a request, that denial is appended to the log. The refusal proof remains scoped to the current configuration, active component responses, and recorded denials for that specific call.
 
-## One fetch, two endings
+## Branching in a child isolates label narrowing
 
-An agent has three tools: pull a ticket from the internal CRM, send email,
-file a public GitHub issue. The contracts say what each does — the CRM read
-makes the run internal, the send needs its recipient among the run's
-readers, the filing needs the run to be public.
+To illustrate policy enforcement, consider an agent configured with three tools: `get_ticket_from_crm`, `send_email`, and `file_github_issue`. The CRM tool contract declares a `delta` that restricts the trajectory to internal reach, `send_email` requires the recipient to match the trajectory audience, and `file_github_issue` requires public reach.
 
 ```toml
 [[tool]]
@@ -157,179 +95,84 @@ can_add_readers = { may_add = ["public"] } # may vouch any recipient
 resolver = { url = "https://approvals.corp/rule", timeout_ms = 30000 }
 ```
 
-The starting label is configuration, and this deployment uses the neutral
-`{public, trusted}`, since nothing has been read yet. A deployment whose
-users paste customer names into the first prompt starts restricted
-instead — a secret typed at the agent enters before any contract can label
-it. The agent's first call is
-`get_ticket_from_crm()`, and OpenAPPA stops it — nothing leaks by reading a
-ticket, but the run would go from public to internal, and after that the
-GitHub tool is closed for the rest of the run. The agent gets the choice up
-front:
+The trajectory begins at `{public, trusted}` unless pre-existing context or user input introduces restricted labels. When the agent calls `get_ticket_from_crm()`, OpenAPPA intercepts the dispatch before execution. The engine offers two operational paths based on the deployment's branching capabilities:
 
-| the agent's move | the parent run |
-|---|---|
-| accept the narrowing | internal from here on; GitHub closed |
-| fetch in a child, return through `remove_pii` | stays public; GitHub open |
-
-The refusal itself lists only the acceptance; the branch is the agent's own
-move, and it needs a host that can branch and hold the raw return back — in
-a deployment that can't, the acceptance is all there is.
+| Execution Path | Trajectory Label Impact | Downstream Dispatch Impact |
+|---|---|---|
+| **Accept Narrowing** | Parent becomes `internal`. | `file_github_issue` is blocked; `send_email` requires authority approval. |
+| **Child Branch + Sanitizer** | Parent remains `{public, trusted}`; child narrows to `internal`. | `remove_pii` sanitizes the return value; `file_github_issue` remains open on parent. |
 
 :::fig-two-endings:::
 
-Say the job is to file the ticket publicly: the agent takes the child
-route, the parent stays public, and `file_github_issue` passes with nothing
-to negotiate. Say instead the job is to email the raw ticket to an outside
-auditor: the agent accepts the narrowing, the run becomes internal, and
-`send_email(ticket, auditor@…)` resolves its requirement against the actual
-argument — the run's readers must include the auditor, and `internal` does
-not. This is a second and separate gate; accepting the narrowing was the
-agent's own call and granted no permission to disclose anything.
+If the goal is publishing the ticket on GitHub, the agent executes the child branch, passes the result through `remove_pii`, and files the public issue without modifying the parent label. If the goal is emailing raw CRM data to an external auditor, the agent accepts the narrowing in the parent trajectory. When `send_email(ticket, auditor@…)` subsequently runs, the engine checks whether `auditor@…` is in the `internal` audience. Because it is not, OpenAPPA blocks the call and generates an authority remedy plan for `disclosure-officer`.
 
-The remedy is a ruling. What reaches the approver is OpenAPPA's own account
-of the call rather than the agent's: which tool, bound to these exact
-arguments by a digest, going to this auditor, over data that came from the
-CRM at this label — the message body included, since ruling on a disclosure
-means seeing it, so register an approver you would show the data to. On
-approval the mail goes, `egress` lands in the log, and the label does not
-change — a second auditor email needs a second approval.
+The authority ruling receives a complete cryptographic manifest of the call, including argument digests, source labels, and message content. If `disclosure-officer` approves the request, the email dispatches and the egress event enters the log. The trajectory label remains `internal`, ensuring that subsequent emails to unapproved recipients require separate authority rulings.
 
-## You don't have to annotate every tool
+## Unknown labels propagate until a requirement checks them
 
-A real deployment has fifty tools, and you will not write fifty contracts
-before the first run. Every tool the agent may call is registered, but a
-registration can be a bare name — annotate the ones that matter. Such a
-tool returns data
-whose label is **Unknown** — not a low trust rank, but a fact you have not
-established yet — and Unknown spreads, so once the run has read one unknown
-value the run's label is unknown too. A tool that is not registered at all
-is a different case: a call naming it is refused as unknown rather than run
-at Unknown.
+Unannotated tools return data with an **Unknown** label state, representing unverified classification rather than a specific trust rank. Unknown labels propagate through trajectory operations, causing any trajectory that ingests an unknown value to become Unknown. Unregistered tool calls are refused directly rather than returning Unknown values.
 
-That does not stop the agent. Calls that don't care about the dimension keep
-working, and the run stops only where it reaches a tool whose contract does
-care — a send that requires trusted data, say — where OpenAPPA refuses and
-names the values it could not establish. So annotating five high-risk tools
-already buys you the obvious flows.
-
-The limit case makes the mechanics plain: with no annotations at all, a
-policy of bare names refuses exactly one thing — a call to a tool that is
-not registered. Unknown fails closed only at a `requires` that consumes it,
-a narrowing stop only fires on a declared `delta`, and a host that branches
-adds one stall, where a child's Unknown return holds at the merge until a
-registered cast establishes it. Past those, the first requirement you write
-is the first place the engine can say no.
-
-To resolve an Unknown you register a **cast**: a rule for what unknown
-values become. It can be a constant — everything unknown is suspicious,
-say — or a service you call per value, so a
-deployment can start blunt and get precise later. The per-value service is
-an ordinary registered external: a resolver that remembers its own answers
-annotates your tools one value at a time, and swapping it in changes no
-engine, no spec, and no contract.
-
-## Not every host can hold data back
-
-OpenAPPA has to sit where it can see the whole run and stop a call before it
-dispatches. A plain MCP gateway sees tool calls but not the conversation
-that gives them meaning; the harness itself qualifies, and so does an
-inference proxy paired with a tool gateway — or with harness-level hooks
-that check each call before dispatch, since hooks can withhold a result.
-
-Withholding is the capability that sorts deployments, because once the
-model has read something, no later policy un-sees it. A harness can
-withhold, since it decides what enters the model's next request; some proxy
-setups cannot. What a host can hold back decides which remedies its agents
-are ever offered:
-
-| the host can | the spec calls it | what that unlocks |
-|---|---|---|
-| check every call, withhold nothing | — | every check and refusal, no cleaning remedies |
-| bound a child's context and take its single return | context control | the child route: the raw return stays behind, a sanitizer's derivation crosses |
-| keep a result's bytes out of every model context | a **confining** deployment | pending-cast results held until a cast rules, quarantined children returning only what they extracted |
-
-Checks run, labels propagate, refusals carry the remedies that remain. A
-deployment that cannot withhold can still stop a flow; it just cannot offer
-to clean one, so its agents hit more dead ends and its policies have to be
-written knowing that.
-
-## The guarantees hold under four assumptions
-
-| the assumption | what falls outside it |
+| Execution Context | Impact of Unknown State |
 |---|---|
-| the agent is benign but confusable | a model smuggling secrets through its choice of actions is out of scope |
-| attacks arrive through data the agent reads | a source you marked trusted is trusted by definition — a CRM serving attacker-controlled text is not caught |
-| what you register is right | an auto-approve authority and a cast calling every unknown value trusted are legal; they run, and they void exactly the guarantees they touch, in a log that says so |
-| the log is durable and in order | a history check is only as sound as the log it has seen |
+| **Unannotated Tool Dispatch** | Succeeds and assigns **Unknown** label state to its output. |
+| **Unregistered Tool Dispatch** | Refused directly by the engine before execution. |
+| **Requirement Check (`requires`)** | Fails closed when consuming an **Unknown** label value. |
+| **Child Merge Boundary** | Holds **Unknown** child returns until established by a registered cast. |
 
-Contracts describe what each tool does and authorities decide the cases the
-algebra cannot; both are yours to get right. An append-only file or table
-wherever you already keep state is enough for the log, and concurrent
-branches share a single one, appends serialized.
+An Unknown label state does not halt execution until a tool contract's `requires` clause explicitly checks the value. To resolve an **Unknown** state, deployments register a **cast** component that assigns concrete labels based on static rules or external evaluation services. This design allows deployments to start with a few high-risk tool annotations and incrementally expand policy coverage over time.
 
-## What you already have becomes a component
+## Host context control determines available remedies
 
-Most teams evaluating OpenAPPA already run some of this table's left
-column: a permission prompt, a judge model, a few hundred lines of
-if-statements. OpenAPPA does not replace judgment, it gives judgment a
-place to stand and a ceiling it cannot exceed.
+OpenAPPA runs at an execution boundary where it can inspect trajectory context and withhold tool results prior to model ingestion. Basic MCP gateways observe tool calls without context, whereas host harnesses and inference proxies paired with pre-dispatch hooks provide necessary withholding capabilities. The host's withholding capability determines which remedy types the engine can offer to an agent.
 
-| what you run today | what it becomes | its ceiling |
+| Host Capability Level | Spec Classification | Enabled Remediation Features |
 |---|---|---|
-| a permission prompt, or an auto-approve mode | an authority implemented as `builtin = "hitl"` — abstaining today, since no queue puts a person in the loop yet | its mandate: which gaps it may cover, up to what rank or reader set |
-| a model judging whether an action should proceed | an authority resolver | the same mandate |
-| a model or classifier judging whether content is trustworthy | a cast resolver | `may_cast` — the states it may resolve to |
-| a trained PII or injection detector that redacts | a sanitizer | its one declared transition — the audience the derivation may reach, or the trust it may carry |
-| a regex or allowlist output filter | a sanitizer | the same |
-| ifs that gate a flow between two systems | a tool contract | none needed; the algebra does it |
+| Inspect dispatches, withhold nothing | Standard Deployment | All policy checks and refusals; no result-cleaning remedies. |
+| Bound child context, capture single return | Context Control | Child trajectory isolation, raw result containment, and sanitizer merges. |
+| Withhold result bytes from all contexts | Confining Deployment | Pending-cast holds and quarantined extraction children. |
 
-The migration is small because you keep the thing you built. A judge already
-exposed over HTTP becomes an authority by adding a block of TOML that names
-its endpoint and declares what its answers are allowed to do. The model
-stays, the prompt stays, the weights stay.
+A deployment lacking result-withholding capabilities still enforces policy checks and blocks unauthorized flows. However, it cannot offer sanitization remedies that hold back raw data, requiring policies to account for immutable context updates. As a result, agents in non-withholding deployments reach more direct refusal boundaries when attempting restricted operations.
 
-What changes is the position the judge rules from: it is asked about the
-call OpenAPPA identified rather than the one the agent described, so a
-steered model cannot put a flattering question to it; its answer is bounded
-by its mandate, so a wrong or compromised classifier approves at most what
-you declared; a timeout or an error abstains and the refusal stands; and
-every decision lands in the log next to the context it saw.
+## Model guarantees depend on four explicit assumptions
 
-The last row is the one that shrinks a codebase. Rules that gate a flow
-between two systems — CRM data must not reach Slack, a customer record must
-not leave by email — do not become a component at all. They are what
-contracts express natively, so that part of the if-pile is simply deleted.
+OpenAPPA guarantees hold strictly within defined system boundaries. The engine assumes benign agent behavior, untampered logs, valid component definitions, and external attack vectors. These four explicit assumptions bound the scope of automated policy enforcement:
 
-## What adoption costs
+| Assumption | Scope Boundary |
+|---|---|
+| **Benign but confusable agent** | Covert channels and intentional secret smuggling by the model are out of scope. |
+| **Attacks arrive via ingested data** | Pre-trusted sources are trusted by definition; compromised trusted data is not caught. |
+| **Registered components are correct** | Misconfigured authorities or permissive casts void their respective guarantees in the log. |
+| **Log is durable and strictly ordered** | Trajectory verification depends on total ordering and persistence of log entries. |
 
-Three things cost real effort. Tool contracts are the smallest of them: a
-first draft comes from what you already have — tool descriptions, argument
-schemas, the ACLs behind them — and a person reviews it. Reviewing
-one is reading four lines and asking whether they describe the tool
-honestly, which is why `contracts.md` is written as a guide to reading
-contracts rather than writing them.
+Tool contracts specify behavioral bounds, while registered authorities handle cases beyond static algebra. Log persistence requires an append-only store with serialized appends across concurrent child branches. System administrators configure component mandates to reflect organization-specific security policies.
 
-Authorities cost attention, and this is where deployments actually fail. If
-every restricted send pages a human, the humans learn to approve without
-reading, and an approval nobody reads is worse than no approval at all. The
-design keeps the volume down — accepting a narrowing is the agent's own step
-and never reaches a person, and an authority is consulted only where a call
-would exceed what the run's label already allows. Whether that lands at a
-handful of approvals a day or a hundred depends on your contracts, and it is
-the number to watch during a pilot.
+## Existing checks map onto registered engine components
 
-Coverage is the third, and it is incremental by construction. Annotate the
-tools that touch data you care about, leave the rest Unknown, and extend
-where a refusal tells you something is missing.
+Deployments migrate existing security logic into OpenAPPA by registering external endpoints as policy components with explicit mandates:
 
-## Where next
+| Existing Security Logic | OpenAPPA Component | Enforcement Mandate / Ceiling |
+|---|---|---|
+| Permission prompts or auto-approvers | `builtin = "hitl"` Authority | Bounded by mandate gap coverage (`can_add_readers`, trust ranks). |
+| Action evaluation models | Authority Resolver | Bounded by mandate gap coverage. |
+| Content trustworthiness classifiers | Cast Resolver | Bounded by declared `may_cast` target states. |
+| PII redact or injection filters | Sanitizer | Bounded by declared label transition (`from` $\rightarrow$ `to`). |
+| Structural flow-control `if` statements | Tool Contracts | Handled directly by label algebra; imperative code deleted. |
 
-The [AgentDojo harness](/docs/agentdojo) runs the engine against the
-prompt-injection benchmark. The repository's `docs/` holds the rest:
-`spec.md` is the normative account, every rule with an id you can cite;
-`contracts.md` covers the configuration dialect and how to review a policy
-someone else wrote; `rationale.md` answers the design questions skipped
-here — why labels never widen, why there are two dimensions and not
-three. The paper states the model formally, with theorem scoping and
-citations.
+Converting existing logic to registered components prevents prompt manipulation from bypassing checks, as queries evaluate structured tool calls rather than model-generated text. Component authority remains capped by registered mandates, ensuring that compromised classifiers cannot grant arbitrary permissions.
+
+The last row highlights how OpenAPPA simplifies codebases. Policy rules governing system interactions—such as restricting CRM data from reaching external channels—are declared natively in tool contracts. This eliminates bespoke guardrail logic and conditional checks from application code.
+
+## Operational cost is driven by approval volume
+
+Adopting OpenAPPA involves three main operational tasks, with human review volume representing the primary operational constraint:
+
+1. **Contract Definition:** Initial contracts are derived from existing tool schemas and ACLs. Reviewing a contract requires verifying a few declarative lines against tool behavior.
+2. **Approval Volume Management:** Routing every restricted dispatch to human approvers causes approval fatigue. OpenAPPA mitigates volume by allowing agents to accept narrowings autonomously, consulting authorities only when dispatches exceed trajectory bounds.
+3. **Incremental Coverage:** Policy enforcement scales incrementally by annotating high-risk tools first and defining casts as additional controls are required.
+
+## Next steps
+
+- [Reading a policy](/docs/contracts): Guide to reviewing and writing policy configuration.
+- [AgentDojo harness](/docs/agentdojo): Running OpenAPPA against prompt-injection benchmarks.
+- `docs/spec.md`: Normative specification containing all formal rule identifiers.
+- `docs/rationale.md`: Design rationales behind algebraic invariants and label dimensions.
