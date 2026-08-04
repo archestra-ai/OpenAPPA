@@ -12,11 +12,13 @@ def configure_tau2_data_dir(explicit: str | None, parser: argparse.ArgumentParse
         return
     if "TAU2_DATA_DIR" in os.environ:
         return
-    sibling_checkout = Path(__file__).resolve().parents[4] / "taubench" / "data"
-    if sibling_checkout.is_dir():
-        os.environ["TAU2_DATA_DIR"] = str(sibling_checkout)
+    managed_checkout = Path(__file__).resolve().parents[2] / ".tau2-bench" / "data"
+    if managed_checkout.is_dir():
+        os.environ["TAU2_DATA_DIR"] = str(managed_checkout)
         return
-    parser.error("TauBench's repository data is required; pass --tau2-data-dir or set TAU2_DATA_DIR")
+    parser.error(
+        "TauBench's repository data is required; run ./setup-taubench.sh, pass --tau2-data-dir, or set TAU2_DATA_DIR"
+    )
 
 
 def main() -> None:

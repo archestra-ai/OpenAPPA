@@ -5,13 +5,13 @@ This package evaluates OpenAPPA through TauBench's public custom-agent interface
 The initial evaluation covers the Airline domain with a trust-only contract. Customer-record readers add `suspicious` trust, while mutations and egress require `internal` trust; airline-owned reference data contributes the fold identity. The policy uses only tool source types and never reads task instructions, expected actions, or other benchmark ground truth.
 
 ```sh
-uv sync
+./setup-taubench.sh
 export OPENROUTER_API_KEY=...
 
 uv run appa-taubench
 ```
 
-TauBench keeps benchmark data outside its Python package, so its repository checkout must remain available. The CLI detects the sibling `../taubench/data` checkout used for this evaluation; pass `--tau2-data-dir PATH` or set `TAU2_DATA_DIR` for another layout. This keeps the benchmark data and its implementation unmodified.
+TauBench keeps benchmark data outside its Python package. The setup script clones its repository at the same revision as the pinned Python dependency into the ignored `.tau2-bench/` directory, then syncs the harness environment. The CLI uses that checkout by default; pass `--tau2-data-dir PATH` or set `TAU2_DATA_DIR` to use another checkout. This keeps the benchmark data and its implementation unmodified.
 
 The default smoke evaluation compares the stock agent and OpenAPPA on tasks 27 and 40 with `openrouter/openai/gpt-4.1-mini`, one trial each. Task 27 is read-only, while task 40 reads a reservation and then proposes a mutation that the contract refuses after customer-authored data enters the trajectory. Results and exact trajectories are written below `runs/`; rerunning the same configuration resumes the saved run rather than buying the same completions again.
 
