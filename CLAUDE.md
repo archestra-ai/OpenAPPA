@@ -96,6 +96,12 @@ or deprecation paths. The paper is the exception: it stays as published.
 Applies to `docs/` and anything else written for readers outside the
 project. `paper/` has its own register and these rules do not touch it.
 
+**Audience & Register**
+
+- **Target Audience:** Smart, busy tech leaders who are not security or AI specialists.
+- **Register:** Plain technical English that respects intelligence without requiring domain jargon. Avoid alienating readers with academic or field terms ("semilattice", "sink-side adequacy", "trajectory laundering"). Retain mathematical rigor and confidence ("provable", "mathematically proven", "deterministic") to highlight the solid math behind OpenAPPA.
+- **Value Proposition Framing:** Emphasize that OpenAPPA keeps agents productive rather than just blocking calls. Highlight exact, sound remedy plans (e.g. policy approvals, sanitizers) and proactive warnings before reading data that restricts reach (narrowing).
+
 **Vocabulary**
 
 - Ordinary programming vocabulary stays — declarative, imperative,

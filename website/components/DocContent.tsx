@@ -10,6 +10,7 @@ import { ExfiltrationFigure } from "@/components/figures/ExfiltrationFigure";
 import { GuardrailFigure } from "@/components/figures/GuardrailFigure";
 import { LabelFoldFigure } from "@/components/figures/LabelFoldFigure";
 import { NegotiationFigure } from "@/components/figures/NegotiationFigure";
+import { RemedyPlanFigure } from "@/components/figures/RemedyPlanFigure";
 import { TwoEndingsFigure } from "@/components/figures/TwoEndingsFigure";
 import { LogoGallery } from "@/components/LogoGallery";
 import { Term } from "@/components/Term";
@@ -24,6 +25,7 @@ const DIRECTIVES: Record<string, () => ReactNode> = {
   "fig-guardrail": () => <GuardrailFigure />,
   "fig-label-fold": () => <LabelFoldFigure />,
   "fig-negotiation": () => <NegotiationFigure />,
+  "fig-remedy-plan": () => <RemedyPlanFigure />,
   "fig-two-endings": () => <TwoEndingsFigure />,
 };
 

@@ -7,7 +7,9 @@ description: The whole model in one sitting — what OpenAPPA guarantees and wha
 
 ## OpenAPPA enforces information-flow policy before tool dispatch
 
-OpenAPPA sits between an agent and its tools to answer one question before every call: may this data go there? The engine either allows the proposed tool dispatch or refuses it with the exact steps that would make it pass. Rather than evaluating the call in isolation, OpenAPPA folds everything the agent has read so far into a running label and evaluates tool contracts against that state. As a result, a tool call that is legal early in a trajectory is refused once the agent touches sensitive data.
+OpenAPPA sits between an agent and its tools to answer one question before every action: *is this data allowed to go to this destination?*
+
+Rather than just blocking unsafe calls, OpenAPPA keeps agents productive. It tracks everything an agent ingests into a mathematically proven security label, warns the agent *before* it reads data that would restrict its reach, and when a call is refused, returns exact remedy plans—such as requesting a policy approval or redacting sensitive fields with a sanitizer—so the agent can safely find a path forward.
 
 | Runtime State | Scope | Engine Semantics |
 |---|---|---|
@@ -18,7 +20,11 @@ Policy rules stay strictly declarative: contracts, authorities, sanitizers, and 
 
 ## Labels only move one way
 
-A tool contract declares its `delta` to define how consuming a call result modifies the trajectory label. Every `delta` restricts access by intersecting audiences, lowering trust ranks, or both. Because no `delta` can widen permissions, reading an internal system permanently marks the trajectory as internal, and touching suspicious content permanently drops trust. No subsequent tool dispatch, authority approval, or sequence of steps can restore public or trusted status to that trajectory label.
+A tool contract declares a `delta` to define how fetching its result restricts the agent's current security label. A `delta` can only restrict permissions—it intersects allowed readers, lowers trust levels, or leaves the label unchanged.
+
+Because permissions only tighten over time, data cannot be laundered by passing it through intermediate steps or LLM calls. Reading internal system records permanently marks the execution context as internal, and ingesting unvetted web content permanently drops its trust level.
+
+Restricting permissions doesn't mean blocking external work: an external component can approve a specific outbound call without changing the overall label, or the agent can spin off a child execution to isolate sensitive reads from its main workflow.
 
 :::fig-label-fold:::
 
@@ -28,11 +34,9 @@ The current label is calculated directly as a functional fold over all preceding
 label = deltasSoFar.reduce(narrow, startingLabel)   // narrow only ever restricts
 ```
 
-Trajectories cannot be laundered because no step in the system can increase label permissions. While this rule prevents an agent from sending internal data to an outside recipient directly, the agent can still complete external interactions. A registered authority can approve a single external call without altering the trajectory label, or an interactive exchange can fork into a child trajectory where external responses narrow only the isolated child context.
-
 ## Reading data costs the agent reach
 
-OpenAPPA stops an agent *before* a fetch that restricts its label, informing it of lost reach before data enters its context. Reading internal data does not leak information by itself, but it restricts all future steps in the trajectory to an internal context. Sinks requiring public reach become permanently unavailable, and previously unconstrained dispatches require explicit approval.
+OpenAPPA stops an agent *before* a fetch that restricts its label, informing it of lost reach before data enters its context. Reading internal data does not leak information by itself, but it restricts all future steps in the trajectory to an internal context. Destinations requiring public reach become permanently unavailable, and previously unconstrained dispatches require explicit approval.
 
 By evaluating the step before dispatch, OpenAPPA prevents scenarios where an agent ingests data only to discover three steps later that outbound dispatches are blocked. The engine presents this pre-fetch choice as a **narrowing** stop. If the agent accepts the narrowing, the acceptance is recorded in the log and the call proceeds. Subsequent steps that cause no additional restriction pass without stopping, so narrowing prompts occur once per level of increased restriction.
 
@@ -42,7 +46,11 @@ Child trajectories isolate label modifications within host-managed sub-execution
 
 ## Engine refusals enumerate every sound remedy
 
-An empty remedy list in a refusal is a proof that no legal flow exists under the active policy configuration and execution log. When OpenAPPA blocks a flow, it returns a structured object containing every sound path forward: requesting an authority approval, cleaning data with a sanitizer, executing a prerequisite tool call, or accepting a narrowing prompt. Because every remedy except narrowing acceptance derives from a registered component, the engine enumerates all valid options in a single refusal object:
+When OpenAPPA refuses a flow, it doesn't leave the agent stranded. An empty remedy list in a refusal is a mathematical proof that no legal flow exists under the active policy configuration and log. When candidate paths exist, OpenAPPA returns a structured object enumerating every sound way forward: requesting a policy approval, cleaning data with a sanitizer, executing a prerequisite tool call, or accepting a narrowing prompt.
+
+:::fig-remedy-plan:::
+
+Because every remedy except narrowing acceptance derives from a registered component, the engine presents all valid options in a single refusal object:
 
 ```ts
 { outcome: "block",
@@ -135,7 +143,7 @@ A deployment lacking result-withholding capabilities still enforces policy check
 
 ## Model guarantees depend on four explicit assumptions
 
-OpenAPPA guarantees hold strictly within defined system boundaries. The engine assumes benign agent behavior, untampered logs, valid component definitions, and external attack vectors. These four explicit assumptions bound the scope of automated policy enforcement:
+OpenAPPA guarantees hold strictly within defined system boundaries. The engine assumes a benign but confusable agent, untampered logs, valid component definitions, and that untrusted input arrives via ingested data. These four explicit assumptions bound the scope of automated policy enforcement:
 
 | Assumption | Scope Boundary |
 |---|---|

@@ -6,36 +6,45 @@
 
 const TERMS = {
   delta:
-    "What a call's admitted result folds into the run's label. Always restrictive — it intersects the readers, lowers the trust, or leaves the label alone.",
+    "The label contribution of an admitted call result. A delta never expands permissions: it intersects reader sets, lowers the trust rank, or leaves the trajectory label unchanged.",
   requires:
-    "What must hold before a call may dispatch: conditions on the run's label, its history, and attention marks.",
+    "The prerequisites for executing a tool call: rules on allowed readers, trust levels, and required history.",
   audience:
-    "The readers dimension of a label. In a delta, the readers a result is limited to; in requires, a condition on the run's readers.",
+    "Who is allowed to see data. In a delta, it restricts who can receive the tool's result; in requires, it checks who the agent can send data to.",
   trust:
-    "The trust dimension of a label. In a delta, the rank a result carries; in requires, the floor a call demands.",
-  trusted: "A trust rank, above suspicious. The fold keeps the lower of two ranks.",
-  suspicious: "A trust rank, below trusted. The fold keeps the lower of two ranks.",
-  public: "The reader id meaning everyone. A run whose audience includes public can reach any recipient.",
+    "Whether data comes from a vetted source. In a delta, it marks tool output as trusted or suspicious; in requires, it sets the minimum trust level a tool demands.",
+  trusted: "Data from a vetted source.",
+  suspicious:
+    "Data from an unvetted source, like external web content. Once ingested, the run stays suspicious.",
+  public:
+    "The reader representing everyone. An agent with public access can send data to any outbound destination.",
   internal:
-    "A reader id from the examples. A run whose audience is exactly internal can reach only that reader, and public sinks are closed to it.",
+    "An example reader for restricted internal data. Reading internal data closes off public destinations.",
   "{public, trusted}":
-    "A whole label: audience public — everyone may read — at the trusted rank. The neutral starting point when nothing has been read yet.",
-  egress: "An effect kind: data left the system through this call. A successful call appends its effects to the log.",
+    "The neutral starting label before reading any data: unrestricted outbound reach and trusted status.",
+  egress:
+    "A side effect where data leaves the system, recorded in the log on successful execution.",
   mutation:
-    "An effect kind: the call changed something outside the run. A successful call appends its effects to the log.",
-  effects: "The tool's declared emits: what a successful call appends to the run's log.",
-  emits: "What a successful call appends to the log, declared as effects = [...] in the TOML.",
-  exactly: "In an audience: the reader set becomes precisely this list.",
-  includes: "In requires: the run's readers must contain these.",
-  cap: "In requires: the run's readers must stay within this set.",
-  may_add: "The ceiling of an authority's audience cover: the readers its rulings may vouch.",
-  may_cast: "The ceiling on a cast resolver: the states it is allowed to resolve an Unknown value to.",
+    "A side effect where external state is modified, recorded in the log on successful execution.",
+  effects:
+    "What a successful tool call appends to the execution log, declared as effects = [...] in the contract.",
+  emits:
+    "What a successful tool call appends to the log, declared as effects = [...] in the contract.",
+  exactly: "In an audience condition: the allowed reader set becomes precisely this list.",
+  includes: "In a requires condition: the run's allowed readers must contain these.",
+  cap: "In a requires condition: the run's allowed readers must stay within this set.",
+  may_add:
+    "The audience cover ceiling of an authority: the readers its rulings may vouch for.",
+  may_cast:
+    "The ceiling on a cast resolver: the states it is allowed to resolve an Unknown value to.",
   attention: "Named marks demanding a fresh ruling on every dispatch.",
   'builtin = "hitl"':
     "The built-in human-in-the-loop authority: elicitation hosted by the harness rather than a remote resolver.",
   requirement_gaps: "Returned on a refusal: the unmet entries of requires.",
-  remedy_plans: "Returned on a refusal: the sound ways out, most of them executable by id.",
-  unestablished: "Returned on a refusal: values whose needed dimension no registered cast could establish.",
+  remedy_plans:
+    "Returned on a refusal: exact sound paths forward to unblock execution.",
+  unestablished:
+    "Returned on a refusal: values whose needed dimension no registered cast could establish.",
 } as const satisfies Record<string, string>;
 
 export function termDefinition(chip: string): string | undefined {

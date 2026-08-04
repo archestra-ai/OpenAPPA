@@ -2,13 +2,10 @@
 title: What is OpenAPPA
 category: Get started
 order: 1
-description: An information-flow policy engine for LLM agents — running code first, specification second.
+description: A deterministic policy engine for LLM agents — tracking data origins and enforcing information flow before tool calls dispatch.
 ---
 
-OpenAPPA is deterministic security for LLM agents. Instead of filtering
-prompts and outputs — asking a classifier "does this text look malicious?" —
-it asks a question that has a provable answer: **can this value, derived from
-these sources, legally flow into this sink?**
+OpenAPPA brings deterministic data protection to LLM agents. Instead of relying on prompt filters or classifiers—asking "does this text look malicious?"—it tracks data origins and answers a question with a provable answer: **can data derived from these sources legally flow into this destination?**
 
 ## The more the agent knows, the better it works
 
@@ -22,15 +19,15 @@ Nobody attacked anything in this next run. The task is the same, the connections
 
 :::fig-exfiltration:::
 
-## OpenAPPA is a deterministic guardrail
+## OpenAPPA is a deterministic policy boundary
 
-OpenAPPA wraps the agent in a boundary where the colors finally mean something. Every piece of data that crosses in carries a label — where it came from, who may read it. Everything the agent derives inherits the labels of what it read. And every flow out — a tool call, an email — is checked against a declared contract *before it happens*. The check is deterministic: same labels, same contract, same verdict, on run 1 and run 40. The agent stays free to be creative inside the boundary; the boundary decides what leaves it.
+OpenAPPA wraps the agent in a boundary where data origins and access rights carry clear, mathematical weight. Every piece of data that crosses in carries a label—where it came from and who may read it. Everything the agent derives inherits the labels of what it read. And every outbound action—a tool call, an email—is checked against a declared contract *before it happens*. The check is deterministic: same labels, same contract, same verdict, on run 1 and run 40. The agent stays free to be creative inside the boundary; the policy decides what leaves it.
 
 :::fig-guardrail:::
 
-## OpenAPPA proactively communicates limitations instead of blocking
+## OpenAPPA keeps agents productive instead of just blocking
 
-OpenAPPA's checks are legible: when a flow can't happen, the agent learns why *before* anything runs — and a reason is something a language model can act on.
+OpenAPPA's checks are legible and actionable: when a flow cannot proceed directly, the agent learns why *before* execution and receives exact, sound remedy plans. Instead of getting stuck or silently failing, the language model can request policy approvals, sanitize sensitive fields, or accept necessary reach restrictions to safely complete its task.
 
 :::fig-negotiation:::
 

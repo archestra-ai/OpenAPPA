@@ -41,7 +41,7 @@ a leak.
 **Is `delta` missing entirely, and was that meant?** No `delta` key at all
 means unannotated, and results enter at Unknown on both dimensions
 . That fails closed, which is right, but it also blocks every
-annotated sink downstream until a cast resolves it. The explicit "this
+annotated outbound call downstream until a cast resolves it. The explicit "this
 result carries nothing" annotation is `delta = {}`, which is a different
 statement. An unannotated tool may not also declare label requirements: its
 own contribution would evaluate as identity and outrun its requirement, so
@@ -206,7 +206,7 @@ What a mandate may hold does not depend on the implementation behind it:
 the deployer opened on purpose, and reading mandates beside their
 implementations is exactly what this review is for.
 
-A `resolver` endpoint is a privileged sink. It receives the call's identity
+A `resolver` endpoint is a privileged external service. It receives the call's identity
 — tool name and canonical digest — the rendered argument payload, and the
 typed review context: the label fold at review time, each referenced
 argument value's label and provenance, and the gaps it would clear,
@@ -333,7 +333,7 @@ misbehaving resolver can never widen a label past its ceiling.
 
 ## Worked example
 
-Two tasks share a fetch and differ only in the sink: send the ticket to an
+Two tasks share a fetch and differ only in the outbound destination: send the ticket to an
 external auditor, or file it in a public tracker.
 
 ```toml
