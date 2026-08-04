@@ -14,7 +14,7 @@ const PROPOSED_BOX = { x: 30, y: 120, w: 210, h: 140 };
 const ENGINE_BOX = { x: 280, y: 120, w: 190, h: 140 };
 const REMEDIES_X = 520;
 const REMEDY_BOXES = [
-  { title: "Plan 1: Policy Approval", detail: "Authority: disclosure-officer", colorKey: "accent" as const, y: 50 },
+  { title: "Plan 1: Policy Approval", detail: "Authority: user", colorKey: "accent" as const, y: 50 },
   { title: "Plan 2: Sanitizer Redact", detail: "Transform: remove_pii", colorKey: "info" as const, y: 150 },
   { title: "Plan 3: Accept Narrowing", detail: "Acknowledge reach reduction", colorKey: "warn" as const, y: 250 },
 ];

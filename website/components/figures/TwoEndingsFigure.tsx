@@ -215,7 +215,7 @@ function draw(ctx: CanvasRenderingContext2D, t: number, th: Theme) {
   if (ruling > 0) {
     ctx.save();
     ctx.globalAlpha = ruling;
-    chip(ctx, haltMail.x, haltMail.y + 64, "disclosure-officer ✓", th.accent, th.accentBg, th.mono);
+    chip(ctx, haltMail.x, haltMail.y + 64, "user ✓", th.accent, th.accentBg, th.mono);
     ctx.restore();
   }
   badge(ctx, th, A.mail.x - 12, center(A.mail).y, true, ease(seg(t, 0.6, 0.64)));
