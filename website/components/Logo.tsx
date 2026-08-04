@@ -72,6 +72,11 @@ export function PixelMark({ size = 26, style }: { size?: number; style?: CSSProp
     for (let x = 0; x < MARK_COLS; x++) {
       const c = row[x];
       if (c === ".") continue;
+      // Body pixel behind each eye: blinking scales the eye away and must
+      // reveal fur, not the page background (the eye fill IS the bg color).
+      if (c === "4") {
+        body.push(<rect key={`b${x}-${y}`} x={x} y={y} width={1} height={1} fill={MARK_FILL["1"]} />);
+      }
       const rect = <rect key={`${x}-${y}`} x={x} y={y} width={1} height={1} fill={MARK_FILL[c]} />;
       (c === "4" ? eyes : body).push(rect);
     }

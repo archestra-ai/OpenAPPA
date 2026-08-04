@@ -90,10 +90,7 @@ delta    = {}                      # a grant receipt carries nothing
 Now each call carries one question, and the release is checked against a
 run that already holds the read.
 
-**Do the tags route where you think?** Wrong tags cannot make an unsound
-decision — an authority still cannot exceed its mandate — but they can route
-a gap to the wrong desk or fail to route it at all, which surfaces as a
-block with no remedy.
+**Do the tags route where you think?** Wrong tags cannot make an invalid decision—an authority still cannot exceed its mandate—but they can route a gap to the wrong desk or fail to route it at all, which surfaces as a block with no remedy.
 
 **Is the mandate bigger than the job?** `can_add_readers = { may_add =
 ["public"] }` lets that authority vouch a release to anyone. Read mandates

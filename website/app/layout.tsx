@@ -25,7 +25,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={plexMono.variable}>
+    <html lang="en" className={`${plexMono.variable} ${plexSans.variable}`}>
       <body style={{ fontFamily: "var(--font-plex-sans), system-ui, sans-serif" }}>
         {children}
       </body>

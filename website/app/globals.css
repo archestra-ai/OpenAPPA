@@ -132,11 +132,12 @@ samp {
 
 @keyframes appa-blink {
   0%,
-  92%,
+  91%,
+  97%,
   100% {
     transform: scaleY(1);
   }
-  96% {
+  94% {
     transform: scaleY(0.08);
   }
 }
@@ -146,8 +147,9 @@ samp {
 }
 
 .appa-mark-eyes {
-  transform-origin: 12px 7.5px;
-  animation: appa-blink 6.2s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: appa-blink 5s ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -436,10 +438,12 @@ samp {
 .landing .prose ul > li::before {
   content: "[*]";
   color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 13px;
 }
 
 .landing .prose li {
-  padding-left: 2.4em;
+  padding-left: 2.2em;
 }
 
 .prose code {

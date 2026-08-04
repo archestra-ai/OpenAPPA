@@ -71,16 +71,20 @@ export function registerPixelMarks(): void {
             const c = BEAST[y][x];
             if (c === ".") continue;
             const r = '<rect x="' + x + '" y="' + y + '" width="1" height="1" fill="' + FILL[c] + '"/>';
-            if (c === "4") eyes += r;
-            else body += r;
+            if (c === "4") {
+              // Body pixel behind each eye: blinking scales the eye away and
+              // must reveal fur, not the page background (eye fill IS --bg).
+              body += '<rect x="' + x + '" y="' + y + '" width="1" height="1" fill="' + FILL["1"] + '"/>';
+              eyes += r;
+            } else body += r;
           }
         this.attachShadow({ mode: "open" }).innerHTML =
           "<style>:host{display:inline-block;line-height:0}" +
           "svg{display:block;overflow:visible}" +
           "@keyframes appa-float{0%,100%{transform:translateY(0)}50%{transform:translateY(-2%)}}" +
-          "@keyframes appa-blink{0%,92%,100%{transform:scaleY(1)}96%{transform:scaleY(0.08)}}" +
+          "@keyframes appa-blink{0%,91%,97%,100%{transform:scaleY(1)}94%{transform:scaleY(0.08)}}" +
           ".f{animation:appa-float 5.5s ease-in-out infinite}" +
-          ".e{transform-origin:12px 7.5px;animation:appa-blink 6.2s ease-in-out infinite}" +
+          ".e{transform-box:fill-box;transform-origin:center;animation:appa-blink 5s ease-in-out infinite}" +
           "@media (prefers-reduced-motion:reduce){.f,.e{animation:none}}</style>" +
           '<svg viewBox="0 0 ' + W + " " + H + '" width="' + size + '" height="' + boxH +
           '" shape-rendering="crispEdges" role="img" aria-label="OpenAPPA mascot">' +

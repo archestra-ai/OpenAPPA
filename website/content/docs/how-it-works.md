@@ -9,7 +9,7 @@ description: The whole model in one sitting — what OpenAPPA guarantees and wha
 
 OpenAPPA sits between an agent and its tools to answer one question before every action: *is this data allowed to go to this destination?*
 
-APPA stands for **Agentic Permissions Policy Algebra**. It provides a formal system to track data sensitivity and trust as an agent executes. Instead of blindly blocking tasks when sensitive data is touched, APPA calculates exact label flow and presents the agent with sound, actionable remedies—such as isolating reads in child branches, invoking sanitizers, or requesting targeted approvals—so the agent stays productive without violating policy.
+APPA stands for **Agentic Permissions Policy Algebra**. It provides a formal system to track data sensitivity and trust as an agent executes. Instead of blindly blocking tasks when sensitive data is touched, APPA calculates exact label flow and presents the agent with valid, actionable remedies—such as isolating reads in child branches, invoking sanitizers, or requesting targeted approvals—so the agent stays productive without violating policy.
 
 By evaluating checks *before* tool dispatch, OpenAPPA prevents agents from getting stranded mid-task. Every refusal presents clear options: approve the exact call, sanitize the data, satisfy a prerequisite, or accept a narrower label.
 
@@ -98,9 +98,9 @@ The trajectory begins at `{public, trusted}` unless pre-existing context or user
 
 If the goal is publishing the ticket on GitHub, the agent executes the child branch, passes the result through `remove_pii`, and files the public issue without modifying the parent label. If the goal is emailing raw CRM data to an external auditor, the agent accepts the narrowing in the parent trajectory. When `send_email(ticket, auditor@…)` subsequently runs, the engine checks whether `auditor@…` is in the `internal` audience. Because it is not, OpenAPPA blocks the call and generates an authority remedy plan for `user`. Once `user` approves the request, the email dispatches and the egress event enters the log. The trajectory label remains `internal`, ensuring that subsequent emails to unapproved recipients require separate authority rulings.
 
-## Engine refusals enumerate every sound remedy
+## Engine refusals enumerate every valid remedy
 
-When OpenAPPA refuses a flow, it doesn't leave the agent stranded. An empty remedy list proves that the call is unreachable within the planner's modeled transitions under the active policy configuration and log. When candidate paths exist, OpenAPPA returns a structured object enumerating every sound alternative available from the registered components and deployment capabilities: requesting a policy approval, cleaning data with a sanitizer, executing a prerequisite tool call, or accepting a narrowing prompt.
+When OpenAPPA refuses a flow, it doesn't leave the agent stranded. An empty remedy list proves that the call is unreachable within the planner's modeled transitions under the active policy configuration and log. When candidate paths exist, OpenAPPA returns a structured object enumerating every valid alternative available from the registered components and deployment capabilities: requesting a policy approval, cleaning data with a sanitizer, executing a prerequisite tool call, or accepting a narrowing prompt.
 
 :::fig-remedy-plan:::
 
@@ -111,7 +111,7 @@ Because every remedy except narrowing acceptance derives from a registered compo
   requirement_gaps: [...],  // unmet entries from `requires`
   narrowing: {...},         // present when the call's own delta narrows
   unestablished: [...],     // values whose labels could not be established
-  remedy_plans: [...] }     // sound remedy plans executable by id or tool call
+  remedy_plans: [...] }     // valid remedy plans executable by id or tool call
 ```
 
 A non-empty remedy list indicates that candidate paths exist, though external components may still decline a requested ruling. When an authority denies a request, that denial is appended to the log. The refusal proof remains scoped to the current configuration, active component responses, and recorded denials for that specific call.
@@ -174,7 +174,7 @@ Adopting OpenAPPA shifts your security model from manual code checks to formal a
 ## Next steps
 
 - [Reading a policy](/docs/contracts): Guide to reviewing and writing policy configuration.
-- [AgentDojo harness](/docs/agentdojo): Running OpenAPPA against prompt-injection benchmarks.
+- [Evaluating OpenAPPA](/docs/evaluation): Empirical paper results on multi-step workflows and bench-corp.
 - `docs/spec.md`: Normative specification containing all formal rule identifiers.
 - `docs/rationale.md`: Design rationales behind algebraic invariants and label dimensions.
 - [OpenAPPA Paper (arXiv:2607.24625)](https://arxiv.org/pdf/2607.24625): Formal paper detailing core algebraic invariants and label dimensions.

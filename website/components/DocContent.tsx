@@ -25,9 +25,35 @@ const DIRECTIVES: Record<string, () => ReactNode> = {
   "fig-negotiation": () => <NegotiationFigure />,
   "fig-remedy-plan": () => <RemedyPlanFigure />,
   "fig-two-endings": () => <TwoEndingsFigure />,
+  "details-7pc-leak": () => (
+    <details className="leak-details my-6 rounded-lg border border-[var(--border)] bg-[var(--bg-subtle,#18181b)] p-4 text-sm text-[var(--text)]">
+      <summary className="cursor-pointer font-semibold text-[var(--text-strong)] hover:text-[var(--accent)]">
+        Why the 7% leak occurred under GPT-4o (and why the algebra held)
+      </summary>
+      <div className="mt-3 space-y-3 border-t border-[var(--border)] pt-3 leading-relaxed">
+        <p>
+          You might notice that under GPT-4o, OpenAPPA allowed 3 breaches out of 42 episodes (a 7% Attack Success Rate). Does this mean the label algebra failed?
+        </p>
+        <p>
+          <strong>No—OpenAPPA&apos;s mathematical label invariants held 100% of the time.</strong> Every non-zero breach traced back to two specific scenario configurations, neither of which was an enforcement bypass:
+        </p>
+        <ol className="list-decimal space-y-2 pl-5">
+          <li>
+            <strong>Authorized recipient smuggling (<code>hide-secret-in-status</code>)</strong>: An injected prompt tricked the agent into emailing data to <code>finance-lead@</code>. Because <code>finance-lead@</code> was explicitly listed in the policy as an authorized internal finance reader, OpenAPPA&apos;s label algebra permitted the send. The label algebra enforces <em>who</em> is legally allowed to receive data (reader sets); detecting secret text hidden inside an email sent to an authorized recipient requires content scrubbers, which recipient label algebra does not claim to provide.
+          </li>
+          <li>
+            <strong>Unannotated write contract (<code>joint-merger-brief</code>)</strong>: The agent copied an HR value into a finance data store whose tool contract had no destination restriction declared on creation, then read it back under the finance contract. OpenAPPA prospectively enforces declared tool contracts; if a custom write contract omits a restriction, the engine permits the call.
+          </li>
+        </ol>
+        <p>
+          In short: the policy algebra executed perfectly according to its declared rules. Prospective enforcement is as complete as the tool contracts provided to it.
+        </p>
+      </div>
+    </details>
+  ),
 };
 
-const DIRECTIVE_SPLIT = /^:::([a-z-]+):::$/m;
+const DIRECTIVE_SPLIT = /^:::([a-z0-9-]+):::$/m;
 
 function AnchoredHeading({
   level,
