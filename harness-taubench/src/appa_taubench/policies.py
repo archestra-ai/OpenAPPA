@@ -22,8 +22,9 @@ class Policy:
             )
 
 
-def load_policy(name: str) -> Policy:
-    resource = CONTRACTS.joinpath(f"{name}.toml")
+def load_policy() -> Policy:
+    name = "banking_knowledge"
+    resource = CONTRACTS.joinpath("banking_knowledge.toml")
     source = resource.read_text(encoding="utf-8")
     raw = tomllib.loads(source)
     entries = raw.get("tool")

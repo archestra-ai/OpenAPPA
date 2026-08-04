@@ -1,0 +1,331 @@
+version = 1
+trust_chain = ["suspicious", "internal"]
+
+# Bank-authored knowledge and dispatcher metadata carry no customer-authored
+# content. The dispatcher itself is neutral because the harness checks its
+# agent_tool_name as a logical tool before Tau executes the wrapper.
+[[tool]]
+name = "KB_search_bm25"
+delta = {}
+
+[[tool]]
+name = "KB_search_dense"
+delta = {}
+
+[[tool]]
+name = "shell"
+delta = {}
+
+[[tool]]
+name = "get_current_time"
+delta = {}
+
+[[tool]]
+name = "unlock_discoverable_agent_tool"
+delta = {}
+
+[[tool]]
+name = "list_discoverable_agent_tools"
+delta = {}
+
+[[tool]]
+name = "call_discoverable_agent_tool"
+delta = {}
+
+# Structured customer and account readers admit customer-specific data.
+[[tool]]
+name = "get_user_information_by_id"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "get_user_information_by_name"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "get_user_information_by_email"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "get_referrals_by_user"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "get_credit_card_transactions_by_user"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "get_credit_card_accounts_by_user"
+delta = { trust = "suspicious" }
+
+# Top-level mutations require a trajectory that has not incorporated
+# suspicious customer data. Their receipts carry no new content.
+[[tool]]
+name = "change_user_email"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "log_verification"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "give_discoverable_user_tool"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "transfer_to_human_agents"
+effects = ["egress"]
+requires = { trust = "internal" }
+delta = {}
+
+# Logical discoverable readers are checked by their inner tool identity.
+[[tool]]
+name = "get_all_user_accounts_by_user_id_3847"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "get_atm_deposit_images_8473"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "get_bank_account_transactions_9173"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "get_closure_reason_history_8293"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "get_credit_limit_increase_history_4829"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "get_debit_cards_by_account_id_7823"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "get_debit_dispute_status_7483"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "get_payment_history_6183"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "get_pending_replacement_orders_5765"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "get_user_dispute_history_7291"
+delta = { trust = "suspicious" }
+
+# Logical discoverable mutations share the top-level mutation requirement.
+[[tool]]
+name = "activate_debit_card_8291"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "activate_debit_card_8292"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "activate_debit_card_8293"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "apply_checking_account_credit_5829"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "apply_credit_card_account_flag_6147"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "apply_savings_account_credit_6831"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "apply_statement_credit_8472"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "approve_credit_limit_increase_5847"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "change_debit_card_pin_6285"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "clear_debit_card_fraud_alert_4892"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "close_bank_account_7392"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "close_credit_card_account_7834"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "close_debit_card_4721"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "deny_credit_limit_increase_5848"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "example_agent_tool_0000"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "file_credit_card_transaction_dispute_4829"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "file_debit_card_transaction_dispute_6281"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "freeze_debit_card_3892"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "log_credit_card_closure_reason_4521"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "open_bank_account_4821"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "order_debit_card_5739"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "order_replacement_credit_card_7291"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "pay_credit_card_from_checking_9182"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "request_temporary_debit_card_limit_increase_8374"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "reset_debit_card_pin_6284"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "set_debit_card_recurring_block_7382"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "submit_credit_limit_increase_request_7392"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "submit_interest_discrepancy_report_7294"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "transfer_funds_between_bank_accounts_7291"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "unfreeze_debit_card_3893"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "update_transaction_rewards_3847"
+effects = ["mutation"]
+requires = { trust = "internal" }
+delta = {}
+
+# Discoverable transfer operations commit egress without mutating the DB.
+[[tool]]
+name = "emergency_credit_bureau_incident_transfer_1114"
+effects = ["egress"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "initial_transfer_to_human_agent_0218"
+effects = ["egress"]
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "initial_transfer_to_human_agent_1822"
+effects = ["egress"]
+requires = { trust = "internal" }
+delta = {}

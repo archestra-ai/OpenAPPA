@@ -5,6 +5,10 @@ import logging
 import os
 from pathlib import Path
 
+from appa_taubench import SUPPORTED_RETRIEVAL_CONFIGS
+
+DEFAULT_MODEL = "openrouter/openai/gpt-4.1-mini"
+
 
 def configure_tau2_data_dir(explicit: str | None, parser: argparse.ArgumentParser) -> None:
     if explicit is not None:
@@ -21,39 +25,89 @@ def configure_tau2_data_dir(explicit: str | None, parser: argparse.ArgumentParse
     )
 
 
-def main() -> None:
+def integer_at_least(minimum: int):
+    def parse(value: str) -> int:
+        parsed = int(value)
+        if parsed < minimum:
+            raise argparse.ArgumentTypeError(f"must be at least {minimum}")
+        return parsed
+
+    return parse
+
+
+def add_data_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--tau2-data-dir", default=None)
+
+
+def add_model_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--retrieval-config", choices=SUPPORTED_RETRIEVAL_CONFIGS, default="alltools-qwen")
+    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--user-model", default=None)
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="appa-taubench",
-        description="Run a minimal OpenAPPA utility evaluation on TauBench",
+        description="Run and submit OpenAPPA on Tau Knowledge",
     )
-    parser.add_argument("--domain", choices=["airline"], default="airline")
-    parser.add_argument("--defense", choices=["appa", "none", "both"], default="both")
-    parser.add_argument("--task-ids", nargs="+", default=["27", "40"])
-    parser.add_argument("--model", default="openrouter/openai/gpt-4.1-mini")
-    parser.add_argument("--user-model", default=None)
-    parser.add_argument("--logdir", default="runs")
-    parser.add_argument("--run-name", default=None)
-    parser.add_argument("--tau2-data-dir", default=None)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--max-steps", type=int, default=60)
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    preflight_parser = commands.add_parser("preflight", help="check Knowledge dependencies without API calls")
+    add_data_argument(preflight_parser)
+    add_model_arguments(preflight_parser)
+
+    run_parser = commands.add_parser("run", help="run the complete Knowledge base split")
+    add_data_argument(run_parser)
+    add_model_arguments(run_parser)
+    run_parser.add_argument("--logdir", default="runs")
+    run_parser.add_argument("--run-name", default=None)
+    run_parser.add_argument("--seed", type=int, default=300)
+    run_parser.add_argument("--max-steps", type=integer_at_least(1), default=200)
+    run_parser.add_argument("--max-concurrency", type=integer_at_least(1), default=3)
+    run_parser.add_argument("--num-trials", type=integer_at_least(4), default=4)
+    run_parser.add_argument("--dry-run", action="store_true", help="validate and print the plan without invoking Tau")
+
+    submit_parser = commands.add_parser("submit", help="prepare and validate a completed custom submission")
+    add_data_argument(submit_parser)
+    submit_parser.add_argument("run_dir")
+    submit_parser.add_argument("--output", required=True)
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
 
     configure_tau2_data_dir(args.tau2_data_dir, parser)
-    defenses = ["none", "appa"] if args.defense == "both" else [args.defense]
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    from appa_taubench.bench import run_bench
+    if args.command == "submit":
+        from appa_taubench.submission import prepare_custom_submission
 
+        submission_dir = prepare_custom_submission(args.run_dir, args.output)
+        print(f"submission: {submission_dir}")
+        return
+
+    from appa_taubench.bench import preflight, run_bench
+
+    user_model = args.user_model or args.model
+    if args.command == "preflight":
+        try:
+            preflight(args.retrieval_config, args.model, user_model)
+        except (RuntimeError, ValueError) as error:
+            parser.exit(1, f"error: {error}\n")
+        return
     raise SystemExit(
         run_bench(
-            domain=args.domain,
-            defenses=defenses,
-            task_ids=args.task_ids,
+            retrieval_config=args.retrieval_config,
             model=args.model,
-            user_model=args.user_model or args.model,
+            user_model=user_model,
             logdir=args.logdir,
             run_name=args.run_name,
             seed=args.seed,
             max_steps=args.max_steps,
+            max_concurrency=args.max_concurrency,
+            num_trials=args.num_trials,
+            dry_run=args.dry_run,
         )
     )

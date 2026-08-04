@@ -1,3 +1,4 @@
+import json
 from collections.abc import Iterator
 
 import pytest
@@ -5,6 +6,7 @@ from tau2.data_model.message import AssistantMessage, ToolCall, ToolMessage, Use
 from tau2.environment.tool import as_tool
 
 from appa_taubench.agent import AppaAgent, drain_stats
+from appa_taubench.knowledge import DISCOVERABLE_WRAPPER
 from appa_taubench.native import Allowed, Blocked, Reported
 
 
@@ -21,8 +23,9 @@ class FakeSession:
     decisions: Iterator[Allowed | Blocked]
     instance: "FakeSession"
 
-    def __init__(self, policy, tools, user_prompt) -> None:
+    def __init__(self, policy, tools, user_prompt, logical_tools=None) -> None:
         self.user_prompt = user_prompt
+        self.logical_tools = logical_tools or []
         self.reported = []
         self.rounds = 0
         self.closed = False
@@ -31,6 +34,11 @@ class FakeSession:
 
     def check(self, tool, arguments):
         return next(self.decisions)
+
+    def logical_call(self, tool, arguments):
+        if tool != DISCOVERABLE_WRAPPER:
+            return tool, arguments
+        return arguments["agent_tool_name"], json.loads(arguments.get("arguments", "{}"))
 
     def report(self, content, error):
         self.reported.append((content, error))
@@ -50,13 +58,19 @@ def clear_stats():
     drain_stats()
 
 
-def response(tool: str | None, cost: float = 0.1) -> AssistantMessage:
+def response(tool: str | None, cost: float = 0.1, arguments=None) -> AssistantMessage:
     if tool is None:
         return AssistantMessage.text("done", cost=cost)
     return AssistantMessage(
         role="assistant",
         content=None,
-        tool_calls=[ToolCall(id=f"call-{tool}", name=tool, arguments={"value": "one"})],
+        tool_calls=[
+            ToolCall(
+                id=f"call-{tool}",
+                name=tool,
+                arguments=arguments or {"value": "one"},
+            )
+        ],
         cost=cost,
     )
 
@@ -99,3 +113,82 @@ def test_block_feedback_stays_inside_the_agent_and_only_an_allowed_call_reaches_
     assert agent.stats.allowed == 1
     assert FakeSession.instance.rounds == 1
     agent.stop()
+
+
+def test_logical_dispatch_and_hidden_retry_are_correlated_in_the_audit(monkeypatch, tmp_path) -> None:
+    wrapped_arguments = {
+        "agent_tool_name": "write_record",
+        "arguments": '{"record_id":"safe"}',
+    }
+    FakeSession.decisions = iter(
+        [
+            Blocked("use the remedy"),
+            Allowed(DISCOVERABLE_WRAPPER, wrapped_arguments),
+        ]
+    )
+    responses = iter(
+        [
+            response(DISCOVERABLE_WRAPPER, 0.2, wrapped_arguments),
+            response("execute_remedy_plan", 0.3, {"plan_id": "remedy-0"}),
+            response(None),
+        ]
+    )
+    monkeypatch.setattr("appa_taubench.agent.FrameworkSession", FakeSession)
+    monkeypatch.setattr("appa_taubench.agent.generate", lambda **kwargs: next(responses))
+
+    agent = AppaAgent(
+        [as_tool(lookup)],
+        "domain policy",
+        "appa policy",
+        "model",
+        llm_args={"seed": 42},
+        audit_dir=str(tmp_path),
+        task_id="task-1",
+    )
+    proposed, state = agent.generate_next_message(UserMessage.text("write it"), agent.get_init_state())
+    assert proposed.tool_calls[0].name == DISCOVERABLE_WRAPPER
+    assert proposed.cost == pytest.approx(0.5)
+    final, _ = agent.generate_next_message(
+        ToolMessage(id="call-execute_remedy_plan", role="tool", content="written"),
+        state,
+    )
+    assert final.content == "done"
+    agent.stop()
+
+    [audit_path] = list(tmp_path.glob("*.json"))
+    audit = json.loads(audit_path.read_text())
+    assert audit["task_id"] == "task-1"
+    assert audit["model_args"] == {"seed": 42}
+    assert audit["stats"]["policy_blocks"] == 1
+    assert audit["stats"]["completions"] == 3
+    policy_events = [event for event in audit["events"] if event["kind"].startswith("policy_")]
+    assert policy_events[0]["policy_tool"] == "write_record"
+    assert policy_events[0]["tool_call_id"] == f"call-{DISCOVERABLE_WRAPPER}"
+    assert policy_events[1]["tool_call_id"] == "call-execute_remedy_plan"
+    assert policy_events[1]["dispatched_tool"] == DISCOVERABLE_WRAPPER
+    result_event = next(event for event in audit["events"] if event["kind"] == "tool_result")
+    assert result_event["tool_call_id"] == "call-execute_remedy_plan"
+    assert result_event["original_content"] == "written"
+
+
+def test_mismatched_tau_result_still_closes_the_session_and_audit(monkeypatch, tmp_path) -> None:
+    FakeSession.decisions = iter([Allowed("lookup", {"value": "one"})])
+    monkeypatch.setattr("appa_taubench.agent.FrameworkSession", FakeSession)
+    monkeypatch.setattr("appa_taubench.agent.generate", lambda **kwargs: response("lookup"))
+    agent = AppaAgent(
+        [as_tool(lookup)],
+        "domain policy",
+        "appa policy",
+        "model",
+        audit_dir=str(tmp_path),
+        task_id="task-1",
+    )
+    _, state = agent.generate_next_message(UserMessage.text("find one"), agent.get_init_state())
+
+    with pytest.raises(ValueError, match="does not match"):
+        agent.generate_next_message(ToolMessage(id="wrong", role="tool", content="found"), state)
+    agent.stop()
+
+    assert FakeSession.instance.closed
+    assert not agent.pending
+    assert len(list(tmp_path.glob("*.json"))) == 1

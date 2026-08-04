@@ -24,4 +24,22 @@ fi
 git -C "${CHECKOUT_DIR}" checkout --detach "${REVISION}"
 
 uv sync --project "${HARNESS_DIR}" --locked
-echo "TauBench is ready at ${CHECKOUT_DIR}"
+
+required=(srt rg)
+if [[ "$(uname -s)" == "Linux" ]]; then
+    required+=(bwrap socat)
+fi
+missing=()
+for executable in "${required[@]}"; do
+    if ! command -v "${executable}" >/dev/null 2>&1; then
+        missing+=("${executable}")
+    fi
+done
+if (( ${#missing[@]} > 0 )); then
+    echo "error: missing Tau Knowledge sandbox executables: ${missing[*]}" >&2
+    echo "install @anthropic-ai/sandbox-runtime@0.0.23 and the platform packages documented in README.md" >&2
+    exit 1
+fi
+
+echo "Tau Knowledge is installed at ${CHECKOUT_DIR}"
+echo "Set the required API key, then run: uv run --project ${HARNESS_DIR} appa-taubench preflight"

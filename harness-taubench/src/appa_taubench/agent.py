@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 from threading import Lock
+from uuid import uuid4
 
 from tau2.agent.base_agent import ValidAgentInputMessage
 from tau2.agent.llm_agent import LLMAgent, LLMAgentState
@@ -16,9 +20,9 @@ from tau2.data_model.message import (
 from tau2.environment.tool import Tool, as_tool
 from tau2.utils.llm_utils import generate
 
+from appa_taubench.knowledge import discoverable_tools
 from appa_taubench.native import Allowed, Blocked, FrameworkSession
 
-EXECUTE_REMEDY_PLAN = "execute_remedy_plan"
 POLICY_BLOCK_SENTINEL = "OpenAPPA blocked this tool call: "
 SEQUENTIAL_CALL_FEEDBACK = "OpenAPPA requires one sequential tool call per model completion."
 MAX_BLOCKED_COMPLETIONS = 3
@@ -55,6 +59,55 @@ _completed_stats: list[EpisodeStats] = []
 _stats_lock = Lock()
 
 
+class EpisodeAudit:
+    """Raw custom-scaffold events kept beside Tau's scored trajectory."""
+
+    def __init__(
+        self,
+        directory: str | None,
+        task_id: str | None,
+        model: str,
+        model_args: dict | None,
+    ) -> None:
+        self.directory = None if directory is None else Path(directory)
+        self.episode_id = str(uuid4())
+        self.task_id = task_id
+        self.model = model
+        self.model_args = model_args or {}
+        self.events: list[dict] = []
+        self.closed = False
+
+    def record(self, kind: str, **fields) -> None:
+        if self.directory is None or self.closed:
+            return
+        self.events.append(
+            {
+                "kind": kind,
+                "timestamp": datetime.now(UTC).isoformat(),
+                **fields,
+            }
+        )
+
+    def close(self, stats: EpisodeStats) -> None:
+        if self.directory is None or self.closed:
+            return
+        self.closed = True
+        self.directory.mkdir(parents=True, exist_ok=True)
+        path = self.directory / f"{self.episode_id}.json"
+        temporary = path.with_suffix(".json.tmp")
+        payload = {
+            "format_version": 1,
+            "episode_id": self.episode_id,
+            "task_id": self.task_id,
+            "model": self.model,
+            "model_args": self.model_args,
+            "stats": asdict(stats),
+            "events": self.events,
+        }
+        temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(path)
+
+
 def drain_stats() -> EpisodeStats:
     total = EpisodeStats()
     with _stats_lock:
@@ -75,8 +128,11 @@ class AppaAgent(LLMAgent[LLMAgentState]):
         policy: str,
         llm: str,
         llm_args: dict | None = None,
+        audit_dir: str | None = None,
+        task_id: str | None = None,
     ) -> None:
         self.domain_tools = list(tools)
+        self.logical_tools = discoverable_tools()
         self.policy = policy
         remedy_tool = as_tool(execute_remedy_plan)
         super().__init__(
@@ -87,8 +143,10 @@ class AppaAgent(LLMAgent[LLMAgentState]):
         )
         self.session: FrameworkSession | None = None
         self.pending = False
+        self._pending_tool_call_id: str | None = None
         self.stats = EpisodeStats()
         self._recorded_stats = False
+        self.audit = EpisodeAudit(audit_dir, task_id, llm, llm_args)
 
     @property
     def system_prompt(self) -> str:
@@ -106,7 +164,12 @@ class AppaAgent(LLMAgent[LLMAgentState]):
         if self.session is None:
             if not isinstance(message, UserMessage) or not isinstance(message.content, str):
                 raise ValueError("an OpenAPPA episode must begin with a text user message")
-            self.session = FrameworkSession(self.policy, self.domain_tools, message.content)
+            self.session = FrameworkSession(
+                self.policy,
+                self.domain_tools,
+                message.content,
+                logical_tools=self.logical_tools,
+            )
         elif self.pending:
             self._report(message)
 
@@ -114,6 +177,11 @@ class AppaAgent(LLMAgent[LLMAgentState]):
         hidden_cost = 0.0
         for _ in range(MAX_BLOCKED_COMPLETIONS):
             response = self._complete(state)
+            self.audit.record(
+                "model_completion",
+                completion=self.stats.completions,
+                response=response.model_dump(mode="json"),
+            )
             if not response.tool_calls:
                 self._add_hidden_cost(response, hidden_cost)
                 state.messages.append(response)
@@ -122,21 +190,50 @@ class AppaAgent(LLMAgent[LLMAgentState]):
             if len(response.tool_calls) != 1:
                 hidden_cost += response.cost or 0.0
                 self.stats.sequential_blocks += len(response.tool_calls)
+                self.audit.record(
+                    "sequential_block",
+                    tool_call_count=len(response.tool_calls),
+                    feedback=SEQUENTIAL_CALL_FEEDBACK,
+                )
                 self._append_feedback(state, response, SEQUENTIAL_CALL_FEEDBACK)
                 continue
 
             call = response.tool_calls[0]
             self.stats.checks += 1
+            try:
+                policy_tool, policy_arguments = self.session.logical_call(call.name, call.arguments)
+            except ValueError:
+                policy_tool, policy_arguments = call.name, call.arguments
             decision = self.session.check(call.name, call.arguments)
             match decision:
                 case Blocked(feedback):
                     hidden_cost += response.cost or 0.0
                     self.stats.policy_blocks += 1
+                    self.audit.record(
+                        "policy_block",
+                        tool_call_id=call.id,
+                        proposed_tool=call.name,
+                        proposed_arguments=call.arguments,
+                        policy_tool=policy_tool,
+                        policy_arguments=policy_arguments,
+                        feedback=feedback,
+                    )
                     self._append_feedback(state, response, feedback)
                 case Allowed(dispatched_tool, dispatched_arguments):
+                    self.audit.record(
+                        "policy_allow",
+                        tool_call_id=call.id,
+                        proposed_tool=call.name,
+                        proposed_arguments=call.arguments,
+                        policy_tool=policy_tool,
+                        policy_arguments=policy_arguments,
+                        dispatched_tool=dispatched_tool,
+                        dispatched_arguments=dispatched_arguments,
+                    )
                     call.name = dispatched_tool
                     call.arguments = dispatched_arguments
                     self.pending = True
+                    self._pending_tool_call_id = call.id
                     self.stats.allowed += 1
                     self._add_hidden_cost(response, hidden_cost)
                     state.messages.append(response)
@@ -165,10 +262,12 @@ class AppaAgent(LLMAgent[LLMAgentState]):
         finally:
             self.session = None
             self.pending = False
+            self._pending_tool_call_id = None
             if not self._recorded_stats:
                 with _stats_lock:
                     _completed_stats.append(self.stats)
                 self._recorded_stats = True
+            self.audit.close(self.stats)
 
     def _complete(self, state: LLMAgentState) -> AssistantMessage:
         session = self.session
@@ -206,13 +305,25 @@ class AppaAgent(LLMAgent[LLMAgentState]):
         if len(results) != 1:
             raise ValueError("OpenAPPA permits one outstanding TauBench tool call")
         result = results[0]
+        if result.id != self._pending_tool_call_id:
+            raise ValueError("TauBench tool result does not match the outstanding OpenAPPA call")
+        original_content = result.content
         reported = session.report(result.content, result.error)
         result.content = reported.content
+        self.audit.record(
+            "tool_result",
+            tool_call_id=result.id,
+            original_content=original_content,
+            error=result.error,
+            delivered_content=reported.content,
+            disposition=reported.disposition,
+        )
         if reported.disposition == "admitted":
             self.stats.admitted_results += 1
         else:
             self.stats.sealed_results += 1
         self.pending = False
+        self._pending_tool_call_id = None
 
     @staticmethod
     def _append_feedback(state: LLMAgentState, response: AssistantMessage, feedback: str) -> None:
@@ -242,4 +353,6 @@ def create_appa_agent(tools, domain_policy, **kwargs) -> AppaAgent:
         policy=kwargs["appa_policy"],
         llm=kwargs["llm"],
         llm_args=kwargs.get("llm_args"),
+        audit_dir=kwargs.get("audit_dir"),
+        task_id=None if kwargs.get("task") is None else str(kwargs["task"].id),
     )
