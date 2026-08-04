@@ -125,10 +125,10 @@ pub(crate) fn plan(registry: &Registry, views: &Views, call: &ResolvedCall, raw:
     }
     let fork_reason = match (&raw.narrowing, raw.requirement_gaps.is_empty()) {
         (Some(_), true) => {
-            "delegate the restricting work to a child session: the child accepts this narrowing and this session's label stays"
+            "delegate the restricting work to a child session: the child accepts this narrowing and this session's label stays. A value the child returns still crosses checked at the merge — a raw restricted return costs this session the same narrowing, so have the child finish the work and submit_result null, or return a sanitized derivation"
         }
         (Some(_), false) => {
-            "delegate the restricting work to a child session: the child accepts this narrowing and remedies the requirement gaps there, and this session's label stays"
+            "delegate the restricting work to a child session: the child accepts this narrowing and remedies the requirement gaps there, and this session's label stays. A value the child returns still crosses checked at the merge — a raw restricted return costs this session the same narrowing, so have the child finish the work and submit_result null, or return a sanitized derivation"
         }
         (None, _) => {
             "handle in a subagent (advisory: a child begins at the same label, so a fork cures no requirement)"

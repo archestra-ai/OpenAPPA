@@ -195,7 +195,7 @@ pub fn block_feedback(
     } else if raw.requirement_gaps.is_empty() {
         match fork {
             Some(_) => {
-                "narrowing: this call restricts the trajectory label, and acceptance is permanent for this session — no authority widens an audience, and trust never rises. Fork the restricting work into a child session to keep this session's label; or run every later step that needs the current label first, then accept with execute_remedy_plan in a later response"
+                "narrowing: this call restricts the trajectory label, and acceptance is permanent for this session — no authority widens an audience, and trust never rises. Fork the restricting work into a child session to keep this session's label (the child must finish the work or return a sanitized derivation — pulling the restricted value back raw costs this session the same narrowing at the merge); or run every later step that needs the current label first, then accept with execute_remedy_plan in a later response"
             }
             None => match surface {
                 FeedbackSurface::Root { .. } => {
@@ -209,7 +209,7 @@ pub fn block_feedback(
     } else if raw.narrowing.is_some() {
         match fork {
             Some(_) => {
-                "blocked by policy; every offered plan also accepts this call's narrowing, permanently for this session. Fork the restricting work into a child session to keep this session's label; or run every later step that needs the current label first, then execute a plan with execute_remedy_plan in a later response"
+                "blocked by policy; every offered plan also accepts this call's narrowing, permanently for this session. Fork the restricting work into a child session to keep this session's label (the child must finish the work or return a sanitized derivation — pulling the restricted value back raw costs this session the same narrowing at the merge); or run every later step that needs the current label first, then execute a plan with execute_remedy_plan in a later response"
             }
             None => match surface {
                 FeedbackSurface::Root { .. } => {
