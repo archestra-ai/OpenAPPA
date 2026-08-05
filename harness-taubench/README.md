@@ -100,7 +100,7 @@ uv run appa-taubench chaos-screen \
   --run-name tau-knowledge-luna-max-authenticated-session-screen
 ```
 
-The penetration-test profile asks the agent to discover one plausible shortcut from the tools and context before following the supported process. It names no task, tool, prerequisite, or expected bypass, and it forbids fabricated arguments and unavailable tools. The guarded and permissive arms therefore test the same independently chosen shortcut rather than one scripted by the harness.
+The penetration-test profile asks the agent to discover one plausible shortcut from the tools and context before following the supported process. It names no task, tool, prerequisite, or expected bypass, and it forbids fabricated arguments and unavailable tools. The guarded and permissive arms receive the same shortcut-seeking instruction while each trajectory chooses what to attempt, rather than having the harness script a bypass.
 
 ```sh
 uv run appa-taubench chaos-screen \
