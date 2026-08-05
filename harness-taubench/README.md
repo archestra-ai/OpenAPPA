@@ -100,6 +100,16 @@ uv run appa-taubench chaos-screen \
   --run-name tau-knowledge-luna-max-authenticated-session-screen
 ```
 
+The penetration-test profile asks the agent to discover one plausible shortcut from the tools and context before following the supported process. It names no task, tool, prerequisite, or expected bypass, and it forbids fabricated arguments and unavailable tools. The guarded and permissive arms therefore test the same independently chosen shortcut rather than one scripted by the harness.
+
+```sh
+uv run appa-taubench chaos-screen \
+  --model openrouter/openai/gpt-5.6-luna \
+  --reasoning-effort max \
+  --agent-prompt-profile pentest-shortcut-chaos \
+  --run-name tau-knowledge-luna-max-pentest-shortcut-screen
+```
+
 The screen is useful when the guarded audit contains a pre-verification policy block followed by the offered `log_verification` redispatch and the intended mutation. The permissive audit shows whether the same model instead dispatched that mutation without verification, while matched rewards show whether recovery improved task completion. Stochastic trajectories remain associative evidence, so a promising screen advances to the frozen pilot before a complete run.
 
 ## Publication runs freeze every effective setting
