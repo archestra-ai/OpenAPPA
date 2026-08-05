@@ -22,6 +22,7 @@ from tau2.runner import get_tasks, run_tasks
 from tau2.scripts.leaderboard.verify_trajectories_public import check_num_trials, check_tasks
 from tau2.utils import llm_utils as tau_llm_utils
 
+from appa_taubench import AGENT_PROMPT_PROFILES
 from appa_taubench.agent import create_appa_agent, drain_stats
 from appa_taubench.evaluation import (
     TASK_102_ASSERTION,
@@ -99,6 +100,7 @@ class RunSpec:
     policy_sha256: str
     implementation_sha256: str
     retrieval_index_sha256: str
+    agent_prompt_profile: str = "standard"
     binding_identity: str = BINDING_IDENTITY
     tau2_revision: str = TAU2_REVISION
     domain: str = DOMAIN
@@ -193,7 +195,10 @@ def make_run_spec(
     task_ids: tuple[str, ...],
     publication_run: bool,
     policy: Policy,
+    agent_prompt_profile: str = "standard",
 ) -> RunSpec:
+    if agent_prompt_profile not in AGENT_PROMPT_PROFILES:
+        raise ValueError(f"unknown agent prompt profile: {agent_prompt_profile}")
     return RunSpec(
         retrieval_config=retrieval_config,
         policy_mode=policy_mode,
@@ -212,6 +217,7 @@ def make_run_spec(
         policy_sha256=hashlib.sha256(policy.toml.encode()).hexdigest(),
         implementation_sha256=implementation_digest(),
         retrieval_index_sha256=retrieval_index_digest(retrieval_config),
+        agent_prompt_profile=agent_prompt_profile,
     )
 
 
@@ -486,9 +492,12 @@ def _execute_bench(
     task_ids: tuple[str, ...] | None,
     publication_run: bool,
     dry_run: bool = False,
+    agent_prompt_profile: str = "standard",
 ) -> Path | None:
     if publication_run and num_trials < 4:
         raise ValueError("leaderboard runs require at least four trials")
+    if policy_mode == "stock" and agent_prompt_profile != "standard":
+        raise ValueError("agent prompt profiles do not apply to the stock Tau agent")
     all_tasks, policy = preflight(
         retrieval_config,
         model,
@@ -520,6 +529,7 @@ def _execute_bench(
         selected_ids,
         publication_run,
         policy,
+        agent_prompt_profile,
     )
     base_name = run_name or f"tau-knowledge-{policy_mode}-{retrieval_config}-{slug(model)}"
     suffix = f"{slug(base_name)}-{spec.digest()[:12]}"
@@ -549,6 +559,7 @@ def _execute_bench(
                 appa_policy=policy.toml,
                 audit_dir=str(output_dir / "appa-audit"),
                 trial_seeds=spec.trial_seeds,
+                agent_prompt_profile=spec.agent_prompt_profile,
             )
             registry.register_agent_factory(factory, agent_name)
 
@@ -658,6 +669,7 @@ def run_bench(
     reasoning_effort: str = "high",
     policy_mode: str = "guarded",
     dry_run: bool = False,
+    agent_prompt_profile: str = "standard",
 ) -> int:
     _execute_bench(
         retrieval_config,
@@ -675,7 +687,8 @@ def run_bench(
         num_trials,
         None,
         True,
-        dry_run,
+        dry_run=dry_run,
+        agent_prompt_profile=agent_prompt_profile,
     )
     return 0
 
@@ -693,12 +706,14 @@ def run_pilot(
     max_concurrency: int,
     reasoning_effort: str = "high",
     dry_run: bool = False,
+    agent_prompt_profile: str = "standard",
 ) -> int:
     """Run the frozen ten-task slice through guarded, permissive, and stock arms."""
     from appa_taubench.report import build_matched_summary
 
     directories = {}
     for mode in ("guarded", "permissive", "stock"):
+        prompt_profile = "standard" if mode == "stock" else agent_prompt_profile
         directories[mode] = _execute_bench(
             retrieval_config,
             mode,
@@ -715,7 +730,8 @@ def run_pilot(
             1,
             PILOT_TASK_IDS,
             False,
-            dry_run,
+            dry_run=dry_run,
+            agent_prompt_profile=prompt_profile,
         )
     if not dry_run:
         build_matched_summary(
@@ -738,6 +754,7 @@ def run_chaos_screen(
     max_concurrency: int,
     reasoning_effort: str = "high",
     dry_run: bool = False,
+    agent_prompt_profile: str = "standard",
 ) -> int:
     """Screen verification recovery on a compact guarded/permissive slice."""
     from appa_taubench.report import build_matched_summary
@@ -760,7 +777,8 @@ def run_chaos_screen(
             1,
             CHAOS_SCREEN_TASK_IDS,
             False,
-            dry_run,
+            dry_run=dry_run,
+            agent_prompt_profile=agent_prompt_profile,
         )
     if not dry_run:
         build_matched_summary(

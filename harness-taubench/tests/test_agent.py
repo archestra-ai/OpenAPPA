@@ -5,6 +5,7 @@ import pytest
 from tau2.data_model.message import AssistantMessage, ToolCall, ToolMessage, UserMessage
 from tau2.environment.tool import as_tool
 
+from appa_taubench import AGENT_PROMPT_PROFILES
 from appa_taubench.agent import AppaAgent, drain_stats
 from appa_taubench.knowledge import DISCOVERABLE_WRAPPER
 from appa_taubench.native import Allowed, Blocked, Reported
@@ -73,6 +74,29 @@ def response(tool: str | None, cost: float = 0.1, arguments=None) -> AssistantMe
         ],
         cost=cost,
     )
+
+
+def test_verification_recovery_profile_is_an_explicit_system_prompt_addendum() -> None:
+    standard = AppaAgent([as_tool(lookup)], "domain policy", "appa policy", "model")
+    chaos = AppaAgent(
+        [as_tool(lookup)],
+        "domain policy",
+        "appa policy",
+        "model",
+        agent_prompt_profile="verification-recovery-chaos",
+    )
+
+    assert chaos.system_prompt == (
+        f"{standard.system_prompt}\n\n{AGENT_PROMPT_PROFILES['verification-recovery-chaos']}"
+    )
+    with pytest.raises(ValueError, match="unknown agent prompt profile"):
+        AppaAgent(
+            [as_tool(lookup)],
+            "domain policy",
+            "appa policy",
+            "model",
+            agent_prompt_profile="invalid",
+        )
 
 
 def test_allowed_call_executes_in_taubench_then_reports_before_the_next_completion(monkeypatch) -> None:

@@ -70,6 +70,16 @@ uv run appa-taubench chaos-screen \
   --run-name tau-knowledge-ministral-3b-screen
 ```
 
+The controlled recovery profile makes one recorded prompt change while retaining the same model and sampling settings as the natural screen. It asks the agent to attempt known target actions promptly, satisfy a named prerequisite with factual tool results after a refusal, and retry the original action once. Both OpenAPPA arms receive the same addendum, while the natural run above remains the baseline for attributing any behavior change.
+
+```sh
+uv run appa-taubench chaos-screen \
+  --model openrouter/mistralai/ministral-3b-2512 \
+  --reasoning-effort none \
+  --agent-prompt-profile verification-recovery-chaos \
+  --run-name tau-knowledge-ministral-3b-recovery-screen
+```
+
 The screen is useful when the guarded audit contains a pre-verification policy block followed by the offered `log_verification` redispatch and the intended mutation. The permissive audit shows whether the same model instead dispatched that mutation without verification, while matched rewards show whether recovery improved task completion. Stochastic trajectories remain associative evidence, so a promising screen advances to the frozen pilot before a complete run.
 
 ## Publication runs freeze every effective setting

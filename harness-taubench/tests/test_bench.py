@@ -78,8 +78,11 @@ def test_cli_defaults_describe_a_complete_submission_run() -> None:
     assert args.dry_run is False
     assert not hasattr(args, "task_ids")
     assert not hasattr(args, "defense")
+    assert args.agent_prompt_profile == "standard"
     assert dict(run_spec().model_args) == {"reasoning_effort": "high"}
     assert dict(run_spec().user_model_args) == {"reasoning_effort": "low"}
+    assert run_spec().payload()["agent_prompt_profile"] == "standard"
+    assert run_spec().digest() != run_spec(agent_prompt_profile="verification-recovery-chaos").digest()
 
 
 def test_static_preflight_binds_policy_and_loads_the_complete_split() -> None:
@@ -109,13 +112,46 @@ def test_chaos_screen_cli_freezes_the_verification_sensitive_slice() -> None:
             "openrouter/mistralai/ministral-3b-2512",
             "--reasoning-effort",
             "none",
+            "--agent-prompt-profile",
+            "verification-recovery-chaos",
         ]
     )
     assert args.run_name == "tau-knowledge-chaos-screen"
     assert args.model == "openrouter/mistralai/ministral-3b-2512"
     assert args.reasoning_effort == "none"
+    assert args.agent_prompt_profile == "verification-recovery-chaos"
     assert bench.CHAOS_SCREEN_TASK_IDS == ("task_005", "task_036", "task_075")
     assert "task_102" not in bench.CHAOS_SCREEN_TASK_IDS
+
+
+def test_chaos_screen_uses_the_same_prompt_profile_in_both_arms(monkeypatch, tmp_path) -> None:
+    calls = []
+
+    def execute(*args, **kwargs):
+        calls.append((args[1], kwargs["agent_prompt_profile"]))
+        return tmp_path / args[1]
+
+    monkeypatch.setattr(bench, "_execute_bench", execute)
+
+    bench.run_chaos_screen(
+        retrieval_config="alltools-qwen",
+        model="openrouter/model",
+        user_model="openrouter/user",
+        judge_model="openrouter/judge",
+        review_model="openrouter/review",
+        logdir=str(tmp_path),
+        run_name="screen",
+        seed=300,
+        max_steps=200,
+        max_concurrency=1,
+        dry_run=True,
+        agent_prompt_profile="verification-recovery-chaos",
+    )
+
+    assert calls == [
+        ("guarded", "verification-recovery-chaos"),
+        ("permissive", "verification-recovery-chaos"),
+    ]
 
 
 def test_provider_history_uses_the_standard_tool_call_shape() -> None:
@@ -561,6 +597,7 @@ def test_run_bench_passes_submission_shape_to_tau_without_task_filter(monkeypatc
             max_concurrency=3,
             num_trials=4,
             reasoning_effort="max",
+            agent_prompt_profile="verification-recovery-chaos",
         )
         == 0
     )
@@ -581,7 +618,11 @@ def test_run_bench_passes_submission_shape_to_tau_without_task_filter(monkeypatc
     assert config.verbose_logs is True
     assert config.hallucination_retries == 0
     assert Path(captured["paths"]["save_path"]).name == "results.json"
-    assert (Path(captured["paths"]["save_dir"]) / bench.RUN_MANIFEST).is_file()
+    manifest_path = Path(captured["paths"]["save_dir"]) / bench.RUN_MANIFEST
+    assert manifest_path.is_file()
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["config"]["agent_prompt_profile"] == "verification-recovery-chaos"
+    assert captured["factory"].keywords["agent_prompt_profile"] == "verification-recovery-chaos"
 
 
 def test_run_bench_refuses_too_few_trials_before_preflight(monkeypatch, tmp_path) -> None:

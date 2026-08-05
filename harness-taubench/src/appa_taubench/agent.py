@@ -21,6 +21,7 @@ from tau2.environment.tool import Tool, as_tool
 from tau2.runner.batch import _current_simulation_id
 from tau2.utils.llm_utils import generate
 
+from appa_taubench import AGENT_PROMPT_PROFILES
 from appa_taubench.knowledge import discoverable_tools
 from appa_taubench.native import Allowed, Blocked, FrameworkSession
 
@@ -144,10 +145,14 @@ class AppaAgent(LLMAgent[LLMAgentState]):
         task_id: str | None = None,
         simulation_id: str | None = None,
         trial_seeds: tuple[int, ...] = (),
+        agent_prompt_profile: str = "standard",
     ) -> None:
+        if agent_prompt_profile not in AGENT_PROMPT_PROFILES:
+            raise ValueError(f"unknown agent prompt profile: {agent_prompt_profile}")
         self.domain_tools = list(tools)
         self.logical_tools = discoverable_tools()
         self.policy = policy
+        self.agent_prompt_profile = agent_prompt_profile
         remedy_tool = as_tool(execute_remedy_plan)
         super().__init__(
             tools=[*tools, remedy_tool],
@@ -174,11 +179,15 @@ class AppaAgent(LLMAgent[LLMAgentState]):
 
     @property
     def system_prompt(self) -> str:
-        return (
+        prompt = (
             f"{super().system_prompt}\n\n"
             "Call at most one tool in each response. OpenAPPA may return policy feedback in a tool result; "
             "follow that feedback or explain that the request cannot be completed."
         )
+        addendum = AGENT_PROMPT_PROFILES[self.agent_prompt_profile]
+        if addendum:
+            prompt = f"{prompt}\n\n{addendum}"
+        return prompt
 
     def generate_next_message(
         self,
@@ -413,4 +422,5 @@ def create_appa_agent(tools, domain_policy, **kwargs) -> AppaAgent:
         task_id=None if kwargs.get("task") is None else str(kwargs["task"].id),
         simulation_id=_current_simulation_id.get(),
         trial_seeds=kwargs.get("trial_seeds", ()),
+        agent_prompt_profile=kwargs.get("agent_prompt_profile", "standard"),
     )

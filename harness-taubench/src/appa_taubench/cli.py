@@ -5,7 +5,7 @@ import logging
 import os
 from pathlib import Path
 
-from appa_taubench import SUPPORTED_RETRIEVAL_CONFIGS
+from appa_taubench import AGENT_PROMPT_PROFILES, SUPPORTED_RETRIEVAL_CONFIGS
 from appa_taubench.policies import POLICY_MODES
 
 DEFAULT_MODEL = "openrouter/openai/gpt-5.2"
@@ -58,6 +58,7 @@ def add_execution_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--seed", type=int, default=300)
     parser.add_argument("--max-steps", type=integer_at_least(1), default=200)
     parser.add_argument("--max-concurrency", type=integer_at_least(1), default=3)
+    parser.add_argument("--agent-prompt-profile", choices=AGENT_PROMPT_PROFILES, default="standard")
     parser.add_argument("--dry-run", action="store_true", help="validate and print the plan without invoking Tau")
 
 
@@ -146,6 +147,7 @@ def main() -> None:
                 max_steps=args.max_steps,
                 max_concurrency=args.max_concurrency,
                 dry_run=args.dry_run,
+                agent_prompt_profile=args.agent_prompt_profile,
             )
         )
     if args.command == "chaos-screen":
@@ -163,6 +165,7 @@ def main() -> None:
                 max_steps=args.max_steps,
                 max_concurrency=args.max_concurrency,
                 dry_run=args.dry_run,
+                agent_prompt_profile=args.agent_prompt_profile,
             )
         )
     raise SystemExit(
@@ -181,5 +184,6 @@ def main() -> None:
             num_trials=args.num_trials,
             policy_mode=args.policy_mode,
             dry_run=args.dry_run,
+            agent_prompt_profile=args.agent_prompt_profile,
         )
     )
