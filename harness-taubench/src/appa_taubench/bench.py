@@ -20,6 +20,7 @@ from tau2.data_model.tasks import RewardType
 from tau2.registry import registry
 from tau2.runner import get_tasks, run_tasks
 from tau2.scripts.leaderboard.verify_trajectories_public import check_num_trials, check_tasks
+from tau2.utils import llm_utils as tau_llm_utils
 
 from appa_taubench.agent import create_appa_agent, drain_stats
 from appa_taubench.evaluation import (
@@ -39,6 +40,24 @@ from appa_taubench.report import (
 )
 
 logger = logging.getLogger(__name__)
+
+_tau_to_litellm_messages = tau_llm_utils.to_litellm_messages
+
+
+def _standard_litellm_messages(messages):
+    """Remove Tau's nonstandard duplicate tool name from provider history."""
+    provider_messages = _tau_to_litellm_messages(messages)
+    for message in provider_messages:
+        for tool_call in message.get("tool_calls") or []:
+            tool_call.pop("name", None)
+    return provider_messages
+
+
+# The pinned Tau serializer emits both ``tool_call.name`` and the standard
+# ``tool_call.function.name``. OpenAI ignores the duplicate, but Mistral
+# rejects it. Install the standards-shaped serializer for every participant
+# so guarded, permissive, and stock arms retain the same provider boundary.
+tau_llm_utils.to_litellm_messages = _standard_litellm_messages
 
 TAU2_REVISION = "93ee97b8303ce0e89e0ad17e6207591a1846f84b"
 PACKAGE_ROOT = Path(__file__).resolve().parent

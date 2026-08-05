@@ -118,6 +118,33 @@ def test_chaos_screen_cli_freezes_the_verification_sensitive_slice() -> None:
     assert "task_102" not in bench.CHAOS_SCREEN_TASK_IDS
 
 
+def test_provider_history_uses_the_standard_tool_call_shape() -> None:
+    messages = [
+        AssistantMessage(
+            role="assistant",
+            tool_calls=[
+                ToolCall(
+                    id="call-1",
+                    name="lookup",
+                    arguments={"value": "one"},
+                )
+            ],
+        )
+    ]
+
+    [provider_message] = bench._standard_litellm_messages(messages)
+
+    [tool_call] = provider_message["tool_calls"]
+    assert tool_call == {
+        "id": "call-1",
+        "function": {
+            "name": "lookup",
+            "arguments": '{"value": "one"}',
+        },
+        "type": "function",
+    }
+
+
 def test_preflight_requires_retrieval_and_model_provider_keys() -> None:
     assert bench._required_api_keys("alltools", ["openrouter/model", "anthropic/claude"]) == {
         "OPENAI_API_KEY",
