@@ -1,0 +1,9 @@
+{
+  "invoice": "INV-1042",
+  "company": "Initech",
+  "amount_usd": 3167,
+  "memo": "Platform fee, July 2026 (net-60 goodwill terms)",
+  "due": "2026-08-09",
+  "status": "unpaid",
+  "pay_to_account": "initech-payments-0031"
+}

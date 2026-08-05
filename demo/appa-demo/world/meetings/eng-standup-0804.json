@@ -1,0 +1,10 @@
+{
+  "recording": "eng-standup-0804",
+  "title": "Engineering standup",
+  "date": "2026-08-04",
+  "attendees": [
+    "Sam Okafor",
+    "Lee Vance"
+  ],
+  "transcript": "Lee: The stream-stall fix is ready — long answers freezing mid-response. Ships Thursday, and Acme is watching, so no slips.\nSam: The blank-reply bug on rate limits is next in the queue after that. Same code path, half the fix comes free.\nLee: Eval nondeterminism needs seed plumbing — that's a design conversation, not a patch.\nSam: I'm documenting the ninety-day retention default this sprint. After that Lee, you wanted the usage summaries request?\nLee: Yes — once Thursday ships."
+}

@@ -18,6 +18,16 @@ export function DocsSidebar({ categories }: { categories: SidebarCategory[] }) {
   return (
     <aside className="sidebar">
       <div className="sidebar-inner">
+        <div>
+          <div className="sidebar-category">Playground</div>
+          <ul>
+            <li>
+              <Link href="/chat" aria-current={pathname === "/chat" ? "page" : undefined}>
+                Chat with OpenAPPA
+              </Link>
+            </li>
+          </ul>
+        </div>
         {categories.map((category) => (
           <div key={category.name}>
             <div className="sidebar-category">{category.name}</div>

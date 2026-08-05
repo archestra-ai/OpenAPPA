@@ -1,0 +1,9 @@
+{
+  "number": 110,
+  "title": "Blank assistant reply when rate-limited",
+  "author": "@mel-ortiz",
+  "labels": [
+    "bug"
+  ],
+  "body": "When the account hits a rate limit mid-conversation the chat just shows an empty assistant bubble. No error, no retry hint — it reads like the assistant chose to say nothing. Surface the 429 as an actual error state."
+}

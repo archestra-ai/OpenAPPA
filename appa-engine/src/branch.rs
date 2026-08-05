@@ -246,11 +246,10 @@ pub(crate) fn check_child_return(
         if !sanitizer.on.output {
             continue;
         }
-        if fold.audience.covers(&sanitizer.can_reduce.from_includes) != Adequacy::Holds {
+        if sanitizer.transition.admits(&fold) != Adequacy::Holds {
             continue;
         }
-        // The label the sanitized crossing would carry: trust preserved, audience relabeled.
-        let sanitized = Label::new(fold.trust.clone(), Dim::Known(sanitizer.can_reduce.to.clone()));
+        let sanitized = sanitizer.transition.derive(&fold);
         let merged = current.combine(&sanitized);
         if merged == current {
             plans.push(ReturnPlan::Sanitize {
@@ -352,18 +351,14 @@ fn sanitized_crossing(
     if !registered.on.output {
         return Err(BranchError::SanitizerNotOutput(sanitizer.as_str().to_string()));
     }
-    if fold.audience.covers(&registered.can_reduce.from_includes) != Adequacy::Holds {
+    if registered.transition.admits(fold) != Adequacy::Holds {
         return Err(BranchError::TransitionSourceUnmet);
     }
-    let value = LabeledValue::new(
-        body,
-        Label::new(fold.trust.clone(), Dim::Known(registered.can_reduce.to.clone())),
-    );
+    let value = LabeledValue::new(body, registered.transition.derive(fold));
     let derivation = ReturnDerivation::Sanitized {
         sanitizer: sanitizer.clone(),
         raw_digest,
-        from: registered.can_reduce.from_includes.clone(),
-        to: registered.can_reduce.to.clone(),
+        transition: registered.transition.clone(),
     };
     Ok((value, derivation))
 }
@@ -393,7 +388,7 @@ fn unestablished_dims(views: &Views, trajectory: &TrajectoryId, fold: &Label, ou
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::{AudienceTransition, Sanitizer, SanitizerPoints};
+    use crate::authority::{Sanitizer, SanitizerPoints, Transition};
     use crate::fact::{CloseOutcome, EffectKind, Revision};
     use crate::label::{Audience, Label, ReaderId, Trust};
     use crate::projection::Projection;
@@ -437,10 +432,11 @@ mod tests {
                 input: false,
                 output: true,
             },
-            can_reduce: AudienceTransition {
+            transition: Transition::Audience {
                 from_includes: internal(),
                 to: Audience::Public,
             },
+            hint: None,
         };
         Registry::build(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
@@ -582,10 +578,11 @@ mod tests {
                 input: false,
                 output: true,
             },
-            can_reduce: AudienceTransition {
+            transition: Transition::Audience {
                 from_includes: internal(),
                 to: Audience::Public,
             },
+            hint: None,
         };
         let to_finance = Sanitizer {
             name: SanitizerName::new("to-finance"),
@@ -593,10 +590,11 @@ mod tests {
                 input: false,
                 output: true,
             },
-            can_reduce: AudienceTransition {
+            transition: Transition::Audience {
                 from_includes: internal(),
                 to: Audience::restricted([ReaderId::new("finance")]),
             },
+            hint: None,
         };
         let input_only = Sanitizer {
             name: SanitizerName::new("input-only"),
@@ -604,10 +602,11 @@ mod tests {
                 input: true,
                 output: false,
             },
-            can_reduce: AudienceTransition {
+            transition: Transition::Audience {
                 from_includes: internal(),
                 to: Audience::Public,
             },
+            hint: None,
         };
         Registry::build(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
@@ -1232,8 +1231,10 @@ mod tests {
                 &ReturnDerivation::Sanitized {
                     sanitizer: SanitizerName::new("declassify"),
                     raw_digest: RawResultDigest::of(b"secret"),
-                    from: internal(),
-                    to: Audience::Public,
+                    transition: Transition::Audience {
+                        from_includes: internal(),
+                        to: Audience::Public,
+                    },
                 }
             ),
             other => panic!("expected ChildReturn, got {other:?}"),

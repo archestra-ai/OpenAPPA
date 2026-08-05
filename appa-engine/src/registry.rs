@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::authority::{Authority, Cast, CastResolution, CastTarget, Sanitizer};
+use crate::authority::{Authority, Cast, CastResolution, CastTarget, Hint, Sanitizer, Transition};
 use crate::contract::ToolContract;
-use crate::label::{Dim, Dimension, Trust};
+use crate::label::{Adequacy, Dim, Dimension, Trust};
 use crate::names::{AuthorityName, CastName, SanitizerName};
 use crate::value::ToolName;
 
@@ -109,6 +109,8 @@ pub enum LoadError {
         "tool {tool}: {count} worst-case alternative remedy assignments exceed the {max} the planner enumerates — reduce the requirement entries or the competent authorities"
     )]
     TooManyPlanAlternatives { tool: String, count: u128, max: u128 },
+    #[error("{context}: hint is {len} characters, over the {max} a plan offer carries")]
+    HintTooLong { context: String, len: usize, max: usize },
 }
 
 /// The most unique grouped authority assignments one block may enumerate — the bound that keeps
@@ -117,7 +119,12 @@ pub enum LoadError {
 /// problem (multiplying interchangeable authorities per gap), not a tuning problem.
 pub(crate) const MAX_PLAN_ALTERNATIVES: u128 = 16;
 
-fn worst_case_plan_alternatives(tool: &ToolContract, authorities: &[Authority]) -> u128 {
+/// The longest hint a registration may carry. Every offer of every block repeats the
+/// hints of the entities it names, so an unbounded one is a way to flood the agent's context from
+/// configuration. A sentence or two is the intended shape.
+pub const MAX_HINT_CHARS: usize = 512;
+
+fn worst_case_plan_alternatives(tool: &ToolContract, authorities: &[Authority], sanitizers: &[Sanitizer]) -> u128 {
     use crate::check::Gap;
     use crate::contract::{AudienceRequirement, HistoryRequirement};
     use crate::fact::EffectKind;
@@ -185,6 +192,15 @@ fn worst_case_plan_alternatives(tool: &ToolContract, authorities: &[Authority]) 
                 .count(),
         );
     }
+    let output = tool.output_label();
+    let applicable = match tool.pending_cast_dim() {
+        Some(_) => 0,
+        None => sanitizers
+            .iter()
+            .filter(|sanitizer| sanitizer.on.output && sanitizer.transition.admits(&output) == Adequacy::Holds)
+            .count(),
+    };
+    multiply(applicable + 1);
     count
 }
 
@@ -204,6 +220,12 @@ impl Registry {
         // Sanitizers index first: the child return-sanitizer binding validates against them.
         let mut sanitizers = BTreeMap::new();
         for sanitizer in config.sanitizers {
+            let context = || format!("sanitizer {}", sanitizer.name.as_str());
+            if let Transition::Trust { from_floor, to } = &sanitizer.transition {
+                check_rank(&config.trust_chain, Some(*from_floor), || format!("{} from", context()))?;
+                check_rank(&config.trust_chain, Some(*to), || format!("{} to", context()))?;
+            }
+            check_hint(sanitizer.hint.as_ref(), context)?;
             if sanitizers.insert(sanitizer.name.clone(), sanitizer.clone()).is_some() {
                 return Err(LoadError::DuplicateSanitizer(sanitizer.name.as_str().to_string()));
             }
@@ -235,13 +257,17 @@ impl Registry {
             check_rank(&config.trust_chain, authority.mandate.trust_ceiling, || {
                 format!("authority {} trust ceiling", authority.name.as_str())
             })?;
+            check_hint(authority.hint.as_ref(), || {
+                format!("authority {}", authority.name.as_str())
+            })?;
             if seen_authorities.insert(authority.name.clone(), ()).is_some() {
                 return Err(LoadError::DuplicateAuthority(authority.name.as_str().to_string()));
             }
         }
 
+        let sanitizer_list: Vec<Sanitizer> = sanitizers.values().cloned().collect();
         for tool in tools.values() {
-            let count = worst_case_plan_alternatives(tool, &config.authorities);
+            let count = worst_case_plan_alternatives(tool, &config.authorities, &sanitizer_list);
             if count > MAX_PLAN_ALTERNATIVES {
                 return Err(LoadError::TooManyPlanAlternatives {
                     tool: tool.name.as_str().to_string(),
@@ -360,6 +386,17 @@ fn check_rank(chain: &TrustChain, rank: Option<Trust>, context: impl Fn() -> Str
     }
 }
 
+fn check_hint(hint: Option<&Hint>, context: impl Fn() -> String) -> Result<(), LoadError> {
+    match hint {
+        Some(hint) if hint.as_str().chars().count() > MAX_HINT_CHARS => Err(LoadError::HintTooLong {
+            context: context(),
+            len: hint.as_str().chars().count(),
+            max: MAX_HINT_CHARS,
+        }),
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,6 +436,7 @@ mod tests {
                 ..Mandate::default()
             },
             scope: Scope::default(),
+            hint: None,
         }
     }
 
@@ -438,6 +476,7 @@ mod tests {
             name: AuthorityName::new("noop"),
             mandate: Mandate::default(),
             scope: Scope::default(),
+            hint: None,
         }];
         assert!(matches!(
             Registry::build(cfg),
@@ -657,6 +696,7 @@ mod tests {
                 ..Mandate::default()
             },
             scope: Scope::default(),
+            hint: None,
         };
         let mut cfg = base();
         cfg.tools = vec![two_marks("wire")];

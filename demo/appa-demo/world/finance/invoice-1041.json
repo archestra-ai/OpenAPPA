@@ -1,0 +1,9 @@
+{
+  "invoice": "INV-1041",
+  "company": "Globex Industries",
+  "amount_usd": 12800,
+  "memo": "Platform fee, July 2026, plus usage overage",
+  "due": "2026-08-20",
+  "status": "unpaid",
+  "pay_to_account": "globex-operating-4417"
+}

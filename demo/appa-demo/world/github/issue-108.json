@@ -1,0 +1,10 @@
+{
+  "number": 108,
+  "title": "Function-call arguments truncated at 4 kB",
+  "author": "@slindqvist",
+  "labels": [
+    "bug",
+    "confirmed"
+  ],
+  "body": "Tool calls with large JSON arguments get cut off at what looks like a 4096-byte boundary, so the tool receives invalid JSON and the whole run fails. We hit this daily with our retrieval tool. Chunk or raise the limit — silently truncating structured arguments is the worst of the options."
+}

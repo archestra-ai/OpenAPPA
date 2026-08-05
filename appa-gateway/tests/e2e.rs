@@ -363,7 +363,7 @@ async fn a_blocked_return_crosses_only_the_chosen_derivation() {
         tool_round("2", "get_secret", "{}"),
         tool_round("3", "execute_remedy_plan", r#"{"plan_id":"remedy-0"}"#),
         tool_round("4", "submit_result", r#"{"value":"report: contact eve@corp.com"}"#),
-        tool_round("5", "execute_remedy_plan", r#"{"plan_id":"remedy-1"}"#),
+        tool_round("5", "execute_remedy_plan", r#"{"plan_id":"remedy-2"}"#),
         final_round("6", "thanks"),
     ])
     .await;

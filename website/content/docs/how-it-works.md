@@ -22,6 +22,8 @@ Policy definitions remain strictly declarative: contracts, authorities, sanitize
 
 Imperative or model-based judgment—if necessary—lives outside the engine in registered external components such as regex filters, classification models, or human approval queues. These external components follow the exact same policy rules: an authority mandate caps which policy gaps a human or service can approve, while a sanitizer mandate bounds the exact label transition a scrubber can claim.
 
+Either kind may also carry a `hint`: a sentence, in the operator's own words, on what the component is for. The hint travels with every remedy plan naming that component, so an agent choosing among plans reads stated purpose rather than a bare name, and a reviewer reads intent beside the mandate. A hint grants nothing—the mandate remains the only bound on power.
+
 ## Labels only move one way
 
 A tool contract declares a `delta` to define how fetching its result restricts the agent's current security label. A `delta` can only restrict permissions—it intersects allowed readers, lowers trust levels, or leaves the label unchanged.
@@ -69,9 +71,10 @@ requires = { audience = { includes = ["public"] } }
 delta    = {}
 effects  = ["egress", "mutation"]
 
-[[sanitizer]]                              # the child route crosses this
+[[sanitizer]]                              # both sanitized routes cross this
 name = "remove_pii"
 on   = ["tool_output"]
+hint = "Removes customer identities from a CRM record."   # advisory; grants nothing
 
 [sanitizer.mandate]
 audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
@@ -87,16 +90,19 @@ builtin = "hitl"
 can_cover_readers = { may_add = ["public"] } # may cover any recipient
 ```
 
-The trajectory begins at `{public, trusted}` unless pre-existing context or user input introduces restricted labels. When the agent calls `get_ticket_from_crm()`, OpenAPPA intercepts the dispatch before execution. The engine offers two operational paths based on the deployment's branching capabilities:
+The trajectory begins at `{public, trusted}` unless pre-existing context or user input introduces restricted labels. When the agent calls `get_ticket_from_crm()`, OpenAPPA intercepts the dispatch before execution. The engine offers three operational paths, and the block names all of them:
 
 | Execution Path | Trajectory Label Impact | Downstream Dispatch Impact |
 |---|---|---|
 | **Accept Narrowing** | Parent becomes `internal`. | `file_github_issue` is blocked; `send_email` requires authority approval. |
-| **Child Branch + Sanitizer** | Parent remains `{public, trusted}`; child narrows to `internal`. | `remove_pii` sanitizes the return value; `file_github_issue` remains open on parent. |
+| **Sanitize the Result** | Parent remains `{public, trusted}`. | The raw ticket is withheld from the model; `remove_pii`'s derivation is admitted in its place. |
+| **Child Branch + Sanitizer** | Parent remains `{public, trusted}`; child narrows to `internal`. | The child reads the raw ticket and returns the sanitized derivation across the merge. |
 
 :::fig-two-endings:::
 
-If the goal is publishing the ticket on GitHub, the agent executes the child branch, passes the result through `remove_pii`, and files the public issue without modifying the parent label. If the goal is emailing raw CRM data to an external auditor, the agent accepts the narrowing in the parent trajectory. When `send_email(ticket, auditor@…)` subsequently runs, the engine checks whether `auditor@…` is in the `internal` audience. Because it is not, OpenAPPA blocks the call and generates an authority remedy plan for `user`. Once `user` approves the request, the email dispatches and the egress event enters the log. The trajectory label remains `internal`, ensuring that subsequent emails to unapproved recipients require separate authority rulings.
+The second and third paths differ in what the model gets to read. Sanitizing the result never shows anyone the raw ticket — the derivation is all that exists downstream. The child branch lets the child read the raw ticket and reason over it, and sanitizes only what crosses back. Choose the branch when the work itself needs the restricted content; choose the result sanitizer when the derivation is what you wanted anyway. Each sanitizer's `hint` states what its derivation drops, so that choice is informed.
+
+If the goal is emailing raw CRM data to an external auditor, neither sanitized route applies and the agent accepts the narrowing in the parent trajectory. When `send_email(ticket, auditor@…)` subsequently runs, the engine checks whether `auditor@…` is in the `internal` audience. Because it is not, OpenAPPA blocks the call and generates an authority remedy plan for `user`. Once `user` approves the request, the email dispatches and the egress event enters the log. The trajectory label remains `internal`, ensuring that subsequent emails to unapproved recipients require separate authority rulings.
 
 ## Engine refusals enumerate every valid remedy
 

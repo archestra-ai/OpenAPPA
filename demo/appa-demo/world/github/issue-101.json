@@ -1,0 +1,10 @@
+{
+  "number": 101,
+  "title": "Chat stream stalls mid-response on long answers",
+  "author": "@rokonkwo",
+  "labels": [
+    "bug",
+    "confirmed"
+  ],
+  "body": "On answers past roughly 2k tokens the stream freezes: the typing indicator keeps spinning but no more tokens arrive. The run completes server-side (it shows up in the transcript log), the UI just never gets the tail.\n\nThis is what took us down during the July peak. Reproduced on 4.2.1 and on main; short answers are fine."
+}

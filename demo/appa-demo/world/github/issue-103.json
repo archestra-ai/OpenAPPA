@@ -1,0 +1,9 @@
+{
+  "number": 103,
+  "title": "Tool calls time out behind corporate proxy",
+  "author": "@tvasquez",
+  "labels": [
+    "bug"
+  ],
+  "body": "Any agent tool call that runs longer than ~30 s dies behind our egress proxy, and the harness then retries — which double-fires side effects. A keep-alive ping on the tool channel, or honoring proxy idle timeouts, would fix both.\n\nWe have hit this twice hard enough to open support tickets."
+}

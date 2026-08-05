@@ -1,0 +1,9 @@
+{
+  "number": 106,
+  "title": "Model fallback silently downgrades responses",
+  "author": "@slindqvist",
+  "labels": [
+    "bug"
+  ],
+  "body": "When the primary model rate-limits, the harness falls back to the smaller model with no signal anywhere — not in the response metadata, not in the logs. Our eval scores dropped for a week before we found it. At minimum, stamp the model actually used on every response."
+}

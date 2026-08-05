@@ -37,6 +37,7 @@ use crate::wire::{WireMessage, WireTool, WireToolCall};
 
 const SEALED_WITHHELD: &str = "[tool result withheld: exceeds the size the policy admits]";
 const SEALED_UNRESOLVED: &str = "[tool result withheld: its label could not be established]";
+const SEALED_UNSANITIZED: &str = "[tool result withheld: the sanitizer this plan bound could not derive from it]";
 const SEALED_UNAVAILABLE: &str = "[tool result unavailable]";
 const SEALED_FAILED: &str = "[tool call failed]";
 const SEALED_INDETERMINATE: &str = "[tool call outcome unknown — it may or may not have run]";
@@ -663,7 +664,7 @@ impl Turn {
                     drop(projection);
                     match self.open_dispatch(&call)? {
                         Some(dispatch) => {
-                            return self.invoke_and_admit(dispatch, &call, call_id, budget).await;
+                            return self.invoke_and_admit(dispatch, &call, call_id, None, budget).await;
                         }
                         None => {
                             self.feedback(call_id, "the call could not be dispatched (the policy state changed)")?
@@ -698,7 +699,14 @@ impl Turn {
                     };
                     let has_offers = planned.plans.iter().any(|plan| plan.executable().is_some());
                     let feedback = if !has_offers {
-                        crate::feedback::block_feedback(&raw, &planned, &[], surface, &views)
+                        crate::feedback::block_feedback(
+                            self.mediator.engine().registry(),
+                            &raw,
+                            &planned,
+                            &[],
+                            surface,
+                            &views,
+                        )
                     } else {
                         let attempts = self.remedy_attempts.entry(call.digest()).or_insert(0);
                         *attempts += 1;
@@ -716,7 +724,14 @@ impl Turn {
                                 (handle, plan.clone())
                             })
                             .collect::<Vec<_>>();
-                        let feedback = crate::feedback::block_feedback(&raw, &planned, &offers, surface, &views);
+                        let feedback = crate::feedback::block_feedback(
+                            self.mediator.engine().registry(),
+                            &raw,
+                            &planned,
+                            &offers,
+                            surface,
+                            &views,
+                        );
                         self.pending.push(PendingBlock {
                             call,
                             offers,
@@ -855,7 +870,11 @@ impl Turn {
                         }
                         _ => self.pending[cohort_index].offers.retain(|(offer, _)| offer != handle),
                     }
-                    let feedback = crate::feedback::denial_feedback(&self.pending[cohort_index].offers, surface);
+                    let feedback = crate::feedback::denial_feedback(
+                        self.mediator.engine().registry(),
+                        &self.pending[cohort_index].offers,
+                        surface,
+                    );
                     self.pending.retain(|cohort| !cohort.offers.is_empty());
                     self.feedback(call_id, &feedback)?;
                     return Ok(CallProgress::Go);
@@ -893,7 +912,11 @@ impl Turn {
             Err(error) => return Err(TurnError::Store(error)),
         }
         self.pending.remove(cohort_index);
-        self.invoke_and_admit(dispatch, &call, call_id, budget).await
+        let bound = chosen.steps.iter().find_map(|step| match step {
+            appa_engine::plan::RemedyStep::Sanitize(sanitizer) => Some(sanitizer.clone()),
+            appa_engine::plan::RemedyStep::Authorize(_) | appa_engine::plan::RemedyStep::Accept(_) => None,
+        });
+        self.invoke_and_admit(dispatch, &call, call_id, bound, budget).await
     }
 
     async fn handle_submit_result(
@@ -1555,6 +1578,7 @@ impl Turn {
         dispatch: DispatchId,
         call: &ResolvedCall,
         call_id: &ToolCallId,
+        bound: Option<SanitizerName>,
         budget: &mut RunBudget,
     ) -> Result<CallProgress, TurnError> {
         budget.record_tool_invocation();
@@ -1592,6 +1616,23 @@ impl Turn {
         let mut withheld = None;
         let mut cast_offer: Option<(CastName, DimValue, String)> = None;
         let admission = match &outcome {
+            ToolOutcome::Success {
+                body: BodyDisposition::Available(body),
+            } if bound.is_some() => {
+                let sanitizer = bound.expect("guarded by the arm condition");
+                match self.derive_sanitized(&sanitizer, body, budget).await {
+                    Err(TurnCancelled) => return Ok(CallProgress::Cancelled),
+                    Ok(Some(derived)) => ResultAdmission::SuccessSanitized {
+                        body: ValueBody::new(derived),
+                        sanitizer,
+                        raw_digest: RawResultDigest::of(body.as_bytes()),
+                    },
+                    Ok(None) => {
+                        withheld = Some(SEALED_UNSANITIZED);
+                        ResultAdmission::SuccessNoValue
+                    }
+                }
+            }
             ToolOutcome::Success {
                 body: BodyDisposition::Available(body),
             } => match pending_cast {
@@ -1752,7 +1793,10 @@ impl Turn {
                         | AdmitError::ConstantMismatch
                         | AdmitError::CeilingExceeded
                         | AdmitError::NarrowingUnaccepted
-                        | AdmitError::AcceptanceMismatch),
+                        | AdmitError::AcceptanceMismatch
+                        | AdmitError::OutputSanitizerBound
+                        | AdmitError::SanitizerBindingMismatch
+                        | AdmitError::SanitizerTransitionUnmet),
                     ) => {
                         result = Admission::Refused(error);
                         None

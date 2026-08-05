@@ -42,6 +42,7 @@ A tool contract is typically four lines long. Use this checklist during policy r
 | **Dynamic Recipients** | Static list `includes = ["user@corp"]` when recipient comes from a tool argument. | Use dynamic argument placeholder `includes = ["$recipient"]`. | Static lists pass unauthorized recipient arguments without checking argument values. |
 | **Combined Read & Release** | Single tool `share_doc(doc, recipient)` fetching and releasing in one step. | Split into `fetch_doc` (read) and `grant_doc_access` (release). | Combined tools force authorities to approve releases before content is fetched. |
 | **Authority Mandates** | Overly permissive mandates like `can_cover_readers = { may_add = ["public"] }`. | Restrict authority `mandate` and `scope.tags` to the minimum necessary desk. | Authorities cannot exceed mandates, but overly broad mandates weaken review gates. |
+| **Hint Accuracy** | A `hint` describing a power the mandate does not hold, or content the sanitizer does not remove. | Restate the declared mandate in your own words: say what the entity covers or strips, and nothing more. | A hint reaches the agent with every plan naming the entity, and grants nothing. A misleading one steers plan choice wrongly and misleads review. |
 
 ## Tools
 
@@ -80,6 +81,7 @@ An `[[authority]]` provides dynamic judgment to clear specific requirement gaps 
 ```toml
 [[authority]]
 name = "finance-officer"
+hint = "The desk that signs off spend. Consult it to release a payment."  # Advisory; grants nothing
 
 [authority.mandate]
 can_cover_trust_to = "trusted"                 # Cover unmet trust floor up to this rank
@@ -112,7 +114,8 @@ A `[[sanitizer]]` defines a formal label transition for data passed through a re
 ```toml
 [[sanitizer]]
 name = "pii-redactor"
-on   = ["tool_output"]                         # Applies to child sub-execution returns
+on   = ["tool_output"]                         # Tool results and child sub-execution returns
+hint = "Removes personal details from a finance record."  # Advisory; grants nothing
 
 [sanitizer.mandate]
 # Source label must satisfy `from`; output receives exact `to` label
@@ -121,6 +124,15 @@ audience = { from = { includes = ["finance"] }, to = { exactly = ["public"] } }
 [sanitizer.implementation]
 builtin = "redact-email"
 ```
+
+A mandate binds exactly one dimension. Trust is declared on the same terms, as a floor the source must meet and the rank the derivation carries — this is how a scrubber vouches untrusted fetched text back up:
+
+```toml
+[sanitizer.mandate]
+trust = { from = "suspicious", to = "trusted" } # Instead of `audience`, never alongside it
+```
+
+A registered `tool_output` sanitizer is offered as a remedy plan at every narrowing its mandate can transition. Executing that plan withholds the raw tool result from the model and admits the derivation instead, so the trajectory folds the derivation's label. The plan carries an acceptance only for the residual its mandate cannot shed — a mandate on `audience` leaves a trust narrowing to accept, and the reverse. A sanitizer whose relabel would change nothing is never offered.
 
 To enforce automated return sanitization across all child sub-executions, policies can bind a default return sanitizer:
 

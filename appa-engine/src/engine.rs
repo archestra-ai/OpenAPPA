@@ -597,6 +597,7 @@ mod tests {
                 ..Mandate::default()
             },
             scope: Scope::default(),
+            hint: None,
         };
         let cfg = RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),

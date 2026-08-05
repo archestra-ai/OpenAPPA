@@ -3,8 +3,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use appa_engine::fact::{BoundaryKind, CloseOutcome, Fact};
+use appa_engine::fact::{BoundaryKind, CloseOutcome, Fact, Revision};
 use appa_engine::label::{Audience, Dim, Label, ReaderId, Trust};
+use appa_engine::projection::Projection;
 use appa_engine::value::{Provenance, RawResultDigest, ResolvedCall, ToolName, TrajectoryId};
 use appa_runtime::store::TenantId;
 use appa_runtime::tool::{BuiltinTool, EXECUTE_REMEDY_PLAN, FORK, SUBMIT_RESULT};
@@ -953,7 +954,7 @@ builtin = "redact-email"
             .mediate(
                 calls(vec![
                     call("submit", SUBMIT_RESULT, r#"{"value":"ask eve@corp.com"}"#),
-                    call("early-accept", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-2"}"#),
+                    call("early-accept", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-3"}"#),
                 ]),
                 &mut budget,
             )
@@ -972,7 +973,7 @@ builtin = "redact-email"
                 calls(vec![call(
                     "accept-return",
                     EXECUTE_REMEDY_PLAN,
-                    r#"{"plan_id":"remedy-2"}"#
+                    r#"{"plan_id":"remedy-3"}"#
                 )]),
                 &mut budget,
             )
@@ -989,7 +990,7 @@ builtin = "redact-email"
             .mediate(
                 calls(vec![
                     call("submit", SUBMIT_RESULT, r#"{"value":"ask eve@corp.com"}"#),
-                    call("same-round-sanitize", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-1"}"#),
+                    call("same-round-sanitize", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-2"}"#),
                 ]),
                 &mut budget,
             )
@@ -1520,7 +1521,7 @@ builtin = "redact-email"
         turn.mediate(
             calls(vec![
                 call("submit", SUBMIT_RESULT, r#"{"value":"ask eve@corp.com"}"#),
-                call("early-sanitize", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-1"}"#),
+                call("early-sanitize", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-2"}"#),
             ]),
             &mut budget,
         )
@@ -1539,7 +1540,7 @@ builtin = "redact-email"
             calls(vec![call(
                 "sanitize-return",
                 EXECUTE_REMEDY_PLAN,
-                r#"{"plan_id":"remedy-1"}"#
+                r#"{"plan_id":"remedy-2"}"#
             )]),
             &mut budget,
         )
@@ -1796,7 +1797,7 @@ builtin = "redact-email"
                 calls(vec![call(
                     "sibling-cross",
                     EXECUTE_REMEDY_PLAN,
-                    r#"{"plan_id":"remedy-2"}"#,
+                    r#"{"plan_id":"remedy-3"}"#,
                 )]),
                 &mut budget,
             )
@@ -1811,7 +1812,7 @@ builtin = "redact-email"
                 calls(vec![call(
                     "stale-offer",
                     EXECUTE_REMEDY_PLAN,
-                    r#"{"plan_id":"remedy-2"}"#,
+                    r#"{"plan_id":"remedy-3"}"#,
                 )]),
                 &mut budget,
             )
@@ -1825,7 +1826,7 @@ builtin = "redact-email"
                 calls(vec![call(
                     "replayed-offer",
                     EXECUTE_REMEDY_PLAN,
-                    r#"{"plan_id":"remedy-2"}"#,
+                    r#"{"plan_id":"remedy-3"}"#,
                 )]),
                 &mut budget,
             )
@@ -1925,7 +1926,7 @@ resolver = {{ url = "{beta_url}", timeout_ms = 1000 }}
         assert!(matches!(
             child
                 .mediate(
-                    calls(vec![call(call_id, EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-1"}"#,)]),
+                    calls(vec![call(call_id, EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-3"}"#,)]),
                     &mut budget,
                 )
                 .await
@@ -1938,7 +1939,7 @@ resolver = {{ url = "{beta_url}", timeout_ms = 1000 }}
     assert!(matches!(
         child
             .mediate(
-                calls(vec![call("beta-1", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-2"}"#,)]),
+                calls(vec![call("beta-1", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-4"}"#,)]),
                 &mut budget,
             )
             .await
@@ -1963,7 +1964,7 @@ resolver = {{ url = "{beta_url}", timeout_ms = 1000 }}
                 calls(vec![call(
                     "second-alpha-1",
                     EXECUTE_REMEDY_PLAN,
-                    r#"{"plan_id":"remedy-4"}"#,
+                    r#"{"plan_id":"remedy-6"}"#,
                 )]),
                 &mut budget,
             )
@@ -1979,7 +1980,7 @@ resolver = {{ url = "{beta_url}", timeout_ms = 1000 }}
                 calls(vec![call(
                     "accept-raw",
                     EXECUTE_REMEDY_PLAN,
-                    r#"{"plan_id":"remedy-3"}"#,
+                    r#"{"plan_id":"remedy-5"}"#,
                 )]),
                 &mut budget,
             )
@@ -2774,4 +2775,101 @@ return_sanitizer = "pii"
     assert_eq!(residual.len(), 2, "both fold dimensions are named");
     assert!(residual.iter().all(|entry| entry["source_kind"] == "tool_result"));
     child_turn.stop(StopReason::Cancelled).unwrap();
+}
+
+#[tokio::test]
+async fn a_tool_output_sanitize_plan_admits_the_derivation_and_withholds_the_raw() {
+    let mediated = mediator(
+        r#"
+version = 1
+[[tool]]
+name = "read"
+delta = { audience = { exactly = ["internal"] } }
+
+[[sanitizer]]
+name = "pii"
+on = ["tool_output"]
+hint = "Drops email addresses so a record can leave the org."
+[sanitizer.mandate]
+audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+[sanitizer.implementation]
+builtin = "redact-email"
+"#,
+        &[("read", BuiltinTool::Echo("ask eve@corp.com".to_string()))],
+    );
+    let tenant = TenantId::new("tenant");
+    let session = mediated.create_session(tenant.clone());
+    let mut budget = RunBudget::default();
+    let mut turn = begin(&mediated, &tenant, &session, "go").await;
+
+    assert!(matches!(
+        turn.mediate(calls(vec![call("read-call", "read", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    let payload = feedback_payload(&facts(&mediated, &tenant, &session), "read-call");
+    let plans = payload["remedy_plans"].as_array().expect("remedy plans");
+    assert_eq!(plans.len(), 2, "acceptance and the applicable sanitizer");
+    let sanitize = plans
+        .iter()
+        .find(|plan| plan["sanitizes"].is_object())
+        .expect("a sanitize plan is offered");
+    assert_eq!(sanitize["sanitizes"]["sanitizer"], "pii");
+    assert_eq!(
+        sanitize["sanitizes"]["hint"],
+        "Drops email addresses so a record can leave the org."
+    );
+    assert_eq!(sanitize["accepts_narrowing"], false);
+    let handle = sanitize["plan_id"]
+        .as_str()
+        .expect("the plan carries a handle")
+        .to_string();
+
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call("sanitize-call", EXECUTE_REMEDY_PLAN, &remedy_args(&handle))]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+
+    let log = facts(&mediated, &tenant, &session);
+    let admitted: Vec<_> = log
+        .iter()
+        .filter_map(|fact| match fact {
+            Fact::ValueAdmitted {
+                value,
+                provenance: Provenance::ToolResult { .. },
+                ..
+            } => Some((value.body.as_str(), value.label.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        admitted,
+        [(
+            "ask [redacted-email]",
+            Label::new(Dim::Known(Trust::new(u8::MAX)), Dim::Known(Audience::Public))
+        )]
+    );
+    let projection = Projection::build(&log, Revision::new(log.len() as u64));
+    assert_eq!(
+        projection.view(&session).current_label(),
+        Label::new(Dim::Known(Trust::new(1)), Dim::Known(Audience::Public))
+    );
+    assert!(log.iter().any(|fact| matches!(
+        fact,
+        Fact::OutputSanitizerApplied { sanitizer, raw_digest, .. }
+            if sanitizer.as_str() == "pii" && raw_digest == &RawResultDigest::of(b"ask eve@corp.com")
+    )));
+    assert!(!log.iter().any(|fact| matches!(fact, Fact::Acceptance { .. })));
+    assert!(!log.iter().any(|fact| match fact {
+        Fact::ValueAdmitted { value, .. } => value.body.as_str().contains("eve@corp.com"),
+        Fact::BlockFeedback { content, .. } => content.contains("eve@corp.com"),
+        _ => false,
+    }));
+    turn.stop(StopReason::Cancelled).unwrap();
 }

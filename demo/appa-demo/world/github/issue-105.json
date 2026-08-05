@@ -1,0 +1,9 @@
+{
+  "number": 105,
+  "title": "Document the transcript retention defaults",
+  "author": "@s-okafor",
+  "labels": [
+    "docs"
+  ],
+  "body": "The docs say retention is \"configurable\" but never state the default. It is 90 days as far as I can tell from the API response — worth writing down, along with whether changing it applies retroactively. Compliance teams ask this constantly."
+}

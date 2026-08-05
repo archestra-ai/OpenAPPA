@@ -1,9 +1,10 @@
 //! The one build path: derive every read model from the log by full reprojection.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::fact::{BoundaryKind, CloseOutcome, EffectKind, Fact, ReturnPolicy, Revision};
 use crate::label::{Dim, DimValue, Label};
+use crate::names::SanitizerName;
 use crate::value::{CanonicalDigest, ChildReturnId, DispatchId, LabeledValue, Provenance, TrajectoryId, ValueId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,6 +45,7 @@ pub struct Projection {
     boundaries: Vec<TrajectoryId>,
     forks: Vec<Fork>,
     child_returns: Vec<ReturnedChild>,
+    bound_sanitizers: BTreeMap<DispatchId, SanitizerName>,
 }
 
 impl Projection {
@@ -58,6 +60,7 @@ impl Projection {
         let mut boundaries = Vec::new();
         let mut forks = Vec::new();
         let mut child_returns = Vec::new();
+        let mut bound_sanitizers = BTreeMap::new();
 
         for fact in log {
             match fact {
@@ -105,7 +108,15 @@ impl Projection {
                 }
                 Fact::Ruling { .. } | Fact::Acceptance { .. } | Fact::ChildReturnAcceptance { .. } => {}
                 Fact::AssistantMessage { .. } | Fact::BlockFeedback { .. } => {}
-                Fact::OutputCastApplied { .. } | Fact::OutputCastAccepted { .. } | Fact::OutputCastLapsed { .. } => {}
+                Fact::OutputCastApplied { .. }
+                | Fact::OutputCastAccepted { .. }
+                | Fact::OutputCastLapsed { .. }
+                | Fact::OutputSanitizerApplied { .. } => {}
+                Fact::OutputSanitizerBound {
+                    dispatch, sanitizer, ..
+                } => {
+                    bound_sanitizers.insert(dispatch.clone(), sanitizer.clone());
+                }
                 Fact::ChildReturn { id, value, .. } => child_returns.push(ReturnedChild {
                     id: id.clone(),
                     value: value.clone(),
@@ -140,6 +151,7 @@ impl Projection {
             boundaries,
             forks,
             child_returns,
+            bound_sanitizers,
         }
     }
 
@@ -306,6 +318,13 @@ impl Views<'_> {
     /// close (success-family only, no duplicate effects) and the runtime's once-only checkpoint.
     pub fn is_succeeded(&self, dispatch: &DispatchId) -> bool {
         self.projection.succeeded.contains(dispatch)
+    }
+
+    /// The output sanitizer an executed sanitize plan bound to this dispatch, if any.
+    /// While one stands, admission takes only that sanitizer's derivation and refuses the raw
+    /// result; the runtime also reads it to know which backend to call.
+    pub fn bound_sanitizer(&self, dispatch: &DispatchId) -> Option<&SanitizerName> {
+        self.projection.bound_sanitizers.get(dispatch)
     }
 
     pub fn boundary_count(&self) -> usize {

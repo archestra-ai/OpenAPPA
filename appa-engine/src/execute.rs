@@ -178,13 +178,24 @@ pub(crate) fn execute_remedy_plan(
     }
     if let Some(narrowing) = chosen.steps.iter().find_map(|step| match step {
         plan::RemedyStep::Accept(narrowing) => Some(narrowing.clone()),
-        plan::RemedyStep::Authorize(_) => None,
+        plan::RemedyStep::Authorize(_) | plan::RemedyStep::Sanitize(_) => None,
     }) {
         facts.push(Fact::Acceptance {
             trajectory: trajectory.clone(),
             dispatch: dispatch.clone(),
             plan,
             narrowing,
+        });
+    }
+    if let Some(sanitizer) = chosen.steps.iter().find_map(|step| match step {
+        plan::RemedyStep::Sanitize(sanitizer) => Some(sanitizer.clone()),
+        plan::RemedyStep::Authorize(_) | plan::RemedyStep::Accept(_) => None,
+    }) {
+        facts.push(Fact::OutputSanitizerBound {
+            trajectory: trajectory.clone(),
+            dispatch: dispatch.clone(),
+            plan,
+            sanitizer,
         });
     }
     facts.push(dispatch_opened);
@@ -248,6 +259,7 @@ mod tests {
                 ..Mandate::default()
             },
             scope: Scope::default(),
+            hint: None,
         };
         Registry::build(crate::registry::RegistryConfig {
             trust_chain: chain(),
@@ -352,6 +364,7 @@ mod tests {
                 ..Mandate::default()
             },
             scope: Scope::default(),
+            hint: None,
         };
         let registry = Registry::build(crate::registry::RegistryConfig {
             trust_chain: chain(),
@@ -494,6 +507,7 @@ mod tests {
                 ..Mandate::default()
             },
             scope: Scope::default(),
+            hint: None,
         };
         let officer = Authority {
             name: AuthorityName::new("officer"),
@@ -502,6 +516,7 @@ mod tests {
                 ..Mandate::default()
             },
             scope: Scope::default(),
+            hint: None,
         };
         let wire = ToolContract {
             name: ToolName::new("wire"),
@@ -556,6 +571,7 @@ mod tests {
                 ..Mandate::default()
             },
             scope: Scope::default(),
+            hint: None,
         };
         let a2 = Authority {
             name: AuthorityName::new("a2"),
@@ -564,6 +580,7 @@ mod tests {
                 ..Mandate::default()
             },
             scope: Scope::default(),
+            hint: None,
         };
         let registry = Registry::build(crate::registry::RegistryConfig {
             trust_chain: chain(),

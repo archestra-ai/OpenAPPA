@@ -1,0 +1,9 @@
+{
+  "number": 109,
+  "title": "Eval runs are nondeterministic between reruns",
+  "author": "@pf-harmon",
+  "labels": [
+    "evals"
+  ],
+  "body": "Same suite, temperature 0, same pinned model: about 3% of cases flip between reruns. If there is sampling seed plumbing, expose it; if not, say so in the docs so we stop chasing ghosts."
+}

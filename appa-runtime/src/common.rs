@@ -192,7 +192,7 @@ impl Core {
                 let surface = self.surface()?;
                 let has_offers = planned.plans.iter().any(|plan| plan.executable().is_some());
                 let feedback = if !has_offers {
-                    crate::feedback::block_feedback(&raw, &planned, &[], surface, &views)
+                    crate::feedback::block_feedback(self.engine.registry(), &raw, &planned, &[], surface, &views)
                 } else {
                     let attempts = self.remedy_attempts.entry(call.digest()).or_insert(0);
                     *attempts += 1;
@@ -211,7 +211,14 @@ impl Core {
                             (handle, plan.clone())
                         })
                         .collect();
-                    let feedback = crate::feedback::block_feedback(&raw, &planned, &offers, surface, &views);
+                    let feedback = crate::feedback::block_feedback(
+                        self.engine.registry(),
+                        &raw,
+                        &planned,
+                        &offers,
+                        surface,
+                        &views,
+                    );
                     self.pending_blocks.push(PendingBlock {
                         call,
                         offers,
@@ -340,7 +347,11 @@ impl Core {
                         }
                         _ => self.pending_blocks[cohort_index].offers.retain(|(h, _)| h != plan_id),
                     }
-                    let feedback = crate::feedback::denial_feedback(&self.pending_blocks[cohort_index].offers, surface);
+                    let feedback = crate::feedback::denial_feedback(
+                        self.engine.registry(),
+                        &self.pending_blocks[cohort_index].offers,
+                        surface,
+                    );
                     self.pending_blocks.retain(|cohort| !cohort.offers.is_empty());
                     return Ok(Remedied::Feedback(feedback));
                 }
@@ -449,7 +460,10 @@ impl Core {
                     | AdmitError::NarrowingUnaccepted
                     | AdmitError::AcceptanceMismatch
                     | AdmitError::AlreadySucceeded
-                    | AdmitError::SuccessContradicted,
+                    | AdmitError::SuccessContradicted
+                    | AdmitError::OutputSanitizerBound
+                    | AdmitError::SanitizerBindingMismatch
+                    | AdmitError::SanitizerTransitionUnmet,
                 ) => {
                     verdict = Admission::Refused;
                     None

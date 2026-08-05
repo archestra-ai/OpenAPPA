@@ -46,7 +46,8 @@ const TERMS = {
 
   /* Authorities */
   mandate:
-    "The declared bound on a registered component's power: for an authority, what its rulings may cover; for a sanitizer, the transition it may claim.",
+    "The declared bound on a registered component's power: for an authority, what its rulings may cover; for a sanitizer, the one transition it may claim, on either dimension.",
+  hint: "The deployer's own account of what an authority or sanitizer is for. Carried into every remedy plan naming it, so the agent chooses on stated purpose. Advisory: it grants nothing.",
   can_cover_trust_to: "The ceiling of a trust cover in an authority mandate.",
   can_cover_readers: "The ceiling of an audience cover in an authority mandate.",
   may_add:

@@ -1,0 +1,11 @@
+{
+  "recording": "acme-renewal-risk",
+  "title": "Acme renewal risk review",
+  "date": "2026-07-24",
+  "attendees": [
+    "Dana Whitfield",
+    "Lee Vance",
+    "Marcus Bell"
+  ],
+  "transcript": "Dana: Okonkwo's CTO said it plainly — another incident like July and they walk at renewal. They are already talking to a competitor.\nLee: The July peak was the stream-stall bug. Okonkwo filed the tracker issue on it himself. The fix is staged; it ships Thursday.\nDana: Then Thursday matters more than any discount. I have authority up to eighteen percent but I'd rather not open that door.\nMarcus: Agreed, hold the discount. Let's regroup after Thursday's release and see where their CTO stands.\nDana: One more thing from the call — when their agent pulls a PDF through the retrieval tool, the attachment silently disappears from the result. No error, the answer just quietly ignores it. Okonkwo says nobody has filed it.\nLee: First I'm hearing of it. That needs a tracker issue.\nDana: Their billing is spotless, for the record. 1039 paid on time again."
+}

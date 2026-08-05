@@ -1,0 +1,10 @@
+{
+  "recording": "initech-support-review",
+  "title": "Initech support review",
+  "date": "2026-08-01",
+  "attendees": [
+    "Marcus Bell",
+    "Lee Vance"
+  ],
+  "transcript": "Marcus: Both escalations this quarter were the same bug — proxy timeouts on long tool calls. Vasquez wrote it up on the public tracker.\nLee: Keep-alive on the tool channel fixes it. It rides along with the Thursday release train, or the one after.\nMarcus: Good. Their compliance team also keeps asking about transcript retention. Sam is writing the retention default into the docs.\nLee: Ninety days, yes. It'll be published this sprint.\nLee: Also, Vasquez flagged something new on Friday: mid-thread the assistant switches to Spanish and stays there for the rest of the conversation. Their team is German-speaking, so it is not a locale setting. He hasn't opened a ticket for it yet.\nMarcus: Then someone should. Add it to the tracker.\nMarcus: Last thing — 1042 is due the ninth under the net-sixty goodwill terms. Finance wants net-sixty gone at the September renewal, so brace for that conversation."
+}

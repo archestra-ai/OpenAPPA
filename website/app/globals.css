@@ -1,4 +1,8 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
 
 /* ————————————————————————————————————————————————
    Design tokens — warm monochrome, pale chartreuse accent
@@ -43,6 +47,41 @@
   --syn-string: hsl(151, 45%, 30%);
   --syn-number: hsl(36, 75%, 34%);
   --syn-fn: hsl(30, 8%, 24%);
+  /* shadcn / AI Elements tokens, derived from the site palette above so the
+     components render native to the site (and flip with it in dark mode).
+     `--accent` and `--border` belong to the site; the shadcn utilities that
+     want them are remapped in the @theme block at the end of this file. */
+  --background: var(--bg);
+  --foreground: var(--text);
+  --card: var(--bg);
+  --card-foreground: var(--text);
+  --popover: var(--bg);
+  --popover-foreground: var(--text);
+  --primary: var(--accent);
+  --primary-foreground: var(--text-inverted);
+  --secondary: var(--bg-weak);
+  --secondary-foreground: var(--text-strong);
+  --muted: var(--bg-weak);
+  --muted-foreground: var(--text-weak);
+  --ui-accent: var(--bg-weak-hover);
+  --accent-foreground: var(--text-strong);
+  --destructive: var(--danger);
+  --input: var(--border);
+  --ring: var(--accent);
+  --chart-1: var(--accent);
+  --chart-2: var(--info);
+  --chart-3: var(--warn);
+  --chart-4: var(--danger);
+  --chart-5: var(--icon);
+  --radius: 0.625rem;
+  --sidebar: var(--bg-weak);
+  --sidebar-foreground: var(--text);
+  --sidebar-primary: var(--accent);
+  --sidebar-primary-foreground: var(--text-inverted);
+  --sidebar-accent: var(--bg-weak-hover);
+  --sidebar-accent-foreground: var(--text-strong);
+  --sidebar-border: var(--border-weak);
+  --sidebar-ring: var(--accent);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -181,7 +220,6 @@ samp {
   color: var(--text-strong);
   text-decoration: none;
 }
-
 
 .site-header nav {
   display: flex;
@@ -685,6 +723,29 @@ samp {
 }
 
 /* ————————————————————————————————————————————————
+   Chat — the /chat route fills the viewport below the header; the chat pane
+   scrolls internally, the page itself never does. The playground brings its
+   own right sidebar, so the shell's third (toc) column is dropped.
+   ———————————————————————————————————————————————— */
+.chat-shell {
+  height: calc(100vh - 62px);
+  min-height: 0;
+}
+
+@media (min-width: 1280px) {
+  .chat-shell {
+    grid-template-columns: 16rem minmax(0, 1fr);
+  }
+}
+
+.chat-main {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+
+/* ————————————————————————————————————————————————
    Footer
    ———————————————————————————————————————————————— */
 .site-footer {
@@ -984,4 +1045,63 @@ samp {
   font-weight: 500;
   color: var(--text-strong);
   margin-top: 4px;
+}
+
+/* Tailwind utility names for the shadcn tokens. Two remaps on purpose:
+   `--color-accent` reads the ui hover-surface token (the site's `--accent`
+   is the strong green and stays out of component hover backgrounds), and
+   `--color-border` reads `--border-weak` (the site's card-border weight). */
+@theme inline {
+  --font-heading: var(--font-plex-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-sans: var(--font-plex-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border-weak);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--ui-accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/* No `.dark` block: the shadcn tokens above derive from the site palette,
+   which already flips under prefers-color-scheme. */
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
 }

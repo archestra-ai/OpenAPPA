@@ -1,0 +1,9 @@
+{
+  "invoice": "INV-1039",
+  "company": "Acme Corp",
+  "amount_usd": 34333,
+  "memo": "Platform fee, July 2026 (monthly billing)",
+  "due": "2026-07-15",
+  "status": "paid",
+  "pay_to_account": "acme-payables-2201"
+}

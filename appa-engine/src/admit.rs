@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::authority::CastResolution;
 use crate::check::{Narrowing, UnestablishedFact};
 use crate::fact::{CloseOutcome, Fact, FactBatch};
-use crate::label::{Dim, DimValue, Label};
+use crate::label::{Adequacy, Dim, DimValue, Label};
 use crate::names::CastName;
 use crate::projection::Views;
 use crate::registry::Registry;
@@ -31,6 +31,11 @@ pub enum ResultAdmission {
         body: ValueBody,
         cast: CastName,
         resolved: DimValue,
+    },
+    SuccessSanitized {
+        body: ValueBody,
+        sanitizer: crate::names::SanitizerName,
+        raw_digest: RawResultDigest,
     },
 }
 
@@ -62,6 +67,12 @@ pub enum AdmitError {
     AlreadySucceeded,
     #[error("the dispatch recorded success: a failure or indeterminate close contradicts it")]
     SuccessContradicted,
+    #[error("an executed plan bound this dispatch to a sanitizer: only its derivation may be admitted")]
+    OutputSanitizerBound,
+    #[error("the derivation names a sanitizer this dispatch is not bound to")]
+    SanitizerBindingMismatch,
+    #[error("the bound sanitizer is not registered for output, or the raw result does not satisfy its `from`")]
+    SanitizerTransitionUnmet,
 }
 
 /// Record observed success for a **still-open** dispatch whose value finalization is deferred (a
@@ -214,6 +225,11 @@ pub(crate) fn admit_result(
         },
     };
 
+    let bound = views.bound_sanitizer(dispatch);
+    if bound.is_some() && matches!(admission, ResultAdmission::SuccessRaw { .. }) {
+        return Err(AdmitError::OutputSanitizerBound);
+    }
+
     let facts = match admission {
         ResultAdmission::Failure => vec![Fact::DispatchClosed {
             trajectory: trajectory.clone(),
@@ -280,6 +296,35 @@ pub(crate) fn admit_result(
                     narrowing: accepted,
                 },
                 admit_value(label, body),
+            ]
+        }
+        ResultAdmission::SuccessSanitized {
+            body,
+            sanitizer,
+            raw_digest,
+        } => {
+            match bound {
+                Some(name) if name == &sanitizer => {}
+                Some(_) => return Err(AdmitError::SanitizerBindingMismatch),
+                None => return Err(AdmitError::SanitizerBindingMismatch),
+            }
+            let registered = registry
+                .sanitizer(&sanitizer)
+                .ok_or_else(|| AdmitError::UnknownTool(sanitizer.as_str().to_string()))?;
+            let raw_label = contract.output_label();
+            if !registered.on.output || registered.transition.admits(&raw_label) != Adequacy::Holds {
+                return Err(AdmitError::SanitizerTransitionUnmet);
+            }
+            vec![
+                close_success(),
+                Fact::OutputSanitizerApplied {
+                    trajectory: trajectory.clone(),
+                    dispatch: dispatch.clone(),
+                    sanitizer,
+                    transition: registered.transition.clone(),
+                    raw_digest,
+                },
+                admit_value(registered.transition.derive(&raw_label), body),
             ]
         }
         ResultAdmission::SuccessCastLapsed { body, cast, resolved } => {
@@ -352,7 +397,7 @@ pub(crate) fn admit_cast(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::{AudienceTransition, Cast, CastCeiling, Sanitizer, SanitizerPoints};
+    use crate::authority::{Cast, CastCeiling, Sanitizer, SanitizerPoints, Transition};
     use crate::contract::{Delta, ToolContract};
     use crate::fact::{EffectKind, Revision};
     use crate::label::{Audience, Dim, Dimension, ReaderId, Trust};
@@ -388,10 +433,11 @@ mod tests {
                 input: false,
                 output: true,
             },
-            can_reduce: AudienceTransition {
+            transition: Transition::Audience {
                 from_includes: internal(),
                 to: Audience::Public,
             },
+            hint: None,
         };
         let finance_san = Sanitizer {
             name: crate::names::SanitizerName::new("finance-only"),
@@ -399,10 +445,11 @@ mod tests {
                 input: false,
                 output: true,
             },
-            can_reduce: AudienceTransition {
+            transition: Transition::Audience {
                 from_includes: Audience::restricted([ReaderId::new("finance")]),
                 to: Audience::Public,
             },
+            hint: None,
         };
         let const_cast = Cast {
             name: CastName::new("paranoid"),
@@ -1113,5 +1160,101 @@ mod tests {
         let p = views_of(&log);
         assert!(p.view(&t).has_effect(&EffectKind::new("read")));
         assert!(!p.view(&t).is_open(&dispatch));
+    }
+
+    #[test]
+    fn a_bound_dispatch_admits_only_its_sanitizers_derivation() {
+        let reg = registry();
+        let call = get_call();
+        let (mut log, dispatch) = open_log(&call);
+        let t = traj();
+        log.push(Fact::OutputSanitizerBound {
+            trajectory: t.clone(),
+            dispatch: dispatch.clone(),
+            plan: crate::plan::PlanId::new(1),
+            sanitizer: crate::names::SanitizerName::new("declassify"),
+        });
+        let p = views_of(&log);
+
+        assert_eq!(
+            admit_result(
+                &reg,
+                &p.view(&t),
+                &dispatch,
+                &call,
+                ResultAdmission::SuccessRaw {
+                    body: ValueBody::new("ticket"),
+                },
+            ),
+            Err(AdmitError::OutputSanitizerBound)
+        );
+
+        assert_eq!(
+            admit_result(
+                &reg,
+                &p.view(&t),
+                &dispatch,
+                &call,
+                ResultAdmission::SuccessSanitized {
+                    body: ValueBody::new("redacted"),
+                    sanitizer: crate::names::SanitizerName::new("finance-only"),
+                    raw_digest: RawResultDigest::of(b"ticket"),
+                },
+            ),
+            Err(AdmitError::SanitizerBindingMismatch)
+        );
+
+        let batch = admit_result(
+            &reg,
+            &p.view(&t),
+            &dispatch,
+            &call,
+            ResultAdmission::SuccessSanitized {
+                body: ValueBody::new("redacted"),
+                sanitizer: crate::names::SanitizerName::new("declassify"),
+                raw_digest: RawResultDigest::of(b"ticket"),
+            },
+        )
+        .unwrap();
+        assert!(batch.facts.iter().any(|fact| matches!(
+            fact,
+            Fact::OutputSanitizerApplied { sanitizer, raw_digest, .. }
+                if sanitizer.as_str() == "declassify" && raw_digest == &RawResultDigest::of(b"ticket")
+        )));
+        let admitted = batch
+            .facts
+            .iter()
+            .find_map(|fact| match fact {
+                Fact::ValueAdmitted { value, .. } => Some(value),
+                _ => None,
+            })
+            .expect("the derivation is admitted");
+        assert_eq!(admitted.body.as_str(), "redacted");
+        assert_eq!(
+            admitted.label,
+            Label::new(Dim::Known(SUSPICIOUS), Dim::Known(Audience::Public))
+        );
+    }
+
+    #[test]
+    fn an_unbound_dispatch_refuses_a_derivation() {
+        let reg = registry();
+        let call = get_call();
+        let (log, dispatch) = open_log(&call);
+        let p = views_of(&log);
+        assert_eq!(
+            admit_result(
+                &reg,
+                &p.view(&traj()),
+                &dispatch,
+                &call,
+                ResultAdmission::SuccessSanitized {
+                    body: ValueBody::new("redacted"),
+                    sanitizer: crate::names::SanitizerName::new("declassify"),
+                    raw_digest: RawResultDigest::of(b"ticket"),
+                },
+            ),
+            Err(AdmitError::SanitizerBindingMismatch)
+        );
     }
 }

@@ -1,0 +1,7 @@
+{
+  "number": 107,
+  "title": "Duplicate tokens after the tab regains focus",
+  "author": "@kthxbai9",
+  "labels": [],
+  "body": "Leave a streaming answer, let the laptop sleep, come back: the last sentence renders twice. Looks like the client replays the SSE buffer on visibilitychange without deduplicating."
+}

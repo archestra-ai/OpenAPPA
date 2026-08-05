@@ -1,0 +1,9 @@
+{
+  "number": 104,
+  "title": "Assistant loses its system prompt in long sessions",
+  "author": "@noona-dev",
+  "labels": [
+    "bug"
+  ],
+  "body": "Around turn 40 the assistant's persona and constraints drift — it starts answering things the system prompt explicitly rules out. Looks like the head of the context is being truncated before the tail. Pinning the system message should be unconditional."
+}

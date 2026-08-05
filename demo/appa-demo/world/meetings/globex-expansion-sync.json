@@ -1,0 +1,10 @@
+{
+  "recording": "globex-expansion-sync",
+  "title": "Globex expansion sync",
+  "date": "2026-07-30",
+  "attendees": [
+    "Priya Raman",
+    "Sam Okafor"
+  ],
+  "transcript": "Priya: Quote for the audit-log add-on goes out Friday at twenty-four. Floor is nineteen.\nSam: Understood. Engineering-wise they bring up the argument-truncation bug every call. Lindqvist filed it and it's genuinely hurting their retrieval tool.\nPriya: And their eval team lost a week to the silent model fallback. If we fix those two before the November renewal the expansion sells itself.\nSam: Invoice-wise 1041 is open with the usage overage. They're net-30 and slow, but they always pay.\nPriya: Not worried. Chase it after the twentieth if it's still sitting."
+}

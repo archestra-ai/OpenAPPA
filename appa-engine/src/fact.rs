@@ -2,9 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::authority::Transition;
 use crate::check::{Gap, Narrowing};
 use crate::execute::AuthorityReview;
-use crate::label::{Audience, DimValue, Dimension, Label};
+use crate::label::{DimValue, Dimension, Label};
 use crate::names::{AuthorityName, CastName, SanitizerName};
 use crate::plan::PlanId;
 use crate::value::{
@@ -30,8 +31,7 @@ pub enum ReturnDerivation {
     Sanitized {
         sanitizer: SanitizerName,
         raw_digest: RawResultDigest,
-        from: Audience,
-        to: Audience,
+        transition: Transition,
     },
 }
 
@@ -173,6 +173,19 @@ pub enum Fact {
         resolved: DimValue,
         raw_digest: RawResultDigest,
     },
+    OutputSanitizerBound {
+        trajectory: TrajectoryId,
+        dispatch: DispatchId,
+        plan: PlanId,
+        sanitizer: SanitizerName,
+    },
+    OutputSanitizerApplied {
+        trajectory: TrajectoryId,
+        dispatch: DispatchId,
+        sanitizer: SanitizerName,
+        transition: Transition,
+        raw_digest: RawResultDigest,
+    },
     ChildReturn {
         trajectory: TrajectoryId,
         id: ChildReturnId,
@@ -201,6 +214,8 @@ impl Fact {
             | Fact::OutputCastApplied { trajectory, .. }
             | Fact::OutputCastAccepted { trajectory, .. }
             | Fact::OutputCastLapsed { trajectory, .. }
+            | Fact::OutputSanitizerBound { trajectory, .. }
+            | Fact::OutputSanitizerApplied { trajectory, .. }
             | Fact::ChildReturn { trajectory, .. }
             | Fact::Boundary { trajectory, .. } => trajectory,
         }

@@ -1,10 +1,12 @@
 //! G12 model-facing block feedback: the exact typed decision state, rendered once, shared by the
 //! runtime turn-drive and the SDK so both surfaces are byte-identical.
 
+use appa_engine::authority::Hint;
 use appa_engine::check::{Gap, Narrowing, RawBlock, UnestablishedFact};
 use appa_engine::label::Dimension;
 use appa_engine::plan::{ExecutableRemedyPlan, PlannedBlock, RedispatchEffect, RemedyPlan};
 use appa_engine::projection::Views;
+use appa_engine::registry::Registry;
 use appa_engine::value::Provenance;
 use serde::Serialize;
 
@@ -21,13 +23,24 @@ pub enum FeedbackSurface {
 struct WirePlan<'a> {
     plan_id: &'a str,
     rulings: Vec<WireRuling<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sanitizes: Option<WireSanitize<'a>>,
     accepts_narrowing: bool,
+}
+
+#[derive(Serialize)]
+struct WireSanitize<'a> {
+    sanitizer: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hint: Option<&'a str>,
 }
 
 #[derive(Serialize)]
 struct WireRuling<'a> {
     authority: &'a str,
     covers: &'a [Gap],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hint: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -92,7 +105,10 @@ fn wire_unestablished(facts: &[UnestablishedFact], views: &Views) -> Vec<WireUne
         .collect()
 }
 
-fn wire_plans(offers: &[(String, ExecutableRemedyPlan)]) -> Vec<WirePlan<'_>> {
+/// Render the offered plans, resolving each named authority's and sanitizer's hint from the
+/// registry. Hints are read here rather than carried on the plan because a plan is an assignment of
+/// mandates, not a message: the registry stays the one place the operator's prose lives.
+fn wire_plans<'a>(registry: &'a Registry, offers: &'a [(String, ExecutableRemedyPlan)]) -> Vec<WirePlan<'a>> {
     offers
         .iter()
         .map(|(handle, plan)| WirePlan {
@@ -103,8 +119,22 @@ fn wire_plans(offers: &[(String, ExecutableRemedyPlan)]) -> Vec<WirePlan<'_>> {
                 .map(|required| WireRuling {
                     authority: required.authority.as_str(),
                     covers: &required.covers,
+                    hint: registry
+                        .authority(&required.authority)
+                        .and_then(|authority| authority.hint.as_ref())
+                        .map(Hint::as_str),
                 })
                 .collect(),
+            sanitizes: plan.steps.iter().find_map(|step| match step {
+                appa_engine::plan::RemedyStep::Sanitize(name) => Some(WireSanitize {
+                    sanitizer: name.as_str(),
+                    hint: registry
+                        .sanitizer(name)
+                        .and_then(|sanitizer| sanitizer.hint.as_ref())
+                        .map(Hint::as_str),
+                }),
+                _ => None,
+            }),
             accepts_narrowing: plan
                 .steps
                 .iter()
@@ -130,15 +160,34 @@ fn fork_advice<'a>(
     planned.fork_advice.as_deref()
 }
 
+fn free_sanitize(offers: &[(String, ExecutableRemedyPlan)]) -> Option<(&str, &str)> {
+    offers.iter().find_map(|(handle, plan)| {
+        if plan
+            .steps
+            .iter()
+            .any(|step| matches!(step, appa_engine::plan::RemedyStep::Accept(_)))
+        {
+            return None;
+        }
+        plan.steps.iter().find_map(|step| match step {
+            appa_engine::plan::RemedyStep::Sanitize(name) => Some((handle.as_str(), name.as_str())),
+            _ => None,
+        })
+    })
+}
+
 fn payload(
+    registry: &Registry,
     raw: &RawBlock,
     planned: &PlannedBlock,
     offers: &[(String, ExecutableRemedyPlan)],
     fork: Option<&str>,
     views: &Views,
 ) -> String {
-    let mut remedy_plans: Vec<WireRemedyPlan> =
-        wire_plans(offers).into_iter().map(WireRemedyPlan::Executable).collect();
+    let mut remedy_plans: Vec<WireRemedyPlan> = wire_plans(registry, offers)
+        .into_iter()
+        .map(WireRemedyPlan::Executable)
+        .collect();
     remedy_plans.extend(planned.plans.iter().filter_map(|plan| match plan {
         RemedyPlan::Redispatch { tool, effect } => Some(WireRemedyPlan::Redispatch(WireRedispatch {
             tool: tool.as_str(),
@@ -164,6 +213,7 @@ fn payload(
 /// exact typed payload. A pure narrowing (no requirement gap) presents as an acceptance — the
 /// agent's own step, no authority involved. Anything with gaps presents as a block to remedy.
 pub fn block_feedback(
+    registry: &Registry,
     raw: &RawBlock,
     planned: &PlannedBlock,
     offers: &[(String, ExecutableRemedyPlan)],
@@ -171,6 +221,7 @@ pub fn block_feedback(
     views: &Views,
 ) -> String {
     let fork = fork_advice(raw, planned, offers, surface);
+    let free = free_sanitize(offers);
     let lead = if !raw.unestablished.is_empty() {
         if offers.is_empty() {
             "blocked: a value this call depends on has a label dimension no registered cast could establish. No plan applies — a fact clears this, not a ruling. The unestablished values are named in the payload; work that does not consume them still flows"
@@ -192,6 +243,19 @@ pub fn block_feedback(
                 FeedbackSurface::Root { .. } => "blocked by policy; no remedy is available for this call",
             }
         }
+    } else if let Some((handle, sanitizer)) = free {
+        return format!(
+            "{}\n{}",
+            match raw.requirement_gaps.is_empty() {
+                true => format!(
+                    "narrowing: this call restricts the trajectory label, but one plan avoids that. Execute plan {handle} with execute_remedy_plan: it withholds the raw result and admits the {sanitizer} derivation instead, which this label absorbs without moving. Read that plan's sanitizes.hint to see what the derivation drops; if you need what it drops, accept the narrowing instead — permanently — with one of the other plans"
+                ),
+                false => format!(
+                    "blocked by policy; the requirement gaps still need a ruling, but the narrowing need not be accepted. Plan {handle} withholds the raw result and admits the {sanitizer} derivation, which this label absorbs without moving; read its sanitizes.hint to see what that drops. Every other offered plan accepts the narrowing as well as covering the gaps, permanently"
+                ),
+            },
+            payload(registry, raw, planned, offers, fork, views)
+        );
     } else if raw.requirement_gaps.is_empty() {
         match fork {
             Some(_) => {
@@ -223,7 +287,7 @@ pub fn block_feedback(
     } else {
         "blocked by policy; execute one offered plan with execute_remedy_plan"
     };
-    format!("{lead}\n{}", payload(raw, planned, offers, fork, views))
+    format!("{lead}\n{}", payload(registry, raw, planned, offers, fork, views))
 }
 
 /// Render the executor's preflight refusal: an offered plan was invoked while a consumed
@@ -267,7 +331,11 @@ fn acceptance_cost(surface: FeedbackSurface) -> &'static str {
 /// Render the feedback after an authority declined one offer: the denial, then the remaining
 /// sibling plans as the same typed payload shape (no gaps re-listed — the block is unchanged). A
 /// sibling that carries an acceptance re-offers the narrowing, so its cost is named again here.
-pub fn denial_feedback(remaining: &[(String, ExecutableRemedyPlan)], surface: FeedbackSurface) -> String {
+pub fn denial_feedback(
+    registry: &Registry,
+    remaining: &[(String, ExecutableRemedyPlan)],
+    surface: FeedbackSurface,
+) -> String {
     if remaining.is_empty() {
         return "the authority declined to authorize this call; no alternative plan remains".to_string();
     }
@@ -275,7 +343,7 @@ pub fn denial_feedback(remaining: &[(String, ExecutableRemedyPlan)], surface: Fe
     struct WireRemaining<'a> {
         remedy_plans: Vec<WirePlan<'a>>,
     }
-    let plans = wire_plans(remaining);
+    let plans = wire_plans(registry, remaining);
     let accepts = plans.iter().any(|plan| plan.accepts_narrowing);
     let payload = serde_json::to_string(&WireRemaining { remedy_plans: plans })
         .expect("the plan payload serializes: engine types are Serialize");
@@ -310,16 +378,51 @@ pub fn cast_offer_feedback(handle: &str, narrowing: &Narrowing, surface: Feedbac
 #[cfg(test)]
 mod tests {
     use super::*;
+    use appa_engine::authority::{Authority, Mandate, Sanitizer, SanitizerPoints, Scope, Transition};
     use appa_engine::fact::{EffectKind, Revision};
     use appa_engine::label::{Audience, Dim, Label, ReaderId, Trust};
-    use appa_engine::names::{AuthorityName, MarkName};
+    use appa_engine::names::{AuthorityName, MarkName, SanitizerName};
     use appa_engine::plan::{PlanId, RemedyStep, RequiredRuling};
     use appa_engine::projection::Projection;
+    use appa_engine::registry::{RegistryConfig, TrustChain};
     use appa_engine::value::{ToolName, TrajectoryId};
 
     fn with_empty_views<R>(render: impl FnOnce(&Views) -> R) -> R {
         let projection = Projection::build(&[], Revision::ZERO);
         render(&projection.view(&TrajectoryId::new("session")))
+    }
+
+    fn registry() -> Registry {
+        let authority = |name: &str| Authority {
+            name: AuthorityName::new(name),
+            mandate: Mandate {
+                trust_ceiling: Some(Trust::new(1)),
+                reader_ceiling: Some(Audience::Public),
+                waivers: vec![EffectKind::new("egress")],
+                attends: vec![MarkName::new("signoff")],
+            },
+            scope: Scope::default(),
+            hint: Some(Hint::new(format!("what {name} is for"))),
+        };
+        Registry::build(RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: vec![],
+            authorities: vec![authority("officer"), authority("officer-a"), authority("officer-b")],
+            sanitizers: vec![Sanitizer {
+                name: SanitizerName::new("pii"),
+                on: SanitizerPoints {
+                    input: false,
+                    output: true,
+                },
+                transition: Transition::Audience {
+                    from_includes: Audience::restricted([ReaderId::new("internal")]),
+                    to: Audience::Public,
+                },
+                hint: Some(Hint::new("drops personal details")),
+            }],
+            casts: vec![],
+        })
+        .expect("the fixture registry loads")
     }
 
     fn every_gap() -> Vec<Gap> {
@@ -381,6 +484,7 @@ mod tests {
         let offers = vec![("remedy-7".to_string(), plan_with("officer", every_gap()))];
         let payload = with_empty_views(|views| {
             parsed(&block_feedback(
+                &registry(),
                 &raw,
                 &planned,
                 &offers,
@@ -405,6 +509,7 @@ mod tests {
         assert!(gaps.iter().any(|g| g["Attention"] == "signoff"));
         assert_eq!(payload["remedy_plans"][0]["plan_id"], "remedy-7");
         assert_eq!(payload["remedy_plans"][0]["rulings"][0]["authority"], "officer");
+        assert_eq!(payload["remedy_plans"][0]["rulings"][0]["hint"], "what officer is for");
         assert_eq!(
             payload["remedy_plans"][0]["rulings"][0]["covers"]
                 .as_array()
@@ -434,7 +539,14 @@ mod tests {
         };
         let offers = vec![("remedy-0".to_string(), accept_plan)];
         let feedback = with_empty_views(|views| {
-            block_feedback(&raw, &planned, &offers, FeedbackSurface::Root { can_fork: true }, views)
+            block_feedback(
+                &registry(),
+                &raw,
+                &planned,
+                &offers,
+                FeedbackSurface::Root { can_fork: true },
+                views,
+            )
         });
         let payload = parsed(&feedback);
         assert_eq!(payload["requirement_gaps"].as_array().unwrap().len(), 0);
@@ -449,6 +561,7 @@ mod tests {
         assert_eq!(payload["fork"], "confine the loss");
         let payload = with_empty_views(|views| {
             parsed(&block_feedback(
+                &registry(),
                 &raw,
                 &planned,
                 &offers,
@@ -457,8 +570,16 @@ mod tests {
             ))
         });
         assert!(payload.get("fork").is_none());
-        let payload =
-            with_empty_views(|views| parsed(&block_feedback(&raw, &planned, &offers, FeedbackSurface::Child, views)));
+        let payload = with_empty_views(|views| {
+            parsed(&block_feedback(
+                &registry(),
+                &raw,
+                &planned,
+                &offers,
+                FeedbackSurface::Child,
+                views,
+            ))
+        });
         assert!(payload.get("fork").is_none());
     }
 
@@ -483,6 +604,7 @@ mod tests {
         let offers = vec![("remedy-0".to_string(), plan)];
         let payload = with_empty_views(|views| {
             parsed(&block_feedback(
+                &registry(),
                 &raw,
                 &planned,
                 &offers,
@@ -494,6 +616,7 @@ mod tests {
         assert_eq!(payload["remedy_plans"][0]["accepts_narrowing"], true);
         let payload = with_empty_views(|views| {
             parsed(&block_feedback(
+                &registry(),
                 &raw,
                 &planned,
                 &offers,
@@ -502,11 +625,20 @@ mod tests {
             ))
         });
         assert!(payload.get("fork").is_none());
-        let payload =
-            with_empty_views(|views| parsed(&block_feedback(&raw, &planned, &offers, FeedbackSurface::Child, views)));
+        let payload = with_empty_views(|views| {
+            parsed(&block_feedback(
+                &registry(),
+                &raw,
+                &planned,
+                &offers,
+                FeedbackSurface::Child,
+                views,
+            ))
+        });
         assert!(payload.get("fork").is_none());
         let payload = with_empty_views(|views| {
             parsed(&block_feedback(
+                &registry(),
                 &raw,
                 &planned,
                 &[],
@@ -550,6 +682,7 @@ mod tests {
         ];
         let payload = with_empty_views(|views| {
             parsed(&block_feedback(
+                &registry(),
                 &raw,
                 &planned,
                 &offers,
@@ -582,6 +715,7 @@ mod tests {
         };
         let payload = with_empty_views(|views| {
             parsed(&block_feedback(
+                &registry(),
                 &raw,
                 &none_planned,
                 &[],
@@ -601,10 +735,14 @@ mod tests {
             actual: Trust::new(0),
         };
         let remaining = vec![("remedy-1".to_string(), plan_with("officer-b", vec![floor]))];
-        let payload = parsed(&denial_feedback(&remaining, FeedbackSurface::Root { can_fork: false }));
+        let payload = parsed(&denial_feedback(
+            &registry(),
+            &remaining,
+            FeedbackSurface::Root { can_fork: false },
+        ));
         assert_eq!(payload["remedy_plans"].as_array().unwrap().len(), 1);
         assert_eq!(payload["remedy_plans"][0]["plan_id"], "remedy-1");
-        assert!(!denial_feedback(&[], FeedbackSurface::Root { can_fork: false }).contains('\n'));
+        assert!(!denial_feedback(&registry(), &[], FeedbackSurface::Root { can_fork: false }).contains('\n'));
     }
 
     #[test]
@@ -672,6 +810,7 @@ mod tests {
             fork_advice: None,
         };
         let payload = parsed(&block_feedback(
+            &registry(),
             &raw,
             &planned,
             &[],
@@ -698,7 +837,14 @@ mod tests {
             plans: vec![],
             fork_advice: None,
         };
-        let payload = parsed(&block_feedback(&raw, &planned, &[], FeedbackSurface::Child, &views));
+        let payload = parsed(&block_feedback(
+            &registry(),
+            &raw,
+            &planned,
+            &[],
+            FeedbackSurface::Child,
+            &views,
+        ));
         assert!(payload.get("unestablished").is_none());
     }
 }

@@ -177,6 +177,7 @@ pub enum SanitizerAnswer {
 pub enum BuiltinSanitizer {
     RedactEmail,
     RedactNumbers,
+    Hosted,
 }
 
 impl BuiltinSanitizer {
@@ -184,6 +185,7 @@ impl BuiltinSanitizer {
         match name {
             "redact-email" => Some(BuiltinSanitizer::RedactEmail),
             "redact-numbers" => Some(BuiltinSanitizer::RedactNumbers),
+            "hosted" => Some(BuiltinSanitizer::Hosted),
             _ => None,
         }
     }
@@ -213,6 +215,7 @@ impl SanitizerBackend {
             SanitizerBackend::Builtin(BuiltinSanitizer::RedactNumbers) => {
                 SanitizerAnswer::Derived(redact_numbers(&input.body))
             }
+            SanitizerBackend::Builtin(BuiltinSanitizer::Hosted) => SanitizerAnswer::Failed,
             SanitizerBackend::Http { url, timeout, client } => {
                 match post_json::<DerivedWire>(client, url, *timeout, input).await {
                     Some(wire) => SanitizerAnswer::Derived(wire.body),

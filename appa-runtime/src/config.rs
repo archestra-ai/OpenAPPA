@@ -19,8 +19,8 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use appa_engine::authority::{
-    AudienceTransition, Authority, Cast, CastCeiling, CastResolution, CastTarget, Mandate, Sanitizer, SanitizerPoints,
-    Scope,
+    Authority, Cast, CastCeiling, CastResolution, CastTarget, Hint, Mandate, Sanitizer, SanitizerPoints, Scope,
+    Transition,
 };
 use appa_engine::contract::{
     AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, RecipientSpec, Requires, ToolContract,
@@ -61,6 +61,8 @@ pub enum ConfigError {
     InputSanitizerPoint { name: String },
     #[error("sanitizer {name} declares no application point (`on` is empty)")]
     NoSanitizerPoint { name: String },
+    #[error("sanitizer {name} mandate: {reason}")]
+    SanitizerMandateShape { name: String, reason: &'static str },
     #[error("{kind} {name}: {reason}")]
     BadImplementation {
         kind: &'static str,
@@ -170,7 +172,7 @@ impl Config {
         let mut sanitizers = Vec::new();
         let mut sanitizer_impls = BTreeMap::new();
         for s in raw.sanitizer {
-            let (sanitizer, imp) = s.convert()?;
+            let (sanitizer, imp) = s.convert(&trust_chain)?;
             sanitizer_impls.insert(sanitizer.name.clone(), imp);
             sanitizers.push(sanitizer);
         }
@@ -521,6 +523,8 @@ struct RawHistory {
 struct RawAuthority {
     name: String,
     #[serde(default)]
+    hint: Option<String>,
+    #[serde(default)]
     mandate: RawMandate,
     #[serde(default)]
     scope: RawScope,
@@ -539,6 +543,7 @@ impl RawAuthority {
                 scope: Scope {
                     tags: self.scope.tags.into_iter().map(TagName::new).collect(),
                 },
+                hint: self.hint.map(Hint::new),
             },
             imp,
         ))
@@ -636,14 +641,16 @@ impl RawResolver {
 struct RawSanitizer {
     name: String,
     on: Vec<String>,
+    #[serde(default)]
+    hint: Option<String>,
     mandate: RawSanitizerMandate,
     implementation: RawTransformImpl,
 }
 
 impl RawSanitizer {
-    fn convert(self) -> Result<(Sanitizer, SanitizerImpl), ConfigError> {
+    fn convert(self, chain: &TrustChain) -> Result<(Sanitizer, SanitizerImpl), ConfigError> {
         let on = parse_points(&self.on, &self.name)?;
-        let can_reduce = self.mandate.convert(&self.name)?;
+        let transition = self.mandate.convert(chain, &self.name)?;
         let imp = match (self.implementation.builtin, self.implementation.resolver) {
             (Some(builtin), None) => SanitizerImpl::Builtin(BuiltinSanitizer::from_name(&builtin).ok_or(
                 ConfigError::UnknownBuiltin {
@@ -662,7 +669,8 @@ impl RawSanitizer {
             Sanitizer {
                 name: SanitizerName::new(self.name),
                 on,
-                can_reduce,
+                transition,
+                hint: self.hint.map(Hint::new),
             },
             imp,
         ))
@@ -672,23 +680,47 @@ impl RawSanitizer {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSanitizerMandate {
-    audience: RawTransition,
+    #[serde(default)]
+    audience: Option<RawAudienceTransition>,
+    #[serde(default)]
+    trust: Option<RawTrustTransition>,
 }
 
 impl RawSanitizerMandate {
-    fn convert(self, name: &str) -> Result<AudienceTransition, ConfigError> {
-        Ok(AudienceTransition {
-            from_includes: parse_audience(&self.audience.from.includes, &format!("sanitizer {name} from"))?,
-            to: parse_audience(&self.audience.to.exactly, &format!("sanitizer {name} to"))?,
-        })
+    fn convert(self, chain: &TrustChain, name: &str) -> Result<Transition, ConfigError> {
+        match (self.audience, self.trust) {
+            (Some(audience), None) => Ok(Transition::Audience {
+                from_includes: parse_audience(&audience.from.includes, &format!("sanitizer {name} from"))?,
+                to: parse_audience(&audience.to.exactly, &format!("sanitizer {name} to"))?,
+            }),
+            (None, Some(trust)) => Ok(Transition::Trust {
+                from_floor: parse_trust(&trust.from, chain, &format!("sanitizer {name} from"))?,
+                to: parse_trust(&trust.to, chain, &format!("sanitizer {name} to"))?,
+            }),
+            (Some(_), Some(_)) => Err(ConfigError::SanitizerMandateShape {
+                name: name.to_string(),
+                reason: "declares both an audience and a trust transition — a mandate binds one dimension",
+            }),
+            (None, None) => Err(ConfigError::SanitizerMandateShape {
+                name: name.to_string(),
+                reason: "declares no transition — give the mandate an `audience` or a `trust` key",
+            }),
+        }
     }
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawTransition {
+struct RawAudienceTransition {
     from: RawIncludes,
     to: RawExactly,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTrustTransition {
+    from: String,
+    to: String,
 }
 
 #[derive(Deserialize)]
@@ -973,11 +1005,104 @@ builtin = "hitl"
             .sanitizer(&SanitizerName::new("remove_pii"))
             .expect("sanitizer present");
         assert!(!san.on.input && san.on.output);
-        assert_eq!(san.can_reduce.to, Audience::Public);
+        assert_eq!(
+            san.transition,
+            Transition::Audience {
+                from_includes: Audience::restricted([ReaderId::new("internal")]),
+                to: Audience::Public,
+            }
+        );
         assert_eq!(
             cfg.sanitizer_impl(&SanitizerName::new("remove_pii")),
             Some(&SanitizerImpl::Builtin(BuiltinSanitizer::RedactEmail))
         );
+    }
+
+    #[test]
+    fn a_sanitizer_mandate_binds_the_trust_dimension() {
+        let cfg = config(
+            r#"
+version = 1
+
+[[sanitizer]]
+name = "scrubber"
+on   = ["tool_output"]
+hint = "Drops instructions out of fetched text."
+[sanitizer.mandate]
+trust = { from = "suspicious", to = "trusted" }
+[sanitizer.implementation]
+builtin = "redact-email"
+"#,
+        );
+        let san = cfg
+            .registry()
+            .sanitizer(&SanitizerName::new("scrubber"))
+            .expect("sanitizer present");
+        assert_eq!(
+            san.transition,
+            Transition::Trust {
+                from_floor: Trust::new(0),
+                to: Trust::new(1),
+            }
+        );
+        assert_eq!(
+            san.hint.as_ref().map(Hint::as_str),
+            Some("Drops instructions out of fetched text.")
+        );
+    }
+
+    #[test]
+    fn a_sanitizer_mandate_claims_exactly_one_dimension() {
+        let both = r#"
+version = 1
+
+[[sanitizer]]
+name = "scrubber"
+on   = ["tool_output"]
+[sanitizer.mandate]
+trust    = { from = "suspicious", to = "trusted" }
+audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+[sanitizer.implementation]
+builtin = "redact-email"
+"#;
+        let neither = r#"
+version = 1
+
+[[sanitizer]]
+name = "scrubber"
+on   = ["tool_output"]
+[sanitizer.mandate]
+[sanitizer.implementation]
+builtin = "redact-email"
+"#;
+        for policy in [both, neither] {
+            assert!(matches!(
+                Config::from_toml_str(policy),
+                Err(ConfigError::SanitizerMandateShape { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn an_overlong_hint_is_refused() {
+        let policy = format!(
+            r#"
+version = 1
+
+[[authority]]
+name = "desk"
+hint = "{}"
+[authority.mandate]
+can_raise_trust_to = "trusted"
+[authority.implementation]
+builtin = "approve"
+"#,
+            "x".repeat(appa_engine::registry::MAX_HINT_CHARS + 1)
+        );
+        assert!(matches!(
+            Config::from_toml_str(&policy),
+            Err(ConfigError::Registry(LoadError::HintTooLong { .. }))
+        ));
     }
 
     #[test]
