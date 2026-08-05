@@ -1,6 +1,11 @@
-# pnpm refuses to install until every dependency with a build script has a
-# recorded decision (pnpm 11 errors, pnpm 10 warns). Next pulls sharp in for
-# image optimization; the lockfile carries its prebuilt binaries, so approving
-# it verifies a binary rather than compiling one.
+# Sharp is the only dependency permitted to build if scripts are explicitly
+# enabled for a reviewed rebuild. Normal installs remain script-free below.
 allowBuilds:
   sharp: true
+
+# Prevent dependency lifecycle scripts from running during installation.
+# Run `pnpm rebuild <package-name>` after review when a package needs one.
+ignoreScripts: true
+
+# Quarantine newly published package versions for seven days.
+minimumReleaseAge: 10080
