@@ -14,6 +14,8 @@ declare module "react" {
     interface IntrinsicElements {
       "appa-mark": React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement> & {
         size?: number | string;
+        /** Mascot overlay: "clean" sweeps a broom, "accept" carries a check. */
+        variant?: "clean" | "accept";
       };
       "appa-word": React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement> & {
         word?: string;

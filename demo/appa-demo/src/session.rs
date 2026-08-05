@@ -22,8 +22,10 @@ use crate::lint::{PolicyError, check_policy};
 
 const SYSTEM_PROMPT: &str = "You are the company assistant at a vendor of an AI agent platform. Depending on \
 configuration you may have access to the CRM, the public GitHub issue tracker, outbound email, finance, and meeting \
-recordings. Use the available tools to complete the user's request. Read what you need, then act. When you are done, \
-briefly summarise what you did.";
+recordings. Use the available tools to complete the user's request. Read what you need, then act. When a call is \
+blocked and remedy plans are offered, pick one and execute it with execute_remedy_plan in the same turn — never ask \
+the user to approve in chat: human approval, when a plan needs it, is collected by the product's own approval prompt \
+after you execute the plan. When you are done, briefly summarise what you did.";
 
 const MAX_LIVE_SESSIONS: usize = 64;
 

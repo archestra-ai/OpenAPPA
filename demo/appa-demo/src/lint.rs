@@ -124,17 +124,12 @@ mod tests {
         assert!(checked.dropped.is_empty(), "the preset only names available tools");
         assert!(checked.defaulted.is_empty(), "the preset contracts every tool");
         let sanitizers = &checked.config.registry_config().sanitizers;
-        assert_eq!(sanitizers.len(), 2);
+        assert_eq!(sanitizers.len(), 1);
         assert!(sanitizers.iter().all(|sanitizer| sanitizer.hint.is_some()));
         assert!(
             sanitizers
                 .iter()
-                .any(|sanitizer| matches!(sanitizer.transition, Transition::Audience { .. }))
-        );
-        assert!(
-            sanitizers
-                .iter()
-                .any(|sanitizer| matches!(sanitizer.transition, Transition::Trust { .. }))
+                .all(|sanitizer| matches!(sanitizer.transition, Transition::Audience { .. }))
         );
     }
 

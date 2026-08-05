@@ -50,13 +50,10 @@ export function describeSystem(system: { id: string; tools: string[] }): Playgro
   };
 }
 
-// Model ids are OpenRouter's, and the service passes whatever it is given
-// straight through, so the menu is the website's to choose.
-export const PLAYGROUND_MODELS = [
-  { id: "openai/gpt-4o", label: "gpt-4o" },
-  { id: "openai/gpt-5.6-luna", label: "gpt-5.6-luna" },
-  { id: "google/gemini-3.5-flash-lite", label: "gemini-3.5-flash-lite" },
-  { id: "qwen/qwen-3.6-35b", label: "qwen-3.6-35b" },
-];
+// The model id is OpenRouter's, and the service passes it straight through.
+// Pinned to the one model the demo is tuned for — the plain (non-reasoning)
+// slug; the runtime never sends a `reasoning` field, so no reasoning is
+// requested. Not selectable in the UI.
+export const PLAYGROUND_MODEL = { id: "openai/gpt-5.6-luna", label: "gpt-5.6-luna" };
 
 export type LabelState = { trust: string; audience: string };

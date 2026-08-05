@@ -389,7 +389,7 @@ impl Pump<'_> {
         self.seen = facts.len();
 
         let label = current_label(&facts, revision, &self.session.trajectory, &self.session.chain);
-        if self.last_label.as_ref() != Some(&label) {
+        if label.0 != "?" && self.last_label.as_ref() != Some(&label) {
             events.push(WireEvent::Label {
                 trajectory: self.session.trajectory.as_str().to_string(),
                 trust: label.0.clone(),

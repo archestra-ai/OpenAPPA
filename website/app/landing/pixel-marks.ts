@@ -46,6 +46,44 @@ const FILL: Record<string, string> = {
   "4": "var(--bg)",
 };
 
+// Mascot variants: an overlay glyph on the same grid, drawn in `--accent-bg`
+// so it cuts light out of the dark body in both themes. `clean` sweeps a
+// broom (a sanitized result), `accept` carries a check (an accepted
+// narrowing).
+const OVERLAYS: Record<string, { ox: number; oy: number; rows: string[] }> = {
+  clean: {
+    ox: 13,
+    oy: 3,
+    rows: [
+      ".......##",
+      "......##.",
+      "......##.",
+      ".....##..",
+      ".....##..",
+      "....##...",
+      "...##....",
+      "..######.",
+      ".########",
+      ".########",
+      "#.##..##.",
+    ],
+  },
+  accept: {
+    ox: 10,
+    oy: 10,
+    rows: [
+      "..........##",
+      ".........###",
+      "........###.",
+      "##.....###..",
+      "###...###...",
+      ".###.###....",
+      "..#####.....",
+      "...###......",
+    ],
+  },
+};
+
 const GLYPHS: Record<string, string[]> = {
   O: ["01110", "10001", "10001", "10001", "10001", "10001", "01110", "00000", "00000"],
   A: ["01110", "10001", "10001", "11111", "10001", "10001", "10001", "00000", "00000"],
@@ -64,6 +102,15 @@ export function registerPixelMarks(): void {
         if (this.shadowRoot) return;
         const size = parseInt(this.getAttribute("size") || "220", 10);
         const boxH = Math.round((size * H) / W);
+        const overlaySpec = OVERLAYS[this.getAttribute("variant") || ""];
+        let overlay = "";
+        if (overlaySpec)
+          for (let y = 0; y < overlaySpec.rows.length; y++)
+            for (let x = 0; x < overlaySpec.rows[y].length; x++)
+              if (overlaySpec.rows[y][x] === "#")
+                overlay +=
+                  '<rect x="' + (overlaySpec.ox + x) + '" y="' + (overlaySpec.oy + y) +
+                  '" width="1" height="1" fill="var(--accent-bg)"/>';
         let eyes = "";
         let body = "";
         for (let y = 0; y < H; y++)
@@ -88,7 +135,7 @@ export function registerPixelMarks(): void {
           "@media (prefers-reduced-motion:reduce){.f,.e{animation:none}}</style>" +
           '<svg viewBox="0 0 ' + W + " " + H + '" width="' + size + '" height="' + boxH +
           '" shape-rendering="crispEdges" role="img" aria-label="OpenAPPA mascot">' +
-          '<g class="f">' + body + '<g class="e">' + eyes + "</g></g></svg>";
+          '<g class="f">' + body + '<g class="e">' + eyes + "</g>" + overlay + "</g></svg>";
       }
     }
     customElements.define("appa-mark", AppaMark);

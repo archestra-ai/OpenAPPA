@@ -37,24 +37,27 @@ import {
 } from "./demo-client";
 import {
   type LabelState,
-  PLAYGROUND_MODELS,
+  PLAYGROUND_MODEL,
   type PlaygroundSystem,
   describeSystem,
 } from "./playground-data";
 import { PolicyEditor, findBlock } from "./PolicyEditor";
 import { registerPixelMarks } from "@/app/landing/pixel-marks";
+import { termDefinition } from "@/lib/terms";
 
 declare module "react" {
   namespace JSX {
     interface IntrinsicElements {
       "appa-mark": React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement> & {
         size?: number | string;
+        /** Mascot overlay: "clean" sweeps a broom, "accept" carries a check. */
+        variant?: "clean" | "accept";
       };
     }
   }
 }
 
-type ThreadItem =
+type ThreadItem = { lab?: LabelState } & (
   | { id: number; t: "user"; text: string }
   | { id: number; t: "text"; text: string; traj?: string }
   | { id: number; t: "note"; text: string; traj?: string }
@@ -69,9 +72,15 @@ type ThreadItem =
       /** The result body the model read, verbatim. */
       result?: string;
       blocked?: string;
-      delta?: string;
       /** Set when the raw result was withheld and a sanitizer's derivation admitted. */
       sanitizedBy?: string;
+      /** Set when the call ran under an authority's ruling. */
+      approvedBy?: string;
+      /**
+       * A resolution card: the held call, run again after its remedy. The
+       * original card keeps the block; this one carries the outcome.
+       */
+      echo?: boolean;
       /** Which trajectory this happened on; child ids render as a branch. */
       traj?: string;
     }
@@ -81,14 +90,38 @@ type ThreadItem =
       /** The service-side approval id the answer posts back to. */
       approvalId: string;
       tool: string;
+      /** The authority the policy consulted, named in the request. */
+      authority?: string;
       detail: string;
       state: "pending" | "approved" | "denied" | "expired";
     }
-  | { id: number; t: "rule" };
+  /** APPA's turn on a held call: the ruling text, rendered as a speaker. */
+  | { id: number; t: "verdict"; text: string; traj?: string }
+  /** The root label moved: a marker row that recolors the rail below it. */
+  | { id: number; t: "shift"; from: LabelState; to: LabelState }
+  | { id: number; t: "rule" }
+);
 
 type Mode = "probing" | "live" | "down";
 
 const KEY_STORAGE = "appa-playground-openrouter-key";
+
+/**
+ * Starters for an empty chat, each walking one of the demo's best paths:
+ * recordings → issues → create_issue crosses both sanitizer territory and the
+ * trust wall; invoices → make_transfer crosses the audience narrowing and the
+ * treasurer's sign-off.
+ */
+const STARTER_PROMPTS = [
+  {
+    tag: "recordings → github",
+    text: "Check the recent meeting recordings for bugs customers mentioned, and file any that are not on GitHub yet.",
+  },
+  {
+    tag: "invoices → transfer",
+    text: "Check the open invoices and pay the overdue one by transfer.",
+  },
+];
 
 /**
  * The harness's own tools (`appa_runtime::tool`). Feedback on these is
@@ -112,38 +145,59 @@ const PROTOCOL_TOOLS = new Set(["execute_remedy_plan", "fork", "submit_result"])
  * consequence per dimension: a trust drop taints the session, an audience
  * shrink makes it confidential.
  */
-/** One sanitizer the block offers, with the operator's account of what it drops. */
-type SanitizeOffer = { sanitizer: string; hint?: string; free: boolean };
+/** One executable plan the block offers, with everything its option line needs. */
+type ParsedPlan = {
+  id: string;
+  /** The authorities the plan consults, each with the operator's hint. */
+  rulings: { authority: string; hint?: string }[];
+  /** The output sanitizer the plan binds, with its hint. */
+  sanitize?: { sanitizer: string; hint?: string };
+  /** Whether executing the plan accepts the block's narrowing. */
+  accepts: boolean;
+};
 
-type Ruling = { offers: SanitizeOffer[]; summary: string; detail?: string } & (
+type Ruling = { plans: ParsedPlan[]; summary: string; detail?: string } & (
   | { kind: "refusal" }
   | {
       kind: "narrowing";
       dimension: "trust" | "audience" | "both";
       /** The readers left, when the shrunk audience is a concrete set. */
       readers?: string[];
+      /** The target trust rank — an index into the policy's trust chain. */
+      toTrustRank?: number;
     }
 );
 
-/**
- * The sanitize plans the block offers. `free` marks the one whose
- * relabel clears the narrowing outright — it accepts nothing, so taking it costs
- * the session no label at all.
- */
-function sanitizeOffers(plans: unknown): SanitizeOffer[] {
+/** The executable entries of `remedy_plans`; id-less redispatch advice stays in the payload. */
+function parsePlans(plans: unknown): ParsedPlan[] {
   if (!Array.isArray(plans)) return [];
   return plans.flatMap((plan) => {
-    const entry = plan as { sanitizes?: { sanitizer?: unknown; hint?: unknown }; accepts_narrowing?: unknown };
-    const name = entry.sanitizes?.sanitizer;
-    if (typeof name !== "string") return [];
-    const hint = entry.sanitizes?.hint;
-    return [{ sanitizer: name, hint: typeof hint === "string" ? hint : undefined, free: !entry.accepts_narrowing }];
+    const entry = plan as {
+      plan_id?: unknown;
+      rulings?: { authority?: unknown; hint?: unknown }[];
+      sanitizes?: { sanitizer?: unknown; hint?: unknown };
+      accepts_narrowing?: unknown;
+    };
+    if (typeof entry.plan_id !== "string") return [];
+    const rulings = (Array.isArray(entry.rulings) ? entry.rulings : []).flatMap((ruling) =>
+      typeof ruling.authority === "string"
+        ? [{ authority: ruling.authority, hint: typeof ruling.hint === "string" ? ruling.hint : undefined }]
+        : [],
+    );
+    const sanitize =
+      typeof entry.sanitizes?.sanitizer === "string"
+        ? {
+            sanitizer: entry.sanitizes.sanitizer,
+            hint: typeof entry.sanitizes.hint === "string" ? entry.sanitizes.hint : undefined,
+          }
+        : undefined;
+    return [{ id: entry.plan_id, rulings, sanitize, accepts: Boolean(entry.accepts_narrowing) }];
   });
 }
 
 function splitRuling(text: string): Ruling {
   const start = text.indexOf("\n{");
-  if (start === -1) return { kind: "refusal", summary: text, offers: [] };
+  if (start === -1) return { kind: "refusal", summary: text, plans: [] };
   const summary = text.slice(0, start).trim();
   const detail = text.slice(start + 1);
   try {
@@ -153,34 +207,33 @@ function splitRuling(text: string): Ruling {
       remedy_plans?: unknown;
     };
     const pretty = JSON.stringify(parsed, null, 2);
-    const offers = sanitizeOffers(parsed.remedy_plans);
+    const plans = parsePlans(parsed.remedy_plans);
     const narrowing = parsed.narrowing;
-    if (!narrowing || parsed.requirement_gaps?.length) return { kind: "refusal", summary, detail: pretty, offers };
+    if (!narrowing || parsed.requirement_gaps?.length) return { kind: "refusal", summary, detail: pretty, plans };
     const moved = (dim: string) => JSON.stringify(narrowing.from?.[dim]) !== JSON.stringify(narrowing.to?.[dim]);
     const dimension = moved("trust") && moved("audience") ? "both" : moved("audience") ? "audience" : "trust";
     // `{"Known": {"Restricted": ["crm"]}}` — the engine's wire shape for a
-    // concrete reader set.
+    // concrete reader set; `{"Known": 0}` for a trust rank (a chain index).
     const known = (narrowing.to?.audience as { Known?: { Restricted?: unknown } } | undefined)?.Known;
     const readers = Array.isArray(known?.Restricted) ? known.Restricted.map(String) : undefined;
-    return { kind: "narrowing", dimension, readers, summary, detail: pretty, offers };
+    const knownTrust = (narrowing.to?.trust as { Known?: unknown } | undefined)?.Known;
+    const toTrustRank = typeof knownTrust === "number" ? knownTrust : undefined;
+    return { kind: "narrowing", dimension, readers, toTrustRank, summary, detail: pretty, plans };
   } catch {
-    return { kind: "refusal", summary, detail, offers: [] };
+    return { kind: "refusal", summary, detail, plans: [] };
   }
 }
 
-function rulingCaption(ruling: Ruling): string {
-  if (ruling.kind === "refusal") return "The policy does not allow this flow.";
-  const audience = ruling.readers?.length
-    ? `may only reach ${ruling.readers.join(", ")}`
-    : "may reach fewer readers";
-  switch (ruling.dimension) {
-    case "trust":
-      return "This source is untrusted. Reading it lowers the session's trust — everything it produces from here on counts as untrusted, permanently.";
-    case "audience":
-      return `This data is confidential. After reading it, whatever the session produces ${audience} — permanently.`;
-    case "both":
-      return `This source is untrusted and confidential. Reading it lowers the session's trust, and its output ${audience} — permanently.`;
-  }
+/**
+ * The policy's trust ranks, least-trusted first, read from the editor's own
+ * text — a narrowing names its target trust as a chain index, and this is what
+ * gives that index the name the visitor typed. The loader validates the real
+ * parse; this regex only has to agree with it on the happy path.
+ */
+function parseTrustChain(policy: string): string[] {
+  const match = policy.match(/trust_chain\s*=\s*\[([^\]]*)\]/);
+  const names = match?.[1].match(/"([^"]*)"/g)?.map((quoted) => quoted.slice(1, -1));
+  return names?.length ? names : ["suspicious", "trusted"];
 }
 
 function rulingBadge(ruling: Ruling): string {
@@ -215,17 +268,13 @@ function segmentThread(
   return segments;
 }
 
+/** The turns that belong to the APPA ↔ agent exchange, boxed as one. */
+function isExchange(item: ThreadItem): boolean {
+  return item.t === "verdict" || item.t === "approval" || (item.t === "tool" && item.name === "execute_remedy_plan");
+}
+
 // Toolbar chrome, matching the site's style strings.
 const chrome = {
-  bar: {
-    display: "flex",
-    alignItems: "center",
-    gap: "0.5rem",
-    padding: "0.7rem 1rem",
-    borderBottom: "1px solid var(--border-weak)",
-    flexWrap: "wrap",
-  } as React.CSSProperties,
-  title: { fontSize: 12.5, color: "var(--icon)" } as React.CSSProperties,
   barBtn: {
     font: "inherit",
     fontSize: 12,
@@ -297,14 +346,11 @@ export function ChatPlayground() {
   const [policyStatus, setPolicyStatus] = useState<{ ok: boolean; text: string } | null>(null);
 
   const [apiKey, setApiKey] = useState("");
-  const [model, setModel] = useState(PLAYGROUND_MODELS[0].id);
 
   const sessionRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const runRef = useRef(0);
   const idRef = useRef(0);
-  // The header pills — flight target for a label change.
-  const pillsRef = useRef<HTMLSpanElement>(null);
 
   useEffect(() => {
     registerPixelMarks();
@@ -345,11 +391,13 @@ export function ChatPlayground() {
           }
           if (result.boundary) {
             setBoundary(result.boundary);
-            boundaryRef.current = result.boundary;
             // With no session running the label simply *is* the boundary, so
             // editing `[boundary]` moves the pills. Once a session exists its
             // live label owns them until New chat.
-            if (!sessionRef.current) setLabel(result.boundary);
+            if (!sessionRef.current) {
+              setLabel(result.boundary);
+              labelRef.current = result.boundary;
+            }
           }
           const notes = [`${result.tools} tools`];
           if (result.unconstrained?.length) notes.push(`${result.unconstrained.length} unconstrained`);
@@ -383,74 +431,50 @@ export function ChatPlayground() {
   }, [editorMax]);
 
   const nextId = () => ++idRef.current;
-  const push = (item: ThreadItem) => setThread((prev) => [...prev, item]);
+  // Every pushed item is stamped with the root label at that moment — the
+  // rail beside the thread is this history, not a live value.
+  const push = (item: ThreadItem) =>
+    setThread((prev) => [...prev, { ...item, lab: item.lab ?? labelRef.current ?? undefined }]);
 
-  // Mirror of `boundary` readable from stable callbacks.
-  const boundaryRef = useRef<LabelState | null>(null);
+  // The root trajectory's current label, readable from `applyEvent`.
+  const labelRef = useRef<LabelState | null>(null);
+  // Mirror of `childIds` for the same reason.
+  const childIdsRef = useRef<Set<string>>(new Set());
 
   /**
-   * Animate a label change: a clone of the pills lifts off from the card
-   * that caused it and flies to the header, which updates on landing. The
-   * flight is pure decoration — reduced motion (or a missing card) gets the
-   * plain update.
+   * Route a remedy's outcome to a resolution card: the held card keeps its
+   * block, and a second card for the same call — appended after the APPA and
+   * agent turns — carries what the remedy produced. Created on the first
+   * outcome event of the batch, patched by the rest.
    */
-  const flyLabel = useCallback((sourceId: number | null, next: LabelState) => {
-    const land = () => {
-      setLabel(next);
-      pillsRef.current?.animate(
-        [{ transform: "scale(1)" }, { transform: "scale(1.14)" }, { transform: "scale(1)" }],
-        { duration: 260, easing: "ease-out" },
-      );
-    };
-    const source = sourceId !== null ? document.querySelector(`[data-item-id="${sourceId}"]`) : null;
-    const target = pillsRef.current;
-    if (!source || !target || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      setLabel(next);
-      return;
-    }
-
-    const pillCss = (bg: string, fg: string) =>
-      `font-size:10.5px;letter-spacing:0.07em;text-transform:uppercase;padding:0.12rem 0.55rem;` +
-      `border-radius:999px;white-space:nowrap;background:${bg};color:${fg};`;
-    const clean = next.trust === boundaryRef.current?.trust;
-    const flyer = document.createElement("div");
-    flyer.style.cssText = "position:fixed;z-index:60;display:flex;gap:0.4rem;pointer-events:none;font-family:inherit;";
-    const trust = document.createElement("span");
-    trust.style.cssText = pillCss(clean ? "#1f6b46" : "#8c5f1f", clean ? "#eafff2" : "#fff4e0");
-    trust.textContent = `trust: ${next.trust}`;
-    const audience = document.createElement("span");
-    audience.style.cssText = pillCss("#3f3168", "#efe9ff");
-    audience.textContent = `audience: ${next.audience}`;
-    flyer.append(trust, audience);
-    document.body.append(flyer);
-
-    const from = source.getBoundingClientRect();
-    const to = target.getBoundingClientRect();
-    const width = flyer.getBoundingClientRect().width;
-    const startLeft = Math.max(8, Math.min(from.right - width - 12, window.innerWidth - width - 8));
-    const startTop = from.top + 10;
-    flyer.style.left = `${startLeft}px`;
-    flyer.style.top = `${startTop}px`;
-
-    const animation = flyer.animate(
-      [
-        { transform: "translate(0, 0) scale(1)", opacity: 0.95 },
-        { transform: `translate(${to.left - startLeft}px, ${to.top - startTop}px) scale(0.92)`, opacity: 0.55 },
-      ],
-      { duration: 650, easing: "cubic-bezier(0.3, 0.7, 0.2, 1)" },
+  const resolveHeld = (prev: ThreadItem[], patch: Partial<Extract<ThreadItem, { t: "tool" }>>): ThreadItem[] => {
+    const heldAt = prev.findLastIndex(
+      (item) => item.t === "tool" && item.state === "blocked" && !PROTOCOL_TOOLS.has(item.name),
     );
-    let landed = false;
-    const done = () => {
-      if (landed) return;
-      landed = true;
-      flyer.remove();
-      land();
-    };
-    animation.onfinish = done;
-    animation.oncancel = done;
-    // Belt and braces: never leave the pills stale if the animation dies.
-    setTimeout(done, 900);
-  }, []);
+    if (heldAt === -1) return prev;
+    const held = prev[heldAt] as Extract<ThreadItem, { t: "tool" }>;
+    const echoAt = prev.findLastIndex(
+      (item, at) => at > heldAt && item.t === "tool" && Boolean(item.echo) && item.name === held.name,
+    );
+    if (echoAt !== -1)
+      return prev.map((item, at) => (at === echoAt && item.t === "tool" ? { ...item, ...patch } : item));
+    return [
+      ...prev,
+      {
+        id: ++idRef.current,
+        t: "tool",
+        echo: true,
+        callId: `${held.callId}+resolved`,
+        name: held.name,
+        args: held.args,
+        state: "done",
+        output: "ran",
+        traj: held.traj,
+        lab: labelRef.current ?? undefined,
+        ...patch,
+      },
+    ];
+  };
 
   const resetChat = useCallback(() => {
     runRef.current += 1;
@@ -458,8 +482,10 @@ export function ChatPlayground() {
     if (sessionRef.current) deleteSession(sessionRef.current);
     sessionRef.current = null;
     setThread([]);
+    childIdsRef.current = new Set();
     setChildIds(new Set());
     setLabel(boundary);
+    labelRef.current = boundary;
     setBusy(false);
     setTurns(0);
     setInput("");
@@ -472,11 +498,11 @@ export function ChatPlayground() {
       case "says":
         push({ id: nextId(), t: "text", text: event.text, traj: event.trajectory });
         break;
-      case "tool_proposed":
+      case "tool_proposed": {
         // Light the contract the engine is about to check. The harness's own
         // tools have no contract in the editor.
         if (!PROTOCOL_TOOLS.has(event.tool)) setFocus({ name: event.tool, at: Date.now() });
-        push({
+        const item: ThreadItem = {
           id: nextId(),
           t: "tool",
           callId: event.call_id,
@@ -484,8 +510,24 @@ export function ChatPlayground() {
           args: event.arguments,
           state: "running",
           traj: event.trajectory,
+          lab: labelRef.current ?? undefined,
+        };
+        setThread((prev) => {
+          // The agent's remedy choice precedes the approval it triggers, but
+          // the elicitation can hit the wire first: slot a protocol call in
+          // front of any still-pending approval so the screen keeps the
+          // causal order — choose, then ask the human.
+          let at = prev.length;
+          if (PROTOCOL_TOOLS.has(event.tool))
+            while (at > 0) {
+              const before = prev[at - 1];
+              if (before.t === "approval" && before.state === "pending") at--;
+              else break;
+            }
+          return [...prev.slice(0, at), item, ...prev.slice(at)];
         });
         break;
+      }
       case "blocked":
         // The runtime has one channel for text fed back to the model on a
         // call, and it carries harness acknowledgments as well as rulings —
@@ -493,27 +535,56 @@ export function ChatPlayground() {
         // does. Feedback on the harness's own protocol tools (submit_result,
         // fork) is an outcome, not a ruling, so it closes the card calmly
         // instead of wearing the error styling.
-        setThread((prev) =>
-          prev.map((item) => {
-            if (item.t !== "tool" || item.callId !== event.call_id || item.state !== "running") return item;
-            return PROTOCOL_TOOLS.has(item.name)
-              ? { ...item, state: "done" as const, output: event.text }
-              : { ...item, state: "blocked" as const, blocked: event.text };
-          }),
-        );
+        setThread((prev) => {
+          const index = prev.findIndex(
+            (item) => item.t === "tool" && item.callId === event.call_id && item.state === "running",
+          );
+          if (index === -1) return prev;
+          const item = prev[index] as Extract<ThreadItem, { t: "tool" }>;
+          if (PROTOCOL_TOOLS.has(item.name))
+            return prev.map((entry, at) =>
+              at === index ? { ...item, state: "done" as const, output: event.text } : entry,
+            );
+          // The card records the hold; the ruling itself is APPA's own turn.
+          const next = prev.map((entry, at) =>
+            at === index ? { ...item, state: "blocked" as const, blocked: event.text } : entry,
+          );
+          next.push({
+            id: ++idRef.current,
+            t: "verdict",
+            text: event.text,
+            traj: item.traj,
+            lab: labelRef.current ?? undefined,
+          });
+          return next;
+        });
         break;
       case "tool_result":
         // The admission and the close land in the same batch, in either
-        // order: attach to the oldest running card, else the newest done
-        // card still missing its body.
+        // order. Attach to the oldest running world card; failing that, to
+        // the held card whose remedy produced this body — the result belongs
+        // on the call the visitor watched get held, not on the protocol step
+        // that unblocked it — then to any running card, then to the newest
+        // done card still missing its body.
         setThread((prev) => {
+          const runningWorld = prev.findIndex(
+            (item) => item.t === "tool" && item.state === "running" && !PROTOCOL_TOOLS.has(item.name),
+          );
+          if (runningWorld !== -1) {
+            const item = prev[runningWorld] as Extract<ThreadItem, { t: "tool" }>;
+            const next = [...prev];
+            next[runningWorld] = { ...item, result: event.body };
+            return next;
+          }
+          const held = prev.findLastIndex(
+            (item) => item.t === "tool" && item.state === "blocked" && !PROTOCOL_TOOLS.has(item.name),
+          );
+          if (held !== -1) return resolveHeld(prev, { result: event.body });
           const running = prev.findIndex((item) => item.t === "tool" && item.state === "running");
           const at =
             running !== -1
               ? running
-              : prev.length -
-                1 -
-                [...prev].reverse().findIndex((item) => item.t === "tool" && item.state === "done" && !item.result);
+              : prev.findLastIndex((item) => item.t === "tool" && item.state === "done" && !item.result);
           const item = prev[at];
           if (!item || item.t !== "tool") return prev;
           const next = [...prev];
@@ -541,23 +612,26 @@ export function ChatPlayground() {
         });
         break;
       case "label": {
-        // Attach the delta pill to the card that caused the change, and
-        // remember that card as the launch pad for the flight.
-        let sourceId: number | null = null;
-        setThread((prev) => {
-          const index = [...prev].reverse().findIndex((item) => item.t === "tool" && item.state === "done");
-          if (index === -1) return prev;
-          const at = prev.length - 1 - index;
-          const item = prev[at] as Extract<ThreadItem, { t: "tool" }>;
-          sourceId = item.id;
-          if (item.delta) return prev;
-          const next = [...prev];
-          next[at] = { ...item, delta: `trust: ${event.trust} · audience: ${event.audience}` };
-          return next;
-        });
-        // Defer to after the state flush so the card (and its rect) exist.
         const next = { trust: event.trust, audience: event.audience };
-        setTimeout(() => flyLabel(sourceId, next), 30);
+        // A child's fold is its branch's own story: a line inside the branch
+        // block, never a move on the root rail.
+        if (childIdsRef.current.has(event.trajectory)) {
+          push({
+            id: nextId(),
+            t: "note",
+            text: `branch label → trust: ${event.trust} · audience: ${event.audience}`,
+            traj: event.trajectory,
+          });
+          break;
+        }
+        // The rail recolors below the separator naming the move, and the
+        // session-label pills update in place.
+        const from = labelRef.current;
+        if (from && (from.trust !== next.trust || from.audience !== next.audience)) {
+          push({ id: nextId(), t: "shift", from, to: next, lab: next });
+        }
+        labelRef.current = next;
+        setLabel(next);
         break;
       }
       case "approval_requested": {
@@ -569,33 +643,68 @@ export function ChatPlayground() {
           t: "approval",
           approvalId: event.id,
           tool: event.tool,
+          authority,
           detail: JSON.stringify(event.detail, null, 2),
           state: "pending",
         });
         break;
       }
       case "approval_resolved":
-        setThread((prev) =>
-          prev.map((item) =>
-            item.t === "approval" && item.approvalId === event.id
-              ? { ...item, state: event.expired ? "expired" : event.approved ? "approved" : "denied" }
-              : item,
-          ),
-        );
+        setThread((prev) => {
+          // The paused call resumes under this ruling: say so on its card.
+          const resolved = prev.find((item) => item.t === "approval" && item.approvalId === event.id);
+          const authority = resolved?.t === "approval" ? resolved.authority : undefined;
+          const running = event.approved
+            ? prev.findLastIndex(
+                (item) =>
+                  item.t === "tool" &&
+                  item.state === "running" &&
+                  resolved?.t === "approval" &&
+                  item.name === resolved.tool,
+              )
+            : -1;
+          return prev.map((item, at) => {
+            if (item.t === "approval" && item.approvalId === event.id)
+              return { ...item, state: event.expired ? "expired" : event.approved ? "approved" : "denied" };
+            if (at === running && item.t === "tool" && authority) return { ...item, approvedBy: authority };
+            return item;
+          });
+        });
         break;
-      case "remedy":
+      case "remedy": {
+        // "narrowing accepted" would repeat what the label separator (root)
+        // or the branch-label note (child) already says: drop it. A ruling
+        // lands on the card it approved instead of floating as a line.
+        const approved = event.text.match(/^approved by (.+)$/);
+        if (approved) {
+          setThread((prev) => {
+            const running = prev.findLastIndex(
+              (item) => item.t === "tool" && item.state === "running" && !PROTOCOL_TOOLS.has(item.name),
+            );
+            if (running !== -1)
+              return prev.map((item, at) =>
+                at === running && item.t === "tool" ? { ...item, approvedBy: approved[1] } : item,
+              );
+            return resolveHeld(prev, { approvedBy: approved[1] });
+          });
+          break;
+        }
+        if (event.text.startsWith("narrowing accepted:")) break;
         push({ id: nextId(), t: "note", text: event.text, traj: event.trajectory });
         break;
+      }
       case "sanitized":
-        // Mark the call whose result was replaced. The `tool_result` that follows
-        // carries the derivation, so the card shows what the assistant actually read
-        // and says where it came from — no separate line in the flow.
+        // Mark the call whose result was replaced: a running world card
+        // completes in place; a held card resolves onto its echo.
         setThread((prev) => {
-          const index = prev.findLastIndex((item) => item.t === "tool" && item.state === "running");
-          if (index === -1) return prev;
-          return prev.map((item, at) =>
-            at === index && item.t === "tool" ? { ...item, sanitizedBy: event.sanitizer } : item,
+          const running = prev.findLastIndex(
+            (item) => item.t === "tool" && item.state === "running" && !PROTOCOL_TOOLS.has(item.name),
           );
+          if (running !== -1)
+            return prev.map((item, at) =>
+              at === running && item.t === "tool" ? { ...item, sanitizedBy: event.sanitizer } : item,
+            );
+          return resolveHeld(prev, { sanitizedBy: event.sanitizer });
         });
         break;
       case "merge":
@@ -607,7 +716,8 @@ export function ChatPlayground() {
         break;
       case "fork":
         // No note: the branch block's own header marks the fork.
-        setChildIds((prev) => new Set(prev).add(event.child));
+        childIdsRef.current = new Set(childIdsRef.current).add(event.child);
+        setChildIds(childIdsRef.current);
         break;
       case "answer":
         // The final answer is already in the log as the last assistant message;
@@ -641,10 +751,11 @@ export function ChatPlayground() {
 
       try {
         if (!sessionRef.current) {
-          const info = await createSession(policyText, systems, model);
+          const info = await createSession(policyText, systems, PLAYGROUND_MODEL.id);
           if (runRef.current !== run) return;
           sessionRef.current = info.session;
           setLabel({ trust: info.trust, audience: info.audience });
+          labelRef.current = { trust: info.trust, audience: info.audience };
         }
         const controller = new AbortController();
         abortRef.current = controller;
@@ -665,7 +776,7 @@ export function ChatPlayground() {
         if (runRef.current === run) setBusy(false);
       }
     },
-    [apiKey, applyEvent, model, policyText, systems, turns],
+    [apiKey, applyEvent, policyText, systems, turns],
   );
 
   const send = useCallback(
@@ -692,6 +803,9 @@ export function ChatPlayground() {
   // policy text — absent when the focused name has no block there.
   const highlight = useMemo(() => (focus ? findBlock(policyText, focus.name) : null), [focus, policyText]);
 
+  // Names a narrowing's target trust rank in the visitor's own vocabulary.
+  const trustChain = useMemo(() => parseTrustChain(policyText), [policyText]);
+
   // Post the visitor's ruling; the resolved state arrives back on the stream.
   const answerApproval = async (approvalId: string, approve: boolean) => {
     if (!sessionRef.current) return;
@@ -702,7 +816,206 @@ export function ChatPlayground() {
     }
   };
 
-  const renderItem = (item: ThreadItem) => {
+  // ---- pills and APPA-turn chrome -----------------------------------------
+
+  // A registered entity named in chat is a door into the policy: clicking it
+  // opens the policy pane scrolled to that block, lit.
+  const focusEntity = (name: string) => {
+    setPane("policy");
+    setFocus({ name, at: Date.now() });
+  };
+
+  const entityPill = (name: string, hint?: string) => (
+    <button
+      className="inline-block cursor-pointer rounded-full border border-[var(--accent-border)] bg-[var(--accent-bg)] px-2 font-mono text-[10.5px] leading-[1.6] text-[var(--accent)] hover:bg-[var(--bg-weak-hover)]"
+      onClick={() => focusEntity(name)}
+      title={hint ? `“${hint}” — click to see it in the policy` : "Click to see it in the policy"}
+      type="button"
+    >
+      {name}
+    </button>
+  );
+
+  // A label value wears the glossary: the same definition the docs popovers
+  // use, as a plain tooltip.
+  const termPill = (text: string) => (
+    <span
+      className="inline-block rounded-full border border-[var(--border-weak)] bg-[var(--bg-weak)] px-2 font-mono text-[10.5px] leading-[1.6] text-[var(--text-strong)]"
+      style={termDefinition(text) ? { cursor: "help", borderBottomStyle: "dotted" } : undefined}
+      title={termDefinition(text)}
+    >
+      {text}
+    </span>
+  );
+
+  /** The narrowing's cost in plain words: what changes for this chat if we accept. */
+  const acceptMove = (ruling: Extract<Ruling, { kind: "narrowing" }>) => {
+    const moves: React.ReactNode[] = [];
+    if (ruling.dimension !== "audience") {
+      const to =
+        ruling.toTrustRank !== undefined
+          ? (trustChain[ruling.toTrustRank] ?? `rank ${ruling.toTrustRank}`)
+          : "less trusted";
+      moves.push(<span key="trust">the chat becomes {termPill(to)}</span>);
+    }
+    if (ruling.dimension !== "trust") {
+      const to = ruling.readers ? ruling.readers.join(", ") || "nobody" : "fewer readers";
+      moves.push(<span key="audience">only {termPill(to)} sees the results</span>);
+    }
+    return moves.map((move, index) => (
+      <span key={index}>
+        {index > 0 && " and "}
+        {move}
+      </span>
+    ));
+  };
+
+  /** One plan as one option line: what "we" do, in the order the plan does it. */
+  const planOption = (plan: ParsedPlan, ruling: Ruling) => {
+    const clauses: React.ReactNode[] = [];
+    for (const ruled of plan.rulings)
+      clauses.push(<>we ask {entityPill(ruled.authority, ruled.hint)} for approval</>);
+    if (plan.sanitize) clauses.push(<>we clean it with {entityPill(plan.sanitize.sanitizer, plan.sanitize.hint)}</>);
+    if (plan.accepts || clauses.length === 0)
+      clauses.push(ruling.kind === "narrowing" ? <>we accept — {acceptMove(ruling)}</> : <>we accept the cost</>);
+    return (
+      <li className="my-1" key={plan.id}>
+        {clauses.map((clause, index) => (
+          <span key={index}>
+            {index > 0 && " and "}
+            {clause}
+          </span>
+        ))}
+      </li>
+    );
+  };
+
+  const appaWho = (badge?: React.ReactNode) => (
+    <div className="mb-1.5 flex items-center gap-2 font-mono text-[11px] tracking-[0.12em] text-[var(--text-weak)] uppercase">
+      <span className="flex size-7 shrink-0 items-center justify-center rounded-full border border-[var(--accent-border)] bg-[var(--accent-bg)]">
+        <appa-mark size={17} />
+      </span>
+      appa
+      {badge && <span className="ml-auto">{badge}</span>}
+    </div>
+  );
+
+  const agentWho = (
+    <div className="mb-1.5 flex items-center gap-2 font-mono text-[11px] tracking-[0.12em] text-[var(--text-weak)] uppercase">
+      <span className="flex size-7 shrink-0 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--bg)] text-[15px]">
+        🤖
+      </span>
+      agent
+    </div>
+  );
+
+  /**
+   * One grey container for the APPA ↔ agent exchange. Consecutive exchange
+   * turns merge into a single box: rounding and top padding only at the run's
+   * edges, and the rows between them close their gap.
+   */
+  const exchangeShell = (group: { first: boolean; last: boolean } | undefined, children: React.ReactNode) => {
+    const edges = group ?? { first: true, last: true };
+    return (
+      <div
+        className={`w-full min-w-0 max-w-[95%] bg-[var(--bg-weak)] px-4 pb-4 ${
+          edges.first ? "rounded-t-md pt-4" : "pt-0"
+        } ${edges.last ? "rounded-b-md" : ""}`}
+      >
+        {children}
+      </div>
+    );
+  };
+
+  /**
+   * The plan an `execute_remedy_plan` call chose, resolved against the block
+   * that offered it — the nearest earlier blocked card whose ruling carries
+   * that plan_id. Lets the choice render in the agent's own voice instead of
+   * as a protocol payload.
+   */
+  const chosenPlan = (item: Extract<ThreadItem, { t: "tool" }>) => {
+    const planId = item.args.plan_id;
+    if (typeof planId !== "string") return null;
+    const at = thread.findIndex((entry) => entry.id === item.id);
+    for (let index = (at === -1 ? thread.length : at) - 1; index >= 0; index--) {
+      const prev = thread[index];
+      if (prev.t !== "tool" || prev.state !== "blocked" || !prev.blocked) continue;
+      const ruling = splitRuling(prev.blocked);
+      const plan = ruling.plans.find((entry) => entry.id === planId);
+      if (plan) return { plan, ruling };
+    }
+    return null;
+  };
+
+  const renderItem = (item: ThreadItem, group?: { first: boolean; last: boolean }) => {
+    if (item.t === "verdict") {
+      const ruling = splitRuling(item.text);
+      const warnKind = ruling.kind === "narrowing";
+      const tone = warnKind
+        ? { bg: "var(--warn-bg)", fg: "var(--warn)" }
+        : { bg: "var(--danger-bg)", fg: "var(--danger)" };
+      const caption =
+        ruling.kind === "refusal" ? (
+          <>{ruling.summary}</>
+        ) : ruling.dimension === "trust" ? (
+          <>
+            This source is not trusted — if we read it, the chat becomes{" "}
+            {termPill(
+              ruling.toTrustRank !== undefined
+                ? (trustChain[ruling.toTrustRank] ?? `rank ${ruling.toTrustRank}`)
+                : "less trusted",
+            )}
+            .
+          </>
+        ) : ruling.dimension === "audience" ? (
+          <>
+            This data is confidential — if we read it, only{" "}
+            {termPill(ruling.readers ? ruling.readers.join(", ") || "nobody" : "fewer readers")} sees the results.
+          </>
+        ) : (
+          <>Not trusted and confidential — if we read it, {acceptMove(ruling)}.</>
+        );
+      return exchangeShell(
+        group,
+        (
+            <>
+              {appaWho()}
+              <div className="text-[13.5px] leading-relaxed">
+                <p className="m-0">
+                  {caption}
+                  {ruling.plans.length > 0 && (
+                    <>
+                      {" "}
+                      <b>I have a plan for you:</b>
+                    </>
+                  )}
+                </p>
+                {ruling.plans.length > 0 && (
+                  <ol className="m-0 mt-1 list-decimal pl-6">
+                    {ruling.plans.map((plan) => planOption(plan, ruling))}
+                  </ol>
+                )}
+                <details className="mt-2">
+                  <summary className="cursor-pointer font-mono text-[10.5px] text-[var(--icon)]">
+                    what the model was told
+                  </summary>
+                  <div
+                    className="mt-1 overflow-x-auto rounded-md text-xs"
+                    style={{ background: tone.bg, color: tone.fg }}
+                  >
+                    <div className="whitespace-pre-wrap break-words p-2">{ruling.summary}</div>
+                    {ruling.detail && (
+                      <pre className="m-0 max-h-40 overflow-auto p-2 font-mono text-[11px] leading-relaxed">
+                        {ruling.detail}
+                      </pre>
+                    )}
+                  </div>
+                </details>
+              </div>
+            </>
+        ),
+      );
+    }
     if (item.t === "user")
       return (
         <Message from="user" key={item.id}>
@@ -724,6 +1037,22 @@ export function ChatPlayground() {
         </div>
       );
     if (item.t === "rule") return <div className="border-t border-dashed border-[var(--border-weak)]" key={item.id} />;
+    if (item.t === "shift")
+      return (
+        <div
+          className="my-1 flex w-full items-center gap-3"
+          key={item.id}
+          title={`was trust: ${item.from.trust} · audience: ${item.from.audience}`}
+        >
+          <span className="h-px flex-1 bg-[var(--warn)] opacity-40" />
+          <span className="flex flex-wrap items-center gap-1.5 font-mono text-[10.5px] tracking-widest text-[var(--warn)] uppercase">
+            new label
+            <span style={pill("var(--warn-bg)", "var(--warn)")}>trust: {item.to.trust}</span>
+            <span style={pill("var(--warn-bg)", "var(--warn)")}>audience: {item.to.audience}</span>
+          </span>
+          <span className="h-px flex-1 bg-[var(--warn)] opacity-40" />
+        </div>
+      );
     if (item.t === "approval") {
       const verdict =
         item.state === "approved"
@@ -733,18 +1062,19 @@ export function ChatPlayground() {
             : item.state === "expired"
               ? { text: "expired — abstained", bg: "var(--bg-weak-hover)", fg: "var(--icon)" }
               : null;
-      return (
-        <div
-          className="w-full min-w-0 max-w-[95%] rounded-md border border-[var(--warn)] bg-[var(--warn-bg)] p-3"
-          key={item.id}
-        >
-          <div className="flex flex-wrap items-center gap-2">
-            <span style={pill("var(--warn)", "var(--warn-bg)")}>human sign-off</span>
-            <span className="font-mono text-xs text-[var(--text-strong)]">{item.tool}</span>
-            {verdict && <span style={pill(verdict.bg, verdict.fg)}>{verdict.text}</span>}
-          </div>
-          <p className="m-0 mt-2 text-[11.5px] leading-relaxed text-[var(--warn)]">
-            This call needs your approval. No answer within the window keeps it blocked.
+      return exchangeShell(
+        group,
+        (
+          <>
+          {appaWho(
+            <span style={pill(verdict ? verdict.bg : "var(--warn)", verdict ? verdict.fg : "var(--warn-bg)")}>
+              {verdict ? verdict.text : "waiting on you"}
+            </span>,
+          )}
+          <div className="rounded-md border border-[var(--warn)] bg-[var(--warn-bg)] p-4">
+          <p className="m-0 text-[13.5px] leading-relaxed text-[var(--text)]">
+            We ask {item.authority ? entityPill(item.authority) : "a human"} to approve{" "}
+            <span className="font-mono text-xs text-[var(--text-strong)]">{item.tool}</span>.
           </p>
           {item.state === "pending" && (
             <div className="mt-2 flex gap-2">
@@ -772,39 +1102,51 @@ export function ChatPlayground() {
               {item.detail}
             </pre>
           </details>
-        </div>
+          </div>
+          </>
+        ),
       );
     }
-    // The engine's own remedy step is not a tool call on the world, so it
-    // does not wear a tool card: a small APPA mark in the flow, expandable
-    // to the plan it executed and what came back.
+    // The agent's remedy choice, in its own voice: "I choose to use X" says
+    // more than a protocol payload. The wire call stays available underneath.
     if (item.name === "execute_remedy_plan") {
-      return (
-        <details className="w-full min-w-0 max-w-[95%]" data-item-id={item.id} key={item.id}>
-          <summary
-            className="flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden"
-            title="APPA remedy step — click to expand"
-          >
-            <span
-              className={`flex size-7 shrink-0 items-center justify-center rounded-full border border-[var(--accent-border)] bg-[var(--accent-bg)] ${
-                item.state === "running" ? "animate-pulse" : ""
-              }`}
-            >
-              <appa-mark size={17} />
+      const chosen = chosenPlan(item);
+      const sentence = chosen ? (
+        <>
+          {chosen.plan.rulings.map((ruled, index) => (
+            <span key={ruled.authority}>
+              {index > 0 && " and "}I ask {entityPill(ruled.authority, ruled.hint)} for approval
             </span>
-            <span className="font-mono text-[10.5px] tracking-widest text-[var(--icon)] uppercase">
-              appa · remedy {item.state === "running" ? "· executing…" : ""}
-            </span>
-          </summary>
-          <div className="mt-2 ml-9 rounded-md border border-[var(--border-weak)] bg-[var(--bg-weak)] p-2 font-mono text-[11px] leading-relaxed">
-            <div className="break-words">execute_remedy_plan {JSON.stringify(item.args)}</div>
-            {(item.output ?? item.blocked) && (
-              <div className="mt-1 break-words whitespace-pre-wrap text-[var(--text-weak)]">
-                ⎿ {item.output ?? item.blocked}
-              </div>
-            )}
-          </div>
-        </details>
+          ))}
+          {chosen.plan.sanitize && (
+            <>
+              {chosen.plan.rulings.length > 0 && " and "}I choose to use{" "}
+              {entityPill(chosen.plan.sanitize.sanitizer, chosen.plan.sanitize.hint)}
+            </>
+          )}
+          {chosen.plan.accepts &&
+            (chosen.plan.rulings.length > 0 || chosen.plan.sanitize ? (
+              <> and accept what remains</>
+            ) : (
+              <>
+                I accept{chosen.ruling.kind === "narrowing" ? <> — {acceptMove(chosen.ruling)}</> : <> the cost</>}
+              </>
+            ))}
+          .
+        </>
+      ) : (
+        <>I execute remedy plan {typeof item.args.plan_id === "string" ? item.args.plan_id : "…"}.</>
+      );
+      return exchangeShell(
+        group,
+        (
+          <>
+            {agentWho}
+            <div className={`text-[14px] leading-relaxed ${item.state === "running" ? "animate-pulse" : ""}`}>
+              {sentence}
+            </div>
+          </>
+        ),
       );
     }
     const state =
@@ -815,72 +1157,58 @@ export function ChatPlayground() {
           : ("output-available" as const);
     const ruling = item.state === "blocked" && item.blocked ? splitRuling(item.blocked) : null;
     // A ruling is the engine mediating — the thing the demo exists to show —
-    // so it gets verdict styling, never the error slot. Red stays reserved
-    // for service failures.
+    // so the card wears verdict styling, never the error slot. The ruling's
+    // own words are APPA's turn, a separate item in the thread.
     const verdict = ruling
       ? ruling.kind === "narrowing"
         ? { badge: rulingBadge(ruling), bg: "var(--warn-bg)", fg: "var(--warn)" }
         : { badge: rulingBadge(ruling), bg: "var(--danger-bg)", fg: "var(--danger)" }
       : null;
     return (
-      <div className="w-full min-w-0 max-w-[95%]" data-item-id={item.id} key={item.id}>
+      <div className="w-full min-w-0 max-w-[95%]" key={item.id}>
         <Tool className="w-full">
-        <ToolHeader
-          badge={verdict ? <span style={pill(verdict.bg, verdict.fg)}>{verdict.badge}</span> : undefined}
-          state={state}
-          type={`tool-${item.name}` as `tool-${string}`}
-        />
-        <ToolContent>
-          <ToolInput input={item.args} />
-          {ruling && verdict ? (
-            <div className="space-y-2">
-              <h4 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">APPA</h4>
-              <p className="m-0 text-[11.5px] leading-relaxed text-[var(--text-weak)]">{rulingCaption(ruling)}</p>
-              <div className="overflow-x-auto rounded-md text-xs" style={{ background: verdict.bg, color: verdict.fg }}>
-                <div className="whitespace-pre-wrap break-words p-2">{ruling.summary}</div>
-                {ruling.detail && (
-                  <pre className="m-0 max-h-40 overflow-auto p-2 font-mono text-[11px] leading-relaxed">
-                    {ruling.detail}
-                  </pre>
-                )}
-              </div>
-              {ruling.offers.length > 0 && (
-                <div className="space-y-1.5 rounded-md bg-[var(--bg-weak)] p-2">
-                  <div className="font-medium text-[10.5px] uppercase tracking-wide text-[var(--text-weak)]">
-                    Or clean the result first
-                  </div>
-                  {ruling.offers.map((offer) => (
-                    <div className="text-[11.5px] leading-relaxed" key={offer.sanitizer}>
-                      <span className="font-mono text-[var(--text-strong)]">{offer.sanitizer}</span>
-                      {offer.free && (
-                        <span className="ml-1.5" style={pill("var(--accent-bg)", "var(--accent)")}>
-                          costs nothing
-                        </span>
-                      )}
-                      {offer.hint && <div className="text-[var(--text-weak)]">{offer.hint}</div>}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          ) : (
+          <ToolHeader
+            badge={
+              // The held card keeps its block; the resolution card — the same
+              // call, run again after its remedy — wears the outcome: the
+              // mascot sweeps for a cleaned result, carries a check for an
+              // accepted narrowing.
+              item.sanitizedBy ? (
+                <span className="inline-flex items-center gap-1.5" style={pill("var(--accent-bg)", "var(--accent)")}>
+                  <appa-mark size={16} variant="clean" /> cleaned
+                </span>
+              ) : item.approvedBy ? (
+                <span style={pill("var(--accent-bg)", "var(--accent)")}>approved by {item.approvedBy}</span>
+              ) : item.echo ? (
+                <span className="inline-flex items-center gap-1.5" style={pill("var(--warn-bg)", "var(--warn)")}>
+                  <appa-mark size={16} variant="accept" /> accepted
+                </span>
+              ) : verdict ? (
+                <span style={pill(verdict.bg, verdict.fg)}>
+                  {ruling?.kind === "narrowing" ? `held · ${verdict.badge}` : verdict.badge}
+                </span>
+              ) : undefined
+            }
+            state={state}
+            type={`tool-${item.name}` as `tool-${string}`}
+          />
+          <ToolContent>
+            <ToolInput input={item.args} />
             <ToolOutput
               errorText={undefined}
               output={
-                item.state === "done" && item.output ? (
+                (item.state === "done" && item.output) || item.result || item.sanitizedBy || item.approvedBy ? (
                   <div className="p-2 font-mono text-xs">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span>⎿ {item.output}</span>
-                      {item.delta && <span style={pill("var(--warn-bg)", "var(--warn)")}>{item.delta}</span>}
-                      {item.sanitizedBy && (
-                        <span style={pill("var(--accent-bg)", "var(--accent)")}>
-                          cleaned by {item.sanitizedBy}
-                        </span>
-                      )}
-                    </div>
+                    {item.state === "done" && item.output && <div>⎿ {item.output}</div>}
                     {item.sanitizedBy && (
-                      <div className="mt-1 font-sans text-[11px] text-[var(--text-weak)]">
-                        The assistant never saw the raw result — only this.
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5 font-sans text-[11px] text-[var(--text-weak)]">
+                        cleaned with {entityPill(item.sanitizedBy)} — the assistant never saw the raw result, only
+                        this:
+                      </div>
+                    )}
+                    {item.approvedBy && (
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5 font-sans text-[11px] text-[var(--text-weak)]">
+                        approved by {entityPill(item.approvedBy)}
                       </div>
                     )}
                     {item.result && (
@@ -892,12 +1220,39 @@ export function ChatPlayground() {
                 ) : undefined
               }
             />
-          )}
-        </ToolContent>
+          </ToolContent>
         </Tool>
       </div>
     );
   };
+
+  // ---- the label rail ------------------------------------------------------
+
+  // Loss relative to entry: green while the label still sits where the turn
+  // entered, amber once the audience has narrowed, red once trust has dropped
+  // (red wins). Boundary-relative, so it stays true under renamed ranks.
+  const railTone = (lab?: LabelState) => {
+    const entry = boundary;
+    if (!lab || !entry) return "transparent";
+    if (lab.trust !== entry.trust) return "var(--danger)";
+    if (lab.audience !== entry.audience) return "var(--warn)";
+    return "var(--accent-border)";
+  };
+
+  // One thread row: the rail segment carrying the label at that moment, then
+  // the turn. A shift row is stamped with the label it moved to, so the rail
+  // simply changes color through the separator — the separator itself is the
+  // marker.
+  const railRow = (key: number, content: React.ReactNode, lab?: LabelState, tight = false) => (
+    <div className="grid grid-cols-[12px_minmax(0,1fr)] gap-x-2" key={key}>
+      <span
+        className="w-[5px] justify-self-start rounded-[1px]"
+        style={{ background: railTone(lab) }}
+        title={lab ? `trust: ${lab.trust} · audience: ${lab.audience}` : undefined}
+      />
+      <div className={`min-w-0 ${tight ? "pb-0" : "pb-4"}`}>{content}</div>
+    </div>
+  );
 
   // The whole right-hand pane, rendered into the desktop sidebar or the
   // mobile drawer — one JSX value so the two never drift.
@@ -1002,17 +1357,9 @@ export function ChatPlayground() {
             </div>
             <div className="flex items-center gap-2 rounded-md border border-[var(--border)] px-2.5 py-1.5">
               <span className="text-[11px] whitespace-nowrap text-[var(--icon)]">Model</span>
-              <select
-                className="min-w-0 flex-1 cursor-pointer bg-transparent text-right font-mono text-xs text-[var(--text)] outline-none"
-                onChange={(event) => setModel(event.currentTarget.value)}
-                value={model}
-              >
-                {PLAYGROUND_MODELS.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.label}
-                  </option>
-                ))}
-              </select>
+              <span className="min-w-0 flex-1 text-right font-mono text-xs text-[var(--text-weak)]">
+                {PLAYGROUND_MODEL.label}
+              </span>
             </div>
           </div>
     </>
@@ -1020,37 +1367,61 @@ export function ChatPlayground() {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-[var(--bg)]">
-      <div style={chrome.bar}>
-        <span style={chrome.title}>chat with openappa</span>
-        {mode === "probing" && <span style={pill("var(--bg-weak-hover)", "var(--icon)")}>connecting…</span>}
-        {mode === "down" && <span style={pill("var(--danger-bg)", "var(--danger)")}>service unavailable</span>}
-        {live && <span style={pill("var(--accent-bg)", "var(--accent)")}>live agent</span>}
-        <span style={{ marginLeft: "auto", display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
-          <span style={{ fontSize: 11, color: "var(--icon)" }}>turn {turns}</span>
-          <span ref={pillsRef} style={{ display: "flex", gap: "0.4rem" }}>
-            {label && <LabelPills boundary={boundary} label={label} />}
-          </span>
-          <button type="button" onClick={resetChat} className="lp-replay" style={chrome.barBtn}>
-            New chat
-          </button>
-          <button className="lg:hidden" onClick={() => setPanelOpen(true)} style={chrome.barBtn} type="button">
-            Tools · policy
-          </button>
-        </span>
-      </div>
-
       {/* The sidebar is sized so the preset's longest contract line fits the
           editor unwrapped at its 13px mono; on narrower screens it cedes
           room to the chat and accepts a wrap. */}
       <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_34rem] xl:grid-cols-[minmax(0,1fr)_42rem]">
         {/* ---- chat pane ---- */}
         <div className="flex min-h-0 min-w-0 flex-col border-b border-[var(--border-weak)] bg-[var(--bg)] lg:border-r lg:border-b-0">
+          {/* One strip of chrome: the session label heads the chat it governs
+              (the flight from a card lands here), with the few controls the
+              playground needs on the right. */}
+          <div className="flex flex-wrap items-center gap-2 border-b border-[var(--border-weak)] px-3 py-1.5">
+            <span className="font-mono text-[10px] tracking-widest text-[var(--icon)] uppercase">session label</span>
+            <span style={{ display: "flex", gap: "0.4rem" }}>
+              {label && <LabelPills boundary={boundary} label={label} />}
+            </span>
+            <span className="ml-auto flex flex-wrap items-center gap-2">
+              {mode === "probing" && <span style={pill("var(--bg-weak-hover)", "var(--icon)")}>connecting…</span>}
+              {mode === "down" && <span style={pill("var(--danger-bg)", "var(--danger)")}>service unavailable</span>}
+              <button type="button" onClick={resetChat} className="lp-replay" style={chrome.barBtn}>
+                New chat
+              </button>
+              <button className="lg:hidden" onClick={() => setPanelOpen(true)} style={chrome.barBtn} type="button">
+                Tools · policy
+              </button>
+            </span>
+          </div>
           <Conversation className="min-h-0">
-            <ConversationContent className="gap-4">
+            <ConversationContent className="gap-0">
               {thread.length === 0 ? (
-                // An empty live chat shows nothing; only a service problem
-                // earns a message.
-                mode === "live" ? null : (
+                // An empty live chat offers two starters that walk the demo's
+                // best paths; a service problem earns a message instead.
+                mode === "live" ? (
+                  <div className="flex h-full flex-col items-center justify-center gap-4 px-4 py-12">
+                    <span className="font-mono text-[11px] tracking-widest text-[var(--icon)] uppercase">
+                      start with
+                    </span>
+                    <div className="grid w-full max-w-[46rem] grid-cols-1 gap-3 sm:grid-cols-2">
+                      {STARTER_PROMPTS.map((starter) => (
+                        <button
+                          className="group flex cursor-pointer flex-col gap-2.5 rounded-xl border border-[var(--border-weak)] bg-[var(--bg-weak)] p-5 text-left transition-colors hover:border-[var(--accent-border)] hover:bg-[var(--accent-bg)]"
+                          key={starter.tag}
+                          onClick={() => (needsKey ? setInput(starter.text) : send(starter.text))}
+                          type="button"
+                        >
+                          <span className="flex items-center justify-between font-mono text-[10.5px] tracking-widest text-[var(--icon)] uppercase group-hover:text-[var(--accent)]">
+                            {starter.tag}
+                            <span aria-hidden className="transition-transform group-hover:translate-x-0.5">→</span>
+                          </span>
+                          <span className="text-[14.5px] leading-normal text-[var(--text-strong)]">
+                            {starter.text}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
                   <ConversationEmptyState
                     title={mode === "down" ? "The demo service is offline" : "Connecting…"}
                     description={
@@ -1062,22 +1433,31 @@ export function ChatPlayground() {
                 )
               ) : (
                 segmentThread(thread, childIds).map((segment) =>
-                  segment.child ? (
-                    <details
-                      className="w-full min-w-0 max-w-[95%] rounded-md border border-dashed border-[var(--border-weak)]"
-                      key={segment.items[0].id}
-                    >
-                      <summary className="cursor-pointer px-3 py-2 font-mono text-[11px] text-[var(--text-weak)] hover:text-[var(--text-strong)]">
-                        ⑂ child {segment.child} — what it reads narrows this branch only ·{" "}
-                        {segment.items.length} steps
-                      </summary>
-                      <div className="mb-2 ml-3 flex flex-col gap-3 border-l-2 border-[var(--warn)] py-1 pr-2 pl-3">
-                        {segment.items.map(renderItem)}
-                      </div>
-                    </details>
-                  ) : (
-                    segment.items.map(renderItem)
-                  ),
+                  segment.child
+                    ? railRow(
+                        segment.items[0].id,
+                        <details className="w-full min-w-0 max-w-[95%] rounded-md border border-dashed border-[var(--border-weak)]">
+                          <summary className="cursor-pointer px-3 py-2 font-mono text-[11px] text-[var(--text-weak)] hover:text-[var(--text-strong)]">
+                            ⑂ child {segment.child} — what it reads narrows this branch only ·{" "}
+                            {segment.items.length} steps
+                          </summary>
+                          <div className="mb-2 ml-3 flex flex-col gap-3 border-l-2 border-[var(--warn)] py-1 pr-2 pl-3">
+                            {segment.items.map((entry) => renderItem(entry))}
+                          </div>
+                        </details>,
+                        segment.items[0].lab,
+                      )
+                    : segment.items.map((item, index) => {
+                        // Consecutive exchange turns share one grey box.
+                        const group = isExchange(item)
+                          ? {
+                              first: index === 0 || !isExchange(segment.items[index - 1]),
+                              last:
+                                index === segment.items.length - 1 || !isExchange(segment.items[index + 1]),
+                            }
+                          : undefined;
+                        return railRow(item.id, renderItem(item, group), item.lab, Boolean(group && !group.last));
+                      }),
                 )
               )}
             </ConversationContent>

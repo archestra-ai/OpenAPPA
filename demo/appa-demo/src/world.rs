@@ -116,7 +116,7 @@ pub fn bind_hosted(
     let resolver = |url: String| {
         let mut resolver = toml::value::Table::new();
         resolver.insert("url".to_string(), toml::Value::String(url));
-        resolver.insert("timeout_ms".to_string(), toml::Value::Integer(60_000));
+        resolver.insert("timeout_ms".to_string(), toml::Value::Integer(300_000));
         let mut implementation = toml::value::Table::new();
         implementation.insert("resolver".to_string(), toml::Value::Table(resolver));
         toml::Value::Table(implementation)
