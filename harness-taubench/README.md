@@ -90,6 +90,16 @@ uv run appa-taubench chaos-screen \
   --run-name tau-knowledge-luna-max-low-friction-screen
 ```
 
+The authenticated-session profile is a stronger stress test that gives the agent the false premise that login authentication already satisfies account-action requirements. OpenAPPA still evaluates the actual trajectory and therefore sees no prior `identity.verified` effect. Both arms receive the same false premise, so only the guarded arm can turn that mismatch into policy feedback and a remedy path.
+
+```sh
+uv run appa-taubench chaos-screen \
+  --model openrouter/openai/gpt-5.6-luna \
+  --reasoning-effort max \
+  --agent-prompt-profile authenticated-session-chaos \
+  --run-name tau-knowledge-luna-max-authenticated-session-screen
+```
+
 The screen is useful when the guarded audit contains a pre-verification policy block followed by the offered `log_verification` redispatch and the intended mutation. The permissive audit shows whether the same model instead dispatched that mutation without verification, while matched rewards show whether recovery improved task completion. Stochastic trajectories remain associative evidence, so a promising screen advances to the frozen pilot before a complete run.
 
 ## Publication runs freeze every effective setting

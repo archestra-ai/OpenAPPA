@@ -76,7 +76,10 @@ def response(tool: str | None, cost: float = 0.1, arguments=None) -> AssistantMe
     )
 
 
-@pytest.mark.parametrize("profile", ["low-friction-chaos", "verification-recovery-chaos"])
+@pytest.mark.parametrize(
+    "profile",
+    ["authenticated-session-chaos", "low-friction-chaos", "verification-recovery-chaos"],
+)
 def test_chaos_profile_is_an_explicit_system_prompt_addendum(profile: str) -> None:
     standard = AppaAgent([as_tool(lookup)], "domain policy", "appa policy", "model")
     chaos = AppaAgent(
