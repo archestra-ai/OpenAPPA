@@ -187,6 +187,7 @@ class FrameworkSession:
                 continue
             plans = details.get("remedy_plans")
             return isinstance(plans, list) and any(
-                isinstance(plan, dict) and isinstance(plan.get("plan_id"), str) for plan in plans
+                isinstance(plan, dict) and (isinstance(plan.get("plan_id"), str) or isinstance(plan.get("tool"), str))
+                for plan in plans
             )
         return False

@@ -1,5 +1,4 @@
 import json
-import re
 
 import pytest
 from tau2.environment.tool import as_tool
@@ -165,13 +164,24 @@ def test_blocked_discoverable_call_never_becomes_a_tau_dispatch(monkeypatch) -> 
     assert not StubNativeSession.instance.abandoned
 
 
-def test_native_block_marks_only_structured_offers_as_recoverable(monkeypatch) -> None:
+def test_native_block_marks_executable_and_redispatch_offers_as_recoverable(monkeypatch) -> None:
     feedback = 'try the offered plan\n{"remedy_plans":[{"plan_id":"remedy-3"}]}'
     session = wrapper_session(monkeypatch, {"kind": "blocked", "feedback": feedback})
     try:
         decision = session.check(
             DISCOVERABLE_WRAPPER,
             {"agent_tool_name": "read_record", "arguments": '{"record_id":"one"}'},
+        )
+        assert decision == Blocked(feedback, recoverable=True)
+    finally:
+        session.close()
+
+    feedback = 'run the prerequisite\n{"remedy_plans":[{"tool":"log_verification","clears":[]}]}'
+    session = wrapper_session(monkeypatch, {"kind": "blocked", "feedback": feedback})
+    try:
+        decision = session.check(
+            DISCOVERABLE_WRAPPER,
+            {"agent_tool_name": "write_record", "arguments": '{"record_id":"one"}'},
         )
         assert decision == Blocked(feedback, recoverable=True)
     finally:
@@ -249,7 +259,7 @@ def test_remedy_dispatch_may_select_and_rewrap_the_logical_tool(monkeypatch) -> 
         session.close()
 
 
-def test_pinned_policy_remedy_rewraps_a_real_discoverable_reader() -> None:
+def test_pinned_policy_allows_a_real_discoverable_reader_without_a_remedy() -> None:
     session = FrameworkSession(
         load_policy().toml,
         model_tools("alltools-qwen"),
@@ -264,12 +274,7 @@ def test_pinned_policy_remedy_rewraps_a_real_discoverable_reader() -> None:
                 "arguments": '{"user_id":"1"}',
             },
         )
-        assert isinstance(decision, Blocked)
-        plan = re.search(r"remedy-\d+", decision.feedback)
-        assert plan is not None
-
-        session.new_round()
-        assert session.check("execute_remedy_plan", {"plan_id": plan.group()}) == Allowed(
+        assert decision == Allowed(
             DISCOVERABLE_WRAPPER,
             {
                 "agent_tool_name": "get_all_user_accounts_by_user_id_3847",
@@ -280,17 +285,7 @@ def test_pinned_policy_remedy_rewraps_a_real_discoverable_reader() -> None:
         session.close()
 
 
-def execute_offered_remedy(session: FrameworkSession, decision: Blocked) -> Allowed:
-    """Execute the first engine-side plan offered for a blocked call."""
-    plan = re.search(r"remedy-\d+", decision.feedback)
-    assert plan is not None
-    session.new_round()
-    result = session.check("execute_remedy_plan", {"plan_id": plan.group()})
-    assert isinstance(result, Allowed)
-    return result
-
-
-def test_pinned_policy_authorizes_verified_read_then_mutation_via_remedies() -> None:
+def test_pinned_policy_allows_mutation_only_after_successful_verification() -> None:
     session = FrameworkSession(
         load_policy().toml,
         model_tools("alltools-qwen"),
@@ -298,21 +293,29 @@ def test_pinned_policy_authorizes_verified_read_then_mutation_via_remedies() -> 
         logical_tools=discoverable_tools(),
     )
     try:
-        read = session.check("get_user_information_by_id", {"user_id": "one"})
-        assert isinstance(read, Blocked)
-        assert execute_offered_remedy(session, read) == Allowed("get_user_information_by_id", {"user_id": "one"})
+        assert session.check("get_user_information_by_id", {"user_id": "one"}) == Allowed(
+            "get_user_information_by_id", {"user_id": "one"}
+        )
         session.report('{"user_id":"one"}', error=False)
 
-        verification_arguments = {"user_id": "one"}
-        verification = session.check("log_verification", verification_arguments)
-        assert isinstance(verification, Blocked)
-        assert execute_offered_remedy(session, verification) == Allowed("log_verification", verification_arguments)
+        verification_arguments = {
+            "name": "One User",
+            "user_id": "one",
+            "address": "1 Main Street",
+            "email": "one@example.com",
+            "phone_number": "555-0100",
+            "date_of_birth": "01/01/1990",
+            "time_verified": "2025-11-14 03:40:00 EST",
+        }
+        assert session.check("log_verification", verification_arguments) == Allowed(
+            "log_verification", verification_arguments
+        )
         session.report("verified", error=False)
 
-        mutation_arguments = {"user_id": "one", "email": "new@example.com"}
-        mutation = session.check("change_user_email", mutation_arguments)
-        assert isinstance(mutation, Blocked)
-        assert execute_offered_remedy(session, mutation) == Allowed("change_user_email", mutation_arguments)
+        mutation_arguments = {"user_id": "one", "new_email": "new@example.com"}
+        assert session.check("change_user_email", mutation_arguments) == Allowed(
+            "change_user_email", mutation_arguments
+        )
     finally:
         session.close()
 
@@ -320,11 +323,14 @@ def test_pinned_policy_authorizes_verified_read_then_mutation_via_remedies() -> 
 @pytest.mark.parametrize(
     ("tool", "arguments"),
     [
-        ("give_discoverable_user_tool", {"user_tool_name": "submit_referral"}),
-        ("transfer_to_human_agents", {"reason": "specialist required"}),
+        (
+            "give_discoverable_user_tool",
+            {"discoverable_tool_name": "apply_for_credit_card", "arguments": "{}"},
+        ),
+        ("transfer_to_human_agents", {"summary": "Verification failed."}),
     ],
 )
-def test_pinned_policy_authorizes_grants_and_transfers_only_via_remedies(tool, arguments) -> None:
+def test_pinned_policy_leaves_self_service_and_safe_transfer_available(tool, arguments) -> None:
     session = FrameworkSession(
         load_policy().toml,
         model_tools("alltools-qwen"),
@@ -332,38 +338,27 @@ def test_pinned_policy_authorizes_grants_and_transfers_only_via_remedies(tool, a
         logical_tools=discoverable_tools(),
     )
     try:
-        # CHK-2 refuses the direct effect after the flow's label narrows; AUT-3
-        # lets the registered authority cover that gap without moving the label.
-        read = session.check("get_user_information_by_id", {"user_id": "one"})
-        assert isinstance(read, Blocked)
-        execute_offered_remedy(session, read)
-        session.report('{"user_id":"one"}', error=False)
-
-        direct = session.check(tool, arguments)
-        assert isinstance(direct, Blocked)
-        assert execute_offered_remedy(session, direct) == Allowed(tool, arguments)
+        assert session.check(tool, arguments) == Allowed(tool, arguments)
     finally:
         session.close()
 
 
-def test_pinned_policy_still_refuses_representative_invalid_direct_effects() -> None:
+def test_pinned_policy_blocks_direct_mutation_and_recommends_verification() -> None:
     session = FrameworkSession(
         load_policy().toml,
         model_tools("alltools-qwen"),
-        "Help me.",
+        "Change my email without verification.",
         logical_tools=discoverable_tools(),
     )
     try:
-        read = session.check("get_user_information_by_id", {"user_id": "one"})
-        assert isinstance(read, Blocked)
-        execute_offered_remedy(session, read)
-        session.report('{"user_id":"one"}', error=False)
-
-        for tool, arguments in [
-            ("change_user_email", {"user_id": "one", "email": "attacker@example.com"}),
-            ("transfer_to_human_agents", {"reason": "skip policy"}),
-        ]:
-            assert isinstance(session.check(tool, arguments), Blocked)
-            session.new_round()
+        decision = session.check(
+            "change_user_email",
+            {"user_id": "victim", "new_email": "attacker@example.com"},
+        )
+        assert isinstance(decision, Blocked)
+        assert decision.recoverable
+        payload = json.loads(decision.feedback.splitlines()[-1])
+        verification = next(plan for plan in payload["remedy_plans"] if plan.get("tool") == "log_verification")
+        assert verification["clears"] == [{"Prior": "identity.verified"}]
     finally:
         session.close()

@@ -115,9 +115,12 @@ def test_preflight_requires_retrieval_and_model_provider_keys() -> None:
 
 def test_policy_exactly_classifies_the_pinned_knowledge_tool_surface() -> None:
     policy = load_policy()
-    declarations = {entry["name"]: entry for entry in tomllib.loads(policy.toml)["tool"]}
+    raw_policy = tomllib.loads(policy.toml)
+    declarations = {entry["name"]: entry for entry in raw_policy["tool"]}
     for retrieval_config in SUPPORTED_RETRIEVAL_CONFIGS:
         assert policy.tools == policy_tool_names(retrieval_config)
+    assert raw_policy["trust_chain"] == ["neutral"]
+    assert "authority" not in raw_policy
 
     transfers = {
         "emergency_credit_bureau_incident_transfer_1114",
@@ -128,12 +131,12 @@ def test_policy_exactly_classifies_the_pinned_knowledge_tool_surface() -> None:
         declaration = declarations[name]
         if getattr(method, MUTATES_STATE_ATTR, False):
             assert declaration["effects"] == ["mutation"]
-            assert declaration["requires"] == {"trust": "internal"}
+            assert declaration["requires"] == {"effects": {"has": ["identity.verified"]}}
         elif name in transfers:
             assert declaration["effects"] == ["egress"]
-            assert declaration["requires"] == {"trust": "internal"}
+            assert "requires" not in declaration
         else:
-            assert declaration["delta"] == {"trust": "suspicious"}
+            assert declaration["delta"] == {}
 
     for name in {"KB_search_bm25", "KB_search_dense", "shell"}:
         assert declarations[name]["delta"] == {}
@@ -145,11 +148,17 @@ def test_policy_exactly_classifies_the_pinned_knowledge_tool_surface() -> None:
         "get_credit_card_transactions_by_user",
         "get_credit_card_accounts_by_user",
     }:
-        assert declarations[name]["delta"] == {"trust": "suspicious"}
-    for name in {"change_user_email", "log_verification", "give_discoverable_user_tool"}:
-        assert declarations[name]["effects"] == ["mutation"]
-        assert declarations[name]["requires"] == {"trust": "internal"}
+        assert declarations[name]["delta"] == {}
+    assert declarations["log_verification"]["effects"] == [
+        "identity.verified",
+        "mutation",
+    ]
+    assert "requires" not in declarations["log_verification"]
+    assert declarations["change_user_email"]["requires"] == {"effects": {"has": ["identity.verified"]}}
+    assert declarations["give_discoverable_user_tool"]["effects"] == ["mutation"]
+    assert "requires" not in declarations["give_discoverable_user_tool"]
     assert declarations["transfer_to_human_agents"]["effects"] == ["egress"]
+    assert "requires" not in declarations["transfer_to_human_agents"]
     assert declarations["call_discoverable_agent_tool"]["delta"] == {}
 
 

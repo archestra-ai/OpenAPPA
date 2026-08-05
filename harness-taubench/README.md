@@ -1,6 +1,6 @@
-# OpenAPPA preserves Tau's utility evaluator
+# OpenAPPA preserves Tau's task and policy-compliance evaluator
 
-This package evaluates OpenAPPA on the `banking_knowledge` domain from the [Tau leaderboard](https://taubench.com/leaderboard?benchmark=knowledge). Tau executes every authorized tool call and applies its stock evaluator, while OpenAPPA checks each proposed call and receives the real result before the agent continues. The result measures utility under an information-flow overlay; security claims require a separate attack set with a security oracle.
+This package evaluates OpenAPPA on the `banking_knowledge` domain from the [Tau leaderboard](https://taubench.com/leaderboard?benchmark=knowledge). Tau executes every authorized tool call and applies its stock evaluator, while OpenAPPA checks each proposed call and receives the real result before the agent continues. Tau includes security-relevant policy cases such as failed identity verification, social pressure to bypass procedure, valid recovery-code exceptions, and fraud escalation. Its reward therefore carries some security signal, but it does not identify unsafe proposed calls, attribute a prevented action to OpenAPPA, or report false-positive and false-negative authorization decisions.
 
 The harness pins Tau 1.0.1 at commit `93ee97b8303ce0e89e0ad17e6207591a1846f84b`. Publication runs use all 97 tasks in the `base` split and four trials, producing 388 scored simulations. Preflight pins the reviewed inventory at 955 expected actions and rejects any upstream change to the task, action, or NL-assertion surface.
 
@@ -31,7 +31,7 @@ export OPENAI_API_KEY=...
 uv run appa-taubench preflight --retrieval-config alltools
 ```
 
-Preflight checks the pinned checkout and installed package, executable and credential names, complete task inventory, and exact policy coverage. It replays all 955 golden actions through Tau and replays all 853 expected assistant actions through the committed OpenAPPA contract, including every required remedy. It constructs no retrieval index and makes no model call, so this stage spends no API credit.
+Preflight checks the pinned checkout and installed package, executable and credential names, complete task inventory, and exact policy coverage. It replays all 955 golden actions through Tau and replays all 853 expected assistant actions through the committed OpenAPPA contract, including its verification-history requirements. It constructs no retrieval index and makes no model call, so this stage spends no API credit.
 
 ## The pilot compares enforcement, scaffold, and stock Tau
 
@@ -81,15 +81,17 @@ Tau's `results.json` remains the scored trajectory source, and task 102 uses Tau
 
 Verbose per-simulation Tau artifacts are enabled because the pinned Tau runner exposes its simulation correlation context through that lifecycle. Final validation requires one directly correlated OpenAPPA sidecar for every guarded or permissive result and the exact evaluator calls required by each task. Failed attempts remain separate from scored simulations and their auditable costs are reported separately.
 
-## Discoverable operations keep their policy identity
+## Verification gates bank mutations without blocking safe exits
 
 Tau exposes specialized banking operations through `call_discoverable_agent_tool`, whose `agent_tool_name` selects a reader, mutation, or transfer. The harness checks the inner logical name and decoded arguments, then wraps an authorized logical dispatch back into Tau's stock dispatcher. Tau performs the underlying operation, records its database effects, and scores the executed call.
 
-Customer and account readers narrow the trajectory's trust label to `suspicious`, while mutations and transfers require `internal`. A registered in-process authority models an operator who approves the exact staged internal call; it is an intentionally open and call-scoped gate under `CFG-15`. The authority does not inspect task IDs, expected actions, target database state, golden retrieval paths, or evaluator criteria, so benchmark answers never enter runtime authorization.
+Transactional and knowledge-base reads are bank-authored and remain neutral, so ordinary retrieval does not trigger policy remedies. A successful `log_verification` emits `identity.verified`, and every bank mutation requires that effect to exist earlier in the trajectory. No authority is registered to waive the requirement, while self-service tool grants and human transfers remain available before verification because Tau uses both as safe pre-authentication paths. This shape matches the pinned reference trajectories: 282 of their 283 bank-mutation calls follow `log_verification`, and the remaining call grants a public self-service tool to the user.
+
+The contract trusts Tau's documented meaning of a successful `log_verification` call. Tau's implementation records the supplied fields but does not validate the two-of-four identity evidence or bind the effect to the same user ID used by a later mutation, so the contract cannot establish those stronger properties. A focused adversarial subset plus a per-call authorization oracle is still needed to measure unsafe-action prevention and benign false positives separately from Tau's aggregate reward.
 
 ## Submission metadata discloses the custom scaffold
 
-The submit command invokes Tau's public trajectory verification and interactive preparation, copies the correlated audits and manifest, forces custom-scaffold metadata, and runs Tau's final submission validator. Its disclosure names the modified prompt, remedy tool, sequential-call rule, hidden replanning after multi-call or recoverable policy blocks, fixed terminal refusals, and trajectory rewriting. The result is labeled a custom utility evaluation rather than evidence that Tau's normal tasks establish information-flow security.
+The submit command invokes Tau's public trajectory verification and interactive preparation, copies the correlated audits and manifest, forces custom-scaffold metadata, and runs Tau's final submission validator. Its disclosure names the modified prompt, remedy tool, sequential-call rule, hidden replanning after multi-call or recoverable policy blocks, fixed terminal refusals, and trajectory rewriting. The result is labeled a custom task and policy-compliance evaluation rather than a standalone proof of authorization security.
 
 ```sh
 uv run appa-taubench submit runs/EXACT_GUARDED_RUN_DIRECTORY --output prepared-submission
