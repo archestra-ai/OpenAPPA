@@ -85,6 +85,15 @@ def build_parser() -> argparse.ArgumentParser:
     add_execution_arguments(pilot_parser)
     pilot_parser.set_defaults(run_name="tau-knowledge-pilot")
 
+    screen_parser = commands.add_parser(
+        "chaos-screen",
+        help="screen a model on three verification-sensitive guarded and permissive tasks",
+    )
+    add_data_argument(screen_parser)
+    add_model_arguments(screen_parser)
+    add_execution_arguments(screen_parser)
+    screen_parser.set_defaults(run_name="tau-knowledge-chaos-screen")
+
     submit_parser = commands.add_parser("submit", help="prepare and validate a completed custom submission")
     add_data_argument(submit_parser)
     submit_parser.add_argument("run_dir")
@@ -106,7 +115,7 @@ def main() -> None:
         print(f"submission: {submission_dir}")
         return
 
-    from appa_taubench.bench import preflight, run_bench, run_pilot
+    from appa_taubench.bench import preflight, run_bench, run_chaos_screen, run_pilot
 
     user_model = args.user_model
     review_model = args.review_model or args.judge_model
@@ -125,6 +134,23 @@ def main() -> None:
     if args.command == "pilot":
         raise SystemExit(
             run_pilot(
+                retrieval_config=args.retrieval_config,
+                model=args.model,
+                reasoning_effort=args.reasoning_effort,
+                user_model=user_model,
+                judge_model=args.judge_model,
+                review_model=review_model,
+                logdir=args.logdir,
+                run_name=args.run_name,
+                seed=args.seed,
+                max_steps=args.max_steps,
+                max_concurrency=args.max_concurrency,
+                dry_run=args.dry_run,
+            )
+        )
+    if args.command == "chaos-screen":
+        raise SystemExit(
+            run_chaos_screen(
                 retrieval_config=args.retrieval_config,
                 model=args.model,
                 reasoning_effort=args.reasoning_effort,

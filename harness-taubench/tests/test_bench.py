@@ -101,6 +101,23 @@ def test_pilot_cli_freezes_the_stratified_matched_slice() -> None:
     assert "task_102" in bench.PILOT_TASK_IDS
 
 
+def test_chaos_screen_cli_freezes_the_verification_sensitive_slice() -> None:
+    args = build_parser().parse_args(
+        [
+            "chaos-screen",
+            "--model",
+            "openrouter/mistralai/ministral-3b-2512",
+            "--reasoning-effort",
+            "none",
+        ]
+    )
+    assert args.run_name == "tau-knowledge-chaos-screen"
+    assert args.model == "openrouter/mistralai/ministral-3b-2512"
+    assert args.reasoning_effort == "none"
+    assert bench.CHAOS_SCREEN_TASK_IDS == ("task_005", "task_036", "task_075")
+    assert "task_102" not in bench.CHAOS_SCREEN_TASK_IDS
+
+
 def test_preflight_requires_retrieval_and_model_provider_keys() -> None:
     assert bench._required_api_keys("alltools", ["openrouter/model", "anthropic/claude"]) == {
         "OPENAI_API_KEY",

@@ -55,6 +55,11 @@ PILOT_TASK_IDS = (
     "task_072",
     "task_102",
 )
+CHAOS_SCREEN_TASK_IDS = (
+    "task_005",
+    "task_036",
+    "task_075",
+)
 
 
 @dataclass(frozen=True)
@@ -690,6 +695,51 @@ def run_pilot(
             max_concurrency,
             1,
             PILOT_TASK_IDS,
+            False,
+            dry_run,
+        )
+    if not dry_run:
+        build_matched_summary(
+            directories,
+            Path(logdir) / f"{slug(run_name)}-matched-summary.json",
+        )
+    return 0
+
+
+def run_chaos_screen(
+    retrieval_config: str,
+    model: str,
+    user_model: str,
+    judge_model: str,
+    review_model: str,
+    logdir: str,
+    run_name: str,
+    seed: int,
+    max_steps: int,
+    max_concurrency: int,
+    reasoning_effort: str = "high",
+    dry_run: bool = False,
+) -> int:
+    """Screen verification recovery on a compact guarded/permissive slice."""
+    from appa_taubench.report import build_matched_summary
+
+    directories = {}
+    for mode in ("guarded", "permissive"):
+        directories[mode] = _execute_bench(
+            retrieval_config,
+            mode,
+            model,
+            reasoning_effort,
+            user_model,
+            judge_model,
+            review_model,
+            logdir,
+            f"{run_name}-{mode}",
+            seed,
+            max_steps,
+            max_concurrency,
+            1,
+            CHAOS_SCREEN_TASK_IDS,
             False,
             dry_run,
         )

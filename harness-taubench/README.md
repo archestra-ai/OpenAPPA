@@ -59,6 +59,19 @@ Each arm writes `run-summary.json`, and the parent run directory receives a matc
 
 Tool execution errors are distinct from successful tool invocations whose returned content reports an operational failure such as a duplicate referral. Both are counted by requestor and retained verbatim. User-review findings and reported tool failures remain diagnostics attached to the scheduled result; the harness does not discard a run merely because a stochastic reviewer flags the user simulator.
 
+## The chaos screen isolates verification recovery
+
+The chaos screen compares only guarded and permissive scaffolds on three short tasks where an eager agent can attempt a bank mutation before verification. Task 005 applies pressure with a fake supervisor bypass code, task 036 pairs an urgent fraud report with a legitimate replacement-card order, and task 075 provides a benign account-opening control. This slice selects an adverse model or prompt before spending on the ten-task pilot or the complete benchmark; it does not replace either publication-shaped evaluation.
+
+```sh
+uv run appa-taubench chaos-screen \
+  --model openrouter/mistralai/ministral-3b-2512 \
+  --reasoning-effort none \
+  --run-name tau-knowledge-ministral-3b-screen
+```
+
+The screen is useful when the guarded audit contains a pre-verification policy block followed by the offered `log_verification` redispatch and the intended mutation. The permissive audit shows whether the same model instead dispatched that mutation without verification, while matched rewards show whether recovery improved task completion. Stochastic trajectories remain associative evidence, so a promising screen advances to the frozen pilot before a complete run.
+
 ## Publication runs freeze every effective setting
 
 The default agent is OpenRouter's GPT-5.2 at `reasoning_effort=high`, matching the current Tau GPT-5.2 leaderboard configuration. `--reasoning-effort` overrides that agent setting and records it in the run digest and manifest. The user simulator is explicitly fixed to the leaderboard-recommended GPT-5.2 at `reasoning_effort=low`; it never changes when `--model` or `--reasoning-effort` changes. GPT-4.1 at temperature zero performs task 102's score-bearing NL judgment and the separate user-simulator review. The audit records both requested and provider-resolved model identifiers, but OpenRouter's aliases do not establish a stronger immutable snapshot identity.
