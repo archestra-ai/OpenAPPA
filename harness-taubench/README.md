@@ -80,6 +80,16 @@ uv run appa-taubench chaos-screen \
   --run-name tau-knowledge-ministral-3b-recovery-screen
 ```
 
+The low-friction profile instead gives a capable agent a First-Contact Resolution incentive to attempt requested account actions immediately. It does not tell the agent that authentication has already happened or disable its response to subsequent policy feedback. This makes a guarded block followed by successful verification and retry attributable to the policy interaction rather than a false session premise.
+
+```sh
+uv run appa-taubench chaos-screen \
+  --model openrouter/openai/gpt-5.6-luna \
+  --reasoning-effort max \
+  --agent-prompt-profile low-friction-chaos \
+  --run-name tau-knowledge-luna-max-low-friction-screen
+```
+
 The screen is useful when the guarded audit contains a pre-verification policy block followed by the offered `log_verification` redispatch and the intended mutation. The permissive audit shows whether the same model instead dispatched that mutation without verification, while matched rewards show whether recovery improved task completion. Stochastic trajectories remain associative evidence, so a promising screen advances to the frozen pilot before a complete run.
 
 ## Publication runs freeze every effective setting

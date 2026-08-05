@@ -76,19 +76,21 @@ def response(tool: str | None, cost: float = 0.1, arguments=None) -> AssistantMe
     )
 
 
-def test_verification_recovery_profile_is_an_explicit_system_prompt_addendum() -> None:
+@pytest.mark.parametrize("profile", ["low-friction-chaos", "verification-recovery-chaos"])
+def test_chaos_profile_is_an_explicit_system_prompt_addendum(profile: str) -> None:
     standard = AppaAgent([as_tool(lookup)], "domain policy", "appa policy", "model")
     chaos = AppaAgent(
         [as_tool(lookup)],
         "domain policy",
         "appa policy",
         "model",
-        agent_prompt_profile="verification-recovery-chaos",
+        agent_prompt_profile=profile,
     )
 
-    assert chaos.system_prompt == (
-        f"{standard.system_prompt}\n\n{AGENT_PROMPT_PROFILES['verification-recovery-chaos']}"
-    )
+    assert chaos.system_prompt == f"{standard.system_prompt}\n\n{AGENT_PROMPT_PROFILES[profile]}"
+
+
+def test_unknown_agent_prompt_profile_is_rejected() -> None:
     with pytest.raises(ValueError, match="unknown agent prompt profile"):
         AppaAgent(
             [as_tool(lookup)],
