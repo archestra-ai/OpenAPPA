@@ -2,10 +2,8 @@
 title: What is OpenAPPA
 category: Get started
 order: 1
-description: A deterministic policy engine for LLM agents — tracking data origins and enforcing information flow before tool calls dispatch.
+description: OpenAPPA is open-source, deterministic security for real-world agentic applications.
 ---
-
-OpenAPPA is open-source, deterministic security for real-world agentic applications.
 
 The more tools and data sources an agent is connected to, the more it can do. Capability, however, arrives together with risk — the risk of data exfiltration. Put plainly, an agent can pick up something sensitive and publish it, whether through a hallucination or an outright prompt injection.
 
@@ -13,12 +11,12 @@ The problem has reached epidemic scale. A partial list of published exfiltration
 
 By now there is plenty of research on how to build agents that cannot leak sensitive data even in principle — not "cannot with 99.99% probability," but deterministically constrained. Simon Willison's excellent posts come to mind — the [Dual LLM pattern](https://simonwillison.net/2023/Apr/25/dual-llm-pattern/), the [lethal trifecta](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/) framing, and his coverage of [CaMeL](https://simonwillison.net/2025/Apr/11/camel/) — as does Microsoft's [FIDES](https://arxiv.org/abs/2505.23643).
 
-And yet a gap remains between these ideas on paper and the ability to apply them in a concrete environment, in a concrete product or company. Four questions stand between the two:
+And yet a gap remains between these ideas on paper and the ability to apply them in a concrete environment, in a concrete product or company:
 
-- How do I describe agent security in plain language at scale in my organization?
+- How do I describe agent security in plain language?
 - How do I enforce it on the agents I already have?
 - How do I monitor it in production?
-- How do I act based on observability I get?
+- How do I scale it in my organizations?
 
 OpenAPPA answers all four.
 
@@ -26,7 +24,7 @@ OpenAPPA answers all four.
 
 Plenty of PII detectors and prompt-injection classifiers exist today — OpenAI's [moderation models](https://platform.openai.com/docs/guides/moderation), Meta's [Llama Prompt Guard](https://www.llama.com/docs/model-cards-and-prompt-formats/prompt-guard/), Microsoft's [Prompt Shields](https://learn.microsoft.com/en-us/azure/ai-services/content-safety/concepts/jailbreak-detection), and [Lakera Guard](https://www.lakera.ai/lakera-guard) among them. We believe real agent security is deterministic: it holds on every run, not on 99% of them. Only then can you genuinely trust agents in real applications — say, around medical or financial data.
 
-The foundation of OpenAPPA is data-flow tracking. In other words, it lets you state — and enforce — the answer to one question: *can this value, derived from these sources, legally flow into this sink?* 
+The foundation of OpenAPPA is data-flow tracking. In other words, it answers the question: *can this value, derived from these sources, legally flow into this sink?* 
 
 And where it is genuinely unavoidable, OpenAPPA also lets you plug in non-deterministic agent-security tools.
 

@@ -1,5 +1,5 @@
 ---
-title: How OpenAPPA works
+title: How it works
 category: Get started
 order: 2
 description: The whole model in one sitting — what OpenAPPA guarantees and what it costs.

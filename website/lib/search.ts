@@ -71,7 +71,7 @@ const STATIC_RULES = [
   { id: "UNK-5", title: "UNK-5: Unannotated Output State", url: "/docs/contracts#what-to-check-when-reviewing", snippet: "Unannotated tool outputs enter in Unknown state." },
 ];
 
-const GLOSSARY_TERMS = [
+export const GLOSSARY_TERMS = [
   "delta",
   "requires",
   "audience",

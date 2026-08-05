@@ -183,12 +183,14 @@ samp {
 
 .appa-mark-float {
   animation: appa-float 5.5s ease-in-out infinite;
+  animation-delay: var(--appa-float-delay, 0s);
 }
 
 .appa-mark-eyes {
   transform-box: fill-box;
   transform-origin: center;
   animation: appa-blink 5s ease-in-out infinite;
+  animation-delay: var(--appa-blink-delay, 0s);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1045,6 +1047,210 @@ samp {
   font-weight: 500;
   color: var(--text-strong);
   margin-top: 4px;
+}
+
+/* ————————————————————————————————————————————————
+   MCP panel — card in the TOC column + install modal
+   ———————————————————————————————————————————————— */
+.mcp-panel-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 20px 24px 0;
+  padding: 10px 12px;
+  width: calc(100% - 48px);
+  background: var(--bg-weak);
+  border: 1px solid var(--border-weak);
+  border-radius: 8px;
+  color: var(--text-weak);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: left;
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+
+.mcp-panel-card:hover {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+  color: var(--text-strong);
+}
+
+.mcp-dialog {
+  max-width: 640px;
+}
+
+.mcp-dialog-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px;
+  border-bottom: 1px solid var(--border-weak);
+}
+
+.mcp-dialog-title {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--text-strong);
+  font-size: 14px;
+}
+
+.mcp-dialog-subtitle {
+  margin-top: 6px;
+  color: var(--text-weak);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.mcp-dialog-subtitle code {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.mcp-agent-list {
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 8px 16px 16px;
+}
+
+.mcp-agent-row {
+  margin-top: 12px;
+}
+
+.mcp-agent-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-strong);
+  margin-bottom: 4px;
+}
+
+.mcp-agent-hint {
+  font-weight: 400;
+  color: var(--text-weak);
+}
+
+.mcp-command {
+  position: relative;
+  background: var(--bg-weak);
+  border: 1px solid var(--border-weak);
+  border-radius: 6px;
+}
+
+.mcp-command pre {
+  margin: 0;
+  padding: 8px 64px 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.mcp-copy-btn {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  right: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 2px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border-weak);
+  border-radius: 4px;
+  color: var(--text-weak);
+  cursor: pointer;
+}
+
+.mcp-copy-btn:hover {
+  color: var(--text-strong);
+  border-color: var(--border);
+}
+
+/* multi-line snippets keep the button pinned to the top corner */
+.mcp-command.multiline .mcp-copy-btn {
+  top: 6px;
+  transform: none;
+}
+
+/* ————————————————————————————————————————————————
+   Mascot theater — the Advisory Board audience
+   ———————————————————————————————————————————————— */
+.mascot-theater {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin: 1.5rem 0 3rem;
+}
+
+.mascot-theater-row {
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+}
+
+/* ————————————————————————————————————————————————
+   Under construction — filler for empty doc pages
+   ———————————————————————————————————————————————— */
+.under-construction {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  padding: 3.5rem 0 2rem;
+  text-align: center;
+}
+
+.uc-stripes {
+  width: min(340px, 75%);
+  height: 8px;
+  border-radius: 2px;
+  background: repeating-linear-gradient(-45deg, var(--warn) 0 6px, transparent 6px 14px);
+  opacity: 0.45;
+}
+
+.uc-label {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--warn);
+}
+
+.uc-text {
+  max-width: 30rem;
+  color: var(--text-weak);
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.uc-text a {
+  color: var(--accent);
+}
+
+/* ————————————————————————————————————————————————
+   Policy stack figure — one policy, many enforcement points
+   ———————————————————————————————————————————————— */
+.policy-stack-figure {
+  position: relative;
+  margin: 1.5rem 0 2rem;
+}
+
+.policy-stack-figure svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.psf-mascot {
+  position: absolute;
+  left: 24%;
+  top: 34%;
+  transform: translate(-50%, -100%);
+  line-height: 0;
 }
 
 /* Tailwind utility names for the shadcn tokens. Two remaps on purpose:

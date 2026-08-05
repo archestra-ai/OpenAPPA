@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 
+import { CurlPanel } from "@/components/CurlPanel";
+import { McpPanel } from "@/components/McpPanel";
 import type { TocItem } from "@/lib/docs";
 
 export function TableOfContents({ items }: { items: TocItem[] }) {
@@ -28,28 +30,32 @@ export function TableOfContents({ items }: { items: TocItem[] }) {
     return () => observer.disconnect();
   }, [items]);
 
-  if (items.length === 0) return null;
-
   return (
     <aside className="toc">
       <div className="toc-inner">
-        <div className="toc-title">On this page</div>
-        <nav>
-          {items.map((item) => (
-            <a
-              key={item.id}
-              href={`#${item.id}`}
-              className={[
-                item.level === 3 ? "depth-3" : "",
-                activeId === item.id ? "active" : "",
-              ]
-                .filter(Boolean)
-                .join(" ")}
-            >
-              {item.text}
-            </a>
-          ))}
-        </nav>
+        {items.length > 0 && (
+          <>
+            <div className="toc-title">On this page</div>
+            <nav>
+              {items.map((item) => (
+                <a
+                  key={item.id}
+                  href={`#${item.id}`}
+                  className={[
+                    item.level === 3 ? "depth-3" : "",
+                    activeId === item.id ? "active" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                >
+                  {item.text}
+                </a>
+              ))}
+            </nav>
+          </>
+        )}
+        <McpPanel />
+        <CurlPanel />
       </div>
     </aside>
   );

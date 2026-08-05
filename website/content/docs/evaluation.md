@@ -1,7 +1,7 @@
 ---
 title: Evaluating OpenAPPA
 category: Evaluation
-order: 4
+order: 10
 description: How OpenAPPA stops data exfiltration attacks without breaking your AI agent's ability to get work done.
 ---
 

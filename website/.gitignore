@@ -1,5 +1,6 @@
 node_modules/
 .next/
+content/spec.md
 out/
 next-env.d.ts
 *.tsbuildinfo

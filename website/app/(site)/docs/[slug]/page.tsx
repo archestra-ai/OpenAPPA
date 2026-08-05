@@ -3,6 +3,7 @@ import { notFound, redirect } from "next/navigation";
 
 import { DocContent } from "@/components/DocContent";
 import { DocShell } from "@/components/DocShell";
+import { UnderConstruction } from "@/components/UnderConstruction";
 import { generateTableOfContents, getAllDocs, getDocBySlug } from "@/lib/docs";
 
 interface Props {
@@ -37,7 +38,7 @@ export default async function DocPage({ params }: Props) {
         <h1>{doc.title}</h1>
       </div>
       {doc.description && <p className="doc-description">{doc.description}</p>}
-      <DocContent content={doc.content} />
+      {doc.content.trim() === "" ? <UnderConstruction /> : <DocContent content={doc.content} />}
     </DocShell>
   );
 }

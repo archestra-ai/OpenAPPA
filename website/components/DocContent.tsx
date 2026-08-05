@@ -12,8 +12,10 @@ import { ExfiltrationFigure } from "@/components/figures/ExfiltrationFigure";
 import { GuardrailFigure } from "@/components/figures/GuardrailFigure";
 import { LabelFoldFigure } from "@/components/figures/LabelFoldFigure";
 import { NegotiationFigure } from "@/components/figures/NegotiationFigure";
+import { PolicyStackFigure } from "@/components/figures/PolicyStackFigure";
 import { RemedyPlanFigure } from "@/components/figures/RemedyPlanFigure";
 import { TwoEndingsFigure } from "@/components/figures/TwoEndingsFigure";
+import { MascotBoard } from "@/components/MascotBoard";
 import { Term } from "@/components/Term";
 import { termDefinition } from "@/lib/terms";
 
@@ -25,8 +27,10 @@ const DIRECTIVES: Record<string, () => ReactNode> = {
   "fig-guardrail": () => <GuardrailFigure />,
   "fig-label-fold": () => <LabelFoldFigure />,
   "fig-negotiation": () => <NegotiationFigure />,
+  "fig-policy-stack": () => <PolicyStackFigure />,
   "fig-remedy-plan": () => <RemedyPlanFigure />,
   "fig-two-endings": () => <TwoEndingsFigure />,
+  "mascot-board": () => <MascotBoard />,
   "details-7pc-leak": () => (
     <details className="leak-details my-6 rounded-lg border border-[var(--border)] bg-[var(--bg-weak)] p-4 text-sm text-[var(--text)]">
       <summary className="cursor-pointer font-semibold text-[var(--text-strong)] hover:text-[var(--accent)]">
