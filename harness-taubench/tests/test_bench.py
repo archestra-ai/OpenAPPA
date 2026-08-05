@@ -71,6 +71,7 @@ def test_cli_defaults_describe_a_complete_submission_run() -> None:
     assert args.max_steps == 200
     assert args.seed == 300
     assert args.model == "openrouter/openai/gpt-5.2"
+    assert args.reasoning_effort == "high"
     assert args.user_model == "openrouter/openai/gpt-5.2"
     assert args.judge_model == "openrouter/openai/gpt-4.1"
     assert args.policy_mode == "guarded"
@@ -93,8 +94,9 @@ def test_static_preflight_binds_policy_and_loads_the_complete_split() -> None:
 
 
 def test_pilot_cli_freezes_the_stratified_matched_slice() -> None:
-    args = build_parser().parse_args(["pilot"])
+    args = build_parser().parse_args(["pilot", "--reasoning-effort", "max"])
     assert args.run_name == "tau-knowledge-pilot"
+    assert args.reasoning_effort == "max"
     assert len(bench.PILOT_TASK_IDS) == 10
     assert "task_102" in bench.PILOT_TASK_IDS
 
@@ -505,6 +507,7 @@ def test_run_bench_passes_submission_shape_to_tau_without_task_filter(monkeypatc
             max_steps=200,
             max_concurrency=3,
             num_trials=4,
+            reasoning_effort="max",
         )
         == 0
     )
@@ -514,6 +517,7 @@ def test_run_bench_passes_submission_shape_to_tau_without_task_filter(monkeypatc
     assert config.task_split_name == "base"
     assert config.task_ids is None
     assert config.retrieval_config == "alltools-qwen"
+    assert config.llm_args_agent == {"reasoning_effort": "max"}
     assert config.num_trials == 4
     assert config.max_steps == 200
     assert config.auto_resume is True

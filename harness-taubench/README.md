@@ -39,6 +39,12 @@ The pilot fixes ten tasks spanning reads, verification, mutation, transfer, user
 
 ```sh
 uv run appa-taubench pilot --run-name tau-knowledge-pilot
+
+# Override and record the agent's reasoning effort for models that support it.
+uv run appa-taubench pilot \
+  --model openrouter/openai/gpt-5.6-luna \
+  --reasoning-effort max \
+  --run-name tau-knowledge-luna-max-pilot
 ```
 
 The three arms expose different associations. Guarded versus permissive holds the OpenAPPA prompt, remedy tool, and one-call scaffold constant while changing policy enforcement. Stock versus permissive changes that custom scaffold itself, so a custom result is not presented as though it used Tau's standard agent. Matched task IDs and seeds do not make stochastic trajectories a causal experiment.
@@ -55,7 +61,7 @@ Tool execution errors are distinct from successful tool invocations whose return
 
 ## Publication runs freeze every effective setting
 
-The default agent is OpenRouter's GPT-5.2 at `reasoning_effort=high`, matching the current Tau GPT-5.2 leaderboard configuration. The user simulator is explicitly fixed to the leaderboard-recommended GPT-5.2 at `reasoning_effort=low`; it never changes when `--model` changes. GPT-4.1 at temperature zero performs task 102's score-bearing NL judgment and the separate user-simulator review. The audit records both requested and provider-resolved model identifiers, but OpenRouter's aliases do not establish a stronger immutable snapshot identity.
+The default agent is OpenRouter's GPT-5.2 at `reasoning_effort=high`, matching the current Tau GPT-5.2 leaderboard configuration. `--reasoning-effort` overrides that agent setting and records it in the run digest and manifest. The user simulator is explicitly fixed to the leaderboard-recommended GPT-5.2 at `reasoning_effort=low`; it never changes when `--model` or `--reasoning-effort` changes. GPT-4.1 at temperature zero performs task 102's score-bearing NL judgment and the separate user-simulator review. The audit records both requested and provider-resolved model identifiers, but OpenRouter's aliases do not establish a stronger immutable snapshot identity.
 
 ```sh
 # Validate the exact 388-simulation guarded plan without model calls.
