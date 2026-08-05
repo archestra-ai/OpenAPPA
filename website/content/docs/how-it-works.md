@@ -84,7 +84,7 @@ name    = "user"
 builtin = "hitl"
 
 [authority.mandate]
-can_add_readers = { may_add = ["public"] } # may vouch any recipient
+can_cover_readers = { may_add = ["public"] } # may cover any recipient
 ```
 
 The trajectory begins at `{public, trusted}` unless pre-existing context or user input introduces restricted labels. When the agent calls `get_ticket_from_crm()`, OpenAPPA intercepts the dispatch before execution. The engine offers two operational paths based on the deployment's branching capabilities:
@@ -127,7 +127,7 @@ Unannotated tools return data with an **Unknown** label state, representing unve
 | **Unannotated Tool Dispatch** | Succeeds and assigns **Unknown** label state to its output. |
 | **Unregistered Tool Dispatch** | Refused directly by the engine before execution. |
 | **Requirement Check (`requires`)** | Fails closed when consuming an **Unknown** label value. |
-| **Child Merge Boundary** | Holds **Unknown** child returns until established by a registered cast. |
+| **Child Merge Boundary** | Unknown child returns merge and absorb like any read; registered casts may resolve them at the boundary. |
 
 An Unknown label state does not halt execution until a tool contract's `requires` clause explicitly checks the value. To resolve an **Unknown** state, deployments register a **cast** component that assigns concrete labels based on static rules or external evaluation services. This design allows deployments to start with a few high-risk tool annotations and incrementally expand policy coverage over time.
 

@@ -26,7 +26,7 @@ Every set specification in a policy requires an explicit **operator** to prevent
 | **`exactly`** | Fixes the set to these exact members. | `delta = { audience = { exactly = ["support"] } }` |
 | **`includes`** | Requires at least these members (`audience ⊇ recipients`). | `requires = { audience = { includes = ["$recipient"] } }` |
 | **`cap`** | Bounds the allowed audience from above (`audience ⊆ C`). | `requires = { audience = { cap = ["internal"] } }` |
-| **`may_add`** | Bounds the readers an authority is permitted to vouch for. | `can_add_readers = { may_add = ["public"] }` |
+| **`may_add`** | Bounds the readers an authority is permitted to cover. | `can_cover_readers = { may_add = ["public"] }` |
 
 A set declaration without an explicit operator causes a policy load error.
 
@@ -41,7 +41,7 @@ A tool contract is typically four lines long. Use this checklist during policy r
 | **`effects` Completeness** | Mutation or deployment tool omits `effects`. | Declare all side effects, e.g., `effects = ["migration.applied", "mutation"]`. | Under-declared effects pass `no_prior` checks silently without triggering history constraints. |
 | **Dynamic Recipients** | Static list `includes = ["user@corp"]` when recipient comes from a tool argument. | Use dynamic argument placeholder `includes = ["$recipient"]`. | Static lists pass unauthorized recipient arguments without checking argument values. |
 | **Combined Read & Release** | Single tool `share_doc(doc, recipient)` fetching and releasing in one step. | Split into `fetch_doc` (read) and `grant_doc_access` (release). | Combined tools force authorities to approve releases before content is fetched. |
-| **Authority Mandates** | Overly permissive mandates like `can_add_readers = { may_add = ["public"] }`. | Restrict authority `mandate` and `scope.tags` to the minimum necessary desk. | Authorities cannot exceed mandates, but overly broad mandates weaken review gates. |
+| **Authority Mandates** | Overly permissive mandates like `can_cover_readers = { may_add = ["public"] }`. | Restrict authority `mandate` and `scope.tags` to the minimum necessary desk. | Authorities cannot exceed mandates, but overly broad mandates weaken review gates. |
 
 ## Tools
 
@@ -82,8 +82,8 @@ An `[[authority]]` provides dynamic judgment to clear specific requirement gaps 
 name = "finance-officer"
 
 [authority.mandate]
-can_raise_trust_to = "trusted"                 # Cover unmet trust floor up to this rank
-can_add_readers    = { may_add = ["public"] }  # Vouch readers into an unmet `includes` check
+can_cover_trust_to = "trusted"                 # Cover unmet trust floor up to this rank
+can_cover_readers  = { may_add = ["public"] }  # Cover an unmet `includes` check up to these readers
 can_waive          = ["email.sent"]            # Waive a failed `no_prior` constraint
 attends            = ["finance-signoff"]       # Satisfy fresh attention demands
 
@@ -135,13 +135,16 @@ Unannotated tools return data in an `Unknown` label state. A `[[cast]]` resolves
 
 ```toml
 [[cast]]
-name     = "paranoid-default"
-constant = { trust = "suspicious" }           # Constant cast: resolves all Unknown trust to suspicious
-
-[[cast]]
 name     = "content-classifier"
 resolver = { url = "https://classifier.corp/resolve", timeout_ms = 10000,
              may_cast = { trust = ["suspicious"] } } # Bounded resolver cast
+
+[cast.scope]
+tags = ["support"]                            # Applies only to values from tools with these tags
+
+[[cast]]
+name     = "paranoid-default"
+constant = { trust = "suspicious" }           # Unscoped constant fallback, registered last
 ```
 
-Casts evaluate in registration order. The engine validates every resolver response against its declared `may_cast` ceiling before admitting the value.
+Applicable casts — matched by scope tags — evaluate in registration order. Register constant casts last: a cast placed after a constant that covers it can never run, and the loader refuses it. The engine validates every resolver response against its declared `may_cast` ceiling before admitting the value.

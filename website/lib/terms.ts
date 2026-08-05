@@ -47,10 +47,10 @@ const TERMS = {
   /* Authorities */
   mandate:
     "The declared bound on a registered component's power: for an authority, what its rulings may cover; for a sanitizer, the transition it may claim.",
-  can_raise_trust_to: "The ceiling of a trust cover in an authority mandate.",
-  can_add_readers: "The ceiling of an audience cover in an authority mandate.",
+  can_cover_trust_to: "The ceiling of a trust cover in an authority mandate.",
+  can_cover_readers: "The ceiling of an audience cover in an authority mandate.",
   may_add:
-    "The audience cover ceiling of an authority: the readers its rulings may vouch for.",
+    "The audience cover ceiling of an authority: the readers its rulings may cover.",
   can_waive: "The effect kinds an authority ruling may waive for one dispatch.",
   attends: "The attention marks an authority's rulings satisfy.",
   scope: "The tags an authority has jurisdiction over.",
