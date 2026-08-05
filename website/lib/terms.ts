@@ -22,7 +22,13 @@ const TERMS = {
   suspicious:
     "Data from an unvetted source, like external web content. Once ingested, the run stays suspicious.",
   public:
-    "The reader representing everyone. An agent with public access can send data to any outbound destination.",
+    "The reserved audience state meaning everyone: the complete reader universe, not a reader ID. An agent with public reach can send data to any outbound destination. Never a group member.",
+  "@name":
+    "A group: a directory-held reader set. The membership resolver turns the name into literal reader IDs when the engine reads it; the algebra never stores the name.",
+  "@auditors":
+    "A group: a directory-held reader set, resolved to literal reader IDs by the membership resolver when the engine reads it.",
+  "[membership]":
+    "The one registration every @name group resolves through. A group mention without it is a load error.",
   internal:
     "An example reader for restricted internal data. Reading internal data closes off public destinations.",
   "{public, trusted}":
@@ -41,8 +47,8 @@ const TERMS = {
     "What a successful tool call appends to the log, declared as effects = [...] in the contract.",
   exactly: "In an audience condition: the allowed reader set becomes precisely this list.",
   includes: "In a requires condition: the run's allowed readers must contain these.",
-  cap: "In a requires condition: the run's allowed readers must stay within this set.",
-  tags: "Routing names with no algebraic life; the currency of authority scope.",
+  cap: "In a requires condition: the run's allowed readers must stay within this set. In may_cast: the ceiling a resolved reader set must stay within.",
+  tags: "Routing names with no algebraic life; the currency of authority, cast, and sanitizer scope.",
 
   /* Authorities */
   mandate:
@@ -54,17 +60,23 @@ const TERMS = {
     "The audience cover ceiling of an authority: the readers its rulings may cover.",
   can_waive: "The effect kinds an authority ruling may waive for one dispatch.",
   attends: "The attention marks an authority's rulings satisfy.",
-  scope: "The tags an authority has jurisdiction over.",
+  scope:
+    "The tags a registered component (authority, cast, or sanitizer) has jurisdiction over.",
   attention: "Named marks demanding a fresh ruling on every dispatch.",
   'builtin = "hitl"':
     "The built-in human-in-the-loop authority: elicitation hosted by the harness rather than a remote resolver.",
 
   /* Sanitizers and Casts */
+  on: "Where a sanitizer may apply: tool_output at admissions the host can withhold, tool_input as whole-argument substitution at dispatch.",
+  tool_input:
+    "A sanitizer application point: the sanitizer derives a replacement for the whole argument set of one call, and the harness dispatches exactly the substituted bytes.",
+  tool_output:
+    "A sanitizer application point: an admission the host can withhold — the child-return crossing, or any tool result in a confining deployment. The derivation is admitted; the raw value is withheld.",
   from: "In a sanitizer mandate: the required source label state before the transition applies.",
   to: "In a sanitizer mandate: the exact target label state produced after the transition.",
   constant: "In a cast: every Unknown on the dimension resolves to one declared state.",
   resolver:
-    "The dynamic implementation of a registered external: authority rulings, cast decisions, or sanitizer derivations.",
+    "The dynamic implementation of a registered external: authority rulings, cast decisions, sanitizer derivations, or membership answers.",
   may_cast:
     "The ceiling on a cast resolver: the states it is allowed to resolve an Unknown value to.",
   "[child]": "Run configuration for child sub-executions.",

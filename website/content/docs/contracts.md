@@ -30,6 +30,22 @@ Every set specification in a policy requires an explicit **operator** to prevent
 
 A set declaration without an explicit operator causes a policy load error.
 
+### Groups
+
+A reader list may name a **group**, written `@name`. The registered membership resolver turns the name into its literal reader set at the moment the engine first reads it for an operation — at the pre-dispatch check, at mandate or cast-ceiling validation, at sanitizer application. A name without the mark is a literal reader ID. A reader ID starting with `@` is a load error, as is a group mention in a policy with no `[membership]` registration.
+
+```toml
+[membership]                    # one per deployment; every @group resolves here
+resolver = { url = "https://directory.corp/members", timeout_ms = 5000 }
+
+[[tool]]
+name     = "post_audit_note"
+requires = { audience = { cap = ["finance", "@auditors"] } }  # group in a cap
+delta    = {}
+```
+
+Resolution is fresh per call, and pinned within one: the set resolved at a call's check is the set its admission folds. A member added to the directory reaches the next call without a policy reload; removal reaches only future resolutions — a set already resolved stands. `public` is reserved and never a group member; a directory answer containing it is malformed.
+
 ## What to check when reviewing
 
 A tool contract is typically four lines long. Use this checklist during policy review to catch common syntax and structural red flags:
@@ -115,11 +131,15 @@ A `[[sanitizer]]` defines a formal label transition for data passed through a re
 [[sanitizer]]
 name = "pii-redactor"
 on   = ["tool_output"]                         # Tool results and child sub-execution returns
+# on = ["tool_input"]                          # Whole-argument substitution at dispatch
 hint = "Removes personal details from a finance record."  # Advisory; grants nothing
 
 [sanitizer.mandate]
 # Source label must satisfy `from`; output receives exact `to` label
 audience = { from = { includes = ["finance"] }, to = { exactly = ["public"] } }
+
+[sanitizer.scope]
+tags = ["support"]                             # Applies only to values from tools with these tags
 
 [sanitizer.implementation]
 builtin = "redact-email"
@@ -132,7 +152,11 @@ A mandate binds exactly one dimension. Trust is declared on the same terms, as a
 trust = { from = "suspicious", to = "trusted" } # Instead of `audience`, never alongside it
 ```
 
-A registered `tool_output` sanitizer is offered as a remedy plan at every narrowing its mandate can transition. Executing that plan withholds the raw tool result from the model and admits the derivation instead, so the trajectory folds the derivation's label. The plan carries an acceptance only for the residual its mandate cannot shed — a mandate on `audience` leaves a trust narrowing to accept, and the reverse. A sanitizer whose relabel would change nothing is never offered.
+A registered `tool_output` sanitizer is offered as a remedy plan at every narrowing its mandate can transition, in deployments able to withhold the raw result at that point. Executing that plan withholds the raw tool result from the model and admits the derivation instead, so the trajectory folds the derivation's label. The plan carries an acceptance only for the residual its mandate cannot shed — a mandate on `audience` leaves a trust narrowing to accept, and the reverse. A sanitizer whose relabel would change nothing is never offered.
+
+Like a cast or an authority, a sanitizer may scope itself by tags: it applies only to values whose originating tool carries a covered tag. A child sub-execution return originates from no tool, so only unscoped sanitizers apply at that crossing.
+
+At `tool_input`, the sanitizer derives a replacement for the whole argument set of one call, and the harness dispatches exactly the substituted bytes. The substitution can clear an `includes` gap — the derivation's `to` stands in for the argument contribution — but never a `cap` or trust gap: a cap bounds the run's own reach, and rewriting the bytes does not rewrite the decision to call.
 
 To enforce automated return sanitization across all child sub-executions, policies can bind a default return sanitizer:
 

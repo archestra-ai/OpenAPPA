@@ -46,6 +46,8 @@ OpenAPPA stops an agent *before* a fetch that restricts its label, informing it 
 
 By evaluating the step before dispatch, OpenAPPA prevents scenarios where an agent ingests data only to discover three steps later that outbound dispatches are blocked. The engine presents this pre-fetch choice as a **narrowing** stop. If the agent accepts the narrowing, the acceptance is recorded in the log and the call proceeds. Subsequent steps that cause no additional restriction pass without stopping, so narrowing prompts occur once per level of increased restriction during run.
 
+In deployments where the host can hold a raw tool result out of the model's context, a registered sanitizer offers a third path: the host runs the call, the sanitizer cleans the result, and only the cleaned derivation enters context — clearing the narrowing partially or entirely without a child branch.
+
 ## A child's narrowing dies with it
 
 Child trajectories isolate label modifications within host-managed sub-executions. A child starts with the parent trajectory's current label, but any data read within the child narrows the child's label exclusively. When the child completes, it returns a single value across its boundary that folds into the parent trajectory like any other tool read. If that raw return would narrow the parent, the merge stops at the boundary until accepted directly or cleaned through a registered `sanitizer`. Parent and child branches share a single append-only log so that all sends and approvals remain globally auditable.
@@ -152,7 +154,7 @@ In short: declarative tool contracts set automatic bounds, while external compon
 
 ## Existing checks map onto registered engine components
 
-Deployments migrate existing security controls into OpenAPPA by registering them as policy components with explicit mandates:
+Deployments migrate existing security controls into OpenAPPA by registering them as policy components with explicit mandates or ceilings:
 
 | Existing Security Control | OpenAPPA Component |
 |---|---|
@@ -160,11 +162,12 @@ Deployments migrate existing security controls into OpenAPPA by registering them
 | Custom approval webhooks / LLM evaluators | Authority Resolver |
 | Content scanners & trust classifiers | Cast Resolver |
 | Regex / ML PII scrubbers & redactors | Sanitizer |
+| Directory / IAM group lookups | Membership Resolver |
 | Imperative `if/else` access checks | Tool Contracts |
 
 Registering security controls as OpenAPPA components prevents prompt injections from bypassing policy. Because the engine evaluates structured tool dispatches at the boundary rather than model output text, a compromised model cannot talk its way past policy rules.
 
-Crucially, external components are capped by registered mandates: even if an ML classifier or third-party scanner makes a mistake, it cannot grant permissions beyond its pre-configured ceiling. Furthermore, declaring tool bounds in contracts removes scattered guardrail scripts and imperative `if` checks from your application code.
+Crucially, external components are capped by registered mandates: even if an ML classifier or third-party scanner makes a mistake, it cannot grant permissions beyond its pre-configured ceiling. A membership resolver carries no mandate — its answers are trusted directory input, and the model refuses only the reserved `public` reader in an answer. Furthermore, declaring tool bounds in contracts removes scattered guardrail scripts and imperative `if` checks from your application code.
 
 ## Operational impact: How OpenAPPA simplifies security
 
