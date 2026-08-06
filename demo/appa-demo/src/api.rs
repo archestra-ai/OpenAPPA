@@ -33,7 +33,7 @@ fn demo_limits() -> Limits {
     Limits {
         max_inference_rounds: 16,
         run_deadline: Duration::from_secs(90),
-        max_forks: 8,
+        max_forks: 0,
         max_fork_depth: 1,
         ..Limits::default()
     }
