@@ -120,7 +120,9 @@ impl Audience {
         }
     }
 
-    fn within(&self, cap: &Audience) -> bool {
+    /// `self ⊆ cap` — the trajectory's readers stay within the tool's declared cap. Crate-visible
+    /// because mandate-power comparison orders reader ceilings by this same inclusion.
+    pub(crate) fn within(&self, cap: &Audience) -> bool {
         match (self, cap) {
             (_, Audience::Public) => true,
             (Audience::Public, Audience::Restricted(_)) => false,

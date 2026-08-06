@@ -222,6 +222,43 @@ async fn the_injection_ladder_blocks_the_email_when_the_authority_denies() {
 }
 
 #[tokio::test]
+async fn a_no_answer_consult_keeps_the_offer_executable_in_the_sdk() {
+    let url = spawn_authority(vec!["maybe", "approve"]).await;
+    let mut session = open(&ladder_policy(&url));
+    session.begin_turn("read the forum, then send").unwrap();
+
+    let CallDecision::Block { .. } = session.check_call(call("read_forum", serde_json::json!({}))).unwrap() else {
+        panic!("forum read should soft-block");
+    };
+    session.begin_round().unwrap();
+    let RemedyDecision::Authorized { handle, .. } = session.resolve_remedy(Some("remedy-0")).await.unwrap() else {
+        panic!("the read remedy should authorize");
+    };
+    session.report_outcome(handle, ok_body("a forum post")).unwrap();
+
+    let CallDecision::Block { feedback } = session
+        .check_call(call("send_email", serde_json::json!({"to":"hr@corp"})))
+        .unwrap()
+    else {
+        panic!("send_email should block");
+    };
+    assert!(feedback.contains("remedy-1"));
+
+    let RemedyDecision::NoAnswer { feedback } = session.resolve_remedy(Some("remedy-1")).await.unwrap() else {
+        panic!("a consult with no answer is typed NoAnswer, not Declined");
+    };
+    assert!(feedback.contains("remedy-1"));
+
+    let RemedyDecision::Authorized { handle, call: rendered } = session.resolve_remedy(Some("remedy-1")).await.unwrap()
+    else {
+        panic!("the surviving offer authorizes on retry");
+    };
+    assert_eq!(rendered.tool.as_str(), "send_email");
+    session.report_outcome(handle, ok_body("sent")).unwrap();
+    session.end_turn().unwrap();
+}
+
+#[tokio::test]
 async fn the_in_flight_guard_refuses_a_second_check_before_report() {
     let mut session = open(LOOKUP_POLICY);
     session.begin_turn("look").unwrap();

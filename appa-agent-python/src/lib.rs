@@ -14,7 +14,7 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
 
-const BINDING_IDENTITY: &str = "appa-agent-python-v3";
+const BINDING_IDENTITY: &str = "appa-agent-python-v4";
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 const BRIDGE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -119,7 +119,9 @@ impl SessionInner {
                 .map_err(|error| error.to_string())?
             {
                 RemedyDecision::Authorized { handle, call } => DispatchDecision::Dispatch { handle, call },
-                RemedyDecision::Declined { feedback } => DispatchDecision::Blocked { feedback },
+                RemedyDecision::Declined { feedback } | RemedyDecision::NoAnswer { feedback } => {
+                    DispatchDecision::Blocked { feedback }
+                }
             }
         } else {
             let call = RenderedCall {

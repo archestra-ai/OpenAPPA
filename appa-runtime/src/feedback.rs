@@ -328,22 +328,12 @@ fn acceptance_cost(surface: FeedbackSurface) -> &'static str {
     }
 }
 
-/// Render the feedback after an authority declined one offer: the denial, then the remaining
-/// sibling plans as the same typed payload shape (no gaps re-listed — the block is unchanged). A
-/// sibling that carries an acceptance re-offers the narrowing, so its cost is named again here.
-pub fn denial_feedback(
-    registry: &Registry,
-    remaining: &[(String, ExecutableRemedyPlan)],
-    surface: FeedbackSurface,
-) -> String {
-    if remaining.is_empty() {
-        return "the authority declined to authorize this call; no alternative plan remains".to_string();
-    }
+fn offers_tail(registry: &Registry, offers: &[(String, ExecutableRemedyPlan)], surface: FeedbackSurface) -> String {
     #[derive(Serialize)]
     struct WireRemaining<'a> {
         remedy_plans: Vec<WirePlan<'a>>,
     }
-    let plans = wire_plans(registry, remaining);
+    let plans = wire_plans(registry, offers);
     let accepts = plans.iter().any(|plan| plan.accepts_narrowing);
     let payload = serde_json::to_string(&WireRemaining { remedy_plans: plans })
         .expect("the plan payload serializes: engine types are Serialize");
@@ -355,7 +345,39 @@ pub fn denial_feedback(
     } else {
         String::new()
     };
-    format!("the authority declined to authorize this call; alternatives remain{cost}\n{payload}")
+    format!("{cost}\n{payload}")
+}
+
+/// Render the feedback after an authority declined one offer: the denial, then the remaining
+/// sibling plans as the same typed payload shape. A sibling that carries an acceptance re-offers
+/// the narrowing, so its cost is named again here.
+pub fn denial_feedback(
+    registry: &Registry,
+    remaining: &[(String, ExecutableRemedyPlan)],
+    surface: FeedbackSurface,
+) -> String {
+    if remaining.is_empty() {
+        return "the authority declined to authorize this call; no alternative plan remains".to_string();
+    }
+    format!(
+        "the authority declined to authorize this call; alternatives remain{}",
+        offers_tail(registry, remaining, surface)
+    )
+}
+
+/// Render the feedback after a consult returned no answer: nothing was consumed, so
+/// every offer stands — the consulted plan included — and the same `plan_id` may be executed
+/// again. A consult with no answer is not a denial and does not stick.
+pub fn no_answer_feedback(
+    registry: &Registry,
+    handle: &str,
+    offers: &[(String, ExecutableRemedyPlan)],
+    surface: FeedbackSurface,
+) -> String {
+    format!(
+        "the authority returned no answer; nothing was consumed — plan_id \"{handle}\" stands and may be executed again{}",
+        offers_tail(registry, offers, surface)
+    )
 }
 
 pub fn cast_offer_feedback(handle: &str, narrowing: &Narrowing, surface: FeedbackSurface) -> String {

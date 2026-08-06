@@ -32,6 +32,7 @@ pub enum CallDecision {
 pub enum RemedyDecision {
     Authorized { handle: DispatchHandle, call: RenderedCall },
     Declined { feedback: String },
+    NoAnswer { feedback: String },
 }
 
 pub struct CallSession {
@@ -112,6 +113,7 @@ impl CallSession {
         self.guard_ready()?;
         match self.core.resolve_remedy(plan_id).await? {
             Remedied::Feedback(feedback) => Ok(RemedyDecision::Declined { feedback }),
+            Remedied::NoAnswer(feedback) => Ok(RemedyDecision::NoAnswer { feedback }),
             Remedied::Authorized { dispatch, call } => {
                 let rendered = RenderedCall::from_call(&call);
                 let id = self.core.next_handle_id();

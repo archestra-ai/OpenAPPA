@@ -856,26 +856,44 @@ impl Turn {
                     covers: requirement.covers.clone(),
                     reviewed: request.review(),
                 }),
-                answer @ (AuthorityAnswer::Deny | AuthorityAnswer::Abstain) => {
-                    let surface = self.acceptance_surface();
-                    match answer {
-                        AuthorityAnswer::Deny => {
-                            let denier = requirement.authority.clone();
-                            let digest = self.pending[cohort_index].call.digest();
-                            for cohort in &mut self.pending {
-                                if cohort.call.digest() == digest {
-                                    cohort.offers.retain(|(_, plan)| !plan.names_authority(&denier));
-                                }
-                            }
-                        }
-                        _ => self.pending[cohort_index].offers.retain(|(offer, _)| offer != handle),
-                    }
+                AuthorityAnswer::Deny => {
+                    let denier = requirement.authority.clone();
+                    let digest = self.pending[cohort_index].call.digest();
+                    let survivors: Vec<(String, ExecutableRemedyPlan)> = self.pending[cohort_index]
+                        .offers
+                        .iter()
+                        .filter(|(_, plan)| !plan.names_authority(&denier))
+                        .cloned()
+                        .collect();
                     let feedback = crate::feedback::denial_feedback(
                         self.mediator.engine().registry(),
-                        &self.pending[cohort_index].offers,
-                        surface,
+                        &survivors,
+                        self.acceptance_surface(),
                     );
+                    self.append(vec![
+                        Fact::Denial {
+                            trajectory: self.session.clone(),
+                            digest,
+                            authority: denier.clone(),
+                        },
+                        feedback_fact(&self.session, call_id, &feedback),
+                    ])?;
+                    self.mark_answered(call_id);
+                    for cohort in &mut self.pending {
+                        if cohort.call.digest() == digest {
+                            cohort.offers.retain(|(_, plan)| !plan.names_authority(&denier));
+                        }
+                    }
                     self.pending.retain(|cohort| !cohort.offers.is_empty());
+                    return Ok(CallProgress::Go);
+                }
+                AuthorityAnswer::Abstain => {
+                    let feedback = crate::feedback::no_answer_feedback(
+                        self.mediator.engine().registry(),
+                        handle,
+                        &self.pending[cohort_index].offers,
+                        self.acceptance_surface(),
+                    );
                     self.feedback(call_id, &feedback)?;
                     return Ok(CallProgress::Go);
                 }

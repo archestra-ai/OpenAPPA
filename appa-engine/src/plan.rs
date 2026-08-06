@@ -68,11 +68,12 @@
 //! has no dispatch, no gaps, and no authorities, so none of this module's tool-block machinery
 //! applies to it. The tool-output plans here mirror its shape deliberately.
 
+use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::authority::{Authority, Sanitizer};
+use crate::authority::{Authority, Mandate, Sanitizer};
 use crate::check::{self, Gap, Narrowing, RawBlock};
 use crate::contract::ToolContract;
 use crate::fact::EffectKind;
@@ -183,14 +184,17 @@ pub(crate) fn plan(registry: &Registry, views: &Views, call: &ResolvedCall, raw:
         label: views.current_label(),
         effects: views.present_effects(),
     };
+    let no_denials = BTreeSet::new();
+    let denied = views.denied_authorities(&call.digest()).unwrap_or(&no_denials);
 
     let mut plans: Vec<RemedyPlan> = enumerate_plans(registry, &start, call)
         .into_iter()
+        .filter(|plan| !denied.iter().any(|authority| plan.names_authority(authority)))
         .map(RemedyPlan::Executable)
         .collect();
 
     if plans.is_empty() && !raw.requirement_gaps.is_empty() {
-        for (tool, effect) in curative_redispatches(registry, &start, call, raw) {
+        for (tool, effect) in curative_redispatches(registry, &start, call, raw, denied) {
             plans.push(RemedyPlan::Redispatch { tool, effect });
         }
     }
@@ -212,7 +216,12 @@ pub(crate) fn plan(registry: &Registry, views: &Views, call: &ResolvedCall, raw:
     }
 }
 
-fn directly_clearable(registry: &Registry, state: &State, call: &ResolvedCall) -> Option<Vec<RemedyStep>> {
+fn directly_clearable(
+    registry: &Registry,
+    state: &State,
+    call: &ResolvedCall,
+    denied: &BTreeSet<AuthorityName>,
+) -> Option<Vec<RemedyStep>> {
     let contract = registry.tool(call.tool())?;
     let has_effect = |kind: &EffectKind| state.effects.contains(kind);
     let eval = check::evaluate_state(
@@ -229,7 +238,7 @@ fn directly_clearable(registry: &Registry, state: &State, call: &ResolvedCall) -
     let mut steps = Vec::new();
     for gap in &eval.requirement_gaps {
         // One ruling by an authority covers one or more gaps — emit each authority once.
-        let step = RemedyStep::Authorize(authority_for(registry, gap, &contract.tags)?.clone());
+        let step = RemedyStep::Authorize(authority_for(registry, gap, &contract.tags, denied)?.clone());
         if !steps.contains(&step) {
             steps.push(step);
         }
@@ -261,7 +270,7 @@ fn enumerate_plans(registry: &Registry, state: &State, call: &ResolvedCall) -> V
     };
     let tails = narrowing_remedies(registry, &state.label, contract, block.narrowing.as_ref());
 
-    let mut plans: Vec<ExecutableRemedyPlan> = Vec::new();
+    let mut candidates: Vec<PlanCandidate> = Vec::new();
     for required in assignments {
         for tail in &tails {
             let mut steps: Vec<RemedyStep> = required
@@ -269,20 +278,119 @@ fn enumerate_plans(registry: &Registry, state: &State, call: &ResolvedCall) -> V
                 .map(|r| RemedyStep::Authorize(r.authority.clone()))
                 .collect();
             steps.extend(tail.iter().cloned());
-            plans.push(ExecutableRemedyPlan {
-                id: PlanId(plans.len() as u32),
+            candidates.push(PlanCandidate {
                 steps,
                 required: required.clone(),
             });
         }
     }
-    plans
+    least_mandate_first(registry, &block.requirement_gaps, candidates)
+        .into_iter()
+        .enumerate()
+        .map(|(position, candidate)| ExecutableRemedyPlan {
+            id: PlanId(position as u32),
+            steps: candidate.steps,
+            required: candidate.required,
+        })
+        .collect()
 }
 
-/// Every unique grouped authority assignment covering `gaps`, in registration order (so the first
-/// is all-first-choices). `None` when some gap has no competent authority — a prior/cap gap has
-/// none by construction, which is what makes the two plan kinds mutually exclusive. A gapless block
-/// yields exactly one empty assignment, so the narrowing remedies still cross with something.
+struct PlanCandidate {
+    steps: Vec<RemedyStep>,
+    required: Vec<RequiredRuling>,
+}
+
+fn least_mandate_first(registry: &Registry, gaps: &[Gap], candidates: Vec<PlanCandidate>) -> Vec<PlanCandidate> {
+    let mut ordered: Vec<usize> = Vec::with_capacity(candidates.len());
+    let mut used = vec![false; candidates.len()];
+    for _ in 0..candidates.len() {
+        let next = (0..candidates.len())
+            .filter(|&index| !used[index])
+            .find(|&index| {
+                (0..candidates.len())
+                    .filter(|&other| !used[other] && other != index)
+                    .all(|other| !plan_precedes(registry, gaps, &candidates[other], &candidates[index]))
+            })
+            .expect("a finite strict partial order has a minimal element");
+        used[next] = true;
+        ordered.push(next);
+    }
+    let mut slots: Vec<Option<PlanCandidate>> = candidates.into_iter().map(Some).collect();
+    ordered
+        .into_iter()
+        .map(|index| slots[index].take().expect("each candidate is selected once"))
+        .collect()
+}
+
+fn plan_precedes(registry: &Registry, gaps: &[Gap], a: &PlanCandidate, b: &PlanCandidate) -> bool {
+    let mut strictly_less = false;
+    for gap in gaps {
+        match gap_power_cmp(
+            gap,
+            assigned_mandate(registry, a, gap),
+            assigned_mandate(registry, b, gap),
+        ) {
+            Some(Ordering::Less) => strictly_less = true,
+            Some(Ordering::Equal) => {}
+            Some(Ordering::Greater) | None => return false,
+        }
+    }
+    strictly_less
+}
+
+fn assigned_mandate<'a>(registry: &'a Registry, candidate: &PlanCandidate, gap: &Gap) -> &'a Mandate {
+    let authority = &candidate
+        .required
+        .iter()
+        .find(|ruling| ruling.covers.contains(gap))
+        .expect("every requirement gap is covered by the assignment")
+        .authority;
+    &registry
+        .authority(authority)
+        .expect("assignments name only registered authorities")
+        .mandate
+}
+
+fn gap_power_cmp(gap: &Gap, a: &Mandate, b: &Mandate) -> Option<Ordering> {
+    match gap {
+        Gap::TrustFloor { .. } => {
+            let (a, b) = (a.trust_ceiling, b.trust_ceiling);
+            let a = a.expect("a competent trust-floor authority declares a trust ceiling");
+            let b = b.expect("a competent trust-floor authority declares a trust ceiling");
+            Some(a.cmp(&b))
+        }
+        Gap::Includes { .. } => {
+            let a = a
+                .reader_ceiling
+                .as_ref()
+                .expect("a competent includes authority declares a reader ceiling");
+            let b = b
+                .reader_ceiling
+                .as_ref()
+                .expect("a competent includes authority declares a reader ceiling");
+            inclusion_cmp(a.within(b), b.within(a))
+        }
+        Gap::NoPrior(_) => {
+            let a: BTreeSet<&EffectKind> = a.waivers.iter().collect();
+            let b: BTreeSet<&EffectKind> = b.waivers.iter().collect();
+            inclusion_cmp(a.is_subset(&b), b.is_subset(&a))
+        }
+        Gap::Attention(_) => Some(Ordering::Equal),
+        // A prior/cap gap has no covering authority by construction (`enumerate_assignments`
+        // returns `None`), so no assignment reaching this comparison carries one.
+        Gap::Prior(_) | Gap::Cap { .. } => Some(Ordering::Equal),
+    }
+}
+
+fn inclusion_cmp(a_in_b: bool, b_in_a: bool) -> Option<Ordering> {
+    match (a_in_b, b_in_a) {
+        (true, true) => Some(Ordering::Equal),
+        (true, false) => Some(Ordering::Less),
+        (false, true) => Some(Ordering::Greater),
+        (false, false) => None,
+    }
+}
+
 fn enumerate_assignments(registry: &Registry, gaps: &[Gap], tags: &[TagName]) -> Option<Vec<Vec<RequiredRuling>>> {
     let mut choices: Vec<Vec<&AuthorityName>> = Vec::with_capacity(gaps.len());
     for gap in gaps {
@@ -385,9 +493,15 @@ fn prerequisite_runnable(registry: &Registry, state: &State, tool: &ToolContract
     if !eval.consumed.is_empty() {
         return false;
     }
+    // No denial lookup here, deliberately: `RMD-16` binds exactly one rendered call (tool plus
+    // canonical digest), and this synthetic argument-unbound call stands for *every* way of
+    // running the prerequisite — a denial recorded for the literal null-argument rendering must
+    // not shrink the over-approximating reachability search. The prerequisite's own denials bite
+    // at its own block, when it is actually proposed.
+    let no_denials = BTreeSet::new();
     eval.requirement_gaps
         .iter()
-        .all(|gap| authority_for(registry, gap, &tool.tags).is_some())
+        .all(|gap| authority_for(registry, gap, &tool.tags, &no_denials).is_some())
 }
 
 /// The rulings a block's remedy plan needs gathered: for each authority the block routes to, the gaps
@@ -401,10 +515,16 @@ pub struct RequiredRuling {
     pub covers: Vec<Gap>,
 }
 
-fn authority_for<'r>(registry: &'r Registry, gap: &Gap, tags: &[TagName]) -> Option<&'r AuthorityName> {
+fn authority_for<'r>(
+    registry: &'r Registry,
+    gap: &Gap,
+    tags: &[TagName],
+    denied: &BTreeSet<AuthorityName>,
+) -> Option<&'r AuthorityName> {
     registry
         .authorities()
         .iter()
+        .filter(|authority| !denied.contains(&authority.name))
         .find(|authority| covers_gap(authority, gap, tags))
         .map(|authority| &authority.name)
 }
@@ -454,8 +574,14 @@ fn synthetic_call(tool: &ToolContract) -> ResolvedCall {
     ResolvedCall::new(tool.name.clone(), serde_json::Value::Null, Vec::new())
 }
 
-fn curable(registry: &Registry, state: &State, call: &ResolvedCall, visiting: &mut Vec<State>) -> bool {
-    if directly_clearable(registry, state, call).is_some() {
+fn curable(
+    registry: &Registry,
+    state: &State,
+    call: &ResolvedCall,
+    denied: &BTreeSet<AuthorityName>,
+    visiting: &mut Vec<State>,
+) -> bool {
+    if directly_clearable(registry, state, call, denied).is_some() {
         return true;
     }
     if visiting.contains(state) {
@@ -468,7 +594,7 @@ fn curable(registry: &Registry, state: &State, call: &ResolvedCall, visiting: &m
         }
         transitions(registry, state, tool)
             .into_iter()
-            .any(|next| next != *state && curable(registry, &next, call, visiting))
+            .any(|next| next != *state && curable(registry, &next, call, denied, visiting))
     });
     visiting.pop();
     cured
@@ -479,6 +605,7 @@ fn curative_redispatches(
     start: &State,
     call: &ResolvedCall,
     raw: &RawBlock,
+    denied: &BTreeSet<AuthorityName>,
 ) -> Vec<(ToolName, RedispatchEffect)> {
     let mut curative = Vec::new();
     for tool in registry.tools() {
@@ -488,7 +615,7 @@ fn curative_redispatches(
         let successors = transitions(registry, start, tool);
         let reaches = successors.iter().any(|next| {
             let mut visiting = Vec::new();
-            next != start && curable(registry, next, call, &mut visiting)
+            next != start && curable(registry, next, call, denied, &mut visiting)
         });
         if !reaches {
             continue;
@@ -532,7 +659,7 @@ fn redispatch_effect(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::{Mandate, Sanitizer, SanitizerPoints, Scope, Transition};
+    use crate::authority::{Hint, Mandate, Sanitizer, SanitizerPoints, Scope, Transition};
     use crate::check::CheckOutcome;
     use crate::contract::{
         AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, RecipientSpec, Requires, ToolContract,
@@ -797,6 +924,19 @@ mod tests {
                 .steps
                 .contains(&RemedyStep::Authorize(AuthorityName::new("steward")))
         );
+        assert_eq!(executables[0].id, PlanId::new(0));
+        assert_eq!(executables[1].id, PlanId::new(1));
+        assert_eq!(
+            executables[0].steps,
+            vec![
+                RemedyStep::Authorize(AuthorityName::new("steward")),
+                RemedyStep::Accept(planned.raw.narrowing.clone().expect("the block narrows")),
+            ]
+        );
+        assert!(matches!(
+            executables[1].steps.as_slice(),
+            [RemedyStep::Authorize(_), RemedyStep::Sanitize(_), ..]
+        ));
     }
 
     #[test]
@@ -1157,6 +1297,538 @@ mod tests {
                 },
             ]
         );
+    }
+
+    fn assigned(planned: &PlannedBlock) -> Vec<Vec<&str>> {
+        planned
+            .plans
+            .iter()
+            .filter_map(RemedyPlan::executable)
+            .map(|plan| plan.required.iter().map(|r| r.authority.as_str()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn a_weaker_authority_registered_later_still_leads_the_menu() {
+        let tool = ToolContract {
+            name: ToolName::new("wire"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![],
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(TRUSTED),
+                    audience: vec![],
+                },
+                ..Requires::default()
+            },
+        };
+        let officer = |name: &str, ceiling: Trust| Authority {
+            name: AuthorityName::new(name),
+            mandate: Mandate {
+                trust_ceiling: Some(ceiling),
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into(), "executive".into()]),
+            tools: vec![tool],
+            authorities: vec![officer("executive", Trust::new(2)), officer("officer", TRUSTED)],
+            sanitizers: vec![],
+            casts: vec![],
+        });
+        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let planned = plan_of(&registry, &log, &call("wire", json!({})));
+        assert_eq!(assigned(&planned), vec![vec!["officer"], vec!["executive"]]);
+        assert_eq!(exec(&planned.plans[0]).id, PlanId::new(0));
+        assert_eq!(exec(&planned.plans[1]).id, PlanId::new(1));
+    }
+
+    #[test]
+    fn reader_ceilings_order_by_inclusion_and_public_is_maximal() {
+        let tool = ToolContract {
+            name: ToolName::new("send"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![],
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                        Audience::restricted([ReaderId::new("hr")]),
+                    ))],
+                },
+                ..Requires::default()
+            },
+        };
+        let desk = |name: &str, ceiling: Audience| Authority {
+            name: AuthorityName::new(name),
+            mandate: Mandate {
+                reader_ceiling: Some(ceiling),
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![tool],
+            authorities: vec![
+                desk("global", Audience::Public),
+                desk(
+                    "wide",
+                    Audience::restricted([ReaderId::new("hr"), ReaderId::new("finance")]),
+                ),
+                desk("exact", Audience::restricted([ReaderId::new("hr")])),
+            ],
+            sanitizers: vec![],
+            casts: vec![],
+        });
+        let log = vec![user_value(known(
+            TRUSTED,
+            Audience::restricted([ReaderId::new("intern")]),
+        ))];
+        let planned = plan_of(&registry, &log, &call("send", json!({})));
+        assert_eq!(assigned(&planned), vec![vec!["exact"], vec!["wide"], vec!["global"]]);
+    }
+
+    #[test]
+    fn waiver_sets_order_by_inclusion_ignoring_vector_order_and_duplicates() {
+        let tool = ToolContract {
+            name: ToolName::new("wire"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![],
+            requires: Requires {
+                history: vec![HistoryRequirement::NoPrior(EffectKind::new("spend"))],
+                ..Requires::default()
+            },
+        };
+        let waiver = |name: &str, kinds: Vec<&str>| Authority {
+            name: AuthorityName::new(name),
+            mandate: Mandate {
+                waivers: kinds.into_iter().map(EffectKind::new).collect(),
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![tool],
+            authorities: vec![
+                waiver("broad", vec!["notify", "spend"]),
+                waiver("narrow", vec!["spend", "spend"]),
+            ],
+            sanitizers: vec![],
+            casts: vec![],
+        });
+        let log = vec![
+            user_value(known(TRUSTED, Audience::Public)),
+            committed_effect(EffectKind::new("spend")),
+        ];
+        let planned = plan_of(&registry, &log, &call("wire", json!({})));
+        assert_eq!(assigned(&planned), vec![vec!["narrow"], vec!["broad"]]);
+    }
+
+    #[test]
+    fn crossing_ceilings_are_incomparable_and_keep_enumeration_order() {
+        let tool = ToolContract {
+            name: ToolName::new("send"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![],
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                        Audience::restricted([ReaderId::new("hr")]),
+                    ))],
+                },
+                ..Requires::default()
+            },
+        };
+        let desk = |name: &str, ceiling: Audience| Authority {
+            name: AuthorityName::new(name),
+            mandate: Mandate {
+                reader_ceiling: Some(ceiling),
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![tool],
+            authorities: vec![
+                desk(
+                    "legal",
+                    Audience::restricted([ReaderId::new("hr"), ReaderId::new("legal")]),
+                ),
+                desk(
+                    "audit",
+                    Audience::restricted([ReaderId::new("hr"), ReaderId::new("audit")]),
+                ),
+            ],
+            sanitizers: vec![],
+            casts: vec![],
+        });
+        let log = vec![user_value(known(
+            TRUSTED,
+            Audience::restricted([ReaderId::new("intern")]),
+        ))];
+        let planned = plan_of(&registry, &log, &call("send", json!({})));
+        assert_eq!(assigned(&planned), vec![vec!["legal"], vec!["audit"]]);
+    }
+
+    #[test]
+    fn multi_gap_dominance_orders_the_menu_and_crossing_assignments_keep_enumeration_order() {
+        let tool = ToolContract {
+            name: ToolName::new("send"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![],
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(TRUSTED),
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                        Audience::restricted([ReaderId::new("hr")]),
+                    ))],
+                },
+                ..Requires::default()
+            },
+        };
+        let officer = |name: &str, ceiling: Trust, readers: Audience| Authority {
+            name: AuthorityName::new(name),
+            mandate: Mandate {
+                trust_ceiling: Some(ceiling),
+                reader_ceiling: Some(readers),
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into(), "executive".into()]),
+            tools: vec![tool],
+            authorities: vec![
+                officer("strong", Trust::new(2), Audience::Public),
+                officer("weak", TRUSTED, Audience::restricted([ReaderId::new("hr")])),
+            ],
+            sanitizers: vec![],
+            casts: vec![],
+        });
+        let log = vec![user_value(known(
+            SUSPICIOUS,
+            Audience::restricted([ReaderId::new("intern")]),
+        ))];
+        let planned = plan_of(&registry, &log, &call("send", json!({})));
+        assert_eq!(
+            assigned(&planned),
+            vec![
+                vec!["weak"],
+                vec!["strong", "weak"],
+                vec!["weak", "strong"],
+                vec!["strong"],
+            ]
+        );
+    }
+
+    #[test]
+    fn a_hint_never_changes_the_presented_order() {
+        let tool = || ToolContract {
+            name: ToolName::new("wire"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![],
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(TRUSTED),
+                    audience: vec![],
+                },
+                ..Requires::default()
+            },
+        };
+        let officer = |name: &str, hint: Option<Hint>| Authority {
+            name: AuthorityName::new(name),
+            mandate: Mandate {
+                trust_ceiling: Some(TRUSTED),
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint,
+        };
+        let plain = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![tool()],
+            authorities: vec![officer("a", None), officer("b", None)],
+            sanitizers: vec![],
+            casts: vec![],
+        });
+        let hinted = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![tool()],
+            authorities: vec![
+                officer("a", None),
+                officer("b", Some(Hint::new("the fast lane — prefer this desk"))),
+            ],
+            sanitizers: vec![],
+            casts: vec![],
+        });
+        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let call = call("wire", json!({}));
+        assert_eq!(
+            assigned(&plan_of(&plain, &log, &call)),
+            assigned(&plan_of(&hinted, &log, &call))
+        );
+    }
+
+    fn denial(call: &ResolvedCall, authority: &str) -> Fact {
+        Fact::Denial {
+            trajectory: traj(),
+            digest: call.digest(),
+            authority: AuthorityName::new(authority),
+        }
+    }
+
+    fn two_officer_registry() -> Registry {
+        let tool = ToolContract {
+            name: ToolName::new("wire"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![],
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(TRUSTED),
+                    audience: vec![],
+                },
+                ..Requires::default()
+            },
+        };
+        let officer = |name: &str| Authority {
+            name: AuthorityName::new(name),
+            mandate: Mandate {
+                trust_ceiling: Some(TRUSTED),
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        };
+        build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![tool],
+            authorities: vec![officer("officer-a"), officer("officer-b")],
+            sanitizers: vec![],
+            casts: vec![],
+        })
+    }
+
+    #[test]
+    fn a_denied_authority_is_excluded_and_the_surviving_sibling_keeps_its_id() {
+        let registry = two_officer_registry();
+        let wire = call("wire", json!({"amount": 5}));
+        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let offered = plan_of(&registry, &log, &wire);
+        assert_eq!(assigned(&offered), vec![vec!["officer-a"], vec!["officer-b"]]);
+        let sibling = exec(&offered.plans[1]).clone();
+
+        let log = vec![
+            user_value(known(SUSPICIOUS, Audience::Public)),
+            denial(&wire, "officer-a"),
+        ];
+        let filtered = plan_of(&registry, &log, &wire);
+        assert_eq!(assigned(&filtered), vec![vec!["officer-b"]]);
+        assert_eq!(exec(&filtered.plans[0]), &sibling);
+        assert_eq!(exec(&filtered.plans[0]).id, PlanId::new(1));
+    }
+
+    #[test]
+    fn a_denial_binds_the_exact_rendered_call() {
+        let registry = two_officer_registry();
+        let denied_call = call("wire", json!({"amount": 5}));
+        let log = vec![
+            user_value(known(SUSPICIOUS, Audience::Public)),
+            denial(&denied_call, "officer-a"),
+        ];
+        assert_eq!(
+            assigned(&plan_of(&registry, &log, &call("wire", json!({"amount": 6})))),
+            vec![vec!["officer-a"], vec!["officer-b"]]
+        );
+        assert_eq!(
+            assigned(&plan_of(&registry, &log, &denied_call)),
+            vec![vec!["officer-b"]]
+        );
+    }
+
+    #[test]
+    fn a_stale_offer_naming_a_denied_authority_is_refused_at_execution() {
+        let registry = two_officer_registry();
+        let wire = call("wire", json!({"amount": 5}));
+        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let stale = exec(&plan_of(&registry, &log, &wire).plans[0]).clone();
+
+        let log = vec![
+            user_value(known(SUSPICIOUS, Audience::Public)),
+            denial(&wire, "officer-a"),
+        ];
+        let projection = Projection::build(&log, Revision::new(log.len() as u64));
+        let trajectory = traj();
+        let views = projection.view(&trajectory);
+        let refused = crate::execute::execute_remedy_plan(&registry, &views, &stale, &wire, &[]);
+        assert_eq!(refused, Err(crate::execute::PlanError::UnknownPlan(0)));
+    }
+
+    #[test]
+    fn a_sole_denied_authority_makes_the_block_terminally_planless() {
+        let tool = ToolContract {
+            name: ToolName::new("wire"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![],
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(TRUSTED),
+                    audience: vec![],
+                },
+                ..Requires::default()
+            },
+        };
+        let officer = Authority {
+            name: AuthorityName::new("officer"),
+            mandate: Mandate {
+                trust_ceiling: Some(TRUSTED),
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![tool],
+            authorities: vec![officer],
+            sanitizers: vec![],
+            casts: vec![],
+        });
+        let wire = call("wire", json!({}));
+        let log = vec![
+            user_value(known(SUSPICIOUS, Audience::Public)),
+            denial(&wire, "officer"),
+        ];
+        let planned = plan_of(&registry, &log, &wire);
+        assert!(planned.plans.is_empty());
+        assert!(!planned.is_curable());
+    }
+
+    #[test]
+    fn a_denied_target_authority_removes_the_cure_from_reachability() {
+        let target = ToolContract {
+            name: ToolName::new("send"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![],
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(TRUSTED),
+                    audience: vec![],
+                },
+                history: vec![HistoryRequirement::Prior(EffectKind::new("receipt"))],
+                ..Requires::default()
+            },
+        };
+        let emitter = ToolContract {
+            name: ToolName::new("emitter"),
+            tags: vec![],
+            delta: None,
+            emits: vec![EffectKind::new("receipt")],
+            requires: Requires::default(),
+        };
+        let officer = Authority {
+            name: AuthorityName::new("officer"),
+            mandate: Mandate {
+                trust_ceiling: Some(TRUSTED),
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![target, emitter],
+            authorities: vec![officer],
+            sanitizers: vec![],
+            casts: vec![],
+        });
+        let send = call("send", json!({}));
+        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let reachable = plan_of(&registry, &log, &send);
+        assert!(reachable.plans.iter().any(|plan| matches!(
+            plan,
+            RemedyPlan::Redispatch { tool, .. } if tool == &ToolName::new("emitter")
+        )));
+
+        let log = vec![
+            user_value(known(SUSPICIOUS, Audience::Public)),
+            denial(&send, "officer"),
+        ];
+        let cut = plan_of(&registry, &log, &send);
+        assert!(cut.plans.is_empty());
+        assert!(!cut.is_curable());
+    }
+
+    #[test]
+    fn a_null_rendering_denial_does_not_shrink_the_prerequisite_search() {
+        let target = ToolContract {
+            name: ToolName::new("send"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![],
+            requires: Requires {
+                history: vec![HistoryRequirement::Prior(EffectKind::new("receipt"))],
+                ..Requires::default()
+            },
+        };
+        let emitter = ToolContract {
+            name: ToolName::new("emitter"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![EffectKind::new("receipt")],
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(TRUSTED),
+                    audience: vec![],
+                },
+                ..Requires::default()
+            },
+        };
+        let gate = Authority {
+            name: AuthorityName::new("gate"),
+            mandate: Mandate {
+                trust_ceiling: Some(TRUSTED),
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![target, emitter],
+            authorities: vec![gate],
+            sanitizers: vec![],
+            casts: vec![],
+        });
+        let send = call("send", json!({}));
+        let null_rendering = ResolvedCall::new(ToolName::new("emitter"), serde_json::Value::Null, Vec::new());
+        let log = vec![
+            user_value(known(SUSPICIOUS, Audience::Public)),
+            denial(&null_rendering, "gate"),
+        ];
+        let planned = plan_of(&registry, &log, &send);
+        assert!(planned.plans.iter().any(|plan| matches!(
+            plan,
+            RemedyPlan::Redispatch { tool, .. } if tool == &ToolName::new("emitter")
+        )));
     }
 
     #[test]
@@ -1721,9 +2393,10 @@ mod tests {
         }
 
         pub(super) fn curable(registry: &Registry, start: &State, call: &ResolvedCall) -> bool {
+            let no_denials = std::collections::BTreeSet::new();
             reachable(registry, start)
                 .iter()
-                .any(|state| directly_clearable(registry, state, call).is_some())
+                .any(|state| directly_clearable(registry, state, call, &no_denials).is_some())
         }
     }
 
@@ -1993,7 +2666,7 @@ mod tests {
             let per_gap: Vec<Vec<&Authority>> = raw.requirement_gaps.iter()
                 .map(|gap| authorities.iter().filter(|a| competent(a, gap)).collect())
                 .collect();
-            let expected: Vec<Vec<(AuthorityName, Vec<Gap>)>> = if per_gap.iter().any(Vec::is_empty) {
+            let enumerated: Vec<Vec<(AuthorityName, Vec<Gap>)>> = if per_gap.iter().any(Vec::is_empty) {
                 Vec::new()
             } else {
                 let mut combos: Vec<Vec<(AuthorityName, Vec<Gap>)>> = vec![Vec::new()];
@@ -2019,10 +2692,73 @@ mod tests {
                 }
                 unique
             };
+
+            let mandate_of = |name: &AuthorityName| {
+                &authorities.iter().find(|a| &a.name == name).expect("assignments name generated authorities").mandate
+            };
+            let power_cmp = |gap: &Gap, a: &AuthorityName, b: &AuthorityName| -> Option<std::cmp::Ordering> {
+                use std::cmp::Ordering as O;
+                let inclusion = |a_in_b: bool, b_in_a: bool| match (a_in_b, b_in_a) {
+                    (true, true) => Some(O::Equal),
+                    (true, false) => Some(O::Less),
+                    (false, true) => Some(O::Greater),
+                    (false, false) => None,
+                };
+                let (a, b) = (mandate_of(a), mandate_of(b));
+                match gap {
+                    Gap::TrustFloor { .. } => Some(a.trust_ceiling.unwrap().cmp(&b.trust_ceiling.unwrap())),
+                    Gap::Includes { .. } => {
+                        let (ca, cb) = (a.reader_ceiling.clone().unwrap(), b.reader_ceiling.clone().unwrap());
+                        inclusion(
+                            Dim::Known(cb.clone()).covers(&ca) == Adequacy::Holds,
+                            Dim::Known(ca).covers(&cb) == Adequacy::Holds,
+                        )
+                    }
+                    Gap::NoPrior(_) => {
+                        let sa: std::collections::BTreeSet<_> = a.waivers.iter().collect();
+                        let sb: std::collections::BTreeSet<_> = b.waivers.iter().collect();
+                        inclusion(sa.is_subset(&sb), sb.is_subset(&sa))
+                    }
+                    Gap::Attention(_) | Gap::Prior(_) | Gap::Cap { .. } => Some(O::Equal),
+                }
+            };
+            let precedes = |a: &Vec<(AuthorityName, Vec<Gap>)>, b: &Vec<(AuthorityName, Vec<Gap>)>| -> bool {
+                let assigned = |combo: &Vec<(AuthorityName, Vec<Gap>)>, gap: &Gap| {
+                    combo.iter().find(|(_, covers)| covers.contains(gap)).expect("every gap is covered").0.clone()
+                };
+                let mut strictly_less = false;
+                for gap in &raw.requirement_gaps {
+                    match power_cmp(gap, &assigned(a, gap), &assigned(b, gap)) {
+                        Some(std::cmp::Ordering::Less) => strictly_less = true,
+                        Some(std::cmp::Ordering::Equal) => {}
+                        Some(std::cmp::Ordering::Greater) | None => return false,
+                    }
+                }
+                strictly_less
+            };
+            let mut expected: Vec<Vec<(AuthorityName, Vec<Gap>)>> = Vec::with_capacity(enumerated.len());
+            let mut used = vec![false; enumerated.len()];
+            for _ in 0..enumerated.len() {
+                let next = (0..enumerated.len())
+                    .filter(|&i| !used[i])
+                    .find(|&i| (0..enumerated.len())
+                        .filter(|&j| !used[j] && j != i)
+                        .all(|j| !precedes(&enumerated[j], &enumerated[i])))
+                    .expect("a finite strict partial order has a minimal element");
+                used[next] = true;
+                expected.push(enumerated[next].clone());
+            }
+
             let actual: Vec<Vec<(AuthorityName, Vec<Gap>)>> = planned.plans.iter()
                 .filter_map(RemedyPlan::executable)
                 .map(|p| p.required.iter().map(|r| (r.authority.clone(), r.covers.clone())).collect())
                 .collect();
+            for i in 0..actual.len() {
+                for j in (i + 1)..actual.len() {
+                    prop_assert!(!precedes(&actual[j], &actual[i]),
+                        "presented order inverts a dominance edge: {:?} precedes {:?}", actual[j], actual[i]);
+                }
+            }
             prop_assert_eq!(actual, expected);
         }
     }

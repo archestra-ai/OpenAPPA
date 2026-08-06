@@ -355,7 +355,8 @@ async fn a_denial_consumes_every_offer_naming_the_denying_authority() {
     // `RMD-6`: a denial consumes every offered plan naming the denying authority for this rendered
     // call, so an advertised alternative is always executable. `broad` covers both gaps, so it is
     // named by both offered plans; denying it must retire both, not just the one consulted.
-    // (An abstention is the complement and stays plan-local — the sibling test above covers it.)
+    // (A consult that returns no answer is the complement and consumes nothing — the no-answer
+    // tests below cover it.)
     let (deny_url, consults, deny_server) = spawn_counting_authority("deny");
     let policy = format!(
         r#"
@@ -520,6 +521,486 @@ implementation = {{ builtin = "approve" }}
         } if effects.iter().any(|effect| effect.as_str() == "spend")
     )));
     turn.stop(StopReason::Cancelled).unwrap();
+}
+
+#[tokio::test]
+async fn a_no_answer_consult_leaves_the_offer_executable_and_appends_nothing() {
+    // `RMD-6`: a consult that returns no answer consumes nothing — the offer stands and may be
+    // executed again — and it appends no governance event. The budget pins
+    // one blocked proposal, so the successful retry is provably the surviving handle rather
+    // than a fresh proposal cohort (`RMD-7`: rate control never surfaces as a lost offer).
+    let (url, consults, server) = spawn_scripted_authority(vec!["maybe", "approve"]);
+    let policy = format!(
+        r#"
+version = 1
+[[tool]]
+name = "wire"
+effects = ["spend"]
+[tool.requires]
+attention = ["signoff"]
+
+[[authority]]
+name = "officer"
+mandate = {{ attends = ["signoff"] }}
+implementation = {{ resolver = {{ url = "{url}" }} }}
+"#
+    );
+    let mediated = mediator(&policy, &[("wire", BuiltinTool::Echo("paid".to_string()))]);
+    let tenant = TenantId::new("tenant");
+    let session = mediated.create_session(tenant.clone());
+    let mut turn = begin(&mediated, &tenant, &session, "pay").await;
+    let mut budget = RunBudget::new(Limits {
+        max_blocked_proposals_per_call: 1,
+        ..Limits::default()
+    });
+
+    assert!(matches!(
+        turn.mediate(calls(vec![call("blocked", "wire", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call("first", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-0"}"#)]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    assert_eq!(consults.load(Ordering::SeqCst), 1);
+    let log = facts(&mediated, &tenant, &session);
+    assert!(!log.iter().any(|fact| matches!(fact, Fact::Ruling { .. })));
+    assert!(!log.iter().any(|fact| matches!(fact, Fact::Acceptance { .. })));
+    assert!(!log.iter().any(|fact| matches!(fact, Fact::DispatchOpened { .. })));
+    // The no-answer feedback relists the standing offer under the same handle.
+    let payload = feedback_payload(&log, "first");
+    let handles: Vec<&str> = payload["remedy_plans"]
+        .as_array()
+        .expect("remedy plans")
+        .iter()
+        .map(|plan| plan["plan_id"].as_str().expect("a plan id"))
+        .collect();
+    assert_eq!(handles, ["remedy-0"]);
+
+    // The same handle executes again; this time the consult approves and the call dispatches.
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call("retry", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-0"}"#)]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    assert_eq!(consults.load(Ordering::SeqCst), 2);
+    let log = facts(&mediated, &tenant, &session);
+    assert_eq!(log.iter().filter(|fact| matches!(fact, Fact::Ruling { .. })).count(), 1);
+    assert!(log.iter().any(|fact| matches!(
+        fact,
+        Fact::DispatchClosed {
+            outcome: CloseOutcome::Success { effects },
+            ..
+        } if effects.iter().any(|effect| effect.as_str() == "spend")
+    )));
+    turn.stop(StopReason::Cancelled).unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_no_answer_consult_leaves_sibling_offers_untouched() {
+    // The complement of the denial sweep: `broad` returns no answer on the consulted plan, and
+    // both offers — the consulted one included — stay live; the sibling then authorizes.
+    let (url, consults, server) = spawn_scripted_authority(vec!["maybe", "approve"]);
+    let policy = format!(
+        r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+[boundary]
+trust = "suspicious"
+[[tool]]
+name = "wire"
+effects = ["spend"]
+delta = {{}}
+[tool.requires]
+trust = "trusted"
+attention = ["signoff"]
+
+[[authority]]
+name = "broad"
+mandate = {{ can_raise_trust_to = "trusted", attends = ["signoff"] }}
+implementation = {{ resolver = {{ url = "{url}" }} }}
+
+[[authority]]
+name = "mark-only"
+mandate = {{ attends = ["signoff"] }}
+implementation = {{ builtin = "approve" }}
+"#
+    );
+    let mediated = mediator(&policy, &[("wire", BuiltinTool::Echo("paid".to_string()))]);
+    let tenant = TenantId::new("tenant");
+    let session = mediated.create_session(tenant.clone());
+    let mut turn = begin(&mediated, &tenant, &session, "pay").await;
+    let mut budget = RunBudget::default();
+
+    // The block offers two plans: {broad: floor+mark} and {broad: floor, mark-only: mark}.
+    assert!(matches!(
+        turn.mediate(calls(vec![call("blocked", "wire", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call(
+                "no-answer",
+                EXECUTE_REMEDY_PLAN,
+                r#"{"plan_id":"remedy-0"}"#
+            )]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    assert_eq!(consults.load(Ordering::SeqCst), 1);
+    let payload = feedback_payload(&facts(&mediated, &tenant, &session), "no-answer");
+    let handles: Vec<&str> = payload["remedy_plans"]
+        .as_array()
+        .expect("remedy plans")
+        .iter()
+        .map(|plan| plan["plan_id"].as_str().expect("a plan id"))
+        .collect();
+    assert_eq!(handles, ["remedy-0", "remedy-1"]);
+
+    // The sibling stays executable: `broad` is consulted afresh and now approves.
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call("sibling", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-1"}"#)]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    assert_eq!(consults.load(Ordering::SeqCst), 2);
+    let log = facts(&mediated, &tenant, &session);
+    assert_eq!(log.iter().filter(|fact| matches!(fact, Fact::Ruling { .. })).count(), 2);
+    assert!(log.iter().any(|fact| matches!(
+        fact,
+        Fact::DispatchClosed {
+            outcome: CloseOutcome::Success { effects },
+            ..
+        } if effects.iter().any(|effect| effect.as_str() == "spend")
+    )));
+    turn.stop(StopReason::Cancelled).unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_partial_approval_lands_nothing_when_a_later_consult_returns_no_answer() {
+    // Plan execution is atomic: when a later consult returns no answer, the earlier
+    // authority's approval is discarded with it — nothing lands short of dispatch —
+    // and the retry consults the earlier authority afresh rather than reusing the discarded
+    // approval.
+    let (floor_url, floor_consults, floor_server) = spawn_scripted_authority(vec!["approve"]);
+    let (mark_url, mark_consults, mark_server) = spawn_scripted_authority(vec!["maybe", "approve"]);
+    let policy = format!(
+        r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+[boundary]
+trust = "suspicious"
+[[tool]]
+name = "wire"
+effects = ["spend"]
+delta = {{}}
+[tool.requires]
+trust = "trusted"
+attention = ["signoff"]
+
+[[authority]]
+name = "floor-officer"
+mandate = {{ can_raise_trust_to = "trusted" }}
+implementation = {{ resolver = {{ url = "{floor_url}" }} }}
+
+[[authority]]
+name = "mark-officer"
+mandate = {{ attends = ["signoff"] }}
+implementation = {{ resolver = {{ url = "{mark_url}" }} }}
+"#
+    );
+    let mediated = mediator(&policy, &[("wire", BuiltinTool::Echo("paid".to_string()))]);
+    let tenant = TenantId::new("tenant");
+    let session = mediated.create_session(tenant.clone());
+    let mut turn = begin(&mediated, &tenant, &session, "pay").await;
+    let mut budget = RunBudget::default();
+
+    // One plan: {floor-officer: floor, mark-officer: mark}, consulted in gap order.
+    assert!(matches!(
+        turn.mediate(calls(vec![call("blocked", "wire", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call("partial", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-0"}"#)]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    assert_eq!(floor_consults.load(Ordering::SeqCst), 1);
+    assert_eq!(mark_consults.load(Ordering::SeqCst), 1);
+    let log = facts(&mediated, &tenant, &session);
+    assert!(!log.iter().any(|fact| matches!(fact, Fact::Ruling { .. })));
+    assert!(!log.iter().any(|fact| matches!(fact, Fact::DispatchOpened { .. })));
+
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call("retry", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-0"}"#)]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    assert_eq!(floor_consults.load(Ordering::SeqCst), 2);
+    assert_eq!(mark_consults.load(Ordering::SeqCst), 2);
+    let log = facts(&mediated, &tenant, &session);
+    assert_eq!(log.iter().filter(|fact| matches!(fact, Fact::Ruling { .. })).count(), 2);
+    assert!(log.iter().any(|fact| matches!(
+        fact,
+        Fact::DispatchClosed {
+            outcome: CloseOutcome::Success { effects },
+            ..
+        } if effects.iter().any(|effect| effect.as_str() == "spend")
+    )));
+    turn.stop(StopReason::Cancelled).unwrap();
+    floor_server.abort();
+    mark_server.abort();
+}
+
+#[tokio::test]
+async fn a_denial_lands_as_a_fact_and_excludes_the_authority_in_later_turns() {
+    // `RMD-16`: the denial is a recorded governance event, and the exclusion replays from the
+    // log — a later turn's block of the same rendered call offers only the sibling authority and
+    // never consults the denier again. Changed arguments change the digest and lift it.
+    let (deny_url, consults, deny_server) = spawn_counting_authority("deny");
+    let policy = format!(
+        r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+[boundary]
+trust = "suspicious"
+[[tool]]
+name = "wire"
+effects = ["spend"]
+delta = {{}}
+[tool.requires]
+trust = "trusted"
+
+[[authority]]
+name = "floor-a"
+mandate = {{ can_raise_trust_to = "trusted" }}
+implementation = {{ resolver = {{ url = "{deny_url}" }} }}
+
+[[authority]]
+name = "floor-b"
+mandate = {{ can_raise_trust_to = "trusted" }}
+implementation = {{ builtin = "approve" }}
+"#
+    );
+    let mediated = mediator(&policy, &[("wire", BuiltinTool::Echo("paid".to_string()))]);
+    let tenant = TenantId::new("tenant");
+    let session = mediated.create_session(tenant.clone());
+    let mut budget = RunBudget::default();
+
+    let mut turn = begin(&mediated, &tenant, &session, "pay").await;
+    assert!(matches!(
+        turn.mediate(calls(vec![call("blocked", "wire", r#"{"amount":1}"#)]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call("denied", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-0"}"#)]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    assert_eq!(consults.load(Ordering::SeqCst), 1);
+    let rendered = ResolvedCall::new(ToolName::new("wire"), serde_json::json!({"amount": 1}), Vec::new());
+    let log = facts(&mediated, &tenant, &session);
+    let denials: Vec<&Fact> = log.iter().filter(|fact| matches!(fact, Fact::Denial { .. })).collect();
+    assert_eq!(denials.len(), 1);
+    assert!(matches!(
+        denials[0],
+        Fact::Denial { digest, authority, .. }
+            if *digest == rendered.digest() && authority.as_str() == "floor-a"
+    ));
+    // A same-turn re-proposal of the denied rendered call already excludes the denier: the
+    // exclusion reads from the log at enumeration, not from turn memory.
+    assert!(matches!(
+        turn.mediate(calls(vec![call("re-propose", "wire", r#"{"amount":1}"#)]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    let payload = feedback_payload(&facts(&mediated, &tenant, &session), "re-propose");
+    assert_eq!(payload["remedy_plans"].as_array().expect("remedy plans").len(), 1);
+    assert!(matches!(
+        turn.mediate(final_answer("later"), &mut budget).await.unwrap(),
+        Step::Final(_)
+    ));
+    // Release the turn lease before beginning the next turn on the same trajectory.
+    drop(turn);
+
+    // A fresh turn re-blocks the same rendered call: the exclusion replays from the log, so only
+    // the sibling is offered, it executes, and the denier's resolver is never consulted again.
+    let mut turn = begin(&mediated, &tenant, &session, "pay again").await;
+    assert!(matches!(
+        turn.mediate(calls(vec![call("again", "wire", r#"{"amount":1}"#)]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    let payload = feedback_payload(&facts(&mediated, &tenant, &session), "again");
+    let plans = payload["remedy_plans"].as_array().expect("remedy plans");
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0]["rulings"][0]["authority"], "floor-b");
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call("sibling", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-0"}"#)]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    assert_eq!(consults.load(Ordering::SeqCst), 1);
+    let log = facts(&mediated, &tenant, &session);
+    assert!(log.iter().any(|fact| matches!(
+        fact,
+        Fact::DispatchClosed {
+            outcome: CloseOutcome::Success { effects },
+            ..
+        } if effects.iter().any(|effect| effect.as_str() == "spend")
+    )));
+
+    // Changed arguments change the digest and lift the exclusion: both authorities are offered.
+    assert!(matches!(
+        turn.mediate(calls(vec![call("fresh", "wire", r#"{"amount":2}"#)]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    let payload = feedback_payload(&facts(&mediated, &tenant, &session), "fresh");
+    assert_eq!(payload["remedy_plans"].as_array().expect("remedy plans").len(), 2);
+    assert_eq!(
+        facts(&mediated, &tenant, &session)
+            .iter()
+            .filter(|fact| matches!(fact, Fact::Denial { .. }))
+            .count(),
+        1
+    );
+    turn.stop(StopReason::Cancelled).unwrap();
+    deny_server.abort();
+}
+
+#[tokio::test]
+async fn a_denial_names_only_the_actual_denier_in_a_multi_authority_plan() {
+    // A plan can require several authorities; only the one that answered Deny is recorded and
+    // excluded. The sibling plan routing the mark elsewhere stays offered and executes.
+    let (deny_url, consults, deny_server) = spawn_counting_authority("deny");
+    let policy = format!(
+        r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+[boundary]
+trust = "suspicious"
+[[tool]]
+name = "wire"
+effects = ["spend"]
+delta = {{}}
+[tool.requires]
+trust = "trusted"
+attention = ["signoff"]
+
+[[authority]]
+name = "floor-officer"
+mandate = {{ can_raise_trust_to = "trusted" }}
+implementation = {{ builtin = "approve" }}
+
+[[authority]]
+name = "mark-a"
+mandate = {{ attends = ["signoff"] }}
+implementation = {{ resolver = {{ url = "{deny_url}" }} }}
+
+[[authority]]
+name = "mark-b"
+mandate = {{ attends = ["signoff"] }}
+implementation = {{ builtin = "approve" }}
+"#
+    );
+    let mediated = mediator(&policy, &[("wire", BuiltinTool::Echo("paid".to_string()))]);
+    let tenant = TenantId::new("tenant");
+    let session = mediated.create_session(tenant.clone());
+    let mut budget = RunBudget::default();
+    let mut turn = begin(&mediated, &tenant, &session, "pay").await;
+
+    // Two plans: {floor-officer, mark-a} and {floor-officer, mark-b}.
+    assert!(matches!(
+        turn.mediate(calls(vec![call("blocked", "wire", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call("denied", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-0"}"#)]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    assert_eq!(consults.load(Ordering::SeqCst), 1);
+    let log = facts(&mediated, &tenant, &session);
+    let denials: Vec<&Fact> = log.iter().filter(|fact| matches!(fact, Fact::Denial { .. })).collect();
+    assert_eq!(denials.len(), 1);
+    assert!(matches!(denials[0], Fact::Denial { authority, .. } if authority.as_str() == "mark-a"));
+    // The approving floor-officer's answer landed nothing: the plan stopped short of dispatch.
+    assert!(!log.iter().any(|fact| matches!(fact, Fact::Ruling { .. })));
+
+    // The sibling plan does not name mark-a and executes with both its rulings recorded.
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call("sibling", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-1"}"#)]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    assert_eq!(consults.load(Ordering::SeqCst), 1);
+    let log = facts(&mediated, &tenant, &session);
+    assert_eq!(log.iter().filter(|fact| matches!(fact, Fact::Ruling { .. })).count(), 2);
+    assert!(log.iter().any(|fact| matches!(
+        fact,
+        Fact::DispatchClosed {
+            outcome: CloseOutcome::Success { effects },
+            ..
+        } if effects.iter().any(|effect| effect.as_str() == "spend")
+    )));
+    turn.stop(StopReason::Cancelled).unwrap();
+    deny_server.abort();
 }
 
 #[tokio::test]
@@ -2329,6 +2810,12 @@ async fn read_request_headers(socket: &mut tokio::net::TcpStream) {
 fn spawn_counting_authority(
     ruling: &'static str,
 ) -> (String, std::sync::Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    spawn_scripted_authority(vec![ruling])
+}
+
+fn spawn_scripted_authority(
+    rulings: Vec<&'static str>,
+) -> (String, std::sync::Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
@@ -2338,8 +2825,9 @@ fn spawn_counting_authority(
         let listener = TcpListener::from_std(listener).unwrap();
         loop {
             let (mut socket, _) = listener.accept().await.unwrap();
-            counter.fetch_add(1, Ordering::SeqCst);
+            let consult = counter.fetch_add(1, Ordering::SeqCst);
             read_request_headers(&mut socket).await;
+            let ruling = rulings[consult.min(rulings.len() - 1)];
             let body = format!(r#"{{"ruling":"{ruling}"}}"#);
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

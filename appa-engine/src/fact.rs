@@ -9,7 +9,8 @@ use crate::label::{DimValue, Dimension, Label};
 use crate::names::{AuthorityName, CastName, SanitizerName};
 use crate::plan::PlanId;
 use crate::value::{
-    ChildReturnId, DispatchId, LabeledValue, Provenance, RawResultDigest, ToolCallId, ToolName, TrajectoryId, ValueId,
+    CanonicalDigest, ChildReturnId, DispatchId, LabeledValue, Provenance, RawResultDigest, ToolCallId, ToolName,
+    TrajectoryId, ValueId,
 };
 
 /// How a child bound at fork may return: the immutable policy recorded on the `Fork` boundary.
@@ -134,6 +135,11 @@ pub enum Fact {
         covers: Vec<Gap>,
         reviewed: AuthorityReview,
     },
+    Denial {
+        trajectory: TrajectoryId,
+        digest: CanonicalDigest,
+        authority: AuthorityName,
+    },
     Acceptance {
         trajectory: TrajectoryId,
         dispatch: DispatchId,
@@ -208,6 +214,7 @@ impl Fact {
             | Fact::DispatchSucceeded { trajectory, .. }
             | Fact::DispatchClosed { trajectory, .. }
             | Fact::Ruling { trajectory, .. }
+            | Fact::Denial { trajectory, .. }
             | Fact::Acceptance { trajectory, .. }
             | Fact::ChildReturnAcceptance { trajectory, .. }
             | Fact::CastApplied { trajectory, .. }
@@ -255,5 +262,25 @@ pub struct FactBatch {
 impl FactBatch {
     pub fn new(basis: Revision, facts: Vec<Fact>) -> Self {
         FactBatch { basis, facts }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::value::ResolvedCall;
+
+    #[test]
+    fn a_denial_fact_round_trips_through_serde() {
+        let call = ResolvedCall::new(ToolName::new("wire"), json!({"to": "hr"}), vec![]);
+        let fact = Fact::Denial {
+            trajectory: TrajectoryId::new("t"),
+            digest: call.digest(),
+            authority: AuthorityName::new("officer"),
+        };
+        let wire = serde_json::to_string(&fact).expect("a fact serializes");
+        assert_eq!(serde_json::from_str::<Fact>(&wire).expect("a fact deserializes"), fact);
     }
 }

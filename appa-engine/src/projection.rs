@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::fact::{BoundaryKind, CloseOutcome, EffectKind, Fact, ReturnPolicy, Revision};
 use crate::label::{Dim, DimValue, Label};
-use crate::names::SanitizerName;
+use crate::names::{AuthorityName, SanitizerName};
 use crate::value::{CanonicalDigest, ChildReturnId, DispatchId, LabeledValue, Provenance, TrajectoryId, ValueId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,6 +46,16 @@ pub struct Projection {
     forks: Vec<Fork>,
     child_returns: Vec<ReturnedChild>,
     bound_sanitizers: BTreeMap<DispatchId, SanitizerName>,
+    /// Denied authorities per trajectory scope, keyed by rendered call (the
+    /// denial-exclusion consultation). The engine scopes the exclusion "in the trajectory" and is
+    /// silent on forks; the settled reading implemented here — a child snapshots its parent's
+    /// effective set at its `Fork` boundary, later ancestor denials and siblings' do not bind
+    /// it, and a merge propagates nothing upward — awaits its spec clause.
+    /// The snapshot is a deliberate deviation from the rebuild's `O(facts)` shape: each fork
+    /// copies its parent's accumulated set, so a log with `D` denials and `F` forks can retain
+    /// `D×F` entries. Denials are rare governance events and the planner consults one trajectory
+    /// at a time, so the flat copy stays the boring choice over an ancestry-cutoff walk.
+    denials: BTreeMap<TrajectoryId, BTreeMap<CanonicalDigest, BTreeSet<AuthorityName>>>,
 }
 
 impl Projection {
@@ -61,6 +71,7 @@ impl Projection {
         let mut forks = Vec::new();
         let mut child_returns = Vec::new();
         let mut bound_sanitizers = BTreeMap::new();
+        let mut denials: BTreeMap<TrajectoryId, BTreeMap<CanonicalDigest, BTreeSet<AuthorityName>>> = BTreeMap::new();
 
         for fact in log {
             match fact {
@@ -107,6 +118,18 @@ impl Projection {
                     }
                 }
                 Fact::Ruling { .. } | Fact::Acceptance { .. } | Fact::ChildReturnAcceptance { .. } => {}
+                Fact::Denial {
+                    trajectory,
+                    digest,
+                    authority,
+                } => {
+                    denials
+                        .entry(trajectory.clone())
+                        .or_default()
+                        .entry(*digest)
+                        .or_default()
+                        .insert(authority.clone());
+                }
                 Fact::AssistantMessage { .. } | Fact::BlockFeedback { .. } => {}
                 Fact::OutputCastApplied { .. }
                 | Fact::OutputCastAccepted { .. }
@@ -129,12 +152,17 @@ impl Projection {
                             parent,
                             seed,
                             return_policy,
-                        } => forks.push(Fork {
-                            child: trajectory.clone(),
-                            parent: parent.clone(),
-                            seed: seed.clone(),
-                            return_policy: return_policy.clone(),
-                        }),
+                        } => {
+                            if let Some(inherited) = denials.get(parent).cloned() {
+                                denials.insert(trajectory.clone(), inherited);
+                            }
+                            forks.push(Fork {
+                                child: trajectory.clone(),
+                                parent: parent.clone(),
+                                seed: seed.clone(),
+                                return_policy: return_policy.clone(),
+                            });
+                        }
                         BoundaryKind::Merge { .. } => {}
                     }
                 }
@@ -152,6 +180,7 @@ impl Projection {
             forks,
             child_returns,
             bound_sanitizers,
+            denials,
         }
     }
 
@@ -334,6 +363,13 @@ impl Views<'_> {
             .filter(|t| *t == self.trajectory)
             .count()
     }
+
+    /// The authorities denied for this rendered call in this trajectory's scope:
+    /// recorded here, or inherited from an ancestor at fork time. Plan enumeration is the one
+    /// sanctioned consumer (the denial-exclusion consultation), so this stays crate-only.
+    pub(crate) fn denied_authorities(&self, digest: &CanonicalDigest) -> Option<&BTreeSet<AuthorityName>> {
+        self.projection.denials.get(self.trajectory)?.get(digest)
+    }
 }
 
 #[cfg(test)]
@@ -431,6 +467,71 @@ mod tests {
         let p = build(&log);
         assert!(!p.view(&traj("a")).has_effect(&egress));
         assert!(!p.view(&traj("a")).is_open(&dispatch("a")));
+    }
+
+    #[test]
+    fn a_denial_scopes_to_its_trajectory_and_rendered_call() {
+        use crate::names::AuthorityName;
+
+        let wire = ResolvedCall::new(ToolName::new("wire"), json!({"amount": 5}), vec![]);
+        let other = ResolvedCall::new(ToolName::new("wire"), json!({"amount": 6}), vec![]);
+        let log = vec![Fact::Denial {
+            trajectory: traj("a"),
+            digest: wire.digest(),
+            authority: AuthorityName::new("officer"),
+        }];
+        let p = build(&log);
+        let (a, b) = (traj("a"), traj("b"));
+        let view = p.view(&a);
+        let denied = view.denied_authorities(&wire.digest()).expect("the denial is recorded");
+        assert!(denied.contains(&AuthorityName::new("officer")));
+        assert!(view.denied_authorities(&other.digest()).is_none());
+        let sibling = p.view(&b);
+        assert!(sibling.denied_authorities(&wire.digest()).is_none());
+    }
+
+    #[test]
+    fn a_child_inherits_denials_recorded_before_its_fork_and_not_after() {
+        use crate::names::AuthorityName;
+
+        let wire = ResolvedCall::new(ToolName::new("wire"), json!({}), vec![]);
+        let denial = |t: &str, authority: &str| Fact::Denial {
+            trajectory: traj(t),
+            digest: wire.digest(),
+            authority: AuthorityName::new(authority),
+        };
+        let fork = |child: &str, parent: &str| Fact::Boundary {
+            trajectory: traj(child),
+            kind: BoundaryKind::Fork {
+                parent: traj(parent),
+                seed: Label::top(),
+                return_policy: ReturnPolicy::Raw,
+            },
+        };
+        let log = vec![
+            denial("root", "early"),
+            fork("child", "root"),
+            denial("root", "late"),
+            fork("grandchild", "child"),
+            denial("child", "own"),
+            Fact::Boundary {
+                trajectory: traj("root"),
+                kind: BoundaryKind::Merge {
+                    child_return: crate::value::ChildReturnId::new(traj("child"), 0),
+                },
+            },
+        ];
+        let p = build(&log);
+        let names = |t: &TrajectoryId| -> Vec<String> {
+            p.view(t)
+                .denied_authorities(&wire.digest())
+                .map(|set| set.iter().map(|name| name.as_str().to_string()).collect())
+                .unwrap_or_default()
+        };
+        let (child, grandchild, root) = (traj("child"), traj("grandchild"), traj("root"));
+        assert_eq!(names(&child), ["early", "own"]);
+        assert_eq!(names(&grandchild), ["early"]);
+        assert_eq!(names(&root), ["early", "late"]);
     }
 
     #[test]

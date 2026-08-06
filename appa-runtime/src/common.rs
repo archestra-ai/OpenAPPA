@@ -30,8 +30,8 @@ pub(crate) const SEALED_INDETERMINATE: &str = "[tool call outcome unknown — it
 
 /// A blocked call's cohort: every offered plan for one blocked proposal, each keyed by an
 /// SDK-minted turn-unique handle (the engine's `PlanId` is block-local and never exposed to the
-/// model). Mirrors the runtime: a success consumes the whole cohort, an abstention only the offer
-/// it was consulted for, a denial every offer naming that authority for this rendered call,
+/// model). Mirrors the runtime: a success consumes the whole cohort, a consult that returns no
+/// answer consumes nothing, a denial every offer naming that authority for this rendered call,
 /// and an acceptance-carrying plan is informed — executable only in a round after
 /// `offered_round` (the framework signals rounds through `begin_round`).
 #[derive(Debug)]
@@ -76,10 +76,11 @@ pub(crate) enum Checked {
     Feedback(String),
 }
 
-/// How a remedy resolved: the authorized dispatch and its rendered call to execute now, or
-/// model-visible feedback.
+/// How a remedy resolved: the authorized dispatch and its rendered call to execute now, a consult
+/// that returned no answer (the offer stands, `RMD-6`), or other model-visible feedback.
 pub(crate) enum Remedied {
     Authorized { dispatch: DispatchId, call: ResolvedCall },
+    NoAnswer(String),
     Feedback(String),
 }
 
@@ -333,19 +334,19 @@ impl Core {
                     covers: req.covers.clone(),
                     reviewed: request.review(),
                 }),
-                answer @ (AuthorityAnswer::Deny | AuthorityAnswer::Abstain) => {
+                AuthorityAnswer::Deny => {
                     let surface = self.surface()?;
-                    match answer {
-                        AuthorityAnswer::Deny => {
-                            let denier = req.authority.clone();
-                            let digest = self.pending_blocks[cohort_index].call.digest();
-                            for cohort in &mut self.pending_blocks {
-                                if cohort.call.digest() == digest {
-                                    cohort.offers.retain(|(_, plan)| !plan.names_authority(&denier));
-                                }
-                            }
+                    let denier = req.authority.clone();
+                    let digest = self.pending_blocks[cohort_index].call.digest();
+                    self.append(vec![Fact::Denial {
+                        trajectory: self.session.clone(),
+                        digest,
+                        authority: denier.clone(),
+                    }])?;
+                    for cohort in &mut self.pending_blocks {
+                        if cohort.call.digest() == digest {
+                            cohort.offers.retain(|(_, plan)| !plan.names_authority(&denier));
                         }
-                        _ => self.pending_blocks[cohort_index].offers.retain(|(h, _)| h != plan_id),
                     }
                     let feedback = crate::feedback::denial_feedback(
                         self.engine.registry(),
@@ -354,6 +355,15 @@ impl Core {
                     );
                     self.pending_blocks.retain(|cohort| !cohort.offers.is_empty());
                     return Ok(Remedied::Feedback(feedback));
+                }
+                AuthorityAnswer::Abstain => {
+                    let feedback = crate::feedback::no_answer_feedback(
+                        self.engine.registry(),
+                        plan_id,
+                        &self.pending_blocks[cohort_index].offers,
+                        self.surface()?,
+                    );
+                    return Ok(Remedied::NoAnswer(feedback));
                 }
             }
         }
@@ -578,5 +588,95 @@ pub(crate) fn remedy_tool_schema() -> WireTool {
                 "additionalProperties": false
             })),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use super::*;
+
+    async fn spawn_denying_authority() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let mut received = Vec::new();
+            loop {
+                let n = socket.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                received.extend_from_slice(&buf[..n]);
+                if let Some(pos) = received.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let header = String::from_utf8_lossy(&received[..pos]).to_lowercase();
+                    let len: usize = header
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    if received.len() >= pos + 4 + len {
+                        break;
+                    }
+                }
+            }
+            let body = r#"{"ruling":"deny"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{addr}/rule")
+    }
+
+    #[tokio::test]
+    async fn a_denial_appends_exactly_one_fact_through_the_facade() {
+        let url = spawn_denying_authority().await;
+        let policy = format!(
+            r#"
+version = 1
+trust_chain = ["suspicious", "internal"]
+[boundary]
+trust = "suspicious"
+[[tool]]
+name = "send_email"
+effects = ["egress"]
+requires = {{ trust = "internal" }}
+delta = {{}}
+[[authority]]
+name = "security-officer"
+mandate = {{ can_raise_trust_to = "internal" }}
+implementation = {{ resolver = {{ url = "{url}", timeout_ms = 2000 }} }}
+"#
+        );
+        let config = Config::from_toml_str(&policy).expect("policy parses");
+        let mut core = Core::open(config, SdkOptions::default()).expect("policy is SDK-supported");
+        core.admit_user_turn("send it".to_string()).unwrap();
+        let send = ResolvedCall::new(ToolName::new("send_email"), serde_json::json!({"to": "x"}), Vec::new());
+        let Checked::Feedback(_) = core.check_ordinary(send.clone()).unwrap() else {
+            panic!("the send blocks on its trust floor");
+        };
+        let Remedied::Feedback(_) = core.resolve_remedy(Some("remedy-0")).await.unwrap() else {
+            panic!("the authority denies");
+        };
+        let (log, _) = core.store.snapshot(&core.tenant, &core.session).unwrap();
+        let denials: Vec<&Fact> = log.iter().filter(|fact| matches!(fact, Fact::Denial { .. })).collect();
+        assert_eq!(denials.len(), 1);
+        assert!(matches!(
+            denials[0],
+            Fact::Denial { digest, authority, .. }
+                if *digest == send.digest() && authority.as_str() == "security-officer"
+        ));
+
+        core.end_turn().unwrap();
+        core.admit_user_turn("again".to_string()).unwrap();
+        let Checked::Feedback(feedback) = core.check_ordinary(send).unwrap() else {
+            panic!("the send still blocks");
+        };
+        assert!(!feedback.contains("remedy-"));
     }
 }
