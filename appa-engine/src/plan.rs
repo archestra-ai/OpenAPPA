@@ -21,7 +21,7 @@
 //! authority assignment (per-gap choice among competent authorities) crossed with each way of
 //! settling the narrowing — acceptance, or an applicable output sanitizer with the residual it
 //! cannot shed. Enumeration is made total by the registry's load-time bound ([`crate::registry`]'s
-//! `MAX_PLAN_ALTERNATIVES`), which spans both factors — no runtime truncation. Curability itself is
+//! `PlannerCap`), which spans both factors — no runtime truncation. Curability itself is
 //! assignment-independent (any competent authority suffices) and sanitizer-independent at the
 //! blocked call (acceptance is always available, `RMD-11`), so the reachability search and its
 //! reference oracle stay on the cheap first-choice form; a separate assignment-set property checks

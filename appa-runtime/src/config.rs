@@ -29,7 +29,7 @@ use appa_engine::fact::EffectKind;
 use appa_engine::fact::ReturnPolicy;
 use appa_engine::label::{Audience, Dim, DimValue, Label, ReaderId, Trust};
 use appa_engine::names::{AuthorityName, CastName, MarkName, SanitizerName, TagName};
-use appa_engine::registry::{LoadError, Registry, RegistryConfig, TrustChain};
+use appa_engine::registry::{LoadError, PlannerCap, Registry, RegistryConfig, TrustChain};
 use appa_engine::value::ToolName;
 
 use crate::external::{BuiltinAuthority, BuiltinSanitizer};
@@ -75,6 +75,8 @@ pub enum ConfigError {
     UnknownBuiltin { kind: &'static str, name: String },
     #[error("tool {tool}: `parameters` must be a JSON-Schema object (a TOML table)")]
     ToolParametersNotAnObject { tool: String },
+    #[error("[limits] planner_cap is 0: a tool's worst case is at least one plan, so a zero cap refuses every tool")]
+    ZeroPlannerCap,
     #[error("registry rejected: {0}")]
     Registry(#[from] LoadError),
 }
@@ -187,6 +189,11 @@ impl Config {
             casts.push(cast);
         }
 
+        let planner_cap = match raw.limits.as_ref().and_then(|l| l.planner_cap) {
+            None => PlannerCap::default(),
+            Some(cap) => PlannerCap::new(cap).ok_or(ConfigError::ZeroPlannerCap)?,
+        };
+
         let registry_config = RegistryConfig {
             trust_chain,
             tools,
@@ -195,7 +202,7 @@ impl Config {
             casts,
         };
         // Run the engine's algebraic load lints now, so a returned Config is always loadable.
-        let registry = Registry::build(registry_config.clone())?;
+        let registry = Registry::build_with_cap(registry_config.clone(), planner_cap)?;
 
         let child_return = match raw.child {
             None => ReturnPolicy::Raw,
@@ -301,6 +308,13 @@ struct RawConfig {
     #[serde(default)]
     cast: Vec<RawCast>,
     child: Option<RawChild>,
+    limits: Option<RawLimits>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLimits {
+    planner_cap: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -1221,6 +1235,52 @@ resolver = { url = "https://c/resolve", timeout_ms = 10000, may_cast = { trust =
 
     fn err(s: &str) -> ConfigError {
         Config::from_toml_str(s).expect_err("must reject")
+    }
+
+    fn n_authority_policy(n: usize, limits: &str) -> String {
+        let mut s = format!(
+            "version = 1\n{limits}[[tool]]\nname = \"send\"\nrequires = {{ audience = {{ includes = [\"public\"] }} }}\ndelta = {{}}\n"
+        );
+        for i in 0..n {
+            s.push_str(&format!(
+                "[[authority]]\nname = \"a{i}\"\n[authority.mandate]\ncan_add_readers = {{ may_add = [\"public\"] }}\n[authority.implementation]\nbuiltin = \"approve\"\n"
+            ));
+        }
+        s
+    }
+
+    #[test]
+    fn an_omitted_planner_cap_defaults_to_sixty_four() {
+        assert!(Config::from_toml_str(&n_authority_policy(64, "")).is_ok());
+        assert!(matches!(
+            err(&n_authority_policy(65, "")),
+            ConfigError::Registry(LoadError::TooManyPlanAlternatives { count: 65, max: 64, .. })
+        ));
+    }
+
+    #[test]
+    fn a_configured_planner_cap_reaches_the_registry_build() {
+        assert!(matches!(
+            err(&n_authority_policy(3, "[limits]\nplanner_cap = 2\n")),
+            ConfigError::Registry(LoadError::TooManyPlanAlternatives { count: 3, max: 2, .. })
+        ));
+        assert!(Config::from_toml_str(&n_authority_policy(65, "[limits]\nplanner_cap = 65\n")).is_ok());
+    }
+
+    #[test]
+    fn a_zero_planner_cap_is_rejected() {
+        assert!(matches!(
+            err(&n_authority_policy(1, "[limits]\nplanner_cap = 0\n")),
+            ConfigError::ZeroPlannerCap
+        ));
+    }
+
+    #[test]
+    fn an_unknown_limits_key_is_rejected() {
+        assert!(matches!(
+            err("version = 1\n[limits]\nplanner_cup = 64\n"),
+            ConfigError::Parse(_)
+        ));
     }
 
     #[test]

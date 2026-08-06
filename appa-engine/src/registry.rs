@@ -106,18 +106,34 @@ pub enum LoadError {
     )]
     UnannotatedWithLabelRequirement(String),
     #[error(
-        "tool {tool}: {count} worst-case alternative remedy assignments exceed the {max} the planner enumerates — reduce the requirement entries or the competent authorities"
+        "tool {tool}: {count} worst-case alternative remedy assignments exceed the planner cap of {max} — reduce the requirement entries or the competent authorities, or raise `[limits] planner_cap`"
     )]
     TooManyPlanAlternatives { tool: String, count: u128, max: u128 },
     #[error("{context}: hint is {len} characters, over the {max} a plan offer carries")]
     HintTooLong { context: String, len: usize, max: usize },
 }
 
-/// The most unique grouped authority assignments one block may enumerate — the bound that keeps
-/// alternative-plan enumeration total (no runtime truncation, "every sound alternative" literal).
-/// A fixed engine constant, deliberately not a config knob: a policy that trips it has a shape
-/// problem (multiplying interchangeable authorities per gap), not a tuning problem.
-pub(crate) const MAX_PLAN_ALTERNATIVES: u128 = 16;
+/// The planner cap: the most unique grouped authority assignments one block may
+/// enumerate — the bound that keeps alternative-plan enumeration total (`RMD-5`: no runtime
+/// truncation, "every sound alternative" literal). Deployment configuration sets it via
+/// `[limits] planner_cap`; omitted, the cap is 64. Zero is unrepresentable: a tool's worst
+/// case is at least one, so a zero cap would refuse every registry with a tool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlannerCap(u128);
+
+impl PlannerCap {
+    /// `None` for zero — refuse it at the configuration boundary rather than carry a cap that
+    /// cannot admit any tool.
+    pub fn new(cap: u64) -> Option<PlannerCap> {
+        (cap > 0).then_some(PlannerCap(cap as u128))
+    }
+}
+
+impl Default for PlannerCap {
+    fn default() -> Self {
+        PlannerCap(64)
+    }
+}
 
 /// The longest hint a registration may carry. Every offer of every block repeats the
 /// hints of the entities it names, so an unbounded one is a way to flood the agent's context from
@@ -215,6 +231,10 @@ pub struct Registry {
 
 impl Registry {
     pub fn build(config: RegistryConfig) -> Result<Registry, LoadError> {
+        Registry::build_with_cap(config, PlannerCap::default())
+    }
+
+    pub fn build_with_cap(config: RegistryConfig, planner_cap: PlannerCap) -> Result<Registry, LoadError> {
         config.trust_chain.validate()?;
 
         // Sanitizers index first: the child return-sanitizer binding validates against them.
@@ -268,11 +288,11 @@ impl Registry {
         let sanitizer_list: Vec<Sanitizer> = sanitizers.values().cloned().collect();
         for tool in tools.values() {
             let count = worst_case_plan_alternatives(tool, &config.authorities, &sanitizer_list);
-            if count > MAX_PLAN_ALTERNATIVES {
+            if count > planner_cap.0 {
                 return Err(LoadError::TooManyPlanAlternatives {
                     tool: tool.name.as_str().to_string(),
                     count,
-                    max: MAX_PLAN_ALTERNATIVES,
+                    max: planner_cap.0,
                 });
             }
         }
@@ -679,15 +699,11 @@ mod tests {
         assert!(Registry::build(cfg).is_ok());
     }
 
-    #[test]
-    fn the_alternative_plan_bound_refuses_an_over_wide_registry() {
-        let two_marks = |name: &str| {
-            let mut t = tool(name);
-            t.requires = Requires {
-                attention: vec![MarkName::new("m1"), MarkName::new("m2")],
-                ..Requires::default()
-            };
-            t
+    fn n_squared_config(n: usize) -> RegistryConfig {
+        let mut two_marks = tool("wire");
+        two_marks.requires = Requires {
+            attention: vec![MarkName::new("m1"), MarkName::new("m2")],
+            ..Requires::default()
         };
         let attester = |name: String| Authority {
             name: AuthorityName::new(name),
@@ -699,16 +715,35 @@ mod tests {
             hint: None,
         };
         let mut cfg = base();
-        cfg.tools = vec![two_marks("wire")];
-        cfg.authorities = (0..4).map(|i| attester(format!("a{i}"))).collect();
-        assert!(Registry::build(cfg).is_ok());
+        cfg.tools = vec![two_marks];
+        cfg.authorities = (0..n).map(|i| attester(format!("a{i}"))).collect();
+        cfg
+    }
 
-        let mut cfg = base();
-        cfg.tools = vec![two_marks("wire")];
-        cfg.authorities = (0..5).map(|i| attester(format!("a{i}"))).collect();
+    #[test]
+    fn the_default_planner_cap_refuses_an_over_wide_registry_at_sixty_four() {
+        assert!(Registry::build(n_squared_config(8)).is_ok());
         assert!(matches!(
-            Registry::build(cfg),
-            Err(LoadError::TooManyPlanAlternatives { count: 25, max: 16, .. })
+            Registry::build(n_squared_config(9)),
+            Err(LoadError::TooManyPlanAlternatives { count: 81, max: 64, .. })
         ));
+    }
+
+    #[test]
+    fn a_configured_planner_cap_replaces_the_default_bound() {
+        let cap = PlannerCap::new(9).expect("nonzero");
+        assert!(matches!(
+            Registry::build_with_cap(n_squared_config(4), cap),
+            Err(LoadError::TooManyPlanAlternatives { count: 16, max: 9, .. })
+        ));
+        assert!(Registry::build_with_cap(n_squared_config(3), cap).is_ok());
+
+        let raised = PlannerCap::new(100).expect("nonzero");
+        assert!(Registry::build_with_cap(n_squared_config(9), raised).is_ok());
+    }
+
+    #[test]
+    fn a_zero_planner_cap_is_unrepresentable() {
+        assert_eq!(PlannerCap::new(0), None);
     }
 }
