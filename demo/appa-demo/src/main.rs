@@ -27,6 +27,12 @@ struct Args {
 
     #[arg(long, default_value_t = 1800)]
     session_ttl_secs: u64,
+
+    #[arg(long, env = "APPA_DEMO_OPENROUTER_API_KEY", hide_env_values = true)]
+    openrouter_key: Option<String>,
+
+    #[arg(long, default_value_t = 30)]
+    max_turns: u32,
 }
 
 #[tokio::main]
@@ -52,9 +58,14 @@ async fn main() -> anyhow::Result<()> {
     ));
     sessions.spawn_expiry();
 
+    if args.openrouter_key.is_none() {
+        eprintln!("appa-demo: no OpenRouter key (APPA_DEMO_OPENROUTER_API_KEY); turns will be refused");
+    }
     let app = router(AppState {
         sessions,
         origins: Arc::new(origins),
+        openrouter_key: args.openrouter_key.map(Arc::new),
+        max_turns: args.max_turns,
     });
 
     let listener = tokio::net::TcpListener::bind(args.listen)

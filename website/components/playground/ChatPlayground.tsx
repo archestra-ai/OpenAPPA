@@ -104,8 +104,6 @@ type ThreadItem = { lab?: LabelState } & (
 
 type Mode = "probing" | "live" | "down";
 
-const KEY_STORAGE = "appa-playground-openrouter-key";
-
 /**
  * Starters for an empty chat, each walking one of the demo's best paths:
  * recordings → issues → create_issue crosses both sanitizer territory and the
@@ -345,8 +343,6 @@ export function ChatPlayground() {
   const [policyText, setPolicyText] = useState("");
   const [policyStatus, setPolicyStatus] = useState<{ ok: boolean; text: string } | null>(null);
 
-  const [apiKey, setApiKey] = useState("");
-
   const sessionRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const runRef = useRef(0);
@@ -354,7 +350,6 @@ export function ChatPlayground() {
 
   useEffect(() => {
     registerPixelMarks();
-    setApiKey(window.localStorage.getItem(KEY_STORAGE) ?? "");
     let cancelled = false;
     // One round trip: an answer means the service is up and brings what the
     // playground starts from — the shipped policy and the world's systems.
@@ -762,7 +757,6 @@ export function ChatPlayground() {
         await streamTurn(
           sessionRef.current,
           text,
-          apiKey,
           (event) => {
             if (runRef.current === run) applyEvent(event);
           },
@@ -776,7 +770,7 @@ export function ChatPlayground() {
         if (runRef.current === run) setBusy(false);
       }
     },
-    [apiKey, applyEvent, policyText, systems, turns],
+    [applyEvent, policyText, systems, turns],
   );
 
   const send = useCallback(
@@ -797,7 +791,6 @@ export function ChatPlayground() {
   const onSubmit = (message: PromptInputMessage) => send(message.text);
 
   const live = mode === "live";
-  const needsKey = live && !apiKey.trim();
 
   // The line range the engine is acting on, located in the visitor's own
   // policy text — absent when the focused name has no block there.
@@ -1343,19 +1336,6 @@ export function ChatPlayground() {
                 : "Changes apply to the next chat — a session keeps the tools and policy it started with."}
             </p>
             <div className="flex items-center gap-2 rounded-md border border-[var(--border)] px-2.5 py-1.5">
-              <span className="text-[11px] whitespace-nowrap text-[var(--icon)]">OpenRouter key</span>
-              <input
-                className="min-w-0 flex-1 bg-transparent text-right font-mono text-xs text-[var(--text)] outline-none"
-                onChange={(event) => {
-                  setApiKey(event.currentTarget.value);
-                  window.localStorage.setItem(KEY_STORAGE, event.currentTarget.value);
-                }}
-                placeholder="sk-or-…"
-                type="password"
-                value={apiKey}
-              />
-            </div>
-            <div className="flex items-center gap-2 rounded-md border border-[var(--border)] px-2.5 py-1.5">
               <span className="text-[11px] whitespace-nowrap text-[var(--icon)]">Model</span>
               <span className="min-w-0 flex-1 text-right font-mono text-xs text-[var(--text-weak)]">
                 {PLAYGROUND_MODEL.label}
@@ -1407,7 +1387,7 @@ export function ChatPlayground() {
                         <button
                           className="group flex cursor-pointer flex-col gap-2.5 rounded-xl border border-[var(--border-weak)] bg-[var(--bg-weak)] p-5 text-left transition-colors hover:border-[var(--accent-border)] hover:bg-[var(--accent-bg)]"
                           key={starter.tag}
-                          onClick={() => (needsKey ? setInput(starter.text) : send(starter.text))}
+                          onClick={() => send(starter.text)}
                           type="button"
                         >
                           <span className="flex items-center justify-between font-mono text-[10.5px] tracking-widest text-[var(--icon)] uppercase group-hover:text-[var(--accent)]">
@@ -1475,15 +1455,13 @@ export function ChatPlayground() {
                     ? "Connecting…"
                     : mode === "down"
                       ? "The demo service is offline."
-                      : needsKey
-                        ? "Add your OpenRouter key on the right to start chatting…"
-                        : "Message the assistant…"
+                      : "Message the assistant…"
                 }
                 value={input}
               />
               <PromptInputSubmit
                 className="absolute right-1 bottom-1"
-                disabled={!busy && (!live || !input.trim() || needsKey)}
+                disabled={!busy && (!live || !input.trim())}
                 onStop={stop}
                 status={busy ? "streaming" : "ready"}
               />

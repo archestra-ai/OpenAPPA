@@ -43,6 +43,8 @@ fn demo_limits() -> Limits {
 pub struct AppState {
     pub sessions: Arc<Sessions>,
     pub origins: Arc<Vec<String>>,
+    pub openrouter_key: Option<Arc<String>>,
+    pub max_turns: u32,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -70,8 +72,10 @@ enum ApiError {
     TurnInFlight,
     #[error(transparent)]
     UnknownApproval(#[from] crate::approvals::UnknownApproval),
-    #[error("missing OpenRouter key: send `Authorization: Bearer <key>`")]
-    MissingKey,
+    #[error("the service has no OpenRouter key configured")]
+    NoKey,
+    #[error("this session has used its {0} turns; start a new chat")]
+    TurnLimit(u32),
     #[error("unknown system {:?}; valid systems: {}", .0, System::ALL.map(System::id).join(", "))]
     UnknownSystem(String),
     #[error(transparent)]
@@ -87,7 +91,8 @@ impl IntoResponse for ApiError {
             ApiError::UnknownSession(_) => StatusCode::NOT_FOUND,
             ApiError::UnknownApproval(_) => StatusCode::NOT_FOUND,
             ApiError::TurnInFlight => StatusCode::CONFLICT,
-            ApiError::MissingKey => StatusCode::UNAUTHORIZED,
+            ApiError::NoKey => StatusCode::SERVICE_UNAVAILABLE,
+            ApiError::TurnLimit(_) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::UnknownSystem(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::Create(CreateError::AtCapacity) => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::Create(CreateError::World(_)) | ApiError::Create(CreateError::Mediator(_)) => {
@@ -272,13 +277,12 @@ struct MessageRequest {
 async fn session_message(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
     Json(request): Json<MessageRequest>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, axum::Error>>>, ApiError> {
     if request.text.len() > MAX_MESSAGE_BYTES {
         return Err(ApiError::MessageTooLarge);
     }
-    let key = bearer_key(&headers).ok_or(ApiError::MissingKey)?;
+    let key = (*state.openrouter_key.as_deref().ok_or(ApiError::NoKey)?).clone();
     let session = state
         .sessions
         .get(&id)
@@ -288,6 +292,11 @@ async fn session_message(
     let turn_guard = Arc::clone(&session.turn_gate)
         .try_lock_owned()
         .map_err(|_| ApiError::TurnInFlight)?;
+
+    if session.turns_spent() >= state.max_turns {
+        return Err(ApiError::TurnLimit(state.max_turns));
+    }
+    session.spend_turn();
 
     let (baseline, _) = session
         .mediator
@@ -407,12 +416,6 @@ impl Pump<'_> {
     }
 }
 
-fn bearer_key(headers: &HeaderMap) -> Option<String> {
-    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    let key = value.strip_prefix("Bearer ").unwrap_or(value).trim();
-    if key.is_empty() { None } else { Some(key.to_string()) }
-}
-
 // ---- CORS ------------------------------------------------------------------
 
 async fn cors(State(state): State<AppState>, request: Request, next: Next) -> Response {
@@ -436,7 +439,7 @@ async fn cors(State(state): State<AppState>, request: Request, next: Next) -> Re
             );
             response.headers_mut().insert(
                 header::ACCESS_CONTROL_ALLOW_HEADERS,
-                HeaderValue::from_static("authorization,content-type"),
+                HeaderValue::from_static("content-type"),
             );
             response
                 .headers_mut()

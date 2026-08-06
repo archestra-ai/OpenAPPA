@@ -1,0 +1,79 @@
+name: Build appa-demo image
+
+# Builds the chat-playground service image and pushes it to Artifact Registry.
+# This is also the crate's only compile gate: `demo/appa-demo` sits outside
+# the root workspace, so ci.yml's `--workspace` jobs never build it.
+#
+# Required repository secrets: APPA_GCP_SERVICE_ACCOUNT,
+# APPA_GCP_WORKLOAD_IDENTITY_PROVIDER.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "demo/appa-demo/**"
+      - "appa-engine/**"
+      - "appa-runtime/**"
+      - "appa-agent/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Dockerfile"
+      - ".dockerignore"
+      - ".github/workflows/build-appa-demo-image.yml"
+  pull_request:
+    paths:
+      - "demo/appa-demo/**"
+      - "appa-engine/**"
+      - "appa-runtime/**"
+      - "appa-agent/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Dockerfile"
+      - ".dockerignore"
+      - ".github/workflows/build-appa-demo-image.yml"
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  IMAGE: europe-west1-docker.pkg.dev/friendly-path-465518-r6/archestra-public/appa-demo
+
+jobs:
+  build:
+    name: Build (and push from main)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: appa-demo-image-${{ github.ref }}
+      cancel-in-progress: true
+    permissions:
+      # Read the repository to build the image from it.
+      contents: read
+      id-token: write # Required for Workload Identity Federation when pushing images.
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Build image
+        run: docker build --tag "$IMAGE:${GITHUB_SHA::12}" --tag "$IMAGE:latest" .
+
+      - name: Authenticate to Google Cloud
+        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          service_account: ${{ secrets.APPA_GCP_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+
+      - name: Set up Google Cloud
+        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Push image
+        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        run: |
+          gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
+          docker push "$IMAGE:${GITHUB_SHA::12}"
+          docker push "$IMAGE:latest"

@@ -43,11 +43,12 @@ pub struct DemoSession {
     /// here, the SSE pump drains its events, the approval endpoint resolves.
     pub approvals: Arc<Approvals>,
     /// The session's hosted-derivation desk: a rebound `hosted` sanitizer
-    /// resolves here, and each turn lends it the visitor's key.
+    /// resolves here, and each turn lends it the service's key.
     pub derivations: Arc<Derivations>,
     /// Serializes turns: `try_lock_owned` fails while a turn is streaming, so
     /// a second message answers 409 instead of queuing behind the lease.
     pub turn_gate: Arc<tokio::sync::Mutex<()>>,
+    turns: Mutex<u32>,
     world_dir: PathBuf,
     last_used: Mutex<Instant>,
 }
@@ -55,6 +56,14 @@ pub struct DemoSession {
 impl DemoSession {
     pub fn touch(&self) {
         *self.last_used.expect_lock() = Instant::now();
+    }
+
+    pub fn turns_spent(&self) -> u32 {
+        *self.turns.expect_lock()
+    }
+
+    pub fn spend_turn(&self) {
+        *self.turns.expect_lock() += 1;
     }
 
     fn idle_for(&self) -> Duration {
@@ -93,7 +102,7 @@ pub enum CreateError {
     Mediator(#[from] InitError),
 }
 
-/// The models the playground may spend a visitor's key on — the four the
+/// The models the playground may spend the service's key on — the four the
 /// benchmark table names.
 pub const ALLOWED_MODELS: [&str; 4] = [
     "openai/gpt-4o",
@@ -223,6 +232,7 @@ impl Sessions {
             approvals,
             derivations,
             turn_gate: Arc::new(tokio::sync::Mutex::new(())),
+            turns: Mutex::new(0),
             world_dir,
             last_used: Mutex::new(Instant::now()),
         });

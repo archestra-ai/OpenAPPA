@@ -1,0 +1,8 @@
+# Keep the build context to the crates the Dockerfile copies.
+.git
+target
+**/target
+website
+paper
+docs
+demo/*/world/**/.DS_Store

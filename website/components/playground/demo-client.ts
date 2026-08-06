@@ -1,6 +1,7 @@
 // Client for the appa-demo service: session lifecycle, policy validation, and
-// the per-turn SSE stream. `EventSource` is GET-only and cannot set headers,
-// so a turn is a POST whose body is read as a stream and split on SSE frames.
+// the per-turn SSE stream. `EventSource` is GET-only, so a turn is a POST
+// whose body is read as a stream and split on SSE frames. The service holds
+// the OpenRouter key; the browser never handles one.
 
 export const DEMO_URL = process.env.NEXT_PUBLIC_APPA_DEMO_URL ?? "";
 
@@ -124,13 +125,12 @@ export function deleteSession(session: string): void {
 export async function streamTurn(
   session: string,
   text: string,
-  apiKey: string,
   onEvent: (event: DemoEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
   const response = await fetch(`${DEMO_URL}/session/${session}/message`, {
     method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+    headers: { "content-type": "application/json" },
     body: JSON.stringify({ text }),
     signal,
   });
