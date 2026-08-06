@@ -125,8 +125,13 @@ class RunSpec:
         payload["review_model_args"] = dict(self.review_model_args)
         return payload
 
+    def experiment_payload(self) -> dict:
+        payload = self.payload()
+        del payload["max_concurrency"]
+        return payload
+
     def digest(self) -> str:
-        encoded = json.dumps(self.payload(), sort_keys=True, separators=(",", ":"))
+        encoded = json.dumps(self.experiment_payload(), sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(encoded.encode()).hexdigest()
 
 
@@ -224,12 +229,24 @@ def make_run_spec(
 def ensure_run_manifest(output_dir: Path, spec: RunSpec) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / RUN_MANIFEST
-    payload = {"format_version": 1, "run_digest": spec.digest(), "config": spec.payload()}
+    payload = {
+        "format_version": 2,
+        "run_digest": spec.digest(),
+        "config": spec.experiment_payload(),
+        "execution": {"max_concurrency_values": [spec.max_concurrency]},
+    }
     if path.exists():
         existing = json.loads(path.read_text(encoding="utf-8"))
-        if existing != payload:
+        if (
+            existing.get("format_version") != payload["format_version"]
+            or existing.get("run_digest") != payload["run_digest"]
+            or existing.get("config") != payload["config"]
+        ):
             raise ValueError(f"{path} does not match the requested run; use a different --run-name")
-        return
+        concurrency_values = existing.get("execution", {}).get("max_concurrency_values")
+        if not isinstance(concurrency_values, list) or not all(isinstance(value, int) for value in concurrency_values):
+            raise ValueError(f"{path} has invalid execution metadata")
+        payload["execution"]["max_concurrency_values"] = sorted({*concurrency_values, spec.max_concurrency})
     temporary = path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     temporary.replace(path)

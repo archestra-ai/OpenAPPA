@@ -58,6 +58,20 @@ def test_run_manifest_only_resumes_an_exact_configuration(tmp_path) -> None:
         bench.ensure_run_manifest(tmp_path, replace(spec, seed=301))
 
 
+def test_run_manifest_allows_and_records_changed_concurrency(tmp_path) -> None:
+    spec = run_spec(max_concurrency=3)
+    resumed_spec = replace(spec, max_concurrency=50)
+
+    assert resumed_spec.digest() == spec.digest()
+
+    bench.ensure_run_manifest(tmp_path, spec)
+    bench.ensure_run_manifest(tmp_path, resumed_spec)
+
+    manifest = json.loads((tmp_path / bench.RUN_MANIFEST).read_text())
+    assert "max_concurrency" not in manifest["config"]
+    assert manifest["execution"]["max_concurrency_values"] == [3, 50]
+
+
 def test_duplicate_tau_trial_seeds_are_rejected(monkeypatch) -> None:
     monkeypatch.setattr(bench.random.Random, "randint", lambda self, start, end: 42)
     with pytest.raises(ValueError, match="duplicate trial seeds"):
