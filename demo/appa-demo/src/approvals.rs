@@ -8,13 +8,7 @@ use tokio::sync::oneshot;
 
 use crate::events::WireEvent;
 
-/// How long a parked ruling waits for the visitor before abstaining. As long
-/// as the runtime allows: kept just under the resolver ceiling (300 s) the
-/// service configures, so the answer is always ours and never a transport
-/// fault. The runtime bounds every resolver round-trip, so a truly
-/// non-expiring approval would need durable rulings — out of this demo's
-/// scope.
-pub const DECISION_WINDOW: Duration = Duration::from_secs(290);
+pub const DECISION_WINDOW: Duration = Duration::from_secs(364 * 24 * 60 * 60);
 
 #[derive(Default)]
 pub struct Approvals {

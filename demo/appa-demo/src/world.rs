@@ -113,14 +113,16 @@ pub fn bind_hosted(
     let mut value: toml::Value = toml::from_str(merged_toml)?;
     let mut rebound = Rebound::default();
 
-    let resolver = |url: String| {
+    let resolver = |url: String, timeout_ms: i64| {
         let mut resolver = toml::value::Table::new();
         resolver.insert("url".to_string(), toml::Value::String(url));
-        resolver.insert("timeout_ms".to_string(), toml::Value::Integer(300_000));
+        resolver.insert("timeout_ms".to_string(), toml::Value::Integer(timeout_ms));
         let mut implementation = toml::value::Table::new();
         implementation.insert("resolver".to_string(), toml::Value::Table(resolver));
         toml::Value::Table(implementation)
     };
+    const UNBOUNDED_MS: i64 = 365 * 24 * 60 * 60 * 1000;
+    const DERIVATION_MS: i64 = 300_000;
     let builtin_is = |entry: &toml::Value, name: &str| {
         entry
             .get("implementation")
@@ -137,7 +139,10 @@ pub fn bind_hosted(
             let Some(table) = authority.as_table_mut() else {
                 continue;
             };
-            table.insert("implementation".to_string(), resolver(authority_url.to_string()));
+            table.insert(
+                "implementation".to_string(),
+                resolver(authority_url.to_string(), UNBOUNDED_MS),
+            );
             rebound.authorities += 1;
         }
     }
@@ -155,7 +160,7 @@ pub fn bind_hosted(
             };
             table.insert(
                 "implementation".to_string(),
-                resolver(format!("{sanitizer_base}/{name}")),
+                resolver(format!("{sanitizer_base}/{name}"), DERIVATION_MS),
             );
             rebound.sanitizers += 1;
         }

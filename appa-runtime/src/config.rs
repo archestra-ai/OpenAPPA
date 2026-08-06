@@ -37,7 +37,7 @@ use crate::external::{BuiltinAuthority, BuiltinSanitizer};
 const SUPPORTED_VERSION: u32 = 1;
 const DEFAULT_TRUST_CHAIN: [&str; 2] = ["suspicious", "trusted"];
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
-const TIMEOUT_MS_RANGE: std::ops::RangeInclusive<u64> = 1..=300_000;
+const TIMEOUT_MS_RANGE: std::ops::RangeInclusive<u64> = 1..=u64::MAX;
 
 /// Why a policy file failed to load. Structural failures (unknown key, missing field, wrong type,
 /// bare operator-less list) surface as [`ConfigError::Parse`]; the rest are semantic conversions.
@@ -69,7 +69,7 @@ pub enum ConfigError {
         name: String,
         reason: String,
     },
-    #[error("resolver timeout_ms {found} out of range (1..=300000) in {context}")]
+    #[error("resolver timeout_ms {found} out of range (must be at least 1) in {context}")]
     TimeoutOutOfRange { found: u64, context: String },
     #[error("unknown {kind} builtin {name:?} (not a compiled-in implementation)")]
     UnknownBuiltin { kind: &'static str, name: String },
@@ -1587,7 +1587,7 @@ builtin = "redact-email"
     }
 
     #[test]
-    fn resolver_timeout_out_of_range_is_rejected() {
+    fn resolver_timeout_of_zero_is_rejected() {
         assert!(matches!(
             err(r#"version = 1
 [[authority]]
@@ -1595,9 +1595,9 @@ name = "a"
 [authority.mandate]
 can_waive = ["x"]
 [authority.implementation]
-resolver = { url = "https://a", timeout_ms = 999999 }
+resolver = { url = "https://a", timeout_ms = 0 }
 "#),
-            ConfigError::TimeoutOutOfRange { found: 999999, .. }
+            ConfigError::TimeoutOutOfRange { found: 0, .. }
         ));
     }
 }

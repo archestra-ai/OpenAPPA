@@ -29,10 +29,19 @@ const MAX_MESSAGE_BYTES: usize = 2 * 1024;
 
 const PUMP_INTERVAL: Duration = Duration::from_millis(150);
 
+const EFFECTIVELY_UNBOUNDED: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+
+/// Per-turn ceilings. Wall-clock is deliberately unbounded so a parked
+/// approval waits for the visitor's click, not a timer: a runaway loop costs
+/// a visitor 16 rounds, a session the turn cap, and an abandoned tab is
+/// reclaimed by the pump cancelling the turn when the stream drops. A zero
+/// fork budget keeps the playground single-trajectory: the fork tool is never
+/// advertised, so the story stays one visible thread.
 fn demo_limits() -> Limits {
     Limits {
         max_inference_rounds: 16,
-        run_deadline: Duration::from_secs(90),
+        per_external_timeout: EFFECTIVELY_UNBOUNDED,
+        run_deadline: EFFECTIVELY_UNBOUNDED,
         max_forks: 0,
         max_fork_depth: 1,
         ..Limits::default()
@@ -338,6 +347,7 @@ async fn session_message(
             tokio::select! {
                 result = &mut turn => break Some(result),
                 _ = ticker.tick() => {
+                    session.touch();
                     if pump.drain().await.is_err() {
                         cancel.cancel();
                         break None;
