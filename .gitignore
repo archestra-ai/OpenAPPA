@@ -14,3 +14,9 @@ appa.pdf
 appa-arxiv.tar.gz
 # Custom target dirs (CARGO_TARGET_DIR from tooling)
 target-*/
+.envrc
+harness-taubench/runs/
+harness-taubench/.tau2-bench/
+harness-taubench/data/.embeddings_cache/
+__pycache__/
+*.py[cod]

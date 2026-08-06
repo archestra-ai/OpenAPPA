@@ -67,14 +67,14 @@ enum DeliveryDisposition {
 struct SessionInner {
     session: Option<CallSession>,
     runtime: tokio::runtime::Runtime,
-    bridge_url: reqwest::Url,
+    bridge_url: Option<reqwest::Url>,
     client: HttpClient,
-    pending: bool,
+    pending: Option<PendingDispatch>,
 }
 
 impl SessionInner {
-    fn open(policy_toml: &str, tools_json: &str, user_prompt: &str, bridge_url: &str) -> Result<Self, String> {
-        let bridge_url = validate_bridge_url(bridge_url)?;
+    fn open(policy_toml: &str, tools_json: &str, user_prompt: &str, bridge_url: Option<&str>) -> Result<Self, String> {
+        let bridge_url = bridge_url.map(validate_bridge_url).transpose()?;
         let tools: Vec<ToolInput> =
             serde_json::from_str(tools_json).map_err(|error| format!("invalid tools JSON: {error}"))?;
         let config = Config::from_toml_str(policy_toml).map_err(|error| error.to_string())?;
@@ -93,11 +93,11 @@ impl SessionInner {
             runtime,
             bridge_url,
             client: HttpClient::loopback(),
-            pending: false,
+            pending: None,
         })
     }
 
-    fn dispatch(&mut self, tool: &str, arguments_json: &str) -> Result<String, String> {
+    fn prepare(&mut self, tool: &str, arguments_json: &str) -> Result<DispatchDecision, String> {
         if arguments_json.len() > MAX_REQUEST_BODY_BYTES {
             return Err("tool arguments exceed the native request limit".to_string());
         }
@@ -107,7 +107,7 @@ impl SessionInner {
             return Err("tool arguments must be a JSON object".to_string());
         }
 
-        let decision = if tool == EXECUTE_REMEDY_PLAN {
+        Ok(if tool == EXECUTE_REMEDY_PLAN {
             let plan_id = arguments.get("plan_id").and_then(serde_json::Value::as_str);
             let session = self
                 .session
@@ -134,40 +134,99 @@ impl SessionInner {
                 CallDecision::Allow { handle } => DispatchDecision::Dispatch { handle, call },
                 CallDecision::Block { feedback } => DispatchDecision::Blocked { feedback },
             }
-        };
+        })
+    }
 
-        match decision {
-            DispatchDecision::Blocked { feedback } => encode_response(DispatchResponse::Blocked { feedback }),
-            DispatchDecision::Dispatch { handle, call } => self.execute_and_report(handle, call),
+    fn check(&mut self, tool: &str, arguments_json: &str) -> Result<String, String> {
+        match self.prepare(tool, arguments_json)? {
+            DispatchDecision::Blocked { feedback } => encode_response(CheckResponse::Blocked { feedback }),
+            DispatchDecision::Dispatch { handle, call } => {
+                let response = CheckResponse::Allowed {
+                    dispatched_tool: call.tool.as_str().to_string(),
+                    dispatched_arguments: call.arguments.clone(),
+                };
+                self.pending = Some(PendingDispatch { handle, call });
+                encode_response(response)
+            }
         }
     }
 
-    fn execute_and_report(&mut self, handle: DispatchHandle, call: RenderedCall) -> Result<String, String> {
-        self.pending = true;
-        let outcome = self.runtime.block_on(invoke_bridge(
-            self.client.clone(),
-            self.bridge_url.clone(),
-            call.clone(),
-        ));
+    fn dispatch(&mut self, tool: &str, arguments_json: &str) -> Result<String, String> {
+        if self.bridge_url.is_none() {
+            return Err("dispatch requires a bridge URL; use check and report for framework-owned tools".to_string());
+        }
+        match self.prepare(tool, arguments_json)? {
+            DispatchDecision::Blocked { feedback } => encode_response(DispatchResponse::Blocked { feedback }),
+            DispatchDecision::Dispatch { handle, call } => {
+                self.pending = Some(PendingDispatch { handle, call });
+                self.execute_and_report()
+            }
+        }
+    }
+
+    fn execute_and_report(&mut self) -> Result<String, String> {
+        let call = self
+            .pending
+            .as_ref()
+            .ok_or_else(|| "no call is pending".to_string())?
+            .call
+            .clone();
+        let bridge_url = self
+            .bridge_url
+            .clone()
+            .ok_or_else(|| "dispatch requires a bridge URL".to_string())?;
+        let outcome = self
+            .runtime
+            .block_on(invoke_bridge(self.client.clone(), bridge_url, call.clone()));
+        self.report_outcome(outcome)
+    }
+
+    fn report(&mut self, content: Option<&str>, error: bool) -> Result<String, String> {
+        let outcome = if error {
+            ToolOutcome::Failure
+        } else {
+            match content {
+                Some(content) if content.len() <= DEFAULT_BODY_CAP_BYTES => ToolOutcome::Success {
+                    body: BodyDisposition::Available(content.to_string()),
+                },
+                Some(_) => ToolOutcome::Success {
+                    body: BodyDisposition::RejectedTooLarge,
+                },
+                None => ToolOutcome::Success {
+                    body: BodyDisposition::Unavailable,
+                },
+            }
+        };
+        self.report_outcome(outcome)
+    }
+
+    fn report_outcome(&mut self, outcome: ToolOutcome) -> Result<String, String> {
+        let pending = self.pending.take().ok_or_else(|| "no call is pending".to_string())?;
         let reported = self
             .session
             .as_mut()
             .expect("a dispatch originates only from this live session")
-            .report_outcome(handle, outcome)
+            .report_outcome(pending.handle, outcome)
             .map_err(|error| error.to_string());
-        if reported.is_ok() {
-            self.pending = false;
-        }
         let (content, disposition) = match reported? {
             AdmittedResult::Admitted { content, .. } => (content, DeliveryDisposition::Admitted),
             AdmittedResult::Sealed { token } => (token, DeliveryDisposition::Sealed),
         };
         encode_response(DispatchResponse::Delivered {
             content,
-            dispatched_tool: call.tool.as_str().to_string(),
-            dispatched_arguments: call.arguments,
+            dispatched_tool: pending.call.tool.as_str().to_string(),
+            dispatched_arguments: pending.call.arguments,
             disposition,
         })
+    }
+
+    fn abandon(&mut self) -> Result<(), String> {
+        let pending = self.pending.take().ok_or_else(|| "no call is pending".to_string())?;
+        self.session
+            .as_mut()
+            .ok_or_else(|| "the session is closed".to_string())?
+            .abandon(pending.handle)
+            .map_err(|error| error.to_string())
     }
 
     fn new_round(&mut self) -> Result<(), String> {
@@ -179,7 +238,7 @@ impl SessionInner {
     }
 
     fn close(&mut self) -> Result<(), String> {
-        if self.pending {
+        if self.pending.is_some() {
             return Err("cannot close while a call is pending".to_string());
         }
         if let Some(session) = self.session.as_mut() {
@@ -195,6 +254,23 @@ enum DispatchDecision {
     Dispatch { handle: DispatchHandle, call: RenderedCall },
 }
 
+struct PendingDispatch {
+    handle: DispatchHandle,
+    call: RenderedCall,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum CheckResponse {
+    Blocked {
+        feedback: String,
+    },
+    Allowed {
+        dispatched_tool: String,
+        dispatched_arguments: serde_json::Value,
+    },
+}
+
 #[pyclass(module = "appa_agent_python")]
 struct Session {
     inner: Mutex<SessionInner>,
@@ -203,10 +279,41 @@ struct Session {
 #[pymethods]
 impl Session {
     #[new]
-    fn new(policy_toml: &str, tools_json: &str, user_prompt: &str, bridge_url: &str) -> PyResult<Self> {
+    #[pyo3(signature = (policy_toml, tools_json, user_prompt, bridge_url=None))]
+    fn new(policy_toml: &str, tools_json: &str, user_prompt: &str, bridge_url: Option<&str>) -> PyResult<Self> {
         let inner = SessionInner::open(policy_toml, tools_json, user_prompt, bridge_url).map_err(AppaError::new_err)?;
         Ok(Session {
             inner: Mutex::new(inner),
+        })
+    }
+
+    fn check(&self, py: Python<'_>, tool: &str, arguments_json: &str) -> PyResult<String> {
+        py.detach(|| {
+            self.inner
+                .lock()
+                .map_err(|_| AppaError::new_err("the session lock is poisoned"))?
+                .check(tool, arguments_json)
+                .map_err(AppaError::new_err)
+        })
+    }
+
+    fn report(&self, py: Python<'_>, content: Option<&str>, error: bool) -> PyResult<String> {
+        py.detach(|| {
+            self.inner
+                .lock()
+                .map_err(|_| AppaError::new_err("the session lock is poisoned"))?
+                .report(content, error)
+                .map_err(AppaError::new_err)
+        })
+    }
+
+    fn abandon(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| {
+            self.inner
+                .lock()
+                .map_err(|_| AppaError::new_err("the session lock is poisoned"))?
+                .abandon()
+                .map_err(AppaError::new_err)
         })
     }
 
@@ -244,14 +351,14 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         if let Ok(inner) = self.inner.get_mut()
-            && !inner.pending
+            && inner.pending.is_none()
         {
             let _ = inner.close();
         }
     }
 }
 
-fn encode_response(response: DispatchResponse) -> Result<String, String> {
+fn encode_response(response: impl Serialize) -> Result<String, String> {
     serde_json::to_string(&response).map_err(|error| format!("could not encode dispatch response: {error}"))
 }
 
