@@ -36,7 +36,7 @@ on:
 permissions: {}
 
 env:
-  IMAGE: europe-west1-docker.pkg.dev/friendly-path-465518-r6/archestra-public/appa-demo
+  IMAGE: europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-demo/appa-demo
 
 jobs:
   build:
@@ -61,18 +61,20 @@ jobs:
         run: docker build --tag "$IMAGE:${GITHUB_SHA::12}" --tag "$IMAGE:latest" .
 
       - name: Authenticate to Google Cloud
-        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        # Pushes only ever come from main — a workflow_dispatch on a branch
+        # builds without publishing.
+        if: github.ref == 'refs/heads/main'
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           service_account: ${{ secrets.APPA_GCP_SERVICE_ACCOUNT }}
           workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
 
       - name: Set up Google Cloud
-        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        if: github.ref == 'refs/heads/main'
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
       - name: Push image
-        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        if: github.ref == 'refs/heads/main'
         run: |
           gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
           docker push "$IMAGE:${GITHUB_SHA::12}"
