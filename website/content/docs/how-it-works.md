@@ -11,7 +11,7 @@ OpenAPPA sits between an agent and its tools to answer one question before every
 
 APPA stands for **Agentic Permissions Policy Algebra**. It provides a formal system to track data sensitivity and trust as an agent executes. Instead of blindly blocking tasks when sensitive data is touched, APPA calculates exact label flow and presents the agent with valid, actionable remedies—such as isolating reads in child branches, invoking sanitizers, or requesting targeted approvals—so the agent stays productive without violating policy.
 
-By evaluating checks *before* tool dispatch, OpenAPPA prevents agents from getting stranded mid-task. Every refusal presents clear options: approve the exact call, sanitize the data, satisfy a prerequisite, or accept a narrower label.
+By evaluating checks *before* tool dispatch, OpenAPPA prevents agents from getting stranded mid-task. Every refusal presents the sound options that exist: approve the exact call, sanitize the data, satisfy a prerequisite, or accept a narrower label.
 
 | Runtime State | Scope | Engine Semantics |
 |---|---|---|
