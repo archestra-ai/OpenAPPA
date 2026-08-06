@@ -1,8 +1,10 @@
 name: Build appa-demo image
 
 # Builds the chat-playground service image and pushes it to Artifact Registry.
-# This is also the crate's only compile gate: `demo/appa-demo` sits outside
-# the root workspace, so ci.yml's `--workspace` jobs never build it.
+# A manual dispatch on main additionally deploys: it rolls the appa-demo
+# Cloud Run service to the image the run just pushed. This is also the
+# crate's only compile gate: `demo/appa-demo` sits outside the root
+# workspace, so ci.yml's `--workspace` jobs never build it.
 #
 # Required repository secrets: APPA_GCP_SERVICE_ACCOUNT,
 # APPA_GCP_WORKLOAD_IDENTITY_PROVIDER.
@@ -79,3 +81,12 @@ jobs:
           gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
           docker push "$IMAGE:${GITHUB_SHA::12}"
           docker push "$IMAGE:latest"
+
+      - name: Deploy to Cloud Run
+        # Deploying stays a deliberate act: a push to main only publishes the
+        # image; a manual dispatch on main rolls the service to it.
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+        run: |
+          gcloud run services update appa-demo \
+            --region europe-west1 \
+            --image "$IMAGE:${GITHUB_SHA::12}"
