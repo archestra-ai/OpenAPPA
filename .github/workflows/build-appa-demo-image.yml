@@ -1,4 +1,4 @@
-name: Build appa-demo image
+name: Build and deploy appa-demo
 
 # Builds the chat-playground service image and pushes it to Artifact Registry.
 # A manual dispatch on main additionally deploys: it rolls the appa-demo
