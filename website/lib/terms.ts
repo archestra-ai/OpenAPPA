@@ -18,7 +18,8 @@ const TERMS = {
     "Who is allowed to see data. In a delta, it restricts who can receive the tool's result; in requires, it checks who the agent can send data to.",
   trust:
     "Whether data comes from a vetted source. In a delta, it marks tool output as trusted or suspicious; in requires, it sets the minimum trust level a tool demands.",
-  trusted: "Data from a vetted source.",
+  trusted:
+    "Data from a vetted source, or vouched to the rank by a mandated transition — a claim about the instruction channel, never about a value's honesty.",
   suspicious:
     "Data from an unvetted source, like external web content. Once ingested, the run stays suspicious.",
   public:
@@ -42,7 +43,7 @@ const TERMS = {
   "effects.has":
     "In a tool requires check: prior(k) — a matching effect must already exist in the log.",
   "effects.has_no":
-    "In a tool requires check: no_prior(k) — no matching effect may exist in the log.",
+    "In a tool requires check: no_prior(k) — no matching effect may exist, appended to the log or reserved by a dispatch still in flight.",
   emits:
     "What a successful tool call appends to the log, declared as effects = [...] in the contract.",
   exactly: "In an audience condition: the allowed reader set becomes precisely this list.",
@@ -81,6 +82,8 @@ const TERMS = {
     "The ceiling on a cast resolver: the states it is allowed to resolve an Unknown value to.",
   "[child]": "Run configuration for child sub-executions.",
   return_sanitizer: "Configured default sanitizer for all child sub-execution returns.",
+  "attest-schema":
+    "The reserved builtin sanitizer of the quarantine exit: raises trust on a child return whose structure is shape-bounded (values the schema declares and bounds — no free text) and was bound at fork, up to the parent's fork-time rank. Claims instruction-cleanliness only.",
 
   /* Refusals & Model Terms */
   requirement_gaps: "Returned on a refusal: the unmet entries of requires.",

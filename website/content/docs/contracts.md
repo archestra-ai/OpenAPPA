@@ -90,7 +90,7 @@ delta    = {}                                          # Status string carries n
 - **`delta` is strictly restrictive**: A tool's delta can only narrow the audience or lower trust. Within an annotated `delta`, an omitted dimension defaults to identity.
 - **Pending-cast deltas (`delta = { trust = "unknown" }`)**: Holds a label dimension pending resolution by a registered `[[cast]]` at admission. Declaring both `requires` and `unknown` delta on the same dimension is a load error.
 - **Dynamic argument placeholders (`$arg`)**: `requires.audience = { includes = ["$recipient"] }` evaluates `$recipient` against actual call arguments at runtime. Placeholders are valid only inside `includes`.
-- **History checks (`requires.effects`)**: `has` verifies `prior(k)`; `has_no` verifies `no_prior(k)` against the append-only log.
+- **History checks (`requires.effects`)**: `has` verifies `prior(k)` against appended effects; `has_no` verifies `no_prior(k)` against appended effects plus the reserved emits of dispatches still in flight.
 - **Attention demands (`requires.attention`)**: Forces fresh authority sign-off on *every* call, never satisfied by execution history.
 - **Dual-gate contracts**: When a contract defines both a restrictive `delta` and a `requires` check (e.g., `search_and_share`), the engine evaluates both gates.
 
@@ -167,6 +167,21 @@ To enforce automated return sanitization across all child sub-executions, polici
 ```toml
 [child]
 return_sanitizer = "pii-redactor"   # Forces all child sub-execution returns through pii-redactor
+```
+
+The reserved builtin `attest-schema` covers the quarantine exit without touching bytes. It raises trust on a structured child return when three conditions hold: every returned field is shape-bounded (values the schema declares and bounds — ranged numbers, booleans, closed enums, bounded formats, arrays under a length bound; no free text), the structure was bound at fork before the child read anything, and the parent's fork-time rank covers the mandate's `to`. It claims instruction-cleanliness only — a sink that acts on the returned value keeps its own gates.
+
+```toml
+[[sanitizer]]
+name = "quarantine-exit"
+on   = ["tool_output"]
+hint = "Vouches a fork-bound structured return; shape only, no content claims."
+
+[sanitizer.mandate]
+trust = { from = "suspicious", to = "trusted" }
+
+[sanitizer.implementation]
+builtin = "attest-schema"
 ```
 
 ## Casts
