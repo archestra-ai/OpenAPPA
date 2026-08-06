@@ -124,7 +124,7 @@ uv run appa-taubench run --dry-run --policy-mode guarded
 uv run appa-taubench run --policy-mode guarded
 ```
 
-`--policy-mode permissive` runs the full scaffold-matched control, while `--policy-mode stock` runs the full Tau baseline. Publication commands require all 97 tasks and at least four trials. A result with missing trials, missing evaluator evidence, duplicate identities, infrastructure errors, or an unparseable reviewer judgment is refused.
+`--policy-mode permissive` runs the full scaffold-matched control, while `--policy-mode stock` runs the full Tau baseline. Publication commands require all 97 tasks and at least four trials. A result with missing trials, missing evaluator evidence, duplicate identities, infrastructure errors, or an unparseable reviewer judgment is refused. Compact evidence from completed publication runs is committed under [`results/`](results/README.md), while complete trajectories and audits remain in the ignored `runs/` directory.
 
 Every output directory name includes a digest of the experiment settings. `run-config.json` records requested models and arguments, the derived trial seeds, task IDs, limits, retry and review settings, policy and implementation hashes, retrieval corpus/index-recipe hash, binding identity, and Tau revision. It records each `max_concurrency` value separately as execution metadata, so concurrency can be tuned when resuming without changing the experiment's identity. Resume is accepted only when the experiment settings match, and Tau checkpoints every completed simulation.
 
