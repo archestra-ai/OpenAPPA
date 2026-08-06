@@ -46,6 +46,10 @@ delta    = {}
 
 Resolution is fresh per call, and pinned within one: the set resolved at a call's check is the set its admission folds. A member added to the directory reaches the next call without a policy reload; removal reaches only future resolutions — a set already resolved stands. `public` is reserved and never a group member; a directory answer containing it is malformed.
 
+### Deployment coverage
+
+The deployment declares what it covers when it opens the engine — which tools have enforced execution, where raw results can be withheld, whether child branches are controlled. The policy loader validates the file against that declaration, and a construct that names an engine behavior the deployment cannot perform is a load error naming the missing coverage: a `tool_output` sanitizer with no covered application point, a pending-cast `delta` on a tool whose raw result the model would see anyway, a `[child]` section without child-context control, a `requires` on a provider-run tool. A weaker executor class is not a construct — it loads, and its weakness is the open vector. Writing a policy therefore starts from the deployment's coverage, not from the full feature list. What stays uncovered is an open vector the deployment names explicitly and auditably — nothing is removed or silently degraded.
+
 ## What to check when reviewing
 
 A tool contract is typically four lines long. Use this checklist during policy review to catch common syntax and structural red flags:

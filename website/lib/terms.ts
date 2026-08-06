@@ -67,11 +67,11 @@ const TERMS = {
     "The built-in human-in-the-loop authority: elicitation hosted by the harness rather than a remote resolver.",
 
   /* Sanitizers and Casts */
-  on: "Where a sanitizer may apply: tool_output at admissions the host can withhold, tool_input as whole-argument substitution at dispatch.",
+  on: "Where a sanitizer may apply: tool_output at an admission the host can withhold — a child return, or a tool result at a confined application point; tool_input as whole-argument substitution at dispatch.",
   tool_input:
     "A sanitizer application point: the sanitizer derives a replacement for the whole argument set of one call, and the harness dispatches exactly the substituted bytes.",
   tool_output:
-    "A sanitizer application point: an admission the host can withhold — the child-return crossing, or any tool result in a confining deployment. The derivation is admitted; the raw value is withheld.",
+    "A sanitizer application point: an admission the host can withhold — the child-return crossing, or a tool result at an application point the deployment confines. The derivation is admitted; the raw value is withheld.",
   from: "In a sanitizer mandate: the required source label state before the transition applies.",
   to: "In a sanitizer mandate: the exact target label state produced after the transition.",
   constant: "In a cast: every Unknown on the dimension resolves to one declared state.",

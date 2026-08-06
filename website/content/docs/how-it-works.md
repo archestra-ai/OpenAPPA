@@ -102,7 +102,7 @@ The trajectory begins at `{public, trusted}` unless pre-existing context or user
 
 :::fig-two-endings:::
 
-The second and third paths differ in what the model gets to read. Sanitizing the result never shows anyone the raw ticket — the derivation is all that exists downstream. The child branch lets the child read the raw ticket and reason over it, and sanitizes only what crosses back. Choose the branch when the work itself needs the restricted content; choose the result sanitizer when the derivation is what you wanted anyway. Each sanitizer's `hint` states what its derivation drops, so that choice is informed.
+The second and third paths differ in what the model gets to read. Sanitizing the result never shows the model the raw ticket — the derivation is all that exists downstream in model context, though the host machine held the raw unless the deployment withholds it before the framework receives it. The child branch lets the child read the raw ticket and reason over it, and sanitizes only what crosses back. Choose the branch when the work itself needs the restricted content; choose the result sanitizer when the derivation is what you wanted anyway. Each sanitizer's `hint` states what its derivation drops, so that choice is informed.
 
 If the goal is emailing raw CRM data to an external auditor, neither sanitized route applies and the agent accepts the narrowing in the parent trajectory. When `send_email(ticket, auditor@…)` subsequently runs, the engine checks whether `auditor@…` is in the `internal` audience. Because it is not, OpenAPPA blocks the call and generates an authority remedy plan for `user`. Once `user` approves the request, the email dispatches and the egress event enters the log. The trajectory label remains `internal`, ensuring that subsequent emails to unapproved recipients require separate authority rulings.
 
@@ -139,9 +139,25 @@ Unannotated tools return data with an **Unknown** label state, representing unve
 
 An Unknown label state does not halt execution until a tool contract's `requires` clause explicitly checks the value. To resolve an **Unknown** state, deployments register a **cast** component that assigns concrete labels based on static rules or external evaluation services. This design allows deployments to start with a few high-risk tool annotations and incrementally expand policy coverage over time.
 
-## Model guarantees depend on four explicit assumptions
+## Deploy at the gateway alone, or add components for full coverage
 
-OpenAPPA guarantees hold strictly within defined system boundaries. The engine assumes a benign but confusable agent, untampered logs, valid component definitions, and that untrusted input arrives via ingested data. These four explicit assumptions bound the scope of automated policy enforcement:
+OpenAPPA's baseline host is an inference gateway: point every agent's model base URL at it, and change nothing else. The engine checks each proposed tool call while it still holds the model's response, so a refused call never reaches the agent framework. It ties each request to its conversation by matching the request against responses it served earlier. In this setup, input sanitizers work in full — the framework never sees pre-substitution arguments. Output sanitizers and pending casts keep raw results away from the model. Sub-agent spawning is governed by an ordinary contract on the spawn tool.
+
+The pure gateway leaves some vectors open, and OpenAPPA's posture is to allow and declare rather than remove: tool execution is assumed faithful rather than enforced, raw results still exist on the framework's side, and sub-agent branching stays off. The deployment declaration names each open vector explicitly and auditably, so a technology leader can review exactly what remains. A policy construct that names a feature the deployment does not cover is refused at load with the missing coverage named, never degraded silently.
+
+Each optional component closes a named vector:
+
+| Feature | What it is and why | How it can be implemented |
+|---|---|---|
+| **Session identity** | Bind each request to its trajectory; labels accumulate per trajectory, so a wrong bind forgets restrictions | Content matching at the gateway (zero client changes; a compaction mismatch is refused or starts fresh with an operator alert, per configuration), or a gateway-minted trajectory token echoed by the framework or injected by a harness hook |
+| **Execution enforcement** | The executed call is the approved call, exactly once | A tool gateway that matches each call to a one-use grant (remote tools); pre-tool hooks (local tools); neither — execution stays assumed, and the echo of the conversation is verified after the fact |
+| **Raw withholding** | Output sanitizing and pending casts: the model — or nobody — sees the raw result | Gateway swap on the next request (the model never sees it; the framework's machine does); tool-gateway rewrite (the raw never reaches the framework); a post-tool hook replaces it before storage, though the framework process briefly held it |
+| **Branching** | Children inherit the parent's restrictions and return only through a checked, sanitizable `submit_result` | Harness hooks plus an agent adapter; sub-agent traffic routed and registered through the gateway; neither — spawning is treated as egress and governed by contract |
+| **Provider-run tools** | Tools the model provider executes inside the inference call — no pre-dispatch gate is possible | Allow them: their declared label folds when the response shows they ran, and their outbound queries are a declared open vector. Or strip them from the request, closing the vector |
+
+## Model guarantees depend on five explicit assumptions
+
+OpenAPPA guarantees hold strictly within defined system boundaries. The engine assumes a benign but confusable agent, untampered logs, valid component definitions, a well-behaved harness where execution is not enforced, and that untrusted input arrives via ingested data. These five explicit assumptions bound the scope of automated policy enforcement:
 
 | Assumption | Scope Boundary |
 |---|---|
@@ -149,6 +165,7 @@ OpenAPPA guarantees hold strictly within defined system boundaries. The engine a
 | **Attacks arrive via ingested data** | Pre-trusted sources are trusted by definition; compromised trusted data is not caught. |
 | **Registered components are correct** | Misconfigured authorities or permissive casts void their respective guarantees. |
 | **Log is durable and strictly ordered** | Trajectory verification depends on total ordering and persistence of log entries. |
+| **The harness executes faithfully where unenforced** | For tools without a tool gateway or hook, the framework is assumed to run approved calls unchanged, once, and to echo conversations honestly. A visible break is refused, with an operator alert recommended — not defended against. |
 
 In short: declarative tool contracts set automatic bounds, while external components handle dynamic cases like human approvals or content scanners. As long as the execution log is persisted, OpenAPPA ensures every decision remains provable and auditable under your team's security mandates.
 
