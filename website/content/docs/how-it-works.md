@@ -34,10 +34,10 @@ Restricting permissions doesn't mean blocking external work: a component named `
 
 :::fig-label-fold:::
 
-The current label is calculated directly as a functional fold over all preceding deltas, eliminating the need to replay trajectory history:
+The current label is calculated directly as a functional fold over the labels of all previously admitted values — a tool result's declared restriction, or a sanitizer derivation's cleaner label when one was admitted in its place — eliminating the need to replay trajectory history:
 
 ```ts
-label = deltasSoFar.reduce(narrow, startingLabel)   // narrow only ever restricts
+label = admittedLabels.reduce(narrow, startingLabel)   // narrow only ever restricts
 ```
 
 ## Reading data costs the agent reach
