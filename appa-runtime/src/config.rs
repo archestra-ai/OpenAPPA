@@ -23,12 +23,13 @@ use appa_engine::authority::{
     Transition,
 };
 use appa_engine::contract::{
-    AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, RecipientSpec, Requires, ToolContract,
+    AudienceDelta, AudienceRequirement, Delta, DynamicAudienceBinding, HistoryRequirement, LabelRequirements,
+    RecipientSpec, Requires, ToolContract,
 };
 use appa_engine::fact::EffectKind;
 use appa_engine::fact::ReturnPolicy;
 use appa_engine::label::{Audience, Dim, DimValue, Label, ReaderId, Trust};
-use appa_engine::names::{AuthorityName, CastName, MarkName, SanitizerName, TagName};
+use appa_engine::names::{AuthorityName, CastName, DynamicResolverName, MarkName, SanitizerName, TagName};
 use appa_engine::registry::{LoadError, PlannerCap, Registry, RegistryConfig, TrustChain};
 use appa_engine::value::ToolName;
 
@@ -75,6 +76,12 @@ pub enum ConfigError {
     UnknownBuiltin { kind: &'static str, name: String },
     #[error("tool {tool}: `parameters` must be a JSON-Schema object (a TOML table)")]
     ToolParametersNotAnObject { tool: String },
+    #[error("duplicate dynamic resolver {0}")]
+    DuplicateDynamicResolver(String),
+    #[error("tool {tool} dynamic binding names unregistered resolver {resolver}")]
+    UnregisteredDynamicResolver { tool: String, resolver: String },
+    #[error("tool {tool} dynamic argument {argument} must be declared as a string in parameters")]
+    DynamicArgumentNotString { tool: String, argument: String },
     #[error("[limits] planner_cap is 0: a tool's worst case is at least one plan, so a zero cap refuses every tool")]
     ZeroPlannerCap,
     #[error("registry rejected: {0}")]
@@ -110,6 +117,12 @@ pub enum CastImpl {
     HttpResolver { url: String, timeout_ms: u64 },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DynamicResolverImpl {
+    pub url: String,
+    pub timeout_ms: u64,
+}
+
 /// A fully parsed and **fully validated** policy: the immutable engine [`Registry`] plus the
 /// outer layer's per-name implementation bindings. Parsing runs both the surface lints and the engine's
 /// algebraic load lints, so a returned `Config` is always loadable.
@@ -124,6 +137,7 @@ pub struct Config {
     tool_impls: BTreeMap<ToolName, ToolImpl>,
     tool_parameters: BTreeMap<ToolName, serde_json::Value>,
     child_return: ReturnPolicy,
+    dynamic_resolver_impls: BTreeMap<DynamicResolverName, DynamicResolverImpl>,
 }
 
 impl Config {
@@ -149,6 +163,21 @@ impl Config {
             None => default_boundary_label(&trust_chain),
         };
 
+        let mut dynamic_resolver_impls = BTreeMap::new();
+        for resolver in raw.dynamic_resolver {
+            let name = DynamicResolverName::new(resolver.name);
+            let url = resolver
+                .resolver
+                .url
+                .ok_or_else(|| bad_impl("dynamic resolver", name.as_str(), "requires url"))?;
+            let imp = DynamicResolverImpl {
+                url,
+                timeout_ms: check_timeout(resolver.resolver.timeout_ms, "dynamic resolver")?,
+            };
+            if dynamic_resolver_impls.insert(name.clone(), imp).is_some() {
+                return Err(ConfigError::DuplicateDynamicResolver(name.as_str().to_string()));
+            }
+        }
         let mut tools = Vec::new();
         let mut tool_impls = BTreeMap::new();
         let mut tool_parameters = BTreeMap::new();
@@ -161,6 +190,29 @@ impl Config {
                 tool_parameters.insert(tool.name.clone(), parameters);
             }
             tools.push(tool);
+        }
+        for tool in &tools {
+            for binding in dynamic_bindings(tool) {
+                if !dynamic_resolver_impls.contains_key(&binding.resolver) {
+                    return Err(ConfigError::UnregisteredDynamicResolver {
+                        tool: tool.name.as_str().into(),
+                        resolver: binding.resolver.as_str().into(),
+                    });
+                }
+                let is_string = tool_parameters
+                    .get(&tool.name)
+                    .and_then(|p| p.get("properties"))
+                    .and_then(|p| p.get(&binding.argument))
+                    .and_then(|p| p.get("type"))
+                    .and_then(|t| t.as_str())
+                    == Some("string");
+                if !is_string {
+                    return Err(ConfigError::DynamicArgumentNotString {
+                        tool: tool.name.as_str().into(),
+                        argument: binding.argument.clone(),
+                    });
+                }
+            }
         }
 
         let mut authorities = Vec::new();
@@ -247,6 +299,7 @@ impl Config {
             tool_impls,
             tool_parameters,
             child_return,
+            dynamic_resolver_impls,
         })
     }
 
@@ -262,6 +315,10 @@ impl Config {
 
     pub fn registry_config(&self) -> &RegistryConfig {
         &self.registry_config
+    }
+
+    pub fn dynamic_resolvers(&self) -> &BTreeMap<DynamicResolverName, DynamicResolverImpl> {
+        &self.dynamic_resolver_impls
     }
 
     pub fn authority_impl(&self, name: &AuthorityName) -> Option<&AuthorityImpl> {
@@ -307,6 +364,8 @@ struct RawConfig {
     sanitizer: Vec<RawSanitizer>,
     #[serde(default)]
     cast: Vec<RawCast>,
+    #[serde(default)]
+    dynamic_resolver: Vec<RawDynamicResolver>,
     child: Option<RawChild>,
     limits: Option<RawLimits>,
 }
@@ -315,6 +374,13 @@ struct RawConfig {
 #[serde(deny_unknown_fields)]
 struct RawLimits {
     planner_cap: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDynamicResolver {
+    name: String,
+    resolver: RawResolver,
 }
 
 #[derive(Deserialize)]
@@ -434,6 +500,14 @@ struct RawDelta {
 enum RawDeltaAudience {
     Token(String),
     Exactly(RawExactly),
+    Dynamic(RawDynamicBinding),
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDynamicBinding {
+    resolver: String,
+    argument: String,
 }
 
 const UNKNOWN_TOKEN: &str = "unknown";
@@ -446,17 +520,18 @@ impl RawDelta {
             None => None,
         };
         let audience = match self.audience {
-            Some(RawDeltaAudience::Token(token)) if token == UNKNOWN_TOKEN => Some(Dim::Unknown),
+            Some(RawDeltaAudience::Token(token)) if token == UNKNOWN_TOKEN => Some(AudienceDelta::PendingCast),
             Some(RawDeltaAudience::Token(token)) => {
                 return Err(ConfigError::BadAudience {
                     context: format!("{ctx} delta audience"),
                     reason: format!("expected {{ exactly = [...] }} or \"unknown\", found {token:?}"),
                 });
             }
-            Some(RawDeltaAudience::Exactly(a)) => Some(Dim::Known(parse_audience(
+            Some(RawDeltaAudience::Exactly(a)) => Some(AudienceDelta::Static(parse_audience(
                 &a.exactly,
                 &format!("{ctx} delta audience"),
             )?)),
+            Some(RawDeltaAudience::Dynamic(b)) => Some(AudienceDelta::Dynamic(b.into_binding())),
             None => None,
         };
         Ok(Delta { trust, audience })
@@ -484,10 +559,10 @@ impl RawRequires {
         let mut audience = Vec::new();
         if let Some(a) = self.audience {
             if let Some(inc) = a.includes {
-                audience.push(AudienceRequirement::Includes(parse_recipient_spec(
-                    &inc,
-                    &format!("{ctx} requires includes"),
-                )?));
+                audience.push(AudienceRequirement::Includes(match inc {
+                    RawRecipientSpec::Static(list) => parse_recipient_spec(&list, &format!("{ctx} requires includes"))?,
+                    RawRecipientSpec::Dynamic(binding) => RecipientSpec::Dynamic(binding.into_binding()),
+                }));
             }
             if let Some(cap) = a.cap {
                 audience.push(AudienceRequirement::Cap(parse_audience(
@@ -519,8 +594,24 @@ impl RawRequires {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRequiresAudience {
-    includes: Option<Vec<String>>,
+    includes: Option<RawRecipientSpec>,
     cap: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawRecipientSpec {
+    Static(Vec<String>),
+    Dynamic(RawDynamicBinding),
+}
+
+impl RawDynamicBinding {
+    fn into_binding(self) -> DynamicAudienceBinding {
+        DynamicAudienceBinding {
+            resolver: DynamicResolverName::new(self.resolver),
+            argument: self.argument,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -855,6 +946,19 @@ fn bad_impl(kind: &'static str, name: &str, reason: &str) -> ConfigError {
     }
 }
 
+fn dynamic_bindings(tool: &ToolContract) -> Vec<&DynamicAudienceBinding> {
+    let mut bindings = Vec::new();
+    if let Some(AudienceDelta::Dynamic(binding)) = tool.delta.as_ref().and_then(|d| d.audience.as_ref()) {
+        bindings.push(binding);
+    }
+    for requirement in &tool.requires.label.audience {
+        if let AudienceRequirement::Includes(RecipientSpec::Dynamic(binding)) = requirement {
+            bindings.push(binding);
+        }
+    }
+    bindings
+}
+
 fn check_timeout(timeout_ms: Option<u64>, context: &str) -> Result<u64, ConfigError> {
     let ms = timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
     if TIMEOUT_MS_RANGE.contains(&ms) {
@@ -943,6 +1047,77 @@ fn parse_points(tokens: &[String], name: &str) -> Result<SanitizerPoints, Config
 mod tests {
     use super::*;
 
+    #[test]
+    fn dynamic_resolvers_parse_both_binding_sites_and_validate_registration() {
+        let policy = r#"
+version = 1
+[[dynamic_resolver]]
+name = "crm-acl"
+resolver = { url = "https://acl.invalid/readers", timeout_ms = 50 }
+[[tool]]
+name = "lookup"
+parameters = { type = "object", properties = { customer_id = { type = "string" } } }
+delta = { audience = { resolver = "crm-acl", argument = "customer_id" } }
+[[tool]]
+name = "send"
+parameters = { type = "object", properties = { channel = { type = "string" } } }
+requires = { audience = { includes = { resolver = "crm-acl", argument = "channel" } } }
+delta = {}
+"#;
+        let config = Config::from_toml_str(policy).expect("dynamic policy");
+        assert_eq!(config.dynamic_resolvers().len(), 1);
+        assert!(matches!(
+            config
+                .registry()
+                .tool(&ToolName::new("lookup"))
+                .unwrap()
+                .delta
+                .as_ref()
+                .unwrap()
+                .audience,
+            Some(AudienceDelta::Dynamic(_))
+        ));
+        assert!(matches!(
+            config
+                .registry()
+                .tool(&ToolName::new("send"))
+                .unwrap()
+                .requires
+                .label
+                .audience[0],
+            AudienceRequirement::Includes(RecipientSpec::Dynamic(_))
+        ));
+
+        let duplicate = policy.replace("[[tool]]\nname = \"lookup\"", "[[dynamic_resolver]]\nname = \"crm-acl\"\nresolver = { url = \"https://duplicate.invalid\" }\n[[tool]]\nname = \"lookup\"");
+        assert!(matches!(
+            Config::from_toml_str(&duplicate),
+            Err(ConfigError::DuplicateDynamicResolver(_))
+        ));
+        let unregistered = policy.replace(
+            "resolver = \"crm-acl\", argument = \"customer_id\"",
+            "resolver = \"missing\", argument = \"customer_id\"",
+        );
+        assert!(matches!(
+            Config::from_toml_str(&unregistered),
+            Err(ConfigError::UnregisteredDynamicResolver { .. })
+        ));
+        let non_string = policy.replace(
+            "customer_id = { type = \"string\" }",
+            "customer_id = { type = \"integer\" }",
+        );
+        assert!(matches!(
+            Config::from_toml_str(&non_string),
+            Err(ConfigError::DynamicArgumentNotString { tool, argument })
+                if tool == "lookup" && argument == "customer_id"
+        ));
+        let missing = policy.replace("argument = \"customer_id\"", "argument = \"missing\"");
+        assert!(matches!(
+            Config::from_toml_str(&missing),
+            Err(ConfigError::DynamicArgumentNotString { tool, argument })
+                if tool == "lookup" && argument == "missing"
+        ));
+    }
+
     const WORKED: &str = r#"
 version = 1
 
@@ -991,7 +1166,7 @@ builtin = "hitl"
         let get = reg.tool(&ToolName::new("get_ticket_from_crm")).expect("tool present");
         assert_eq!(
             get.delta.as_ref().expect("declared delta").audience,
-            Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])))
+            Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into())
         );
         assert_eq!(get.requires.label.trust_floor, Some(Trust::new(1)));
 
@@ -1325,7 +1500,7 @@ resolver = { url = "https://c/resolve", timeout_ms = 10000, may_cast = { trust =
         let probe = reg.tool(&ToolName::new("probe")).unwrap();
         assert_eq!(
             probe.delta.as_ref().expect("declared delta").audience,
-            Some(Dim::Unknown)
+            Some(Dim::Unknown.into())
         );
     }
 

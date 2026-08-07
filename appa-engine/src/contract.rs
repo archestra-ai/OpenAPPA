@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::fact::EffectKind;
 use crate::label::{Audience, Dim, Dimension, Label, Trust};
-use crate::names::{MarkName, TagName};
+use crate::names::{DynamicResolverName, MarkName, TagName};
 use crate::value::ToolName;
 
 /// A **declared** restrictive label contribution: what a successful call folds into the trajectory.
@@ -22,7 +22,73 @@ use crate::value::ToolName;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Delta {
     pub trust: Option<Dim<Trust>>,
-    pub audience: Option<Dim<Audience>>,
+    pub audience: Option<AudienceDelta>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct DynamicAudienceBinding {
+    pub resolver: DynamicResolverName,
+    pub argument: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AudienceDelta {
+    Static(Audience),
+    PendingCast,
+    Dynamic(DynamicAudienceBinding),
+}
+
+impl From<Dim<Audience>> for AudienceDelta {
+    fn from(value: Dim<Audience>) -> Self {
+        match value {
+            Dim::Known(audience) => Self::Static(audience),
+            Dim::Unknown => Self::PendingCast,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PinnedDynamicResolution {
+    binding: DynamicAudienceBinding,
+    audience: Option<Audience>,
+}
+
+impl PinnedDynamicResolution {
+    /// Pin one resolver answer. A malformed dynamic answer contributes no audience:
+    /// `public` is not a literal reader set, and an `@group` must go through membership resolution.
+    pub fn from_answer(binding: DynamicAudienceBinding, audience: Option<Audience>) -> Self {
+        let audience = audience.filter(|answer| match answer {
+            Audience::Public => false,
+            Audience::Restricted(readers) => !readers
+                .iter()
+                .any(|reader| reader.as_str() == "public" || reader.as_str().starts_with('@')),
+        });
+        PinnedDynamicResolution { binding, audience }
+    }
+
+    pub fn binding(&self) -> &DynamicAudienceBinding {
+        &self.binding
+    }
+
+    pub fn audience(&self) -> Option<&Audience> {
+        self.audience.as_ref()
+    }
+}
+
+impl<'de> Deserialize<'de> for PinnedDynamicResolution {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireResolution {
+            binding: DynamicAudienceBinding,
+            audience: Option<Audience>,
+        }
+
+        let wire = WireResolution::deserialize(deserializer)?;
+        Ok(PinnedDynamicResolution::from_answer(wire.binding, wire.audience))
+    }
 }
 
 impl Delta {
@@ -38,7 +104,11 @@ impl Delta {
     pub fn output_label(&self) -> Label {
         Label::new(
             self.trust.clone().unwrap_or(Dim::Known(Trust::new(u8::MAX))),
-            self.audience.clone().unwrap_or(Dim::Known(Audience::Public)),
+            match &self.audience {
+                Some(AudienceDelta::Static(a)) => Dim::Known(a.clone()),
+                Some(AudienceDelta::PendingCast | AudienceDelta::Dynamic(_)) => Dim::Unknown,
+                None => Dim::Known(Audience::Public),
+            },
         )
     }
 
@@ -55,8 +125,8 @@ impl Delta {
                 Some(Dim::Unknown) | None => Dim::Known(Trust::new(u8::MAX)),
             },
             match &self.audience {
-                Some(Dim::Known(a)) => Dim::Known(a.clone()),
-                Some(Dim::Unknown) | None => Dim::Known(Audience::Public),
+                Some(AudienceDelta::Static(a)) => Dim::Known(a.clone()),
+                Some(AudienceDelta::PendingCast | AudienceDelta::Dynamic(_)) | None => Dim::Known(Audience::Public),
             },
         );
         label.combine(&established)
@@ -65,7 +135,7 @@ impl Delta {
     pub fn pending_cast_dim(&self) -> Option<Dimension> {
         match (&self.trust, &self.audience) {
             (Some(Dim::Unknown), _) => Some(Dimension::Trust),
-            (_, Some(Dim::Unknown)) => Some(Dimension::Audience),
+            (_, Some(AudienceDelta::PendingCast)) => Some(Dimension::Audience),
             _ => None,
         }
     }
@@ -81,6 +151,7 @@ impl Delta {
 pub enum RecipientSpec {
     Static(Audience),
     Placeholder(String),
+    Dynamic(DynamicAudienceBinding),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +200,35 @@ impl ToolContract {
             Some(delta) => delta.output_label(),
             None => Label::new(Dim::Unknown, Dim::Unknown),
         }
+    }
+
+    /// The output label with a proposed call's dynamic audience answer pinned into it. A missing
+    /// or failed answer leaves that dimension Unknown.
+    pub(crate) fn output_label_for_call(&self, call: &crate::value::ResolvedCall) -> Label {
+        let mut label = self.output_label();
+        if let Some(AudienceDelta::Dynamic(binding)) = self.delta.as_ref().and_then(|delta| delta.audience.as_ref()) {
+            label.audience = call
+                .dynamic_resolution(binding)
+                .cloned()
+                .map(Dim::Known)
+                .unwrap_or(Dim::Unknown);
+        }
+        label
+    }
+
+    /// The output label recovered from the dynamic answer persisted on a dispatch. Admission uses
+    /// this form, never the caller's in-memory resolution.
+    pub(crate) fn output_label_for_resolutions(&self, resolutions: &[PinnedDynamicResolution]) -> Label {
+        let mut label = self.output_label();
+        if let Some(AudienceDelta::Dynamic(binding)) = self.delta.as_ref().and_then(|delta| delta.audience.as_ref()) {
+            let mut matching = resolutions.iter().filter(|resolution| resolution.binding() == binding);
+            let answer = matching.next().and_then(PinnedDynamicResolution::audience);
+            label.audience = match (answer, matching.next()) {
+                (Some(audience), None) => Dim::Known(audience.clone()),
+                _ => Dim::Unknown,
+            };
+        }
+        label
     }
 
     /// The single dimension this contract declares pending-cast, if any. An unannotated tool

@@ -6,6 +6,13 @@ trust_chain = ["suspicious", "trusted"]
 trust = "trusted"
 audience = { exactly = ["public"] }
 
+# The service replaces this reserved URL with the session's loopback
+# recipient directory. The resolver maps each proposed email recipient to
+# the literal readers behind that address.
+[[dynamic_resolver]]
+name = "email-recipient-readers"
+resolver = { url = "http://demo.invalid/dynamic-resolver", timeout_ms = 5000 }
+
 # --- CRM: customer records are confidential ---------------------------
 
 [[tool]]
@@ -31,18 +38,19 @@ delta    = {}
 
 # --- Email: a message leaves the org ----------------------------------
 
-# The recipient can be anyone, so sending is publishing: still readable
-# by everyone, not derived from an untrusted source.
+# The recipient directory resolves an individual address to that reader and
+# expands a distribution list to its current members. The flow must cover
+# every resolved reader and must not derive from an untrusted source.
 [[tool]]
 name     = "send_email"
-requires = { trust = "trusted", audience = { includes = ["public"] } }
+requires = { trust = "trusted", audience = { includes = { resolver = "email-recipient-readers", argument = "to" } } }
 delta    = {}
 
 # --- Finance: the books are confidential; moving money needs a human ---
 
 [[tool]]
 name  = "list_invoices"
-delta = { audience = { exactly = ["internal"] } }
+delta = { audience = { exactly = ["cfo@corp.example", "ap-lead@corp.example"] } }
 
 # Every transfer demands a human sign-off (an attention mark): the
 # treasurer must rule on the exact call before it may dispatch.

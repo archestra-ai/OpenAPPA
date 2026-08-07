@@ -9,6 +9,7 @@ use appa_engine::admit::{AdmitError, CastAnswer, ResultAdmission};
 use appa_engine::authority::CastResolution;
 use appa_engine::branch::{ReturnBlock, ReturnCheck, ReturnPlan, ReturnSubmission};
 use appa_engine::check::{CheckOutcome, Narrowing, UnestablishedFact};
+use appa_engine::contract::PinnedDynamicResolution;
 use appa_engine::execute::Ruling;
 use appa_engine::fact::{BoundaryKind, Fact, FactBatch, ProposedCall, ReturnPolicy, Revision};
 use appa_engine::label::{DimValue, Dimension};
@@ -635,9 +636,38 @@ impl Turn {
             }
             _ => {
                 let call = ResolvedCall::new(proposed.tool.clone(), proposed.arguments.clone(), Vec::new());
+                let call = match self.resolve_dynamic_call(call, budget).await {
+                    Some(call) => call,
+                    None => return Ok(CallProgress::Cancelled),
+                };
                 self.mediate_call(&proposed.id, call, budget).await
             }
         }
+    }
+
+    async fn resolve_dynamic_call(&self, call: ResolvedCall, budget: &RunBudget) -> Option<ResolvedCall> {
+        let Some(contract) = self.mediator.engine().registry().tool(call.tool()) else {
+            return Some(call);
+        };
+        let mut resolutions = Vec::new();
+        for binding in crate::common::dynamic_bindings(contract) {
+            if self.cancel.is_cancelled() || budget.external_budget().is_zero() {
+                return None;
+            }
+            let value = call.arguments().get(&binding.argument).and_then(|value| value.as_str());
+            let audience = if let (Some(value), Some(backend)) =
+                (value, self.mediator.dynamic_resolver_backend(&binding.resolver))
+            {
+                tokio::select! {
+                    _ = self.cancel.cancelled() => return None,
+                    result = tokio::time::timeout(budget.external_budget(), backend.resolve(&binding.resolver, call.tool(), &binding.argument, value)) => result.ok().flatten(),
+                }
+            } else {
+                None
+            };
+            resolutions.push(PinnedDynamicResolution::from_answer(binding, audience));
+        }
+        Some(call.with_dynamic_resolutions(resolutions))
     }
 
     async fn mediate_call(
@@ -1464,7 +1494,12 @@ impl Turn {
                     let projection = Projection::build(&log, revision);
                     self.mediator
                         .engine()
-                        .cast_narrowing(&projection.view(&self.session), &pending.call, &pending.resolved)
+                        .cast_narrowing(
+                            &projection.view(&self.session),
+                            &pending.dispatch,
+                            &pending.call,
+                            &pending.resolved,
+                        )
                         .expect("dispatched call is registered")
                 };
                 match narrowing {
@@ -1528,7 +1563,12 @@ impl Turn {
             let projection = Projection::build(&log, revision);
             self.mediator
                 .engine()
-                .cast_narrowing(&projection.view(&self.session), &pending.call, &pending.resolved)
+                .cast_narrowing(
+                    &projection.view(&self.session),
+                    &pending.dispatch,
+                    &pending.call,
+                    &pending.resolved,
+                )
                 .expect("dispatched call is registered")
         };
         let Some(narrowing) = narrowing else {
@@ -1665,7 +1705,7 @@ impl Turn {
                             let projection = Projection::build(&log, revision);
                             self.mediator
                                 .engine()
-                                .cast_narrowing(&projection.view(&self.session), call, &resolved)
+                                .cast_narrowing(&projection.view(&self.session), &dispatch, call, &resolved)
                                 .expect("dispatched call is registered")
                         };
                         if let Some(narrowing) = narrowing {
@@ -1711,7 +1751,7 @@ impl Turn {
                     let projection = Projection::build(&log, revision);
                     self.mediator
                         .engine()
-                        .cast_narrowing(&projection.view(&self.session), call, &resolved)
+                        .cast_narrowing(&projection.view(&self.session), &dispatch, call, &resolved)
                         .expect("dispatched call is registered")
                 };
                 match narrowing {

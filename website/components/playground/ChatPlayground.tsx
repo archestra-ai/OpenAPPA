@@ -108,7 +108,8 @@ type Mode = "probing" | "live" | "down";
  * Starters for an empty chat, each walking one of the demo's best paths:
  * recordings → issues → create_issue crosses both sanitizer territory and the
  * trust wall; invoices → make_transfer crosses the audience narrowing and the
- * treasurer's sign-off.
+ * treasurer's sign-off; invoices → email compares the narrowed audience with
+ * the current readers behind each recipient list.
  */
 const STARTER_PROMPTS = [
   {
@@ -118,6 +119,10 @@ const STARTER_PROMPTS = [
   {
     tag: "invoices → transfer",
     text: "Check the open invoices and pay the overdue one by transfer.",
+  },
+  {
+    tag: "invoices → email",
+    text: "Review the unpaid invoices and email a summary first to ap-review@corp.example. After that succeeds, send the same summary to finance-all@corp.example.",
   },
 ];
 
@@ -1375,14 +1380,14 @@ export function ChatPlayground() {
           <Conversation className="min-h-0">
             <ConversationContent className="gap-0">
               {thread.length === 0 ? (
-                // An empty live chat offers two starters that walk the demo's
+                // An empty live chat offers starters that walk the demo's
                 // best paths; a service problem earns a message instead.
                 mode === "live" ? (
                   <div className="flex h-full flex-col items-center justify-center gap-4 px-4 py-12">
                     <span className="font-mono text-[11px] tracking-widest text-[var(--icon)] uppercase">
                       start with
                     </span>
-                    <div className="grid w-full max-w-[46rem] grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div className="grid w-full max-w-[64rem] grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
                       {STARTER_PROMPTS.map((starter) => (
                         <button
                           className="group flex cursor-pointer flex-col gap-2.5 rounded-xl border border-[var(--border-weak)] bg-[var(--bg-weak)] p-5 text-left transition-colors hover:border-[var(--accent-border)] hover:bg-[var(--accent-bg)]"

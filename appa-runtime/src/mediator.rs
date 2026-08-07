@@ -8,7 +8,7 @@ use appa_engine::contract::ToolContract;
 use appa_engine::engine::Engine;
 use appa_engine::fact::{Fact, Revision};
 use appa_engine::label::Dim;
-use appa_engine::names::{AuthorityName, CastName, SanitizerName};
+use appa_engine::names::{AuthorityName, CastName, DynamicResolverName, SanitizerName};
 use appa_engine::projection::Projection;
 use appa_engine::registry::TrustChain;
 use appa_engine::value::{ToolName, TrajectoryId};
@@ -17,7 +17,7 @@ use thiserror::Error;
 use tokio::sync::OwnedMutexGuard;
 
 use crate::config::{AuthorityImpl, CastImpl, Config, SanitizerImpl, ToolImpl};
-use crate::external::{AuthorityBackend, BuiltinAuthority, CastBackend, SanitizerBackend};
+use crate::external::{AuthorityBackend, BuiltinAuthority, CastBackend, DynamicResolverBackend, SanitizerBackend};
 use crate::store::{SessionStore, StoreError, StoreIdentity, TenantId};
 use crate::tool::{BuiltinTool, EXECUTE_REMEDY_PLAN, FORK, HttpClient, HttpTool, SUBMIT_RESULT, ToolBackend};
 use crate::wire::{WireMessage, WireTool, WireToolSchema};
@@ -98,6 +98,7 @@ pub struct Mediator {
     authority_backends: BTreeMap<AuthorityName, AuthorityBackend>,
     sanitizer_backends: BTreeMap<SanitizerName, SanitizerBackend>,
     cast_backends: BTreeMap<CastName, CastBackend>,
+    dynamic_resolver_backends: BTreeMap<DynamicResolverName, DynamicResolverBackend>,
     transcript_head: TranscriptHead,
 }
 
@@ -189,6 +190,20 @@ impl Mediator {
                 );
             }
         }
+        let dynamic_resolver_backends = config
+            .dynamic_resolvers()
+            .iter()
+            .map(|(name, imp)| {
+                (
+                    name.clone(),
+                    DynamicResolverBackend::Http {
+                        url: imp.url.clone(),
+                        timeout: Duration::from_millis(imp.timeout_ms),
+                        client: client.clone(),
+                    },
+                )
+            })
+            .collect();
 
         Ok(Mediator {
             config,
@@ -198,6 +213,7 @@ impl Mediator {
             authority_backends,
             sanitizer_backends,
             cast_backends,
+            dynamic_resolver_backends,
             transcript_head: TranscriptHead::none(),
         })
     }
@@ -239,6 +255,10 @@ impl Mediator {
 
     pub fn cast_backend(&self, name: &CastName) -> Option<&CastBackend> {
         self.cast_backends.get(name)
+    }
+
+    pub fn dynamic_resolver_backend(&self, name: &DynamicResolverName) -> Option<&DynamicResolverBackend> {
+        self.dynamic_resolver_backends.get(name)
     }
 
     pub fn advertised_tools(&self, is_child: bool, can_fork: bool) -> Vec<WireTool> {
@@ -366,8 +386,17 @@ fn policy_description(contract: &ToolContract, trust_chain: &TrustChain) -> Stri
                 None => {}
             }
             match &delta.audience {
-                Some(Dim::Known(audience)) => clauses.push(format!("output audience={audience:?}")),
-                Some(Dim::Unknown) => clauses.push("output audience=unknown".to_string()),
+                Some(appa_engine::contract::AudienceDelta::Static(audience)) => {
+                    clauses.push(format!("output audience={audience:?}"))
+                }
+                Some(appa_engine::contract::AudienceDelta::PendingCast) => {
+                    clauses.push("output audience=unknown".to_string())
+                }
+                Some(appa_engine::contract::AudienceDelta::Dynamic(binding)) => clauses.push(format!(
+                    "output audience=resolver:{}({})",
+                    binding.resolver.as_str(),
+                    binding.argument
+                )),
                 None => {}
             }
             if delta.is_none() {

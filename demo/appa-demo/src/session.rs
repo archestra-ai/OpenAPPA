@@ -195,6 +195,7 @@ impl Sessions {
                 &checked.merged_toml,
                 &format!("{shim_url}authority"),
                 &format!("{shim_url}sanitizer"),
+                &format!("{shim_url}dynamic-resolver"),
             )
             .map_err(|error| CreateError::Policy(PolicyError::Load(error.into())))?;
             if rebound == Rebound::default() {

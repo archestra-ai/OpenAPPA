@@ -106,13 +106,14 @@ impl Engine {
     pub fn cast_narrowing(
         &self,
         views: &Views,
+        dispatch: &DispatchId,
         call: &ResolvedCall,
         resolved: &DimValue,
     ) -> Result<Option<Narrowing>, EngineError> {
         let contract = self.contract(call)?;
         Ok(admit::pending_cast_narrowing(
             views,
-            &admit::cast_filled_label(contract, resolved),
+            &admit::cast_filled_dispatch_label(contract, views, dispatch, resolved),
         ))
     }
 
@@ -203,8 +204,9 @@ pub(crate) fn opened_dispatch(contract: &ToolContract, views: &Views, call: &Res
     let fact = Fact::DispatchOpened {
         trajectory: views.trajectory().clone(),
         dispatch: dispatch.clone(),
-        proposed_label: check::committed_label(contract, &views.current_label()),
+        proposed_label: check::committed_label_for_call(contract, &views.current_label(), call),
         proposed_effects: contract.emits.clone(),
+        dynamic_resolutions: call.dynamic_resolutions().to_vec(),
     };
     (dispatch, fact)
 }
@@ -270,7 +272,7 @@ mod tests {
             tags: vec![],
             delta: Some(Delta {
                 trust: None,
-                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")]))),
+                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
             }),
             emits: vec![],
             requires: Requires {
@@ -435,7 +437,7 @@ mod tests {
             tags: vec![],
             delta: Some(Delta {
                 trust: None,
-                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")]))),
+                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
             }),
             emits: vec![],
             requires: Requires {

@@ -268,7 +268,7 @@ fn enumerate_plans(registry: &Registry, state: &State, call: &ResolvedCall) -> V
     let Some(assignments) = enumerate_assignments(registry, &block.requirement_gaps, &contract.tags) else {
         return Vec::new();
     };
-    let tails = narrowing_remedies(registry, &state.label, contract, block.narrowing.as_ref());
+    let tails = narrowing_remedies(registry, &state.label, contract, call, block.narrowing.as_ref());
 
     let mut candidates: Vec<PlanCandidate> = Vec::new();
     for required in assignments {
@@ -376,9 +376,9 @@ fn gap_power_cmp(gap: &Gap, a: &Mandate, b: &Mandate) -> Option<Ordering> {
             inclusion_cmp(a.is_subset(&b), b.is_subset(&a))
         }
         Gap::Attention(_) => Some(Ordering::Equal),
-        // A prior/cap gap has no covering authority by construction (`enumerate_assignments`
-        // returns `None`), so no assignment reaching this comparison carries one.
-        Gap::Prior(_) | Gap::Cap { .. } => Some(Ordering::Equal),
+        // These gaps have no covering authority by construction (`enumerate_assignments` returns
+        // `None`), so no assignment reaching this comparison carries one.
+        Gap::Prior(_) | Gap::Cap { .. } | Gap::UnresolvedDynamicRecipient { .. } => Some(Ordering::Equal),
     }
 }
 
@@ -444,14 +444,16 @@ fn narrowing_remedies(
     registry: &Registry,
     current: &Label,
     contract: &ToolContract,
+    call: &ResolvedCall,
     narrowing: Option<&Narrowing>,
 ) -> Vec<Vec<RemedyStep>> {
     let Some(narrowing) = narrowing else {
         return vec![Vec::new()];
     };
     let mut tails = vec![vec![RemedyStep::Accept(narrowing.clone())]];
-    for sanitizer in applicable_output_sanitizers(registry, contract) {
-        let Some(sanitized) = sanitized_commit(current, contract, sanitizer) else {
+    let output = contract.output_label_for_call(call);
+    for sanitizer in applicable_output_sanitizers(registry, contract, &output) {
+        let Some(sanitized) = sanitized_commit(current, &output, sanitizer) else {
             continue;
         };
         let mut tail = vec![RemedyStep::Sanitize(sanitizer.name.clone())];
@@ -466,23 +468,26 @@ fn narrowing_remedies(
     tails
 }
 
-fn applicable_output_sanitizers<'r>(registry: &'r Registry, contract: &ToolContract) -> Vec<&'r Sanitizer> {
+fn applicable_output_sanitizers<'r>(
+    registry: &'r Registry,
+    contract: &ToolContract,
+    output: &Label,
+) -> Vec<&'r Sanitizer> {
     if contract.pending_cast_dim().is_some() {
         return Vec::new();
     }
-    let output = contract.output_label();
     registry
         .sanitizers()
-        .filter(|sanitizer| sanitizer.on.output && sanitizer.transition.admits(&output) == Adequacy::Holds)
+        .filter(|sanitizer| sanitizer.on.output && sanitizer.transition.admits(output) == Adequacy::Holds)
         .collect()
 }
 
-fn sanitized_commit(current: &Label, contract: &ToolContract, sanitizer: &Sanitizer) -> Option<Label> {
-    let raw = check::committed_label(contract, current);
+fn sanitized_commit(current: &Label, output: &Label, sanitizer: &Sanitizer) -> Option<Label> {
+    let raw = current.combine(output);
     if &raw == current {
         return None;
     }
-    let sanitized = current.combine(&sanitizer.transition.derive(&contract.output_label()));
+    let sanitized = current.combine(&sanitizer.transition.derive(output));
     (sanitized != raw).then_some(sanitized)
 }
 
@@ -545,7 +550,7 @@ pub(crate) fn covers_gap(authority: &Authority, gap: &Gap, tags: &[TagName]) -> 
         Gap::NoPrior(kind) => authority.scope.covers(tags) && mandate.waivers.contains(kind),
         // Attention routes by its own currency — the attended mark — never by scope.
         Gap::Attention(mark) => mandate.attends.contains(mark),
-        Gap::Prior(_) | Gap::Cap { .. } => false,
+        Gap::Prior(_) | Gap::Cap { .. } | Gap::UnresolvedDynamicRecipient { .. } => false,
     }
 }
 
@@ -556,8 +561,9 @@ fn transitions(registry: &Registry, state: &State, tool: &ToolContract) -> Vec<S
         label: check::committed_label(tool, &state.label),
         effects: effects.clone(),
     }];
-    for sanitizer in applicable_output_sanitizers(registry, tool) {
-        if let Some(label) = sanitized_commit(&state.label, tool, sanitizer) {
+    let output = tool.output_label();
+    for sanitizer in applicable_output_sanitizers(registry, tool, &output) {
+        if let Some(label) = sanitized_commit(&state.label, &output, sanitizer) {
             let next = State {
                 label,
                 effects: effects.clone(),
@@ -662,7 +668,8 @@ mod tests {
     use crate::authority::{Hint, Mandate, Sanitizer, SanitizerPoints, Scope, Transition};
     use crate::check::CheckOutcome;
     use crate::contract::{
-        AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, RecipientSpec, Requires, ToolContract,
+        AudienceDelta, AudienceRequirement, Delta, DynamicAudienceBinding, HistoryRequirement, LabelRequirements,
+        PinnedDynamicResolution, RecipientSpec, Requires, ToolContract,
     };
     use crate::fact::{Fact, Revision};
     use crate::label::{Audience, ReaderId, Trust};
@@ -823,14 +830,14 @@ mod tests {
             "crm",
             Delta {
                 trust: None,
-                audience: Some(Dim::Known(internal())),
+                audience: Some(Dim::Known(internal()).into()),
             },
         );
         let tracker = reader(
             "tracker",
             Delta {
                 trust: Some(Dim::Known(SUSPICIOUS)),
-                audience: Some(Dim::Known(internal())),
+                audience: Some(Dim::Known(internal()).into()),
             },
         );
         let registry = build(RegistryConfig {
@@ -876,12 +883,110 @@ mod tests {
     }
 
     #[test]
+    fn a_dynamic_output_uses_its_pinned_audience_for_sanitizer_plans() {
+        let binding = DynamicAudienceBinding {
+            resolver: crate::names::DynamicResolverName::new("directory"),
+            argument: "room".into(),
+        };
+        let lookup = reader(
+            "lookup",
+            Delta {
+                trust: None,
+                audience: Some(AudienceDelta::Dynamic(binding.clone())),
+            },
+        );
+        let finance = Audience::restricted([ReaderId::new("finance")]);
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![lookup],
+            authorities: vec![],
+            sanitizers: vec![
+                output_sanitizer(
+                    "declassify",
+                    Transition::Audience {
+                        from_includes: internal(),
+                        to: Audience::Public,
+                    },
+                ),
+                output_sanitizer(
+                    "finance-only",
+                    Transition::Audience {
+                        from_includes: internal(),
+                        to: finance.clone(),
+                    },
+                ),
+            ],
+            casts: vec![],
+        });
+        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let call = call("lookup", json!({ "room": "internal" }))
+            .with_dynamic_resolutions(vec![PinnedDynamicResolution::from_answer(binding, Some(internal()))]);
+
+        let planned = plan_of(&registry, &log, &call);
+        assert_eq!(
+            sanitize_offers(&planned),
+            [("declassify".to_string(), false), ("finance-only".to_string(), true)]
+        );
+        let finance_plan = planned
+            .plans
+            .iter()
+            .filter_map(RemedyPlan::executable)
+            .find(|plan| {
+                plan.steps
+                    .contains(&RemedyStep::Sanitize(SanitizerName::new("finance-only")))
+            })
+            .unwrap();
+        assert!(finance_plan.steps.contains(&RemedyStep::Accept(Narrowing {
+            from: known(TRUSTED, Audience::Public),
+            to: known(TRUSTED, finance),
+        })));
+    }
+
+    #[test]
+    fn an_unresolved_dynamic_recipient_has_no_remedy_and_an_empty_answer_is_valid() {
+        let binding = DynamicAudienceBinding {
+            resolver: crate::names::DynamicResolverName::new("channel-members"),
+            argument: "channel".into(),
+        };
+        let mut send = reader("send", Delta::NONE);
+        send.requires.label.audience = vec![AudienceRequirement::Includes(RecipientSpec::Dynamic(binding.clone()))];
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![send],
+            authorities: vec![],
+            sanitizers: vec![],
+            casts: vec![],
+        });
+        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let unresolved = call("send", json!({ "channel": "support" }))
+            .with_dynamic_resolutions(vec![PinnedDynamicResolution::from_answer(binding.clone(), None)]);
+        let planned = plan_of(&registry, &log, &unresolved);
+        assert_eq!(
+            planned.raw.requirement_gaps,
+            [Gap::UnresolvedDynamicRecipient {
+                resolver: binding.resolver.clone(),
+                argument: binding.argument.clone(),
+            }]
+        );
+        assert!(planned.plans.is_empty());
+
+        let empty = call("send", json!({ "channel": "empty" })).with_dynamic_resolutions(vec![
+            PinnedDynamicResolution::from_answer(binding, Some(Audience::restricted([]))),
+        ]);
+        let projection = Projection::build(&log, Revision::new(log.len() as u64));
+        assert_eq!(
+            check::evaluate(registry.tool(empty.tool()).unwrap(), &projection.view(&traj()), &empty,),
+            CheckOutcome::Allow
+        );
+    }
+
+    #[test]
     fn a_sanitize_plan_still_carries_every_requirement_ruling() {
         let mut publish = reader(
             "publish",
             Delta {
                 trust: None,
-                audience: Some(Dim::Known(internal())),
+                audience: Some(Dim::Known(internal()).into()),
             },
         );
         publish.requires.attention = vec![MarkName::new("signoff")];
@@ -1036,7 +1141,7 @@ mod tests {
             tags: vec![],
             delta: Some(Delta {
                 trust: None,
-                audience: Some(Dim::Known(a.clone())),
+                audience: Some(Dim::Known(a.clone()).into()),
             }),
             emits: vec![],
             requires: Requires::default(),
@@ -1130,7 +1235,7 @@ mod tests {
             tags: vec![],
             delta: Some(Delta {
                 trust: None,
-                audience: Some(Dim::Known(to)),
+                audience: Some(Dim::Known(to).into()),
             }),
             emits: vec![],
             requires: Requires::default(),
@@ -1951,7 +2056,7 @@ mod tests {
             tags: vec![],
             delta: Some(Delta {
                 trust: None,
-                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")]))),
+                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
             }),
             emits: vec![],
             requires: Requires::default(),
@@ -2423,7 +2528,10 @@ mod tests {
                 prop::option::of((0u8..2).prop_map(|t| Dim::Known(Trust::new(t)))),
                 prop::option::of(small_audience().prop_map(Dim::Known)),
             )
-                .prop_map(|(trust, audience)| Some(Delta { trust, audience })),
+                .prop_map(|(trust, audience)| Some(Delta {
+                    trust,
+                    audience: audience.map(Into::into)
+                })),
         ]
     }
 
@@ -2660,7 +2768,7 @@ mod tests {
                         .is_some_and(|c| Dim::Known(c.clone()).covers(recipients) == Adequacy::Holds),
                     Gap::NoPrior(kind) => scoped && authority.mandate.waivers.contains(kind),
                     Gap::Attention(mark) => authority.mandate.attends.contains(mark),
-                    Gap::Prior(_) | Gap::Cap { .. } => false,
+                    Gap::Prior(_) | Gap::Cap { .. } | Gap::UnresolvedDynamicRecipient { .. } => false,
                 }
             };
             let per_gap: Vec<Vec<&Authority>> = raw.requirement_gaps.iter()
@@ -2719,7 +2827,10 @@ mod tests {
                         let sb: std::collections::BTreeSet<_> = b.waivers.iter().collect();
                         inclusion(sa.is_subset(&sb), sb.is_subset(&sa))
                     }
-                    Gap::Attention(_) | Gap::Prior(_) | Gap::Cap { .. } => Some(O::Equal),
+                    Gap::Attention(_)
+                    | Gap::Prior(_)
+                    | Gap::Cap { .. }
+                    | Gap::UnresolvedDynamicRecipient { .. } => Some(O::Equal),
                 }
             };
             let precedes = |a: &Vec<(AuthorityName, Vec<Gap>)>, b: &Vec<(AuthorityName, Vec<Gap>)>| -> bool {

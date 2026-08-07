@@ -4,11 +4,14 @@ use std::collections::BTreeMap;
 
 use appa_engine::admit::{AdmitError, ResultAdmission};
 use appa_engine::check::CheckOutcome;
+use appa_engine::contract::{
+    AudienceDelta, AudienceRequirement, DynamicAudienceBinding, PinnedDynamicResolution, RecipientSpec, ToolContract,
+};
 use appa_engine::engine::Engine;
 use appa_engine::execute::Ruling;
 use appa_engine::fact::{BoundaryKind, Fact, FactBatch, ReturnPolicy};
 use appa_engine::label::Label;
-use appa_engine::names::AuthorityName;
+use appa_engine::names::{AuthorityName, DynamicResolverName};
 use appa_engine::projection::Projection;
 use appa_engine::value::{
     CanonicalDigest, DispatchId, LabeledValue, Provenance, ResolvedCall, ToolName, TrajectoryId, ValueBody,
@@ -16,7 +19,7 @@ use appa_engine::value::{
 
 use crate::assemble;
 use crate::config::Config;
-use crate::external::{AuthorityAnswer, AuthorityBackend, AuthorityRequest};
+use crate::external::{AuthorityAnswer, AuthorityBackend, AuthorityRequest, DynamicResolverBackend};
 use crate::store::{SessionStore, StoreError, TenantId};
 use crate::tool::{BodyDisposition, EXECUTE_REMEDY_PLAN, FORK, SUBMIT_RESULT, ToolOutcome};
 use crate::types::{OpenError, SdkOptions, ToolSurfaceError};
@@ -56,6 +59,7 @@ pub(crate) struct Core {
     pub(crate) tenant: TenantId,
     pub(crate) session: TrajectoryId,
     pub(crate) authorities: BTreeMap<AuthorityName, AuthorityBackend>,
+    pub(crate) dynamic_resolvers: BTreeMap<DynamicResolverName, DynamicResolverBackend>,
     pub(crate) options: SdkOptions,
     pub(crate) pending_blocks: Vec<PendingBlock>,
     pub(crate) remedy_attempts: BTreeMap<CanonicalDigest, u32>,
@@ -99,6 +103,7 @@ impl Core {
         validate_policy(&config)?;
         let engine = Engine::new(config.registry().clone());
         let authorities = assemble::authority_backends(&config);
+        let dynamic_resolvers = assemble::dynamic_resolver_backends(&config);
         let store = SessionStore::new();
         let tenant = TenantId::new("appa-sdk");
         let session = store.create_session(tenant.clone());
@@ -109,6 +114,7 @@ impl Core {
             tenant,
             session,
             authorities,
+            dynamic_resolvers,
             options,
             pending_blocks: Vec::new(),
             remedy_attempts: BTreeMap::new(),
@@ -155,6 +161,37 @@ impl Core {
         let id = self.next_handle_id;
         self.next_handle_id += 1;
         id
+    }
+
+    /// Resolve every dynamic audience binding once for this proposed call. The returned call owns
+    /// the pinned answers consumed by checks, remedies, dispatch, and admission. A
+    /// missing argument, missing backend, timeout, or malformed answer pins no audience and leaves
+    /// the engine's fail-closed dynamic gap or Unknown output standing.
+    pub(crate) async fn resolve_dynamic_call(&self, call: ResolvedCall) -> ResolvedCall {
+        let Some(contract) = self.engine.registry().tool(call.tool()) else {
+            return call;
+        };
+        let mut resolutions = Vec::new();
+        for binding in dynamic_bindings(contract) {
+            let value = call
+                .arguments()
+                .get(&binding.argument)
+                .and_then(serde_json::Value::as_str);
+            let audience = if let (Some(value), Some(backend)) = (value, self.dynamic_resolvers.get(&binding.resolver))
+            {
+                tokio::time::timeout(
+                    self.options.per_external_timeout,
+                    backend.resolve(&binding.resolver, call.tool(), &binding.argument, value),
+                )
+                .await
+                .ok()
+                .flatten()
+            } else {
+                None
+            };
+            resolutions.push(PinnedDynamicResolution::from_answer(binding, audience));
+        }
+        call.with_dynamic_resolutions(resolutions)
     }
 
     /// Admit one user turn: exactly one `ValueAdmitted` with user provenance at the policy's
@@ -564,6 +601,24 @@ fn validate_policy(config: &Config) -> Result<(), OpenError> {
         }
     }
     Ok(())
+}
+
+/// Every distinct dynamic audience binding one proposed call consumes, in contract order. A
+/// source delta and sink requirement may deliberately share one binding; one proposal resolves it
+/// once and pins that answer for both uses.
+pub(crate) fn dynamic_bindings(contract: &ToolContract) -> Vec<DynamicAudienceBinding> {
+    let mut bindings = Vec::new();
+    if let Some(AudienceDelta::Dynamic(binding)) = contract.delta.as_ref().and_then(|delta| delta.audience.as_ref()) {
+        bindings.push(binding.clone());
+    }
+    for requirement in &contract.requires.label.audience {
+        if let AudienceRequirement::Includes(RecipientSpec::Dynamic(binding)) = requirement
+            && !bindings.contains(binding)
+        {
+            bindings.push(binding.clone());
+        }
+    }
+    bindings
 }
 
 pub(crate) fn turn_end(session: &TrajectoryId) -> Fact {

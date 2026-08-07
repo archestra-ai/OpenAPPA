@@ -426,6 +426,7 @@ mod tests {
                 dispatch: prior,
                 proposed_label: Label::top(),
                 proposed_effects: vec![],
+                dynamic_resolutions: Vec::new(),
             },
         ];
         let stale = Ruling {
@@ -666,7 +667,7 @@ mod tests {
             tags: vec![],
             delta: Some(Delta {
                 trust: None,
-                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")]))),
+                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
             }),
             emits: vec![],
             requires: Requires::default(),

@@ -116,6 +116,8 @@ pub enum Fact {
         dispatch: DispatchId,
         proposed_label: Label,
         proposed_effects: Vec<EffectKind>,
+        #[serde(default)]
+        dynamic_resolutions: Vec<crate::contract::PinnedDynamicResolution>,
     },
     DispatchSucceeded {
         trajectory: TrajectoryId,

@@ -132,7 +132,11 @@ impl SessionInner {
                 .session
                 .as_mut()
                 .ok_or_else(|| "the session is closed".to_string())?;
-            match session.check_call(call.clone()).map_err(|error| error.to_string())? {
+            match self
+                .runtime
+                .block_on(session.check_call(call.clone()))
+                .map_err(|error| error.to_string())?
+            {
                 CallDecision::Allow { handle } => DispatchDecision::Dispatch { handle, call },
                 CallDecision::Block { feedback } => DispatchDecision::Blocked { feedback },
             }

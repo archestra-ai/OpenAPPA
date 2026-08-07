@@ -46,6 +46,39 @@ delta    = {}
 
 Resolution is fresh per call, and pinned within one: the set resolved at a call's check is the set its admission folds. A member added to the directory reaches the next call without a policy reload; removal reaches only future resolutions — a set already resolved stands. `public` is reserved and never a group member; a directory answer containing it is malformed.
 
+### Dynamic resolvers
+
+A dynamic resolver maps one top-level string argument to literal reader IDs. It does not resolve `@group` membership.
+
+```toml
+[[dynamic_resolver]]
+name = "crm-acl"
+resolver = { url = "https://acl.corp/readers", timeout_ms = 5000 }
+
+[[dynamic_resolver]]
+name = "channel-members"
+resolver = { url = "https://chat.corp/readers", timeout_ms = 5000 }
+
+[[tool]]
+name = "lookup_customer"
+parameters = { type = "object", properties = { customer_id = { type = "string" } } }
+delta = { audience = { resolver = "crm-acl", argument = "customer_id" } }
+
+[[tool]]
+name = "send_message"
+parameters = { type = "object", properties = { channel = { type = "string" } } }
+requires = { audience = { includes = { resolver = "channel-members", argument = "channel" } } }
+delta = {}
+```
+
+The tool's parameter schema must declare the argument as a top-level string. Missing and non-string call arguments fail resolution. Answers may contain many readers or none. They may not contain `public` or an `@group`.
+
+Resolution occurs when a proposed call first checks. Its answer remains pinned through rechecks, remedy plans, rulings, dispatch, and admission. A new proposal resolves again. The dispatch record stores the answer. Blocks and rulings store the resulting literal readers.
+
+A failed dynamic `includes` produces an unresolved dynamic-recipient gap. No mandate or remedy plan can clear it. A failed dynamic delta contributes Unknown audience. It acts as identity during narrowing and follows `UNK` after admission.
+
+The endpoint accepts a versioned JSON POST request: `{version:1,resolver,tool,argument,value}`. It returns `{version:1,readers:[...]}`. Non-2xx responses, timeouts, malformed responses, and oversized responses fail closed.
+
 ### Deployment coverage
 
 The deployment declares what it covers when it opens the engine — which tools have enforced execution, where raw results can be withheld, whether child branches are controlled. The policy loader validates the file against that declaration, and a construct that names an engine behavior the deployment cannot perform is a load error naming the missing coverage: a `tool_output` sanitizer with no covered application point, a pending-cast `delta` on a tool whose raw result the model would see anyway, a `[child]` section without child-context control, a `requires` on a provider-run tool. A weaker executor class is not a construct — it loads, and its weakness is the open vector. Writing a policy therefore starts from the deployment's coverage, not from the full feature list. What stays uncovered is an open vector the deployment names explicitly and auditably — nothing is removed or silently degraded.
@@ -59,7 +92,7 @@ A tool contract is typically four lines long. Use this checklist during policy r
 | **`delta` Accuracy** | Tool reads sensitive customer data but declares `delta = {}` or omits `delta`. | Declare explicit restriction, e.g. `delta = { audience = { exactly = ["support"] } }`. | Undermines downstream checks; over-restricting is safe (costs reach, doesn't leak). |
 | **Unannotated Tools** | Omitting `delta` while declaring `requires`. | Use `delta = {}` if output carries no labels, or separate unannotated tools. | Loader refuses `requires` on unannotated tools; unannotated output enters as `Unknown`. |
 | **`effects` Completeness** | Mutation or deployment tool omits `effects`. | Declare all side effects, e.g., `effects = ["migration.applied", "mutation"]`. | Under-declared effects pass `no_prior` checks silently without triggering history constraints. |
-| **Dynamic Recipients** | Static list `includes = ["user@corp"]` when recipient comes from a tool argument. | Use dynamic argument placeholder `includes = ["$recipient"]`. | Static lists pass unauthorized recipient arguments without checking argument values. |
+| **Dynamic Recipients** | Static readers when an ACL depends on an argument. | Use a placeholder for a literal recipient, or a dynamic resolver for an argument-derived reader set. | Static readers can ignore the proposed argument; dynamic resolution pins the ACL answer. |
 | **Combined Read & Release** | Single tool `share_doc(doc, recipient)` fetching and releasing in one step. | Split into `fetch_doc` (read) and `grant_doc_access` (release). | Combined tools force authorities to approve releases before content is fetched. |
 | **Authority Mandates** | Overly permissive mandates like `can_cover_readers = { may_add = ["public"] }`. | Restrict authority `mandate` and `scope.tags` to the minimum necessary desk. | Authorities cannot exceed mandates, but overly broad mandates weaken review gates. |
 | **Hint Accuracy** | A `hint` describing a power the mandate does not hold, or content the sanitizer does not remove. | Restate the declared mandate in your own words: say what the entity covers or strips, and nothing more. | A hint reaches the agent with every plan naming the entity, and grants nothing. A misleading one steers plan choice wrongly and misleads review. |
@@ -90,6 +123,7 @@ delta    = {}                                          # Status string carries n
 - **`delta` is strictly restrictive**: A tool's delta can only narrow the audience or lower trust. Within an annotated `delta`, an omitted dimension defaults to identity.
 - **Pending-cast deltas (`delta = { trust = "unknown" }`)**: Holds a label dimension pending resolution by a registered `[[cast]]` at admission. Declaring both `requires` and `unknown` delta on the same dimension is a load error.
 - **Dynamic argument placeholders (`$arg`)**: `requires.audience = { includes = ["$recipient"] }` evaluates `$recipient` against actual call arguments at runtime. Placeholders are valid only inside `includes`.
+- **Dynamic resolvers**: A `{ resolver = "name", argument = "arg" }` form maps a top-level string argument to literal readers. It is valid as an audience delta or as the value of `includes`.
 - **History checks (`requires.effects`)**: `has` verifies `prior(k)` against appended effects; `has_no` verifies `no_prior(k)` against appended effects plus the reserved emits of dispatches still in flight.
 - **Attention demands (`requires.attention`)**: Forces fresh authority sign-off on *every* call, never satisfied by execution history.
 - **Dual-gate contracts**: When a contract defines both a restrictive `delta` and a `requires` check (e.g., `search_and_share`), the engine evaluates both gates.

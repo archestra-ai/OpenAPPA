@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::authority::{Authority, Cast, CastResolution, CastTarget, Hint, Sanitizer, Transition};
-use crate::contract::ToolContract;
+use crate::contract::{AudienceDelta, ToolContract};
 use crate::label::{Adequacy, Dim, Dimension, Trust};
 use crate::names::{AuthorityName, CastName, SanitizerName};
 use crate::value::ToolName;
@@ -211,6 +211,13 @@ fn worst_case_plan_alternatives(tool: &ToolContract, authorities: &[Authority], 
     let output = tool.output_label();
     let applicable = match tool.pending_cast_dim() {
         Some(_) => 0,
+        None if matches!(
+            tool.delta.as_ref().and_then(|delta| delta.audience.as_ref()),
+            Some(AudienceDelta::Dynamic(_))
+        ) =>
+        {
+            sanitizers.iter().filter(|sanitizer| sanitizer.on.output).count()
+        }
         None => sanitizers
             .iter()
             .filter(|sanitizer| sanitizer.on.output && sanitizer.transition.admits(&output) == Adequacy::Holds)
@@ -375,7 +382,9 @@ fn validate_pending_cast(tool: &ToolContract) -> Result<(), LoadError> {
             Ok(())
         };
     };
-    if matches!(delta.trust, Some(Dim::Unknown)) && matches!(delta.audience, Some(Dim::Unknown)) {
+    if matches!(delta.trust, Some(Dim::Unknown))
+        && matches!(delta.audience, Some(crate::contract::AudienceDelta::PendingCast))
+    {
         return Err(LoadError::DualPendingCast(tool.name.as_str().to_string()));
     }
     match delta.pending_cast_dim() {
@@ -420,8 +429,10 @@ fn check_hint(hint: Option<&Hint>, context: impl Fn() -> String) -> Result<(), L
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authority::SanitizerPoints;
     use crate::authority::{CastCeiling, CastTarget, Mandate, Scope};
-    use crate::contract::{Delta, Requires};
+    use crate::contract::{Delta, DynamicAudienceBinding, Requires};
+    use crate::label::Audience;
     use crate::names::{AuthorityName, MarkName};
 
     fn chain() -> TrustChain {
@@ -561,7 +572,7 @@ mod tests {
         cfg.tools = vec![ToolContract {
             delta: Some(Delta {
                 trust: Some(Dim::Unknown),
-                audience: Some(Dim::Unknown),
+                audience: Some(Dim::Unknown.into()),
             }),
             ..tool("scan")
         }];
@@ -603,7 +614,7 @@ mod tests {
         cfg.tools = vec![ToolContract {
             delta: Some(Delta {
                 trust: None,
-                audience: Some(Dim::Unknown),
+                audience: Some(Dim::Unknown.into()),
             }),
             requires: Requires {
                 label: LabelRequirements {
@@ -726,6 +737,35 @@ mod tests {
         assert!(matches!(
             Registry::build(n_squared_config(9)),
             Err(LoadError::TooManyPlanAlternatives { count: 81, max: 64, .. })
+        ));
+    }
+
+    #[test]
+    fn the_alternative_bound_counts_every_sanitizer_for_a_dynamic_output() {
+        let mut dynamic = tool("lookup");
+        dynamic.delta.as_mut().unwrap().audience = Some(AudienceDelta::Dynamic(DynamicAudienceBinding {
+            resolver: crate::names::DynamicResolverName::new("directory"),
+            argument: "customer".into(),
+        }));
+        let sanitizer = |index| Sanitizer {
+            name: SanitizerName::new(format!("sanitizer-{index}")),
+            on: SanitizerPoints {
+                input: false,
+                output: true,
+            },
+            transition: Transition::Audience {
+                from_includes: Audience::Public,
+                to: Audience::Public,
+            },
+            hint: None,
+        };
+        let mut cfg = base();
+        cfg.tools = vec![dynamic];
+        cfg.sanitizers = (0..16).map(sanitizer).collect();
+        let cap = PlannerCap::new(16).expect("nonzero");
+        assert!(matches!(
+            Registry::build_with_cap(cfg, cap),
+            Err(LoadError::TooManyPlanAlternatives { count: 17, max: 16, .. })
         ));
     }
 

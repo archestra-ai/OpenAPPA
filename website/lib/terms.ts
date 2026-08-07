@@ -30,6 +30,10 @@ const TERMS = {
     "A group: a directory-held reader set, resolved to literal reader IDs by the membership resolver when the engine reads it.",
   "[membership]":
     "The one registration every @name group resolves through. A group mention without it is a load error.",
+  "[[dynamic_resolver]]":
+    "A named external that maps one top-level string tool argument to literal reader IDs for a dynamic audience contract. It is distinct from @group membership resolution.",
+  argument:
+    "In a dynamic audience form, the top-level string tool argument passed to the named dynamic resolver.",
   internal:
     "An example reader for restricted internal data. Reading internal data closes off public destinations.",
   "{public, trusted}":
@@ -77,7 +81,7 @@ const TERMS = {
   to: "In a sanitizer mandate: the exact target label state produced after the transition.",
   constant: "In a cast: every Unknown on the dimension resolves to one declared state.",
   resolver:
-    "The dynamic implementation of a registered external: authority rulings, cast decisions, sanitizer derivations, or membership answers.",
+    "The dynamic implementation of a registered external: authority rulings, cast decisions, sanitizer derivations, membership answers, or argument-to-reader-set answers.",
   may_cast:
     "The ceiling on a cast resolver: the states it is allowed to resolve an Unknown value to.",
   "[child]": "Run configuration for child sub-executions.",

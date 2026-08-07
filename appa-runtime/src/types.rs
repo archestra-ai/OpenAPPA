@@ -14,6 +14,8 @@ pub struct SdkOptions {
     /// in it consultable once. It is spam control on the agent, not a count of denials — a denial
     /// bites by excluding the denying authority's plans, never by shrinking this budget.
     pub max_blocked_proposals_per_call: u32,
+    /// The most one external authority consultation or dynamic resolution may take; a timeout
+    /// fails closed.
     pub per_external_timeout: std::time::Duration,
 }
 

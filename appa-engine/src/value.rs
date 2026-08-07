@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::contract::{DynamicAudienceBinding, PinnedDynamicResolution};
 use crate::label::Label;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -198,6 +199,8 @@ pub struct ResolvedCall {
     tool: ToolName,
     arguments: serde_json::Value,
     arg_refs: Vec<ValueId>,
+    #[serde(skip, default)]
+    dynamic_resolutions: Vec<PinnedDynamicResolution>,
 }
 
 impl ResolvedCall {
@@ -206,6 +209,7 @@ impl ResolvedCall {
             tool,
             arguments,
             arg_refs,
+            dynamic_resolutions: Vec::new(),
         }
     }
 
@@ -219,6 +223,32 @@ impl ResolvedCall {
 
     pub fn arg_refs(&self) -> &[ValueId] {
         &self.arg_refs
+    }
+
+    pub fn with_dynamic_resolutions(mut self, resolutions: Vec<PinnedDynamicResolution>) -> Self {
+        self.dynamic_resolutions.clear();
+        for resolution in resolutions {
+            match self
+                .dynamic_resolutions
+                .iter()
+                .position(|existing| existing.binding() == resolution.binding())
+            {
+                Some(index) => self.dynamic_resolutions[index] = resolution,
+                None => self.dynamic_resolutions.push(resolution),
+            }
+        }
+        self
+    }
+
+    pub fn dynamic_resolutions(&self) -> &[PinnedDynamicResolution] {
+        &self.dynamic_resolutions
+    }
+
+    pub fn dynamic_resolution(&self, binding: &DynamicAudienceBinding) -> Option<&crate::label::Audience> {
+        self.dynamic_resolutions
+            .iter()
+            .find(|resolution| resolution.binding() == binding)
+            .and_then(PinnedDynamicResolution::audience)
     }
 
     pub fn digest(&self) -> CanonicalDigest {
@@ -249,6 +279,24 @@ mod tests {
         let other_tool = ResolvedCall::new(ToolName::new("refund"), json!({ "to": "a" }), vec![]);
         assert_ne!(base.digest(), other_arg.digest());
         assert_ne!(base.digest(), other_tool.digest());
+    }
+
+    #[test]
+    fn dynamic_resolution_does_not_enter_the_call_digest() {
+        let binding = DynamicAudienceBinding {
+            resolver: crate::names::DynamicResolverName::new("directory"),
+            argument: "recipient".into(),
+        };
+        let base = ResolvedCall::new(ToolName::new("send"), json!({ "recipient": "room" }), vec![]);
+        let resolved = base
+            .clone()
+            .with_dynamic_resolutions(vec![PinnedDynamicResolution::from_answer(
+                binding,
+                Some(crate::label::Audience::restricted([crate::label::ReaderId::new(
+                    "alice",
+                )])),
+            )]);
+        assert_eq!(base.digest(), resolved.digest());
     }
 
     #[test]

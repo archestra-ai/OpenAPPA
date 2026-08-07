@@ -223,6 +223,81 @@ delta = {}
 }
 
 #[tokio::test]
+async fn a_dynamic_output_resolves_once_and_its_dispatch_snapshot_governs_admission() {
+    let (resolver_url, requests, server) = spawn_repeating_response(r#"{"version":1,"readers":["internal"]}"#).await;
+    let policy = format!(
+        r#"
+version = 1
+trust_chain = ["trusted"]
+
+[[dynamic_resolver]]
+name = "crm-acl"
+resolver = {{ url = "{resolver_url}" }}
+
+[[tool]]
+name = "lookup"
+parameters = {{ type = "object", properties = {{ customer_id = {{ type = "string" }} }} }}
+delta = {{ audience = {{ resolver = "crm-acl", argument = "customer_id" }} }}
+"#
+    );
+    let mediator = mediator(&policy, &[("lookup", BuiltinTool::Echo("customer record".to_string()))]);
+    let tenant = TenantId::new("tenant");
+    let session = mediator.create_session(tenant.clone());
+    let mut turn = begin(&mediator, &tenant, &session, "look up customer").await;
+    let mut budget = RunBudget::default();
+
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![
+                call("lookup-call", "lookup", r#"{"customer_id":"customer-123"}"#,)
+            ]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    let payload = feedback_payload(&facts(&mediator, &tenant, &session), "lookup-call");
+    let handle = payload["remedy_plans"][0]["plan_id"].as_str().unwrap();
+
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call("accept", EXECUTE_REMEDY_PLAN, &remedy_args(handle))]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    server.abort();
+    assert_eq!(requests.load(Ordering::SeqCst), 1, "recheck reused the pinned answer");
+
+    let log = facts(&mediator, &tenant, &session);
+    let pinned = log.iter().find_map(|fact| match fact {
+        Fact::DispatchOpened {
+            dynamic_resolutions, ..
+        } => Some(dynamic_resolutions),
+        _ => None,
+    });
+    assert_eq!(
+        pinned.unwrap()[0].audience(),
+        Some(&Audience::restricted([ReaderId::new("internal")]))
+    );
+    assert_eq!(
+        tool_values(&log),
+        [(
+            "customer record",
+            &Label::new(
+                Dim::Known(Trust::new(u8::MAX)),
+                Dim::Known(Audience::restricted([ReaderId::new("internal")])),
+            ),
+        )]
+    );
+    turn.stop(StopReason::Cancelled).unwrap();
+}
+
+#[tokio::test]
 async fn a_pending_cast_output_keeps_its_raw_body_confined() {
     let tenant = TenantId::new("tenant");
     let mut budget = RunBudget::default();

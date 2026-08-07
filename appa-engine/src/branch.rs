@@ -1309,6 +1309,7 @@ mod tests {
             dispatch: dispatch.clone(),
             proposed_label: Label::top(),
             proposed_effects: vec![egress.clone()],
+            dynamic_resolutions: Vec::new(),
         });
         log.push(Fact::DispatchClosed {
             trajectory: child(),

@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::contract::PinnedDynamicResolution;
 use crate::fact::{BoundaryKind, CloseOutcome, EffectKind, Fact, ReturnPolicy, Revision};
 use crate::label::{Dim, DimValue, Label};
 use crate::names::{AuthorityName, SanitizerName};
@@ -46,6 +47,7 @@ pub struct Projection {
     forks: Vec<Fork>,
     child_returns: Vec<ReturnedChild>,
     bound_sanitizers: BTreeMap<DispatchId, SanitizerName>,
+    dynamic_resolutions: BTreeMap<DispatchId, Vec<PinnedDynamicResolution>>,
     /// Denied authorities per trajectory scope, keyed by rendered call (the
     /// denial-exclusion consultation). The engine scopes the exclusion "in the trajectory" and is
     /// silent on forks; the settled reading implemented here — a child snapshots its parent's
@@ -71,6 +73,7 @@ impl Projection {
         let mut forks = Vec::new();
         let mut child_returns = Vec::new();
         let mut bound_sanitizers = BTreeMap::new();
+        let mut dynamic_resolutions = BTreeMap::new();
         let mut denials: BTreeMap<TrajectoryId, BTreeMap<CanonicalDigest, BTreeSet<AuthorityName>>> = BTreeMap::new();
 
         for fact in log {
@@ -85,8 +88,12 @@ impl Projection {
                     provenance: provenance.clone(),
                 }),
                 Fact::DispatchOpened {
-                    trajectory, dispatch, ..
+                    trajectory,
+                    dispatch,
+                    dynamic_resolutions: resolutions,
+                    ..
                 } => {
+                    dynamic_resolutions.insert(dispatch.clone(), resolutions.clone());
                     open.insert(dispatch.clone());
                     opened.push(OpenedDispatch {
                         trajectory: trajectory.clone(),
@@ -180,6 +187,7 @@ impl Projection {
             forks,
             child_returns,
             bound_sanitizers,
+            dynamic_resolutions,
             denials,
         }
     }
@@ -222,6 +230,9 @@ pub struct Views<'a> {
 }
 
 impl Views<'_> {
+    pub fn dynamic_resolutions(&self, dispatch: &DispatchId) -> Option<&[PinnedDynamicResolution]> {
+        self.projection.dynamic_resolutions.get(dispatch).map(Vec::as_slice)
+    }
     pub fn revision(&self) -> Revision {
         self.projection.revision
     }
@@ -434,6 +445,7 @@ mod tests {
                 dispatch: dispatch("a"),
                 proposed_label: Label::top(),
                 proposed_effects: vec![egress.clone()],
+                dynamic_resolutions: Vec::new(),
             },
             Fact::DispatchClosed {
                 trajectory: traj("a"),
@@ -457,6 +469,7 @@ mod tests {
                 dispatch: dispatch("a"),
                 proposed_label: Label::top(),
                 proposed_effects: vec![egress.clone()],
+                dynamic_resolutions: Vec::new(),
             },
             Fact::DispatchClosed {
                 trajectory: traj("a"),

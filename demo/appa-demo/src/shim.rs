@@ -40,9 +40,8 @@ pub struct World {
     pub derivations: Arc<Derivations>,
 }
 
-/// Serve the tools — and the session's human-authority resolver — on an
-/// ephemeral loopback port; the task lives with the process. Returns the
-/// bound address.
+/// Serve the tools and session-hosted external resolvers on an ephemeral
+/// loopback port; the task lives with the process. Returns the bound address.
 pub async fn serve(world: World) -> std::io::Result<SocketAddr> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
@@ -50,6 +49,7 @@ pub async fn serve(world: World) -> std::io::Result<SocketAddr> {
         .route("/", post(handle))
         .route("/authority", post(authority))
         .route("/sanitizer/{name}", post(sanitize))
+        .route("/dynamic-resolver", post(dynamic_resolver))
         .with_state(Arc::new(world));
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
@@ -95,6 +95,38 @@ async fn sanitize(
 #[derive(Deserialize)]
 pub struct SanitizerInput {
     pub body: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DynamicResolverRequest {
+    version: u32,
+    resolver: String,
+    tool: String,
+    argument: String,
+    value: String,
+}
+
+async fn dynamic_resolver(
+    axum::Json(request): axum::Json<DynamicResolverRequest>,
+) -> (StatusCode, axum::Json<serde_json::Value>) {
+    if request.version != 1
+        || request.resolver != "email-recipient-readers"
+        || request.tool != "send_email"
+        || request.argument != "to"
+    {
+        return (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({})));
+    }
+
+    let readers = match request.value.as_str() {
+        "ap-review@corp.example" => vec!["cfo@corp.example", "ap-lead@corp.example"],
+        "finance-all@corp.example" => vec!["cfo@corp.example", "ap-lead@corp.example", "controller@corp.example"],
+        recipient => vec![recipient],
+    };
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "version": 1, "readers": readers })),
+    )
 }
 
 pub fn dispatch(world: &World, call: &RenderedCall) -> (StatusCode, String) {
@@ -347,6 +379,48 @@ mod tests {
             std::fs::read_to_string(world.data_root.join("crm/acme-corp.md")).unwrap(),
             "# Acme\n"
         );
+    }
+
+    #[tokio::test]
+    async fn recipient_directory_expands_the_demo_lists() {
+        let resolve = |value: &str| DynamicResolverRequest {
+            version: 1,
+            resolver: "email-recipient-readers".to_string(),
+            tool: "send_email".to_string(),
+            argument: "to".to_string(),
+            value: value.to_string(),
+        };
+
+        let (status, axum::Json(answer)) = dynamic_resolver(axum::Json(resolve("ap-review@corp.example"))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            answer["readers"],
+            serde_json::json!(["cfo@corp.example", "ap-lead@corp.example"])
+        );
+
+        let (status, axum::Json(answer)) = dynamic_resolver(axum::Json(resolve("finance-all@corp.example"))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            answer["readers"],
+            serde_json::json!(["cfo@corp.example", "ap-lead@corp.example", "controller@corp.example"])
+        );
+
+        let (status, axum::Json(answer)) = dynamic_resolver(axum::Json(resolve("person@corp.example"))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(answer["readers"], serde_json::json!(["person@corp.example"]));
+    }
+
+    #[tokio::test]
+    async fn recipient_directory_refuses_unknown_bindings() {
+        let request = DynamicResolverRequest {
+            version: 2,
+            resolver: "email-recipient-readers".to_string(),
+            tool: "send_email".to_string(),
+            argument: "to".to_string(),
+            value: "ap-review@corp.example".to_string(),
+        };
+        let (status, _) = dynamic_resolver(axum::Json(request)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[test]

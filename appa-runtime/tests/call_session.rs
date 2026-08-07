@@ -1,4 +1,6 @@
 
+use std::sync::{Arc, Mutex};
+
 use appa_engine::label::{Audience, Dim, ReaderId, Trust};
 use appa_engine::value::ToolName;
 use appa_runtime::{
@@ -7,6 +9,7 @@ use appa_runtime::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
 
 const SUSPICIOUS: Trust = Trust::new(0);
 
@@ -43,6 +46,245 @@ name = "fetch"
 delta = { audience = { exactly = ["internal"] } }
 "#;
 
+fn tool_schema(name: &str) -> appa_runtime::WireTool {
+    appa_runtime::WireTool {
+        kind: "function".into(),
+        function: appa_runtime::WireToolSchema {
+            name: name.into(),
+            description: None,
+            parameters: None,
+        },
+    }
+}
+
+fn feedback_payload(feedback: &str) -> serde_json::Value {
+    let (_, payload) = feedback
+        .split_once('\n')
+        .expect("feedback carries one JSON payload line");
+    serde_json::from_str(payload).expect("feedback payload is JSON")
+}
+
+fn dynamic_policy(resolver_url: &str) -> String {
+    format!(
+        r#"
+version = 1
+
+[[dynamic_resolver]]
+name = "customer-acl"
+resolver = {{ url = "{resolver_url}", timeout_ms = 2000 }}
+
+[[dynamic_resolver]]
+name = "recipient-members"
+resolver = {{ url = "{resolver_url}", timeout_ms = 2000 }}
+
+[[tool]]
+name = "lookup_customer"
+parameters = {{ type = "object", properties = {{ customer = {{ type = "string" }} }}, required = ["customer"] }}
+delta = {{ audience = {{ resolver = "customer-acl", argument = "customer" }} }}
+
+[[tool]]
+name = "send_message"
+parameters = {{ type = "object", properties = {{ recipient = {{ type = "string" }}, body = {{ type = "string" }} }}, required = ["recipient", "body"] }}
+requires = {{ audience = {{ includes = {{ resolver = "recipient-members", argument = "recipient" }} }} }}
+effects = ["egress"]
+delta = {{}}
+"#
+    )
+}
+
+async fn spawn_dynamic_resolver(
+    responses: Vec<&'static str>,
+) -> (String, Arc<Mutex<Vec<serde_json::Value>>>, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&requests);
+    let server = tokio::spawn(async move {
+        for body in responses {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let mut received = Vec::new();
+            let body_start = loop {
+                let n = socket.read(&mut buf).await.unwrap();
+                assert_ne!(n, 0, "resolver request ended before its body arrived");
+                received.extend_from_slice(&buf[..n]);
+                let Some(header_end) = received.windows(4).position(|window| window == b"\r\n\r\n") else {
+                    continue;
+                };
+                let header = String::from_utf8_lossy(&received[..header_end]).to_lowercase();
+                let content_length = header
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                let body_start = header_end + 4;
+                if received.len() >= body_start + content_length {
+                    break body_start;
+                }
+            };
+            captured
+                .lock()
+                .unwrap()
+                .push(serde_json::from_slice(&received[body_start..]).expect("resolver request is JSON"));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    (format!("http://{addr}/resolve"), requests, server)
+}
+
+#[tokio::test]
+async fn the_sdk_resolves_source_and_sink_audiences_and_pins_the_source_answer() {
+    let (url, requests, server) = spawn_dynamic_resolver(vec![
+        r#"{"version":1,"readers":["finance@example"]}"#,
+        r#"{"version":1,"readers":["finance@example"]}"#,
+        r#"{"version":1,"readers":["external@example"]}"#,
+    ])
+    .await;
+    let mut session = open(&dynamic_policy(&url));
+    session
+        .bind_tools(vec![tool_schema("lookup_customer"), tool_schema("send_message")])
+        .unwrap();
+    session.begin_turn("look up and send the customer record").unwrap();
+
+    let CallDecision::Block { feedback } = session
+        .check_call(call("lookup_customer", serde_json::json!({"customer":"customer-123"})))
+        .await
+        .unwrap()
+    else {
+        panic!("the resolved source audience should surface its narrowing");
+    };
+    assert!(feedback.contains("remedy-0"));
+    assert_eq!(requests.lock().unwrap().len(), 1);
+
+    session.begin_round().unwrap();
+    let RemedyDecision::Authorized { handle, .. } = session.resolve_remedy(Some("remedy-0")).await.unwrap() else {
+        panic!("the informed acceptance should authorize the source read");
+    };
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "the remedy reused the pinned source answer"
+    );
+    let result = session.report_outcome(handle, ok_body("customer record")).unwrap();
+    assert!(matches!(
+        result,
+        AdmittedResult::Admitted { label, .. }
+            if label.audience == Dim::Known(Audience::restricted([ReaderId::new("finance@example")]))
+    ));
+
+    let CallDecision::Allow { handle } = session
+        .check_call(call(
+            "send_message",
+            serde_json::json!({"recipient":"finance-list","body":"customer record"}),
+        ))
+        .await
+        .unwrap()
+    else {
+        panic!("the source audience covers the resolved authorized recipient");
+    };
+    session
+        .report_outcome(
+            handle,
+            ToolOutcome::Success {
+                body: BodyDisposition::Unavailable,
+            },
+        )
+        .unwrap();
+
+    let CallDecision::Block { feedback } = session
+        .check_call(call(
+            "send_message",
+            serde_json::json!({"recipient":"outside-list","body":"customer record"}),
+        ))
+        .await
+        .unwrap()
+    else {
+        panic!("the source audience must not cover an unauthorized recipient");
+    };
+    assert!(
+        feedback_payload(&feedback)["remedy_plans"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    session.end_turn().unwrap();
+    server.await.unwrap();
+
+    assert_eq!(
+        *requests.lock().unwrap(),
+        vec![
+            serde_json::json!({
+                "version": 1,
+                "resolver": "customer-acl",
+                "tool": "lookup_customer",
+                "argument": "customer",
+                "value": "customer-123",
+            }),
+            serde_json::json!({
+                "version": 1,
+                "resolver": "recipient-members",
+                "tool": "send_message",
+                "argument": "recipient",
+                "value": "finance-list",
+            }),
+            serde_json::json!({
+                "version": 1,
+                "resolver": "recipient-members",
+                "tool": "send_message",
+                "argument": "recipient",
+                "value": "outside-list",
+            }),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_failed_sdk_source_resolution_leaves_later_egress_blocked() {
+    let (url, _, server) = spawn_dynamic_resolver(vec![
+        r#"{"version":1,"readers":["@malformed"]}"#,
+        r#"{"version":1,"readers":["external@example"]}"#,
+    ])
+    .await;
+    let mut session = open(&dynamic_policy(&url));
+    session
+        .bind_tools(vec![tool_schema("lookup_customer"), tool_schema("send_message")])
+        .unwrap();
+    session.begin_turn("look up and send the customer record").unwrap();
+
+    let CallDecision::Allow { handle } = session
+        .check_call(call("lookup_customer", serde_json::json!({"customer":"customer-123"})))
+        .await
+        .unwrap()
+    else {
+        panic!("an unresolved source delta is identity for the narrowing check");
+    };
+    let result = session.report_outcome(handle, ok_body("customer record")).unwrap();
+    assert!(matches!(
+        result,
+        AdmittedResult::Admitted { label, .. } if label.audience == Dim::Unknown
+    ));
+
+    let CallDecision::Block { feedback } = session
+        .check_call(call(
+            "send_message",
+            serde_json::json!({"recipient":"outside-list","body":"customer record"}),
+        ))
+        .await
+        .unwrap()
+    else {
+        panic!("a later audience-consuming egress must block on the unresolved source");
+    };
+    let payload = feedback_payload(&feedback);
+    assert_eq!(payload["unestablished"].as_array().unwrap().len(), 1);
+    assert!(payload["remedy_plans"].as_array().unwrap().is_empty());
+    session.end_turn().unwrap();
+    server.await.unwrap();
+}
+
 #[tokio::test]
 async fn a_same_completion_narrowing_acceptance_is_refused_until_the_next_round() {
     let mut session = open(NARROWING_POLICY);
@@ -58,7 +300,8 @@ async fn a_same_completion_narrowing_acceptance_is_refused_until_the_next_round(
         .unwrap();
     session.begin_turn("fetch it").unwrap();
 
-    let CallDecision::Block { feedback } = session.check_call(call("fetch", serde_json::json!({}))).unwrap() else {
+    let CallDecision::Block { feedback } = session.check_call(call("fetch", serde_json::json!({}))).await.unwrap()
+    else {
         panic!("the narrowing fetch should soft-block");
     };
     assert!(feedback.contains("remedy-0"));
@@ -156,7 +399,8 @@ async fn an_allowed_call_is_checked_executed_and_reported() {
         .unwrap();
     session.begin_turn("look it up").unwrap();
 
-    let CallDecision::Allow { handle } = session.check_call(call("lookup", serde_json::json!({}))).unwrap() else {
+    let CallDecision::Allow { handle } = session.check_call(call("lookup", serde_json::json!({}))).await.unwrap()
+    else {
         panic!("expected Allow");
     };
     assert_eq!(handle.occurrence(), 0);
@@ -173,7 +417,10 @@ async fn the_injection_ladder_blocks_the_email_when_the_authority_denies() {
     let mut session = open(&ladder_policy(&url));
     session.begin_turn("check the forum and act").unwrap();
 
-    let CallDecision::Block { feedback } = session.check_call(call("read_forum", serde_json::json!({}))).unwrap()
+    let CallDecision::Block { feedback } = session
+        .check_call(call("read_forum", serde_json::json!({})))
+        .await
+        .unwrap()
     else {
         panic!("forum read should soft-block");
     };
@@ -193,7 +440,11 @@ async fn the_injection_ladder_blocks_the_email_when_the_authority_denies() {
         .unwrap();
     assert!(matches!(&result, AdmittedResult::Admitted { label, .. } if label.trust == Dim::Known(SUSPICIOUS)));
 
-    let CallDecision::Block { .. } = session.check_call(call("read_hr", serde_json::json!({}))).unwrap() else {
+    let CallDecision::Block { .. } = session
+        .check_call(call("read_hr", serde_json::json!({})))
+        .await
+        .unwrap()
+    else {
         panic!("hr read should soft-block");
     };
     session.begin_round().unwrap();
@@ -209,6 +460,7 @@ async fn the_injection_ladder_blocks_the_email_when_the_authority_denies() {
 
     let CallDecision::Block { feedback } = session
         .check_call(call("send_email", serde_json::json!({"to":"evil@x","body":"ssn"})))
+        .await
         .unwrap()
     else {
         panic!("send_email should block");
@@ -227,7 +479,11 @@ async fn a_no_answer_consult_keeps_the_offer_executable_in_the_sdk() {
     let mut session = open(&ladder_policy(&url));
     session.begin_turn("read the forum, then send").unwrap();
 
-    let CallDecision::Block { .. } = session.check_call(call("read_forum", serde_json::json!({}))).unwrap() else {
+    let CallDecision::Block { .. } = session
+        .check_call(call("read_forum", serde_json::json!({})))
+        .await
+        .unwrap()
+    else {
         panic!("forum read should soft-block");
     };
     session.begin_round().unwrap();
@@ -238,6 +494,7 @@ async fn a_no_answer_consult_keeps_the_offer_executable_in_the_sdk() {
 
     let CallDecision::Block { feedback } = session
         .check_call(call("send_email", serde_json::json!({"to":"hr@corp"})))
+        .await
         .unwrap()
     else {
         panic!("send_email should block");
@@ -262,11 +519,12 @@ async fn a_no_answer_consult_keeps_the_offer_executable_in_the_sdk() {
 async fn the_in_flight_guard_refuses_a_second_check_before_report() {
     let mut session = open(LOOKUP_POLICY);
     session.begin_turn("look").unwrap();
-    let CallDecision::Allow { handle } = session.check_call(call("lookup", serde_json::json!({}))).unwrap() else {
+    let CallDecision::Allow { handle } = session.check_call(call("lookup", serde_json::json!({}))).await.unwrap()
+    else {
         panic!("expected Allow");
     };
     assert!(matches!(
-        session.check_call(call("lookup", serde_json::json!({}))),
+        session.check_call(call("lookup", serde_json::json!({}))).await,
         Err(CallError::CallOutstanding)
     ));
     assert!(matches!(session.end_turn(), Err(CallError::CallOutstanding)));
@@ -281,7 +539,7 @@ async fn the_run_lease_refuses_a_second_concurrent_turn() {
     assert!(matches!(session.begin_turn("second"), Err(CallError::TurnActive)));
     session.end_turn().unwrap();
     assert!(matches!(
-        session.check_call(call("lookup", serde_json::json!({}))),
+        session.check_call(call("lookup", serde_json::json!({}))).await,
         Err(CallError::NoTurn)
     ));
 }
@@ -290,12 +548,14 @@ async fn the_run_lease_refuses_a_second_concurrent_turn() {
 async fn repeated_identical_calls_are_distinct_occurrences() {
     let mut session = open(LOOKUP_POLICY);
     session.begin_turn("twice").unwrap();
-    let CallDecision::Allow { handle } = session.check_call(call("lookup", serde_json::json!({}))).unwrap() else {
+    let CallDecision::Allow { handle } = session.check_call(call("lookup", serde_json::json!({}))).await.unwrap()
+    else {
         panic!();
     };
     assert_eq!(handle.occurrence(), 0);
     session.report_outcome(handle, ok_body("one")).unwrap();
-    let CallDecision::Allow { handle } = session.check_call(call("lookup", serde_json::json!({}))).unwrap() else {
+    let CallDecision::Allow { handle } = session.check_call(call("lookup", serde_json::json!({}))).await.unwrap()
+    else {
         panic!();
     };
     assert_eq!(handle.occurrence(), 1);
@@ -319,7 +579,7 @@ delta = {}
 "#,
     );
     session.begin_turn("send once").unwrap();
-    let CallDecision::Allow { handle } = session.check_call(call("send", serde_json::json!({}))).unwrap() else {
+    let CallDecision::Allow { handle } = session.check_call(call("send", serde_json::json!({}))).await.unwrap() else {
         panic!("send should be allowed")
     };
     let result = session
@@ -332,7 +592,9 @@ delta = {}
         .unwrap();
     assert!(matches!(result, AdmittedResult::Sealed { .. }));
     assert!(matches!(
-        session.check_call(call("before_send_only", serde_json::json!({}))),
+        session
+            .check_call(call("before_send_only", serde_json::json!({})))
+            .await,
         Ok(CallDecision::Block { .. })
     ));
 }
@@ -374,12 +636,13 @@ implementation = { builtin = "approve" }
         .unwrap();
     session.begin_turn("go").unwrap();
 
-    let CallDecision::Allow { handle } = session.check_call(call("scan", serde_json::json!({}))).unwrap() else {
+    let CallDecision::Allow { handle } = session.check_call(call("scan", serde_json::json!({}))).await.unwrap() else {
         panic!("expected Allow for the unannotated read");
     };
     session.report_outcome(handle, ok_body("mail body")).unwrap();
 
-    let CallDecision::Block { feedback } = session.check_call(call("vault", serde_json::json!({}))).unwrap() else {
+    let CallDecision::Block { feedback } = session.check_call(call("vault", serde_json::json!({}))).await.unwrap()
+    else {
         panic!("expected a block naming the unestablished value");
     };
     let (_, json) = feedback.split_once('\n').expect("a prose lead then the payload line");

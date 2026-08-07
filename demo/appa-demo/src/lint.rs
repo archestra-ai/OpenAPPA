@@ -1,4 +1,4 @@
-//! The demo box's own gate on submitted policies: builtin implementations only.
+//! The demo box's own gate on submitted policies: service-hosted implementations only.
 
 use std::collections::BTreeSet;
 
@@ -9,7 +9,7 @@ use appa_runtime::config::{AuthorityImpl, CastImpl, ConfigError, SanitizerImpl};
 use appa_runtime::external::BuiltinSanitizer;
 
 use crate::params::InjectError;
-use crate::world::merge_policy;
+use crate::world::{DYNAMIC_RESOLVER_PLACEHOLDER, merge_policy};
 
 /// Why a submitted policy was refused. `Load` carries the real loader's own
 /// message — it goes to the editor verbatim.
@@ -20,7 +20,7 @@ pub enum PolicyError {
     #[error("{0}")]
     Load(#[from] ConfigError),
     #[error(
-        "the demo runs builtin implementations only: {kind} {name:?} names an HTTP endpoint, \
+        "the demo runs service-hosted implementations only: {kind} {name:?} names an HTTP endpoint, \
          which this box will not call on a visitor's behalf"
     )]
     NonBuiltinImplementation { kind: &'static str, name: String },
@@ -54,6 +54,14 @@ pub fn check_policy(policy: &str, enabled: &BTreeSet<System>) -> Result<CheckedP
             return Err(PolicyError::NonBuiltinImplementation {
                 kind: "tool",
                 name: tool.name.as_str().to_string(),
+            });
+        }
+    }
+    for (name, implementation) in config.dynamic_resolvers() {
+        if implementation.url != DYNAMIC_RESOLVER_PLACEHOLDER {
+            return Err(PolicyError::NonBuiltinImplementation {
+                kind: "dynamic resolver",
+                name: name.as_str().to_string(),
             });
         }
     }
@@ -109,6 +117,9 @@ mod tests {
     use super::*;
 
     use appa_engine::authority::Transition;
+    use appa_engine::contract::{AudienceDelta, AudienceRequirement, RecipientSpec};
+    use appa_engine::label::{Audience, ReaderId};
+    use appa_engine::value::ToolName;
 
     fn systems(list: &str) -> BTreeSet<System> {
         list.split(',')
@@ -123,6 +134,36 @@ mod tests {
         assert_eq!(checked.tool_count, 8);
         assert!(checked.dropped.is_empty(), "the preset only names available tools");
         assert!(checked.defaulted.is_empty(), "the preset contracts every tool");
+        let dynamic_resolvers = checked.config.dynamic_resolvers();
+        assert_eq!(dynamic_resolvers.len(), 1);
+        assert!(
+            dynamic_resolvers
+                .values()
+                .all(|implementation| implementation.url == DYNAMIC_RESOLVER_PLACEHOLDER)
+        );
+        let invoices = checked
+            .config
+            .registry()
+            .tool(&ToolName::new("list_invoices"))
+            .expect("the finance system provides list_invoices");
+        assert!(matches!(
+            invoices.delta.as_ref().and_then(|delta| delta.audience.as_ref()),
+            Some(AudienceDelta::Static(audience))
+                if *audience == Audience::restricted([
+                    ReaderId::new("cfo@corp.example"),
+                    ReaderId::new("ap-lead@corp.example"),
+                ])
+        ));
+        let email = checked
+            .config
+            .registry()
+            .tool(&ToolName::new("send_email"))
+            .expect("the email system provides send_email");
+        assert!(matches!(
+            email.requires.label.audience.as_slice(),
+            [AudienceRequirement::Includes(RecipientSpec::Dynamic(binding))]
+                if binding.resolver.as_str() == "email-recipient-readers" && binding.argument == "to"
+        ));
         let sanitizers = &checked.config.registry_config().sanitizers;
         assert_eq!(sanitizers.len(), 1);
         assert!(sanitizers.iter().all(|sanitizer| sanitizer.hint.is_some()));
@@ -202,6 +243,36 @@ implementation = { resolver = { url = "http://10.0.0.1/exfil" } }
         .unwrap_err();
         assert!(
             matches!(error, PolicyError::NonBuiltinImplementation { kind: "authority", .. }),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn visitor_dynamic_resolver_is_refused() {
+        let error = check_policy(
+            r#"
+version = 1
+
+[[dynamic_resolver]]
+name = "directory"
+resolver = { url = "http://169.254.169.254/readers" }
+
+[[tool]]
+name = "send_email"
+requires = { audience = { includes = { resolver = "directory", argument = "to" } } }
+delta = {}
+"#,
+            &systems("email"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PolicyError::NonBuiltinImplementation {
+                    kind: "dynamic resolver",
+                    ..
+                }
+            ),
             "got: {error}"
         );
     }

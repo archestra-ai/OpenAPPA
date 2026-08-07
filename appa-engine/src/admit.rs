@@ -148,14 +148,21 @@ fn validate_cast_resolution(
     Ok(())
 }
 
-/// The output label with exactly the pending dimension filled by the resolution; the established
-/// one is preserved untouched.
-pub(crate) fn cast_filled_label(contract: &crate::contract::ToolContract, resolved: &DimValue) -> Label {
-    let output = contract.output_label();
+fn cast_filled_output_label(output: Label, resolved: &DimValue) -> Label {
     match resolved {
         DimValue::Trust(t) => Label::new(Dim::Known(*t), output.audience),
         DimValue::Audience(a) => Label::new(output.trust, Dim::Known(a.clone())),
     }
+}
+
+pub(crate) fn cast_filled_dispatch_label(
+    contract: &crate::contract::ToolContract,
+    views: &Views,
+    dispatch: &DispatchId,
+    resolved: &DimValue,
+) -> Label {
+    let output = contract.output_label_for_resolutions(views.dynamic_resolutions(dispatch).unwrap_or_default());
+    cast_filled_output_label(output, resolved)
 }
 
 pub struct CastAnswer {
@@ -206,6 +213,8 @@ pub(crate) fn admit_result(
     }
 
     let trajectory = views.trajectory().clone();
+    let output_label =
+        || contract.output_label_for_resolutions(views.dynamic_resolutions(dispatch).unwrap_or_default());
     let close_success = || Fact::DispatchClosed {
         trajectory: trajectory.clone(),
         dispatch: dispatch.clone(),
@@ -246,11 +255,11 @@ pub(crate) fn admit_result(
             if contract.pending_cast_dim().is_some() {
                 return Err(AdmitError::OutputPendingCast);
             }
-            vec![close_success(), admit_value(contract.output_label(), body)]
+            vec![close_success(), admit_value(output_label(), body)]
         }
         ResultAdmission::SuccessCast { body, cast, resolved } => {
             validate_cast_resolution(registry, contract, &cast, &resolved)?;
-            let label = cast_filled_label(contract, &resolved);
+            let label = cast_filled_output_label(output_label(), &resolved);
             if pending_cast_narrowing(views, &label).is_some() {
                 return Err(AdmitError::NarrowingUnaccepted);
             }
@@ -275,7 +284,7 @@ pub(crate) fn admit_result(
             accepted,
         } => {
             validate_cast_resolution(registry, contract, &cast, &resolved)?;
-            let label = cast_filled_label(contract, &resolved);
+            let label = cast_filled_output_label(output_label(), &resolved);
             if pending_cast_narrowing(views, &label) != Some(accepted.clone()) {
                 return Err(AdmitError::AcceptanceMismatch);
             }
@@ -311,7 +320,7 @@ pub(crate) fn admit_result(
             let registered = registry
                 .sanitizer(&sanitizer)
                 .ok_or_else(|| AdmitError::UnknownTool(sanitizer.as_str().to_string()))?;
-            let raw_label = contract.output_label();
+            let raw_label = output_label();
             if !registered.on.output || registered.transition.admits(&raw_label) != Adequacy::Holds {
                 return Err(AdmitError::SanitizerTransitionUnmet);
             }
@@ -398,7 +407,7 @@ pub(crate) fn admit_cast(
 mod tests {
     use super::*;
     use crate::authority::{Cast, CastCeiling, Sanitizer, SanitizerPoints, Transition};
-    use crate::contract::{Delta, ToolContract};
+    use crate::contract::{AudienceDelta, Delta, DynamicAudienceBinding, PinnedDynamicResolution, ToolContract};
     use crate::fact::{EffectKind, Revision};
     use crate::label::{Audience, Dim, Dimension, ReaderId, Trust};
     use crate::projection::Projection;
@@ -412,6 +421,13 @@ mod tests {
         Audience::restricted([ReaderId::new("internal")])
     }
 
+    fn dynamic_binding() -> DynamicAudienceBinding {
+        DynamicAudienceBinding {
+            resolver: crate::names::DynamicResolverName::new("directory"),
+            argument: "room".into(),
+        }
+    }
+
     fn traj() -> TrajectoryId {
         TrajectoryId::new("t")
     }
@@ -422,7 +438,7 @@ mod tests {
             tags: vec![],
             delta: Some(Delta {
                 trust: Some(Dim::Known(SUSPICIOUS)),
-                audience: Some(Dim::Known(internal())),
+                audience: Some(Dim::Known(internal()).into()),
             }),
             emits: vec![EffectKind::new("read")],
             requires: Default::default(),
@@ -473,7 +489,7 @@ mod tests {
             tags: vec![],
             delta: Some(Delta {
                 trust: Some(Dim::Unknown),
-                audience: Some(Dim::Known(internal())),
+                audience: Some(Dim::Known(internal()).into()),
             }),
             emits: vec![EffectKind::new("read")],
             requires: Default::default(),
@@ -483,14 +499,24 @@ mod tests {
             tags: vec![],
             delta: Some(Delta {
                 trust: Some(Dim::Known(SUSPICIOUS)),
-                audience: Some(Dim::Unknown),
+                audience: Some(Dim::Unknown.into()),
+            }),
+            emits: vec![EffectKind::new("read")],
+            requires: Default::default(),
+        };
+        let dynamic_scan = ToolContract {
+            name: ToolName::new("dynamic_scan"),
+            tags: vec![],
+            delta: Some(Delta {
+                trust: Some(Dim::Unknown),
+                audience: Some(AudienceDelta::Dynamic(dynamic_binding())),
             }),
             emits: vec![EffectKind::new("read")],
             requires: Default::default(),
         };
         Registry::build(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![get, scan, poll],
+            tools: vec![get, scan, poll, dynamic_scan],
             authorities: vec![],
             sanitizers: vec![out_san, finance_san],
             casts: vec![const_cast, audience_cast, resolver_cast],
@@ -513,6 +539,7 @@ mod tests {
             dispatch: dispatch.clone(),
             proposed_label: Label::top(),
             proposed_effects: vec![EffectKind::new("read")],
+            dynamic_resolutions: Vec::new(),
         }];
         (log, dispatch)
     }
@@ -799,6 +826,78 @@ mod tests {
             Fact::ValueAdmitted { value, .. } => {
                 assert_eq!(value.label.trust, Dim::Known(SUSPICIOUS));
                 assert_eq!(value.label.audience, Dim::Known(internal()));
+            }
+            other => panic!("expected ValueAdmitted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_dynamic_audience_survives_trust_cast_acceptance_and_admission() {
+        let reg = registry();
+        let binding = dynamic_binding();
+        let call = ResolvedCall::new(ToolName::new("dynamic_scan"), json!({ "room": "internal" }), vec![])
+            .with_dynamic_resolutions(vec![PinnedDynamicResolution::from_answer(
+                binding.clone(),
+                Some(Audience::restricted([ReaderId::new("finance")])),
+            )]);
+        let dispatch = DispatchId::new(traj(), call.digest(), 0);
+        let log = vec![Fact::DispatchOpened {
+            trajectory: traj(),
+            dispatch: dispatch.clone(),
+            proposed_label: Label::top(),
+            proposed_effects: vec![EffectKind::new("read")],
+            dynamic_resolutions: vec![PinnedDynamicResolution::from_answer(binding, Some(internal()))],
+        }];
+        let projection = views_of(&log);
+        let trajectory = traj();
+        let views = projection.view(&trajectory);
+        let expected = Narrowing {
+            from: Label::top(),
+            to: Label::new(Dim::Known(SUSPICIOUS), Dim::Known(internal())),
+        };
+        assert_eq!(
+            pending_cast_narrowing(
+                &views,
+                &cast_filled_dispatch_label(
+                    reg.tool(call.tool()).unwrap(),
+                    &views,
+                    &dispatch,
+                    &DimValue::Trust(SUSPICIOUS),
+                ),
+            ),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            admit_result(
+                &reg,
+                &views,
+                &dispatch,
+                &call,
+                ResultAdmission::SuccessCast {
+                    body: ValueBody::new("scan"),
+                    cast: CastName::new("paranoid"),
+                    resolved: DimValue::Trust(SUSPICIOUS),
+                },
+            ),
+            Err(AdmitError::NarrowingUnaccepted)
+        );
+
+        let batch = admit_result(
+            &reg,
+            &views,
+            &dispatch,
+            &call,
+            ResultAdmission::SuccessCastAccepted {
+                body: ValueBody::new("scan"),
+                cast: CastName::new("paranoid"),
+                resolved: DimValue::Trust(SUSPICIOUS),
+                accepted: expected,
+            },
+        )
+        .unwrap();
+        match batch.facts.last().unwrap() {
+            Fact::ValueAdmitted { value, .. } => {
+                assert_eq!(value.label, Label::new(Dim::Known(SUSPICIOUS), Dim::Known(internal())));
             }
             other => panic!("expected ValueAdmitted, got {other:?}"),
         }

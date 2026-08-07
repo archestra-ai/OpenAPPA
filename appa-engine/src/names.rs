@@ -31,6 +31,9 @@ name_newtype!(
     CastName
 );
 name_newtype!(
+    DynamicResolverName
+);
+name_newtype!(
     MarkName
 );
 name_newtype!(

@@ -6,6 +6,10 @@ use crate::systems::System;
 
 use crate::params::{InjectError, tool_parameters};
 
+/// The only dynamic-resolver URL a visitor policy may name. Session creation
+/// replaces it with the session's loopback endpoint after the SSRF lint.
+pub const DYNAMIC_RESOLVER_PLACEHOLDER: &str = "http://demo.invalid/dynamic-resolver";
+
 pub fn system_tools(system: System) -> Vec<String> {
     system.tools().iter().map(|tool| tool.to_string()).collect()
 }
@@ -100,15 +104,17 @@ pub fn merge_policy(policy: &str, enabled: &BTreeSet<System>) -> Result<MergedPo
 pub struct Rebound {
     pub authorities: usize,
     pub sanitizers: usize,
+    pub dynamic_resolvers: usize,
 }
 
-/// Replace the two reserved builtins the harness is meant to host with this session's own
-/// endpoints: `hitl` authorities with the approval desk, `hosted` sanitizers with the derivation
-/// endpoint.
+/// Replace the implementations the harness hosts with this session's own endpoints: `hitl`
+/// authorities with the approval desk, `hosted` sanitizers with the derivation endpoint, and the
+/// reserved dynamic-resolver placeholder with the directory endpoint.
 pub fn bind_hosted(
     merged_toml: &str,
     authority_url: &str,
     sanitizer_base: &str,
+    dynamic_resolver_url: &str,
 ) -> Result<(String, Rebound), toml::de::Error> {
     let mut value: toml::Value = toml::from_str(merged_toml)?;
     let mut rebound = Rebound::default();
@@ -163,6 +169,22 @@ pub fn bind_hosted(
                 resolver(format!("{sanitizer_base}/{name}"), DERIVATION_MS),
             );
             rebound.sanitizers += 1;
+        }
+    }
+
+    if let Some(resolvers) = value.get_mut("dynamic_resolver").and_then(|list| list.as_array_mut()) {
+        for dynamic_resolver in resolvers {
+            let Some(url) = dynamic_resolver
+                .get_mut("resolver")
+                .and_then(|resolver| resolver.get_mut("url"))
+            else {
+                continue;
+            };
+            if url.as_str() != Some(DYNAMIC_RESOLVER_PLACEHOLDER) {
+                continue;
+            }
+            *url = toml::Value::String(dynamic_resolver_url.to_string());
+            rebound.dynamic_resolvers += 1;
         }
     }
 
@@ -256,6 +278,10 @@ delta = {}
     fn only_the_harness_hosted_builtins_are_rebound() {
         let policy = r#"
 version = 1
+[[dynamic_resolver]]
+name = "directory"
+resolver = { url = "http://demo.invalid/dynamic-resolver", timeout_ms = 5000 }
+
 [[authority]]
 name = "treasurer"
 mandate.attends = ["human-approval"]
@@ -282,16 +308,24 @@ implementation.builtin = "redact-numbers"
             policy,
             "http://127.0.0.1:5555/authority",
             "http://127.0.0.1:5555/sanitizer",
+            "http://127.0.0.1:5555/dynamic-resolver",
         )
         .unwrap();
         assert_eq!(
             rebound,
             Rebound {
                 authorities: 1,
-                sanitizers: 1
+                sanitizers: 1,
+                dynamic_resolvers: 1,
             }
         );
         let value: toml::Value = toml::from_str(&bound).unwrap();
+
+        let dynamic_resolvers = value["dynamic_resolver"].as_array().unwrap();
+        assert_eq!(
+            dynamic_resolvers[0]["resolver"]["url"].as_str(),
+            Some("http://127.0.0.1:5555/dynamic-resolver")
+        );
 
         let authorities = value["authority"].as_array().unwrap();
         assert_eq!(

@@ -1,5 +1,5 @@
-//! External decision backends: authorities, sanitizers, and casts — the outer layer's
-//! trusted base of dynamic judgment, invoked south of the engine.
+//! External decision backends: authorities, sanitizers, casts, and dynamic audience resolvers —
+//! the outer layer's trusted base of dynamic judgment, invoked south of the engine.
 
 use std::time::Duration;
 
@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use appa_engine::check::Gap;
 use appa_engine::execute::{AuthorityReview, ReviewedRef};
 use appa_engine::label::{Audience, DimValue, Label, ReaderId};
-use appa_engine::names::AuthorityName;
+use appa_engine::names::{AuthorityName, DynamicResolverName};
 use appa_engine::projection::Views;
 use appa_engine::registry::TrustChain;
 use appa_engine::value::{CanonicalDigest, ResolvedCall, ToolName, ValueId};
@@ -351,6 +351,62 @@ fn parse_readers(readers: &[String]) -> Option<Audience> {
     Some(Audience::restricted(readers.iter().map(ReaderId::new)))
 }
 
+// --- dynamic audience resolvers ------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub enum DynamicResolverBackend {
+    Http {
+        url: String,
+        timeout: Duration,
+        client: HttpClient,
+    },
+}
+
+#[derive(Serialize)]
+struct DynamicResolverRequest<'a> {
+    version: u32,
+    resolver: &'a DynamicResolverName,
+    tool: &'a ToolName,
+    argument: &'a str,
+    value: &'a str,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DynamicResolverWire {
+    version: u32,
+    readers: Vec<String>,
+}
+
+impl DynamicResolverBackend {
+    pub async fn resolve(
+        &self,
+        resolver: &DynamicResolverName,
+        tool: &ToolName,
+        argument: &str,
+        value: &str,
+    ) -> Option<Audience> {
+        let request = DynamicResolverRequest {
+            version: 1,
+            resolver,
+            tool,
+            argument,
+            value,
+        };
+        let DynamicResolverBackend::Http { url, timeout, client } = self;
+        let wire = post_json::<DynamicResolverWire>(client, url, *timeout, &request).await?;
+        if wire.version != 1
+            || wire
+                .readers
+                .iter()
+                .any(|reader| reader == "public" || reader.starts_with('@'))
+        {
+            return None;
+        }
+        Some(Audience::restricted(wire.readers.into_iter().map(ReaderId::new)))
+    }
+}
+
 // --- shared HTTP ---------------------------------------------------------------
 
 const RESOLVER_BODY_CAP: usize = 64 * 1024;
@@ -529,6 +585,69 @@ mod tests {
         };
         assert_eq!(backend.rule(&authority_request()).await, AuthorityAnswer::Abstain);
         handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dynamic_resolver_sends_the_versioned_binding_and_accepts_literal_readers() {
+        let (addr, handle) = spawn_server("200 OK", r#"{"version":1,"readers":["alice","bob"]}"#).await;
+        let backend = DynamicResolverBackend::Http {
+            url: format!("http://{addr}/readers"),
+            timeout: Duration::from_secs(5),
+            client: HttpClient::new(),
+        };
+        assert_eq!(
+            backend
+                .resolve(
+                    &DynamicResolverName::new("crm-acl"),
+                    &ToolName::new("lookup"),
+                    "customer_id",
+                    "customer-123",
+                )
+                .await,
+            Some(Audience::restricted([ReaderId::new("alice"), ReaderId::new("bob")]))
+        );
+        let request = handle.await.unwrap();
+        let body = request.split("\r\n\r\n").nth(1).expect("request has a body");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(body).unwrap(),
+            serde_json::json!({
+                "version": 1,
+                "resolver": "crm-acl",
+                "tool": "lookup",
+                "argument": "customer_id",
+                "value": "customer-123",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_resolver_accepts_empty_readers_and_rejects_non_literal_answers() {
+        for (body, expected) in [
+            (r#"{"version":1,"readers":[]}"#, Some(Audience::restricted([]))),
+            (r#"{"version":2,"readers":["alice"]}"#, None),
+            (r#"{"version":1,"readers":["public"]}"#, None),
+            (r#"{"version":1,"readers":["@support"]}"#, None),
+            (r#"{"version":1,"readers":"alice"}"#, None),
+        ] {
+            let (addr, handle) = spawn_server("200 OK", body).await;
+            let backend = DynamicResolverBackend::Http {
+                url: format!("http://{addr}/readers"),
+                timeout: Duration::from_secs(5),
+                client: HttpClient::new(),
+            };
+            assert_eq!(
+                backend
+                    .resolve(
+                        &DynamicResolverName::new("directory"),
+                        &ToolName::new("lookup"),
+                        "id",
+                        "123",
+                    )
+                    .await,
+                expected
+            );
+            handle.await.unwrap();
+        }
     }
 
     #[tokio::test]

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec, ToolContract};
 use crate::fact::EffectKind;
 use crate::label::{Adequacy, Audience, Dim, Dimension, Label, ReaderId, Trust};
-use crate::names::MarkName;
+use crate::names::{DynamicResolverName, MarkName};
 use crate::projection::Views;
 use crate::value::{ResolvedCall, ValueId};
 
@@ -21,6 +21,10 @@ pub struct UnestablishedFact {
 pub enum Gap {
     TrustFloor { required: Trust, actual: Trust },
     Includes { recipients: Audience },
+    UnresolvedDynamicRecipient {
+        resolver: DynamicResolverName,
+        argument: String,
+    },
     Cap { cap: Audience },
     Prior(EffectKind),
     NoPrior(EffectKind),
@@ -80,6 +84,22 @@ pub(crate) fn committed_label(contract: &ToolContract, current: &Label) -> Label
     }
 }
 
+pub(crate) fn committed_label_for_call(contract: &ToolContract, current: &Label, call: &ResolvedCall) -> Label {
+    let mut label = committed_label(contract, current);
+    if let Some(crate::contract::Delta {
+        audience: Some(crate::contract::AudienceDelta::Dynamic(binding)),
+        ..
+    }) = &contract.delta
+        && let Some(audience) = call.dynamic_resolution(binding)
+    {
+        label = label.combine(&Label::new(
+            Dim::Known(Trust::new(u8::MAX)),
+            Dim::Known(audience.clone()),
+        ));
+    }
+    label
+}
+
 /// Evaluate one call against the branch views. Pure: a function of the contract, the views, and
 /// the resolved arguments. The block carries every slot at once: the evaluable gaps, the
 /// narrowing, and the consumed-Unknown dimensions named per value.
@@ -115,7 +135,7 @@ pub(crate) fn evaluate_state(
     call: &ResolvedCall,
     placeholders: PlaceholderGaps,
 ) -> StateEval {
-    let committed = committed_label(contract, current);
+    let committed = committed_label_for_call(contract, current, call);
     let consumed = consumed_unknown(contract, &committed, call);
 
     // Clock 1: narrowing, on the committed label.
@@ -218,14 +238,25 @@ fn label_gaps(
                         gaps.push(Gap::Includes { recipients });
                     }
                 }
-                None => match placeholders {
-                    PlaceholderGaps::FailClosed if !matches!(committed.audience, Dim::Unknown) => {
-                        gaps.push(Gap::Includes {
-                            recipients: unresolved_recipient(spec),
-                        })
+                None => {
+                    if let RecipientSpec::Dynamic(binding) = spec {
+                        if placeholders == PlaceholderGaps::FailClosed {
+                            gaps.push(Gap::UnresolvedDynamicRecipient {
+                                resolver: binding.resolver.clone(),
+                                argument: binding.argument.clone(),
+                            });
+                        }
+                    } else {
+                        match placeholders {
+                            PlaceholderGaps::FailClosed if !matches!(committed.audience, Dim::Unknown) => {
+                                gaps.push(Gap::Includes {
+                                    recipients: unresolved_recipient(spec),
+                                })
+                            }
+                            PlaceholderGaps::FailClosed | PlaceholderGaps::Waived => {}
+                        }
                     }
-                    PlaceholderGaps::FailClosed | PlaceholderGaps::Waived => {}
-                },
+                }
             },
             AudienceRequirement::Cap(cap) => {
                 if committed.audience.within_cap(cap) == Adequacy::Fails {
@@ -261,6 +292,7 @@ fn resolve_recipients(spec: &RecipientSpec, call: &ResolvedCall) -> Option<Audie
             .get(key)
             .and_then(|value| value.as_str())
             .map(|value| Audience::restricted([ReaderId::new(value)])),
+        RecipientSpec::Dynamic(binding) => call.dynamic_resolution(binding).cloned(),
     }
 }
 
@@ -268,6 +300,7 @@ fn unresolved_recipient(spec: &RecipientSpec) -> Audience {
     let key = match spec {
         RecipientSpec::Placeholder(key) => key.as_str(),
         RecipientSpec::Static(_) => "static",
+        RecipientSpec::Dynamic(_) => "dynamic",
     };
     Audience::restricted([ReaderId::new(format!("<unresolved:{key}>"))])
 }

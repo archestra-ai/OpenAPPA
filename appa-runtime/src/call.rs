@@ -87,13 +87,13 @@ impl CallSession {
     /// Check one proposed tool call (the hook's `ToolCall` event, for an ordinary tool). On allow a
     /// dispatch opens and a handle is returned; on block the model-visible feedback is returned. No
     /// transcript fact is authored — the framework delivers the feedback (e.g. as a hook skip).
-    pub fn check_call(&mut self, call: RenderedCall) -> Result<CallDecision, CallError> {
+    pub async fn check_call(&mut self, call: RenderedCall) -> Result<CallDecision, CallError> {
         self.guard_ready()?;
         let resolved = ResolvedCall::new(call.tool.clone(), call.arguments.clone(), Vec::new());
-        match self.core.check_ordinary(resolved)? {
+        let resolved = self.core.resolve_dynamic_call(resolved).await;
+        match self.core.check_ordinary(resolved.clone())? {
             Checked::Feedback(feedback) => Ok(CallDecision::Block { feedback }),
             Checked::Allow(dispatch) => {
-                let resolved = ResolvedCall::new(call.tool.clone(), call.arguments.clone(), Vec::new());
                 let id = self.core.next_handle_id();
                 self.in_flight = Some(id);
                 Ok(CallDecision::Allow {
