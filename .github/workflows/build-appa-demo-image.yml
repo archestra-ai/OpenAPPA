@@ -1,8 +1,9 @@
 name: Build and deploy appa-demo
 
-# Builds the chat-playground service image and pushes it to Artifact Registry.
-# A manual dispatch on main additionally deploys: it rolls the appa-demo
-# Cloud Run service to the image the run just pushed. This is also the
+# Builds the chat-playground service image. Publishing is a deliberate act:
+# only a manual dispatch on main pushes the image to Artifact Registry and
+# rolls the appa-demo Cloud Run service to it — nothing runs on pushes to
+# main. Pull requests build without publishing; that build is also the
 # crate's only compile gate: `demo/appa-demo` sits outside the root
 # workspace, so ci.yml's `--workspace` jobs never build it.
 #
@@ -10,18 +11,6 @@ name: Build and deploy appa-demo
 # APPA_GCP_WORKLOAD_IDENTITY_PROVIDER.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "demo/appa-demo/**"
-      - "appa-engine/**"
-      - "appa-runtime/**"
-      - "appa-agent/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "Dockerfile"
-      - ".dockerignore"
-      - ".github/workflows/build-appa-demo-image.yml"
   pull_request:
     paths:
       - "demo/appa-demo/**"
@@ -42,7 +31,7 @@ env:
 
 jobs:
   build:
-    name: Build (and push from main)
+    name: Build (push and deploy on dispatch)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:
@@ -63,28 +52,27 @@ jobs:
         run: docker build --tag "$IMAGE:${GITHUB_SHA::12}" --tag "$IMAGE:latest" .
 
       - name: Authenticate to Google Cloud
-        # Pushes only ever come from main — a workflow_dispatch on a branch
-        # builds without publishing.
-        if: github.ref == 'refs/heads/main'
+        # Publishing only ever comes from a manual dispatch on main — a
+        # workflow_dispatch on a branch or a pull request builds without
+        # publishing.
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           service_account: ${{ secrets.APPA_GCP_SERVICE_ACCOUNT }}
           workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
 
       - name: Set up Google Cloud
-        if: github.ref == 'refs/heads/main'
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
       - name: Push image
-        if: github.ref == 'refs/heads/main'
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
         run: |
           gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
           docker push "$IMAGE:${GITHUB_SHA::12}"
           docker push "$IMAGE:latest"
 
       - name: Deploy to Cloud Run
-        # Deploying stays a deliberate act: a push to main only publishes the
-        # image; a manual dispatch on main rolls the service to it.
         if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
         run: |
           gcloud run services update appa-demo \
