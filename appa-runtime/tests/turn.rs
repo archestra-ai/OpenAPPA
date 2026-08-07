@@ -2657,6 +2657,184 @@ resolver = {{ url = "{resolver_url}", may_cast = {{ trust = ["suspicious"] }} }}
 }
 
 #[tokio::test]
+async fn hostile_audience_answers_never_pass_the_cap_or_the_literal_reader_rules() {
+    for hostile in [
+        r#"{"audience":["public"]}"#,
+        r#"{"audience":["@hr"]}"#,
+        r#"{"audience":["stranger"]}"#,
+    ] {
+        let (resolver_url, requests, server) = spawn_repeating_response(hostile).await;
+        let policy = format!(
+            r#"
+version = 1
+
+[[tool]]
+name = "scan"
+effects = ["read"]
+delta = {{ audience = "unknown" }}
+
+[[cast]]
+name = "classifier"
+resolver = {{ url = "{resolver_url}", may_cast = {{ audience = {{ cap = ["finance"] }} }} }}
+"#
+        );
+        let mediator = mediator(&policy, &[("scan", BuiltinTool::Echo("mailbox".to_string()))]);
+        let tenant = TenantId::new("tenant");
+        let session = mediator.create_session(tenant.clone());
+        let mut turn = begin(&mediator, &tenant, &session, "scan").await;
+        let mut budget = RunBudget::default();
+
+        assert!(matches!(
+            turn.mediate(calls(vec![call("scan-call", "scan", "{}")]), &mut budget)
+                .await
+                .unwrap(),
+            Step::Continue
+        ));
+        server.abort();
+        assert_eq!(requests.load(Ordering::SeqCst), 1, "answer {hostile}");
+
+        let log = facts(&mediator, &tenant, &session);
+        assert!(
+            !log.iter()
+                .any(|fact| matches!(fact, Fact::CastApplied { .. } | Fact::OutputCastApplied { .. })),
+            "answer {hostile} must not land a cast"
+        );
+        assert!(tool_values(&log).is_empty(), "answer {hostile} must stay confined");
+        turn.stop(StopReason::Cancelled).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_public_cast_answer_is_admitted_under_a_public_cap() {
+    let (resolver_url, requests, server) = spawn_repeating_response(r#"{"audience":["public"]}"#).await;
+    let policy = format!(
+        r#"
+version = 1
+
+[[tool]]
+name = "scan"
+effects = ["read"]
+delta = {{ audience = "unknown" }}
+
+[[cast]]
+name = "classifier"
+resolver = {{ url = "{resolver_url}", may_cast = {{ audience = {{ cap = ["public"] }} }} }}
+"#
+    );
+    let mediator = mediator(&policy, &[("scan", BuiltinTool::Echo("wiki article".to_string()))]);
+    let tenant = TenantId::new("tenant");
+    let session = mediator.create_session(tenant.clone());
+    let mut turn = begin(&mediator, &tenant, &session, "scan").await;
+    let mut budget = RunBudget::default();
+
+    assert!(matches!(
+        turn.mediate(calls(vec![call("scan-call", "scan", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    server.abort();
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+
+    let log = facts(&mediator, &tenant, &session);
+    assert!(
+        log.iter()
+            .any(|fact| matches!(fact, Fact::CastApplied { .. } | Fact::OutputCastApplied { .. })),
+        "the public answer must land a cast"
+    );
+    let values = tool_values(&log);
+    assert_eq!(values.len(), 1);
+    let (body, label) = values[0];
+    assert_eq!(body, "wiki article");
+    assert_eq!(label.audience, Dim::Known(Audience::Public));
+    turn.stop(StopReason::Cancelled).unwrap();
+}
+
+#[tokio::test]
+async fn a_cancelled_emitting_dispatch_reserves_its_kind_for_the_family() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        accepted_tx.send(()).ok();
+        let _socket = socket;
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+    let policy = format!(
+        r#"
+version = 1
+[[tool]]
+name = "slow"
+effects = ["email.sent"]
+[tool.implementation.http]
+url = "http://{address}/run"
+
+[[tool]]
+name = "guard"
+requires = {{ effects = {{ has_no = ["email.sent"] }} }}
+delta = {{}}
+"#
+    );
+    let mediator = mediator(&policy, &[("guard", BuiltinTool::Echo("ok".to_string()))]);
+    let tenant = TenantId::new("tenant");
+    let session = mediator.create_session(tenant.clone());
+    let token = CancellationToken::new();
+    let cancel = token.clone();
+    tokio::spawn(async move {
+        accepted_rx.await.ok();
+        cancel.cancel();
+    });
+    let mut turn = mediator
+        .begin_turn(tenant.clone(), session.clone(), "run", token)
+        .await
+        .unwrap();
+    let mut budget = RunBudget::default();
+    assert!(matches!(
+        turn.mediate(calls(vec![call("slow-call", "slow", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::PolicyStop(_)
+    ));
+    server.abort();
+    drop(turn);
+    let log = facts(&mediator, &tenant, &session);
+    assert!(log.iter().any(|fact| matches!(
+        fact,
+        Fact::DispatchClosed {
+            outcome: CloseOutcome::Indeterminate,
+            ..
+        }
+    )));
+
+    let mut retry = mediator
+        .begin_turn(tenant.clone(), session.clone(), "run", CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(matches!(
+        retry
+            .mediate(calls(vec![call("guard-call", "guard", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    let log = facts(&mediator, &tenant, &session);
+    let guard = ResolvedCall::new(ToolName::new("guard"), serde_json::json!({}), Vec::new());
+    assert!(
+        !log.iter().any(|fact| matches!(
+            fact,
+            Fact::DispatchOpened { dispatch, .. } if dispatch.digest() == &guard.digest()
+        )),
+        "the reservation of the cancelled dispatch must keep no_prior failing closed"
+    );
+    assert!(log.iter().any(|fact| matches!(
+        fact,
+        Fact::BlockFeedback { call_id, .. } if call_id.as_str() == "guard-call"
+    )));
+    retry.stop(StopReason::Cancelled).unwrap();
+}
+
+#[tokio::test]
 async fn cancellation_mid_round_closes_open_call_and_answers_all_remaining_calls() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

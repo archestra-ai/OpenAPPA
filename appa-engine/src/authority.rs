@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::fact::EffectKind;
-use crate::label::{Adequacy, Audience, Dim, DimValue, Dimension, Label, Trust};
+use crate::label::{Adequacy, Audience, Dim, DimValue, Dimension, Label, ReaderId, Trust};
 use crate::names::{AuthorityName, CastName, MarkName, SanitizerName, TagName};
 
 /// Operator prose on a registered authority or sanitizer: why this entry exists, in the
@@ -125,23 +125,38 @@ pub struct Sanitizer {
     pub hint: Option<Hint>,
 }
 
-/// The ceiling a resolver-implemented cast may not exceed: the admissible target states per
-/// dimension. At least one dimension must be listed (a resolver that may cast to nothing is inert).
+/// The ceiling a resolver-implemented cast may not exceed. Trust: the admissible target
+/// ranks. Audience: a cap the resolved audience must stay within — a `public` cap is the open gate
+/// that admits a Public resolution; `None` withholds the dimension entirely. At least one
+/// dimension must be declared (a resolver that may cast to nothing is inert).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CastCeiling {
     pub trust: Vec<Trust>,
-    pub audience: Vec<Audience>,
+    pub audience: Option<Audience>,
 }
 
 impl CastCeiling {
     pub fn is_empty(&self) -> bool {
-        self.trust.is_empty() && self.audience.is_empty()
+        self.trust.is_empty() && self.audience.is_none()
     }
 
+    /// Is `target` an admissible resolution under this ceiling? Trust: rank membership. Audience:
+    /// the resolution must stay within the declared cap — Public is within only a `public` cap —
+    /// and a restricted set must hold literal reader IDs: never the reserved `public` spelling,
+    /// never a group.
     pub fn admits(&self, target: &CastTarget) -> bool {
         match target {
             DimValue::Trust(t) => self.trust.contains(t),
-            DimValue::Audience(a) => self.audience.contains(a),
+            DimValue::Audience(resolved) => match &self.audience {
+                None => false,
+                Some(cap) => {
+                    let literal_ids = match resolved {
+                        Audience::Public => true,
+                        Audience::Restricted(readers) => readers.iter().all(ReaderId::is_literal),
+                    };
+                    literal_ids && resolved.within(cap)
+                }
+            },
         }
     }
 }
@@ -157,4 +172,57 @@ pub enum CastResolution {
 pub struct Cast {
     pub name: CastName,
     pub resolution: CastResolution,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn readers(ids: &[&str]) -> Audience {
+        Audience::restricted(ids.iter().copied().map(ReaderId::new))
+    }
+
+    fn audience_ceiling(cap: Audience) -> CastCeiling {
+        CastCeiling {
+            trust: vec![],
+            audience: Some(cap),
+        }
+    }
+
+    #[test]
+    fn an_audience_ceiling_is_a_cap_not_an_enumeration() {
+        let ceiling = audience_ceiling(readers(&["finance", "audit"]));
+        assert!(ceiling.admits(&DimValue::Audience(readers(&["finance"]))));
+        assert!(ceiling.admits(&DimValue::Audience(readers(&["finance", "audit"]))));
+        assert!(!ceiling.admits(&DimValue::Audience(readers(&["finance", "stranger"]))));
+    }
+
+    #[test]
+    fn a_public_resolution_is_admitted_only_under_a_public_cap() {
+        let wide = audience_ceiling(Audience::Public);
+        assert!(wide.admits(&DimValue::Audience(Audience::Public)));
+        assert!(wide.admits(&DimValue::Audience(readers(&["anyone"]))));
+        let narrow = audience_ceiling(readers(&["finance"]));
+        assert!(!narrow.admits(&DimValue::Audience(Audience::Public)));
+    }
+
+    #[test]
+    fn a_resolution_must_hold_literal_reader_ids() {
+        let wide = audience_ceiling(Audience::Public);
+        assert!(!wide.admits(&DimValue::Audience(readers(&["@hr"]))));
+        assert!(!wide.admits(&DimValue::Audience(readers(&["public"]))));
+        assert!(!wide.admits(&DimValue::Audience(readers(&["ap@corp", "@hr"]))));
+        assert!(wide.admits(&DimValue::Audience(readers(&["ap@corp"]))));
+    }
+
+    #[test]
+    fn an_undeclared_audience_dimension_admits_nothing() {
+        let trust_only = CastCeiling {
+            trust: vec![Trust::new(0)],
+            audience: None,
+        };
+        assert!(!trust_only.admits(&DimValue::Audience(readers(&["finance"]))));
+        assert!(trust_only.admits(&DimValue::Trust(Trust::new(0))));
+        assert!(!trust_only.admits(&DimValue::Trust(Trust::new(1))));
+    }
 }

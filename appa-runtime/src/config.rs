@@ -913,10 +913,13 @@ struct RawCastResolver {
 struct RawCastCeiling {
     #[serde(default)]
     trust: Vec<String>,
-    /// Each entry names a target audience with its operator (`{ exactly = [...] }`) — a bare list
-    /// would be an operator-less set mention, which the dialect forbids.
-    #[serde(default)]
-    audience: Vec<RawExactly>,
+    audience: Option<RawCapSet>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCapSet {
+    cap: Vec<String>,
 }
 
 impl RawCastCeiling {
@@ -927,11 +930,7 @@ impl RawCastCeiling {
                 .iter()
                 .map(|t| parse_trust(t, chain, ctx))
                 .collect::<Result<_, _>>()?,
-            audience: self
-                .audience
-                .iter()
-                .map(|set| parse_audience(&set.exactly, ctx))
-                .collect::<Result<_, _>>()?,
+            audience: self.audience.map(|set| parse_audience(&set.cap, ctx)).transpose()?,
         })
     }
 }
@@ -999,6 +998,14 @@ fn parse_audience(list: &[String], context: &str) -> Result<Audience, ConfigErro
         return Err(ConfigError::BadAudience {
             context: context.to_string(),
             reason: format!("argument placeholder {ph:?} is only valid in an `includes`"),
+        });
+    }
+    if let Some(group) = list.iter().find(|r| r.starts_with('@')) {
+        return Err(ConfigError::BadAudience {
+            context: context.to_string(),
+            reason: format!(
+                "{group:?} is a group mention: the `@` mark is reserved, and this configuration registers no membership resolver"
+            ),
         });
     }
     Ok(Audience::restricted(list.iter().map(ReaderId::new)))
@@ -1396,7 +1403,7 @@ constant = { trust = "suspicious" }
 version = 1
 [[cast]]
 name = "classifier"
-resolver = { url = "https://c/resolve", timeout_ms = 10000, may_cast = { trust = ["suspicious"] } }
+resolver = { url = "https://c/resolve", timeout_ms = 10000, may_cast = { trust = ["suspicious"], audience = { cap = ["finance", "audit"] } } }
 "#,
         );
         assert_eq!(
@@ -1405,6 +1412,23 @@ resolver = { url = "https://c/resolve", timeout_ms = 10000, may_cast = { trust =
                 url: "https://c/resolve".to_string(),
                 timeout_ms: 10_000
             })
+        );
+        let cast = cfg
+            .registry_config()
+            .casts
+            .iter()
+            .find(|c| c.name == CastName::new("classifier"))
+            .expect("classifier registered");
+        assert_eq!(
+            cast.resolution,
+            CastResolution::Resolver {
+                may_cast: CastCeiling {
+                    trust: vec![Trust::new(0)],
+                    audience: Some(Audience::restricted(
+                        [ReaderId::new("finance"), ReaderId::new("audit"),]
+                    )),
+                },
+            }
         );
     }
 
@@ -1662,12 +1686,20 @@ builtin = "scrub-everything"
     }
 
     #[test]
-    fn may_cast_audience_requires_an_operator() {
+    fn may_cast_audience_requires_the_cap_operator() {
         assert!(matches!(
             err(r#"version = 1
 [[cast]]
 name = "c"
-resolver = { url = "https://c", may_cast = { audience = [["public"]] } }
+resolver = { url = "https://c", may_cast = { audience = ["public"] } }
+"#),
+            ConfigError::Parse(_)
+        ));
+        assert!(matches!(
+            err(r#"version = 1
+[[cast]]
+name = "c"
+resolver = { url = "https://c", may_cast = { audience = [{ exactly = ["public"] }] } }
 "#),
             ConfigError::Parse(_)
         ));
@@ -1676,10 +1708,48 @@ resolver = { url = "https://c", may_cast = { audience = [["public"]] } }
 version = 1
 [[cast]]
 name = "c"
-resolver = { url = "https://c", may_cast = { audience = [{ exactly = ["public"] }] } }
+resolver = { url = "https://c", may_cast = { audience = { cap = ["public"] } } }
 "#,
         );
-        assert!(cfg.cast_impl(&CastName::new("c")).is_some());
+        let cast = cfg.registry_config().casts.first().expect("cast registered");
+        assert_eq!(
+            cast.resolution,
+            CastResolution::Resolver {
+                may_cast: CastCeiling {
+                    trust: vec![],
+                    audience: Some(Audience::Public),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn a_group_mention_cannot_load_without_a_membership_resolver() {
+        assert!(matches!(
+            err(r#"version = 1
+[[cast]]
+name = "c"
+resolver = { url = "https://c", may_cast = { audience = { cap = ["@auditors"] } } }
+"#),
+            ConfigError::BadAudience { .. }
+        ));
+        assert!(matches!(
+            err(r#"version = 1
+[[tool]]
+name = "t"
+delta = { audience = { exactly = ["@team"] } }
+"#),
+            ConfigError::BadAudience { .. }
+        ));
+        let cfg = config(
+            r#"
+version = 1
+[[tool]]
+name = "t"
+delta = { audience = { exactly = ["ap@corp.example"] } }
+"#,
+        );
+        assert!(cfg.registry().tool(&ToolName::new("t")).is_some());
     }
 
     #[test]

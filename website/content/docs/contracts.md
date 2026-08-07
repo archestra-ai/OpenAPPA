@@ -124,7 +124,7 @@ delta    = {}                                          # Status string carries n
 - **Pending-cast deltas (`delta = { trust = "unknown" }`)**: Holds a label dimension pending resolution by a registered `[[cast]]` at admission. Declaring both `requires` and `unknown` delta on the same dimension is a load error.
 - **Dynamic argument placeholders (`$arg`)**: `requires.audience = { includes = ["$recipient"] }` evaluates `$recipient` against actual call arguments at runtime. Placeholders are valid only inside `includes`.
 - **Dynamic resolvers**: A `{ resolver = "name", argument = "arg" }` form maps a top-level string argument to literal readers. It is valid as an audience delta or as the value of `includes`.
-- **History checks (`requires.effects`)**: `has` verifies `prior(k)` against appended effects; `has_no` verifies `no_prior(k)` against appended effects plus the reserved emits of dispatches still in flight.
+- **History checks (`requires.effects`)**: `has` verifies `prior(k)` against appended effects; `has_no` verifies `no_prior(k)` against appended effects plus unsettled reservations — emits reserved at release and not yet observed to succeed or fail.
 - **Attention demands (`requires.attention`)**: Forces fresh authority sign-off on *every* call, never satisfied by execution history.
 - **Dual-gate contracts**: When a contract defines both a restrictive `delta` and a `requires` check (e.g., `search_and_share`), the engine evaluates both gates.
 
@@ -236,4 +236,4 @@ name     = "paranoid-default"
 constant = { trust = "suspicious" }           # Unscoped constant fallback, registered last
 ```
 
-Applicable casts — matched by scope tags — evaluate in registration order. Register constant casts last: a cast placed after a constant that covers it can never run, and the loader refuses it. The engine validates every resolver response against its declared `may_cast` ceiling before admitting the value.
+Applicable casts — matched by scope tags — evaluate in registration order. Register constant casts last: a cast placed after a constant that covers it can never run, and the loader refuses it. The engine validates every resolver response against its declared `may_cast` ceiling before admitting the value. A `public` audience cap is an open gate: it lets a single resolver answer resolve a value to `public` and lift its audience restriction entirely — review it like any covering mandate.

@@ -1321,4 +1321,35 @@ mod tests {
         let projection = build(&log);
         assert!(projection.view(&parent()).has_effect(&egress));
     }
+
+    #[test]
+    fn an_in_flight_child_dispatch_reserves_against_the_parent() {
+        let mut log = forked(known(TRUSTED, Audience::Public));
+        let egress = EffectKind::new("egress");
+        let call = ResolvedCall::new(ToolName::new("send"), json!({}), vec![]);
+        let dispatch = DispatchId::new(child(), call.digest(), 0);
+        log.push(Fact::DispatchOpened {
+            trajectory: child(),
+            dispatch: dispatch.clone(),
+            proposed_label: Label::top(),
+            proposed_effects: vec![egress.clone()],
+            dynamic_resolutions: Vec::new(),
+        });
+        let projection = build(&log);
+        let parent_id = parent();
+        let parent_view = projection.view(&parent_id);
+        assert!(!parent_view.has_effect(&egress));
+        assert!(parent_view.has_reservation(&egress));
+        log.push(Fact::DispatchClosed {
+            trajectory: child(),
+            dispatch,
+            outcome: CloseOutcome::Success {
+                effects: vec![egress.clone()],
+            },
+        });
+        let projection = build(&log);
+        let parent_view = projection.view(&parent_id);
+        assert!(parent_view.has_effect(&egress));
+        assert!(!parent_view.has_reservation(&egress));
+    }
 }

@@ -109,6 +109,7 @@ pub(crate) fn evaluate(contract: &ToolContract, views: &Views, call: &ResolvedCa
         contract,
         &current,
         &|kind| views.has_effect(kind),
+        &|kind| views.has_reservation(kind),
         call,
         PlaceholderGaps::FailClosed,
     );
@@ -123,15 +124,19 @@ pub(crate) fn evaluate(contract: &ToolContract, views: &Views, call: &ResolvedCa
     })
 }
 
-/// The gap logic on an abstract `(current label, effect predicate)` state — the one place the two
-/// clocks live, shared by [`evaluate`] and the remedy reachability search (`plan`). A label
-/// requirement that consumes an `Unknown` dimension lands in `consumed`, never in the gaps
-/// (masked — one missing fact is not also a coverable gap); requirements on established
-/// dimensions evaluate as always. An Unknown dimension nothing requires blocks nothing.
+/// The gap logic on an abstract `(current label, history predicates)` state — the one place the
+/// two clocks live, shared by [`evaluate`] and the remedy reachability search (`plan`). History
+/// reads two predicates: `has_committed` answers for appended effects, `has_reserved`
+/// for unsettled reservations — `prior(k)` consults only the first, `no_prior(k)`
+/// fails on either, and the two are never merged. A label requirement that consumes an `Unknown`
+/// dimension lands in `consumed`, never in the gaps (masked — one missing fact is not also a
+/// coverable gap); requirements on established dimensions evaluate as always. An Unknown
+/// dimension nothing requires blocks nothing.
 pub(crate) fn evaluate_state(
     contract: &ToolContract,
     current: &Label,
-    has_effect: &impl Fn(&EffectKind) -> bool,
+    has_committed: &impl Fn(&EffectKind) -> bool,
+    has_reserved: &impl Fn(&EffectKind) -> bool,
     call: &ResolvedCall,
     placeholders: PlaceholderGaps,
 ) -> StateEval {
@@ -144,10 +149,9 @@ pub(crate) fn evaluate_state(
         to: committed.clone(),
     });
 
-    // Clocks 2 and 3: label requirements on the committed label, history on the log as it stands.
     let mut gaps = Vec::new();
     label_gaps(contract, &committed, call, placeholders, &mut gaps);
-    history_gaps(contract, has_effect, &mut gaps);
+    history_gaps(contract, has_committed, has_reserved, &mut gaps);
     for mark in &contract.requires.attention {
         gaps.push(Gap::Attention(mark.clone()));
     }
@@ -267,16 +271,21 @@ fn label_gaps(
     }
 }
 
-fn history_gaps(contract: &ToolContract, has_effect: &impl Fn(&EffectKind) -> bool, gaps: &mut Vec<Gap>) {
+fn history_gaps(
+    contract: &ToolContract,
+    has_committed: &impl Fn(&EffectKind) -> bool,
+    has_reserved: &impl Fn(&EffectKind) -> bool,
+    gaps: &mut Vec<Gap>,
+) {
     for requirement in &contract.requires.history {
         match requirement {
             HistoryRequirement::Prior(kind) => {
-                if !has_effect(kind) {
+                if !has_committed(kind) {
                     gaps.push(Gap::Prior(kind.clone()));
                 }
             }
             HistoryRequirement::NoPrior(kind) => {
-                if has_effect(kind) {
+                if has_committed(kind) || has_reserved(kind) {
                     gaps.push(Gap::NoPrior(kind.clone()));
                 }
             }

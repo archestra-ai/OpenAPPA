@@ -72,7 +72,7 @@ impl Trust {
 }
 
 /// A symbolic reader identity — an opaque atom to the pure algebra. The current dialect's
-/// audiences are explicit id-lists: every audience that reaches the algebra is a concrete set, so
+/// restricted audiences are explicit id-lists (`public` is the one non-list state, `LBL-4`), so
 /// intersection/subset are exact. Named groups with resolver-backed membership (`john ∈ hr`
 /// resolved fresh at every check) are design direction, not implemented (spec §Audience).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -85,6 +85,13 @@ impl ReaderId {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// A literal reader ID: `public` is a reserved audience state, never a
+    /// reader, and the `@` mark is reserved for group names, which only a membership resolver may
+    /// expand. A restricted cast resolution must hold literal IDs only.
+    pub fn is_literal(&self) -> bool {
+        self.0 != "public" && !self.0.starts_with('@')
     }
 }
 

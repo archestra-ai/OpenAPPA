@@ -47,12 +47,12 @@ const TERMS = {
   "effects.has":
     "In a tool requires check: prior(k) — a matching effect must already exist in the log.",
   "effects.has_no":
-    "In a tool requires check: no_prior(k) — no matching effect may exist, appended to the log or reserved by a dispatch still in flight.",
+    "In a tool requires check: no_prior(k) — no matching effect may exist, appended to the log or under an unsettled reservation.",
   emits:
     "What a successful tool call appends to the log, declared as effects = [...] in the contract.",
   exactly: "In an audience condition: the allowed reader set becomes precisely this list.",
   includes: "In a requires condition: the run's allowed readers must contain these.",
-  cap: "In a requires condition: the run's allowed readers must stay within this set. In may_cast: the ceiling a resolved reader set must stay within.",
+  cap: "In a requires condition: the run's allowed readers must stay within this set. In may_cast: the ceiling a resolved audience must stay within; only a public cap admits a public resolution.",
   tags: "Routing names with no algebraic life; the currency of authority, cast, and sanitizer scope.",
 
   /* Authorities */

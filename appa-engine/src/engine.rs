@@ -394,6 +394,335 @@ mod tests {
     }
 
     #[test]
+    fn an_includes_requirement_reads_the_committed_label() {
+        let b_reader = Audience::restricted([ReaderId::new("b")]);
+        let share = ToolContract {
+            name: ToolName::new("share"),
+            tags: vec![],
+            delta: Some(Delta {
+                trust: None,
+                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("a")])).into()),
+            }),
+            emits: vec![],
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(b_reader.clone()))],
+                },
+                ..Requires::default()
+            },
+        };
+        let e = engine(vec![share]);
+        let both = Audience::restricted([ReaderId::new("a"), ReaderId::new("b")]);
+        let log = vec![user_value(known(TRUSTED, both.clone()))];
+        match check(&e, &log, &call("share", json!({}))) {
+            CheckOutcome::Block(block) => {
+                assert_eq!(block.requirement_gaps, vec![Gap::Includes { recipients: b_reader }]);
+                assert_eq!(
+                    block.narrowing,
+                    Some(crate::check::Narrowing {
+                        from: known(TRUSTED, both),
+                        to: known(TRUSTED, Audience::restricted([ReaderId::new("a")])),
+                    })
+                );
+                assert!(block.unestablished.is_empty());
+            }
+            other => panic!("expected the committed-label includes gap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_trust_floor_reads_the_committed_label() {
+        let risky = ToolContract {
+            name: ToolName::new("risky"),
+            tags: vec![],
+            delta: Some(Delta {
+                trust: Some(Dim::Known(SUSPICIOUS)),
+                audience: None,
+            }),
+            emits: vec![],
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(TRUSTED),
+                    audience: vec![],
+                },
+                ..Requires::default()
+            },
+        };
+        let e = engine(vec![risky]);
+        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        match check(&e, &log, &call("risky", json!({}))) {
+            CheckOutcome::Block(block) => {
+                assert_eq!(
+                    block.requirement_gaps,
+                    vec![Gap::TrustFloor {
+                        required: TRUSTED,
+                        actual: SUSPICIOUS,
+                    }]
+                );
+                assert!(block.narrowing.is_some());
+            }
+            other => panic!("expected the committed-label trust gap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_read_that_narrows_into_the_cap_passes_the_cap() {
+        let a_reader = Audience::restricted([ReaderId::new("a")]);
+        let scoped = ToolContract {
+            name: ToolName::new("scoped"),
+            tags: vec![],
+            delta: Some(Delta {
+                trust: None,
+                audience: Some(Dim::Known(a_reader.clone()).into()),
+            }),
+            emits: vec![],
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![AudienceRequirement::Cap(a_reader)],
+                },
+                ..Requires::default()
+            },
+        };
+        let e = engine(vec![scoped]);
+        let both = Audience::restricted([ReaderId::new("a"), ReaderId::new("b")]);
+        let log = vec![user_value(known(TRUSTED, both))];
+        match check(&e, &log, &call("scoped", json!({}))) {
+            CheckOutcome::Block(block) => {
+                assert!(block.requirement_gaps.is_empty(), "narrowing into the cap is not a gap");
+                assert!(block.narrowing.is_some());
+            }
+            other => panic!("expected a narrowing-only soft block, got {other:?}"),
+        }
+    }
+
+    fn emitting(name: &str, kind: &str) -> ToolContract {
+        ToolContract {
+            name: ToolName::new(name),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![EffectKind::new(kind)],
+            requires: Requires::default(),
+        }
+    }
+
+    fn history_guarded(name: &str, requirement: HistoryRequirement) -> ToolContract {
+        ToolContract {
+            name: ToolName::new(name),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![],
+            requires: Requires {
+                history: vec![requirement],
+                ..Requires::default()
+            },
+        }
+    }
+
+    fn open(e: &Engine, log: &mut Vec<Fact>, c: &ResolvedCall) -> crate::value::DispatchId {
+        let p = Projection::build(log, Revision::new(log.len() as u64));
+        let batch = e.open_dispatch(&p.view(&traj()), c).unwrap();
+        let dispatch = batch
+            .facts
+            .iter()
+            .find_map(|fact| match fact {
+                Fact::DispatchOpened { dispatch, .. } => Some(dispatch.clone()),
+                _ => None,
+            })
+            .expect("open_dispatch appends the open fact");
+        log.extend(batch.facts);
+        dispatch
+    }
+
+    fn close(
+        e: &Engine,
+        log: &mut Vec<Fact>,
+        dispatch: &crate::value::DispatchId,
+        c: &ResolvedCall,
+        admission: crate::admit::ResultAdmission,
+    ) {
+        let p = Projection::build(log, Revision::new(log.len() as u64));
+        let batch = e.admit_result(&p.view(&traj()), dispatch, c, admission).unwrap();
+        log.extend(batch.facts);
+    }
+
+    fn reservation_tools() -> Vec<ToolContract> {
+        vec![
+            emitting("send", "email.sent"),
+            history_guarded("guard", HistoryRequirement::NoPrior(EffectKind::new("email.sent"))),
+            history_guarded("wants", HistoryRequirement::Prior(EffectKind::new("email.sent"))),
+        ]
+    }
+
+    #[test]
+    fn an_open_dispatch_reserves_its_emits_for_no_prior_only() {
+        let e = engine(reservation_tools());
+        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        assert_eq!(check(&e, &log, &call("guard", json!({}))), CheckOutcome::Allow);
+        let send = call("send", json!({}));
+        let dispatch = open(&e, &mut log, &send);
+        match check(&e, &log, &call("guard", json!({}))) {
+            CheckOutcome::Block(b) => {
+                assert_eq!(b.requirement_gaps, vec![Gap::NoPrior(EffectKind::new("email.sent"))])
+            }
+            other => panic!("expected a reservation-failed no_prior, got {other:?}"),
+        }
+        match check(&e, &log, &call("wants", json!({}))) {
+            CheckOutcome::Block(b) => {
+                assert_eq!(b.requirement_gaps, vec![Gap::Prior(EffectKind::new("email.sent"))])
+            }
+            other => panic!("expected prior unfulfilled by a reservation, got {other:?}"),
+        }
+        close(
+            &e,
+            &mut log,
+            &dispatch,
+            &send,
+            crate::admit::ResultAdmission::SuccessRaw {
+                body: ValueBody::new("sent"),
+            },
+        );
+        match check(&e, &log, &call("guard", json!({}))) {
+            CheckOutcome::Block(b) => {
+                assert_eq!(b.requirement_gaps, vec![Gap::NoPrior(EffectKind::new("email.sent"))])
+            }
+            other => panic!("expected a committed-effect no_prior failure, got {other:?}"),
+        }
+        assert_eq!(check(&e, &log, &call("wants", json!({}))), CheckOutcome::Allow);
+    }
+
+    #[test]
+    fn a_failed_dispatch_evaporates_its_reservation() {
+        let e = engine(reservation_tools());
+        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let send = call("send", json!({}));
+        let dispatch = open(&e, &mut log, &send);
+        close(&e, &mut log, &dispatch, &send, crate::admit::ResultAdmission::Failure);
+        assert_eq!(check(&e, &log, &call("guard", json!({}))), CheckOutcome::Allow);
+        match check(&e, &log, &call("wants", json!({}))) {
+            CheckOutcome::Block(b) => {
+                assert_eq!(b.requirement_gaps, vec![Gap::Prior(EffectKind::new("email.sent"))])
+            }
+            other => panic!("expected prior still unmet, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_indeterminate_close_keeps_the_reservation() {
+        let e = engine(reservation_tools());
+        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let send = call("send", json!({}));
+        let dispatch = open(&e, &mut log, &send);
+        close(
+            &e,
+            &mut log,
+            &dispatch,
+            &send,
+            crate::admit::ResultAdmission::Indeterminate,
+        );
+        let p = Projection::build(&log, Revision::new(log.len() as u64));
+        assert!(!p.view(&traj()).is_open(&dispatch), "the dispatch is closed");
+        match check(&e, &log, &call("guard", json!({}))) {
+            CheckOutcome::Block(b) => {
+                assert_eq!(b.requirement_gaps, vec![Gap::NoPrior(EffectKind::new("email.sent"))])
+            }
+            other => panic!("expected the reservation to outlive the close, got {other:?}"),
+        }
+        match check(&e, &log, &call("wants", json!({}))) {
+            CheckOutcome::Block(b) => {
+                assert_eq!(b.requirement_gaps, vec![Gap::Prior(EffectKind::new("email.sent"))])
+            }
+            other => panic!("expected prior unmet, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_reservations_of_one_kind_settle_independently() {
+        let e = engine(reservation_tools());
+        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let send = call("send", json!({}));
+        let first = open(&e, &mut log, &send);
+        let second = open(&e, &mut log, &send);
+        assert_ne!(first, second, "a repeat call is a new dispatch occurrence");
+        close(&e, &mut log, &first, &send, crate::admit::ResultAdmission::Failure);
+        match check(&e, &log, &call("guard", json!({}))) {
+            CheckOutcome::Block(b) => {
+                assert_eq!(b.requirement_gaps, vec![Gap::NoPrior(EffectKind::new("email.sent"))])
+            }
+            other => panic!("expected the second reservation to hold, got {other:?}"),
+        }
+        close(&e, &mut log, &second, &send, crate::admit::ResultAdmission::Failure);
+        assert_eq!(check(&e, &log, &call("guard", json!({}))), CheckOutcome::Allow);
+    }
+
+    #[test]
+    fn a_calls_own_emits_never_fail_its_own_check() {
+        let selfguard = ToolContract {
+            name: ToolName::new("selfguard"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![EffectKind::new("email.sent")],
+            requires: Requires {
+                history: vec![HistoryRequirement::NoPrior(EffectKind::new("email.sent"))],
+                ..Requires::default()
+            },
+        };
+        let e = engine(vec![selfguard]);
+        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let c = call("selfguard", json!({}));
+        assert_eq!(check(&e, &log, &c), CheckOutcome::Allow);
+        let _dispatch = open(&e, &mut log, &c);
+        match check(&e, &log, &c) {
+            CheckOutcome::Block(b) => {
+                assert_eq!(b.requirement_gaps, vec![Gap::NoPrior(EffectKind::new("email.sent"))])
+            }
+            other => panic!("expected the open dispatch to reserve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_success_checkpoint_settles_while_the_dispatch_stays_open() {
+        let scan = ToolContract {
+            name: ToolName::new("scan"),
+            tags: vec![],
+            delta: Some(Delta {
+                trust: Some(Dim::Unknown),
+                audience: None,
+            }),
+            emits: vec![EffectKind::new("read")],
+            requires: Requires::default(),
+        };
+        let tools = vec![
+            scan,
+            history_guarded("guard_read", HistoryRequirement::NoPrior(EffectKind::new("read"))),
+            history_guarded("wants_read", HistoryRequirement::Prior(EffectKind::new("read"))),
+        ];
+        let e = engine(tools);
+        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let scan_call = call("scan", json!({}));
+        let dispatch = open(&e, &mut log, &scan_call);
+        assert!(matches!(
+            check(&e, &log, &call("guard_read", json!({}))),
+            CheckOutcome::Block(_)
+        ));
+        assert!(matches!(
+            check(&e, &log, &call("wants_read", json!({}))),
+            CheckOutcome::Block(_)
+        ));
+        let p = Projection::build(&log, Revision::new(log.len() as u64));
+        let batch = e.observe_success(&p.view(&traj()), &dispatch, &scan_call).unwrap();
+        log.extend(batch.facts);
+        let p = Projection::build(&log, Revision::new(log.len() as u64));
+        assert!(p.view(&traj()).is_open(&dispatch));
+        assert_eq!(check(&e, &log, &call("wants_read", json!({}))), CheckOutcome::Allow);
+        assert!(matches!(
+            check(&e, &log, &call("guard_read", json!({}))),
+            CheckOutcome::Block(_)
+        ));
+    }
+
+    #[test]
     fn attention_is_always_a_gap() {
         let tool = ToolContract {
             name: ToolName::new("wire"),

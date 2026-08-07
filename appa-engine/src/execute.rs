@@ -208,7 +208,7 @@ mod tests {
     use super::*;
     use crate::authority::{Authority, Mandate, Scope};
     use crate::contract::{Delta, LabelRequirements, Requires, ToolContract};
-    use crate::fact::{Fact, Revision};
+    use crate::fact::{EffectKind, Fact, Revision};
     use crate::label::{Audience, Dim, Label, ReaderId, Trust};
     use crate::names::MarkName;
     use crate::projection::Projection;
@@ -337,6 +337,64 @@ mod tests {
             covers: vec![floor_gap()],
         };
         let batch = run(&registry, &log, &call("wire", json!({})), &[ruling]).unwrap();
+        assert!(matches!(batch.facts[0], Fact::Ruling { .. }));
+        assert!(matches!(batch.facts.last().unwrap(), Fact::DispatchOpened { .. }));
+    }
+
+    #[test]
+    fn a_waiver_executes_over_a_reservation_failed_no_prior() {
+        let guard = ToolContract {
+            name: ToolName::new("guard"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![],
+            requires: Requires {
+                history: vec![crate::contract::HistoryRequirement::NoPrior(EffectKind::new(
+                    "email.sent",
+                ))],
+                ..Requires::default()
+            },
+        };
+        let keeper = Authority {
+            name: AuthorityName::new("keeper"),
+            mandate: Mandate {
+                waivers: vec![EffectKind::new("email.sent")],
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        };
+        let registry = Registry::build(crate::registry::RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![guard],
+            authorities: vec![keeper],
+            sanitizers: vec![],
+            casts: vec![],
+        })
+        .unwrap();
+        let seed = call("send", json!({}));
+        let log = vec![
+            user_value(known(TRUSTED, Audience::Public)),
+            Fact::DispatchOpened {
+                trajectory: traj(),
+                dispatch: DispatchId::new(traj(), seed.digest(), 0),
+                proposed_label: known(TRUSTED, Audience::Public),
+                proposed_effects: vec![EffectKind::new("email.sent")],
+                dynamic_resolutions: vec![],
+            },
+        ];
+        let guard_call = call("guard", json!({}));
+        let ruling = Ruling {
+            dispatch: DispatchId::new(traj(), guard_call.digest(), 0),
+            authority: AuthorityName::new("keeper"),
+            reviewed: AuthorityReview {
+                tool: ToolName::new("guard"),
+                trajectory_label: known(TRUSTED, Audience::Public),
+                arg_refs: vec![],
+            },
+            covers: vec![Gap::NoPrior(EffectKind::new("email.sent"))],
+        };
+        let batch = run(&registry, &log, &guard_call, &[ruling]).unwrap();
         assert!(matches!(batch.facts[0], Fact::Ruling { .. }));
         assert!(matches!(batch.facts.last().unwrap(), Fact::DispatchOpened { .. }));
     }

@@ -41,6 +41,7 @@ pub struct Projection {
     values: Vec<AdmittedValue>,
     effects: Vec<EffectKind>,
     open: BTreeSet<DispatchId>,
+    reservations: BTreeMap<DispatchId, Vec<EffectKind>>,
     succeeded: BTreeSet<DispatchId>,
     opened: Vec<OpenedDispatch>,
     boundaries: Vec<TrajectoryId>,
@@ -67,6 +68,7 @@ impl Projection {
         let mut values = Vec::new();
         let mut effects = Vec::new();
         let mut open = BTreeSet::new();
+        let mut reservations = BTreeMap::new();
         let mut succeeded = BTreeSet::new();
         let mut opened = Vec::new();
         let mut boundaries = Vec::new();
@@ -90,11 +92,13 @@ impl Projection {
                 Fact::DispatchOpened {
                     trajectory,
                     dispatch,
+                    proposed_effects,
                     dynamic_resolutions: resolutions,
                     ..
                 } => {
                     dynamic_resolutions.insert(dispatch.clone(), resolutions.clone());
                     open.insert(dispatch.clone());
+                    reservations.insert(dispatch.clone(), proposed_effects.clone());
                     opened.push(OpenedDispatch {
                         trajectory: trajectory.clone(),
                         digest: *dispatch.digest(),
@@ -106,13 +110,21 @@ impl Projection {
                     ..
                 } => {
                     succeeded.insert(dispatch.clone());
+                    reservations.remove(dispatch);
                     effects.extend(committed.iter().cloned());
                 }
                 Fact::DispatchClosed { dispatch, outcome, .. } => {
                     open.remove(dispatch);
                     succeeded.remove(dispatch);
-                    if let CloseOutcome::Success { effects: committed } = outcome {
-                        effects.extend(committed.iter().cloned());
+                    match outcome {
+                        CloseOutcome::Success { effects: committed } => {
+                            reservations.remove(dispatch);
+                            effects.extend(committed.iter().cloned());
+                        }
+                        CloseOutcome::Failure => {
+                            reservations.remove(dispatch);
+                        }
+                        CloseOutcome::Indeterminate => {}
                     }
                 }
                 // A cast overrides its value's Unknown dimension in the fold; the body is untouched.
@@ -181,6 +193,7 @@ impl Projection {
             values,
             effects,
             open,
+            reservations,
             succeeded,
             opened,
             boundaries,
@@ -348,6 +361,27 @@ impl Views<'_> {
 
     pub fn present_effects(&self) -> BTreeSet<EffectKind> {
         self.projection.effects.iter().cloned().collect()
+    }
+
+    /// Does an unsettled reservation anywhere in the family contain a matching emit? `no_prior(k)`
+    /// additionally fails on this; `prior(k)` never reads it — both
+    /// directions fail closed.
+    pub fn has_reservation(&self, kind: &EffectKind) -> bool {
+        self.projection
+            .reservations
+            .values()
+            .any(|reserved| reserved.iter().any(|e| e == kind))
+    }
+
+    /// The effect kinds under an unsettled reservation — the reserved half of a remedy-planning
+    /// state, seeded once per enumeration (`CHK-17` reservations are check-time state; the search
+    /// simulates commits, never releases).
+    pub fn present_reservations(&self) -> BTreeSet<EffectKind> {
+        self.projection
+            .reservations
+            .values()
+            .flat_map(|reserved| reserved.iter().cloned())
+            .collect()
     }
 
     pub fn is_open(&self, dispatch: &DispatchId) -> bool {

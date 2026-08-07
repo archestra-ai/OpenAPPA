@@ -173,6 +173,7 @@ impl PlannedBlock {
 struct State {
     label: Label,
     effects: BTreeSet<EffectKind>,
+    reservations: BTreeSet<EffectKind>,
 }
 
 /// Plan the remedies for a raw block. Emits the executable plans when the block clears in one
@@ -183,6 +184,7 @@ pub(crate) fn plan(registry: &Registry, views: &Views, call: &ResolvedCall, raw:
     let start = State {
         label: views.current_label(),
         effects: views.present_effects(),
+        reservations: views.present_reservations(),
     };
     let no_denials = BTreeSet::new();
     let denied = views.denied_authorities(&call.digest()).unwrap_or(&no_denials);
@@ -223,11 +225,13 @@ fn directly_clearable(
     denied: &BTreeSet<AuthorityName>,
 ) -> Option<Vec<RemedyStep>> {
     let contract = registry.tool(call.tool())?;
-    let has_effect = |kind: &EffectKind| state.effects.contains(kind);
+    let has_committed = |kind: &EffectKind| state.effects.contains(kind);
+    let has_reserved = |kind: &EffectKind| state.reservations.contains(kind);
     let eval = check::evaluate_state(
         contract,
         &state.label,
-        &has_effect,
+        &has_committed,
+        &has_reserved,
         call,
         check::PlaceholderGaps::FailClosed,
     );
@@ -253,11 +257,13 @@ fn enumerate_plans(registry: &Registry, state: &State, call: &ResolvedCall) -> V
     let Some(contract) = registry.tool(call.tool()) else {
         return Vec::new();
     };
-    let has_effect = |kind: &EffectKind| state.effects.contains(kind);
+    let has_committed = |kind: &EffectKind| state.effects.contains(kind);
+    let has_reserved = |kind: &EffectKind| state.reservations.contains(kind);
     let block = check::evaluate_state(
         contract,
         &state.label,
-        &has_effect,
+        &has_committed,
+        &has_reserved,
         call,
         check::PlaceholderGaps::FailClosed,
     );
@@ -493,8 +499,16 @@ fn sanitized_commit(current: &Label, output: &Label, sanitizer: &Sanitizer) -> O
 
 fn prerequisite_runnable(registry: &Registry, state: &State, tool: &ToolContract) -> bool {
     let call = synthetic_call(tool);
-    let has_effect = |kind: &EffectKind| state.effects.contains(kind);
-    let eval = check::evaluate_state(tool, &state.label, &has_effect, &call, check::PlaceholderGaps::Waived);
+    let has_committed = |kind: &EffectKind| state.effects.contains(kind);
+    let has_reserved = |kind: &EffectKind| state.reservations.contains(kind);
+    let eval = check::evaluate_state(
+        tool,
+        &state.label,
+        &has_committed,
+        &has_reserved,
+        &call,
+        check::PlaceholderGaps::Waived,
+    );
     if !eval.consumed.is_empty() {
         return false;
     }
@@ -560,6 +574,7 @@ fn transitions(registry: &Registry, state: &State, tool: &ToolContract) -> Vec<S
     let mut states = vec![State {
         label: check::committed_label(tool, &state.label),
         effects: effects.clone(),
+        reservations: state.reservations.clone(),
     }];
     let output = tool.output_label();
     for sanitizer in applicable_output_sanitizers(registry, tool, &output) {
@@ -567,6 +582,7 @@ fn transitions(registry: &Registry, state: &State, tool: &ToolContract) -> Vec<S
             let next = State {
                 label,
                 effects: effects.clone(),
+                reservations: state.reservations.clone(),
             };
             if !states.contains(&next) {
                 states.push(next);
@@ -1536,6 +1552,99 @@ mod tests {
         ];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         assert_eq!(assigned(&planned), vec![vec!["narrow"], vec!["broad"]]);
+    }
+
+    fn open_reservation(tool: &str, kinds: &[&str]) -> Fact {
+        let seed = ResolvedCall::new(ToolName::new(tool), json!({}), vec![]);
+        Fact::DispatchOpened {
+            trajectory: traj(),
+            dispatch: crate::value::DispatchId::new(traj(), seed.digest(), 0),
+            proposed_label: known(TRUSTED, Audience::Public),
+            proposed_effects: kinds.iter().copied().map(EffectKind::new).collect(),
+            dynamic_resolutions: vec![],
+        }
+    }
+
+    #[test]
+    fn a_reservation_caused_no_prior_gap_enumerates_its_waiver_plans() {
+        let guard = ToolContract {
+            name: ToolName::new("guard"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![],
+            requires: Requires {
+                history: vec![HistoryRequirement::NoPrior(EffectKind::new("email.sent"))],
+                ..Requires::default()
+            },
+        };
+        let keeper = Authority {
+            name: AuthorityName::new("keeper"),
+            mandate: Mandate {
+                waivers: vec![EffectKind::new("email.sent")],
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![guard],
+            authorities: vec![keeper],
+            sanitizers: vec![],
+            casts: vec![],
+        });
+        let log = vec![
+            user_value(known(TRUSTED, Audience::Public)),
+            open_reservation("send", &["email.sent"]),
+        ];
+        let planned = plan_of(&registry, &log, &call("guard", json!({})));
+        assert!(planned.is_curable());
+        assert_eq!(assigned(&planned), vec![vec!["keeper"]]);
+    }
+
+    #[test]
+    fn a_reserved_kind_gates_the_synthetic_prerequisite() {
+        let delete = ToolContract {
+            name: ToolName::new("delete_db"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![],
+            requires: Requires {
+                history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
+                ..Requires::default()
+            },
+        };
+        let backup = ToolContract {
+            name: ToolName::new("backup"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: vec![EffectKind::new("backup.done")],
+            requires: Requires {
+                history: vec![HistoryRequirement::NoPrior(EffectKind::new("lock"))],
+                ..Requires::default()
+            },
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![delete, backup],
+            authorities: vec![],
+            sanitizers: vec![],
+            casts: vec![],
+        });
+        let clear = vec![user_value(known(TRUSTED, Audience::Public))];
+        let planned = plan_of(&registry, &clear, &call("delete_db", json!({})));
+        assert!(matches!(
+            planned.plans.as_slice(),
+            [RemedyPlan::Redispatch { tool, .. }] if tool == &ToolName::new("backup")
+        ));
+
+        let reserved = vec![
+            user_value(known(TRUSTED, Audience::Public)),
+            open_reservation("locker", &["lock"]),
+        ];
+        let planned = plan_of(&registry, &reserved, &call("delete_db", json!({})));
+        assert!(planned.plans.is_empty());
+        assert!(!planned.is_curable());
     }
 
     #[test]
@@ -2623,6 +2732,7 @@ mod tests {
             .prop_map(|(trust, audience, effects)| State {
                 label: known(trust, audience),
                 effects,
+                reservations: BTreeSet::new(),
             })
     }
 
@@ -2684,8 +2794,16 @@ mod tests {
             let contract = registry.tool(&target).expect("target is modulo the re-keyed tool count");
             let call = synthetic_call(contract);
 
-            let has_effect = |kind: &EffectKind| state.effects.contains(kind);
-            let eval = check::evaluate_state(contract, &state.label, &has_effect, &call, check::PlaceholderGaps::FailClosed);
+            let has_committed = |kind: &EffectKind| state.effects.contains(kind);
+            let has_reserved = |kind: &EffectKind| state.reservations.contains(kind);
+            let eval = check::evaluate_state(
+                contract,
+                &state.label,
+                &has_committed,
+                &has_reserved,
+                &call,
+                check::PlaceholderGaps::FailClosed,
+            );
             if !eval.consumed.is_empty() || (eval.requirement_gaps.is_empty() && eval.narrowing.is_none()) {
                 return Ok(());
             }
@@ -2739,8 +2857,16 @@ mod tests {
             let target = ToolName::new(format!("t{}", target % registry.tools().count().max(1)));
             let contract = registry.tool(&target).expect("target is modulo the re-keyed tool count");
             let call = synthetic_call(contract);
-            let has_effect = |kind: &EffectKind| state.effects.contains(kind);
-            let eval = check::evaluate_state(contract, &state.label, &has_effect, &call, check::PlaceholderGaps::FailClosed);
+            let has_committed = |kind: &EffectKind| state.effects.contains(kind);
+            let has_reserved = |kind: &EffectKind| state.reservations.contains(kind);
+            let eval = check::evaluate_state(
+                contract,
+                &state.label,
+                &has_committed,
+                &has_reserved,
+                &call,
+                check::PlaceholderGaps::FailClosed,
+            );
             if !eval.consumed.is_empty() || (eval.requirement_gaps.is_empty() && eval.narrowing.is_none()) {
                 return Ok(());
             }

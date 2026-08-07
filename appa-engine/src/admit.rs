@@ -480,7 +480,7 @@ mod tests {
             resolution: CastResolution::Resolver {
                 may_cast: CastCeiling {
                     trust: vec![SUSPICIOUS],
-                    audience: vec![Audience::Public],
+                    audience: Some(Audience::restricted([ReaderId::new("finance"), ReaderId::new("audit")])),
                 },
             },
         };
@@ -743,7 +743,7 @@ mod tests {
                 },
                 CastAnswer {
                     cast: CastName::new("classifier"),
-                    resolved: DimValue::Audience(Audience::Public),
+                    resolved: DimValue::Audience(Audience::restricted([ReaderId::new("finance")])),
                 }
             ),
             Err(CastError::NotUnknown)
@@ -782,6 +782,96 @@ mod tests {
             ),
             Err(AdmitError::NarrowingUnaccepted)
         );
+    }
+
+    #[test]
+    fn an_audience_resolution_is_bounded_at_the_engine_not_the_wire() {
+        let reg = registry();
+        let call = ResolvedCall::new(ToolName::new("poll_room"), json!({}), vec![]);
+        let (log, dispatch) = open_log(&call);
+        let t = traj();
+        let attempt = |resolved: DimValue| {
+            let p = views_of(&log);
+            admit_result(
+                &reg,
+                &p.view(&t),
+                &dispatch,
+                &call,
+                ResultAdmission::SuccessCast {
+                    body: ValueBody::new("room roster"),
+                    cast: CastName::new("classifier"),
+                    resolved,
+                },
+            )
+        };
+        let refused = [
+            Audience::restricted([ReaderId::new("@hr")]),
+            Audience::restricted([ReaderId::new("public")]),
+            Audience::Public,
+            Audience::restricted([ReaderId::new("stranger")]),
+        ];
+        for answer in refused {
+            assert_eq!(attempt(DimValue::Audience(answer)), Err(AdmitError::CeilingExceeded));
+        }
+    }
+
+    #[test]
+    fn a_public_resolution_is_admitted_under_a_public_cap() {
+        let fetch = ToolContract {
+            name: ToolName::new("fetch_page"),
+            tags: vec![],
+            delta: Some(Delta {
+                trust: None,
+                audience: Some(Dim::Unknown.into()),
+            }),
+            emits: vec![],
+            requires: Default::default(),
+        };
+        let librarian = Cast {
+            name: CastName::new("librarian"),
+            resolution: CastResolution::Resolver {
+                may_cast: CastCeiling {
+                    trust: vec![],
+                    audience: Some(Audience::Public),
+                },
+            },
+        };
+        let reg = Registry::build(RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: vec![fetch],
+            authorities: vec![],
+            sanitizers: vec![],
+            casts: vec![librarian],
+        })
+        .unwrap();
+        let call = ResolvedCall::new(ToolName::new("fetch_page"), json!({}), vec![]);
+        let (log, dispatch) = open_log(&call);
+        let t = traj();
+        let attempt = |resolved: Audience| {
+            let p = views_of(&log);
+            admit_result(
+                &reg,
+                &p.view(&t),
+                &dispatch,
+                &call,
+                ResultAdmission::SuccessCast {
+                    body: ValueBody::new("wiki article"),
+                    cast: CastName::new("librarian"),
+                    resolved: DimValue::Audience(resolved),
+                },
+            )
+        };
+        assert_eq!(
+            attempt(Audience::restricted([ReaderId::new("public")])),
+            Err(AdmitError::CeilingExceeded)
+        );
+        let batch = attempt(Audience::Public).unwrap();
+        match batch.facts.last().unwrap() {
+            Fact::ValueAdmitted { value, .. } => {
+                assert_eq!(value.label.audience, Dim::Known(Audience::Public));
+            }
+            other => panic!("expected ValueAdmitted, got {other:?}"),
+        }
     }
 
     #[test]
