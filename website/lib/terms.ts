@@ -89,7 +89,7 @@ const TERMS = {
   requirement_gaps: "Returned on a refusal: the unmet entries of requires.",
   narrowing: "The loss of reach a proposed flow would commit; returned on a refusal for the agent to accept, alone or inside a composed plan.",
   remedy_plans:
-    "Returned on a refusal: exact sound paths forward to unblock execution.",
+    "Returned on a refusal: exact valid paths forward to unblock execution.",
   unestablished:
     "Returned on a refusal: values whose needed dimension no registered cast could establish.",
   Unknown:
