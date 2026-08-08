@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::fact::EffectKind;
-use crate::label::{Audience, Dim, Dimension, Label, Trust};
+use crate::label::{Audience, Dim, Dimension, Label, ReaderId, Trust};
 use crate::names::{DynamicResolverName, MarkName, TagName};
 use crate::value::ToolName;
 
@@ -59,9 +59,7 @@ impl PinnedDynamicResolution {
     pub fn from_answer(binding: DynamicAudienceBinding, audience: Option<Audience>) -> Self {
         let audience = audience.filter(|answer| match answer {
             Audience::Public => false,
-            Audience::Restricted(readers) => !readers
-                .iter()
-                .any(|reader| reader.as_str() == "public" || reader.as_str().starts_with('@')),
+            Audience::Restricted(readers) => readers.iter().all(ReaderId::is_literal),
         });
         PinnedDynamicResolution { binding, audience }
     }
@@ -235,5 +233,41 @@ impl ToolContract {
     /// declares none: its Unknown output is admitted as-is, not confined awaiting a cast.
     pub fn pending_cast_dim(&self) -> Option<Dimension> {
         self.delta.as_ref().and_then(Delta::pending_cast_dim)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::names::DynamicResolverName;
+
+    fn binding() -> DynamicAudienceBinding {
+        DynamicAudienceBinding {
+            resolver: DynamicResolverName::new("crm-acl"),
+            argument: "customer_id".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_dynamic_answer_keeps_only_literal_reader_sets() {
+        let pinned = |audience| {
+            PinnedDynamicResolution::from_answer(binding(), Some(audience))
+                .audience()
+                .cloned()
+        };
+
+        assert_eq!(pinned(Audience::Public), None);
+        assert_eq!(pinned(Audience::restricted([ReaderId::new("public")])), None);
+        assert_eq!(pinned(Audience::restricted([ReaderId::new("@hr")])), None);
+        assert_eq!(
+            pinned(Audience::restricted([ReaderId::new("finance"), ReaderId::new("@hr")])),
+            None,
+            "one group member spoils the whole answer"
+        );
+
+        let empty = Audience::restricted([]);
+        assert_eq!(pinned(empty.clone()), Some(empty), "no readers is a valid answer");
+        let email = Audience::restricted([ReaderId::new("ap@corp.example")]);
+        assert_eq!(pinned(email.clone()), Some(email), "`@` mid-ID is an ordinary reader");
     }
 }

@@ -72,9 +72,13 @@ impl Trust {
 }
 
 /// A symbolic reader identity — an opaque atom to the pure algebra. The current dialect's
-/// restricted audiences are explicit id-lists (`public` is the one non-list state, `LBL-4`), so
-/// intersection/subset are exact. Named groups with resolver-backed membership (`john ∈ hr`
-/// resolved fresh at every check) are design direction, not implemented (spec §Audience).
+/// restricted audiences are explicit id-lists (`public` is the one non-list state), so
+/// intersection/subset are exact. Two spellings are reserved — `public` and a leading `@` —
+/// which the algebra must never hold as a reader: a group is expanded to literal IDs by the
+/// membership resolver before a reader set is built. The constructor cannot enforce that, so the
+/// rule is [`is_literal`](ReaderId::is_literal), applied on the ingresses that carry it today:
+/// registry declarations at load, cast answers against their ceiling, and dynamic resolver answers.
+/// A `$recipient` argument and an imported fact are not yet among them (`T14`, `T31`).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ReaderId(String);
 

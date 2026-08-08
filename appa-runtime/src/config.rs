@@ -1753,6 +1753,37 @@ delta = { audience = { exactly = ["ap@corp.example"] } }
     }
 
     #[test]
+    fn the_group_guard_holds_on_the_direct_build_path_too() {
+        let toml = err(r#"version = 1
+[[tool]]
+name = "t"
+delta = { audience = { exactly = ["@team"] } }
+"#);
+        assert!(matches!(toml, ConfigError::BadAudience { .. }));
+
+        let direct = RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: vec![ToolContract {
+                name: ToolName::new("t"),
+                tags: vec![],
+                delta: Some(Delta {
+                    trust: None,
+                    audience: Some(AudienceDelta::Static(Audience::restricted([ReaderId::new("@team")]))),
+                }),
+                emits: vec![],
+                requires: Requires::default(),
+            }],
+            authorities: vec![],
+            sanitizers: vec![],
+            casts: vec![],
+        };
+        assert!(matches!(
+            Registry::build(direct),
+            Err(LoadError::NonLiteralReader { reader, .. }) if reader == "@team"
+        ));
+    }
+
+    #[test]
     fn algebraic_registry_lints_run_at_parse() {
         assert!(matches!(
             err(

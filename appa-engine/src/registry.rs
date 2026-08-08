@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::authority::{Authority, Cast, CastResolution, CastTarget, Hint, Sanitizer, Transition};
-use crate::contract::{AudienceDelta, ToolContract};
-use crate::label::{Adequacy, Dim, Dimension, Trust};
+use crate::contract::{AudienceDelta, AudienceRequirement, RecipientSpec, ToolContract};
+use crate::label::{Adequacy, Audience, Dim, Dimension, Trust};
 use crate::names::{AuthorityName, CastName, SanitizerName};
 use crate::value::ToolName;
 
@@ -111,6 +111,10 @@ pub enum LoadError {
     TooManyPlanAlternatives { tool: String, count: u128, max: u128 },
     #[error("{context}: hint is {len} characters, over the {max} a plan offer carries")]
     HintTooLong { context: String, len: usize, max: usize },
+    #[error(
+        "{context}: {reader:?} is not a literal reader ID — `public` names the whole audience, and the `@` mark is reserved for groups a membership resolver expands"
+    )]
+    NonLiteralReader { context: String, reader: String },
 }
 
 /// The planner cap: the most unique grouped authority assignments one block may
@@ -248,9 +252,15 @@ impl Registry {
         let mut sanitizers = BTreeMap::new();
         for sanitizer in config.sanitizers {
             let context = || format!("sanitizer {}", sanitizer.name.as_str());
-            if let Transition::Trust { from_floor, to } = &sanitizer.transition {
-                check_rank(&config.trust_chain, Some(*from_floor), || format!("{} from", context()))?;
-                check_rank(&config.trust_chain, Some(*to), || format!("{} to", context()))?;
+            match &sanitizer.transition {
+                Transition::Trust { from_floor, to } => {
+                    check_rank(&config.trust_chain, Some(*from_floor), || format!("{} from", context()))?;
+                    check_rank(&config.trust_chain, Some(*to), || format!("{} to", context()))?;
+                }
+                Transition::Audience { from_includes, to } => {
+                    check_readers(from_includes, || format!("{} from", context()))?;
+                    check_readers(to, || format!("{} to", context()))?;
+                }
             }
             check_hint(sanitizer.hint.as_ref(), context)?;
             if sanitizers.insert(sanitizer.name.clone(), sanitizer.clone()).is_some() {
@@ -270,6 +280,20 @@ impl Registry {
             check_rank(&config.trust_chain, tool.requires.label.trust_floor, || {
                 format!("tool {} trust floor", tool.name.as_str())
             })?;
+            if let Some(AudienceDelta::Static(audience)) = tool.delta.as_ref().and_then(|d| d.audience.as_ref()) {
+                check_readers(audience, || format!("tool {} delta", tool.name.as_str()))?;
+            }
+            for requirement in &tool.requires.label.audience {
+                match requirement {
+                    AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => {
+                        check_readers(recipients, || format!("tool {} includes", tool.name.as_str()))?;
+                    }
+                    AudienceRequirement::Cap(cap) => {
+                        check_readers(cap, || format!("tool {} cap", tool.name.as_str()))?;
+                    }
+                    AudienceRequirement::Includes(RecipientSpec::Placeholder(_) | RecipientSpec::Dynamic(_)) => {}
+                }
+            }
             validate_pending_cast(&tool)?;
             if tools.insert(tool.name.clone(), tool.clone()).is_some() {
                 return Err(LoadError::DuplicateTool(tool.name.as_str().to_string()));
@@ -284,6 +308,11 @@ impl Registry {
             check_rank(&config.trust_chain, authority.mandate.trust_ceiling, || {
                 format!("authority {} trust ceiling", authority.name.as_str())
             })?;
+            if let Some(ceiling) = &authority.mandate.reader_ceiling {
+                check_readers(ceiling, || {
+                    format!("authority {} reader ceiling", authority.name.as_str())
+                })?;
+            }
             check_hint(authority.hint.as_ref(), || {
                 format!("authority {}", authority.name.as_str())
             })?;
@@ -316,13 +345,18 @@ impl Registry {
                             format!("cast {} may_cast", cast.name.as_str())
                         })?;
                     }
+                    if let Some(cap) = &may_cast.audience {
+                        check_readers(cap, || format!("cast {} may_cast", cast.name.as_str()))?;
+                    }
                 }
                 CastResolution::Constant(CastTarget::Trust(rank)) => {
                     check_rank(&config.trust_chain, Some(*rank), || {
                         format!("cast {} constant", cast.name.as_str())
                     })?;
                 }
-                CastResolution::Constant(CastTarget::Audience(_)) => {}
+                CastResolution::Constant(CastTarget::Audience(audience)) => {
+                    check_readers(audience, || format!("cast {} constant", cast.name.as_str()))?;
+                }
             }
             if casts.insert(cast.name.clone(), cast.clone()).is_some() {
                 return Err(LoadError::DuplicateCast(cast.name.as_str().to_string()));
@@ -415,6 +449,19 @@ fn check_rank(chain: &TrustChain, rank: Option<Trust>, context: impl Fn() -> Str
     }
 }
 
+fn check_readers(audience: &Audience, context: impl Fn() -> String) -> Result<(), LoadError> {
+    let Audience::Restricted(readers) = audience else {
+        return Ok(());
+    };
+    match readers.iter().find(|reader| !reader.is_literal()) {
+        Some(reader) => Err(LoadError::NonLiteralReader {
+            context: context(),
+            reader: reader.as_str().to_string(),
+        }),
+        None => Ok(()),
+    }
+}
+
 fn check_hint(hint: Option<&Hint>, context: impl Fn() -> String) -> Result<(), LoadError> {
     match hint {
         Some(hint) if hint.as_str().chars().count() > MAX_HINT_CHARS => Err(LoadError::HintTooLong {
@@ -432,7 +479,7 @@ mod tests {
     use crate::authority::SanitizerPoints;
     use crate::authority::{CastCeiling, CastTarget, Mandate, Scope};
     use crate::contract::{Delta, DynamicAudienceBinding, Requires};
-    use crate::label::Audience;
+    use crate::label::{Audience, ReaderId};
     use crate::names::{AuthorityName, MarkName};
 
     fn chain() -> TrustChain {
@@ -469,6 +516,151 @@ mod tests {
             scope: Scope::default(),
             hint: None,
         }
+    }
+
+    fn audience_sites(reader: &str) -> Vec<(&'static str, RegistryConfig)> {
+        let named = Audience::restricted([ReaderId::new(reader)]);
+        let literal = Audience::restricted([ReaderId::new("finance")]);
+
+        let mut delta = base();
+        let mut delta_tool = tool("emit");
+        delta_tool.delta = Some(Delta {
+            trust: None,
+            audience: Some(AudienceDelta::Static(named.clone())),
+        });
+        delta.tools = vec![delta_tool];
+
+        let mut includes = base();
+        let mut includes_tool = tool("emit");
+        includes_tool.requires.label.audience =
+            vec![AudienceRequirement::Includes(RecipientSpec::Static(named.clone()))];
+        includes.tools = vec![includes_tool];
+
+        let mut cap = base();
+        let mut cap_tool = tool("emit");
+        cap_tool.requires.label.audience = vec![AudienceRequirement::Cap(named.clone())];
+        cap.tools = vec![cap_tool];
+
+        let mut ceiling = base();
+        ceiling.authorities = vec![Authority {
+            name: AuthorityName::new("officer"),
+            mandate: Mandate {
+                reader_ceiling: Some(named.clone()),
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        }];
+
+        let sanitizer = |transition| Sanitizer {
+            name: SanitizerName::new("redactor"),
+            on: SanitizerPoints {
+                input: false,
+                output: true,
+            },
+            transition,
+            hint: None,
+        };
+        let mut transition_from = base();
+        transition_from.sanitizers = vec![sanitizer(Transition::Audience {
+            from_includes: named.clone(),
+            to: literal.clone(),
+        })];
+        let mut transition_to = base();
+        transition_to.sanitizers = vec![sanitizer(Transition::Audience {
+            from_includes: literal,
+            to: named.clone(),
+        })];
+
+        let cast = |name, resolution| Cast {
+            name: CastName::new(name),
+            resolution,
+        };
+        let mut may_cast = base();
+        may_cast.casts = vec![cast(
+            "classifier",
+            CastResolution::Resolver {
+                may_cast: CastCeiling {
+                    trust: vec![],
+                    audience: Some(named.clone()),
+                },
+            },
+        )];
+        let mut constant = base();
+        constant.casts = vec![cast("paranoid", CastResolution::Constant(CastTarget::Audience(named)))];
+
+        vec![
+            ("tool emit delta", delta),
+            ("tool emit includes", includes),
+            ("tool emit cap", cap),
+            ("authority officer reader ceiling", ceiling),
+            ("sanitizer redactor from", transition_from),
+            ("sanitizer redactor to", transition_to),
+            ("cast classifier may_cast", may_cast),
+            ("cast paranoid constant", constant),
+        ]
+    }
+
+    #[test]
+    fn every_declared_audience_refuses_a_reserved_or_group_reader() {
+        for reserved in ["public", "@auditors"] {
+            for (context, cfg) in audience_sites(reserved) {
+                match Registry::build(cfg) {
+                    Err(LoadError::NonLiteralReader {
+                        context: reported,
+                        reader,
+                    }) => {
+                        assert_eq!(reader, reserved, "{context} reported the wrong reader");
+                        assert_eq!(reported, context, "{context} reported the wrong site");
+                    }
+                    other => panic!("{context} admitted {reserved:?}: {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn one_reserved_member_spoils_an_otherwise_literal_set() {
+        let mut cfg = base();
+        let mut spoiled = tool("emit");
+        spoiled.requires.label.audience = vec![AudienceRequirement::Cap(Audience::restricted([
+            ReaderId::new("ap@corp.example"),
+            ReaderId::new("finance"),
+            ReaderId::new("public"),
+        ]))];
+        cfg.tools = vec![spoiled];
+        assert!(matches!(
+            Registry::build(cfg),
+            Err(LoadError::NonLiteralReader { reader, .. }) if reader == "public"
+        ));
+    }
+
+    #[test]
+    fn the_group_mark_is_a_prefix_and_never_a_substring() {
+        for (context, cfg) in audience_sites("ap@corp.example") {
+            assert!(Registry::build(cfg).is_ok(), "{context} refused an ordinary reader ID");
+        }
+    }
+
+    #[test]
+    fn public_and_the_empty_set_stay_loadable_audiences() {
+        let mut public_ceiling = base();
+        public_ceiling.authorities = vec![Authority {
+            name: AuthorityName::new("officer"),
+            mandate: Mandate {
+                reader_ceiling: Some(Audience::Public),
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        }];
+        assert!(Registry::build(public_ceiling).is_ok());
+
+        let mut empty_cap = base();
+        let mut cap_tool = tool("emit");
+        cap_tool.requires.label.audience = vec![AudienceRequirement::Cap(Audience::restricted([]))];
+        empty_cap.tools = vec![cap_tool];
+        assert!(Registry::build(empty_cap).is_ok());
     }
 
     #[test]
