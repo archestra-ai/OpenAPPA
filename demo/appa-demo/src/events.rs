@@ -172,7 +172,7 @@ pub fn fact_event(fact: &Fact, chain: &TrustChain) -> Vec<WireEvent> {
             BoundaryKind::Merge { .. } => vec![WireEvent::Merge {
                 trajectory: trajectory.as_str().to_string(),
             }],
-            BoundaryKind::TurnEnd => Vec::new(),
+            BoundaryKind::TurnEnd | BoundaryKind::VoidReturn => Vec::new(),
         },
         // Algebraically detailed records the chat does not render.
         _ => Vec::new(),

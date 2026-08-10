@@ -166,6 +166,13 @@ impl Engine {
         branch::check_child_return(&self.registry, parent, child)
     }
 
+    /// Record a child's void return: the child-attributed terminal that ends the branch and
+    /// crosses no value — no merge, no label contribution. A branch ends at most once.
+    /// See [`crate::branch`].
+    pub fn submit_void_return(&self, parent: &Views, child: &TrajectoryId) -> Result<FactBatch, BranchError> {
+        branch::submit_void_return(parent, child)
+    }
+
     /// The child fold's unestablished facts — what a cast must establish before this child's
     /// return can merge. Policy-independent: the runtime drives resolution *before*
     /// the return-policy split, so raw and sanitizer-bound returns resolve alike.

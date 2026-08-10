@@ -18,10 +18,10 @@ pub enum BranchError {
     AlreadyForked,
     #[error("the parent's current label has an unresolved dimension — resolve it before forking")]
     ParentUnresolved,
-    #[error("the fork parent already returned its result — a returned child cannot fork")]
-    ParentReturned,
-    #[error("the child has already returned — a child returns at most once")]
-    AlreadyReturned,
+    #[error("the fork parent already ended its errand — an ended branch cannot fork")]
+    ParentEnded,
+    #[error("the branch already ended its errand — by one value crossing or one void, at most once")]
+    AlreadyEnded,
     #[error("the child was not forked from this parent (reparenting/cross-family merge refused)")]
     NotDirectParent,
     #[error("no sanitizer registered as {0}")]
@@ -63,8 +63,8 @@ pub(crate) fn seed_child(
     if parent.parent_of(child).is_some() {
         return Err(BranchError::AlreadyForked);
     }
-    if parent.returns_by(parent.trajectory()) > 0 {
-        return Err(BranchError::ParentReturned);
+    if parent.has_ended(parent.trajectory()) {
+        return Err(BranchError::ParentEnded);
     }
     match &return_policy {
         ReturnPolicy::Raw => {}
@@ -102,8 +102,8 @@ pub(crate) fn submit_child_return(
         Some(direct) if direct == parent.trajectory() => {}
         _ => return Err(BranchError::NotDirectParent),
     }
-    if parent.returns_by(child) > 0 {
-        return Err(BranchError::AlreadyReturned);
+    if parent.has_ended(child) {
+        return Err(BranchError::AlreadyEnded);
     }
     let policy = parent.return_policy_of(child).ok_or(BranchError::NotForked)?.clone();
     let fold = parent.branch_label(child);
@@ -124,6 +124,27 @@ pub(crate) fn submit_child_return(
     Ok(FactBatch::new(
         parent.revision(),
         crossing_facts(parent, child, value, derivation, None),
+    ))
+}
+
+/// Record a child's **void return**: the child-attributed terminal ends the branch and
+/// crosses no value — no merge, no label contribution. Refused for a non-child and for a branch
+/// that already ended by value or void. The batch is on the family's revision, so
+/// competing terminals linearize at the store's revisioned append and at most one lands.
+pub(crate) fn submit_void_return(parent: &Views, child: &TrajectoryId) -> Result<FactBatch, BranchError> {
+    match parent.parent_of(child) {
+        Some(direct) if direct == parent.trajectory() => {}
+        _ => return Err(BranchError::NotDirectParent),
+    }
+    if parent.has_ended(child) {
+        return Err(BranchError::AlreadyEnded);
+    }
+    Ok(FactBatch::new(
+        parent.revision(),
+        vec![Fact::Boundary {
+            trajectory: child.clone(),
+            kind: BoundaryKind::VoidReturn,
+        }],
     ))
 }
 
@@ -216,8 +237,8 @@ pub(crate) fn check_child_return(
         Some(direct) if direct == parent.trajectory() => {}
         _ => return Err(BranchError::NotDirectParent),
     }
-    if parent.returns_by(child) > 0 {
-        return Err(BranchError::AlreadyReturned);
+    if parent.has_ended(child) {
+        return Err(BranchError::AlreadyEnded);
     }
     match parent.return_policy_of(child) {
         Some(ReturnPolicy::Raw) => {}
@@ -1084,7 +1105,7 @@ mod tests {
                     raw_digest: RawResultDigest::of(b"findings"),
                 },
             ),
-            Err(BranchError::AlreadyReturned)
+            Err(BranchError::AlreadyEnded)
         );
 
         let mut log = blocked_family();
@@ -1114,7 +1135,7 @@ mod tests {
                     body: ValueBody::new("findings"),
                 },
             ),
-            Err(BranchError::AlreadyReturned)
+            Err(BranchError::AlreadyEnded)
         );
     }
 
@@ -1127,11 +1148,11 @@ mod tests {
         let projection = build(&log);
         assert_eq!(
             submit_child_return(&registry(), &projection.view(&parent()), &child(), raw("second")),
-            Err(BranchError::AlreadyReturned)
+            Err(BranchError::AlreadyEnded)
         );
         assert_eq!(
             check_child_return(&registry(), &projection.view(&parent()), &child()),
-            Err(BranchError::AlreadyReturned)
+            Err(BranchError::AlreadyEnded)
         );
     }
 
@@ -1150,7 +1171,69 @@ mod tests {
                 ReturnPolicy::Raw,
             )
             .map(|_| ()),
-            Err(BranchError::ParentReturned)
+            Err(BranchError::ParentEnded)
+        );
+    }
+
+    #[test]
+    fn a_void_return_ends_the_branch_and_contributes_nothing() {
+        let mut log = forked(known(SUSPICIOUS, internal()));
+        let projection = build(&log);
+        assert_eq!(
+            submit_void_return(&projection.view(&parent()), &TrajectoryId::new("stranger")),
+            Err(BranchError::NotDirectParent)
+        );
+        let label_before = projection.view(&parent()).current_label();
+        let batch = submit_void_return(&projection.view(&parent()), &child()).unwrap();
+        assert_eq!(
+            batch.facts,
+            [Fact::Boundary {
+                trajectory: child(),
+                kind: BoundaryKind::VoidReturn,
+            }]
+        );
+        log.extend(batch.facts);
+        let projection = build(&log);
+        assert!(projection.view(&parent()).has_ended(&child()));
+        assert_eq!(projection.view(&parent()).returns_by(&child()), 0);
+        assert_eq!(projection.view(&parent()).current_label(), label_before);
+
+        assert_eq!(
+            submit_void_return(&projection.view(&parent()), &child()),
+            Err(BranchError::AlreadyEnded)
+        );
+        assert_eq!(
+            submit_child_return(&registry(), &projection.view(&parent()), &child(), raw("late")),
+            Err(BranchError::AlreadyEnded)
+        );
+        assert_eq!(
+            check_child_return(&registry(), &projection.view(&parent()), &child()),
+            Err(BranchError::AlreadyEnded)
+        );
+        assert_eq!(
+            seed_child(
+                &registry(),
+                &projection.view(&child()),
+                &TrajectoryId::new("grandchild"),
+                ReturnPolicy::Raw,
+            )
+            .map(|_| ()),
+            Err(BranchError::ParentEnded)
+        );
+    }
+
+    #[test]
+    fn competing_terminals_linearize_to_at_most_one() {
+        let mut log = forked(known(SUSPICIOUS, internal()));
+        let projection = build(&log);
+        let ret = submit_child_return(&registry(), &projection.view(&parent()), &child(), raw("finding")).unwrap();
+        let competing = submit_void_return(&projection.view(&parent()), &child()).unwrap();
+        assert_eq!(competing.basis, ret.basis);
+        log.extend(ret.facts);
+        let projection = build(&log);
+        assert_eq!(
+            submit_void_return(&projection.view(&parent()), &child()),
+            Err(BranchError::AlreadyEnded)
         );
     }
 

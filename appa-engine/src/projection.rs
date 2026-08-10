@@ -47,6 +47,7 @@ pub struct Projection {
     boundaries: Vec<TrajectoryId>,
     forks: Vec<Fork>,
     child_returns: Vec<ReturnedChild>,
+    voided: BTreeSet<TrajectoryId>,
     bound_sanitizers: BTreeMap<DispatchId, SanitizerName>,
     dynamic_resolutions: BTreeMap<DispatchId, Vec<PinnedDynamicResolution>>,
     /// Denied authorities per trajectory scope, keyed by rendered call (the
@@ -74,6 +75,7 @@ impl Projection {
         let mut boundaries = Vec::new();
         let mut forks = Vec::new();
         let mut child_returns = Vec::new();
+        let mut voided = BTreeSet::new();
         let mut bound_sanitizers = BTreeMap::new();
         let mut dynamic_resolutions = BTreeMap::new();
         let mut denials: BTreeMap<TrajectoryId, BTreeMap<CanonicalDigest, BTreeSet<AuthorityName>>> = BTreeMap::new();
@@ -183,6 +185,9 @@ impl Projection {
                             });
                         }
                         BoundaryKind::Merge { .. } => {}
+                        BoundaryKind::VoidReturn => {
+                            voided.insert(trajectory.clone());
+                        }
                     }
                 }
             }
@@ -199,6 +204,7 @@ impl Projection {
             boundaries,
             forks,
             child_returns,
+            voided,
             bound_sanitizers,
             dynamic_resolutions,
             denials,
@@ -323,6 +329,14 @@ impl Views<'_> {
             .iter()
             .filter(|returned| returned.id.child() == child)
             .count() as u32
+    }
+
+    /// Has this branch ended its errand? True after its one value crossing or its void
+    /// terminal. The one replay-derived ended-branch predicate: an ended branch is
+    /// closed to new turns, further returns, and forking, and every gate reads this — never the
+    /// raw counts.
+    pub fn has_ended(&self, branch: &TrajectoryId) -> bool {
+        self.returns_by(branch) > 0 || self.projection.voided.contains(branch)
     }
 
     /// The values admitted to this branch, with their ids and labels — for finding the Unknown

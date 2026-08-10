@@ -174,8 +174,8 @@ pub enum BeginTurnError {
     Cancelled,
     #[error("the reserved child belongs to another mediator")]
     ForeignFork,
-    #[error("this session already returned its result — a returned child is closed to new turns")]
-    SessionReturned,
+    #[error("this session already ended its errand — an ended child is closed to new turns")]
+    SessionEnded,
     #[error("session store fault: {0}")]
     Store(#[from] StoreError),
 }
@@ -403,12 +403,12 @@ impl Mediator {
         }
 
         let value = LabeledValue::new(ValueBody::new(text), self.config().boundary_label().clone());
-        let mut returned = false;
+        let mut ended = false;
         let turn_admission = self.store().finalize(&tenant, &session, |facts, revision| {
             if let Some(parent) = &direct_parent {
                 let projection = Projection::build(facts, revision);
-                if projection.view(parent).returns_by(&session) > 0 {
-                    returned = true;
+                if projection.view(parent).has_ended(&session) {
+                    ended = true;
                     return None;
                 }
             }
@@ -421,8 +421,8 @@ impl Mediator {
                 }],
             ))
         })?;
-        if returned {
-            return Err(BeginTurnError::SessionReturned);
+        if ended {
+            return Err(BeginTurnError::SessionEnded);
         }
 
         Ok(Turn {
@@ -984,8 +984,11 @@ impl Turn {
         let body = match exact_shape {
             Some(serde_json::Value::String(value)) => value.clone(),
             Some(serde_json::Value::Null) => {
-                self.finish_child_without_crossing(call_id, "no result returned to the parent")?;
-                return Ok(CallProgress::ChildFinished);
+                let Some(parent) = self.mediator.store().parent_of(&self.tenant, &self.session)? else {
+                    self.feedback(call_id, "this session cannot submit a result")?;
+                    return Ok(CallProgress::Go);
+                };
+                return self.finish_child_void(call_id, &parent);
             }
             _ => {
                 self.feedback(
@@ -999,10 +1002,10 @@ impl Turn {
         if let Some(parent) = self.mediator.store().parent_of(&self.tenant, &self.session)? {
             let (log, revision) = self.mediator.store().snapshot(&self.tenant, &self.session)?;
             let projection = Projection::build(&log, revision);
-            if projection.view(&parent).returns_by(&self.session) > 0 {
+            if projection.view(&parent).has_ended(&self.session) {
                 self.feedback(
                     call_id,
-                    "this session already returned its result — a child returns at most once",
+                    "this session already ended its errand — a child returns or voids at most once",
                 )?;
                 return Ok(CallProgress::Go);
             }
@@ -1196,11 +1199,11 @@ impl Turn {
         {
             let (log, revision) = self.mediator.store().snapshot(&self.tenant, &self.session)?;
             let projection = Projection::build(&log, revision);
-            if projection.view(&parent).returns_by(&self.session) > 0 {
+            if projection.view(&parent).has_ended(&self.session) {
                 self.pending_returns.clear();
                 self.feedback(
                     call_id,
-                    "this session already returned its result — a child returns at most once",
+                    "this session already ended its errand — a child returns or voids at most once",
                 )?;
                 return Ok(CallProgress::Go);
             }
@@ -1279,28 +1282,61 @@ impl Turn {
         Ok(CallProgress::Go)
     }
 
-    fn finish_child_without_crossing(&mut self, call_id: &ToolCallId, response: &str) -> Result<(), TurnError> {
+    fn finish_child_void(&mut self, call_id: &ToolCallId, parent: &TrajectoryId) -> Result<CallProgress, TurnError> {
         let remaining = self.remaining_after_current(call_id);
+        let mut already_ended = false;
+        let mut voided = false;
         self.mediator
             .store()
             .finalize(&self.tenant, &self.session, |facts, revision| {
+                if self.cancel.is_cancelled() {
+                    return None;
+                }
                 let projection = Projection::build(facts, revision);
+                let batch = match self
+                    .mediator
+                    .engine()
+                    .submit_void_return(&projection.view(parent), &self.session)
+                {
+                    Ok(batch) => batch,
+                    Err(appa_engine::branch::BranchError::AlreadyEnded) => {
+                        already_ended = true;
+                        return None;
+                    }
+                    Err(_) => unreachable!("the store's fork linkage names this child's direct parent"),
+                };
                 let mut terminal = self.drain_pending_casts(&projection.view(&self.session));
-                terminal.push(feedback_fact(&self.session, call_id, response));
+                terminal.extend(batch.facts);
+                terminal.push(feedback_fact(
+                    &self.session,
+                    call_id,
+                    "no result returned to the parent",
+                ));
                 terminal.extend(
                     remaining
                         .iter()
                         .map(|id| feedback_fact(&self.session, id, CHILD_FINISHED_REMAINDER)),
                 );
                 terminal.push(turn_end(&self.session));
+                voided = true;
                 Some(FactBatch::new(revision, terminal))
             })?;
-        self.unanswered.clear();
-        self.pending.clear();
-        self.pending_returns.clear();
-        self.pending_casts.clear();
-        self.lifecycle = Lifecycle::Finished;
-        Ok(())
+        if voided {
+            self.unanswered.clear();
+            self.pending.clear();
+            self.pending_returns.clear();
+            self.pending_casts.clear();
+            self.lifecycle = Lifecycle::Finished;
+            return Ok(CallProgress::ChildFinished);
+        }
+        if already_ended {
+            self.feedback(
+                call_id,
+                "this session already ended its errand — a child returns or voids at most once",
+            )?;
+            return Ok(CallProgress::Go);
+        }
+        Ok(CallProgress::Cancelled)
     }
 
     async fn resolve_unknown(

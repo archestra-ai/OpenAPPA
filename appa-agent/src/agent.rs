@@ -170,8 +170,8 @@ impl Agent {
                                     BeginTurnError::ForeignFork => {
                                         return Err(AgentError::Begin(BeginTurnError::ForeignFork));
                                     }
-                                    BeginTurnError::SessionReturned => {
-                                        return Err(AgentError::Begin(BeginTurnError::SessionReturned));
+                                    BeginTurnError::SessionEnded => {
+                                        return Err(AgentError::Begin(BeginTurnError::SessionEnded));
                                     }
                                 }
                             }

@@ -123,6 +123,7 @@ pub enum BoundaryKind {
     Merge {
         child_return: ChildReturnId,
     },
+    VoidReturn,
 }
 
 /// How a dispatch closed. Effects commit **only** on success — a call that dispatched but failed

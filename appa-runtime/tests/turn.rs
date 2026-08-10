@@ -1978,7 +1978,7 @@ async fn child_context_stops_at_the_fork_and_raw_returns_cross_once() {
         mediator
             .begin_turn(tenant.clone(), child.clone(), "return again", CancellationToken::new())
             .await,
-        Err(appa_runtime::BeginTurnError::SessionReturned)
+        Err(appa_runtime::BeginTurnError::SessionEnded)
     ));
     let (log_after, revision_after) = mediator.snapshot(&tenant, &child).unwrap();
     assert_eq!(log_before.len(), log_after.len());
@@ -2278,7 +2278,7 @@ builtin = "redact-email"
 }
 
 #[tokio::test]
-async fn a_voided_child_is_re_drivable_and_may_still_cross_its_one_value() {
+async fn a_voided_child_is_ended_and_closed_to_every_path() {
     let mediated = mediator("version = 1\n", &[]);
     let tenant = TenantId::new("tenant");
     let parent = mediated.create_session(tenant.clone());
@@ -2301,24 +2301,45 @@ async fn a_voided_child_is_re_drivable_and_may_still_cross_its_one_value() {
     ));
     drop(first);
 
-    let mut second = begin(&mediated, &tenant, &child, "look again").await;
-    assert!(matches!(
-        second
-            .mediate(
-                calls(vec![call("return", SUBMIT_RESULT, r#"{"value":"finding"}"#)]),
-                &mut budget,
-            )
-            .await
-            .unwrap(),
-        Step::ChildFinished
-    ));
     let log = facts(&mediated, &tenant, &parent);
     assert_eq!(
         log.iter()
-            .filter(|fact| matches!(fact, Fact::ChildReturn { .. }))
+            .filter(|fact| matches!(
+                fact,
+                Fact::Boundary {
+                    trajectory,
+                    kind: BoundaryKind::VoidReturn,
+                } if trajectory == &child
+            ))
             .count(),
         1
     );
+    assert!(!log.iter().any(|fact| matches!(fact, Fact::ChildReturn { .. })));
+    assert!(!log.iter().any(|fact| matches!(
+        fact,
+        Fact::Boundary {
+            kind: BoundaryKind::Merge { .. },
+            ..
+        }
+    )));
+    assert!(!log.iter().any(|fact| matches!(
+        fact,
+        Fact::ValueAdmitted {
+            provenance: Provenance::ChildReturn { .. },
+            ..
+        }
+    )));
+    let before = log.len();
+
+    assert!(matches!(
+        mediated
+            .begin_turn(tenant.clone(), child.clone(), "look again", CancellationToken::new())
+            .await,
+        Err(appa_runtime::BeginTurnError::SessionEnded)
+    ));
+    assert!(mediated.fork_session(&tenant, &child).is_err());
+    assert!(mediated.fork_session_reserved(&tenant, &child).is_err());
+    assert_eq!(facts(&mediated, &tenant, &parent).len(), before);
 }
 
 #[tokio::test]
