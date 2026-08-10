@@ -277,7 +277,7 @@ pub(crate) fn check_child_return(
                 sanitizer: sanitizer.name.clone(),
                 residual: None,
             });
-        } else if merged != candidate {
+        } else if strictly_improves(&candidate, &merged) {
             plans.push(ReturnPlan::Sanitize {
                 sanitizer: sanitizer.name.clone(),
                 residual: Some(Narrowing {
@@ -286,9 +286,12 @@ pub(crate) fn check_child_return(
                 }),
             });
         }
-        // merged == candidate: the relabel buys nothing over the raw crossing — not offered.
     }
     Ok(ReturnCheck::Block(ReturnBlock::Narrowing { narrowing, plans }))
+}
+
+fn strictly_improves(candidate: &Label, merged: &Label) -> bool {
+    &candidate.combine(merged) == candidate && merged != candidate
 }
 
 /// The child fold's unestablished facts — the values a cast must establish before this child's
@@ -699,13 +702,6 @@ mod tests {
                             sanitizer: SanitizerName::new("declassify"),
                             residual: None,
                         },
-                        ReturnPlan::Sanitize {
-                            sanitizer: SanitizerName::new("to-finance"),
-                            residual: Some(Narrowing {
-                                from: known(SUSPICIOUS, Audience::Public),
-                                to: known(SUSPICIOUS, Audience::restricted([ReaderId::new("finance")])),
-                            }),
-                        },
                     ]
                 );
             }
@@ -714,17 +710,19 @@ mod tests {
     }
 
     #[test]
-    fn a_trust_only_narrowing_offers_no_standalone_sanitize() {
+    fn a_worse_or_equal_relabel_is_never_offered() {
         let mut log = forked(known(TRUSTED, internal()));
         log.push(admit(child(), known(SUSPICIOUS, internal())));
-        match check(&registry(), &log) {
-            ReturnCheck::Block(ReturnBlock::Narrowing { plans, .. }) => assert_eq!(
-                plans,
-                vec![ReturnPlan::Accept(Narrowing {
-                    from: known(TRUSTED, internal()),
-                    to: known(SUSPICIOUS, internal()),
-                })]
-            ),
+        match check(&menu_registry(), &log) {
+            ReturnCheck::Block(ReturnBlock::Narrowing { plans, .. }) => {
+                assert_eq!(
+                    plans,
+                    vec![ReturnPlan::Accept(Narrowing {
+                        from: known(TRUSTED, internal()),
+                        to: known(SUSPICIOUS, internal()),
+                    })]
+                );
+            }
             other => panic!("expected Block, got {other:?}"),
         }
     }
