@@ -341,7 +341,7 @@ requires = {{ trust = "internal" }}
 delta = {{}}
 [[authority]]
 name = "security-officer"
-mandate = {{ can_raise_trust_to = "internal" }}
+mandate = {{ can_cover_trust_to = "internal" }}
 implementation = {{ resolver = {{ url = "{authority_url}", timeout_ms = 2000 }} }}
 "#
     )

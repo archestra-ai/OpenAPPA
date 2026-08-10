@@ -56,6 +56,7 @@ Child trajectories isolate label modifications within host-managed sub-execution
 
 To illustrate policy enforcement, consider an agent configured with three tools: `get_ticket_from_crm`, `send_email`, and `file_github_issue`. The CRM tool contract declares a `delta` that restricts the trajectory to internal reach, `send_email` requires the recipient to match the trajectory audience, and `file_github_issue` requires public reach.
 
+<!-- appa:example-fragment -->
 ```toml
 [[tool]]
 name  = "get_ticket_from_crm"
@@ -86,10 +87,12 @@ resolver = { url = "https://pii.corp/redact", timeout_ms = 10000 }
 
 [[authority]]                              # who can approve the auditor mail
 name    = "user"
-builtin = "hitl"
 
 [authority.mandate]
 can_cover_readers = { may_add = ["public"] } # may cover any recipient
+
+[authority.implementation]
+builtin = "hitl"
 ```
 
 The trajectory begins at `{public, trusted}` unless pre-existing context or user input introduces restricted labels. When the agent calls `get_ticket_from_crm()`, OpenAPPA intercepts the dispatch before execution. The engine offers three operational paths, and the block names all of them:

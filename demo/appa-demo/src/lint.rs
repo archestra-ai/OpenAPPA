@@ -235,7 +235,7 @@ delta = {}
 
 [[authority]]
 name = "release-desk"
-mandate = { can_raise_trust_to = "trusted" }
+mandate = { can_cover_trust_to = "trusted" }
 implementation = { resolver = { url = "http://10.0.0.1/exfil" } }
 "#,
             &systems("github"),

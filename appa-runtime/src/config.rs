@@ -658,8 +658,8 @@ impl RawAuthority {
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct RawMandate {
-    can_raise_trust_to: Option<String>,
-    can_add_readers: Option<RawMayAdd>,
+    can_cover_trust_to: Option<String>,
+    can_cover_readers: Option<RawMayAdd>,
     #[serde(default)]
     can_waive: Vec<String>,
     #[serde(default)]
@@ -670,12 +670,12 @@ impl RawMandate {
     fn convert(self, chain: &TrustChain, ctx: &str) -> Result<Mandate, ConfigError> {
         Ok(Mandate {
             trust_ceiling: self
-                .can_raise_trust_to
+                .can_cover_trust_to
                 .map(|t| parse_trust(&t, chain, ctx))
                 .transpose()?,
             reader_ceiling: self
-                .can_add_readers
-                .map(|r| parse_audience(&r.may_add, &format!("{ctx} can_add_readers")))
+                .can_cover_readers
+                .map(|r| parse_audience(&r.may_add, &format!("{ctx} can_cover_readers")))
                 .transpose()?,
             waivers: self.can_waive.into_iter().map(EffectKind::new).collect(),
             attends: self.attends.into_iter().map(MarkName::new).collect(),
@@ -1156,7 +1156,7 @@ builtin = "redact-email"
 [[authority]]
 name = "human_in_the_loop_approver"
 [authority.mandate]
-can_add_readers = { may_add = ["public"] }
+can_cover_readers = { may_add = ["public"] }
 [authority.implementation]
 builtin = "hitl"
 "#;
@@ -1289,7 +1289,7 @@ version = 1
 name = "desk"
 hint = "{}"
 [authority.mandate]
-can_raise_trust_to = "trusted"
+can_cover_trust_to = "trusted"
 [authority.implementation]
 builtin = "approve"
 "#,
@@ -1326,6 +1326,48 @@ builtin = "approve"
             reg.authority(&name).unwrap().mandate.reader_ceiling,
             Some(Audience::Public)
         );
+    }
+
+    #[test]
+    fn canonical_mandate_keys_map_to_exact_native_ceilings() {
+        let cfg = config(
+            "version = 1\ntrust_chain = [\"suspicious\", \"trusted\"]\n\
+             [[authority]]\nname = \"officer\"\n\
+             [authority.mandate]\ncan_cover_trust_to = \"trusted\"\ncan_cover_readers = { may_add = [\"auditor\", \"counsel\"] }\n\
+             [authority.implementation]\nbuiltin = \"approve\"\n",
+        );
+        let mandate = &cfg
+            .registry()
+            .authority(&AuthorityName::new("officer"))
+            .expect("authority present")
+            .mandate;
+        assert_eq!(mandate.trust_ceiling, Some(Trust::new(1)));
+        assert_eq!(
+            mandate.reader_ceiling,
+            Some(Audience::restricted([
+                ReaderId::new("auditor"),
+                ReaderId::new("counsel")
+            ]))
+        );
+    }
+
+    #[test]
+    fn retired_mandate_spellings_are_load_errors() {
+        for retired in [
+            "version = 1\ntrust_chain = [\"suspicious\", \"trusted\"]\n\
+             [[authority]]\nname = \"officer\"\n\
+             [authority.mandate]\ncan_raise_trust_to = \"trusted\"\n\
+             [authority.implementation]\nbuiltin = \"approve\"\n",
+            "version = 1\n\
+             [[authority]]\nname = \"officer\"\n\
+             [authority.mandate]\ncan_add_readers = { may_add = [\"public\"] }\n\
+             [authority.implementation]\nbuiltin = \"approve\"\n",
+        ] {
+            assert!(
+                Config::from_toml_str(retired).is_err(),
+                "a retired mandate spelling still loads: {retired}"
+            );
+        }
     }
 
     #[test]
@@ -1442,7 +1484,7 @@ resolver = { url = "https://c/resolve", timeout_ms = 10000, may_cast = { trust =
         );
         for i in 0..n {
             s.push_str(&format!(
-                "[[authority]]\nname = \"a{i}\"\n[authority.mandate]\ncan_add_readers = {{ may_add = [\"public\"] }}\n[authority.implementation]\nbuiltin = \"approve\"\n"
+                "[[authority]]\nname = \"a{i}\"\n[authority.mandate]\ncan_cover_readers = {{ may_add = [\"public\"] }}\n[authority.implementation]\nbuiltin = \"approve\"\n"
             ));
         }
         s
@@ -1628,7 +1670,7 @@ resolver = { url = "x", may_cast = { trust = ["suspicious"] } }
     #[test]
     fn builtin_approve_may_back_a_cover_bearing_mandate() {
         let cfg = config(
-            "version = 1\n[[authority]]\nname = \"self\"\n[authority.mandate]\ncan_raise_trust_to = \"trusted\"\n[authority.implementation]\nbuiltin = \"approve\"\n",
+            "version = 1\n[[authority]]\nname = \"self\"\n[authority.mandate]\ncan_cover_trust_to = \"trusted\"\n[authority.implementation]\nbuiltin = \"approve\"\n",
         );
         assert_eq!(
             cfg.authority_impl(&AuthorityName::new("self")),
@@ -1677,7 +1719,7 @@ builtin = "scrub-everything"
     #[test]
     fn builtin_hitl_may_back_a_cover_bearing_mandate() {
         let cfg = config(
-            "version = 1\n[[authority]]\nname = \"a\"\n[authority.mandate]\ncan_raise_trust_to = \"trusted\"\n[authority.implementation]\nbuiltin = \"hitl\"\n",
+            "version = 1\n[[authority]]\nname = \"a\"\n[authority.mandate]\ncan_cover_trust_to = \"trusted\"\n[authority.implementation]\nbuiltin = \"hitl\"\n",
         );
         assert_eq!(
             cfg.authority_impl(&AuthorityName::new("a")),

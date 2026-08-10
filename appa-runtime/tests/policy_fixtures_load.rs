@@ -55,6 +55,52 @@ fn every_shipped_policy_loads() {
 }
 
 #[test]
+fn every_marked_documentation_example_loads() {
+    let root = repo_root();
+    let mut checked = 0;
+    for doc in [
+        "website/content/docs/how-it-works.md",
+        "website/content/docs/contracts.md",
+    ] {
+        let path = root.join(doc);
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        for (marker, wrap) in [
+            ("<!-- appa:example -->", false),
+            ("<!-- appa:example-fragment -->", true),
+        ] {
+            let mut rest = text.as_str();
+            while let Some(at) = rest.find(marker) {
+                rest = &rest[at + marker.len()..];
+                let fence = rest
+                    .find("```toml")
+                    .unwrap_or_else(|| panic!("{doc}: a marker has no following ```toml fence"));
+                let body_start = fence
+                    + rest[fence..]
+                        .find('\n')
+                        .unwrap_or_else(|| panic!("{doc}: unterminated fence line"))
+                    + 1;
+                let body_end = body_start
+                    + rest[body_start..]
+                        .find("```")
+                        .unwrap_or_else(|| panic!("{doc}: unterminated ```toml fence"));
+                let body = &rest[body_start..body_end];
+                let policy = if wrap {
+                    format!("version = 1\n{body}")
+                } else {
+                    body.to_string()
+                };
+                if let Err(error) = Config::from_toml_str(&policy) {
+                    panic!("{doc}: a marked example does not load ({error}):\n{body}");
+                }
+                checked += 1;
+                rest = &rest[body_end..];
+            }
+        }
+    }
+    assert!(checked >= 5, "expected the guides' marked examples, found {checked}");
+}
+
+#[test]
 fn retired_policy_keys_are_load_errors() {
     for retired in [
         "version = 1\n[[preamble]]\nrole = \"system\"\ncontent = \"you are confined\"\n",

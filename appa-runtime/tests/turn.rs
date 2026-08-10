@@ -449,7 +449,7 @@ attention = ["signoff"]
 
 [[authority]]
 name = "broad"
-mandate = {{ can_raise_trust_to = "trusted", attends = ["signoff"] }}
+mandate = {{ can_cover_trust_to = "trusted", attends = ["signoff"] }}
 implementation = {{ resolver = {{ url = "{deny_url}" }} }}
 
 [[authority]]
@@ -704,7 +704,7 @@ attention = ["signoff"]
 
 [[authority]]
 name = "broad"
-mandate = {{ can_raise_trust_to = "trusted", attends = ["signoff"] }}
+mandate = {{ can_cover_trust_to = "trusted", attends = ["signoff"] }}
 implementation = {{ resolver = {{ url = "{url}" }} }}
 
 [[authority]]
@@ -797,7 +797,7 @@ attention = ["signoff"]
 
 [[authority]]
 name = "floor-officer"
-mandate = {{ can_raise_trust_to = "trusted" }}
+mandate = {{ can_cover_trust_to = "trusted" }}
 implementation = {{ resolver = {{ url = "{floor_url}" }} }}
 
 [[authority]]
@@ -880,12 +880,12 @@ trust = "trusted"
 
 [[authority]]
 name = "floor-a"
-mandate = {{ can_raise_trust_to = "trusted" }}
+mandate = {{ can_cover_trust_to = "trusted" }}
 implementation = {{ resolver = {{ url = "{deny_url}" }} }}
 
 [[authority]]
 name = "floor-b"
-mandate = {{ can_raise_trust_to = "trusted" }}
+mandate = {{ can_cover_trust_to = "trusted" }}
 implementation = {{ builtin = "approve" }}
 "#
     );
@@ -1010,7 +1010,7 @@ attention = ["signoff"]
 
 [[authority]]
 name = "floor-officer"
-mandate = {{ can_raise_trust_to = "trusted" }}
+mandate = {{ can_cover_trust_to = "trusted" }}
 implementation = {{ builtin = "approve" }}
 
 [[authority]]
