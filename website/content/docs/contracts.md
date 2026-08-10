@@ -190,7 +190,7 @@ A mandate binds exactly one dimension. Trust is declared on the same terms, as a
 trust = { from = "suspicious", to = "trusted" } # Instead of `audience`, never alongside it
 ```
 
-A registered `tool_output` sanitizer is offered as a remedy plan at every narrowing its mandate can transition, in deployments able to withhold the raw result at that point. Executing that plan withholds the raw tool result from the model and admits the derivation instead, so the trajectory folds the derivation's label. The plan carries an acceptance only for the residual its mandate cannot shed — a mandate on `audience` leaves a trust narrowing to accept, and the reverse. A sanitizer whose relabel would change nothing is never offered.
+A registered `tool_output` sanitizer is offered at each narrowing its mandate can strictly improve. The deployment must be able to withhold the raw result at that point. Executing the plan binds the sanitizer to the dispatch and accepts no raw or guessed residual. On success, the host withholds the raw result and the engine validates the derivation. A derivation that no longer narrows enters the trajectory. Otherwise it remains confined and opens a new stage. That stage offers acceptance of the exact current residual and any further applicable, helpful sanitizers. A sanitizer whose declared transition cannot help is never offered.
 
 Like a cast or an authority, a sanitizer may scope itself by tags: it applies only to values whose originating tool carries a covered tag. A child sub-execution return originates from no tool, so only unscoped sanitizers apply at that crossing.
 

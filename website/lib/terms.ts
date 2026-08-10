@@ -91,7 +91,8 @@ const TERMS = {
 
   /* Refusals & Model Terms */
   requirement_gaps: "Returned on a refusal: the unmet entries of requires.",
-  narrowing: "The loss of reach a proposed flow would commit; returned on a refusal for the agent to settle — by acceptance, or through an offered sanitizer plan — alone or inside a composed plan.",
+  narrowing:
+    "The loss of reach a proposed flow would commit. A raw path requires acceptance. An output-sanitizer path withholds the raw result; its derivation then admits, remains confined for another helpful sanitizer, or awaits acceptance of its exact residual.",
   remedy_plans:
     "Returned on a refusal: exact valid paths forward to unblock execution.",
   unestablished:

@@ -46,7 +46,7 @@ OpenAPPA stops an agent *before* a fetch that restricts its label, informing it 
 
 By evaluating the step before dispatch, OpenAPPA prevents scenarios where an agent ingests data only to discover three steps later that outbound dispatches are blocked. The engine presents this pre-fetch choice as a **narrowing** stop. If the agent accepts the narrowing, the acceptance is recorded in the log and the call proceeds. Subsequent steps that cause no additional restriction pass without stopping, so narrowing prompts occur once per level of increased restriction during run.
 
-In deployments where the host can hold a raw tool result out of the model's context, a registered sanitizer offers a third path: the host runs the call, the sanitizer cleans the result, and only the cleaned derivation enters context — clearing the narrowing partially or entirely without a child branch.
+In deployments where the host can withhold a raw tool result, a registered sanitizer offers a third path. The call runs with the sanitizer bound, but this accepts no raw or guessed residual. The host withholds the raw result and the sanitizer derives a confined candidate. A candidate that no longer narrows enters context. Otherwise, the agent may choose another helpful sanitizer or accept the candidate's exact residual.
 
 ## A child's narrowing dies with it
 
