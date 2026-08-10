@@ -513,6 +513,30 @@ mod tests {
         ];
         let p = build(&log);
         assert!(!p.view(&traj("a")).has_effect(&egress));
+        assert!(!p.view(&traj("a")).has_reservation(&egress));
+        assert!(!p.view(&traj("a")).is_open(&dispatch("a")));
+    }
+
+    #[test]
+    fn an_indeterminate_close_leaves_the_reservation_standing() {
+        let egress = EffectKind::new("egress");
+        let log = vec![
+            Fact::DispatchOpened {
+                trajectory: traj("a"),
+                dispatch: dispatch("a"),
+                proposed_label: Label::top(),
+                proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
+                dynamic_resolutions: Vec::new(),
+            },
+            Fact::DispatchClosed {
+                trajectory: traj("a"),
+                dispatch: dispatch("a"),
+                outcome: CloseOutcome::Indeterminate,
+            },
+        ];
+        let p = build(&log);
+        assert!(!p.view(&traj("a")).has_effect(&egress));
+        assert!(p.view(&traj("a")).has_reservation(&egress));
         assert!(!p.view(&traj("a")).is_open(&dispatch("a")));
     }
 

@@ -1436,21 +1436,6 @@ impl Turn {
         resolved: DimValue,
         narrowing: Narrowing,
     ) -> Result<(), TurnError> {
-        self.mediator
-            .store()
-            .finalize(&self.tenant, &self.session, |facts, revision| {
-                let projection = Projection::build(facts, revision);
-                let views = projection.view(&self.session);
-                if views.is_succeeded(&dispatch) {
-                    return None;
-                }
-                Some(
-                    self.mediator
-                        .engine()
-                        .observe_success(&views, &dispatch, &call)
-                        .expect("the runtime holds this dispatch open and checkpoints it once"),
-                )
-            })?;
         let handle = format!("remedy-{}", self.next_handle);
         self.next_handle += 1;
         let feedback = crate::feedback::cast_offer_feedback(&handle, &narrowing, self.acceptance_surface());
@@ -1665,6 +1650,20 @@ impl Turn {
             .as_mut()
             .expect("this invocation opened a dispatch")
             .close = close;
+        if matches!(outcome, ToolOutcome::Success { .. }) {
+            self.mediator
+                .store()
+                .finalize(&self.tenant, &self.session, |facts, revision| {
+                    let projection = Projection::build(facts, revision);
+                    let views = projection.view(&self.session);
+                    Some(
+                        self.mediator
+                            .engine()
+                            .observe_success(&views, &dispatch, call)
+                            .expect("the runtime holds this dispatch open and checkpoints it once"),
+                    )
+                })?;
+        }
         if self.cancel.is_cancelled() {
             return Ok(CallProgress::Cancelled);
         }

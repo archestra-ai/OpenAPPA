@@ -321,13 +321,7 @@ delta = { trust = "unknown" }
     ));
     let log = facts(&pending_cast, &tenant, &session);
     assert!(tool_values(&log).is_empty());
-    assert!(log.iter().any(|fact| matches!(
-        fact,
-        Fact::DispatchClosed {
-            outcome: CloseOutcome::Success { effects },
-            ..
-        } if effects.iter().any(|effect| effect.as_str() == "read")
-    )));
+    assert_eq!(effect_carriers(&log, "read"), 1);
     assert_eq!(
         log.iter()
             .filter(|fact| matches!(fact, Fact::BlockFeedback { .. }))
@@ -378,13 +372,7 @@ implementation = { builtin = "approve" }
     ));
     let log = facts(&allow, &tenant, &session);
     assert_eq!(log.iter().filter(|fact| matches!(fact, Fact::Ruling { .. })).count(), 1);
-    assert!(log.iter().any(|fact| matches!(
-        fact,
-        Fact::DispatchClosed {
-            outcome: CloseOutcome::Success { effects },
-            ..
-        } if effects.iter().any(|effect| effect.as_str() == "spend")
-    )));
+    assert_eq!(effect_carriers(&log, "spend"), 1);
     turn.stop(StopReason::Cancelled).unwrap();
 
     let (url, server) = spawn_authority("deny").await;
@@ -588,13 +576,7 @@ implementation = {{ builtin = "approve" }}
     );
     assert!(reviewed.arg_refs.is_empty());
     assert_eq!(log.iter().filter(|fact| matches!(fact, Fact::Ruling { .. })).count(), 1);
-    assert!(log.iter().any(|fact| matches!(
-        fact,
-        Fact::DispatchClosed {
-            outcome: CloseOutcome::Success { effects },
-            ..
-        } if effects.iter().any(|effect| effect.as_str() == "spend")
-    )));
+    assert_eq!(effect_carriers(&log, "spend"), 1);
     turn.stop(StopReason::Cancelled).unwrap();
 }
 
@@ -672,13 +654,7 @@ implementation = {{ resolver = {{ url = "{url}" }} }}
     assert_eq!(consults.load(Ordering::SeqCst), 2);
     let log = facts(&mediated, &tenant, &session);
     assert_eq!(log.iter().filter(|fact| matches!(fact, Fact::Ruling { .. })).count(), 1);
-    assert!(log.iter().any(|fact| matches!(
-        fact,
-        Fact::DispatchClosed {
-            outcome: CloseOutcome::Success { effects },
-            ..
-        } if effects.iter().any(|effect| effect.as_str() == "spend")
-    )));
+    assert_eq!(effect_carriers(&log, "spend"), 1);
     turn.stop(StopReason::Cancelled).unwrap();
     server.abort();
 }
@@ -762,13 +738,7 @@ implementation = {{ builtin = "approve" }}
     assert_eq!(consults.load(Ordering::SeqCst), 2);
     let log = facts(&mediated, &tenant, &session);
     assert_eq!(log.iter().filter(|fact| matches!(fact, Fact::Ruling { .. })).count(), 2);
-    assert!(log.iter().any(|fact| matches!(
-        fact,
-        Fact::DispatchClosed {
-            outcome: CloseOutcome::Success { effects },
-            ..
-        } if effects.iter().any(|effect| effect.as_str() == "spend")
-    )));
+    assert_eq!(effect_carriers(&log, "spend"), 1);
     turn.stop(StopReason::Cancelled).unwrap();
     server.abort();
 }
@@ -847,13 +817,7 @@ implementation = {{ resolver = {{ url = "{mark_url}" }} }}
     assert_eq!(mark_consults.load(Ordering::SeqCst), 2);
     let log = facts(&mediated, &tenant, &session);
     assert_eq!(log.iter().filter(|fact| matches!(fact, Fact::Ruling { .. })).count(), 2);
-    assert!(log.iter().any(|fact| matches!(
-        fact,
-        Fact::DispatchClosed {
-            outcome: CloseOutcome::Success { effects },
-            ..
-        } if effects.iter().any(|effect| effect.as_str() == "spend")
-    )));
+    assert_eq!(effect_carriers(&log, "spend"), 1);
     turn.stop(StopReason::Cancelled).unwrap();
     floor_server.abort();
     mark_server.abort();
@@ -961,13 +925,7 @@ implementation = {{ builtin = "approve" }}
     ));
     assert_eq!(consults.load(Ordering::SeqCst), 1);
     let log = facts(&mediated, &tenant, &session);
-    assert!(log.iter().any(|fact| matches!(
-        fact,
-        Fact::DispatchClosed {
-            outcome: CloseOutcome::Success { effects },
-            ..
-        } if effects.iter().any(|effect| effect.as_str() == "spend")
-    )));
+    assert_eq!(effect_carriers(&log, "spend"), 1);
 
     // Changed arguments change the digest and lift the exclusion: both authorities are offered.
     assert!(matches!(
@@ -1067,13 +1025,7 @@ implementation = {{ builtin = "approve" }}
     assert_eq!(consults.load(Ordering::SeqCst), 1);
     let log = facts(&mediated, &tenant, &session);
     assert_eq!(log.iter().filter(|fact| matches!(fact, Fact::Ruling { .. })).count(), 2);
-    assert!(log.iter().any(|fact| matches!(
-        fact,
-        Fact::DispatchClosed {
-            outcome: CloseOutcome::Success { effects },
-            ..
-        } if effects.iter().any(|effect| effect.as_str() == "spend")
-    )));
+    assert_eq!(effect_carriers(&log, "spend"), 1);
     turn.stop(StopReason::Cancelled).unwrap();
     deny_server.abort();
 }
@@ -1302,6 +1254,216 @@ constant = { trust = "suspicious" }
 }
 
 #[tokio::test]
+async fn a_bound_sanitizer_await_finds_the_effects_already_committed() {
+    // `LOG-2`'s order made observable: the tool succeeded and its bound sanitizer derivation is
+    // still in flight, held by the gated server. Mid-await, the family history already shows the
+    // committed effect with its reservation settled, the dispatch still open, and no value — then
+    // the released derivation admits with the close carrying no duplicate effects.
+    let (url, arrived, release) = spawn_gated_response(r#"{"body":"[redacted]"}"#);
+    let policy = format!(
+        r#"
+version = 1
+[[tool]]
+name = "wire"
+effects = ["spend"]
+delta = {{ audience = {{ exactly = ["internal"] }} }}
+
+[[sanitizer]]
+name = "pii"
+on = ["tool_output"]
+[sanitizer.mandate]
+audience = {{ from = {{ includes = ["internal"] }}, to = {{ exactly = ["public"] }} }}
+[sanitizer.implementation]
+resolver = {{ url = "{url}", timeout_ms = 30000 }}
+"#
+    );
+    let mediated = mediator(
+        &policy,
+        &[("wire", BuiltinTool::Echo("send to eve@corp.com".to_string()))],
+    );
+    let tenant = TenantId::new("tenant");
+    let session = mediated.create_session(tenant.clone());
+    let mut turn = begin(&mediated, &tenant, &session, "pay").await;
+    let mut budget = RunBudget::default();
+
+    assert!(matches!(
+        turn.mediate(calls(vec![call("wire-call", "wire", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    let sanitize = offered_plan(&mediated, &tenant, &session, "wire-call", r#""sanitizer":"pii""#);
+    let exec = calls(vec![call("exec", EXECUTE_REMEDY_PLAN, &remedy_args(&sanitize))]);
+    let in_flight = tokio::spawn(async move {
+        let step = turn.mediate(exec, &mut budget).await.unwrap();
+        (turn, step)
+    });
+    arrived.notified().await;
+
+    let log = facts(&mediated, &tenant, &session);
+    assert_eq!(effect_carriers(&log, "spend"), 1);
+    assert!(log.iter().any(|fact| matches!(fact, Fact::DispatchSucceeded { .. })));
+    assert!(!log.iter().any(|fact| matches!(fact, Fact::DispatchClosed { .. })));
+    assert!(tool_values(&log).is_empty());
+    let projection = Projection::build(&log, Revision::new(log.len() as u64));
+    let views = projection.view(&session);
+    assert!(views.has_effect(&EffectKind::new("spend")));
+    assert!(!views.has_reservation(&EffectKind::new("spend")));
+
+    release.notify_one();
+    let (mut turn, step) = in_flight.await.unwrap();
+    assert!(matches!(step, Step::Continue));
+    let log = facts(&mediated, &tenant, &session);
+    assert_eq!(effect_carriers(&log, "spend"), 1);
+    assert_eq!(
+        tool_values(&log).iter().map(|(body, _)| *body).collect::<Vec<_>>(),
+        ["[redacted]"]
+    );
+    assert!(log.iter().any(|fact| matches!(
+        fact,
+        Fact::DispatchClosed {
+            outcome: CloseOutcome::Success { effects },
+            ..
+        } if effects.is_empty()
+    )));
+    turn.stop(StopReason::Cancelled).unwrap();
+}
+
+#[tokio::test]
+async fn a_pending_cast_await_finds_the_effects_already_committed() {
+    // The same order on the cast path: the checkpoint lands before the runtime awaits the cast
+    // resolver, so the effect and its settled reservation are visible mid-resolution — then a
+    // non-narrowing answer admits the value with no second carrier.
+    let (url, arrived, release) = spawn_gated_response(r#"{"trust":"trusted"}"#);
+    let policy = format!(
+        r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+[[tool]]
+name = "scan"
+effects = ["read"]
+delta = {{ trust = "unknown" }}
+
+[[cast]]
+name = "classifier"
+resolver = {{ url = "{url}", may_cast = {{ trust = ["trusted"] }}, timeout_ms = 30000 }}
+"#
+    );
+    let mediated = mediator(&policy, &[("scan", BuiltinTool::Echo("mail body".to_string()))]);
+    let tenant = TenantId::new("tenant");
+    let session = mediated.create_session(tenant.clone());
+    let mut turn = begin(&mediated, &tenant, &session, "scan").await;
+    let mut budget = RunBudget::default();
+
+    let in_flight = tokio::spawn(async move {
+        let step = turn
+            .mediate(calls(vec![call("scan-call", "scan", "{}")]), &mut budget)
+            .await
+            .unwrap();
+        (turn, step)
+    });
+    arrived.notified().await;
+
+    let log = facts(&mediated, &tenant, &session);
+    assert_eq!(effect_carriers(&log, "read"), 1);
+    assert!(log.iter().any(|fact| matches!(fact, Fact::DispatchSucceeded { .. })));
+    assert!(!log.iter().any(|fact| matches!(fact, Fact::DispatchClosed { .. })));
+    assert!(tool_values(&log).is_empty());
+    let projection = Projection::build(&log, Revision::new(log.len() as u64));
+    let views = projection.view(&session);
+    assert!(views.has_effect(&EffectKind::new("read")));
+    assert!(!views.has_reservation(&EffectKind::new("read")));
+
+    release.notify_one();
+    let (mut turn, step) = in_flight.await.unwrap();
+    assert!(matches!(step, Step::Continue));
+    let log = facts(&mediated, &tenant, &session);
+    assert_eq!(effect_carriers(&log, "read"), 1);
+    assert!(log.iter().any(|fact| matches!(fact, Fact::OutputCastApplied { .. })));
+    assert_eq!(
+        tool_values(&log).iter().map(|(body, _)| *body).collect::<Vec<_>>(),
+        ["mail body"]
+    );
+    assert!(log.iter().any(|fact| matches!(
+        fact,
+        Fact::DispatchClosed {
+            outcome: CloseOutcome::Success { effects },
+            ..
+        } if effects.is_empty()
+    )));
+    turn.stop(StopReason::Cancelled).unwrap();
+}
+
+#[tokio::test]
+async fn a_cancellation_after_typed_success_cannot_unmake_the_effects() {
+    // The tool succeeded; while its bound sanitizer derivation hangs, the turn is cancelled. The
+    // checkpoint had already committed the effects, so the teardown closes the dispatch
+    // success-family with no duplicate carrier and admits nothing.
+    let (url, arrived, _release) = spawn_gated_response(r#"{"body":"[redacted]"}"#);
+    let policy = format!(
+        r#"
+version = 1
+[[tool]]
+name = "wire"
+effects = ["spend"]
+delta = {{ audience = {{ exactly = ["internal"] }} }}
+
+[[sanitizer]]
+name = "pii"
+on = ["tool_output"]
+[sanitizer.mandate]
+audience = {{ from = {{ includes = ["internal"] }}, to = {{ exactly = ["public"] }} }}
+[sanitizer.implementation]
+resolver = {{ url = "{url}", timeout_ms = 30000 }}
+"#
+    );
+    let mediated = mediator(
+        &policy,
+        &[("wire", BuiltinTool::Echo("send to eve@corp.com".to_string()))],
+    );
+    let tenant = TenantId::new("tenant");
+    let session = mediated.create_session(tenant.clone());
+    let token = CancellationToken::new();
+    let mut turn = mediated
+        .begin_turn(tenant.clone(), session.clone(), "pay", token.clone())
+        .await
+        .expect("turn begins");
+    let mut budget = RunBudget::default();
+
+    assert!(matches!(
+        turn.mediate(calls(vec![call("wire-call", "wire", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    let sanitize = offered_plan(&mediated, &tenant, &session, "wire-call", r#""sanitizer":"pii""#);
+    let exec = calls(vec![call("exec", EXECUTE_REMEDY_PLAN, &remedy_args(&sanitize))]);
+    let in_flight = tokio::spawn(async move { turn.mediate(exec, &mut budget).await.unwrap() });
+    arrived.notified().await;
+    token.cancel();
+    in_flight.await.unwrap();
+
+    let log = facts(&mediated, &tenant, &session);
+    assert_eq!(effect_carriers(&log, "spend"), 1);
+    assert!(log.iter().any(|fact| matches!(fact, Fact::DispatchSucceeded { .. })));
+    assert!(log.iter().any(|fact| matches!(
+        fact,
+        Fact::DispatchClosed {
+            outcome: CloseOutcome::Success { effects },
+            ..
+        } if effects.is_empty()
+    )));
+    assert!(tool_values(&log).is_empty());
+    assert!(log.iter().any(|fact| matches!(
+        fact,
+        Fact::Boundary {
+            kind: BoundaryKind::TurnEnd,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
 async fn ordinary_narrowing_acceptance_requires_a_later_round() {
     // Informed acceptance holds for ordinary soft blocks as for pending casts: an acceptance
     // authored in the same assistant response that triggered the offer predates it and is
@@ -1397,13 +1559,7 @@ implementation = { builtin = "approve" }
     ));
     let log = facts(&mediated, &tenant, &session);
     assert_eq!(log.iter().filter(|fact| matches!(fact, Fact::Ruling { .. })).count(), 1);
-    assert!(log.iter().any(|fact| matches!(
-        fact,
-        Fact::DispatchClosed {
-            outcome: CloseOutcome::Success { effects },
-            ..
-        } if effects.iter().any(|effect| effect.as_str() == "spend")
-    )));
+    assert_eq!(effect_carriers(&log, "spend"), 1);
 }
 
 #[tokio::test]
@@ -2632,13 +2788,7 @@ resolver = {{ url = "{resolver_url}", may_cast = {{ trust = ["suspicious"] }} }}
     assert_eq!(requests.load(Ordering::SeqCst), 1);
 
     let log = facts(&mediator, &tenant, &session);
-    assert!(log.iter().any(|fact| matches!(
-        fact,
-        Fact::DispatchClosed {
-            outcome: CloseOutcome::Success { effects },
-            ..
-        } if effects.len() == 1 && effects.contains(&EffectKind::new("read"))
-    )));
+    assert_eq!(effect_carriers(&log, "read"), 1);
     assert!(
         !log.iter()
             .any(|fact| matches!(fact, Fact::CastApplied { .. } | Fact::OutputCastApplied { .. }))
@@ -3058,6 +3208,28 @@ async fn read_request_headers(socket: &mut tokio::net::TcpStream) {
             return;
         }
     }
+}
+
+fn spawn_gated_response(body: &'static str) -> (String, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let arrived = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (signal, gate) = (arrived.clone(), release.clone());
+    tokio::spawn(async move {
+        let listener = TcpListener::from_std(listener).unwrap();
+        let (mut socket, _) = listener.accept().await.unwrap();
+        read_request_headers(&mut socket).await;
+        signal.notify_one();
+        gate.notified().await;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+    (format!("http://{address}/derive"), arrived, release)
 }
 
 fn spawn_counting_authority(

@@ -86,9 +86,10 @@ impl Engine {
         admit::admit_result(&self.registry, views, dispatch, call, admission)
     }
 
-    /// Record observed success for a still-open dispatch whose value finalization is deferred (a
-    /// pending-cast offer): its declared effects commit now, at the one append point the spec puts
-    /// at success, while the raw result stays confined. See [`crate::admit::observe_success`].
+    /// Record observed success for a still-open dispatch: its declared effects commit now, at the
+    /// one append point the spec puts at success, while any value finalization — an
+    /// output sanitizer derivation, a pending-cast resolution — is still in flight. See
+    /// [`crate::admit::observe_success`].
     pub fn observe_success(
         &self,
         views: &Views,

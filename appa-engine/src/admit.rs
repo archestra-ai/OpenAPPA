@@ -75,12 +75,6 @@ pub enum AdmitError {
     SanitizerTransitionUnmet,
 }
 
-/// Record observed success for a **still-open** dispatch whose value finalization is deferred (a
-/// pending-cast offer): the declared effects commit now — the spec's one append point at success —
-/// so a later call's `no_prior(k)` sees them while the raw result stays confined awaiting the
-/// agent's acceptance. The eventual close contributes no duplicate effects and must be
-/// success-family ([`admit_result`] refuses a contradictory `Failure`/`Indeterminate`). A dispatch
-/// checkpoints at most once — a repeat is refused, never silently absorbed.
 pub(crate) fn observe_success(
     registry: &Registry,
     views: &Views,
@@ -90,9 +84,6 @@ pub(crate) fn observe_success(
     let contract = registry
         .tool(call.tool())
         .ok_or_else(|| AdmitError::UnknownTool(call.tool().as_str().to_string()))?;
-    if contract.pending_cast_dim().is_none() {
-        return Err(AdmitError::NotPendingCast);
-    }
     if dispatch.digest() != &call.digest() {
         return Err(AdmitError::DigestMismatch);
     }
@@ -1297,14 +1288,6 @@ mod tests {
         let (mut log, dispatch) = open_log(&call);
         let t = traj();
 
-        let plain = get_call();
-        let (plain_log, plain_dispatch) = open_log(&plain);
-        let p = views_of(&plain_log);
-        assert_eq!(
-            observe_success(&reg, &p.view(&t), &plain_dispatch, &plain),
-            Err(AdmitError::NotPendingCast)
-        );
-
         let p = views_of(&log);
         let batch = observe_success(&reg, &p.view(&t), &dispatch, &call).unwrap();
         log.extend(batch.facts);
@@ -1345,6 +1328,58 @@ mod tests {
                 ..
             } if effects.is_empty()
         )));
+        log.extend(batch.facts);
+        let p = views_of(&log);
+        assert!(p.view(&t).has_effect(&EffectKind::new("read")));
+        assert!(!p.view(&t).is_open(&dispatch));
+    }
+
+    #[test]
+    fn an_ordinary_dispatch_checkpoints_at_typed_success() {
+        let reg = registry();
+        let call = get_call();
+        let (mut log, dispatch) = open_log(&call);
+        let t = traj();
+
+        let p = views_of(&log);
+        let batch = observe_success(&reg, &p.view(&t), &dispatch, &call).unwrap();
+        log.extend(batch.facts);
+        let p = views_of(&log);
+        assert!(p.view(&t).has_effect(&EffectKind::new("read")));
+        assert!(p.view(&t).is_open(&dispatch));
+
+        assert_eq!(
+            observe_success(&reg, &p.view(&t), &dispatch, &call),
+            Err(AdmitError::AlreadySucceeded)
+        );
+        assert_eq!(
+            admit_result(&reg, &p.view(&t), &dispatch, &call, ResultAdmission::Failure),
+            Err(AdmitError::SuccessContradicted)
+        );
+
+        let batch = admit_result(
+            &reg,
+            &p.view(&t),
+            &dispatch,
+            &call,
+            ResultAdmission::SuccessRaw {
+                body: ValueBody::new("ticket"),
+            },
+        )
+        .unwrap();
+        assert!(batch.facts.iter().any(|fact| matches!(
+            fact,
+            Fact::DispatchClosed {
+                outcome: CloseOutcome::Success { effects },
+                ..
+            } if effects.is_empty()
+        )));
+        assert!(
+            batch
+                .facts
+                .iter()
+                .any(|fact| matches!(fact, Fact::ValueAdmitted { .. }))
+        );
         log.extend(batch.facts);
         let p = views_of(&log);
         assert!(p.view(&t).has_effect(&EffectKind::new("read")));

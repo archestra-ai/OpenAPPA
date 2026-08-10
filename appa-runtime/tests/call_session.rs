@@ -385,6 +385,54 @@ async fn spawn_authority(rulings: Vec<&'static str>) -> String {
 }
 
 #[tokio::test]
+async fn effects_commit_at_typed_success_for_every_body_disposition() {
+    let policy = r#"
+version = 1
+[[tool]]
+name = "pay"
+effects = ["spend"]
+[[tool]]
+name = "audit"
+requires = { effects = { has_no = ["spend"] } }
+"#;
+    let run = |outcome: ToolOutcome| async move {
+        let mut session = open(policy);
+        session
+            .bind_tools(vec![tool_schema("pay"), tool_schema("audit")])
+            .unwrap();
+        session.begin_turn("pay then audit").unwrap();
+        let CallDecision::Allow { handle } = session.check_call(call("pay", serde_json::json!({}))).await.unwrap()
+        else {
+            panic!("pay is unconditioned");
+        };
+        session.report_outcome(handle, outcome).unwrap();
+        let blocked = match session.check_call(call("audit", serde_json::json!({}))).await.unwrap() {
+            CallDecision::Allow { handle } => {
+                session
+                    .report_outcome(
+                        handle,
+                        ToolOutcome::Success {
+                            body: BodyDisposition::Unavailable,
+                        },
+                    )
+                    .unwrap();
+                false
+            }
+            CallDecision::Block { .. } => true,
+        };
+        session.end_turn().unwrap();
+        blocked
+    };
+
+    let unavailable = ToolOutcome::Success {
+        body: BodyDisposition::Unavailable,
+    };
+    assert!(run(unavailable).await);
+    assert!(!run(ToolOutcome::Failure).await);
+    assert!(run(ToolOutcome::Indeterminate).await);
+}
+
+#[tokio::test]
 async fn an_allowed_call_is_checked_executed_and_reported() {
     let mut session = open(LOOKUP_POLICY);
     session
