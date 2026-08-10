@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use appa_engine::fact::{BoundaryKind, CloseOutcome, Fact, Revision};
+use appa_engine::fact::{BoundaryKind, CloseOutcome, EffectKind, Fact, Revision};
 use appa_engine::label::{Audience, Dim, Label, ReaderId, Trust};
 use appa_engine::projection::Projection;
 use appa_engine::value::{Provenance, RawResultDigest, ResolvedCall, ToolName, TrajectoryId};
@@ -2637,7 +2637,7 @@ resolver = {{ url = "{resolver_url}", may_cast = {{ trust = ["suspicious"] }} }}
         Fact::DispatchClosed {
             outcome: CloseOutcome::Success { effects },
             ..
-        } if effects.len() == 1 && effects[0].as_str() == "read"
+        } if effects.len() == 1 && effects.contains(&EffectKind::new("read"))
     )));
     assert!(
         !log.iter()

@@ -26,8 +26,8 @@ use appa_engine::contract::{
     AudienceDelta, AudienceRequirement, Delta, DynamicAudienceBinding, HistoryRequirement, LabelRequirements,
     RecipientSpec, Requires, ToolContract,
 };
-use appa_engine::fact::EffectKind;
 use appa_engine::fact::ReturnPolicy;
+use appa_engine::fact::{EffectKind, EffectSet};
 use appa_engine::label::{Audience, Dim, DimValue, Label, ReaderId, Trust};
 use appa_engine::names::{AuthorityName, CastName, DynamicResolverName, MarkName, SanitizerName, TagName};
 use appa_engine::registry::{LoadError, PlannerCap, Registry, RegistryConfig, TrustChain};
@@ -76,6 +76,8 @@ pub enum ConfigError {
     UnknownBuiltin { kind: &'static str, name: String },
     #[error("tool {tool}: `parameters` must be a JSON-Schema object (a TOML table)")]
     ToolParametersNotAnObject { tool: String },
+    #[error("tool {tool} declares effect {kind:?} twice — `effects` is a set")]
+    DuplicateEffect { tool: String, kind: String },
     #[error("duplicate dynamic resolver {0}")]
     DuplicateDynamicResolver(String),
     #[error("tool {tool} dynamic binding names unregistered resolver {resolver}")]
@@ -452,12 +454,18 @@ impl RawTool {
         {
             return Err(ConfigError::ToolParametersNotAnObject { tool: self.name });
         }
+        let emits = EffectSet::new(self.effects.into_iter().map(EffectKind::new)).map_err(|duplicate| {
+            ConfigError::DuplicateEffect {
+                tool: self.name.clone(),
+                kind: duplicate.0.as_str().to_string(),
+            }
+        })?;
         Ok((
             ToolContract {
                 name: ToolName::new(self.name),
                 tags: self.tags.into_iter().map(TagName::new).collect(),
                 delta,
-                emits: self.effects.into_iter().map(EffectKind::new).collect(),
+                emits,
                 requires,
             },
             imp,
@@ -1178,7 +1186,7 @@ builtin = "hitl"
         assert_eq!(get.requires.label.trust_floor, Some(Trust::new(1)));
 
         let send = reg.tool(&ToolName::new("send_email")).expect("tool present");
-        assert_eq!(send.emits, vec![EffectKind::new("egress")]);
+        assert_eq!(send.emits, EffectSet::new([EffectKind::new("egress")]).unwrap());
         assert_eq!(
             send.requires.label.audience,
             vec![AudienceRequirement::Includes(RecipientSpec::Placeholder(
@@ -1298,6 +1306,14 @@ builtin = "approve"
         assert!(matches!(
             Config::from_toml_str(&policy),
             Err(ConfigError::Registry(LoadError::HintTooLong { .. }))
+        ));
+    }
+
+    #[test]
+    fn a_duplicate_effect_declaration_is_a_load_error() {
+        assert!(matches!(
+            err("version = 1\n[[tool]]\nname = \"pay\"\neffects = [\"spend\", \"spend\"]\n"),
+            ConfigError::DuplicateEffect { tool, kind } if tool == "pay" && kind == "spend"
         ));
     }
 
@@ -1812,7 +1828,7 @@ delta = { audience = { exactly = ["@team"] } }
                     trust: None,
                     audience: Some(AudienceDelta::Static(Audience::restricted([ReaderId::new("@team")]))),
                 }),
-                emits: vec![],
+                emits: EffectSet::default(),
                 requires: Requires::default(),
             }],
             authorities: vec![],

@@ -687,7 +687,7 @@ mod tests {
         AudienceDelta, AudienceRequirement, Delta, DynamicAudienceBinding, HistoryRequirement, LabelRequirements,
         PinnedDynamicResolution, RecipientSpec, Requires, ToolContract,
     };
-    use crate::fact::{Fact, Revision};
+    use crate::fact::{EffectSet, Fact, Revision};
     use crate::label::{Audience, ReaderId, Trust};
     use crate::names::MarkName;
     use crate::projection::Projection;
@@ -749,7 +749,7 @@ mod tests {
             name: ToolName::new("gate"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(TRUSTED),
@@ -815,7 +815,7 @@ mod tests {
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(delta),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires::default(),
         }
     }
@@ -1069,14 +1069,14 @@ mod tests {
                 trust: Some(Dim::Known(SUSPICIOUS)),
                 audience: None,
             }),
-            emits: vec![EffectKind::new("backup.done")],
+            emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
             requires: Requires::default(),
         };
         let wipe = ToolContract {
             name: ToolName::new("wipe"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(TRUSTED),
@@ -1134,14 +1134,14 @@ mod tests {
             name: ToolName::new("backup"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![EffectKind::new("backup")],
+            emits: EffectSet::new([EffectKind::new("backup")]).unwrap(),
             requires: Requires::default(),
         };
         let prior_target = ToolContract {
             name: ToolName::new("wipe"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(TRUSTED),
@@ -1159,14 +1159,14 @@ mod tests {
                 trust: None,
                 audience: Some(Dim::Known(a.clone()).into()),
             }),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires::default(),
         };
         let cap_target = ToolContract {
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(TRUSTED),
@@ -1209,7 +1209,7 @@ mod tests {
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
@@ -1253,14 +1253,14 @@ mod tests {
                 trust: None,
                 audience: Some(Dim::Known(to).into()),
             }),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires::default(),
         };
         let send = ToolContract {
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
@@ -1307,7 +1307,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(TRUSTED),
@@ -1347,7 +1347,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(TRUSTED),
@@ -1435,7 +1435,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(TRUSTED),
@@ -1473,7 +1473,7 @@ mod tests {
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
@@ -1521,7 +1521,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::NoPrior(EffectKind::new("spend"))],
                 ..Requires::default()
@@ -1560,7 +1560,8 @@ mod tests {
             trajectory: traj(),
             dispatch: crate::value::DispatchId::new(traj(), seed.digest(), 0),
             proposed_label: known(TRUSTED, Audience::Public),
-            proposed_effects: kinds.iter().copied().map(EffectKind::new).collect(),
+            proposed_effects: EffectSet::new(kinds.iter().copied().map(EffectKind::new))
+                .expect("distinct generated effect kinds"),
             dynamic_resolutions: vec![],
         }
     }
@@ -1571,7 +1572,7 @@ mod tests {
             name: ToolName::new("guard"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::NoPrior(EffectKind::new("email.sent"))],
                 ..Requires::default()
@@ -1608,7 +1609,7 @@ mod tests {
             name: ToolName::new("delete_db"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
                 ..Requires::default()
@@ -1618,7 +1619,7 @@ mod tests {
             name: ToolName::new("backup"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![EffectKind::new("backup.done")],
+            emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
             requires: Requires {
                 history: vec![HistoryRequirement::NoPrior(EffectKind::new("lock"))],
                 ..Requires::default()
@@ -1653,7 +1654,7 @@ mod tests {
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
@@ -1703,7 +1704,7 @@ mod tests {
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(TRUSTED),
@@ -1756,7 +1757,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(TRUSTED),
@@ -1812,7 +1813,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(TRUSTED),
@@ -1900,7 +1901,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(TRUSTED),
@@ -1941,7 +1942,7 @@ mod tests {
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(TRUSTED),
@@ -1955,7 +1956,7 @@ mod tests {
             name: ToolName::new("emitter"),
             tags: vec![],
             delta: None,
-            emits: vec![EffectKind::new("receipt")],
+            emits: EffectSet::new([EffectKind::new("receipt")]).unwrap(),
             requires: Requires::default(),
         };
         let officer = Authority {
@@ -1997,7 +1998,7 @@ mod tests {
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("receipt"))],
                 ..Requires::default()
@@ -2007,7 +2008,7 @@ mod tests {
             name: ToolName::new("emitter"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![EffectKind::new("receipt")],
+            emits: EffectSet::new([EffectKind::new("receipt")]).unwrap(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(TRUSTED),
@@ -2051,7 +2052,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 attention: vec![MarkName::new("signoff"), MarkName::new("signoff")],
                 ..Requires::default()
@@ -2091,7 +2092,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(TRUSTED),
@@ -2135,7 +2136,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(TRUSTED),
@@ -2167,7 +2168,7 @@ mod tests {
                 trust: None,
                 audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
             }),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires::default(),
         };
         let registry = build(RegistryConfig {
@@ -2195,7 +2196,7 @@ mod tests {
             name: ToolName::new("delete_db"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![EffectKind::new("db.deleted")],
+            emits: EffectSet::new([EffectKind::new("db.deleted")]).unwrap(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
                 ..Requires::default()
@@ -2205,7 +2206,7 @@ mod tests {
             name: ToolName::new("backup"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![EffectKind::new("backup.done")],
+            emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
             requires: Requires::default(),
         };
         let registry = build(RegistryConfig {
@@ -2230,7 +2231,7 @@ mod tests {
             name: ToolName::new("delete_db"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
                 ..Requires::default()
@@ -2240,7 +2241,7 @@ mod tests {
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![EffectKind::new("backup.done")],
+            emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
             requires: Requires::default(),
         };
         let registry = build(RegistryConfig {
@@ -2273,7 +2274,7 @@ mod tests {
             name: ToolName::new("delete_db"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
                 ..Requires::default()
@@ -2283,7 +2284,7 @@ mod tests {
             name: ToolName::new("backup"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![EffectKind::new("backup.done")],
+            emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
@@ -2316,7 +2317,7 @@ mod tests {
             name: ToolName::new("delete_db"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
                 ..Requires::default()
@@ -2326,7 +2327,7 @@ mod tests {
             name: ToolName::new("backup"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![EffectKind::new("backup.done")],
+            emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
@@ -2371,7 +2372,7 @@ mod tests {
             name: ToolName::new("archive"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("email.sent"))],
                 ..Requires::default()
@@ -2381,7 +2382,7 @@ mod tests {
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![EffectKind::new("email.sent")],
+            emits: EffectSet::new([EffectKind::new("email.sent")]).unwrap(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
@@ -2416,7 +2417,7 @@ mod tests {
             name: ToolName::new("archive"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("email.sent"))],
                 ..Requires::default()
@@ -2426,7 +2427,7 @@ mod tests {
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![EffectKind::new("email.sent")],
+            emits: EffectSet::new([EffectKind::new("email.sent")]).unwrap(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
@@ -2457,7 +2458,7 @@ mod tests {
             name: ToolName::new("delete_db"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
                 ..Requires::default()
@@ -2481,7 +2482,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![TagName::new("payments")],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 attention: vec![MarkName::new("signoff")],
                 ..Requires::default()
@@ -2519,7 +2520,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 attention: vec![MarkName::new("signoff")],
                 ..Requires::default()
@@ -2552,7 +2553,7 @@ mod tests {
             name: ToolName::new("a"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![EffectKind::new("ka")],
+            emits: EffectSet::new([EffectKind::new("ka")]).unwrap(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("kb"))],
                 ..Requires::default()
@@ -2562,7 +2563,7 @@ mod tests {
             name: ToolName::new("b"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![EffectKind::new("kb")],
+            emits: EffectSet::new([EffectKind::new("kb")]).unwrap(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("ka"))],
                 ..Requires::default()
@@ -2686,8 +2687,12 @@ mod tests {
 
     fn a_tool(index: usize) -> impl Strategy<Value = ToolContract> {
         let name = ToolName::new(format!("t{index}"));
-        (a_delta(), prop::collection::vec(small_effect(), 0..2), a_requires()).prop_map(
-            move |(delta, emits, mut requires)| {
+        (
+            a_delta(),
+            prop::collection::btree_set(small_effect(), 0..2),
+            a_requires(),
+        )
+            .prop_map(move |(delta, emits, mut requires)| {
                 if delta.is_none() {
                     requires.label = LabelRequirements::default();
                 }
@@ -2695,11 +2700,10 @@ mod tests {
                     name: name.clone(),
                     tags: vec![],
                     delta,
-                    emits,
+                    emits: EffectSet::new(emits).expect("a btree_set draw is distinct"),
                     requires,
                 }
-            },
-        )
+            })
     }
 
     fn an_authority(index: usize) -> impl Strategy<Value = Authority> {
@@ -3009,7 +3013,9 @@ mod tests {
         Fact::DispatchClosed {
             trajectory: traj(),
             dispatch,
-            outcome: crate::fact::CloseOutcome::Success { effects: vec![kind] },
+            outcome: crate::fact::CloseOutcome::Success {
+                effects: EffectSet::new([kind]).unwrap(),
+            },
         }
     }
 }

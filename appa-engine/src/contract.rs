@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::fact::EffectKind;
+use crate::fact::{EffectKind, EffectSet};
 use crate::label::{Audience, Dim, Dimension, Label, ReaderId, Trust};
 use crate::names::{DynamicResolverName, MarkName, TagName};
 use crate::value::ToolName;
@@ -186,7 +186,7 @@ pub struct ToolContract {
     /// annotation; the two are not interchangeable.
     #[serde(default)]
     pub delta: Option<Delta>,
-    pub emits: Vec<EffectKind>,
+    pub emits: EffectSet,
     pub requires: Requires,
 }
 

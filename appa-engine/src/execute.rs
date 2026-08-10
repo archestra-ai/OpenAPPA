@@ -208,7 +208,7 @@ mod tests {
     use super::*;
     use crate::authority::{Authority, Mandate, Scope};
     use crate::contract::{Delta, LabelRequirements, Requires, ToolContract};
-    use crate::fact::{EffectKind, Fact, Revision};
+    use crate::fact::{EffectKind, EffectSet, Fact, Revision};
     use crate::label::{Audience, Dim, Label, ReaderId, Trust};
     use crate::names::MarkName;
     use crate::projection::Projection;
@@ -243,7 +243,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(TRUSTED),
@@ -347,7 +347,7 @@ mod tests {
             name: ToolName::new("guard"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 history: vec![crate::contract::HistoryRequirement::NoPrior(EffectKind::new(
                     "email.sent",
@@ -379,7 +379,7 @@ mod tests {
                 trajectory: traj(),
                 dispatch: DispatchId::new(traj(), seed.digest(), 0),
                 proposed_label: known(TRUSTED, Audience::Public),
-                proposed_effects: vec![EffectKind::new("email.sent")],
+                proposed_effects: EffectSet::new([EffectKind::new("email.sent")]).unwrap(),
                 dynamic_resolutions: vec![],
             },
         ];
@@ -405,7 +405,7 @@ mod tests {
             name: ToolName::new("vault"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(TRUSTED),
@@ -483,7 +483,7 @@ mod tests {
                 trajectory: traj(),
                 dispatch: prior,
                 proposed_label: Label::top(),
-                proposed_effects: vec![],
+                proposed_effects: EffectSet::default(),
                 dynamic_resolutions: Vec::new(),
             },
         ];
@@ -581,7 +581,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(TRUSTED),
@@ -617,7 +617,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 attention: vec![MarkName::new("m1"), MarkName::new("m2")],
                 ..Requires::default()
@@ -727,7 +727,7 @@ mod tests {
                 trust: None,
                 audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
             }),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires::default(),
         };
         Registry::build(crate::registry::RegistryConfig {

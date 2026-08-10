@@ -218,7 +218,7 @@ mod tests {
     use crate::contract::{
         AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, RecipientSpec, Requires, ToolContract,
     };
-    use crate::fact::{EffectKind, Fact, Revision};
+    use crate::fact::{EffectKind, EffectSet, Fact, Revision};
     use crate::label::{Audience, Dim, Dimension, Label, ReaderId, Trust};
     use crate::names::MarkName;
     use crate::projection::Projection;
@@ -274,7 +274,7 @@ mod tests {
                 trust: None,
                 audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
             }),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(TRUSTED),
@@ -283,6 +283,38 @@ mod tests {
                 ..Requires::default()
             },
         }
+    }
+
+    #[test]
+    fn permuted_effect_declarations_produce_byte_identical_dispatch_facts() {
+        let pay = |emits: [&str; 2]| ToolContract {
+            name: ToolName::new("pay"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: EffectSet::new(emits.map(EffectKind::new)).unwrap(),
+            requires: Requires::default(),
+        };
+        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let p = Projection::build(&log, Revision::new(1));
+        let open = |contract: ToolContract| {
+            engine(vec![contract])
+                .open_dispatch(&p.view(&traj()), &call("pay", json!({})))
+                .unwrap()
+        };
+        let ab = open(pay(["spend", "audit"]));
+        let ba = open(pay(["audit", "spend"]));
+        assert_eq!(
+            serde_json::to_string(&ab.facts).unwrap(),
+            serde_json::to_string(&ba.facts).unwrap()
+        );
+        let mut log_ab = log.clone();
+        log_ab.extend(ab.facts);
+        let mut log_ba = log;
+        log_ba.extend(ba.facts);
+        assert_eq!(
+            Projection::build(&log_ab, Revision::new(2)),
+            Projection::build(&log_ba, Revision::new(2))
+        );
     }
 
     #[test]
@@ -315,7 +347,7 @@ mod tests {
                 trust: Some(Dim::Unknown),
                 audience: None,
             }),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires::default(),
         };
         let e = engine(vec![scan]);
@@ -343,7 +375,7 @@ mod tests {
             name: ToolName::new("send_email"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![EffectKind::new("egress")],
+            emits: EffectSet::new([EffectKind::new("egress")]).unwrap(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
@@ -374,7 +406,7 @@ mod tests {
             name: ToolName::new("delete_db"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 history: vec![
                     HistoryRequirement::Prior(EffectKind::new("backup.done")),
@@ -403,7 +435,7 @@ mod tests {
                 trust: None,
                 audience: Some(Dim::Known(Audience::restricted([ReaderId::new("a")])).into()),
             }),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
@@ -440,7 +472,7 @@ mod tests {
                 trust: Some(Dim::Known(SUSPICIOUS)),
                 audience: None,
             }),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(TRUSTED),
@@ -476,7 +508,7 @@ mod tests {
                 trust: None,
                 audience: Some(Dim::Known(a_reader.clone()).into()),
             }),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
@@ -502,7 +534,7 @@ mod tests {
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![EffectKind::new(kind)],
+            emits: EffectSet::new([EffectKind::new(kind)]).unwrap(),
             requires: Requires::default(),
         }
     }
@@ -512,7 +544,7 @@ mod tests {
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 history: vec![requirement],
                 ..Requires::default()
@@ -662,7 +694,7 @@ mod tests {
             name: ToolName::new("selfguard"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![EffectKind::new("email.sent")],
+            emits: EffectSet::new([EffectKind::new("email.sent")]).unwrap(),
             requires: Requires {
                 history: vec![HistoryRequirement::NoPrior(EffectKind::new("email.sent"))],
                 ..Requires::default()
@@ -690,7 +722,7 @@ mod tests {
                 trust: Some(Dim::Unknown),
                 audience: None,
             }),
-            emits: vec![EffectKind::new("read")],
+            emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
             requires: Requires::default(),
         };
         let tools = vec![
@@ -728,7 +760,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 attention: vec![MarkName::new("signoff")],
                 ..Requires::default()
@@ -768,7 +800,7 @@ mod tests {
                 trust: None,
                 audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
             }),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(TRUSTED),
@@ -796,7 +828,7 @@ mod tests {
             name: ToolName::new(name),
             tags: vec![],
             delta: None,
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires::default(),
         }
     }
@@ -876,7 +908,7 @@ mod tests {
             name: ToolName::new("send_email"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
@@ -912,7 +944,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: Some(TRUSTED),

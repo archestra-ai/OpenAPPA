@@ -389,7 +389,7 @@ fn unestablished_dims(views: &Views, trajectory: &TrajectoryId, fold: &Label, ou
 mod tests {
     use super::*;
     use crate::authority::{Sanitizer, SanitizerPoints, Transition};
-    use crate::fact::{CloseOutcome, EffectKind, Revision};
+    use crate::fact::{CloseOutcome, EffectKind, EffectSet, Revision};
     use crate::label::{Audience, Label, ReaderId, Trust};
     use crate::projection::Projection;
     use crate::registry::{RegistryConfig, TrustChain};
@@ -1308,14 +1308,14 @@ mod tests {
             trajectory: child(),
             dispatch: dispatch.clone(),
             proposed_label: Label::top(),
-            proposed_effects: vec![egress.clone()],
+            proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
             dynamic_resolutions: Vec::new(),
         });
         log.push(Fact::DispatchClosed {
             trajectory: child(),
             dispatch,
             outcome: CloseOutcome::Success {
-                effects: vec![egress.clone()],
+                effects: EffectSet::new([egress.clone()]).unwrap(),
             },
         });
         let projection = build(&log);
@@ -1332,7 +1332,7 @@ mod tests {
             trajectory: child(),
             dispatch: dispatch.clone(),
             proposed_label: Label::top(),
-            proposed_effects: vec![egress.clone()],
+            proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
             dynamic_resolutions: Vec::new(),
         });
         let projection = build(&log);
@@ -1344,7 +1344,7 @@ mod tests {
             trajectory: child(),
             dispatch,
             outcome: CloseOutcome::Success {
-                effects: vec![egress.clone()],
+                effects: EffectSet::new([egress.clone()]).unwrap(),
             },
         });
         let projection = build(&log);

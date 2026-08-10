@@ -62,6 +62,51 @@ impl EffectKind {
     }
 }
 
+/// The canonical set of effect kinds a contract declares or a dispatch commits: unique and
+/// sorted, serialized as exactly that sorted sequence — so permutation-equivalent declarations
+/// converge to one value, engine-produced facts are byte-identical, and replayed histories agree.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct EffectSet(Vec<EffectKind>);
+
+#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
+#[error("duplicate declared effect {}", (self.0).as_str())]
+pub struct DuplicateEffect(pub EffectKind);
+
+impl EffectSet {
+    pub fn new(kinds: impl IntoIterator<Item = EffectKind>) -> Result<EffectSet, DuplicateEffect> {
+        let mut kinds: Vec<EffectKind> = kinds.into_iter().collect();
+        kinds.sort();
+        if let Some(pair) = kinds.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Err(DuplicateEffect(pair[0].clone()));
+        }
+        Ok(EffectSet(kinds))
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &EffectKind> {
+        self.0.iter()
+    }
+
+    pub fn contains(&self, kind: &EffectKind) -> bool {
+        self.0.binary_search(kind).is_ok()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl<'de> Deserialize<'de> for EffectSet {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let kinds = Vec::<EffectKind>::deserialize(deserializer)?;
+        EffectSet::new(kinds).map_err(serde::de::Error::custom)
+    }
+}
+
 /// A boundary is punctuation, not a decision: it marks the log, never gates it (pending offers
 /// die with their turn, and execution is always re-validated against the live state). The engine
 /// appends one at the end of each assistant turn, at fork, and at merge. `Fork` and `Merge` carry
@@ -87,7 +132,7 @@ pub enum BoundaryKind {
 /// no" from "no one knows whether the tool ran".
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CloseOutcome {
-    Success { effects: Vec<EffectKind> },
+    Success { effects: EffectSet },
     Failure,
     Indeterminate,
 }
@@ -115,14 +160,14 @@ pub enum Fact {
         trajectory: TrajectoryId,
         dispatch: DispatchId,
         proposed_label: Label,
-        proposed_effects: Vec<EffectKind>,
+        proposed_effects: EffectSet,
         #[serde(default)]
         dynamic_resolutions: Vec<crate::contract::PinnedDynamicResolution>,
     },
     DispatchSucceeded {
         trajectory: TrajectoryId,
         dispatch: DispatchId,
-        effects: Vec<EffectKind>,
+        effects: EffectSet,
     },
     DispatchClosed {
         trajectory: TrajectoryId,
@@ -273,6 +318,21 @@ mod tests {
 
     use super::*;
     use crate::value::ResolvedCall;
+
+    #[test]
+    fn an_effect_set_is_canonical_and_refuses_duplicates() {
+        let ab = EffectSet::new([EffectKind::new("b"), EffectKind::new("a")]).unwrap();
+        let ba = EffectSet::new([EffectKind::new("a"), EffectKind::new("b")]).unwrap();
+        assert_eq!(ab, ba);
+        assert_eq!(serde_json::to_string(&ab).unwrap(), r#"["a","b"]"#);
+        assert_eq!(
+            EffectSet::new([EffectKind::new("a"), EffectKind::new("a")]),
+            Err(DuplicateEffect(EffectKind::new("a")))
+        );
+        assert!(serde_json::from_str::<EffectSet>(r#"["a","a"]"#).is_err());
+        let normalized: EffectSet = serde_json::from_str(r#"["b","a"]"#).unwrap();
+        assert_eq!(normalized, ab);
+    }
 
     #[test]
     fn a_denial_fact_round_trips_through_serde() {

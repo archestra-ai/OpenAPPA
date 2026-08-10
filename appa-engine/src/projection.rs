@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::contract::PinnedDynamicResolution;
-use crate::fact::{BoundaryKind, CloseOutcome, EffectKind, Fact, ReturnPolicy, Revision};
+use crate::fact::{BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ReturnPolicy, Revision};
 use crate::label::{Dim, DimValue, Label};
 use crate::names::{AuthorityName, SanitizerName};
 use crate::value::{CanonicalDigest, ChildReturnId, DispatchId, LabeledValue, Provenance, TrajectoryId, ValueId};
@@ -41,7 +41,7 @@ pub struct Projection {
     values: Vec<AdmittedValue>,
     effects: Vec<EffectKind>,
     open: BTreeSet<DispatchId>,
-    reservations: BTreeMap<DispatchId, Vec<EffectKind>>,
+    reservations: BTreeMap<DispatchId, EffectSet>,
     succeeded: BTreeSet<DispatchId>,
     opened: Vec<OpenedDispatch>,
     boundaries: Vec<TrajectoryId>,
@@ -478,14 +478,14 @@ mod tests {
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
                 proposed_label: Label::top(),
-                proposed_effects: vec![egress.clone()],
+                proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 dynamic_resolutions: Vec::new(),
             },
             Fact::DispatchClosed {
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
                 outcome: CloseOutcome::Success {
-                    effects: vec![egress.clone()],
+                    effects: EffectSet::new([egress.clone()]).unwrap(),
                 },
             },
         ];
@@ -502,7 +502,7 @@ mod tests {
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
                 proposed_label: Label::top(),
-                proposed_effects: vec![egress.clone()],
+                proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 dynamic_resolutions: Vec::new(),
             },
             Fact::DispatchClosed {

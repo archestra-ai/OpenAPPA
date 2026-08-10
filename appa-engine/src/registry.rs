@@ -479,6 +479,7 @@ mod tests {
     use crate::authority::SanitizerPoints;
     use crate::authority::{CastCeiling, CastTarget, Mandate, Scope};
     use crate::contract::{Delta, DynamicAudienceBinding, Requires};
+    use crate::fact::EffectSet;
     use crate::label::{Audience, ReaderId};
     use crate::names::{AuthorityName, MarkName};
 
@@ -501,7 +502,7 @@ mod tests {
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(Delta::NONE),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Requires::default(),
         }
     }

@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::authority::CastResolution;
 use crate::check::{Narrowing, UnestablishedFact};
-use crate::fact::{CloseOutcome, Fact, FactBatch};
+use crate::fact::{CloseOutcome, EffectSet, Fact, FactBatch};
 use crate::label::{Adequacy, Dim, DimValue, Label};
 use crate::names::CastName;
 use crate::projection::Views;
@@ -220,7 +220,7 @@ pub(crate) fn admit_result(
         dispatch: dispatch.clone(),
         outcome: CloseOutcome::Success {
             effects: if checkpointed {
-                Vec::new()
+                EffectSet::default()
             } else {
                 contract.emits.clone()
             },
@@ -440,7 +440,7 @@ mod tests {
                 trust: Some(Dim::Known(SUSPICIOUS)),
                 audience: Some(Dim::Known(internal()).into()),
             }),
-            emits: vec![EffectKind::new("read")],
+            emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
             requires: Default::default(),
         };
         let out_san = Sanitizer {
@@ -491,7 +491,7 @@ mod tests {
                 trust: Some(Dim::Unknown),
                 audience: Some(Dim::Known(internal()).into()),
             }),
-            emits: vec![EffectKind::new("read")],
+            emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
             requires: Default::default(),
         };
         let poll = ToolContract {
@@ -501,7 +501,7 @@ mod tests {
                 trust: Some(Dim::Known(SUSPICIOUS)),
                 audience: Some(Dim::Unknown.into()),
             }),
-            emits: vec![EffectKind::new("read")],
+            emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
             requires: Default::default(),
         };
         let dynamic_scan = ToolContract {
@@ -511,7 +511,7 @@ mod tests {
                 trust: Some(Dim::Unknown),
                 audience: Some(AudienceDelta::Dynamic(dynamic_binding())),
             }),
-            emits: vec![EffectKind::new("read")],
+            emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
             requires: Default::default(),
         };
         Registry::build(RegistryConfig {
@@ -538,7 +538,7 @@ mod tests {
             trajectory: traj(),
             dispatch: dispatch.clone(),
             proposed_label: Label::top(),
-            proposed_effects: vec![EffectKind::new("read")],
+            proposed_effects: EffectSet::new([EffectKind::new("read")]).unwrap(),
             dynamic_resolutions: Vec::new(),
         }];
         (log, dispatch)
@@ -603,7 +603,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             &batch.facts[0],
-            Fact::DispatchClosed { outcome: CloseOutcome::Success { effects }, .. } if effects == &[EffectKind::new("read")]
+            Fact::DispatchClosed { outcome: CloseOutcome::Success { effects }, .. } if effects == &EffectSet::new([EffectKind::new("read")]).unwrap()
         ));
         match &batch.facts[1] {
             Fact::ValueAdmitted { value, .. } => {
@@ -824,7 +824,7 @@ mod tests {
                 trust: None,
                 audience: Some(Dim::Unknown.into()),
             }),
-            emits: vec![],
+            emits: EffectSet::default(),
             requires: Default::default(),
         };
         let librarian = Cast {
@@ -935,7 +935,7 @@ mod tests {
             trajectory: traj(),
             dispatch: dispatch.clone(),
             proposed_label: Label::top(),
-            proposed_effects: vec![EffectKind::new("read")],
+            proposed_effects: EffectSet::new([EffectKind::new("read")]).unwrap(),
             dynamic_resolutions: vec![PinnedDynamicResolution::from_answer(binding, Some(internal()))],
         }];
         let projection = views_of(&log);
@@ -1051,7 +1051,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             &batch.facts[0],
-            Fact::DispatchClosed { outcome: CloseOutcome::Success { effects }, .. } if effects == &[EffectKind::new("read")]
+            Fact::DispatchClosed { outcome: CloseOutcome::Success { effects }, .. } if effects == &EffectSet::new([EffectKind::new("read")]).unwrap()
         ));
         assert!(matches!(
             &batch.facts[1],
@@ -1207,7 +1207,7 @@ mod tests {
         assert_eq!(batch.facts.len(), 2);
         assert!(matches!(
             &batch.facts[0],
-            Fact::DispatchClosed { outcome: CloseOutcome::Success { effects }, .. } if effects == &[EffectKind::new("read")]
+            Fact::DispatchClosed { outcome: CloseOutcome::Success { effects }, .. } if effects == &EffectSet::new([EffectKind::new("read")]).unwrap()
         ));
         assert!(matches!(
             &batch.facts[1],
