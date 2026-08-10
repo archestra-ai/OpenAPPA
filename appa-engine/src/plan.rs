@@ -223,7 +223,7 @@ fn directly_clearable(
     state: &State,
     call: &ResolvedCall,
     denied: &BTreeSet<AuthorityName>,
-) -> Option<Vec<RemedyStep>> {
+) -> Option<()> {
     let contract = registry.tool(call.tool())?;
     let has_committed = |kind: &EffectKind| state.effects.contains(kind);
     let has_reserved = |kind: &EffectKind| state.reservations.contains(kind);
@@ -238,19 +238,11 @@ fn directly_clearable(
     // `consumed` is deliberately not consulted: the search asks whether the *gaps* clear, per
     // the gap-scoped plan semantics — a persisting unestablished dimension gates execution and
     // dispatch, never the offer. Masking keeps a consumed requirement out of the gap
-    // set, so no step below ever claims to cure it.
-    let mut steps = Vec::new();
+    // set, so no gap below ever claims to be cured by it.
     for gap in &eval.requirement_gaps {
-        // One ruling by an authority covers one or more gaps — emit each authority once.
-        let step = RemedyStep::Authorize(authority_for(registry, gap, &contract.tags, denied)?.clone());
-        if !steps.contains(&step) {
-            steps.push(step);
-        }
+        authority_for(registry, gap, &contract.tags, denied)?;
     }
-    if let Some(narrowing) = eval.narrowing {
-        steps.push(RemedyStep::Accept(narrowing));
-    }
-    Some(steps)
+    Some(())
 }
 
 fn enumerate_plans(registry: &Registry, state: &State, call: &ResolvedCall) -> Vec<ExecutableRemedyPlan> {
@@ -274,16 +266,19 @@ fn enumerate_plans(registry: &Registry, state: &State, call: &ResolvedCall) -> V
     let Some(assignments) = enumerate_assignments(registry, &block.requirement_gaps, &contract.tags) else {
         return Vec::new();
     };
-    let tails = narrowing_remedies(registry, &state.label, contract, call, block.narrowing.as_ref());
+    let settlements = narrowing_remedies(registry, &state.label, contract, call, block.narrowing.as_ref());
 
     let mut candidates: Vec<PlanCandidate> = Vec::new();
     for required in assignments {
-        for tail in &tails {
-            let mut steps: Vec<RemedyStep> = required
-                .iter()
-                .map(|r| RemedyStep::Authorize(r.authority.clone()))
-                .collect();
-            steps.extend(tail.iter().cloned());
+        for settlement in &settlements {
+            let mut steps: Vec<RemedyStep> = Vec::new();
+            if let Some(narrowing) = &settlement.accept {
+                steps.push(RemedyStep::Accept(narrowing.clone()));
+            }
+            steps.extend(required.iter().map(|r| RemedyStep::Authorize(r.authority.clone())));
+            if let Some(sanitizer) = &settlement.sanitize {
+                steps.push(RemedyStep::Sanitize(sanitizer.clone()));
+            }
             candidates.push(PlanCandidate {
                 steps,
                 required: required.clone(),
@@ -446,32 +441,43 @@ fn enumerate_assignments(registry: &Registry, gaps: &[Gap], tags: &[TagName]) ->
     }
 }
 
+struct NarrowingSettlement {
+    accept: Option<Narrowing>,
+    sanitize: Option<SanitizerName>,
+}
+
 fn narrowing_remedies(
     registry: &Registry,
     current: &Label,
     contract: &ToolContract,
     call: &ResolvedCall,
     narrowing: Option<&Narrowing>,
-) -> Vec<Vec<RemedyStep>> {
+) -> Vec<NarrowingSettlement> {
     let Some(narrowing) = narrowing else {
-        return vec![Vec::new()];
+        return vec![NarrowingSettlement {
+            accept: None,
+            sanitize: None,
+        }];
     };
-    let mut tails = vec![vec![RemedyStep::Accept(narrowing.clone())]];
+    let mut settlements = vec![NarrowingSettlement {
+        accept: Some(narrowing.clone()),
+        sanitize: None,
+    }];
     let output = contract.output_label_for_call(call);
     for sanitizer in applicable_output_sanitizers(registry, contract, &output) {
         let Some(sanitized) = sanitized_commit(current, &output, sanitizer) else {
             continue;
         };
-        let mut tail = vec![RemedyStep::Sanitize(sanitizer.name.clone())];
-        if &sanitized != current {
-            tail.push(RemedyStep::Accept(Narrowing {
-                from: current.clone(),
-                to: sanitized,
-            }));
-        }
-        tails.push(tail);
+        let accept = (&sanitized != current).then(|| Narrowing {
+            from: current.clone(),
+            to: sanitized,
+        });
+        settlements.push(NarrowingSettlement {
+            accept,
+            sanitize: Some(sanitizer.name.clone()),
+        });
     }
-    tails
+    settlements
 }
 
 fn applicable_output_sanitizers<'r>(
@@ -1050,14 +1056,17 @@ mod tests {
         assert_eq!(
             executables[0].steps,
             vec![
-                RemedyStep::Authorize(AuthorityName::new("steward")),
                 RemedyStep::Accept(planned.raw.narrowing.clone().expect("the block narrows")),
+                RemedyStep::Authorize(AuthorityName::new("steward")),
             ]
         );
-        assert!(matches!(
-            executables[1].steps.as_slice(),
-            [RemedyStep::Authorize(_), RemedyStep::Sanitize(_), ..]
-        ));
+        assert_eq!(
+            executables[1].steps,
+            vec![
+                RemedyStep::Authorize(AuthorityName::new("steward")),
+                RemedyStep::Sanitize(SanitizerName::new("declassify")),
+            ]
+        );
     }
 
     #[test]

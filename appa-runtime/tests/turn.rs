@@ -1563,6 +1563,96 @@ implementation = { builtin = "approve" }
 }
 
 #[tokio::test]
+async fn a_mixed_plan_consults_no_authority_before_the_acceptance_gate() {
+    // `wire` both narrows the audience (delta → acceptance) and demands attention (gap →
+    // ruling), so its one plan is acceptance-first. Executing it in the round that
+    // surfaced the offer refuses at the informed-acceptance gate before any authority IO: the
+    // counting authority sees zero consultations and no acceptance, ruling, or dispatch lands.
+    // The same plan in the next round consults exactly once and lands the one canonical batch —
+    // acceptance, then the ruling, then the dispatch, adjacent in the log.
+    let (url, consults, _server) = spawn_counting_authority("approve");
+    let policy = format!(
+        r#"
+version = 1
+[[tool]]
+name = "wire"
+delta = {{ audience = {{ exactly = ["internal"] }} }}
+[tool.requires]
+attention = ["signoff"]
+
+[[authority]]
+name = "officer"
+mandate = {{ attends = ["signoff"] }}
+implementation = {{ resolver = {{ url = "{url}", timeout_ms = 2000 }} }}
+"#
+    );
+    let mediated = mediator(&policy, &[("wire", BuiltinTool::Echo("sent".to_string()))]);
+    let tenant = TenantId::new("tenant");
+    let session = mediated.create_session(tenant.clone());
+    let mut turn = begin(&mediated, &tenant, &session, "pay").await;
+    let mut budget = RunBudget::default();
+
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![
+                call("blocked", "wire", "{}"),
+                call("early-accept", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-0"}"#),
+            ]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    let log = facts(&mediated, &tenant, &session);
+    assert_eq!(consults.load(Ordering::SeqCst), 0);
+    assert!(!log.iter().any(|fact| matches!(
+        fact,
+        Fact::Acceptance { .. } | Fact::Ruling { .. } | Fact::DispatchOpened { .. }
+    )));
+
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call("accept", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-0"}"#)]),
+            &mut budget,
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    let log = facts(&mediated, &tenant, &session);
+    assert_eq!(consults.load(Ordering::SeqCst), 1);
+    let acceptance = log
+        .iter()
+        .position(|fact| matches!(fact, Fact::Acceptance { .. }))
+        .unwrap();
+    let ruling = log.iter().position(|fact| matches!(fact, Fact::Ruling { .. })).unwrap();
+    let dispatch = log
+        .iter()
+        .position(|fact| matches!(fact, Fact::DispatchOpened { .. }))
+        .unwrap();
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(fact, Fact::Acceptance { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(log.iter().filter(|fact| matches!(fact, Fact::Ruling { .. })).count(), 1);
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(fact, Fact::DispatchOpened { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(ruling, acceptance + 1);
+    assert_eq!(dispatch, ruling + 1);
+    assert_eq!(
+        tool_values(&log).iter().map(|(body, _)| *body).collect::<Vec<_>>(),
+        ["sent"]
+    );
+}
+
+#[tokio::test]
 async fn return_offers_run_cheapest_first_and_the_free_crossing_leads_the_feedback() {
     // The menu a blocked return offers is ordered by what each plan costs the parent: a
     // residual-free sanitize crosses the value and narrows nothing, raw acceptance narrows

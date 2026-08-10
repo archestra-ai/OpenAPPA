@@ -166,16 +166,6 @@ pub(crate) fn execute_remedy_plan(
     let trajectory = views.trajectory().clone();
 
     let mut facts = Vec::new();
-    for ruling in rulings {
-        facts.push(Fact::Ruling {
-            trajectory: trajectory.clone(),
-            dispatch: dispatch.clone(),
-            plan,
-            authority: ruling.authority.clone(),
-            covers: ruling.covers.clone(),
-            reviewed: ruling.reviewed.clone(),
-        });
-    }
     if let Some(narrowing) = chosen.steps.iter().find_map(|step| match step {
         plan::RemedyStep::Accept(narrowing) => Some(narrowing.clone()),
         plan::RemedyStep::Authorize(_) | plan::RemedyStep::Sanitize(_) => None,
@@ -185,6 +175,20 @@ pub(crate) fn execute_remedy_plan(
             dispatch: dispatch.clone(),
             plan,
             narrowing,
+        });
+    }
+    for required in &chosen.required {
+        let ruling = rulings
+            .iter()
+            .find(|ruling| ruling.authority == required.authority && ruling.covers == required.covers)
+            .expect("the assignment check matched each required entry to exactly one ruling");
+        facts.push(Fact::Ruling {
+            trajectory: trajectory.clone(),
+            dispatch: dispatch.clone(),
+            plan,
+            authority: ruling.authority.clone(),
+            covers: ruling.covers.clone(),
+            reviewed: ruling.reviewed.clone(),
         });
     }
     if let Some(sanitizer) = chosen.steps.iter().find_map(|step| match step {
@@ -337,8 +341,9 @@ mod tests {
             covers: vec![floor_gap()],
         };
         let batch = run(&registry, &log, &call("wire", json!({})), &[ruling]).unwrap();
+        assert_eq!(batch.facts.len(), 2);
         assert!(matches!(batch.facts[0], Fact::Ruling { .. }));
-        assert!(matches!(batch.facts.last().unwrap(), Fact::DispatchOpened { .. }));
+        assert!(matches!(batch.facts[1], Fact::DispatchOpened { .. }));
     }
 
     #[test]
@@ -395,8 +400,9 @@ mod tests {
             covers: vec![Gap::NoPrior(EffectKind::new("email.sent"))],
         };
         let batch = run(&registry, &log, &guard_call, &[ruling]).unwrap();
+        assert_eq!(batch.facts.len(), 2);
         assert!(matches!(batch.facts[0], Fact::Ruling { .. }));
-        assert!(matches!(batch.facts.last().unwrap(), Fact::DispatchOpened { .. }));
+        assert!(matches!(batch.facts[1], Fact::DispatchOpened { .. }));
     }
 
     #[test]
@@ -658,20 +664,28 @@ mod tests {
         let rulings = vec![
             Ruling {
                 dispatch: wire_dispatch(),
-                authority: AuthorityName::new("a1"),
+                authority: AuthorityName::new("a2"),
                 reviewed: review.clone(),
-                covers: vec![Gap::Attention(MarkName::new("m1"))],
+                covers: vec![Gap::Attention(MarkName::new("m2"))],
             },
             Ruling {
                 dispatch: wire_dispatch(),
-                authority: AuthorityName::new("a2"),
+                authority: AuthorityName::new("a1"),
                 reviewed: review,
-                covers: vec![Gap::Attention(MarkName::new("m2"))],
+                covers: vec![Gap::Attention(MarkName::new("m1"))],
             },
         ];
         let batch = run(&registry, &log, &call("wire", json!({})), &rulings).unwrap();
-        let ruling_count = batch.facts.iter().filter(|f| matches!(f, Fact::Ruling { .. })).count();
-        assert_eq!(ruling_count, 2);
+        let ruled: Vec<&str> = batch
+            .facts
+            .iter()
+            .filter_map(|f| match f {
+                Fact::Ruling { authority, .. } => Some(authority.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ruled, ["a1", "a2"]);
+        assert!(matches!(batch.facts.last().unwrap(), Fact::DispatchOpened { .. }));
     }
 
     #[test]
@@ -717,6 +731,61 @@ mod tests {
             run(&registry, &log, &ref_call, &[with_review(top_review())]),
             Err(PlanError::ReviewMismatch)
         );
+    }
+
+    #[test]
+    fn a_mixed_plan_lands_acceptance_before_its_rulings() {
+        let post = ToolContract {
+            name: ToolName::new("post"),
+            tags: vec![],
+            delta: Some(Delta {
+                trust: None,
+                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
+            }),
+            emits: EffectSet::default(),
+            requires: Requires {
+                attention: vec![MarkName::new("signoff")],
+                ..Requires::default()
+            },
+        };
+        let steward = Authority {
+            name: AuthorityName::new("steward"),
+            mandate: Mandate {
+                attends: vec![MarkName::new("signoff")],
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        };
+        let registry = Registry::build(crate::registry::RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![post],
+            authorities: vec![steward],
+            sanitizers: vec![],
+            casts: vec![],
+        })
+        .unwrap();
+        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let post_call = call("post", json!({}));
+        let ruling = Ruling {
+            dispatch: DispatchId::new(traj(), post_call.digest(), 0),
+            authority: AuthorityName::new("steward"),
+            reviewed: AuthorityReview {
+                tool: ToolName::new("post"),
+                trajectory_label: known(TRUSTED, Audience::Public),
+                arg_refs: vec![],
+            },
+            covers: vec![Gap::Attention(MarkName::new("signoff"))],
+        };
+        let batch = run(&registry, &log, &post_call, &[ruling]).unwrap();
+        let offered = crate::check::Narrowing {
+            from: known(TRUSTED, Audience::Public),
+            to: known(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
+        };
+        assert_eq!(batch.facts.len(), 3);
+        assert!(matches!(&batch.facts[0], Fact::Acceptance { narrowing, .. } if *narrowing == offered));
+        assert!(matches!(batch.facts[1], Fact::Ruling { .. }));
+        assert!(matches!(batch.facts[2], Fact::DispatchOpened { .. }));
     }
 
     fn narrowing_registry() -> Registry {

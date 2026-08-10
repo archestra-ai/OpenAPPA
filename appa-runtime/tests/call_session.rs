@@ -1,4 +1,5 @@
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use appa_engine::label::{Audience, Dim, ReaderId, Trust};
@@ -382,6 +383,93 @@ async fn spawn_authority(rulings: Vec<&'static str>) -> String {
         }
     });
     format!("http://{addr}/rule")
+}
+
+fn spawn_counting_authority(ruling: &'static str) -> (String, Arc<AtomicUsize>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let consults = Arc::new(AtomicUsize::new(0));
+    let counter = consults.clone();
+    tokio::spawn(async move {
+        let listener = TcpListener::from_std(listener).unwrap();
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            counter.fetch_add(1, Ordering::SeqCst);
+            let mut buf = vec![0u8; 8192];
+            let mut received = Vec::new();
+            loop {
+                let n = socket.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                received.extend_from_slice(&buf[..n]);
+                if let Some(pos) = received.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let header = String::from_utf8_lossy(&received[..pos]).to_lowercase();
+                    let len: usize = header
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    if received.len() >= pos + 4 + len {
+                        break;
+                    }
+                }
+            }
+            let body = format!(r#"{{"ruling":"{ruling}"}}"#);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    (format!("http://{addr}/rule"), consults)
+}
+
+#[tokio::test]
+async fn a_mixed_plan_consults_no_authority_before_the_acceptance_gate() {
+    let (url, consults) = spawn_counting_authority("approve");
+    let policy = format!(
+        r#"
+version = 1
+[[tool]]
+name = "wire"
+delta = {{ audience = {{ exactly = ["internal"] }} }}
+requires = {{ attention = ["signoff"] }}
+[[authority]]
+name = "officer"
+mandate = {{ attends = ["signoff"] }}
+implementation = {{ resolver = {{ url = "{url}", timeout_ms = 2000 }} }}
+"#
+    );
+    let mut session = open(&policy);
+    session.bind_tools(vec![tool_schema("wire")]).unwrap();
+    session.begin_turn("pay").unwrap();
+
+    let CallDecision::Block { feedback } = session.check_call(call("wire", serde_json::json!({}))).await.unwrap()
+    else {
+        panic!("the mixed block should surface its plan");
+    };
+    assert!(feedback.contains("remedy-0"));
+
+    let RemedyDecision::Declined { .. } = session.resolve_remedy(Some("remedy-0")).await.unwrap() else {
+        panic!("a same-completion acceptance must be refused");
+    };
+    assert_eq!(consults.load(Ordering::SeqCst), 0);
+
+    session.begin_round().unwrap();
+    let RemedyDecision::Authorized { handle, .. } = session.resolve_remedy(Some("remedy-0")).await.unwrap() else {
+        panic!("the informed acceptance authorizes in a later completion");
+    };
+    assert_eq!(consults.load(Ordering::SeqCst), 1);
+    let result = session.report_outcome(handle, ok_body("sent")).unwrap();
+    assert!(matches!(
+        result,
+        AdmittedResult::Admitted { label, .. }
+            if label.audience == Dim::Known(Audience::restricted([ReaderId::new("internal")]))
+    ));
+    session.end_turn().unwrap();
 }
 
 #[tokio::test]
