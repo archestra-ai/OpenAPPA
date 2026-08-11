@@ -71,6 +71,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "appa-adapter-claude-code"
+version = "0.0.0"
+dependencies = [
+ "appa-runtime-api",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "appa-agent"
 version = "0.0.0"
 dependencies = [
@@ -149,9 +159,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "appa-runtime-api"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "appa-runtime-v2"
 version = "0.0.0"
 dependencies = [
+ "appa-adapter-claude-code",
+ "appa-runtime-api",
  "axum",
  "clap",
  "rand 0.10.2",

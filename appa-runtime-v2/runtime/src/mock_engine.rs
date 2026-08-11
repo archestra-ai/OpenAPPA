@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-pub use crate::api::{ChildTask, DispatchId, OfferId, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
+pub(crate) use crate::api::{DispatchId, OfferId, ProposedCall, ToolOutcome, TrajectoryId};
 
 /// The count of writes to one family log. A decision names the
 /// revision it was based on; the store accepts its batch only if the
@@ -41,12 +41,8 @@ pub struct Feedback {
     pub offers: Vec<OfferId>,
 }
 
-/// One typed request for external evidence. The runtime resolves it —
-/// authority, sanitizer, cast resolver, membership resolver, or
-/// dynamic resolver — and feeds the answer back on the same
-/// semantic event. An answer grants nothing until the engine validates
-/// it.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum ExternalRequest {
     Authority { name: String, question: serde_json::Value },
     Sanitizer { name: String, input: serde_json::Value },
@@ -156,6 +152,14 @@ pub enum Presentation {
 #[derive(Debug)]
 pub struct EngineView {
     revision: LogRevision,
+    pending: Vec<PendingOffer>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingOffer {
+    offer: OfferId,
+    tool: String,
+    bytes: Vec<u8>,
 }
 
 impl EngineView {
@@ -173,7 +177,8 @@ pub struct MockEngine {
 }
 
 enum Mode {
-    Default,
+    Permissive,
+    Offer,
     Test {
         queue: Mutex<VecDeque<EngineDecision>>,
         seen: Mutex<Vec<EngineEvent>>,
@@ -181,14 +186,26 @@ enum Mode {
 }
 
 impl MockEngine {
-    /// The binary's engine: permit everything, admit everything,
-    /// append nothing. No policy is enforced.
+    /// The binary's default engine: permit everything, admit
+    /// everything, append nothing. No policy is enforced.
     pub fn permissive() -> MockEngine {
         tracing::warn!(
             "a MOCK engine is deciding: every call is permitted, every result is \
              admitted, and the policy is NOT validated or enforced"
         );
-        MockEngine { mode: Mode::Default }
+        MockEngine { mode: Mode::Permissive }
+    }
+
+    /// The binary's `--mock offer` engine: block every call with a
+    /// narrowing offer, authorize it at `execute_remedy_plan`. Still
+    /// no policy: every call goes through, one accepted offer later.
+    pub fn offer_mode() -> MockEngine {
+        tracing::warn!(
+            "a MOCK engine is deciding: every call is first blocked with a \
+             narrowing offer, executing the offer authorizes exactly that call, \
+             and the policy is NOT validated or enforced"
+        );
+        MockEngine { mode: Mode::Offer }
     }
 
     /// The tests' engine: every `handle` call pops the next enqueued
@@ -210,7 +227,7 @@ impl MockEngine {
                 .lock()
                 .expect("mock queue lock is never poisoned")
                 .push_back(decision),
-            Mode::Default => {
+            Mode::Permissive | Mode::Offer => {
                 panic!("enqueue is meaningful only in test mode")
             }
         }
@@ -219,15 +236,44 @@ impl MockEngine {
     pub fn seen(&self) -> Vec<EngineEvent> {
         match &self.mode {
             Mode::Test { seen, .. } => seen.lock().expect("mock seen lock is never poisoned").clone(),
-            Mode::Default => panic!("seen is meaningful only in test mode"),
+            Mode::Permissive | Mode::Offer => panic!("seen is meaningful only in test mode"),
         }
     }
 
     /// Rebuild the view by replaying the family log. The mock
     /// validates nothing; the real engine validates every batch.
+    /// Offer mode's facts replay into the pending-offer
+    /// set; entries the mock did not write are ignored.
     pub fn rebuild_view(&self, log: &[Vec<u8>]) -> EngineView {
+        let mut pending: Vec<PendingOffer> = Vec::new();
+        for entry in log {
+            let Ok(fact) = serde_json::from_slice::<serde_json::Value>(entry) else {
+                continue;
+            };
+            match fact["fact"].as_str() {
+                Some("turn") => pending.clear(),
+                Some("offer") => {
+                    let (Some(id), Some(tool), Some(call)) =
+                        (fact["id"].as_str(), fact["tool"].as_str(), fact["call"].as_str())
+                    else {
+                        continue;
+                    };
+                    pending.push(PendingOffer {
+                        offer: OfferId(id.to_string()),
+                        tool: tool.to_string(),
+                        bytes: call.as_bytes().to_vec(),
+                    });
+                }
+                Some("executed") => {
+                    let Some(id) = fact["id"].as_str() else { continue };
+                    pending.retain(|entry| entry.offer.0 != id);
+                }
+                _ => {}
+            }
+        }
         EngineView {
             revision: LogRevision(log.len() as u64),
+            pending,
         }
     }
 
@@ -241,7 +287,8 @@ impl MockEngine {
                     .pop_front()
                     .expect("test mode holds an enqueued decision for every event")
             }
-            Mode::Default => permissive_decision(view, event),
+            Mode::Permissive => permissive_decision(view, event),
+            Mode::Offer => offer_decision(view, event),
         }
     }
 }
@@ -252,17 +299,9 @@ fn permissive_decision(view: &EngineView, event: EngineEvent) -> EngineDecision 
         EngineEvent::ModelResponse { call, entropy, .. } => {
             let bytes =
                 serde_json::to_vec(&call).expect("a proposed call serializes: it was deserialized from wire JSON");
-            let dispatch = DispatchId(format!(
-                "mock-dispatch-{}-{:02x}{:02x}{:02x}{:02x}",
-                view.revision().0,
-                entropy.0[0],
-                entropy.0[1],
-                entropy.0[2],
-                entropy.0[3],
-            ));
             Next::ModelResponse {
                 invocations: vec![ReleasedCall {
-                    dispatch,
+                    dispatch: mock_dispatch(view, &entropy),
                     tool: call.tool,
                     bytes,
                 }],
@@ -281,9 +320,95 @@ fn permissive_decision(view: &EngineView, event: EngineEvent) -> EngineDecision 
     EngineDecision { append: None, then }
 }
 
+fn offer_decision(view: &EngineView, event: EngineEvent) -> EngineDecision {
+    match event {
+        EngineEvent::PrincipalRequest => EngineDecision {
+            append: Some(fact_batch(view, serde_json::json!({ "fact": "turn" }))),
+            then: Next::Done,
+        },
+        EngineEvent::ModelResponse { call, entropy, .. } => {
+            let bytes =
+                serde_json::to_vec(&call).expect("a proposed call serializes: it was deserialized from wire JSON");
+            let text = String::from_utf8(bytes).expect("serde_json writes UTF-8");
+            let offer = OfferId(format!("offer-{}", hex(&entropy.0[..16])));
+            let batch = fact_batch(
+                view,
+                serde_json::json!({
+                    "fact": "offer",
+                    "id": offer.0,
+                    "tool": call.tool,
+                    "call": text,
+                }),
+            );
+            let feedback = format!(
+                "appa: this call is blocked. A narrowing remedy is offered: run \
+                 exactly this call. Call execute_remedy_plan with offer id \
+                 \"{}\" to accept it, then propose the call again unchanged.",
+                offer.0,
+            );
+            EngineDecision {
+                append: Some(batch),
+                then: Next::ModelResponse {
+                    invocations: Vec::new(),
+                    feedback: vec![Feedback {
+                        text: feedback,
+                        offers: vec![offer],
+                    }],
+                },
+            }
+        }
+        EngineEvent::ExecuteOffer { offer, entropy, .. } => match view.pending.iter().find(|p| p.offer == offer) {
+            Some(pending) => EngineDecision {
+                append: Some(fact_batch(
+                    view,
+                    serde_json::json!({ "fact": "executed", "id": offer.0 }),
+                )),
+                then: Next::InvokeTool(ReleasedCall {
+                    dispatch: mock_dispatch(view, &entropy),
+                    tool: pending.tool.clone(),
+                    bytes: pending.bytes.clone(),
+                }),
+            },
+            None => EngineDecision {
+                append: None,
+                then: Next::PresentToModel(Presentation::Declined {
+                    feedback: "this offer lapsed with its turn or was already executed".to_string(),
+                }),
+            },
+        },
+        EngineEvent::ToolOutcome { .. } => EngineDecision {
+            append: None,
+            then: Next::PresentToModel(Presentation::KeepOutput),
+        },
+        EngineEvent::ChildReturn { value, .. } => EngineDecision {
+            append: None,
+            then: match value {
+                Some(value) => Next::PresentToModel(Presentation::Value { value }),
+                None => Next::PresentToModel(Presentation::NoValue),
+            },
+        },
+    }
+}
+
+fn fact_batch(view: &EngineView, fact: serde_json::Value) -> ValidatedFactBatch {
+    ValidatedFactBatch {
+        bytes: serde_json::to_vec(&fact).expect("a mock fact serializes"),
+        based_on: view.revision(),
+    }
+}
+
+fn mock_dispatch(view: &EngineView, entropy: &OfferNonce) -> DispatchId {
+    DispatchId(format!("mock-dispatch-{}-{}", view.revision().0, hex(&entropy.0[..4])))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::OutcomeBody;
 
     fn entropy(byte: u8) -> OfferNonce {
         OfferNonce([byte; 32])
@@ -383,6 +508,121 @@ mod tests {
                 value: "summary".to_string()
             }),
         );
+    }
+
+    #[test]
+    fn offer_mode_blocks_then_authorizes_the_exact_call() {
+        let engine = MockEngine::offer_mode();
+        let mut log: Vec<Vec<u8>> = Vec::new();
+        let call = ProposedCall {
+            tool: "Bash".to_string(),
+            arguments: serde_json::json!({"command": "ls"}),
+        };
+
+        let view = engine.rebuild_view(&log);
+        let decision = engine.handle(
+            &view,
+            EngineEvent::ModelResponse {
+                call: call.clone(),
+                evidence: Vec::new(),
+                entropy: entropy(7),
+            },
+        );
+        let batch = decision.append.expect("the offer is remembered in a fact");
+        assert_eq!(batch.based_on, LogRevision(0));
+        log.push(batch.bytes);
+        let offer = match decision.then {
+            Next::ModelResponse { invocations, feedback } => {
+                assert!(invocations.is_empty(), "offer mode releases nothing at first");
+                assert_eq!(feedback.len(), 1);
+                assert_eq!(feedback[0].offers.len(), 1);
+                assert!(
+                    feedback[0].text.contains(&feedback[0].offers[0].0),
+                    "the feedback must name the offer id",
+                );
+                feedback[0].offers[0].clone()
+            }
+            other => panic!("expected a blocking ModelResponse follow-up, got {other:?}"),
+        };
+
+        let view = engine.rebuild_view(&log);
+        let decision = engine.handle(
+            &view,
+            EngineEvent::ExecuteOffer {
+                offer: offer.clone(),
+                evidence: Vec::new(),
+                entropy: entropy(9),
+            },
+        );
+        log.push(decision.append.expect("the execution is remembered in a fact").bytes);
+        match decision.then {
+            Next::InvokeTool(released) => {
+                assert_eq!(released.tool, "Bash");
+                assert_eq!(
+                    released.bytes,
+                    serde_json::to_vec(&call).expect("the test call serializes"),
+                    "the authorized call is byte-exact",
+                );
+            }
+            other => panic!("expected an InvokeTool follow-up, got {other:?}"),
+        }
+
+        let view = engine.rebuild_view(&log);
+        let decision = engine.handle(
+            &view,
+            EngineEvent::ExecuteOffer {
+                offer,
+                evidence: Vec::new(),
+                entropy: entropy(11),
+            },
+        );
+        assert!(matches!(
+            decision.then,
+            Next::PresentToModel(Presentation::Declined { .. }),
+        ));
+    }
+
+    #[test]
+    fn offer_mode_offers_lapse_at_the_next_prompt() {
+        let engine = MockEngine::offer_mode();
+        let mut log: Vec<Vec<u8>> = Vec::new();
+        let call = ProposedCall {
+            tool: "Bash".to_string(),
+            arguments: serde_json::json!({"command": "ls"}),
+        };
+
+        let view = engine.rebuild_view(&log);
+        let decision = engine.handle(
+            &view,
+            EngineEvent::ModelResponse {
+                call,
+                evidence: Vec::new(),
+                entropy: entropy(3),
+            },
+        );
+        log.push(decision.append.expect("the offer fact appends").bytes);
+        let offer = match decision.then {
+            Next::ModelResponse { feedback, .. } => feedback[0].offers[0].clone(),
+            other => panic!("expected a blocking ModelResponse follow-up, got {other:?}"),
+        };
+
+        let view = engine.rebuild_view(&log);
+        let decision = engine.handle(&view, EngineEvent::PrincipalRequest);
+        log.push(decision.append.expect("the turn fact appends").bytes);
+
+        let view = engine.rebuild_view(&log);
+        let decision = engine.handle(
+            &view,
+            EngineEvent::ExecuteOffer {
+                offer,
+                evidence: Vec::new(),
+                entropy: entropy(5),
+            },
+        );
+        assert!(matches!(
+            decision.then,
+            Next::PresentToModel(Presentation::Declined { .. }),
+        ));
     }
 
     #[test]

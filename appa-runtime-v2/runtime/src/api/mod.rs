@@ -1,86 +1,57 @@
 //! The runtime API: `Runtime` and `Session` — the harness-agnostic
-//! boundary declared in `docs/runtime.md`.
+//! event model declared in `docs/runtime.md`.
 
 mod session;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub use session::Session;
+pub use appa_runtime_api::{OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
+pub(crate) use session::{Session, is_control_tool};
 
 use crate::config::Config;
 use crate::external::ExternalServices;
 use crate::mock_engine::MockEngine;
 use crate::store::{Store, StoreError};
 
-/// Identity of one trajectory (root or child). The adapter derives it
-/// from the harness's own ids with a harness prefix; there is no
-/// translation table.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TrajectoryId(pub String);
-
 /// Identity of one open dispatch: a released call the harness is
-/// executing.
+/// executing. Runtime-internal: outcomes correlate by the
+/// call's canonical bytes, never by an id an adapter
+/// carries.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DispatchId(pub String);
+pub(crate) struct DispatchId(pub String);
 
 /// Identity of one remedy offer. Engine-derived and unguessable:
 /// naming it proves the model read the offer.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct OfferId(pub String);
-
-/// A tool call as the model proposed it. The engine canonicalizes;
-/// the runtime and the adapter pass it through unchanged.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub struct ProposedCall {
-    pub tool: String,
-    pub arguments: serde_json::Value,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ChildTask(pub String);
-
-/// What a dispatched tool produced, in the runtime's typing. The
-/// adapter owns the mapping from its harness's wire to this type.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ToolOutcome {
-    Success { body: OutcomeBody },
-    Failure { message: String },
-    Indeterminate,
-}
-
-/// The tool output body, where available. `Unavailable` records a
-/// success whose body the runtime refused to carry (for example, over
-/// the byte cap).
-#[derive(Debug, Clone, PartialEq)]
-pub enum OutcomeBody {
-    Available(String),
-    Unavailable,
-}
+pub(crate) struct OfferId(pub String);
 
 /// An authorized call: the exact canonical bytes the harness must now
 /// execute, never re-rendered and never edited.
 #[derive(Debug, Clone, PartialEq)]
-pub struct AuthorizedCall {
+pub(crate) struct AuthorizedCall {
     pub tool: String,
     pub bytes: Vec<u8>,
 }
 
-/// Answer to a proposed tool call: run it, or do not — `feedback`
-/// tells the model why not and what its options are. An allowed call
-/// always runs with the arguments the model proposed; input
-/// substitution is outside this runtime's coverage.
+/// Answer to a proposed tool call: run it, do not run it — `feedback`
+/// tells the model why not and what its options are — or pass it
+/// through: `Control` is the runtime's own control tool, not a checked
+/// flow; it passes unchecked and opens no dispatch. An
+/// allowed call always runs with the arguments the model proposed;
+/// input substitution is outside this runtime's coverage.
 #[derive(Debug, Clone, PartialEq)]
-pub enum ToolCallDecision {
-    Allow { dispatch: DispatchId },
+pub(crate) enum ToolCallDecision {
+    Allow,
     Deny { feedback: String },
+    Control,
 }
 
 /// What the adapter gives the harness as the tool output. `Keep`: use
 /// the output as it is. `Replace`: use this text instead — a cleaned
 /// version, or a short note saying the real output was not accepted.
 #[derive(Debug, Clone, PartialEq)]
-pub enum ToolResultDecision {
+pub(crate) enum ToolResultDecision {
     Keep,
     Replace { placeholder: String },
 }
@@ -89,8 +60,8 @@ pub enum ToolResultDecision {
 /// a denial: it ends every offer naming the denying authority for this
 /// call. `NoAnswer` leaves the offer standing.
 #[derive(Debug, Clone, PartialEq)]
-pub enum RemedyDecision {
-    Authorized { dispatch: DispatchId, call: AuthorizedCall },
+pub(crate) enum RemedyDecision {
+    Authorized { call: AuthorizedCall },
     Returned { value: String },
     Staged { feedback: String },
     Declined { feedback: String },
@@ -102,7 +73,7 @@ pub enum RemedyDecision {
 /// is finished, so `feedback` goes to the parent as the spawn call's
 /// outcome and names the options by `OfferId`.
 #[derive(Debug, Clone, PartialEq)]
-pub enum ChildReturnDecision {
+pub(crate) enum ChildReturnDecision {
     Returned { value: String },
     NoValue,
     Blocked { feedback: String },
@@ -121,7 +92,7 @@ pub enum OpenError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SessionError {
+pub(crate) enum SessionError {
     #[error("a trajectory with this id already exists")]
     AlreadyExists,
     #[error("no trajectory with this id exists")]
@@ -135,7 +106,7 @@ pub enum SessionError {
 /// Every lifecycle misuse is one typed error; the adapter renders it
 /// as a deny.
 #[derive(Debug, thiserror::Error)]
-pub enum EventError {
+pub(crate) enum EventError {
     #[error("a call is already outstanding; propose one call at a time")]
     CallOutstanding,
     #[error("the trajectory has ended")]
@@ -146,6 +117,8 @@ pub enum EventError {
     TrajectoryExists,
     #[error("no open dispatch with this id exists")]
     UnknownDispatch,
+    #[error("this outcome does not match the open dispatch; it is not reported")]
+    OutcomeMismatch,
     #[error("no live offer with this id exists")]
     UnknownOffer,
     #[error("only a child trajectory submits a return")]
@@ -175,6 +148,15 @@ impl Runtime {
     /// mock engine skips that and says so loudly.
     pub fn open(config: Config, db: PathBuf) -> Result<Runtime, OpenError> {
         Runtime::with_engine(config, db, MockEngine::permissive())
+    }
+
+    /// Opens the same runtime over the offer-mode mock: every call is
+    /// first blocked with a narrowing offer the model accepts through
+    /// `execute_remedy_plan`. Mock-era only — `docs/runtime.md`
+    /// declares `open` alone, and this constructor is deleted at
+    /// engine integration.
+    pub fn open_offer_mode(config: Config, db: PathBuf) -> Result<Runtime, OpenError> {
+        Runtime::with_engine(config, db, MockEngine::offer_mode())
     }
 
     /// The tests' entry: the same runtime over an engine whose queue
@@ -208,7 +190,7 @@ impl Runtime {
     /// Opens a fresh trajectory. Refuses an id that already exists: a
     /// reused harness id MUST NOT continue another trajectory's
     /// history (`POS-8`, harness binding).
-    pub fn create_session(&self, id: TrajectoryId) -> Result<Session, SessionError> {
+    pub(crate) fn create_session(&self, id: TrajectoryId) -> Result<Session, SessionError> {
         self.inner.store.create_root(&id).map_err(|error| match error {
             crate::store::CreateError::AlreadyExists => SessionError::AlreadyExists,
             crate::store::CreateError::Storage(error) => SessionError::Storage(error.to_string()),
@@ -219,7 +201,7 @@ impl Runtime {
     /// Reopens a persisted trajectory. There is no stored view: the
     /// next event rebuilds the engine's picture from the log.
     /// Missing or ended state is refused.
-    pub fn session(&self, id: &TrajectoryId) -> Result<Session, SessionError> {
+    pub(crate) fn session(&self, id: &TrajectoryId) -> Result<Session, SessionError> {
         let row = self
             .inner
             .store
@@ -240,12 +222,6 @@ impl Runtime {
             .store
             .offer_trajectory(offer)
             .map_err(|error| SessionError::Storage(error.to_string()))
-    }
-
-    /// The byte cap the deployment declares for carried bodies. The
-    /// adapter applies it to tool outputs (Q14 mapping).
-    pub(crate) fn max_body_bytes(&self) -> usize {
-        self.inner.config.externals.max_body_bytes
     }
 }
 

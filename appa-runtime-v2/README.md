@@ -39,7 +39,15 @@ max_body_bytes = 65536
 `curl localhost:8787/health` prints `ok` when it is up. The listener
 accepts loopback addresses only. Useful flags: `--listen
 127.0.0.1:<port>` for another port, `-v` to log each hook and
-decision, `-vv` for full detail.
+decision, `-vv` for full detail. `--adapter` picks the harness codec
+the process loads; `claude-code` is the default and the only one
+today.
+
+`--mock offer` swaps the permissive mock for one that first blocks
+every call with a narrowing offer; the session then accepts each call
+through `execute_remedy_plan` before it runs. Slow and chatty, but it
+shows the whole remedy loop working. Use a fresh `--db` path when
+switching modes.
 
 Start the process before the session. While it is down, every action
 in a gated session is blocked, and that cannot be automated from
@@ -88,6 +96,8 @@ sqlite3 appa.db 'SELECT trajectory, tool, state FROM dispatches;'
 - **Stopping the process blocks gated sessions.** That is the design,
   not a fault. Uninstall the plugin (`claude plugin uninstall
   appa-runtime@appa`) if you want ungated sessions back.
-- **`docs/runtime.md`** is the contract this crate implements, and the
-  crate's `CLAUDE.md` describes the mock-engine status and how the
-  real engine plugs in.
+- **`docs/runtime.md`** is the contract the crates in this directory
+  implement — the process (`runtime/`), the shared vocabulary
+  (`api/`), and the Claude Code adapter (`adapters/claude-code/`) —
+  and the directory's `CLAUDE.md` describes the layout, the
+  mock-engine status, and how the real engine plugs in.

@@ -4,7 +4,16 @@ version = "0.0.0"
 edition.workspace = true
 publish = false
 
+[lib]
+name = "appa_runtime_v2"
+
+[[bin]]
+name = "appa-runtime-v2"
+path = "src/main.rs"
+
 [dependencies]
+appa-adapter-claude-code = { path = "../adapters/claude-code" }
+appa-runtime-api = { path = "../api" }
 axum = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 rand = "0.10"

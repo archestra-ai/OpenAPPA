@@ -41,7 +41,7 @@ impl RemedyService {
             Err(error) => return refusal(&error.to_string()),
         };
         match session.on_remedy(offer).await {
-            Ok(RemedyDecision::Authorized { call, .. }) => CallToolResult::success(vec![ContentBlock::text(format!(
+            Ok(RemedyDecision::Authorized { call }) => CallToolResult::success(vec![ContentBlock::text(format!(
                 "Authorized. Propose the {} call again, byte-for-byte identical; \
                      it will run without a new check.",
                 call.tool,

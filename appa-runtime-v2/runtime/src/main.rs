@@ -1,6 +1,7 @@
 //! Process entry: an HTTP listener for hooks. No policy, no state.
 //! Policy lives behind the runtime
-//! API; this file only parses flags, opens the runtime, and serves.
+//! API; this file only parses flags, opens the runtime, picks the
+//! adapter codec, and serves.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -11,10 +12,10 @@ use axum::extract::State;
 use axum::routing::{get, post};
 use clap::Parser;
 
-use appa_runtime_v2::adapters::claude_code;
+use appa_runtime_api::Codec;
 use appa_runtime_v2::api::Runtime;
 use appa_runtime_v2::config::Config;
-use appa_runtime_v2::mcp;
+use appa_runtime_v2::{hooks, mcp};
 
 #[derive(Parser)]
 #[command(name = "appa-runtime-v2")]
@@ -31,6 +32,9 @@ struct Args {
     #[arg(long, value_enum, default_value_t = Adapter::ClaudeCode)]
     adapter: Adapter,
 
+    #[arg(long, value_enum, default_value_t = Mock::Permissive)]
+    mock: Mock,
+
     #[arg(short, action = clap::ArgAction::Count)]
     verbose: u8,
 }
@@ -43,9 +47,25 @@ fn require_loopback(addr: &SocketAddr) -> Result<(), String> {
     }
 }
 
+/// The adapter surface this binary can serve. The one place harness
+/// names appear in this crate: each variant maps to one codec crate.
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum Adapter {
     ClaudeCode,
+}
+
+impl Adapter {
+    fn codec(self) -> Codec {
+        match self {
+            Adapter::ClaudeCode => appa_adapter_claude_code::codec(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Mock {
+    Permissive,
+    Offer,
 }
 
 fn log_level(verbose: u8) -> &'static str {
@@ -56,13 +76,19 @@ fn log_level(verbose: u8) -> &'static str {
     }
 }
 
+#[derive(Clone)]
+struct AppState {
+    runtime: Arc<Runtime>,
+    codec: Codec,
+}
+
 async fn hook(
-    State(runtime): State<Arc<Runtime>>,
+    State(state): State<AppState>,
     body: axum::body::Bytes,
 ) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
-    let answer = claude_code::handle_hook(&runtime, &body).await;
-    let status = axum::http::StatusCode::from_u16(answer.status).expect("hook answers carry valid status codes");
-    (status, axum::Json(answer.body))
+    let (status, body) = hooks::answer(&state.runtime, &state.codec, &body).await;
+    let status = axum::http::StatusCode::from_u16(status).expect("hook answers carry valid status codes");
+    (status, axum::Json(body))
 }
 
 async fn health() -> &'static str {
@@ -90,7 +116,11 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let runtime = match Runtime::open(config, args.db) {
+    let opened = match args.mock {
+        Mock::Permissive => Runtime::open(config, args.db),
+        Mock::Offer => Runtime::open_offer_mode(config, args.db),
+    };
+    let runtime = match opened {
         Ok(runtime) => Arc::new(runtime),
         Err(error) => {
             eprintln!("appa-runtime-v2: {error}");
@@ -98,12 +128,15 @@ async fn main() -> ExitCode {
         }
     };
 
-    let Adapter::ClaudeCode = args.adapter;
+    let state = AppState {
+        runtime: Arc::clone(&runtime),
+        codec: args.adapter.codec(),
+    };
     let app = axum::Router::new()
         .route("/health", get(health))
         .route("/hook", post(hook))
-        .nest_service("/mcp", mcp::service(Arc::clone(&runtime)))
-        .with_state(runtime);
+        .nest_service("/mcp", mcp::service(runtime))
+        .with_state(state);
 
     let listener = match tokio::net::TcpListener::bind(args.listen).await {
         Ok(listener) => listener,

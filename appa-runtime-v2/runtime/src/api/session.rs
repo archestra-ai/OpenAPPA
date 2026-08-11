@@ -10,9 +10,21 @@ use crate::mock_engine::{
 use crate::store::{BatchAppend, DispatchState, EventWrite, Revision, RuntimeRecord};
 
 use super::{
-    AuthorizedCall, ChildReturnDecision, ChildTask, DispatchId, EventError, Inner, OfferId, ProposedCall,
-    RemedyDecision, ToolCallDecision, ToolOutcome, ToolResultDecision, TrajectoryId,
+    AuthorizedCall, ChildReturnDecision, EventError, Inner, OfferId, OutcomeBody, ProposedCall, RemedyDecision,
+    ToolCallDecision, ToolOutcome, ToolResultDecision, TrajectoryId,
 };
+
+/// The runtime's own control tool, recognized by its exact
+/// wire names: the bare name and each name the runtime's distribution
+/// channels produce — the directly registered MCP server and the
+/// `appa-runtime` plugin's server. Selecting an offer is not a checked
+/// flow. A lookalike on another server — say
+/// `mcp__evil__execute_remedy_plan` — is an ordinary checked call.
+pub(crate) fn is_control_tool(tool: &str) -> bool {
+    tool == "execute_remedy_plan"
+        || tool == "mcp__appa__execute_remedy_plan"
+        || tool == "mcp__plugin_appa-runtime_appa__execute_remedy_plan"
+}
 
 const REPLAY_LIMIT: u32 = 8;
 
@@ -20,14 +32,6 @@ const EVIDENCE_LIMIT: u32 = 8;
 
 fn fresh_entropy() -> OfferNonce {
     OfferNonce(rand::random::<[u8; 32]>())
-}
-
-/// What an adapter may know about the one open dispatch: its id,
-/// its tool, and the exact bytes of the call.
-pub(crate) struct OpenDispatch {
-    pub(crate) id: DispatchId,
-    pub(crate) tool: String,
-    pub(crate) bytes: Vec<u8>,
 }
 
 /// One per trajectory (root or child). The adapter drives it; it never
@@ -52,23 +56,6 @@ impl Session {
         &self.trajectory
     }
 
-    /// The one dispatch this trajectory has open, if any. One call
-    /// in flight means at most one. The tool and the exact
-    /// call bytes travel along so the adapter can match an outcome to
-    /// the exact call it came from.
-    pub(crate) fn open_dispatch(&self) -> Result<Option<OpenDispatch>, EventError> {
-        Ok(self
-            .inner
-            .store
-            .open_dispatch(&self.trajectory)
-            .map_err(|error| EventError::Storage(error.to_string()))?
-            .map(|row| OpenDispatch {
-                id: row.id,
-                tool: row.tool,
-                bytes: row.bytes,
-            }))
-    }
-
     /// The user submitted a prompt. Records it as this turn's request
     /// and reports it to the engine as a `PrincipalRequest`, which
     /// expires the previous turn's pending offers.
@@ -91,11 +78,11 @@ impl Session {
         }
     }
 
-    /// Proposes a tool call to the engine and returns its decision.
-    /// A re-proposed call that matches the open authorized
-    /// dispatch resumes it; any other proposal while a
-    /// dispatch is open is the one-call-in-flight refusal.
     pub async fn on_tool_call(&mut self, call: ProposedCall) -> Result<ToolCallDecision, EventError> {
+        if is_control_tool(&call.tool) {
+            tracing::debug!(trajectory = %self.trajectory.0, "control tool passes unchecked");
+            return Ok(ToolCallDecision::Control);
+        }
         self.refuse_if_ended()?;
         if let Some(open) = self
             .inner
@@ -108,8 +95,8 @@ impl Session {
                 DispatchState::Awaiting => {
                     let proposed = serde_json::to_vec(&call).map_err(|error| EventError::Storage(error.to_string()))?;
                     if call.tool == open.tool && proposed == open.bytes {
-                        self.commit_records(vec![RuntimeRecord::PromoteDispatch { id: open.id.clone() }])?;
-                        Ok(ToolCallDecision::Allow { dispatch: open.id })
+                        self.commit_records(vec![RuntimeRecord::PromoteDispatch { id: open.id }])?;
+                        Ok(ToolCallDecision::Allow)
                     } else {
                         Err(EventError::CallOutstanding)
                     }
@@ -158,9 +145,7 @@ impl Session {
                             tool = %released.tool,
                             "call released"
                         );
-                        Ok(ToolCallDecision::Allow {
-                            dispatch: released.dispatch.clone(),
-                        })
+                        Ok(ToolCallDecision::Allow)
                     }
                     ([], feedback) if !feedback.is_empty() => {
                         tracing::debug!(trajectory = %self.trajectory.0, "call blocked");
@@ -175,20 +160,33 @@ impl Session {
         }
     }
 
-    /// The tool ran (post-tool hook). At success the call's effects
-    /// are recorded before any output handling; the label
-    /// folds only from admitted values, and a
-    /// withheld result stays confined.
-    pub async fn on_tool_result(&mut self, d: DispatchId, o: ToolOutcome) -> Result<ToolResultDecision, EventError> {
+    pub async fn on_tool_result(
+        &mut self,
+        call: ProposedCall,
+        o: ToolOutcome,
+    ) -> Result<ToolResultDecision, EventError> {
+        if is_control_tool(&call.tool) {
+            tracing::debug!(trajectory = %self.trajectory.0, "control tool outcome absorbed");
+            return Ok(ToolResultDecision::Keep);
+        }
         self.refuse_if_ended()?;
         let open = self
             .inner
             .store
             .open_dispatch(&self.trajectory)
             .map_err(|error| EventError::Storage(error.to_string()))?;
-        if open.as_ref().map(|row| (&row.id, row.state)) != Some((&d, DispatchState::Executing)) {
+        let Some(open) = open else {
+            return Err(EventError::UnknownDispatch);
+        };
+        let reported = serde_json::to_vec(&call).map_err(|error| EventError::Storage(error.to_string()))?;
+        if call.tool != open.tool || reported != open.bytes {
+            return Err(EventError::OutcomeMismatch);
+        }
+        if open.state != DispatchState::Executing {
             return Err(EventError::UnknownDispatch);
         }
+        let d = open.id;
+        let o = self.cap_outcome(o);
 
         let trajectory = self.trajectory.clone();
         let dispatch = d.clone();
@@ -269,7 +267,6 @@ impl Session {
 
         match decision.then {
             Next::InvokeTool(released) => Ok(RemedyDecision::Authorized {
-                dispatch: released.dispatch,
                 call: AuthorizedCall {
                     tool: released.tool,
                     bytes: released.bytes,
@@ -287,8 +284,9 @@ impl Session {
     /// family log — a child never starts cleaner than its
     /// parent, which the engine derives from that shared
     /// log. No engine event: the spawn call itself was checked as a
-    /// released dispatch.
-    pub fn on_child_start(&mut self, id: TrajectoryId, task: ChildTask) -> Result<Session, EventError> {
+    /// released dispatch, and that dispatch remains the record of what
+    /// the child was asked — the runtime stores no separate task text.
+    pub fn on_child_start(&mut self, id: TrajectoryId) -> Result<Session, EventError> {
         self.refuse_if_ended()?;
         let existing = self
             .inner
@@ -298,16 +296,10 @@ impl Session {
         if existing.is_some() {
             return Err(EventError::TrajectoryExists);
         }
-        self.commit_records(vec![
-            RuntimeRecord::OpenChild {
-                id: id.clone(),
-                parent: self.trajectory.clone(),
-            },
-            RuntimeRecord::Request {
-                trajectory: id.clone(),
-                text: task.0,
-            },
-        ])?;
+        self.commit_records(vec![RuntimeRecord::OpenChild {
+            id: id.clone(),
+            parent: self.trajectory.clone(),
+        }])?;
         Ok(Session::attach(Arc::clone(&self.inner), id, self.family.clone()))
     }
 
@@ -358,6 +350,17 @@ impl Session {
                 Ok(ChildReturnDecision::Blocked { feedback })
             }
             _ => Err(EventError::UnexpectedDecision),
+        }
+    }
+
+    fn cap_outcome(&self, outcome: ToolOutcome) -> ToolOutcome {
+        match outcome {
+            ToolOutcome::Success {
+                body: OutcomeBody::Available(body),
+            } if body.len() > self.inner.config.externals.max_body_bytes => ToolOutcome::Success {
+                body: OutcomeBody::Unavailable,
+            },
+            other => other,
         }
     }
 
@@ -549,7 +552,7 @@ fn offer_records(trajectory: &TrajectoryId, offers: &[OfferId]) -> Vec<RuntimeRe
 
 #[cfg(test)]
 mod tests {
-    use super::super::{OpenError, OutcomeBody, Runtime, SessionError};
+    use super::super::{DispatchId, OpenError, OutcomeBody, Runtime, SessionError};
     use super::*;
     use crate::config::Config;
     use crate::mock_engine::{
@@ -752,14 +755,17 @@ mod tests {
             },
         });
         let decision = session.on_tool_call(call()).await.expect("the replayed event commits");
-        assert_eq!(
-            decision,
-            ToolCallDecision::Allow {
-                dispatch: DispatchId("d-fresh".to_string())
-            },
-        );
+        assert_eq!(decision, ToolCallDecision::Allow);
         let (log, _) = runtime.inner.store.load_log(&root()).expect("the log loads");
         assert_eq!(log, vec![b"fresh".to_vec()]);
+        let open = runtime
+            .inner
+            .store
+            .open_dispatch(&root())
+            .expect("the dispatch query runs")
+            .expect("the released call opened a dispatch");
+        assert_eq!(open.id, DispatchId("d-fresh".to_string()));
+        assert_eq!(open.state, DispatchState::Executing);
 
         let seen = runtime.inner.engine.seen();
         let entropies: Vec<_> = seen
@@ -780,12 +786,7 @@ mod tests {
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         runtime.inner.engine.enqueue(allow_decision("d1", &call()));
         let decision = session.on_tool_call(call()).await.expect("the call is allowed");
-        assert_eq!(
-            decision,
-            ToolCallDecision::Allow {
-                dispatch: DispatchId("d1".to_string())
-            }
-        );
+        assert_eq!(decision, ToolCallDecision::Allow);
 
         let before = runtime.inner.engine.seen().len();
         assert!(matches!(
@@ -793,6 +794,128 @@ mod tests {
             Err(EventError::CallOutstanding),
         ));
         assert_eq!(runtime.inner.engine.seen().len(), before);
+    }
+
+    fn control_call(name: &str) -> ProposedCall {
+        ProposedCall {
+            tool: name.to_string(),
+            arguments: serde_json::json!({"offer_id": "x"}),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_control_tool_passes_unchecked_under_every_shipped_name() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_test_runtime(&dir);
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        for name in [
+            "execute_remedy_plan",
+            "mcp__appa__execute_remedy_plan",
+            "mcp__plugin_appa-runtime_appa__execute_remedy_plan",
+        ] {
+            let decision = session
+                .on_tool_call(control_call(name))
+                .await
+                .expect("the control tool passes");
+            assert_eq!(decision, ToolCallDecision::Control, "{name} is the control tool");
+        }
+        assert!(runtime.inner.engine.seen().is_empty(), "the engine is never consulted");
+        assert!(
+            runtime
+                .inner
+                .store
+                .open_dispatch(&root())
+                .expect("the dispatch query runs")
+                .is_none(),
+            "the control tool opens no dispatch",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lookalike_control_tool_reaches_the_engine() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_test_runtime(&dir);
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        runtime.inner.engine.enqueue(EngineDecision {
+            append: None,
+            then: Next::ModelResponse {
+                invocations: Vec::new(),
+                feedback: vec![Feedback {
+                    text: "blocked: not the runtime's tool".to_string(),
+                    offers: Vec::new(),
+                }],
+            },
+        });
+        let decision = session
+            .on_tool_call(control_call("mcp__evil__execute_remedy_plan"))
+            .await
+            .expect("the deny is delivered");
+        assert!(matches!(decision, ToolCallDecision::Deny { .. }));
+        assert_eq!(
+            runtime.inner.engine.seen().len(),
+            1,
+            "the lookalike is checked like any call",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_control_call_and_its_outcome_pass_while_a_dispatch_is_open() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_test_runtime(&dir);
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        runtime.inner.engine.enqueue(allow_decision("d1", &call()));
+        assert_eq!(
+            session.on_tool_call(call()).await.expect("the call is allowed"),
+            ToolCallDecision::Allow,
+        );
+        let before = runtime.inner.engine.seen().len();
+
+        assert_eq!(
+            session
+                .on_tool_call(control_call("execute_remedy_plan"))
+                .await
+                .expect("the control call passes"),
+            ToolCallDecision::Control,
+        );
+        assert_eq!(
+            session
+                .on_tool_result(
+                    control_call("execute_remedy_plan"),
+                    ToolOutcome::Success {
+                        body: OutcomeBody::Available("Authorized.".to_string()),
+                    },
+                )
+                .await
+                .expect("the control outcome is absorbed"),
+            ToolResultDecision::Keep,
+        );
+        assert_eq!(
+            runtime.inner.engine.seen().len(),
+            before,
+            "the engine was not consulted since the release",
+        );
+        let open = runtime
+            .inner
+            .store
+            .open_dispatch(&root())
+            .expect("the dispatch query runs")
+            .expect("the original dispatch stays open");
+        assert_eq!(open.id, DispatchId("d1".to_string()));
+        assert_eq!(open.state, DispatchState::Executing);
+
+        runtime.inner.engine.enqueue(present(Presentation::KeepOutput));
+        assert_eq!(
+            session
+                .on_tool_result(
+                    call(),
+                    ToolOutcome::Success {
+                        body: OutcomeBody::Available("ok".to_string()),
+                    },
+                )
+                .await
+                .expect("the result is admitted"),
+            ToolResultDecision::Keep,
+        );
     }
 
     #[tokio::test]
@@ -838,7 +961,7 @@ mod tests {
         runtime.inner.engine.enqueue(present(Presentation::KeepOutput));
         let decision = session
             .on_tool_result(
-                DispatchId("d1".to_string()),
+                call(),
                 ToolOutcome::Success {
                     body: OutcomeBody::Available("output".to_string()),
                 },
@@ -855,9 +978,7 @@ mod tests {
                 .is_none()
         );
         assert!(matches!(
-            session
-                .on_tool_result(DispatchId("d1".to_string()), ToolOutcome::Indeterminate)
-                .await,
+            session.on_tool_result(call(), ToolOutcome::Indeterminate).await,
             Err(EventError::UnknownDispatch),
         ));
     }
@@ -876,7 +997,7 @@ mod tests {
         }));
         let decision = session
             .on_tool_result(
-                DispatchId("d1".to_string()),
+                call(),
                 ToolOutcome::Success {
                     body: OutcomeBody::Available("secret".to_string()),
                 },
@@ -897,6 +1018,74 @@ mod tests {
                 .expect("the offer query runs"),
             Some(root()),
         );
+    }
+
+    #[tokio::test]
+    async fn a_mismatched_outcome_is_refused_and_the_dispatch_stays_open() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_test_runtime(&dir);
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        runtime.inner.engine.enqueue(allow_decision("d1", &call()));
+        session.on_tool_call(call()).await.expect("the call is allowed");
+
+        let error = session
+            .on_tool_result(
+                ProposedCall {
+                    tool: "Bash".to_string(),
+                    arguments: serde_json::json!({"command": "rm"}),
+                },
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("output".to_string()),
+                },
+            )
+            .await
+            .expect_err("a mismatched outcome is refused");
+        assert!(matches!(error, EventError::OutcomeMismatch));
+        assert_eq!(
+            error.to_string(),
+            "this outcome does not match the open dispatch; it is not reported",
+        );
+        let open = runtime
+            .inner
+            .store
+            .open_dispatch(&root())
+            .expect("the dispatch query runs")
+            .expect("the dispatch stays open");
+        assert_eq!(open.id, DispatchId("d1".to_string()));
+        assert_eq!(open.state, DispatchState::Executing);
+        assert_eq!(runtime.inner.engine.seen().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_over_cap_success_body_is_carried_as_unavailable() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_test_runtime(&dir);
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        runtime.inner.engine.enqueue(allow_decision("d1", &call()));
+        session.on_tool_call(call()).await.expect("the call is allowed");
+
+        runtime.inner.engine.enqueue(present(Presentation::KeepOutput));
+        let decision = session
+            .on_tool_result(
+                call(),
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("x".repeat(70000)),
+                },
+            )
+            .await
+            .expect("the result is admitted");
+        assert_eq!(decision, ToolResultDecision::Keep);
+        let seen = runtime.inner.engine.seen();
+        match seen.last() {
+            Some(crate::mock_engine::EngineEvent::ToolOutcome { outcome, .. }) => assert_eq!(
+                outcome,
+                &ToolOutcome::Success {
+                    body: OutcomeBody::Unavailable
+                },
+                "the over-cap body is carried as unavailable",
+            ),
+            other => panic!("expected a ToolOutcome event, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -941,7 +1130,6 @@ mod tests {
         assert_eq!(
             decision,
             RemedyDecision::Authorized {
-                dispatch: DispatchId("d-authorized".to_string()),
                 call: AuthorizedCall {
                     tool: "Bash".to_string(),
                     bytes: expected_bytes.clone()
@@ -959,13 +1147,16 @@ mod tests {
 
         let before = runtime.inner.engine.seen().len();
         let resumed = session.on_tool_call(call()).await.expect("the re-proposal resumes");
-        assert_eq!(
-            resumed,
-            ToolCallDecision::Allow {
-                dispatch: DispatchId("d-authorized".to_string())
-            },
-        );
+        assert_eq!(resumed, ToolCallDecision::Allow);
         assert_eq!(runtime.inner.engine.seen().len(), before);
+        let open = runtime
+            .inner
+            .store
+            .open_dispatch(&root())
+            .expect("the dispatch query runs")
+            .expect("the resumed dispatch stays open");
+        assert_eq!(open.id, DispatchId("d-authorized".to_string()));
+        assert_eq!(open.state, DispatchState::Executing);
 
         assert!(matches!(
             session
@@ -1094,14 +1285,11 @@ mod tests {
         let runtime = open_test_runtime(&dir);
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let mut child = session
-            .on_child_start(
-                TrajectoryId("cc:child".to_string()),
-                ChildTask("summarize the report".to_string()),
-            )
+            .on_child_start(TrajectoryId("cc:child".to_string()))
             .expect("the child opens");
 
         assert!(matches!(
-            session.on_child_start(TrajectoryId("cc:child".to_string()), ChildTask("again".to_string()),),
+            session.on_child_start(TrajectoryId("cc:child".to_string())),
             Err(EventError::TrajectoryExists),
         ));
 
@@ -1142,10 +1330,7 @@ mod tests {
         let runtime = open_test_runtime(&dir);
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let mut child = session
-            .on_child_start(
-                TrajectoryId("cc:child".to_string()),
-                ChildTask("read the secret".to_string()),
-            )
+            .on_child_start(TrajectoryId("cc:child".to_string()))
             .expect("the child opens");
 
         runtime.inner.engine.enqueue(present(Presentation::Blocked {
@@ -1173,10 +1358,7 @@ mod tests {
 
         runtime.inner.engine.enqueue(present(Presentation::NoValue));
         let none = session
-            .on_child_start(
-                TrajectoryId("cc:child-2".to_string()),
-                ChildTask("quick check".to_string()),
-            )
+            .on_child_start(TrajectoryId("cc:child-2".to_string()))
             .expect("a second child opens")
             .on_child_end(None)
             .await
@@ -1190,10 +1372,7 @@ mod tests {
         let runtime = open_test_runtime(&dir);
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let mut child = session
-            .on_child_start(
-                TrajectoryId("cc:child".to_string()),
-                ChildTask("read the secret".to_string()),
-            )
+            .on_child_start(TrajectoryId("cc:child".to_string()))
             .expect("the child opens");
         runtime.inner.engine.enqueue(present(Presentation::Blocked {
             feedback: "blocked; execute_remedy_plan(offer-7)".to_string(),
@@ -1231,6 +1410,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_offer_mode_engine_drives_the_full_remedy_loop() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open_with_engine(config(), dir.path().join("appa.db"), MockEngine::offer_mode())
+            .expect("a fresh runtime opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        session.on_prompt("run ls".to_string()).expect("the prompt is accepted");
+
+        let denied = session.on_tool_call(call()).await.expect("the deny is delivered");
+        let ToolCallDecision::Deny { feedback } = denied else {
+            panic!("offer mode must block the first proposal");
+        };
+        let offer = feedback
+            .split('"')
+            .find(|part| part.starts_with("offer-"))
+            .expect("the feedback names the offer id")
+            .to_string();
+        assert_eq!(
+            runtime
+                .inner
+                .store
+                .offer_trajectory(&OfferId(offer.clone()))
+                .expect("the offer query runs"),
+            Some(root()),
+            "the surfaced offer routes to this trajectory",
+        );
+
+        let authorized = session.on_remedy(OfferId(offer)).await.expect("the remedy authorizes");
+        let RemedyDecision::Authorized { call: authorized_call } = authorized else {
+            panic!("executing the offer must authorize the call");
+        };
+        assert_eq!(
+            authorized_call.bytes,
+            serde_json::to_vec(&call()).expect("the test call serializes"),
+            "the authorized call is byte-exact",
+        );
+
+        let resumed = session.on_tool_call(call()).await.expect("the re-proposal resumes");
+        assert_eq!(resumed, ToolCallDecision::Allow);
+
+        let kept = session
+            .on_tool_result(
+                call(),
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("ok".to_string()),
+                },
+            )
+            .await
+            .expect("the result is admitted");
+        assert_eq!(kept, ToolResultDecision::Keep);
+    }
+
+    /// An offer from the prior turn lapses at the next prompt: the
+    /// session delivers the mock's decline instead of an authorization.
+    #[tokio::test]
+    async fn an_offer_mode_offer_lapses_across_a_prompt() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open_with_engine(config(), dir.path().join("appa.db"), MockEngine::offer_mode())
+            .expect("a fresh runtime opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+
+        let denied = session.on_tool_call(call()).await.expect("the deny is delivered");
+        let ToolCallDecision::Deny { feedback } = denied else {
+            panic!("offer mode must block the first proposal");
+        };
+        let offer = feedback
+            .split('"')
+            .find(|part| part.starts_with("offer-"))
+            .expect("the feedback names the offer id")
+            .to_string();
+
+        session
+            .on_prompt("next turn".to_string())
+            .expect("the prompt is accepted");
+        assert!(matches!(
+            session
+                .on_remedy(OfferId(offer))
+                .await
+                .expect("the decline is delivered"),
+            RemedyDecision::Declined { .. },
+        ));
+    }
+
+    #[tokio::test]
     async fn the_random_number_never_repeats_in_a_session() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_test_runtime(&dir);
@@ -1244,7 +1506,7 @@ mod tests {
             runtime.inner.engine.enqueue(present(Presentation::KeepOutput));
             session
                 .on_tool_result(
-                    DispatchId(format!("d{turn}")),
+                    call(),
                     ToolOutcome::Success {
                         body: OutcomeBody::Available("ok".to_string()),
                     },
