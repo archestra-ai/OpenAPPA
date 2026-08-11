@@ -54,7 +54,7 @@ const STATIC_SECTIONS = [
   { title: "Authorities", url: "/docs/contracts#authorities", docTitle: "Policy reference" },
   { title: "Sanitizers", url: "/docs/contracts#sanitizers", docTitle: "Policy reference" },
   { title: "Casts", url: "/docs/contracts#casts", docTitle: "Policy reference" },
-  { title: "Empirical evaluation", url: "/docs/evaluation#empirical-evaluation-results", docTitle: "Evaluating OpenAPPA" },
+  { title: "Empirical evaluation", url: "/docs/evaluation#summary-of-empirical-findings", docTitle: "Evaluating OpenAPPA" },
 ];
 
 const STATIC_RULES = [

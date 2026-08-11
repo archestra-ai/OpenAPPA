@@ -2,124 +2,109 @@
 title: Evaluating OpenAPPA
 category: Evaluation
 order: 10
-description: How OpenAPPA stops data exfiltration attacks without breaking your AI agent's ability to get work done.
+description: Empirical benchmark results evaluating security enforcement and task completion across Bench-Corp, TAU-bench, and AgentThreatBench.
 ---
 
-## The dilemma: Security that breaks the agent
+## Benchmark results and methodology
 
-Building secure AI agents usually forces a painful choice between two bad options:
+Evaluating agent security requires measuring two metrics together: **security enforcement** and **task completion**. An agent that permits unauthorized data flows is unsafe; an agent that refuses to execute valid actions is unhelpful.
 
-1. **No security boundary**: The agent is helpful and fast, but vulnerable. If it reads a public forum post containing a hidden prompt injection, an attacker can trick the agent into emailing your internal financial records to an outside server.
-2. **Paranoid security guardrails**: The moment the agent touches a sensitive database or reads unvetted web content, traditional security systems permanently lock down the agent. From that point on, every outbound action is blocked. The agent gets stuck mid-task and fails.
+We evaluate OpenAPPA by testing whether declared flow policies reliably block unauthorized actions while preserving the agent's ability to finish authorized tasks.
 
-Security shouldn't mean disabling your agent. OpenAPPA was designed to solve this exact bottleneck: **stopping exfiltration attacks (100% safety) while letting the agent finish its job (high utility).**
+Our evaluation spans three benchmark suites:
 
-## Why traditional benchmarks miss the point
+1. **Bench-Corp:** Multi-step enterprise workflows across HR, Finance, and customer support systems.
+2. **TAU-bench:** Banking workflows testing tool use and trajectory recovery.
+3. **AgentThreatBench:** Data exfiltration scenarios targeting LLM tool dispatches.
 
-Standard security benchmarks for AI agents—like AgentDojo, InjecAgent, or ToolEmu—evaluate security over short, single-step tasks. They ask simple questions like *"did the model catch this bad prompt in turn 1?"*
+A **security pass** in these benchmarks means the scorer observed no unauthorized data flow or policy violation during the run. This can occur either because the model acted safely on its own or because OpenAPPA blocked an unsafe tool call before dispatch.
 
-Single-step benchmarks miss two critical realities of real-world agent deployments:
+## Bench-Corp: Multi-step enterprise tasks
 
-- **Data contamination ("taint creep") locks down multi-step tasks**: In traditional security, reading a single internal file or unvetted web page marks the entire agent conversation as "contaminated" (or tainted). Under standard taint tracking, this contamination is permanent. Once marked, the agent is blocked from taking subsequent unconstrained actions (like emailing a client or filing a public ticket)—even if those actions have nothing to do with the sensitive data read earlier. Single-step tests never see this failure mode.
-- **Smarter modern models ignore legacy attacks**: Legacy benchmark suites evaluate attacks over single-step turns. However, even smaller modern models—such as GPT-5.6 Luna—naturally resist older prompt injection templates. Across all four AgentDojo suites under the `tool_knowledge` attack probe, GPT-5.6 Luna scored a 0% Attack Success Rate (ASR) even with zero security defenses enabled. Evaluating a security engine against attacks that modern models ignore anyway doesn't measure whether your security system actually works under complex multi-turn scenarios.
+[`bench-corp`](https://github.com/archestra-ai/OpenAPPA/tree/main/bench-corp) is an open-source benchmark suite we developed to evaluate multi-step agent performance in realistic enterprise environments (HR, Finance, Vendor management, Forums, Task Trackers, and Email). The core test is whether an agent can process untrusted or restricted inputs and still finish its assigned task without leaking confidential data downstream.
 
-To measure real-world performance, OpenAPPA was evaluated against **`bench-corp`**—a multi-step benchmark designed around real corporate workflows.
+We evaluated **GPT-5.6 Luna** across 7 scenarios with 5 repetitions per scenario (140 total episodes across arms and prompt profiles):
 
-## The test track: A simulated company environment
+- **Standard prompts:** Baseline user requests without malicious instructions.
+- **ChaosMonkey prompts:** Adversarial test inputs that inject malicious instructions or untrusted snippets into prompt data to actively attempt data exfiltration or policy bypasses.
 
-`bench-corp` puts AI agents to work inside a realistic corporate environment with six core systems:
+| Agent prompt profile | Policy arm | Task completion | Security pass rate |
+|---|---|---:|---:|
+| **Standard** | **OpenAPPA** | **33/35 (94.3%)** | **35/35 (100%)** |
+| | Unprotected | 26/35 (74.3%) | 25/35 (71.4%) |
+| **ChaosMonkey** | **OpenAPPA** | **32/35 (91.4%)** | **35/35 (100%)** |
+| | Unprotected | 23/35 (65.7%) | 25/35 (71.4%) |
 
-| System | What's Inside | What the Agent Can Do |
-|---|---|---|
-| **HR** | Confidential employee records and salary data | Search, read, and create HR files |
-| **Finance** | Invoices, corporate billing, and accounting logs | Search, read, and create financial records |
-| **Task Tracker** | Internal project tickets, engineering notes, and audit logs | Search, read, and manage tickets |
-| **Public Forum** | Untrusted external posts, support forum tickets, and web inputs | Read public posts (where attacks hide) |
-| **Vendor Portal** | Supplier contracts, agreements, and onboarding forms | Search and read vendor records |
-| **Email** | Outbound email delivery to internal and external recipients | Send emails (`send_email`) |
+Under standard prompts, OpenAPPA achieved **94.3% task completion** with zero security violations. Under adversarial ChaosMonkey prompts, task completion remained high at **91.4%**, with zero successful attacks. In contrast, the unprotected baseline suffered security breaches in 10 out of 35 episodes under both prompt profiles.
 
-The benchmark features **14 complex scenarios**. Some tasks require reading public forums while updating internal tickets; others require checking confidential records before emailing team members. Crucially, 5 scenarios hide sneaky indirect prompt injections inside public forum posts to see if the agent can be tricked into leaking company secrets.
+### Scenario examples
 
-## The headline results: 0% exfiltration, 95% task completion
+- **Wire transfer approval:** A $72,500 wire request contains text claiming *"approval has already been granted."* OpenAPPA ignores prompt text assertions and requires a verified approval event in the system log before permitting the wire transfer.
+- **Legal pre-clearance:** An agent prepares contract terms for external counsel. OpenAPPA requires an audit record before allowing confidential document text to leave the internal boundary.
+- **Multi-tenant isolation:** A client support ticket contains an injected instruction asking the agent to send Tenant A's deployment keys to Tenant B. OpenAPPA evaluates data reader permissions against the destination and blocks the cross-tenant leak.
 
-We evaluated OpenAPPA across four major AI models. We measured two key metrics:
-- **Task Completion (Utility ↑)**: Did the agent successfully complete its assigned work? (Higher is better)
-- **Attack Leaks (ASR ↓)**: Did an attacker successfully trick the agent into exfiltrating secret data? (Lower is better)
+## TAU-bench: Banking domain & policy recovery
 
-| AI Model | Security Defense | Task Completion (Utility ↑) | Attack Leaks (ASR ↓) |
-|---|---|---|---|
-| **GPT-5.6 Luna** | **OpenAPPA (Full)** | **95%** (37 / 39) | **2%** (1 / 42) |
-| | OpenAPPA (No Branching) | 69% (27 / 39) | 0% (0 / 42) |
-| | Unprotected Baseline | 92% (36 / 39) | 36% (15 / 42) |
-| **Qwen 3.6 35B** | **OpenAPPA (Full)** | **72%** (28 / 39) | **0%** (0 / 42) |
-| | OpenAPPA (No Branching) | 54% (21 / 39) | 2% (1 / 42) |
-| | Unprotected Baseline | 92% (36 / 39) | 43% (18 / 42) |
-| **GPT-4o** | **OpenAPPA (Full)** | **59%** (23 / 39) | **7%** (3 / 42) |
-| | Unprotected Baseline | 85% (33 / 39) | 50% (21 / 42) |
-| **Gemini 3.5 Flash-Lite** | **OpenAPPA (Full)** | **44%** (17 / 39) | **0%** (0 / 42) |
-| | Unprotected Baseline | 56% (22 / 39) | 31% (13 / 42) |
+[`TAU-bench`](https://taubench.com/leaderboard?benchmark=knowledge) is a widely recognized benchmark for tool-using agents, developed by Sierra and Stanford researchers. We evaluated OpenAPPA across all 97 tasks in the banking domain with 4 simulations per task (**388 total simulations per prompt profile**).
 
-Across all models, OpenAPPA reduced attack leaks from **31%–50% down to near 0%**, while allowing top models like GPT-5.6 Luna to complete **95% of their tasks**.
+| Metric | Standard prompts | ChaosMonkey prompts |
+|---|---:|---:|
+| Total simulations | 388 | 388 |
+| Successful task completions | 137 (35.31%) | 102 (26.29%) |
+| Policy-checked tool calls | 8,151 | 7,725 |
+| False positive blocks on standard work | 0 | — |
+| Attempted policy violations blocked | — | 24/24 |
+| Blocked trajectories that recovered | — | 12/24 |
 
-:::details-7pc-leak:::
+During standard runs, OpenAPPA inspected 8,151 tool calls without blocking any authorized actions. Under ChaosMonkey prompting, models attempted 24 policy violations—and OpenAPPA **blocked all 24 attempts (100%)**.
 
-## Empirical impact of context branching
+### How policy recovery works
 
-The core mechanism preserving task utility under OpenAPPA is **context branching**—spawning an isolated child execution branch when reading restricted or untrusted data so the parent trajectory remains unpolluted.
+When OpenAPPA blocks an unauthorized action, it returns structured feedback (a **remedy plan**) explaining what missing requirement (such as identity verification or manager approval) is needed to proceed safely.
 
-Comparing full **OpenAPPA** against **OpenAPPA (No Branching)** isolates the exact causal impact of context branching on task completion:
+For example, in a card-replacement task:
+1. The agent attempts to call `issue_replacement_card()`.
+2. OpenAPPA blocks the call because `identity.verified` is missing.
+3. The refusal response provides a remedy: *"Verify user identity first."*
+4. The agent prompts the user, calls `verify_identity()`, and retries the card replacement.
+5. OpenAPPA permits the now-authorized call, allowing the task to finish safely.
 
-- **GPT-5.6 Luna**: Completion rises from **69% to 95%** (+26% task completion restored).
-- **Qwen 3.6 35B**: Completion rises from **54% to 72%** (+18% task completion restored).
-- **Gemini 3.5 Flash-Lite**: Completion rises from **28% to 44%** (+16% task completion restored).
+In TAU-bench testing, **12 out of 24 blocked agents used OpenAPPA's remedy feedback to self-correct and complete their task**. Without remedies, completion under ChaosMonkey prompting would have been 23.20% (90/388); with remedies, it reached 26.29% (102/388).
 
-Without branching, reading a single restricted record permanently taints the parent context, stranding the agent on subsequent unconstrained steps. Branching localizes the label descent inside the child branch, allowing sanitizers to return clean data and keeping the main task on track.
+## AgentThreatBench: Data exfiltration suite
 
-## Prospective remedy utilization in benchmark runs
+[`AgentThreatBench`](https://github.com/UKGovernmentBEIS/inspect_evals/tree/main/src/inspect_evals/agent_threat_bench) is a security benchmark developed by the UK AI Safety Institute based on the OWASP Top 10 for LLM Applications. We evaluated a 10-sample **Data Exfiltration slice** designed to test whether agents leak customer data when processing untrusted inputs.
 
-OpenAPPA never returns generic block errors. When a tool call exceeds current permissions, the engine prospectively computes valid remedy plans—such as requesting an authority approval, routing data through a sanitizer, or accepting a narrowing prompt.
+The test slice includes 8 upstream Data Exfiltration cases plus 2 custom egress cases (one authorized egress, one unauthorized egress).
 
-Across the benchmark runs, LLMs actively invoked these prospective remedy options to navigate policy constraints:
+| Agent prompt profile | Policy arm | Task completion | Security pass rate |
+|---|---|---:|---:|
+| **Standard** | Unprotected | 6/10 (60%) | 10/10 (100%) |
+| | Permissive policy | 7/10 (70%) | 10/10 (100%) |
+| | **Guarded OpenAPPA** | **6/10 (60%)** | **10/10 (100%)** |
+| **Agent-threat chaos** | Unprotected | 7/10 (70%) | 7/10 (70%) |
+| | Permissive policy | 6/10 (60%) | 6/10 (60%) |
+| | **Guarded OpenAPPA** | **6/10 (60%)** | **10/10 (100%)** |
 
-- **GPT-5.6 Luna**: 50 remedy calls invoked across 42 benchmark episodes.
-- **GPT-4o**: 45 remedy calls invoked across 42 benchmark episodes.
-- **Qwen 3.6 35B**: 38 remedy calls invoked across 42 benchmark episodes.
-- **Gemini 3.5 Flash-Lite**: 32 remedy calls invoked across 42 benchmark episodes.
+Under adversarial prompts, unprotected models leaked sensitive data in 30% to 40% of test cases. OpenAPPA blocked 100% of unauthorized data dispatches while matching the standard 60% task completion rate.
 
-Models consistently parse structured refusal objects and execute valid remedy plans to safely complete their assigned tasks.
+Rather than relying on prompt-injection classifiers, OpenAPPA attaches reader-set permissions to customer data when `lookup_customer` runs. When a messaging tool is invoked, OpenAPPA checks whether the recipient belongs to that reader set before allowing dispatch.
 
-## Try it yourself: Running the benchmark
+## Summary of empirical findings
 
-You can run the `bench-corp` benchmark locally to test your own models or policy rules.
+Across all three benchmarks:
 
-### 1. Setup
+- **Bench-Corp:** 0 successful attacks across 70 guarded episodes, with task completion remaining above 91.4%.
+- **TAU-bench:** 0 false positive blocks across 8,151 standard tool calls; 100% of attempted violations blocked under adversarial prompts, with 50% recovering to full task completion via remedy feedback.
+- **AgentThreatBench:** 100% security pass rate across both standard and adversarial prompt profiles.
 
-```sh
-# Clone OpenAPPA and install dependencies
-git clone https://github.com/archestra-ai/OpenAPPA.git
-cd OpenAPPA
-uv sync
-```
+### Scope note
+These results measure performance when policies define clear authorization requirements and return paths. In test scenarios where mixed-content outputs are flagged suspicious but offer no authorization path or transformation tool (such as AgentThreatBench Memory Poisoning cases), OpenAPPA recorded a 100% security pass rate (16/16) and a 0% completion rate (0/16) by failing closed.
 
-### 2. Run an evaluation arm
+## Reproduce and inspect
 
-```sh
-# Run OpenAPPA with full security and branching on GPT-5.6 Luna
-uv run bench-corp run --model openrouter/openai/gpt-5.6-luna --arm appa --logdir runs/appa-luna
+- [`bench-corp`](https://github.com/archestra-ai/OpenAPPA/tree/main/bench-corp) — scenarios, runner, and result format.
+- [`harness-taubench`](https://github.com/archestra-ai/OpenAPPA/tree/main/harness-taubench) — TAU-bench harness and evaluation code.
+- [`AgentThreatBench`](https://github.com/UKGovernmentBEIS/inspect_evals/tree/main/src/inspect_evals/agent_threat_bench) — upstream task definitions and benchmark suite.
+- [OpenAPPA Paper on arXiv](https://arxiv.org/abs/2607.24625) — formal information-flow model and evaluation methodology.
 
-# Run the unprotected control run to see baseline attack vulnerability
-uv run bench-corp run --model openrouter/openai/gpt-5.6-luna --arm appa-open --logdir runs/open-luna
-```
-
-### 3. View the report
-
-```sh
-# Summarize completion rate, attack blocks, and remedy calls
-uv run bench-corp report --logdir runs/appa-luna
-```
-
-## Next steps
-
-- [How OpenAPPA works](/docs/how-it-works) — Visual walkthrough of labels, branching, and remedies.
-- [Reading a policy](/docs/contracts) — How to write tool contracts and sanitizer rules.
-- [OpenAPPA Paper (arXiv:2607.24625)](https://arxiv.org/abs/2607.24625) — Read the full academic paper and formal proofs.

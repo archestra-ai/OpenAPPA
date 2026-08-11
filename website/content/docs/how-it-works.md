@@ -13,10 +13,10 @@ APPA stands for **Agentic Permissions Policy Algebra**. It provides a formal sys
 
 By evaluating checks *before* tool dispatch, OpenAPPA prevents agents from getting stranded mid-task. Every refusal presents the sound options that exist: approve the exact call, sanitize the data, satisfy a prerequisite, or accept a narrower label.
 
-| Runtime State | Scope | Engine Semantics |
-|---|---|---|
-| **Label** | Trajectory | Tracks audience (allowed reader set) and trust rank (`suspicious` vs `trusted`). Reading data intersects audiences and takes the lowest trust rank. |
-| **Log** | Trajectory | Append-only record of execution history, recording tool dispatches, narrowing acceptances, authority approvals, and denials. |
+| Runtime State | Engine Semantics |
+|---|---|
+| **Label** | Tracks audience (allowed reader set) and trust rank (`suspicious` vs `trusted`). Reading data intersects audiences and takes the lowest trust rank. |
+| **Log** | Append-only record of execution history, recording tool dispatches, narrowing acceptances, authority approvals, and denials. |
 
 Policy definitions remain strictly declarative: contracts, authorities, sanitizers, and casts are simple data configurations. Developers do not write static allow or block rules for every tool interaction. Instead, they declare tool contracts—specifying what permissions a tool requires (`requires`), how its output restricts security labels (`delta`), and what side effects it causes (`effects`). From these contracts and the trajectory's current label, OpenAPPA automatically derives whether an action is permitted, blocked, or remediable across any multi-step workflow.
 
