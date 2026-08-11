@@ -106,9 +106,13 @@ pub enum LoadError {
     )]
     UnannotatedWithLabelRequirement(String),
     #[error(
-        "tool {tool}: {count} worst-case alternative remedy assignments exceed the planner cap of {max} — reduce the requirement entries or the competent authorities, or raise `[limits] planner_cap`"
+        "tool {tool}: {count} worst-case alternative remedy plans exceed the planner cap of {max} — reduce the requirement entries, the competent authorities, or the clearing tools, or raise `[limits] planner_cap`"
     )]
     TooManyPlanAlternatives { tool: String, count: u128, max: u128 },
+    #[error(
+        "confined-return stage: {count} worst-case sanitizer alternatives exceed the planner cap of {max} — reduce the registered output sanitizers or raise `[limits] planner_cap`"
+    )]
+    TooManyReturnPlanAlternatives { count: u128, max: u128 },
     #[error("{context}: hint is {len} characters, over the {max} a plan offer carries")]
     HintTooLong { context: String, len: usize, max: usize },
     #[error(
@@ -117,11 +121,12 @@ pub enum LoadError {
     NonLiteralReader { context: String, reader: String },
 }
 
-/// The planner cap: the most unique grouped authority assignments one block may
-/// enumerate — the bound that keeps alternative-plan enumeration total (`RMD-5`: no runtime
-/// truncation, "every sound alternative" literal). Deployment configuration sets it via
-/// `[limits] planner_cap`; omitted, the cap is 64. Zero is unrepresentable: a tool's worst
-/// case is at least one, so a zero cap would refuse every registry with a tool.
+/// The planner cap: the most alternatives one current-stage plan menu may hold — per
+/// tool, the grouped-assignment product times its release paths plus its direct-redispatch
+/// candidates; per catalogue, the confined child-return menu. The bound keeps enumeration total
+/// (no runtime truncation: "every sound alternative" is literal). Deployment configuration
+/// sets it via `[limits] planner_cap`; omitted, the cap is 64. Zero is unrepresentable: every
+/// stage's worst case is at least one, so a zero cap would refuse every registry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlannerCap(u128);
 
@@ -144,10 +149,16 @@ impl Default for PlannerCap {
 /// configuration. A sentence or two is the intended shape.
 pub const MAX_HINT_CHARS: usize = 512;
 
-fn worst_case_plan_alternatives(tool: &ToolContract, authorities: &[Authority], sanitizers: &[Sanitizer]) -> u128 {
+fn worst_case_plan_alternatives(
+    tool: &ToolContract,
+    tools: &BTreeMap<ToolName, ToolContract>,
+    authorities: &[Authority],
+    sanitizers: &[Sanitizer],
+) -> u128 {
     use crate::check::Gap;
     use crate::contract::{AudienceRequirement, HistoryRequirement};
     use crate::fact::EffectKind;
+    use crate::label::Audience;
     use crate::plan::covers_gap;
 
     let mut count: u128 = 1;
@@ -228,7 +239,38 @@ fn worst_case_plan_alternatives(tool: &ToolContract, authorities: &[Authority], 
             .count(),
     };
     multiply(applicable + 1);
-    count
+
+    let priors: Vec<&EffectKind> = tool
+        .requires
+        .history
+        .iter()
+        .filter_map(|requirement| match requirement {
+            HistoryRequirement::Prior(kind) => Some(kind),
+            HistoryRequirement::NoPrior(_) => None,
+        })
+        .collect();
+    let has_cap = tool
+        .requires
+        .label
+        .audience
+        .iter()
+        .any(|requirement| matches!(requirement, AudienceRequirement::Cap(Audience::Restricted(_))));
+    let redispatches = tools
+        .values()
+        .filter(|candidate| {
+            candidate.emits.iter().any(|kind| priors.contains(&kind))
+                || (has_cap
+                    && matches!(
+                        candidate.delta.as_ref().and_then(|delta| delta.audience.as_ref()),
+                        Some(AudienceDelta::Static(Audience::Restricted(_)))
+                    ))
+        })
+        .count() as u128;
+    count.saturating_add(redispatches)
+}
+
+fn worst_case_return_alternatives(sanitizers: &[Sanitizer]) -> u128 {
+    1u128.saturating_add(sanitizers.iter().filter(|sanitizer| sanitizer.on.output).count() as u128)
 }
 
 #[derive(Clone, Debug)]
@@ -323,7 +365,7 @@ impl Registry {
 
         let sanitizer_list: Vec<Sanitizer> = sanitizers.values().cloned().collect();
         for tool in tools.values() {
-            let count = worst_case_plan_alternatives(tool, &config.authorities, &sanitizer_list);
+            let count = worst_case_plan_alternatives(tool, &tools, &config.authorities, &sanitizer_list);
             if count > planner_cap.0 {
                 return Err(LoadError::TooManyPlanAlternatives {
                     tool: tool.name.as_str().to_string(),
@@ -331,6 +373,13 @@ impl Registry {
                     max: planner_cap.0,
                 });
             }
+        }
+        let confined = worst_case_return_alternatives(&sanitizer_list);
+        if confined > planner_cap.0 {
+            return Err(LoadError::TooManyReturnPlanAlternatives {
+                count: confined,
+                max: planner_cap.0,
+            });
         }
 
         let mut casts = BTreeMap::new();
@@ -478,9 +527,11 @@ mod tests {
     use super::*;
     use crate::authority::SanitizerPoints;
     use crate::authority::{CastCeiling, CastTarget, Mandate, Scope};
-    use crate::contract::{Delta, DynamicAudienceBinding, Requires};
-    use crate::fact::EffectSet;
-    use crate::label::{Audience, ReaderId};
+    use crate::contract::{
+        AudienceRequirement, Delta, DynamicAudienceBinding, HistoryRequirement, LabelRequirements, Requires,
+    };
+    use crate::fact::{EffectKind, EffectSet};
+    use crate::label::{Audience, ReaderId, Trust};
     use crate::names::{AuthorityName, MarkName};
 
     fn chain() -> TrustChain {
@@ -978,5 +1029,173 @@ mod tests {
     #[test]
     fn a_zero_planner_cap_is_unrepresentable() {
         assert_eq!(PlannerCap::new(0), None);
+    }
+
+    fn output_sanitizer(index: usize) -> Sanitizer {
+        Sanitizer {
+            name: SanitizerName::new(format!("sanitizer-{index}")),
+            on: SanitizerPoints {
+                input: false,
+                output: true,
+            },
+            transition: Transition::Audience {
+                from_includes: Audience::Public,
+                to: Audience::Public,
+            },
+            hint: None,
+        }
+    }
+
+    fn prior_target_config(emitters: usize) -> RegistryConfig {
+        let mut target = tool("wire");
+        target.requires = Requires {
+            history: vec![HistoryRequirement::Prior(EffectKind::new("k"))],
+            ..Requires::default()
+        };
+        let mut tools = vec![target];
+        for i in 0..emitters {
+            let mut emitter = tool(&format!("emit{i}"));
+            emitter.emits = EffectSet::new([EffectKind::new("k")]).unwrap();
+            tools.push(emitter);
+        }
+        let mut bystander = tool("bystander");
+        bystander.emits = EffectSet::new([EffectKind::new("other")]).unwrap();
+        tools.push(bystander);
+        let mut cfg = base();
+        cfg.tools = tools;
+        cfg
+    }
+
+    #[test]
+    fn the_bound_counts_every_direct_prior_emitter() {
+        let cap = PlannerCap::new(4).expect("nonzero");
+        assert!(Registry::build_with_cap(prior_target_config(3), cap).is_ok());
+        assert!(matches!(
+            Registry::build_with_cap(prior_target_config(4), cap),
+            Err(LoadError::TooManyPlanAlternatives { count: 5, max: 4, ref tool }) if tool == "wire"
+        ));
+    }
+
+    fn cap_target_config(narrowers: usize) -> RegistryConfig {
+        let mut target = tool("send");
+        target.requires = Requires {
+            label: LabelRequirements {
+                trust_floor: None,
+                audience: vec![AudienceRequirement::Cap(Audience::restricted([ReaderId::new("a")]))],
+            },
+            ..Requires::default()
+        };
+        let mut tools = vec![target];
+        for i in 0..narrowers {
+            let mut narrower = tool(&format!("narrow{i}"));
+            narrower.delta.as_mut().unwrap().audience = Some(AudienceDelta::Static(Audience::restricted([
+                ReaderId::new("a"),
+                ReaderId::new("c"),
+            ])));
+            tools.push(narrower);
+        }
+        let mut public = tool("public-delta");
+        public.delta.as_mut().unwrap().audience = Some(AudienceDelta::Static(Audience::Public));
+        let mut dynamic = tool("dynamic-delta");
+        dynamic.delta.as_mut().unwrap().audience = Some(AudienceDelta::Dynamic(DynamicAudienceBinding {
+            resolver: crate::names::DynamicResolverName::new("directory"),
+            argument: "to".into(),
+        }));
+        let mut pending = tool("pending-delta");
+        pending.delta.as_mut().unwrap().audience = Some(AudienceDelta::PendingCast);
+        let neutral = tool("neutral");
+        let mut unannotated = tool("unannotated");
+        unannotated.delta = None;
+        tools.extend([public, dynamic, pending, neutral, unannotated]);
+        let mut cfg = base();
+        cfg.tools = tools;
+        cfg
+    }
+
+    #[test]
+    fn the_bound_counts_only_static_restricted_contributions_for_a_cap() {
+        let cap = PlannerCap::new(4).expect("nonzero");
+        assert!(Registry::build_with_cap(cap_target_config(3), cap).is_ok());
+        assert!(matches!(
+            Registry::build_with_cap(cap_target_config(4), cap),
+            Err(LoadError::TooManyPlanAlternatives { count: 5, max: 4, ref tool }) if tool == "send"
+        ));
+    }
+
+    #[test]
+    fn a_vacuous_public_cap_arms_no_redispatch_count() {
+        let mut cfg = cap_target_config(4);
+        let cap = PlannerCap::new(4).expect("nonzero");
+        assert!(matches!(
+            Registry::build_with_cap(cfg.clone(), cap),
+            Err(LoadError::TooManyPlanAlternatives { count: 5, max: 4, .. })
+        ));
+        cfg.tools[0].requires.label.audience = vec![AudienceRequirement::Cap(Audience::Public)];
+        assert!(Registry::build_with_cap(cfg, cap).is_ok());
+    }
+
+    #[test]
+    fn a_tool_clearing_both_gap_species_counts_once() {
+        let mut target = tool("send");
+        target.requires = Requires {
+            label: LabelRequirements {
+                trust_floor: None,
+                audience: vec![AudienceRequirement::Cap(Audience::restricted([ReaderId::new("a")]))],
+            },
+            history: vec![HistoryRequirement::Prior(EffectKind::new("k"))],
+            ..Requires::default()
+        };
+        let mut fixer = tool("fixer");
+        fixer.emits = EffectSet::new([EffectKind::new("k")]).unwrap();
+        fixer.delta.as_mut().unwrap().audience =
+            Some(AudienceDelta::Static(Audience::restricted([ReaderId::new("a")])));
+        let mut cfg = base();
+        cfg.tools = vec![target, fixer];
+        assert!(Registry::build_with_cap(cfg, PlannerCap::new(2).expect("nonzero")).is_ok());
+    }
+
+    #[test]
+    fn families_that_fit_alone_still_refuse_when_their_sum_exceeds_the_cap() {
+        let mut cfg = prior_target_config(3);
+        cfg.tools[0].requires.label.trust_floor = Some(Trust::new(1));
+        let officer = |name: String| Authority {
+            name: AuthorityName::new(name),
+            mandate: Mandate {
+                trust_ceiling: Some(Trust::new(1)),
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        };
+        cfg.authorities = (0..3).map(|i| officer(format!("officer{i}"))).collect();
+        let cap = PlannerCap::new(5).expect("nonzero");
+        assert!(matches!(
+            Registry::build_with_cap(cfg, cap),
+            Err(LoadError::TooManyPlanAlternatives { count: 6, max: 5, ref tool }) if tool == "wire"
+        ));
+    }
+
+    #[test]
+    fn the_confined_return_stage_is_bounded_even_in_a_zero_tool_catalogue() {
+        let mut cfg = base();
+        cfg.tools = vec![];
+        cfg.sanitizers = (0..5).map(output_sanitizer).collect();
+        let cap = PlannerCap::new(4).expect("nonzero");
+        assert!(matches!(
+            Registry::build_with_cap(cfg.clone(), cap),
+            Err(LoadError::TooManyReturnPlanAlternatives { count: 6, max: 4 })
+        ));
+        assert!(Registry::build_with_cap(cfg, PlannerCap::new(6).expect("nonzero")).is_ok());
+    }
+
+    #[test]
+    fn sanitizer_chains_do_not_multiply_either_stage_bound() {
+        let mut narrowing = tool("fetch");
+        narrowing.delta.as_mut().unwrap().audience =
+            Some(AudienceDelta::Static(Audience::restricted([ReaderId::new("a")])));
+        let mut cfg = base();
+        cfg.tools = vec![narrowing];
+        cfg.sanitizers = (0..5).map(output_sanitizer).collect();
+        assert!(Registry::build_with_cap(cfg, PlannerCap::new(8).expect("nonzero")).is_ok());
     }
 }

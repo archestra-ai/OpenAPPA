@@ -710,6 +710,26 @@ mod tests {
     }
 
     #[test]
+    fn every_return_menu_fits_the_catalogue_bound() {
+        let bound = 3;
+        for parent in [
+            known(TRUSTED, Audience::Public),
+            known(SUSPICIOUS, Audience::Public),
+            known(TRUSTED, internal()),
+        ] {
+            let mut log = forked(parent);
+            log.push(admit(child(), known(SUSPICIOUS, internal())));
+            match check(&menu_registry(), &log) {
+                ReturnCheck::Block(ReturnBlock::Narrowing { plans, .. }) => {
+                    assert!(!plans.is_empty(), "acceptance is always offered");
+                    assert!(plans.len() <= bound);
+                }
+                other => panic!("expected a narrowing block, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn a_worse_or_equal_relabel_is_never_offered() {
         let mut log = forked(known(TRUSTED, internal()));
         log.push(admit(child(), known(SUSPICIOUS, internal())));

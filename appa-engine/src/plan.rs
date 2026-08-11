@@ -2735,6 +2735,142 @@ mod tests {
         }
 
         #[test]
+        fn every_call_stage_menu_fits_the_recomputed_bound(
+            tools in prop::collection::vec(a_tool(0), 1..4),
+            authorities in prop::collection::vec(an_authority(0), 0..3),
+            sanitizers in prop::collection::vec(a_sanitizer(0), 0..2),
+            state in a_state(),
+            target in 0usize..3,
+        ) {
+            let tools: Vec<_> = tools.into_iter().enumerate().map(|(i, mut t)| {
+                t.name = ToolName::new(format!("t{i}"));
+                t
+            }).collect();
+            let authorities: Vec<_> = authorities.into_iter().enumerate().filter_map(|(i, mut a)| {
+                a.name = AuthorityName::new(format!("a{i}"));
+                if a.mandate.is_empty() { None } else { Some(a) }
+            }).collect();
+            let sanitizers: Vec<_> = sanitizers.into_iter().enumerate().map(|(i, mut s)| {
+                s.name = SanitizerName::new(format!("s{i}"));
+                s
+            }).collect();
+            let built = Registry::build(RegistryConfig {
+                trust_chain: chain(),
+                tools,
+                authorities,
+                sanitizers,
+                casts: vec![],
+            });
+            if matches!(built, Err(crate::registry::LoadError::TooManyPlanAlternatives { .. })) {
+                return Ok(());
+            }
+            prop_assert!(built.is_ok(), "generated config must load: {:?}", built.err());
+            let registry = built.unwrap();
+
+            let target = ToolName::new(format!("t{}", target % registry.tools().count().max(1)));
+            let contract = registry.tool(&target).expect("target is modulo the re-keyed tool count");
+            let call = synthetic_call(contract);
+            let has_committed = |kind: &EffectKind| state.effects.contains(kind);
+            let has_reserved = |kind: &EffectKind| state.reservations.contains(kind);
+            let eval = check::evaluate_state(contract, &state.label, &has_committed, &has_reserved, &call);
+            if !eval.consumed.is_empty() || (eval.requirement_gaps.is_empty() && eval.narrowing.is_none()) {
+                return Ok(());
+            }
+            let raw = RawBlock {
+                requirement_gaps: eval.requirement_gaps,
+                narrowing: eval.narrowing,
+                unestablished: Vec::new(),
+            };
+            let mut log = vec![user_value(state.label.clone())];
+            for kind in &state.effects {
+                log.push(committed_effect(kind.clone()));
+            }
+            let projection = Projection::build(&log, Revision::new(log.len() as u64));
+            let trajectory = traj();
+            let views = projection.view(&trajectory);
+            let planned = plan(&registry, &views, &call, &raw);
+
+            let authorities = registry.authorities();
+            let mut bound: u128 = 1;
+            let mut multiply = |competent: usize| bound = bound.saturating_mul(competent.max(1) as u128);
+            if let Some(floor) = contract.requires.label.trust_floor {
+                multiply(
+                    authorities
+                        .iter()
+                        .filter(|a| a.mandate.trust_ceiling.is_some_and(|ceiling| ceiling >= floor))
+                        .count(),
+                );
+            }
+            let mut seen_includes: Vec<&AudienceRequirement> = Vec::new();
+            for requirement in &contract.requires.label.audience {
+                if matches!(requirement, AudienceRequirement::Includes(_)) && !seen_includes.contains(&requirement) {
+                    seen_includes.push(requirement);
+                }
+            }
+            let includes_entries = seen_includes.len();
+            for _ in 0..includes_entries {
+                multiply(
+                    authorities
+                        .iter()
+                        .filter(|a| a.mandate.reader_ceiling.is_some())
+                        .count(),
+                );
+            }
+            let no_priors: BTreeSet<&EffectKind> = contract
+                .requires
+                .history
+                .iter()
+                .filter_map(|requirement| match requirement {
+                    HistoryRequirement::NoPrior(kind) => Some(kind),
+                    HistoryRequirement::Prior(_) => None,
+                })
+                .collect();
+            for kind in &no_priors {
+                multiply(authorities.iter().filter(|a| a.mandate.waivers.contains(kind)).count());
+            }
+            let marks: BTreeSet<_> = contract.requires.attention.iter().collect();
+            for mark in &marks {
+                multiply(authorities.iter().filter(|a| a.mandate.attends.contains(mark)).count());
+            }
+            let output_sanitizers = registry.sanitizers().filter(|sanitizer| sanitizer.on.output).count();
+            bound = bound.saturating_mul(1 + output_sanitizers as u128);
+            let priors: BTreeSet<&EffectKind> = contract
+                .requires
+                .history
+                .iter()
+                .filter_map(|requirement| match requirement {
+                    HistoryRequirement::Prior(kind) => Some(kind),
+                    HistoryRequirement::NoPrior(_) => None,
+                })
+                .collect();
+            let has_cap = contract
+                .requires
+                .label
+                .audience
+                .iter()
+                .any(|requirement| matches!(requirement, AudienceRequirement::Cap(Audience::Restricted(_))));
+            let redispatches = registry
+                .tools()
+                .filter(|candidate| {
+                    candidate.emits.iter().any(|kind| priors.contains(kind))
+                        || (has_cap
+                            && matches!(
+                                candidate.delta.as_ref().and_then(|delta| delta.audience.as_ref()),
+                                Some(AudienceDelta::Static(Audience::Restricted(_)))
+                            ))
+                })
+                .count() as u128;
+            bound = bound.saturating_add(redispatches);
+
+            prop_assert!(
+                (planned.plans.len() as u128) <= bound,
+                "menu of {} exceeds the recomputed bound {}",
+                planned.plans.len(),
+                bound
+            );
+        }
+
+        #[test]
         fn planner_enumerates_exactly_the_sound_assignments(
             tools in prop::collection::vec(a_tool(0), 1..3),
             authorities in prop::collection::vec(an_authority(0), 0..3),
