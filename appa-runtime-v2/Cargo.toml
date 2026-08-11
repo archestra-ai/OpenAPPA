@@ -1,0 +1,32 @@
+[package]
+name = "appa-runtime-v2"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+axum = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+rand = "0.10"
+reqwest = { workspace = true }
+# `server` carries the tool macros' schema derive; `transport-streamable-http-server`
+# is the HTTP transport Claude Code's MCP client speaks.
+rmcp = { version = "3", features = ["server", "macros", "transport-streamable-http-server"] }
+rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+# Must stay 1.x to match rmcp's `#[tool]` schema derive.
+schemars = "1"
+serde = { workspace = true }
+sha2 = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

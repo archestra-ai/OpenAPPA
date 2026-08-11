@@ -19,6 +19,7 @@ COPY appa-dojo-sidecar appa-dojo-sidecar
 COPY appa-engine appa-engine
 COPY appa-gateway appa-gateway
 COPY appa-runtime appa-runtime
+COPY appa-runtime-v2 appa-runtime-v2
 COPY appa-sdk appa-sdk
 COPY demo/appa-demo demo/appa-demo
 RUN cargo build --release --locked --manifest-path demo/appa-demo/Cargo.toml

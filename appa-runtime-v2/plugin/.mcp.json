@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "appa": {
+      "type": "http",
+      "url": "${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/mcp"
+    }
+  }
+}

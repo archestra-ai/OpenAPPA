@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["appa-agent", "appa-agent-python", "appa-dojo-sidecar", "appa-engine", "appa-gateway", "appa-runtime", "appa-sdk"]
+members = ["appa-agent", "appa-agent-python", "appa-dojo-sidecar", "appa-engine", "appa-gateway", "appa-runtime", "appa-runtime-v2", "appa-sdk"]
 
 [workspace.package]
 edition = "2024"
