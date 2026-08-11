@@ -373,10 +373,6 @@ impl Views<'_> {
         self.projection.effects.iter().any(|e| e == kind)
     }
 
-    pub fn present_effects(&self) -> BTreeSet<EffectKind> {
-        self.projection.effects.iter().cloned().collect()
-    }
-
     /// Does an unsettled reservation anywhere in the family contain a matching emit? `no_prior(k)`
     /// additionally fails on this; `prior(k)` never reads it — both
     /// directions fail closed.
@@ -385,17 +381,6 @@ impl Views<'_> {
             .reservations
             .values()
             .any(|reserved| reserved.iter().any(|e| e == kind))
-    }
-
-    /// The effect kinds under an unsettled reservation — the reserved half of a remedy-planning
-    /// state, seeded once per enumeration (`CHK-17` reservations are check-time state; the search
-    /// simulates commits, never releases).
-    pub fn present_reservations(&self) -> BTreeSet<EffectKind> {
-        self.projection
-            .reservations
-            .values()
-            .flat_map(|reserved| reserved.iter().cloned())
-            .collect()
     }
 
     pub fn is_open(&self, dispatch: &DispatchId) -> bool {

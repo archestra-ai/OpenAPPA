@@ -53,25 +53,15 @@ pub enum CheckOutcome {
     Block(RawBlock),
 }
 
-/// The state-only evaluation shared by [`evaluate`] and the remedy reachability search: the gaps
-/// and narrowing as the clocks find them, plus the dimensions whose Unknown a label requirement
-/// consumes. The state path cannot name values — the views path ([`evaluate`]) enumerates them
-/// into the block's `unestablished` slot. Plans are gap-scoped, so the search reads only the
-/// gaps and narrowing for the target; `consumed` matters where a call must actually *run* — a
-/// redispatch prerequisite whose own requirements consume an Unknown is not runnable.
+/// The state-only evaluation shared by [`evaluate`] and executable-plan enumeration (`plan`):
+/// the gaps and narrowing as the clocks find them, plus the dimensions whose Unknown a label
+/// requirement consumes. The state path cannot name values — the views path ([`evaluate`])
+/// enumerates them into the block's `unestablished` slot; enumeration reads only the gaps and
+/// narrowing, because plans are gap-scoped.
 pub(crate) struct StateEval {
     pub(crate) requirement_gaps: Vec<Gap>,
     pub(crate) narrowing: Option<Narrowing>,
     pub(crate) consumed: Vec<Dimension>,
-}
-
-/// How an `includes` placeholder that cannot resolve from the call's arguments enters the gap set.
-/// The origin is carried structurally — never reconstructed from a gap's recipient value, which a
-/// static contract could legally collide with.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PlaceholderGaps {
-    FailClosed,
-    Waived,
 }
 
 /// The label the trajectory would hold after this call commits, on the check's clock. An
@@ -111,7 +101,6 @@ pub(crate) fn evaluate(contract: &ToolContract, views: &Views, call: &ResolvedCa
         &|kind| views.has_effect(kind),
         &|kind| views.has_reservation(kind),
         call,
-        PlaceholderGaps::FailClosed,
     );
     if eval.requirement_gaps.is_empty() && eval.narrowing.is_none() && eval.consumed.is_empty() {
         return CheckOutcome::Allow;
@@ -125,7 +114,7 @@ pub(crate) fn evaluate(contract: &ToolContract, views: &Views, call: &ResolvedCa
 }
 
 /// The gap logic on an abstract `(current label, history predicates)` state — the one place the
-/// two clocks live, shared by [`evaluate`] and the remedy reachability search (`plan`). History
+/// two clocks live, shared by [`evaluate`] and remedy enumeration (`plan`). History
 /// reads two predicates: `has_committed` answers for appended effects, `has_reserved`
 /// for unsettled reservations — `prior(k)` consults only the first, `no_prior(k)`
 /// fails on either, and the two are never merged. A label requirement that consumes an `Unknown`
@@ -138,7 +127,6 @@ pub(crate) fn evaluate_state(
     has_committed: &impl Fn(&EffectKind) -> bool,
     has_reserved: &impl Fn(&EffectKind) -> bool,
     call: &ResolvedCall,
-    placeholders: PlaceholderGaps,
 ) -> StateEval {
     let committed = committed_label_for_call(contract, current, call);
     let consumed = consumed_unknown(contract, &committed, call);
@@ -150,7 +138,7 @@ pub(crate) fn evaluate_state(
     });
 
     let mut gaps = Vec::new();
-    label_gaps(contract, &committed, call, placeholders, &mut gaps);
+    label_gaps(contract, &committed, call, &mut gaps);
     history_gaps(contract, has_committed, has_reserved, &mut gaps);
     for mark in &contract.requires.attention {
         gaps.push(Gap::Attention(mark.clone()));
@@ -218,13 +206,7 @@ fn unestablished_facts(views: &Views, dims: &[Dimension]) -> Vec<UnestablishedFa
     facts
 }
 
-fn label_gaps(
-    contract: &ToolContract,
-    committed: &Label,
-    call: &ResolvedCall,
-    placeholders: PlaceholderGaps,
-    gaps: &mut Vec<Gap>,
-) {
+fn label_gaps(contract: &ToolContract, committed: &Label, call: &ResolvedCall, gaps: &mut Vec<Gap>) {
     if let Some(floor) = contract.requires.label.trust_floor
         && committed.trust.meets_floor(floor) == Adequacy::Fails
         && let Dim::Known(actual) = committed.trust
@@ -242,25 +224,22 @@ fn label_gaps(
                         gaps.push(Gap::Includes { recipients });
                     }
                 }
-                None => {
-                    if let RecipientSpec::Dynamic(binding) = spec {
-                        if placeholders == PlaceholderGaps::FailClosed {
-                            gaps.push(Gap::UnresolvedDynamicRecipient {
-                                resolver: binding.resolver.clone(),
-                                argument: binding.argument.clone(),
+                None => match spec {
+                    RecipientSpec::Dynamic(binding) => gaps.push(Gap::UnresolvedDynamicRecipient {
+                        resolver: binding.resolver.clone(),
+                        argument: binding.argument.clone(),
+                    }),
+                    RecipientSpec::Placeholder(key) => {
+                        if !matches!(committed.audience, Dim::Unknown) {
+                            gaps.push(Gap::Includes {
+                                recipients: unresolved_recipient(key),
                             });
                         }
-                    } else {
-                        match placeholders {
-                            PlaceholderGaps::FailClosed if !matches!(committed.audience, Dim::Unknown) => {
-                                gaps.push(Gap::Includes {
-                                    recipients: unresolved_recipient(spec),
-                                })
-                            }
-                            PlaceholderGaps::FailClosed | PlaceholderGaps::Waived => {}
-                        }
                     }
-                }
+                    RecipientSpec::Static(_) => {
+                        unreachable!("a static includes spec always resolves to its declared audience")
+                    }
+                },
             },
             AudienceRequirement::Cap(cap) => {
                 if committed.audience.within_cap(cap) == Adequacy::Fails {
@@ -305,11 +284,6 @@ fn resolve_recipients(spec: &RecipientSpec, call: &ResolvedCall) -> Option<Audie
     }
 }
 
-fn unresolved_recipient(spec: &RecipientSpec) -> Audience {
-    let key = match spec {
-        RecipientSpec::Placeholder(key) => key.as_str(),
-        RecipientSpec::Static(_) => "static",
-        RecipientSpec::Dynamic(_) => "dynamic",
-    };
+fn unresolved_recipient(key: &str) -> Audience {
     Audience::restricted([ReaderId::new(format!("<unresolved:{key}>"))])
 }

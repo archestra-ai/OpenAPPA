@@ -1,56 +1,41 @@
 //! Remedy planning: turning a raw block into the sound remedies the agent may act on.
 //!
 //! A [`PlannedBlock`] carries the block as found plus **executable plans** (atomic
-//! `Authorize`/`Accept` compositions run through `execute_remedy_plan`) and **prose recommendations**
-//! (`Redispatch` — call another tool first, then re-propose; `Fork` — advisory only). The security
-//! claim lives here: an **empty** set of executable plans *and* curative recommendations is a *proof*
-//! that the block is unliftable — relative to the implemented remedy subset (spec §"Remedy plans":
-//! "an empty list is a proof, not a shrug").
+//! `Authorize`/`Accept` compositions run through `execute_remedy_plan`) and **id-less redispatch
+//! recommendations** (`Redispatch` — call another tool first, then re-propose; `Fork` — advisory
+//! only). The security claim lives here: an **empty** set of executable plans *and* direct
+//! redispatches is a *proof* that the block is unliftable — relative to the implemented remedy
+//! subset, read at the current stage against registered configuration and recorded denials
+//! An empty list is a proof, not a shrug.
 //!
-//! **Curability is reachability over a finite transition system.** A state is `(committed label,
-//! effect history)`; a transition runs a tool that is *directly clearable* at the current state
-//! (every gap covered by one atomic ruling, its narrowing accepted), moving to a state that tool's
-//! success could produce — the raw crossing, or the relabel of any output sanitizer the agent could
-//! bind at that tool's own block ([`transitions`]). A call is curable iff some reachable state
-//! clears it directly. The system is finite — labels only descend, effects only grow, both over
-//! finite domains — so the search terminates. The production planner is a gap-guarded depth-first
-//! search; the completeness proof (tests) checks it against an independently-implemented
-//! forward-closure reference planner.
+//! **A redispatch clears its gap directly or is not offered**. A plan for a failed
+//! `prior(k)` names a registered tool whose `emits` includes `k`. A plan for a failed cap names a
+//! tool whose own established restrictive audience contribution, folded into the current label,
+//! lands within the cap. Only a **static** audience delta can prove that: a dynamic or
+//! pending-cast contribution folds as identity on the check's clock (`Delta::apply`), so it
+//! claims nothing. The blocked target's own delta takes no part in the claim — audience only
+//! narrows under `combine`, so a candidate that clears on its own contribution still clears when
+//! the target's delta folds after it, while one that needs the target's help is target-assisted
+//! advice this module does not offer. The named tool is dispatched as an ordinary separately-checked
+//! call: its own requirements, denials, and reservations bite at its own block, when it is
+//! actually proposed — a directly clearing tool is sound advice even when its own call would
+//! block today.
 //!
 //! **Alternatives.** A clearable block offers **every sound alternative**: each unique grouped
 //! authority assignment (per-gap choice among competent authorities) crossed with each way of
 //! settling the narrowing — acceptance, or an applicable output sanitizer with the residual it
 //! cannot shed. Enumeration is made total by the registry's load-time bound ([`crate::registry`]'s
-//! `PlannerCap`), which spans both factors — no runtime truncation. Curability itself is
-//! assignment-independent (any competent authority suffices) and sanitizer-independent at the
-//! blocked call (acceptance is always available, `RMD-11`), so the reachability search and its
-//! reference oracle stay on the cheap first-choice form; a separate assignment-set property checks
-//! the enumeration set-equal against an independent reference enumerator.
+//! `PlannerCap`), which spans both factors — no runtime truncation. A separate
+//! assignment-set property checks the enumeration set-equal against an independent reference
+//! enumerator, and the redispatch list is checked against an independent direct-set reference.
 //!
 //! **Implemented remedy subset (the honest bound).** `Authorize` (trust floor via `trust_ceiling`,
 //! `includes` via `reader_ceiling`, `no_prior` via `waivers`, attention via `attends`), `Accept`
 //! (narrowing), `Sanitize` (an output sanitizer's relabel standing in for the raw crossing,
-//! `SAN-2`/`RMD-18`), and `Redispatch` over `prior(k)` emitters and cap-narrowing tools. A redispatched
-//! prerequisite's own **placeholder** `includes($recipient)` is treated as satisfiable (the agent
-//! supplies a valid recipient when it actually runs the tool) — an over-approximation, the safe
-//! direction for the proof (it never falsely marks a curable block terminal). Its **static**
-//! `includes` is a real requirement: the recipients are fixed and the audience only ever narrows,
-//! so an *unmet* one is cured by nothing but a covering authority — never advertised without. A
-//! **pending-cast** output dimension
-//! transitions as identity, the same direction: the resolved label is unknowable statically, so
-//! the search may advertise a redispatch whose actual resolution turns out too narrow. Following
-//! such a hint is never an unchecked flow — the redispatched call and the retried block are both
-//! checked for real — but it is more than wasted turns: the prerequisite's *effects commit* even
-//! when its resolution then fails to cure the target. (An unannotated tool transitions as identity
-//! for the same reason — its Unknown contribution folds only at admission — with the same caveat.) Those effects are ones the policy allows
-//! that call to commit on its own terms, so soundness holds; a deployment for which such a
-//! permitted-but-unhelpful side effect is unacceptable should not declare a pending-cast emitter
-//! for a `prior(k)` currency (every curative first redispatch is recommended, in name order — the
-//! agent picks, and each redispatch is separately checked for real). The pending-cast
-//! post-resolution *narrowing* is
-//! conversely never counted as a cap cure, which is covered by the cast de-scope below, not a
-//! completeness hole. **De-scoped — each spec-marked, so the claim and the spec's enumeration
-//! coincide:** input-sanitizer argument substitution (spec: design direction, refused at load) and cast
+//! `SAN-2`/`RMD-18`), and `Redispatch` over direct `prior(k)` emitters and static cap-narrowing
+//! tools, in name order — the agent picks, and each redispatch is separately checked for real.
+//! **De-scoped — each spec-marked, so the claim and the spec's enumeration coincide:**
+//! input-sanitizer argument substitution (spec: design direction, refused at load) and cast
 //! resolution of an Unknown (spec: attempted by the harness itself at check and at admission,
 //! never surfaced as a plan object). The empty-proof is complete over exactly this subset.
 //!
@@ -59,8 +44,7 @@
 //! dispatch, and the dispatch happens before any derivation exists, so a promise to clean the
 //! result afterwards cannot justify the release. That is the fail-closed direction, and it is why
 //! adding the step leaves `is_curable` unchanged — acceptance was already always available for a
-//! narrowing, so the sanitizer adds alternatives, never reachability, *at the blocked
-//! call*. It does add reachability one hop out, which is what [`transitions`] accounts for.
+//! narrowing, so the sanitizer adds alternatives, never remedies for a requirement gap.
 //!
 //! Blocked **child returns** are planned separately with their own closed vocabulary
 //! ([`crate::branch::ReturnPlan`]: accept, or sanitize with an optional accepted residual) — a
@@ -115,10 +99,30 @@ pub struct ExecutableRemedyPlan {
     pub required: Vec<RequiredRuling>,
 }
 
+/// An id-less redispatch recommendation: the named tool and the displayed
+/// gaps its own contribution clears. The validating constructor is the only way to build one, so
+/// an empty claim or a gap species redispatch cannot clear is unrepresentable.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RedispatchEffect {
-    Clears(Vec<Gap>),
-    EnablesPath,
+pub struct RedispatchPlan {
+    tool: ToolName,
+    clears: Vec<Gap>,
+}
+
+impl RedispatchPlan {
+    /// `None` unless at least one gap is claimed and every claimed gap is a redispatch species —
+    /// `prior(k)` or a cap, the two redispatch shapes.
+    pub fn new(tool: ToolName, clears: Vec<Gap>) -> Option<RedispatchPlan> {
+        let valid = !clears.is_empty() && clears.iter().all(|gap| matches!(gap, Gap::Prior(_) | Gap::Cap { .. }));
+        valid.then_some(RedispatchPlan { tool, clears })
+    }
+
+    pub fn tool(&self) -> &ToolName {
+        &self.tool
+    }
+
+    pub fn clears(&self) -> &[Gap] {
+        &self.clears
+    }
 }
 
 /// One way out of a block. A plan with an engine-side step is an executable object with
@@ -127,14 +131,14 @@ pub enum RedispatchEffect {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemedyPlan {
     Executable(ExecutableRemedyPlan),
-    Redispatch { tool: ToolName, effect: RedispatchEffect },
+    Redispatch(RedispatchPlan),
 }
 
 impl RemedyPlan {
     pub fn executable(&self) -> Option<&ExecutableRemedyPlan> {
         match self {
             RemedyPlan::Executable(plan) => Some(plan),
-            RemedyPlan::Redispatch { .. } => None,
+            RemedyPlan::Redispatch(_) => None,
         }
     }
 }
@@ -169,36 +173,27 @@ impl PlannedBlock {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct State {
-    label: Label,
-    effects: BTreeSet<EffectKind>,
-    reservations: BTreeSet<EffectKind>,
-}
-
 /// Plan the remedies for a raw block. Emits the executable plans when the block clears in one
-/// atomic step, and every curative redispatch when only a prior tool call unlocks it. Both land in
+/// atomic step, and every direct redispatch when only a prior tool call unlocks it. Both land in
 /// the one `plans` list; fork advice is separate and never a remedy. See the module docs
-/// for the curability model.
+/// for the direct-clearing model.
 pub(crate) fn plan(registry: &Registry, views: &Views, call: &ResolvedCall, raw: &RawBlock) -> PlannedBlock {
-    let start = State {
-        label: views.current_label(),
-        effects: views.present_effects(),
-        reservations: views.present_reservations(),
-    };
+    let current = views.current_label();
     let no_denials = BTreeSet::new();
     let denied = views.denied_authorities(&call.digest()).unwrap_or(&no_denials);
 
-    let mut plans: Vec<RemedyPlan> = enumerate_plans(registry, &start, call)
+    let mut plans: Vec<RemedyPlan> = enumerate_plans(registry, &current, views, call)
         .into_iter()
         .filter(|plan| !denied.iter().any(|authority| plan.names_authority(authority)))
         .map(RemedyPlan::Executable)
         .collect();
 
     if plans.is_empty() && !raw.requirement_gaps.is_empty() {
-        for (tool, effect) in curative_redispatches(registry, &start, call, raw, denied) {
-            plans.push(RemedyPlan::Redispatch { tool, effect });
-        }
+        plans.extend(
+            direct_redispatches(registry, &current, raw)
+                .into_iter()
+                .map(RemedyPlan::Redispatch),
+        );
     }
     let fork_reason = match (&raw.narrowing, raw.requirement_gaps.is_empty()) {
         (Some(_), true) => {
@@ -218,47 +213,18 @@ pub(crate) fn plan(registry: &Registry, views: &Views, call: &ResolvedCall, raw:
     }
 }
 
-fn directly_clearable(
+fn enumerate_plans(
     registry: &Registry,
-    state: &State,
+    current: &Label,
+    views: &Views,
     call: &ResolvedCall,
-    denied: &BTreeSet<AuthorityName>,
-) -> Option<()> {
-    let contract = registry.tool(call.tool())?;
-    let has_committed = |kind: &EffectKind| state.effects.contains(kind);
-    let has_reserved = |kind: &EffectKind| state.reservations.contains(kind);
-    let eval = check::evaluate_state(
-        contract,
-        &state.label,
-        &has_committed,
-        &has_reserved,
-        call,
-        check::PlaceholderGaps::FailClosed,
-    );
-    // `consumed` is deliberately not consulted: the search asks whether the *gaps* clear, per
-    // the gap-scoped plan semantics — a persisting unestablished dimension gates execution and
-    // dispatch, never the offer. Masking keeps a consumed requirement out of the gap
-    // set, so no gap below ever claims to be cured by it.
-    for gap in &eval.requirement_gaps {
-        authority_for(registry, gap, &contract.tags, denied)?;
-    }
-    Some(())
-}
-
-fn enumerate_plans(registry: &Registry, state: &State, call: &ResolvedCall) -> Vec<ExecutableRemedyPlan> {
+) -> Vec<ExecutableRemedyPlan> {
     let Some(contract) = registry.tool(call.tool()) else {
         return Vec::new();
     };
-    let has_committed = |kind: &EffectKind| state.effects.contains(kind);
-    let has_reserved = |kind: &EffectKind| state.reservations.contains(kind);
-    let block = check::evaluate_state(
-        contract,
-        &state.label,
-        &has_committed,
-        &has_reserved,
-        call,
-        check::PlaceholderGaps::FailClosed,
-    );
+    let has_committed = |kind: &EffectKind| views.has_effect(kind);
+    let has_reserved = |kind: &EffectKind| views.has_reservation(kind);
+    let block = check::evaluate_state(contract, current, &has_committed, &has_reserved, call);
     if block.requirement_gaps.is_empty() && block.narrowing.is_none() {
         return Vec::new();
     }
@@ -266,7 +232,7 @@ fn enumerate_plans(registry: &Registry, state: &State, call: &ResolvedCall) -> V
     let Some(assignments) = enumerate_assignments(registry, &block.requirement_gaps, &contract.tags) else {
         return Vec::new();
     };
-    let settlements = narrowing_remedies(registry, &state.label, contract, call, block.narrowing.as_ref());
+    let settlements = narrowing_remedies(registry, current, contract, call, block.narrowing.as_ref());
 
     let mut candidates: Vec<PlanCandidate> = Vec::new();
     for required in assignments {
@@ -503,32 +469,6 @@ fn sanitized_commit(current: &Label, output: &Label, sanitizer: &Sanitizer) -> O
     (sanitized != raw).then_some(sanitized)
 }
 
-fn prerequisite_runnable(registry: &Registry, state: &State, tool: &ToolContract) -> bool {
-    let call = synthetic_call(tool);
-    let has_committed = |kind: &EffectKind| state.effects.contains(kind);
-    let has_reserved = |kind: &EffectKind| state.reservations.contains(kind);
-    let eval = check::evaluate_state(
-        tool,
-        &state.label,
-        &has_committed,
-        &has_reserved,
-        &call,
-        check::PlaceholderGaps::Waived,
-    );
-    if !eval.consumed.is_empty() {
-        return false;
-    }
-    // No denial lookup here, deliberately: `RMD-16` binds exactly one rendered call (tool plus
-    // canonical digest), and this synthetic argument-unbound call stands for *every* way of
-    // running the prerequisite — a denial recorded for the literal null-argument rendering must
-    // not shrink the over-approximating reachability search. The prerequisite's own denials bite
-    // at its own block, when it is actually proposed.
-    let no_denials = BTreeSet::new();
-    eval.requirement_gaps
-        .iter()
-        .all(|gap| authority_for(registry, gap, &tool.tags, &no_denials).is_some())
-}
-
 /// The rulings a block's remedy plan needs gathered: for each authority the block routes to, the gaps
 /// its ruling must cover. The mandate routing (which authority covers which gap) stays here in the
 /// engine; the runtime only gathers a ruling from each named authority for its gaps and hands them to
@@ -538,20 +478,6 @@ fn prerequisite_runnable(registry: &Registry, state: &State, tool: &ToolContract
 pub struct RequiredRuling {
     pub authority: AuthorityName,
     pub covers: Vec<Gap>,
-}
-
-fn authority_for<'r>(
-    registry: &'r Registry,
-    gap: &Gap,
-    tags: &[TagName],
-    denied: &BTreeSet<AuthorityName>,
-) -> Option<&'r AuthorityName> {
-    registry
-        .authorities()
-        .iter()
-        .filter(|authority| !denied.contains(&authority.name))
-        .find(|authority| covers_gap(authority, gap, tags))
-        .map(|authority| &authority.name)
 }
 
 pub(crate) fn covers_gap(authority: &Authority, gap: &Gap, tags: &[TagName]) -> bool {
@@ -574,114 +500,24 @@ pub(crate) fn covers_gap(authority: &Authority, gap: &Gap, tags: &[TagName]) -> 
     }
 }
 
-fn transitions(registry: &Registry, state: &State, tool: &ToolContract) -> Vec<State> {
-    let mut effects = state.effects.clone();
-    effects.extend(tool.emits.iter().cloned());
-    let mut states = vec![State {
-        label: check::committed_label(tool, &state.label),
-        effects: effects.clone(),
-        reservations: state.reservations.clone(),
-    }];
-    let output = tool.output_label();
-    for sanitizer in applicable_output_sanitizers(registry, tool, &output) {
-        if let Some(label) = sanitized_commit(&state.label, &output, sanitizer) {
-            let next = State {
-                label,
-                effects: effects.clone(),
-                reservations: state.reservations.clone(),
-            };
-            if !states.contains(&next) {
-                states.push(next);
-            }
-        }
-    }
-    states
-}
-
-fn synthetic_call(tool: &ToolContract) -> ResolvedCall {
-    ResolvedCall::new(tool.name.clone(), serde_json::Value::Null, Vec::new())
-}
-
-fn curable(
-    registry: &Registry,
-    state: &State,
-    call: &ResolvedCall,
-    denied: &BTreeSet<AuthorityName>,
-    visiting: &mut Vec<State>,
-) -> bool {
-    if directly_clearable(registry, state, call, denied).is_some() {
-        return true;
-    }
-    if visiting.contains(state) {
-        return false;
-    }
-    visiting.push(state.clone());
-    let cured = registry.tools().any(|tool| {
-        if !prerequisite_runnable(registry, state, tool) {
-            return false;
-        }
-        transitions(registry, state, tool)
-            .into_iter()
-            .any(|next| next != *state && curable(registry, &next, call, denied, visiting))
-    });
-    visiting.pop();
-    cured
-}
-
-fn curative_redispatches(
-    registry: &Registry,
-    start: &State,
-    call: &ResolvedCall,
-    raw: &RawBlock,
-    denied: &BTreeSet<AuthorityName>,
-) -> Vec<(ToolName, RedispatchEffect)> {
-    let mut curative = Vec::new();
+fn direct_redispatches(registry: &Registry, current: &Label, raw: &RawBlock) -> Vec<RedispatchPlan> {
+    let mut direct = Vec::new();
     for tool in registry.tools() {
-        if !prerequisite_runnable(registry, start, tool) {
-            continue;
-        }
-        let successors = transitions(registry, start, tool);
-        let reaches = successors.iter().any(|next| {
-            let mut visiting = Vec::new();
-            next != start && curable(registry, next, call, denied, &mut visiting)
-        });
-        if !reaches {
-            continue;
-        }
-        curative.push((
-            tool.name.clone(),
-            redispatch_effect(registry, tool, call, &successors[0], raw),
-        ));
+        let committed = check::committed_label(tool, current);
+        let clears: Vec<Gap> = raw
+            .requirement_gaps
+            .iter()
+            .filter(|gap| match gap {
+                Gap::Prior(kind) => tool.emits.contains(kind),
+                Gap::Cap { cap } => committed.audience.within_cap(cap) == Adequacy::Holds,
+                _ => false,
+            })
+            .cloned()
+            .collect();
+        // The constructor is also the emptiness filter: a tool clearing nothing yields `None`.
+        direct.extend(RedispatchPlan::new(tool.name.clone(), clears));
     }
-    curative
-}
-
-fn redispatch_effect(
-    registry: &Registry,
-    tool: &ToolContract,
-    call: &ResolvedCall,
-    next: &State,
-    raw: &RawBlock,
-) -> RedispatchEffect {
-    let retried = registry
-        .tool(call.tool())
-        .map(|target| check::committed_label(target, &next.label));
-    let cleared: Vec<Gap> = raw
-        .requirement_gaps
-        .iter()
-        .filter(|gap| match gap {
-            Gap::Prior(kind) => tool.emits.contains(kind),
-            Gap::Cap { cap } => retried
-                .as_ref()
-                .is_some_and(|label| label.audience.within_cap(cap) == Adequacy::Holds),
-            _ => false,
-        })
-        .cloned()
-        .collect();
-    match cleared.is_empty() {
-        true => RedispatchEffect::EnablesPath,
-        false => RedispatchEffect::Clears(cleared),
-    }
+    direct
 }
 
 #[cfg(test)]
@@ -1070,7 +906,7 @@ mod tests {
     }
 
     #[test]
-    fn a_prerequisites_sanitized_crossing_counts_as_a_curative_path() {
+    fn a_direct_emitter_is_offered_without_path_verification() {
         let backup = ToolContract {
             name: ToolName::new("backup"),
             tags: vec![],
@@ -1104,6 +940,7 @@ mod tests {
         );
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
 
+        let expected = vec![redispatch("backup", vec![Gap::Prior(EffectKind::new("backup.done"))])];
         let without = build(RegistryConfig {
             trust_chain: chain(),
             tools: vec![backup.clone(), wipe.clone()],
@@ -1111,10 +948,12 @@ mod tests {
             sanitizers: vec![],
             casts: vec![],
         });
+        let planned = plan_of(&without, &log, &call("wipe", json!({})));
         assert!(
-            !plan_of(&without, &log, &call("wipe", json!({}))).is_curable(),
-            "raw only: running backup breaks the trust floor it would satisfy"
+            planned.is_curable(),
+            "the direct emitter is named on its own contribution"
         );
+        assert_eq!(planned.plans, expected);
 
         let with = build(RegistryConfig {
             trust_chain: chain(),
@@ -1123,17 +962,10 @@ mod tests {
             sanitizers: vec![scrub],
             casts: vec![],
         });
-        let planned = plan_of(&with, &log, &call("wipe", json!({})));
-        assert!(
-            planned.is_curable(),
-            "the sanitized crossing keeps the trust and the effect"
-        );
         assert_eq!(
-            planned.plans,
-            vec![RemedyPlan::Redispatch {
-                tool: ToolName::new("backup"),
-                effect: RedispatchEffect::Clears(vec![Gap::Prior(EffectKind::new("backup.done"))]),
-            }]
+            plan_of(&with, &log, &call("wipe", json!({}))).plans,
+            expected,
+            "a sanitizer at the prerequisite's block changes nothing about the direct offer"
         );
     }
 
@@ -1196,19 +1028,15 @@ mod tests {
         let planned = plan_of(&registry, &log, &call("wipe", json!({})));
         assert!(planned.plans.iter().any(|plan| matches!(
             plan,
-            RemedyPlan::Redispatch {
-                tool,
-                effect: RedispatchEffect::Clears(gaps),
-            } if tool.as_str() == "backup" && gaps == &vec![Gap::Prior(EffectKind::new("backup"))]
+            RemedyPlan::Redispatch(r)
+                if r.tool().as_str() == "backup" && r.clears() == [Gap::Prior(EffectKind::new("backup"))]
         )));
 
         let planned = plan_of(&registry, &log, &call("send", json!({})));
         assert!(planned.plans.iter().any(|plan| matches!(
             plan,
-            RemedyPlan::Redispatch {
-                tool,
-                effect: RedispatchEffect::Clears(gaps),
-            } if tool.as_str() == "narrow" && matches!(gaps.as_slice(), [Gap::Cap { .. }])
+            RemedyPlan::Redispatch(r)
+                if r.tool().as_str() == "narrow" && matches!(r.clears(), [Gap::Cap { .. }])
         )));
     }
 
@@ -1292,22 +1120,119 @@ mod tests {
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("send", json!({})));
 
-        assert!(planned.plans.iter().all(|plan| plan.executable().is_none()));
-        let effect_of = |tool: &str| {
-            planned
-                .plans
-                .iter()
-                .find_map(|plan| match plan {
-                    RemedyPlan::Redispatch { tool: name, effect } if name == &ToolName::new(tool) => Some(effect),
-                    _ => None,
-                })
-                .unwrap_or_else(|| panic!("{tool} is offered"))
-        };
         assert_eq!(
-            effect_of("narrow_all"),
-            &RedispatchEffect::Clears(vec![Gap::Cap { cap: a() }])
+            planned.plans,
+            vec![redispatch("narrow_all", vec![Gap::Cap { cap: a() }])]
         );
-        assert_eq!(effect_of("narrow_some"), &RedispatchEffect::EnablesPath);
+    }
+
+    #[test]
+    fn only_an_established_static_contribution_claims_a_cap_clear() {
+        let a = Audience::restricted([ReaderId::new("a")]);
+        let send = ToolContract {
+            name: ToolName::new("send"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: EffectSet::default(),
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![AudienceRequirement::Cap(a)],
+                },
+                ..Requires::default()
+            },
+        };
+        let contract = |name: &str, delta: Option<Delta>| ToolContract {
+            name: ToolName::new(name),
+            tags: vec![],
+            delta,
+            emits: EffectSet::default(),
+            requires: Requires::default(),
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![
+                send,
+                contract(
+                    "dynamic",
+                    Some(Delta {
+                        trust: None,
+                        audience: Some(AudienceDelta::Dynamic(DynamicAudienceBinding {
+                            resolver: crate::names::DynamicResolverName::new("acl"),
+                            argument: "to".into(),
+                        })),
+                    }),
+                ),
+                contract(
+                    "pending",
+                    Some(Delta {
+                        trust: None,
+                        audience: Some(AudienceDelta::PendingCast),
+                    }),
+                ),
+                contract("neutral", Some(Delta::NONE)),
+                contract("unannotated", None),
+            ],
+            authorities: vec![],
+            sanitizers: vec![],
+            casts: vec![],
+        });
+        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let planned = plan_of(&registry, &log, &call("send", json!({})));
+        assert!(planned.plans.is_empty());
+        assert!(!planned.is_curable());
+    }
+
+    #[test]
+    fn one_tool_clearing_several_gaps_is_one_offer_with_the_complete_claim() {
+        let a = Audience::restricted([ReaderId::new("a")]);
+        let send = ToolContract {
+            name: ToolName::new("send"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            emits: EffectSet::default(),
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![AudienceRequirement::Cap(a.clone())],
+                },
+                history: vec![
+                    HistoryRequirement::Prior(EffectKind::new("backup.done")),
+                    HistoryRequirement::Prior(EffectKind::new("receipt")),
+                ],
+                ..Requires::default()
+            },
+        };
+        let fixer = ToolContract {
+            name: ToolName::new("fixer"),
+            tags: vec![],
+            delta: Some(Delta {
+                trust: None,
+                audience: Some(AudienceDelta::Static(a.clone())),
+            }),
+            emits: EffectSet::new([EffectKind::new("backup.done"), EffectKind::new("receipt")]).unwrap(),
+            requires: Requires::default(),
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![send, fixer],
+            authorities: vec![],
+            sanitizers: vec![],
+            casts: vec![],
+        });
+        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let planned = plan_of(&registry, &log, &call("send", json!({})));
+        assert_eq!(
+            planned.plans,
+            vec![redispatch(
+                "fixer",
+                vec![
+                    Gap::Cap { cap: a },
+                    Gap::Prior(EffectKind::new("backup.done")),
+                    Gap::Prior(EffectKind::new("receipt")),
+                ],
+            )]
+        );
     }
 
     #[test]
@@ -1613,7 +1538,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reserved_kind_gates_the_synthetic_prerequisite() {
+    fn a_reservation_at_the_emitters_own_block_does_not_suppress_the_offer() {
         let delete = ToolContract {
             name: ToolName::new("delete_db"),
             tags: vec![],
@@ -1641,20 +1566,21 @@ mod tests {
             sanitizers: vec![],
             casts: vec![],
         });
+        let expected = vec![redispatch("backup", vec![Gap::Prior(EffectKind::new("backup.done"))])];
         let clear = vec![user_value(known(TRUSTED, Audience::Public))];
-        let planned = plan_of(&registry, &clear, &call("delete_db", json!({})));
-        assert!(matches!(
-            planned.plans.as_slice(),
-            [RemedyPlan::Redispatch { tool, .. }] if tool == &ToolName::new("backup")
-        ));
+        assert_eq!(
+            plan_of(&registry, &clear, &call("delete_db", json!({}))).plans,
+            expected
+        );
 
         let reserved = vec![
             user_value(known(TRUSTED, Audience::Public)),
             open_reservation("locker", &["lock"]),
         ];
-        let planned = plan_of(&registry, &reserved, &call("delete_db", json!({})));
-        assert!(planned.plans.is_empty());
-        assert!(!planned.is_curable());
+        assert_eq!(
+            plan_of(&registry, &reserved, &call("delete_db", json!({}))).plans,
+            expected
+        );
     }
 
     #[test]
@@ -1946,7 +1872,7 @@ mod tests {
     }
 
     #[test]
-    fn a_denied_target_authority_removes_the_cure_from_reachability() {
+    fn a_target_denial_does_not_suppress_the_direct_redispatch() {
         let target = ToolContract {
             name: ToolName::new("send"),
             tags: vec![],
@@ -1985,24 +1911,19 @@ mod tests {
             casts: vec![],
         });
         let send = call("send", json!({}));
+        let expected = vec![redispatch("emitter", vec![Gap::Prior(EffectKind::new("receipt"))])];
         let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
-        let reachable = plan_of(&registry, &log, &send);
-        assert!(reachable.plans.iter().any(|plan| matches!(
-            plan,
-            RemedyPlan::Redispatch { tool, .. } if tool == &ToolName::new("emitter")
-        )));
+        assert_eq!(plan_of(&registry, &log, &send).plans, expected);
 
         let log = vec![
             user_value(known(SUSPICIOUS, Audience::Public)),
             denial(&send, "officer"),
         ];
-        let cut = plan_of(&registry, &log, &send);
-        assert!(cut.plans.is_empty());
-        assert!(!cut.is_curable());
+        assert_eq!(plan_of(&registry, &log, &send).plans, expected);
     }
 
     #[test]
-    fn a_null_rendering_denial_does_not_shrink_the_prerequisite_search() {
+    fn a_denial_recorded_for_the_named_tools_own_call_does_not_remove_the_offer() {
         let target = ToolContract {
             name: ToolName::new("send"),
             tags: vec![],
@@ -2051,7 +1972,7 @@ mod tests {
         let planned = plan_of(&registry, &log, &send);
         assert!(planned.plans.iter().any(|plan| matches!(
             plan,
-            RemedyPlan::Redispatch { tool, .. } if tool == &ToolName::new("emitter")
+            RemedyPlan::Redispatch(r) if r.tool() == &ToolName::new("emitter")
         )));
     }
 
@@ -2230,7 +2151,7 @@ mod tests {
         assert!(planned.is_curable());
         assert!(matches!(
             planned.plans.as_slice(),
-            [RemedyPlan::Redispatch { tool, .. }] if tool == &ToolName::new("backup")
+            [RemedyPlan::Redispatch(r)] if r.tool() == &ToolName::new("backup")
         ));
     }
 
@@ -2267,7 +2188,7 @@ mod tests {
             .plans
             .iter()
             .filter_map(|plan| match plan {
-                RemedyPlan::Redispatch { tool, .. } => Some(tool),
+                RemedyPlan::Redispatch(r) => Some(r.tool()),
                 RemedyPlan::Executable(_) => None,
             })
             .collect();
@@ -2278,7 +2199,7 @@ mod tests {
     }
 
     #[test]
-    fn static_includes_prerequisite_without_covering_authority_is_not_advertised() {
+    fn an_emitters_own_unmet_static_includes_does_not_gate_the_offer() {
         let delete = ToolContract {
             name: ToolName::new("delete_db"),
             tags: vec![],
@@ -2316,112 +2237,14 @@ mod tests {
             Audience::restricted([ReaderId::new("internal")]),
         ))];
         let planned = plan_of(&registry, &log, &call("delete_db", json!({})));
-        assert!(!planned.is_curable());
-        assert!(planned.plans.is_empty());
+        assert_eq!(
+            planned.plans,
+            vec![redispatch("backup", vec![Gap::Prior(EffectKind::new("backup.done"))])]
+        );
     }
 
     #[test]
-    fn static_includes_prerequisite_with_covering_authority_is_advertised() {
-        let delete = ToolContract {
-            name: ToolName::new("delete_db"),
-            tags: vec![],
-            delta: Some(Delta::NONE),
-            emits: EffectSet::default(),
-            requires: Requires {
-                history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
-                ..Requires::default()
-            },
-        };
-        let backup = ToolContract {
-            name: ToolName::new("backup"),
-            tags: vec![],
-            delta: Some(Delta::NONE),
-            emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: None,
-                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
-                        Audience::restricted([ReaderId::new("auditor")]),
-                    ))],
-                },
-                ..Requires::default()
-            },
-        };
-        let voucher = Authority {
-            name: AuthorityName::new("voucher"),
-            mandate: Mandate {
-                reader_ceiling: Some(Audience::restricted([ReaderId::new("auditor")])),
-                ..Mandate::default()
-            },
-            scope: Scope::default(),
-            hint: None,
-        };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: vec![delete, backup],
-            authorities: vec![voucher],
-            sanitizers: vec![],
-            casts: vec![],
-        });
-        let log = vec![user_value(known(
-            TRUSTED,
-            Audience::restricted([ReaderId::new("internal")]),
-        ))];
-        let planned = plan_of(&registry, &log, &call("delete_db", json!({})));
-        assert!(planned.is_curable());
-        assert!(matches!(
-            planned.plans.first(),
-            Some(RemedyPlan::Redispatch { tool, .. }) if tool == &ToolName::new("backup")
-        ));
-    }
-
-    #[test]
-    fn a_sentinel_shaped_static_recipient_is_not_mistaken_for_a_placeholder() {
-        let archive = ToolContract {
-            name: ToolName::new("archive"),
-            tags: vec![],
-            delta: Some(Delta::NONE),
-            emits: EffectSet::default(),
-            requires: Requires {
-                history: vec![HistoryRequirement::Prior(EffectKind::new("email.sent"))],
-                ..Requires::default()
-            },
-        };
-        let send = ToolContract {
-            name: ToolName::new("send"),
-            tags: vec![],
-            delta: Some(Delta::NONE),
-            emits: EffectSet::new([EffectKind::new("email.sent")]).unwrap(),
-            requires: Requires {
-                label: LabelRequirements {
-                    trust_floor: None,
-                    audience: vec![
-                        AudienceRequirement::Includes(RecipientSpec::Static(Audience::restricted([ReaderId::new(
-                            "<unresolved:to>",
-                        )]))),
-                        AudienceRequirement::Includes(RecipientSpec::Placeholder("to".into())),
-                    ],
-                },
-                ..Requires::default()
-            },
-        };
-        let registry = build(RegistryConfig {
-            trust_chain: chain(),
-            tools: vec![archive, send],
-            authorities: vec![],
-            sanitizers: vec![],
-            casts: vec![],
-        });
-        let log = vec![user_value(known(
-            TRUSTED,
-            Audience::restricted([ReaderId::new("internal")]),
-        ))];
-        let planned = plan_of(&registry, &log, &call("archive", json!({})));
-        assert!(!planned.is_curable());
-    }
-
-    #[test]
-    fn placeholder_includes_prerequisite_is_still_advertised() {
+    fn a_placeholder_bearing_emitter_is_advertised_like_any_other() {
         let archive = ToolContract {
             name: ToolName::new("archive"),
             tags: vec![],
@@ -2457,7 +2280,7 @@ mod tests {
         assert!(planned.is_curable());
         assert!(matches!(
             planned.plans.first(),
-            Some(RemedyPlan::Redispatch { tool, .. }) if tool == &ToolName::new("send")
+            Some(RemedyPlan::Redispatch(r)) if r.tool() == &ToolName::new("send")
         ));
     }
 
@@ -2557,7 +2380,7 @@ mod tests {
     }
 
     #[test]
-    fn cyclic_prerequisites_terminate_and_are_uncurable() {
+    fn a_mutual_prerequisite_cycle_does_not_gate_the_direct_offer() {
         let a = ToolContract {
             name: ToolName::new("a"),
             tags: vec![],
@@ -2587,41 +2410,90 @@ mod tests {
         });
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("a", json!({})));
-        assert!(!planned.is_curable());
+        assert_eq!(
+            planned.plans,
+            vec![redispatch("b", vec![Gap::Prior(EffectKind::new("kb"))])]
+        );
     }
 
     mod reference {
         use super::*;
 
-        fn reachable(registry: &Registry, start: &State) -> Vec<State> {
-            let mut states = vec![start.clone()];
-            loop {
-                let mut grew = false;
-                for state in states.clone() {
-                    for tool in registry.tools() {
-                        if prerequisite_runnable(registry, &state, tool) {
-                            for next in transitions(registry, &state, tool) {
-                                if !states.contains(&next) {
-                                    states.push(next);
-                                    grew = true;
-                                }
-                            }
-                        }
-                    }
-                }
-                if !grew {
-                    break;
+        fn intersect(a: &Audience, b: &Audience) -> Audience {
+            match (a, b) {
+                (Audience::Public, other) | (other, Audience::Public) => other.clone(),
+                (Audience::Restricted(a), Audience::Restricted(b)) => {
+                    Audience::Restricted(a.intersection(b).cloned().collect())
                 }
             }
-            states
         }
 
-        pub(super) fn curable(registry: &Registry, start: &State, call: &ResolvedCall) -> bool {
-            let no_denials = std::collections::BTreeSet::new();
-            reachable(registry, start)
-                .iter()
-                .any(|state| directly_clearable(registry, state, call, &no_denials).is_some())
+        fn within(audience: &Audience, cap: &Audience) -> bool {
+            match (audience, cap) {
+                (_, Audience::Public) => true,
+                (Audience::Public, Audience::Restricted(_)) => false,
+                (Audience::Restricted(a), Audience::Restricted(c)) => a.is_subset(c),
+            }
         }
+
+        pub(super) fn coverable(authorities: &[Authority], gap: &Gap) -> bool {
+            authorities.iter().any(|authority| match gap {
+                Gap::TrustFloor { required, .. } => authority
+                    .mandate
+                    .trust_ceiling
+                    .is_some_and(|ceiling| ceiling >= *required),
+                Gap::Includes { recipients } => authority
+                    .mandate
+                    .reader_ceiling
+                    .as_ref()
+                    .is_some_and(|ceiling| within(recipients, ceiling)),
+                Gap::NoPrior(kind) => authority.mandate.waivers.contains(kind),
+                Gap::Attention(mark) => authority.mandate.attends.contains(mark),
+                Gap::Prior(_) | Gap::Cap { .. } | Gap::UnresolvedDynamicRecipient { .. } => false,
+            })
+        }
+
+        pub(super) fn direct_set(registry: &Registry, current: &Label, raw: &RawBlock) -> Vec<(ToolName, Vec<Gap>)> {
+            let mut expected = Vec::new();
+            for tool in registry.tools() {
+                let narrowed = match (&current.audience, &tool.delta) {
+                    (
+                        Dim::Known(audience),
+                        Some(Delta {
+                            audience: Some(AudienceDelta::Static(delta)),
+                            ..
+                        }),
+                    ) => Some(intersect(audience, delta)),
+                    _ => None,
+                };
+                let clears: Vec<Gap> = raw
+                    .requirement_gaps
+                    .iter()
+                    .filter(|gap| match gap {
+                        Gap::Prior(kind) => tool.emits.contains(kind),
+                        Gap::Cap { cap } => narrowed.as_ref().is_some_and(|audience| within(audience, cap)),
+                        _ => false,
+                    })
+                    .cloned()
+                    .collect();
+                if !clears.is_empty() {
+                    expected.push((tool.name.clone(), clears));
+                }
+            }
+            expected
+        }
+    }
+
+    fn redispatch(tool: &str, clears: Vec<Gap>) -> RemedyPlan {
+        let plan = RedispatchPlan::new(ToolName::new(tool), clears).expect("a test claim is a valid redispatch");
+        RemedyPlan::Redispatch(plan)
+    }
+
+    #[derive(Clone, Debug)]
+    struct State {
+        label: Label,
+        effects: BTreeSet<EffectKind>,
+        reservations: BTreeSet<EffectKind>,
     }
 
     fn effect(name: &str) -> EffectKind {
@@ -2749,6 +2621,10 @@ mod tests {
             })
     }
 
+    fn synthetic_call(tool: &ToolContract) -> ResolvedCall {
+        ResolvedCall::new(tool.name.clone(), serde_json::Value::Null, Vec::new())
+    }
+
     fn a_sanitizer(index: usize) -> impl Strategy<Value = Sanitizer> {
         let name = SanitizerName::new(format!("s{index}"));
         prop_oneof![
@@ -2815,7 +2691,6 @@ mod tests {
                 &has_committed,
                 &has_reserved,
                 &call,
-                check::PlaceholderGaps::FailClosed,
             );
             if !eval.consumed.is_empty() || (eval.requirement_gaps.is_empty() && eval.narrowing.is_none()) {
                 return Ok(());
@@ -2835,8 +2710,28 @@ mod tests {
             let views = projection.view(&trajectory);
             let planned = plan(&registry, &views, &call, &raw);
 
-            let oracle = reference::curable(&registry, &state, &call);
-            prop_assert_eq!(planned.is_curable(), oracle);
+            let coverable = raw
+                .requirement_gaps
+                .iter()
+                .all(|gap| reference::coverable(registry.authorities(), gap));
+            let has_executable = planned.plans.iter().any(|plan| plan.executable().is_some());
+            prop_assert_eq!(has_executable, coverable);
+
+            let offered: Vec<(ToolName, Vec<Gap>)> = planned
+                .plans
+                .iter()
+                .filter_map(|plan| match plan {
+                    RemedyPlan::Redispatch(redispatch) => {
+                        Some((redispatch.tool().clone(), redispatch.clears().to_vec()))
+                    }
+                    RemedyPlan::Executable(_) => None,
+                })
+                .collect();
+            let expected = match coverable || raw.requirement_gaps.is_empty() {
+                true => Vec::new(),
+                false => reference::direct_set(&registry, &state.label, &raw),
+            };
+            prop_assert_eq!(offered, expected);
         }
 
         #[test]
@@ -2878,7 +2773,6 @@ mod tests {
                 &has_committed,
                 &has_reserved,
                 &call,
-                check::PlaceholderGaps::FailClosed,
             );
             if !eval.consumed.is_empty() || (eval.requirement_gaps.is_empty() && eval.narrowing.is_none()) {
                 return Ok(());

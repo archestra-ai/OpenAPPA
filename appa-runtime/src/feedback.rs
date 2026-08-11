@@ -4,7 +4,7 @@
 use appa_engine::authority::Hint;
 use appa_engine::check::{Gap, Narrowing, RawBlock, UnestablishedFact};
 use appa_engine::label::Dimension;
-use appa_engine::plan::{ExecutableRemedyPlan, PlannedBlock, RedispatchEffect, RemedyPlan};
+use appa_engine::plan::{ExecutableRemedyPlan, PlannedBlock, RemedyPlan};
 use appa_engine::projection::Views;
 use appa_engine::registry::Registry;
 use appa_engine::value::Provenance;
@@ -47,8 +47,6 @@ struct WireRuling<'a> {
 struct WireRedispatch<'a> {
     tool: &'a str,
     clears: &'a [Gap],
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    enables_path: bool,
 }
 
 #[derive(Serialize)]
@@ -189,13 +187,9 @@ fn payload(
         .map(WireRemedyPlan::Executable)
         .collect();
     remedy_plans.extend(planned.plans.iter().filter_map(|plan| match plan {
-        RemedyPlan::Redispatch { tool, effect } => Some(WireRemedyPlan::Redispatch(WireRedispatch {
-            tool: tool.as_str(),
-            clears: match effect {
-                RedispatchEffect::Clears(gaps) => gaps.as_slice(),
-                RedispatchEffect::EnablesPath => &[],
-            },
-            enables_path: matches!(effect, RedispatchEffect::EnablesPath),
+        RemedyPlan::Redispatch(redispatch) => Some(WireRemedyPlan::Redispatch(WireRedispatch {
+            tool: redispatch.tool().as_str(),
+            clears: redispatch.clears(),
         })),
         RemedyPlan::Executable(_) => None,
     }));
@@ -232,7 +226,7 @@ pub fn block_feedback(
         if planned
             .plans
             .iter()
-            .any(|plan| matches!(plan, RemedyPlan::Redispatch { .. }))
+            .any(|plan| matches!(plan, RemedyPlan::Redispatch(_)))
         {
             "blocked by policy; run a redispatch prerequisite first, then re-propose this call"
         } else {
@@ -404,7 +398,7 @@ mod tests {
     use appa_engine::fact::{EffectKind, Revision};
     use appa_engine::label::{Audience, Dim, Label, ReaderId, Trust};
     use appa_engine::names::{AuthorityName, MarkName, SanitizerName};
-    use appa_engine::plan::{PlanId, RemedyStep, RequiredRuling};
+    use appa_engine::plan::{PlanId, RedispatchPlan, RemedyStep, RequiredRuling};
     use appa_engine::projection::Projection;
     use appa_engine::registry::{RegistryConfig, TrustChain};
     use appa_engine::value::{ToolName, TrajectoryId};
@@ -687,14 +681,13 @@ mod tests {
             plans: vec![
                 RemedyPlan::Executable(plan_with("officer-a", vec![floor.clone()])),
                 RemedyPlan::Executable(plan_with("officer-b", vec![floor.clone()])),
-                RemedyPlan::Redispatch {
-                    tool: ToolName::new("backup"),
-                    effect: RedispatchEffect::Clears(vec![floor.clone()]),
-                },
-                RemedyPlan::Redispatch {
-                    tool: ToolName::new("snapshot"),
-                    effect: RedispatchEffect::EnablesPath,
-                },
+                RemedyPlan::Redispatch(
+                    RedispatchPlan::new(
+                        ToolName::new("backup"),
+                        vec![Gap::Prior(EffectKind::new("backup.done"))],
+                    )
+                    .expect("a prior claim is a valid redispatch"),
+                ),
             ],
             fork_advice: Some("advisory".to_string()),
         };
@@ -713,7 +706,7 @@ mod tests {
             ))
         });
         let plans = payload["remedy_plans"].as_array().unwrap();
-        assert_eq!(plans.len(), 4);
+        assert_eq!(plans.len(), 3);
         assert_eq!(plans[0]["plan_id"], "remedy-0");
         assert_eq!(plans[0]["rulings"][0]["authority"], "officer-a");
         assert_eq!(plans[1]["plan_id"], "remedy-1");
@@ -721,8 +714,6 @@ mod tests {
         assert_eq!(plans[2]["tool"], "backup");
         assert_eq!(plans[2]["clears"].as_array().unwrap().len(), 1);
         assert!(plans[2].get("enables_path").is_none());
-        assert_eq!(plans[3]["tool"], "snapshot");
-        assert_eq!(plans[3]["enables_path"], true);
         assert!(payload.get("fork").is_none());
 
         let none_planned = PlannedBlock {
@@ -746,7 +737,7 @@ mod tests {
             ))
         });
         let plans = payload["remedy_plans"].as_array().unwrap();
-        assert_eq!(plans.len(), 2);
+        assert_eq!(plans.len(), 1);
         assert_eq!(plans[0]["tool"], "backup");
     }
 
