@@ -63,27 +63,27 @@ resolver = { url = "https://chat.corp/readers", timeout_ms = 5000 }
 
 [[tool]]
 name = "lookup_customer"
-parameters = { type = "object", properties = { customer_id = { type = "string" } } }
+parameters = { type = "object", properties = { customer_id = { type = "string" } }, required = ["customer_id"] }
 delta = { audience = { resolver = "crm-acl", argument = "customer_id" } }
 
 [[tool]]
 name = "send_message"
-parameters = { type = "object", properties = { channel = { type = "string" } } }
+parameters = { type = "object", properties = { channel = { type = "string" } }, required = ["channel"] }
 requires = { audience = { includes = { resolver = "channel-members", argument = "channel" } } }
 delta = {}
 ```
 
-The tool's parameter schema must declare the argument as a top-level string. Missing and non-string call arguments fail resolution. Answers may contain many readers or none. They may not contain `public` or an `@group`.
+The tool's parameter schema must declare the argument as a required top-level string. A call that omits the argument or supplies a non-string value fails schema validation as an `InvalidCall` before any resolution runs. Answers may contain many readers or none. They may not contain `public` or an `@group`.
 
 Resolution occurs when a proposed call first checks. Its answer remains pinned through rechecks, remedy plans, rulings, dispatch, and admission. A new proposal resolves again. The dispatch record stores the answer. Blocks and rulings store the resulting literal readers.
 
-A failed dynamic `includes` produces an unresolved dynamic-recipient gap. No mandate or remedy plan can clear it. A failed dynamic delta contributes Unknown audience. It acts as identity during narrowing and follows `UNK` after admission.
+A resolver that produces no answer — a timeout, an error, an abstention, malformed or oversized data — resumes nothing: the check does not complete, no recipient gap or Unknown delta is created, and no engine fact is appended. Runtime may retry or show operational feedback outside the log. A successful answer with an empty reader set is ordinary evidence, distinct from no answer.
 
 The endpoint accepts a versioned JSON POST request: `{version:1,resolver,tool,argument,value}`. It returns `{version:1,readers:[...]}`. Non-2xx responses, timeouts, malformed responses, and oversized responses fail closed.
 
 ### Deployment coverage
 
-The deployment declares what it covers when it opens the engine — which tools have enforced execution, where raw results can be withheld, whether child branches are controlled. The policy loader validates the file against that declaration, and a construct that names an engine behavior the deployment cannot perform is a load error naming the missing coverage: a `tool_output` sanitizer with no covered application point, a pending-cast `delta` on a tool whose raw result the model would see anyway, a `[child]` section without child-context control, a `requires` on a provider-run tool. A weaker executor class is not a construct — it loads, and its weakness is the open vector. Writing a policy therefore starts from the deployment's coverage, not from the full feature list. What stays uncovered is an open vector the deployment names explicitly and auditably — nothing is removed or silently degraded.
+The deployment declares what it covers when it opens the engine — which tools have enforced execution, where raw results can be withheld, whether child branches are controlled. The policy loader validates the file against that declaration, and a construct that names an engine behavior the deployment cannot perform is a load error naming the missing coverage: a `tool_output` sanitizer with no covered application point, a pending-cast `delta` on a tool whose raw result the model would see anyway, a `[child]` section without child-context control, a `requires`, dynamic `delta`, or pending-cast `delta` on a provider-run tool. A weaker executor class is not a construct — it loads, and its weakness is the open vector. Writing a policy therefore starts from the deployment's coverage, not from the full feature list. What stays uncovered is an open vector the deployment names explicitly and auditably — nothing is removed or silently degraded.
 
 ## What to check when reviewing
 

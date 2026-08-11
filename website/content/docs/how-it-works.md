@@ -156,7 +156,7 @@ Each optional component closes a named vector:
 | **Execution enforcement** | The executed call is the approved call, exactly once | A tool gateway that matches each call to a one-use grant (remote tools); pre-tool hooks (local tools); neither — execution stays assumed, and the echo of the conversation is verified after the fact |
 | **Raw withholding** | Output sanitizing and pending casts: the model — or nobody — sees the raw result | Gateway swap on the next request (the model never sees it; the framework's machine does); tool-gateway rewrite (the raw never reaches the framework); a post-tool hook replaces it before storage, though the framework process briefly held it |
 | **Branching** | Children inherit the parent's restrictions and return only through a checked, sanitizable `submit_result` | Harness hooks plus an agent adapter; sub-agent traffic routed and registered through the gateway; neither — spawning is treated as egress and governed by contract |
-| **Provider-run tools** | Tools the model provider executes inside the inference call — no pre-dispatch gate is possible | Allow them: their declared label folds when the response shows they ran, and their outbound queries are a declared open vector. Or strip them from the request, closing the vector |
+| **Provider-run tools** | Tools the model provider executes inside the inference call — no pre-dispatch gate is possible | Allow them: each result the response exposes is admitted like a tool result under the tool's declared label, and their outbound queries are a declared open vector. A surface whose results the response hides cannot be mediated — refuse it or declare it open. Or strip them from the request, closing the vector |
 
 ## Model guarantees depend on five explicit assumptions
 
