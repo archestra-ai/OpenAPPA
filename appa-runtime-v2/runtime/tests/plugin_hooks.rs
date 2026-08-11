@@ -20,7 +20,7 @@ fn shipped_command() -> String {
         "PostToolUse",
         "SubagentStart",
         "SubagentStop",
-        "Stop",
+        "PostToolUseFailure",
     ] {
         let entry = &hooks["hooks"][event][0]["hooks"][0]["command"];
         assert_eq!(

@@ -114,7 +114,6 @@ fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
             child: event.trajectory(),
             value: event.last_assistant_message.clone(),
         })),
-        "Stop" => Ok(None),
         other => {
             tracing::debug!(hook = other, "hook event outside the codec's mapping");
             Ok(None)
@@ -221,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn stop_and_unknown_hooks_parse_to_no_event() {
+    fn unmapped_hooks_parse_to_no_event() {
         for name in ["Stop", "SomethingNew"] {
             let event = serde_json::json!({"hook_event_name": name, "session_id": "s1"});
             assert_eq!(parse_value(&event), Ok(None), "the {name} hook maps to no event");
