@@ -188,6 +188,7 @@ export function Logo({ height = 15 }: { height?: number }) {
       <span style={{ display: "inline-flex", alignItems: "flex-start", gap: height * 0.45 }}>
         <PixelWordmark word="OpenAPPA" capHeight={height} />
         <span
+          className="logo-tagline"
           style={{
             fontSize: labelSize,
             lineHeight: 1,

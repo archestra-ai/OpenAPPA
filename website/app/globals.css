@@ -238,6 +238,24 @@ samp {
   color: var(--text-strong);
 }
 
+/* Small screens: the header must never make the page scroll sideways —
+   drop the search label, the shortcut hint, and the wordmark tagline. */
+@media (max-width: 640px) {
+  .site-header {
+    padding: 14px 16px;
+  }
+
+  .site-header nav {
+    gap: 14px;
+  }
+
+  .site-header .search-trigger-btn span,
+  .site-header .header-kbd,
+  .site-header .logo-tagline {
+    display: none;
+  }
+}
+
 /* ————————————————————————————————————————————————
    Shell — sidebar | content | toc
    ———————————————————————————————————————————————— */

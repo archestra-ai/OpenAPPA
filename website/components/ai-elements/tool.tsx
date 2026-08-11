@@ -94,12 +94,14 @@ export const ToolHeader = ({
       )}
       {...props}
     >
-      <div className="flex items-center gap-2">
-        <WrenchIcon className="size-4 text-muted-foreground" />
+      {/* min-w-0 + wrap: a long badge drops to its own line inside the card
+          instead of pushing past the border on narrow panes. */}
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-left">
+        <WrenchIcon className="size-4 shrink-0 text-muted-foreground" />
         <span className="font-medium text-sm">{title ?? derivedName}</span>
         {badge ?? getStatusBadge(state)}
       </div>
-      <ChevronDownIcon className="size-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+      <ChevronDownIcon className="size-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
     </CollapsibleTrigger>
   );
 };

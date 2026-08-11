@@ -99,6 +99,10 @@ type ThreadItem = { lab?: LabelState } & (
   | { id: number; t: "verdict"; text: string; traj?: string }
   /** The root label moved: a marker row that recolors the rail below it. */
   | { id: number; t: "shift"; from: LabelState; to: LabelState }
+  /** Where the session entered: the label's opening row in the stream. */
+  | { id: number; t: "entry"; label: LabelState }
+  /** The closing recap of a demo case: what the path just showed and why. */
+  | { id: number; t: "authors"; text: string }
   | { id: number; t: "rule" }
 );
 
@@ -115,14 +119,20 @@ const STARTER_PROMPTS = [
   {
     tag: "recordings → github",
     text: "Check the recent meeting recordings for bugs customers mentioned, and file any that are not on GitHub yet.",
+    recap:
+      "What this path shows: meeting recordings are untrusted input, so reading them would have dropped the whole chat to the suspicious rank — and a suspicious chat may not file public GitHub issues. APPA held that one tool call, priced the drop, and offered remedy plans; choosing the strip-customer-data sanitizer meant the assistant never saw the raw transcripts, only the cleaned derivation, so the session kept its label and the issues could still be filed. Every hold and remedy you watched was scoped to a single tool call — nothing was blanket-allowed or blanket-denied.",
   },
   {
     tag: "invoices → transfer",
     text: "Check the open invoices and pay the overdue one by transfer.",
+    recap:
+      "What this path shows: invoices are confidential, so the one call that read them carried a price — the chat's audience narrowed to the finance readers — and the agent accepted it knowingly. Moving money additionally demands a human ruling: make_transfer paused until the treasurer (that was you) approved that exact call, and no answer would have failed it closed. Each decision landed on a single tool call; the policy never had to trust the agent's intentions, only rule on its flows.",
   },
   {
     tag: "invoices → email",
     text: "Review the unpaid invoices and email a summary first to ap-review@corp.example. After that succeeds, send the same summary to finance-all@corp.example.",
+    recap:
+      "What this path shows: once the invoices were read, their summary belonged to the finance audience. An email is a flow to whoever is currently behind the recipient list, so APPA resolved each address to its live readers and compared them with the label — the same summary passed for one list and was refused for the other, decided per tool call at the moment of sending. That is the point of value-granular flow control: verdicts follow the data and its readers, not tool names or good intentions.",
   },
 ];
 
@@ -133,6 +143,12 @@ const STARTER_PROMPTS = [
  * tool's own card. So their cards close calmly instead of styling as errors.
  */
 const PROTOCOL_TOOLS = new Set(["execute_remedy_plan", "fork", "submit_result"]);
+
+/** Resizing floors: the policy pane and the chat pane each keep a readable
+ *  minimum. The chat floor matches the grid's larger (xl) floor so a drag
+ *  never stores a width the columns would refuse to grant. */
+const SIDEBAR_MIN_PX = 320;
+const CHAT_MIN_PX = 480;
 
 /**
  * A ruling arrives as the model sees it: a sentence naming what failed and
@@ -338,6 +354,10 @@ export function ChatPlayground() {
   const [editorMax, setEditorMax] = useState(false);
   // Mobile only: the pane lives in a right-side drawer, closed by default.
   const [panelOpen, setPanelOpen] = useState(false);
+  // Desktop only: the policy pane's width once the visitor has dragged its
+  // edge; null leaves the breakpoint defaults in charge. Remembered locally.
+  const [sidebarPx, setSidebarPx] = useState<number | null>(null);
+  const gridRef = useRef<HTMLDivElement>(null);
   // The contract or authority the engine is acting on right now, lit in the
   // editor. A focus holds until the next acting block replaces it; when the
   // turn settles (`settled`), it lingers briefly and fades.
@@ -419,6 +439,38 @@ export function ChatPlayground() {
     const timer = setTimeout(() => setFocus(null), 4000);
     return () => clearTimeout(timer);
   }, [focus]);
+
+  // A remembered sidebar width survives New chat and reloads.
+  useEffect(() => {
+    const saved = Number(localStorage.getItem("appa-demo-sidebar-px"));
+    if (saved >= SIDEBAR_MIN_PX) setSidebarPx(saved);
+  }, []);
+
+  // Drag the pane edge: width follows the pointer, floors on both sides.
+  const startSidebarDrag = useCallback((event: React.PointerEvent) => {
+    event.preventDefault();
+    const grid = gridRef.current;
+    if (!grid) return;
+    const move = (pointer: PointerEvent) => {
+      const rect = grid.getBoundingClientRect();
+      const room = Math.max(SIDEBAR_MIN_PX, rect.width - CHAT_MIN_PX);
+      setSidebarPx(Math.min(Math.max(rect.right - pointer.clientX, SIDEBAR_MIN_PX), room));
+    };
+    const up = () => {
+      setSidebarPx((px) => {
+        if (px !== null) localStorage.setItem("appa-demo-sidebar-px", String(Math.round(px)));
+        return px;
+      });
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      document.body.style.removeProperty("user-select");
+      document.body.style.removeProperty("cursor");
+    };
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }, []);
 
   // Esc leaves the full-screen editor.
   useEffect(() => {
@@ -746,8 +798,16 @@ export function ChatPlayground() {
       setBusy(true);
       setFocus(null); // a new turn starts with no block acting
       if (turns > 0) push({ id: nextId(), t: "rule" });
+      // The stream tells the whole story on its own: it opens with the label
+      // the session enters under, so a screenshot needs no chrome around it.
+      // Before the loader's first answer there is nothing honest to show;
+      // then the row is inserted once the session reports where it entered.
+      const entryLabel = labelRef.current ?? boundary;
+      const opening = turns === 0;
+      if (opening && entryLabel) push({ id: nextId(), t: "entry", label: entryLabel });
       push({ id: nextId(), t: "user", text });
       setTurns((count) => count + 1);
+      const starter = STARTER_PROMPTS.find((prompt) => prompt.text === text);
 
       try {
         if (!sessionRef.current) {
@@ -756,6 +816,16 @@ export function ChatPlayground() {
           sessionRef.current = info.session;
           setLabel({ trust: info.trust, audience: info.audience });
           labelRef.current = { trust: info.trust, audience: info.audience };
+          if (opening && !entryLabel) {
+            // The visitor beat the policy check's debounce: open the stream
+            // with the label the session actually entered under.
+            const label = { trust: info.trust, audience: info.audience };
+            setThread((prev) => {
+              const at = prev.findIndex((item) => item.t === "user");
+              const item: ThreadItem = { id: ++idRef.current, t: "entry", label, lab: label };
+              return at === -1 ? [item, ...prev] : [...prev.slice(0, at), item, ...prev.slice(at)];
+            });
+          }
         }
         const controller = new AbortController();
         abortRef.current = controller;
@@ -767,6 +837,9 @@ export function ChatPlayground() {
           },
           controller.signal,
         );
+        // A demo case closes the way the docs' examples do: a recap of what
+        // the path just showed and why it matters.
+        if (runRef.current === run && starter) push({ id: nextId(), t: "authors", text: starter.recap });
       } catch (error) {
         if (runRef.current === run && (error as Error).name !== "AbortError") {
           push({ id: nextId(), t: "note", text: (error as Error).message });
@@ -775,7 +848,7 @@ export function ChatPlayground() {
         if (runRef.current === run) setBusy(false);
       }
     },
-    [applyEvent, policyText, systems, turns],
+    [applyEvent, boundary, policyText, systems, turns],
   );
 
   const send = useCallback(
@@ -910,19 +983,39 @@ export function ChatPlayground() {
   /**
    * One grey container for the APPA ↔ agent exchange. Consecutive exchange
    * turns merge into a single box: rounding and top padding only at the run's
-   * edges, and the rows between them close their gap.
+   * edges, and the rows between them close their gap. The box opens by naming
+   * the one tool call under negotiation — the exchange never widens beyond it.
    */
-  const exchangeShell = (group: { first: boolean; last: boolean } | undefined, children: React.ReactNode) => {
+  const exchangeShell = (
+    group: { first: boolean; last: boolean } | undefined,
+    children: React.ReactNode,
+    tool?: string,
+  ) => {
     const edges = group ?? { first: true, last: true };
     return (
       <div
-        className={`w-full min-w-0 max-w-[95%] bg-[var(--bg-weak)] px-4 pb-4 ${
+        className={`w-full min-w-0 bg-[var(--bg-weak)] px-4 pb-4 ${
           edges.first ? "rounded-t-md pt-4" : "pt-0"
         } ${edges.last ? "rounded-b-md" : ""}`}
       >
+        {edges.first && tool && (
+          <div className="mb-2.5 border-b border-[var(--border-weak)] pb-1.5 font-mono text-[10px] tracking-widest text-[var(--icon)] uppercase">
+            negotiating one tool call · {tool}
+          </div>
+        )}
         {children}
       </div>
     );
+  };
+
+  /** The world call this exchange negotiates: the nearest held card above. */
+  const heldToolBefore = (id: number) => {
+    const at = thread.findIndex((entry) => entry.id === id);
+    for (let index = (at === -1 ? thread.length : at) - 1; index >= 0; index--) {
+      const prev = thread[index];
+      if (prev.t === "tool" && prev.state === "blocked" && !PROTOCOL_TOOLS.has(prev.name)) return prev.name;
+    }
+    return undefined;
   };
 
   /**
@@ -1012,17 +1105,18 @@ export function ChatPlayground() {
               </div>
             </>
         ),
+        heldToolBefore(item.id),
       );
     }
     if (item.t === "user")
       return (
-        <Message from="user" key={item.id}>
+        <Message className="max-w-[85%]" from="user" key={item.id}>
           <MessageContent>{item.text}</MessageContent>
         </Message>
       );
     if (item.t === "text")
       return (
-        <Message from="assistant" key={item.id}>
+        <Message className="max-w-full" from="assistant" key={item.id}>
           <MessageContent>
             <MessageResponse>{item.text}</MessageResponse>
           </MessageContent>
@@ -1030,11 +1124,37 @@ export function ChatPlayground() {
       );
     if (item.t === "note")
       return (
-        <div key={item.id} className="font-mono text-[11px] text-[var(--icon)]">
+        // Hanging indent: wrapped lines align under the text, not the glyph.
+        <div key={item.id} className="-indent-4 pl-4 font-mono text-[11px] text-[var(--icon)]">
           ⎿ {item.text}
         </div>
       );
     if (item.t === "rule") return <div className="border-t border-dashed border-[var(--border-weak)]" key={item.id} />;
+    if (item.t === "entry")
+      return (
+        <div className="my-1 flex w-full items-center gap-3" key={item.id}>
+          <span className="h-px flex-1 bg-[var(--border-weak)]" />
+          <span className="flex flex-wrap items-center gap-1.5 font-mono text-[10.5px] tracking-widest text-[var(--icon)] uppercase">
+            session starts
+            <span style={pill("var(--bg-weak)", "var(--text-weak)")}>trust: {item.label.trust}</span>
+            <span style={pill("var(--bg-weak)", "var(--text-weak)")}>audience: {item.label.audience}</span>
+          </span>
+          <span className="h-px flex-1 bg-[var(--border-weak)]" />
+        </div>
+      );
+    if (item.t === "authors")
+      return (
+        <div
+          className="w-full rounded-md border border-[var(--accent-border)] bg-[var(--accent-bg)] p-4"
+          key={item.id}
+        >
+          <div className="mb-1.5 flex items-center gap-2 font-mono text-[11px] tracking-[0.12em] text-[var(--accent)] uppercase">
+            <appa-mark size={17} />
+            author note
+          </div>
+          <p className="m-0 text-[13.5px] leading-relaxed text-[var(--text)]">{item.text}</p>
+        </div>
+      );
     if (item.t === "shift")
       return (
         <div
@@ -1103,6 +1223,7 @@ export function ChatPlayground() {
           </div>
           </>
         ),
+        item.tool,
       );
     }
     // The agent's remedy choice, in its own voice: "I choose to use X" says
@@ -1145,6 +1266,7 @@ export function ChatPlayground() {
             </div>
           </>
         ),
+        heldToolBefore(item.id),
       );
     }
     const state =
@@ -1163,8 +1285,9 @@ export function ChatPlayground() {
         : { badge: rulingBadge(ruling), bg: "var(--danger-bg)", fg: "var(--danger)" }
       : null;
     return (
-      <div className="w-full min-w-0 max-w-[95%]" key={item.id}>
-        <Tool className="w-full">
+      <div className="w-full min-w-0" key={item.id}>
+        {/* mb-0: the thread's rhythm is the row's own padding, not the card's. */}
+        <Tool className="mb-0 w-full">
           <ToolHeader
             badge={
               // The held card keeps its block; the resolution card — the same
@@ -1353,15 +1476,20 @@ export function ChatPlayground() {
   return (
     <div className="flex h-full min-h-0 flex-col bg-[var(--bg)]">
       {/* The sidebar is sized so the preset's longest contract line fits the
-          editor unwrapped at its 13px mono; on narrower screens it cedes
-          room to the chat and accepts a wrap. */}
-      <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_34rem] xl:grid-cols-[minmax(0,1fr)_42rem]">
+          editor unwrapped at its 13px mono; the chat pane keeps a hard floor,
+          so on narrower screens the sidebar cedes room and accepts a wrap.
+          Dragging the pane edge overrides the defaults via --sidebar-w. */}
+      <div
+        className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(26rem,1fr)_minmax(0,var(--sidebar-w,34rem))] xl:grid-cols-[minmax(30rem,1fr)_minmax(0,var(--sidebar-w,42rem))]"
+        ref={gridRef}
+        style={sidebarPx !== null ? ({ "--sidebar-w": `${sidebarPx}px` } as React.CSSProperties) : undefined}
+      >
         {/* ---- chat pane ---- */}
         <div className="flex min-h-0 min-w-0 flex-col border-b border-[var(--border-weak)] bg-[var(--bg)] lg:border-r lg:border-b-0">
           {/* One strip of chrome: the session label heads the chat it governs
               (the flight from a card lands here), with the few controls the
               playground needs on the right. */}
-          <div className="flex flex-wrap items-center gap-2 border-b border-[var(--border-weak)] px-3 py-1.5">
+          <div className="flex flex-wrap items-center gap-2 border-b border-[var(--border-weak)] px-4 py-1.5">
             <span className="font-mono text-[10px] tracking-widest text-[var(--icon)] uppercase">session label</span>
             <span style={{ display: "flex", gap: "0.4rem" }}>
               {label && <LabelPills boundary={boundary} label={label} />}
@@ -1383,11 +1511,16 @@ export function ChatPlayground() {
                 // An empty live chat offers starters that walk the demo's
                 // best paths; a service problem earns a message instead.
                 mode === "live" ? (
-                  <div className="flex h-full flex-col items-center justify-center gap-4 px-4 py-12">
+                  // Column count follows the pane (container), not the
+                  // viewport — the sidebar leaves the chat far narrower than
+                  // the breakpoint suggests. Safe centering: when the cards
+                  // outgrow the pane, align to the scrollable top instead of
+                  // clipping both ends.
+                  <div className="@container flex h-full flex-col items-center gap-4 px-4 py-12 [justify-content:safe_center]">
                     <span className="font-mono text-[11px] tracking-widest text-[var(--icon)] uppercase">
                       start with
                     </span>
-                    <div className="grid w-full max-w-[64rem] grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                    <div className="@xl:grid-cols-2 @4xl:grid-cols-3 grid w-full max-w-[64rem] grid-cols-1 gap-3">
                       {STARTER_PROMPTS.map((starter) => (
                         <button
                           className="group flex cursor-pointer flex-col gap-2.5 rounded-xl border border-[var(--border-weak)] bg-[var(--bg-weak)] p-5 text-left transition-colors hover:border-[var(--accent-border)] hover:bg-[var(--accent-bg)]"
@@ -1417,11 +1550,12 @@ export function ChatPlayground() {
                   />
                 )
               ) : (
-                segmentThread(thread, childIds).map((segment) =>
+                <>
+                {segmentThread(thread, childIds).map((segment) =>
                   segment.child
                     ? railRow(
                         segment.items[0].id,
-                        <details className="w-full min-w-0 max-w-[95%] rounded-md border border-dashed border-[var(--border-weak)]">
+                        <details className="w-full min-w-0 rounded-md border border-dashed border-[var(--border-weak)]">
                           <summary className="cursor-pointer px-3 py-2 font-mono text-[11px] text-[var(--text-weak)] hover:text-[var(--text-strong)]">
                             ⑂ child {segment.child} — what it reads narrows this branch only ·{" "}
                             {segment.items.length} steps
@@ -1443,13 +1577,25 @@ export function ChatPlayground() {
                           : undefined;
                         return railRow(item.id, renderItem(item, group), item.lab, Boolean(group && !group.last));
                       }),
-                )
+                )}
+                {/* Between the model's moves nothing on screen is alive —
+                    running cards pulse, pending approvals wear a badge, and
+                    this row covers the remaining silence. */}
+                {busy &&
+                  !thread.some((item) => item.t === "tool" && item.state === "running") &&
+                  !thread.some((item) => item.t === "approval" && item.state === "pending") &&
+                  railRow(
+                    -1,
+                    <div className="animate-pulse font-mono text-[11px] text-[var(--icon)]">⎿ thinking…</div>,
+                    labelRef.current ?? undefined,
+                  )}
+                </>
               )}
             </ConversationContent>
             <ConversationScrollButton />
           </Conversation>
 
-          <div className="flex flex-col gap-2 border-t border-[var(--border-weak)] p-3">
+          <div className="flex flex-col gap-2 border-t border-[var(--border-weak)] px-4 py-3">
             <PromptInput className="relative" onSubmit={onSubmit}>
               <PromptInputTextarea
                 className="pr-12"
@@ -1474,8 +1620,21 @@ export function ChatPlayground() {
           </div>
         </div>
 
-        {/* ---- policy pane: static sidebar on desktop ---- */}
-        <div className="hidden min-h-0 min-w-0 flex-col bg-[var(--bg)] lg:flex">{policyPane}</div>
+        {/* ---- policy pane: resizable sidebar on desktop ---- */}
+        <div className="relative hidden min-h-0 min-w-0 flex-col bg-[var(--bg)] lg:flex">
+          <div
+            aria-orientation="vertical"
+            className="absolute inset-y-0 -left-1 z-10 w-2 cursor-col-resize transition-colors hover:bg-[var(--accent-border)] active:bg-[var(--accent-border)]"
+            onDoubleClick={() => {
+              setSidebarPx(null);
+              localStorage.removeItem("appa-demo-sidebar-px");
+            }}
+            onPointerDown={startSidebarDrag}
+            role="separator"
+            title="Drag to resize · double-click to reset"
+          />
+          {policyPane}
+        </div>
       </div>
 
       {/* On mobile the pane is a right-side drawer, out of the chat's way. */}
