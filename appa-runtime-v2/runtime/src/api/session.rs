@@ -717,10 +717,7 @@ mod tests {
     fn review() -> appa_engine::execute::AuthorityReview {
         appa_engine::execute::AuthorityReview {
             tool: appa_engine::value::ToolName::new("Bash"),
-            trajectory_label: appa_engine::label::Label::new(
-                appa_engine::label::Dim::Unknown,
-                appa_engine::label::Dim::Unknown,
-            ),
+            trajectory_label: appa_engine::label::PartialLabel::established(appa_engine::label::EstablishedLabel::top()),
         }
     }
 
@@ -1696,7 +1693,7 @@ starting_label = { trust = "suspicious" }
 version = 1
 [[policy.cast]]
 name = "channel-class"
-constant = { trust = "trusted" }
+constant = { trust = "trusted", audience = { exactly = ["public"] } }
 "#;
         assert!(matches!(
             Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None),

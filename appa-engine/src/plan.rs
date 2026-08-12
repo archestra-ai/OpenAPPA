@@ -61,7 +61,7 @@ use crate::authority::{Authority, Mandate, Sanitizer};
 use crate::check::{self, Gap, Narrowing, RawBlock};
 use crate::contract::ToolContract;
 use crate::fact::EffectKind;
-use crate::label::{Adequacy, Dim, Label};
+use crate::label::{Adequacy, EstablishedLabel, Label, PartialLabel};
 use crate::names::{AuthorityName, SanitizerName, TagName};
 use crate::projection::Views;
 use crate::registry::Registry;
@@ -215,7 +215,7 @@ pub(crate) fn plan(registry: &Registry, views: &Views, call: &ResolvedCall, raw:
 
 fn enumerate_plans(
     registry: &Registry,
-    current: &Label,
+    current: &PartialLabel,
     views: &Views,
     call: &ResolvedCall,
 ) -> Vec<ExecutableRemedyPlan> {
@@ -414,7 +414,7 @@ struct NarrowingSettlement {
 
 fn narrowing_remedies(
     registry: &Registry,
-    current: &Label,
+    current: &PartialLabel,
     contract: &ToolContract,
     call: &ResolvedCall,
     narrowing: Option<&Narrowing>,
@@ -437,8 +437,8 @@ fn narrowing_remedies(
         let Some(sanitized) = sanitized_commit(current, &output, sanitizer) else {
             continue;
         };
-        let accept = (&sanitized != current).then(|| Narrowing {
-            from: current.clone(),
+        let accept = (&sanitized != current.bound()).then(|| Narrowing {
+            from: current.bound().clone(),
             to: sanitized,
         });
         settlements.push(NarrowingSettlement {
@@ -463,12 +463,19 @@ fn applicable_output_sanitizers<'r>(
         .collect()
 }
 
-fn sanitized_commit(current: &Label, output: &Label, sanitizer: &Sanitizer) -> Option<Label> {
-    let raw = current.combine(output);
-    if &raw == current {
+/// The established bound a sanitized dispatch of `contract` would commit at `current`, when such
+/// a plan would be offered at all. `None` when the tool does not narrow here (no narrowing, so no
+/// block and no plan to attach the sanitizer to) or when the relabel lands exactly where the raw
+/// crossing would (a sanitizer that changes nothing about the merged outcome is not
+/// offered). The one home of this arithmetic; the comparison reads established parts.
+fn sanitized_commit(current: &PartialLabel, output: &Label, sanitizer: &Sanitizer) -> Option<EstablishedLabel> {
+    let raw = current.bound().combine(&output.established_part());
+    if &raw == current.bound() {
         return None;
     }
-    let sanitized = current.combine(&sanitizer.transition.derive(output));
+    let sanitized = current
+        .bound()
+        .combine(&sanitizer.transition.derive(output).established_part());
     (sanitized != raw).then_some(sanitized)
 }
 
@@ -491,10 +498,9 @@ pub(crate) fn covers_gap(authority: &Authority, gap: &Gap, tags: &[TagName]) -> 
         }
         Gap::Includes { recipients } => {
             authority.scope.covers(tags)
-                && mandate
-                    .reader_ceiling
-                    .as_ref()
-                    .is_some_and(|ceiling| Dim::Known(ceiling.clone()).covers(recipients) == Adequacy::Holds)
+                && mandate.reader_ceiling.as_ref().is_some_and(|ceiling| {
+                    crate::label::Dim::Known(ceiling.clone()).covers(recipients) == Adequacy::Holds
+                })
         }
         Gap::NoPrior(kind) => authority.scope.covers(tags) && mandate.waivers.contains(kind),
         // Attention routes by its own currency — the attended mark — never by scope.
@@ -503,7 +509,7 @@ pub(crate) fn covers_gap(authority: &Authority, gap: &Gap, tags: &[TagName]) -> 
     }
 }
 
-fn direct_redispatches(registry: &Registry, current: &Label, raw: &RawBlock) -> Vec<RedispatchPlan> {
+fn direct_redispatches(registry: &Registry, current: &PartialLabel, raw: &RawBlock) -> Vec<RedispatchPlan> {
     let mut direct = Vec::new();
     for tool in registry.tools() {
         let committed = check::committed_label(tool, current);
@@ -512,7 +518,7 @@ fn direct_redispatches(registry: &Registry, current: &Label, raw: &RawBlock) -> 
             .iter()
             .filter(|gap| match gap {
                 Gap::Prior(kind) => tool.emits.contains(kind),
-                Gap::Cap { cap } => committed.audience.within_cap(cap) == Adequacy::Holds,
+                Gap::Cap { cap } => committed.within_cap(cap) == Adequacy::Holds,
                 _ => false,
             })
             .cloned()
@@ -533,7 +539,7 @@ mod tests {
         PinnedDynamicResolution, RecipientSpec, Requires, ToolContract,
     };
     use crate::fact::{EffectSet, Fact, Revision};
-    use crate::label::{Audience, ReaderId, Trust};
+    use crate::label::{Audience, Dim, ReaderId, Trust};
     use crate::names::MarkName;
     use crate::projection::Projection;
     use crate::registry::{RegistryConfig, TrustChain};
@@ -570,6 +576,10 @@ mod tests {
 
     fn known(trust: Trust, audience: Audience) -> Label {
         Label::new(Dim::Known(trust), Dim::Known(audience))
+    }
+
+    fn established(trust: Trust, audience: Audience) -> EstablishedLabel {
+        EstablishedLabel::new(trust, audience)
     }
 
     fn plan_of(registry: &Registry, log: &[Fact], call: &ResolvedCall) -> PlannedBlock {
@@ -800,8 +810,8 @@ mod tests {
             })
             .unwrap();
         assert!(finance_plan.steps.contains(&RemedyStep::Accept(Narrowing {
-            from: known(TRUSTED, Audience::Public),
-            to: known(TRUSTED, finance),
+            from: established(TRUSTED, Audience::Public),
+            to: established(TRUSTED, finance),
         })));
     }
 
@@ -1518,7 +1528,7 @@ mod tests {
             dispatch: crate::value::DispatchId::new(traj(), seed.digest(), 0),
             tool: seed.tool().clone(),
             arguments: seed.canonical_arguments().clone(),
-            proposed_label: known(TRUSTED, Audience::Public),
+            proposed_label: established(TRUSTED, Audience::Public),
             proposed_effects: EffectSet::new(kinds.iter().copied().map(EffectKind::new))
                 .expect("distinct generated effect kinds"),
             dynamic_resolutions: vec![],
@@ -2155,8 +2165,8 @@ mod tests {
         assert_eq!(
             exec(&planned.plans[0]).steps,
             vec![RemedyStep::Accept(Narrowing {
-                from: known(TRUSTED, Audience::Public),
-                to: known(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
+                from: established(TRUSTED, Audience::Public),
+                to: established(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
             })]
         );
     }
@@ -2507,17 +2517,18 @@ mod tests {
             })
         }
 
-        pub(super) fn direct_set(registry: &Registry, current: &Label, raw: &RawBlock) -> Vec<(ToolName, Vec<Gap>)> {
+        pub(super) fn direct_set(
+            registry: &Registry,
+            current: &PartialLabel,
+            raw: &RawBlock,
+        ) -> Vec<(ToolName, Vec<Gap>)> {
             let mut expected = Vec::new();
             for tool in registry.tools() {
-                let narrowed = match (&current.audience, &tool.delta) {
-                    (
-                        Dim::Known(audience),
-                        Some(Delta {
-                            audience: Some(AudienceDelta::Static(delta)),
-                            ..
-                        }),
-                    ) => Some(intersect(audience, delta)),
+                let narrowed = match &tool.delta {
+                    Some(Delta {
+                        audience: Some(AudienceDelta::Static(delta)),
+                        ..
+                    }) => Some(intersect(&current.bound().audience, delta)),
                     _ => None,
                 };
                 let clears: Vec<Gap> = raw
@@ -2545,9 +2556,15 @@ mod tests {
 
     #[derive(Clone, Debug)]
     struct State {
-        label: Label,
+        label: EstablishedLabel,
         effects: BTreeSet<EffectKind>,
         reservations: BTreeSet<EffectKind>,
+    }
+
+    impl State {
+        fn partial(&self) -> PartialLabel {
+            PartialLabel::established(self.label.clone())
+        }
     }
 
     fn effect(name: &str) -> EffectKind {
@@ -2670,7 +2687,7 @@ mod tests {
             prop::collection::btree_set(small_effect(), 0..2),
         )
             .prop_map(|(trust, audience, effects)| State {
-                label: known(trust, audience),
+                label: established(trust, audience),
                 effects,
                 reservations: BTreeSet::new(),
             })
@@ -2742,7 +2759,7 @@ mod tests {
             let has_reserved = |kind: &EffectKind| state.reservations.contains(kind);
             let eval = check::evaluate_state(
                 contract,
-                &state.label,
+                &state.partial(),
                 &has_committed,
                 &has_reserved,
                 &call,
@@ -2756,7 +2773,7 @@ mod tests {
                 unestablished: Vec::new(),
             };
 
-            let mut log = vec![user_value(state.label.clone())];
+            let mut log = vec![user_value(state.label.clone().into_label())];
             for kind in &state.effects {
                 log.push(committed_effect(kind.clone()));
             }
@@ -2784,7 +2801,7 @@ mod tests {
                 .collect();
             let expected = match coverable || raw.requirement_gaps.is_empty() {
                 true => Vec::new(),
-                false => reference::direct_set(&registry, &state.label, &raw),
+                false => reference::direct_set(&registry, &state.partial(), &raw),
             };
             prop_assert_eq!(offered, expected);
         }
@@ -2827,7 +2844,7 @@ mod tests {
             let call = synthetic_call(contract);
             let has_committed = |kind: &EffectKind| state.effects.contains(kind);
             let has_reserved = |kind: &EffectKind| state.reservations.contains(kind);
-            let eval = check::evaluate_state(contract, &state.label, &has_committed, &has_reserved, &call);
+            let eval = check::evaluate_state(contract, &state.partial(), &has_committed, &has_reserved, &call);
             if !eval.consumed.is_empty() || (eval.requirement_gaps.is_empty() && eval.narrowing.is_none()) {
                 return Ok(());
             }
@@ -2836,7 +2853,7 @@ mod tests {
                 narrowing: eval.narrowing,
                 unestablished: Vec::new(),
             };
-            let mut log = vec![user_value(state.label.clone())];
+            let mut log = vec![user_value(state.label.clone().into_label())];
             for kind in &state.effects {
                 log.push(committed_effect(kind.clone()));
             }
@@ -2960,7 +2977,7 @@ mod tests {
             let has_reserved = |kind: &EffectKind| state.reservations.contains(kind);
             let eval = check::evaluate_state(
                 contract,
-                &state.label,
+                &state.partial(),
                 &has_committed,
                 &has_reserved,
                 &call,
@@ -2974,7 +2991,7 @@ mod tests {
                 unestablished: Vec::new(),
             };
 
-            let mut log = vec![user_value(state.label.clone())];
+            let mut log = vec![user_value(state.label.clone().into_label())];
             for kind in &state.effects {
                 log.push(committed_effect(kind.clone()));
             }

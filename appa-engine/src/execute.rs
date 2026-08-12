@@ -7,7 +7,7 @@ use thiserror::Error;
 use crate::check::{self, CheckOutcome, Gap, UnestablishedFact};
 use crate::engine::opened_dispatch;
 use crate::fact::{Fact, FactBatch};
-use crate::label::Label;
+use crate::label::PartialLabel;
 use crate::names::AuthorityName;
 use crate::plan::{self, covers_gap};
 use crate::projection::Views;
@@ -28,7 +28,7 @@ pub struct Ruling {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorityReview {
     pub tool: crate::value::ToolName,
-    pub trajectory_label: Label,
+    pub trajectory_label: PartialLabel,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -201,7 +201,7 @@ mod tests {
     use crate::authority::{Authority, Mandate, Scope};
     use crate::contract::{Delta, LabelRequirements, Requires, ToolContract};
     use crate::fact::{EffectKind, EffectSet, Fact, Revision};
-    use crate::label::{Audience, Dim, Label, ReaderId, Trust};
+    use crate::label::{Audience, Dim, EstablishedLabel, Label, ReaderId, Trust};
     use crate::names::MarkName;
     use crate::projection::Projection;
     use crate::value::{LabeledValue, Provenance, ToolName, TrajectoryId, ValueBody};
@@ -228,6 +228,14 @@ mod tests {
 
     fn known(trust: Trust, audience: Audience) -> Label {
         Label::new(Dim::Known(trust), Dim::Known(audience))
+    }
+
+    fn established(trust: Trust, audience: Audience) -> EstablishedLabel {
+        EstablishedLabel::new(trust, audience)
+    }
+
+    fn partial(trust: Trust, audience: Audience) -> PartialLabel {
+        PartialLabel::established(EstablishedLabel::new(trust, audience))
     }
 
     fn registry() -> Registry {
@@ -278,7 +286,7 @@ mod tests {
     fn top_review() -> AuthorityReview {
         AuthorityReview {
             tool: ToolName::new("wire"),
-            trajectory_label: known(SUSPICIOUS, Audience::Public),
+            trajectory_label: partial(SUSPICIOUS, Audience::Public),
         }
     }
 
@@ -374,7 +382,7 @@ mod tests {
                 dispatch: DispatchId::new(traj(), seed.digest(), 0),
                 tool: seed.tool().clone(),
                 arguments: seed.canonical_arguments().clone(),
-                proposed_label: known(TRUSTED, Audience::Public),
+                proposed_label: established(TRUSTED, Audience::Public),
                 proposed_effects: EffectSet::new([EffectKind::new("email.sent")]).unwrap(),
                 dynamic_resolutions: vec![],
             },
@@ -385,7 +393,7 @@ mod tests {
             authority: AuthorityName::new("keeper"),
             reviewed: AuthorityReview {
                 tool: ToolName::new("guard"),
-                trajectory_label: known(TRUSTED, Audience::Public),
+                trajectory_label: partial(TRUSTED, Audience::Public),
             },
             covers: vec![Gap::NoPrior(EffectKind::new("email.sent"))],
         };
@@ -434,19 +442,29 @@ mod tests {
             user_value(Label::new(Dim::Unknown, Dim::Known(Audience::Public))),
         ];
         let vault_call = call("vault", json!({}));
+        let mut reviewed_label = partial(SUSPICIOUS, Audience::Public);
+        reviewed_label.fold_value(
+            crate::value::ValueId::new(1),
+            &Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
+        );
         let ruling = Ruling {
             dispatch: DispatchId::new(traj(), vault_call.digest(), 0),
             authority: AuthorityName::new("steward"),
             reviewed: AuthorityReview {
                 tool: ToolName::new("vault"),
-                trajectory_label: Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
+                trajectory_label: reviewed_label,
             },
             covers: vec![Gap::Attention(MarkName::new("signoff"))],
         };
         match run(&registry, &log, &vault_call, &[ruling]) {
             Err(PlanError::Unestablished(facts)) => {
-                assert_eq!(facts.len(), 1);
-                assert_eq!(facts[0].dimension, crate::label::Dimension::Trust);
+                assert_eq!(
+                    facts,
+                    vec![UnestablishedFact {
+                        value: crate::value::ValueId::new(1),
+                        dimensions: std::collections::BTreeSet::from([crate::label::Dimension::Trust]),
+                    }]
+                );
             }
             other => panic!("expected the unestablished refusal, got {other:?}"),
         }
@@ -480,7 +498,7 @@ mod tests {
                 dispatch: prior,
                 tool: wire.tool().clone(),
                 arguments: wire.canonical_arguments().clone(),
-                proposed_label: Label::top(),
+                proposed_label: EstablishedLabel::top(),
                 proposed_effects: EffectSet::default(),
                 dynamic_resolutions: Vec::new(),
             },
@@ -652,7 +670,7 @@ mod tests {
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let review = AuthorityReview {
             tool: ToolName::new("wire"),
-            trajectory_label: known(TRUSTED, Audience::Public),
+            trajectory_label: partial(TRUSTED, Audience::Public),
         };
         let rulings = vec![
             Ruling {
@@ -692,7 +710,7 @@ mod tests {
             covers: vec![floor_gap()],
         };
         let false_label = AuthorityReview {
-            trajectory_label: Label::top(),
+            trajectory_label: PartialLabel::established(EstablishedLabel::top()),
             ..top_review()
         };
         assert_eq!(
@@ -749,14 +767,14 @@ mod tests {
             authority: AuthorityName::new("steward"),
             reviewed: AuthorityReview {
                 tool: ToolName::new("post"),
-                trajectory_label: known(TRUSTED, Audience::Public),
+                trajectory_label: partial(TRUSTED, Audience::Public),
             },
             covers: vec![Gap::Attention(MarkName::new("signoff"))],
         };
         let batch = run(&registry, &log, &post_call, &[ruling]).unwrap();
         let offered = crate::check::Narrowing {
-            from: known(TRUSTED, Audience::Public),
-            to: known(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
+            from: established(TRUSTED, Audience::Public),
+            to: established(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
         };
         assert_eq!(batch.facts.len(), 3);
         assert!(matches!(&batch.facts[0], Fact::Acceptance { narrowing, .. } if *narrowing == offered));
@@ -792,8 +810,8 @@ mod tests {
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let batch = run(&registry, &log, &call("get", json!({})), &[]).unwrap();
         let offered = crate::check::Narrowing {
-            from: known(TRUSTED, Audience::Public),
-            to: known(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
+            from: established(TRUSTED, Audience::Public),
+            to: established(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
         };
         assert!(
             batch
@@ -834,11 +852,11 @@ mod tests {
         let live = offered_plan(&registry, &views, &call("get", json!({})));
         let batch = execute_remedy_plan(&registry, &views, &live, &call("get", json!({})), &[]).unwrap();
         let live_narrowing = crate::check::Narrowing {
-            from: known(
+            from: established(
                 TRUSTED,
                 Audience::restricted([ReaderId::new("internal"), ReaderId::new("extra")]),
             ),
-            to: known(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
+            to: established(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
         };
         assert!(
             batch

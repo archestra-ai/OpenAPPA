@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::check::{Narrowing, UnestablishedFact};
 use crate::fact::{BoundaryKind, Fact, FactBatch, ReturnDerivation, ReturnPolicy};
-use crate::label::{Adequacy, Dim, Dimension, Label};
+use crate::label::{Adequacy, Dimension, EstablishedLabel, PartialLabel};
 use crate::names::SanitizerName;
 use crate::projection::Views;
 use crate::registry::Registry;
@@ -85,14 +85,14 @@ pub(crate) fn seed_child(
         }
     }
     let seed = parent.current_label();
-    if matches!(seed.trust, Dim::Unknown) || matches!(seed.audience, Dim::Unknown) {
+    if !seed.is_fully_established() {
         return Err(BranchError::ParentUnresolved);
     }
     let fact = Fact::Boundary {
         trajectory: child.clone(),
         kind: BoundaryKind::Fork {
             parent: parent.trajectory().clone(),
-            seed,
+            seed: seed.bound().clone().into_label(),
             return_policy,
         },
     };
@@ -121,7 +121,11 @@ pub(crate) fn submit_child_return(
                 ReturnCheck::Block(ReturnBlock::Unestablished(_)) => return Err(BranchError::ReturnFoldUnestablished),
                 ReturnCheck::Block(ReturnBlock::Narrowing { .. }) => return Err(BranchError::ReturnNarrowsParent),
             }
-            (LabeledValue::new(body, fold.clone()), ReturnDerivation::Raw)
+            // Allow proved the fold fully established and non-narrowing: the crossing carries it.
+            (
+                LabeledValue::new(body, fold.bound().clone().into_label()),
+                ReturnDerivation::Raw,
+            )
         }
         (ReturnPolicy::Sanitized(bound), ReturnSubmission::Derived { body, raw_digest }) => {
             sanitized_crossing(registry, &fold, &bound, body, raw_digest)?
@@ -218,9 +222,10 @@ pub enum ReturnCheck {
     Block(ReturnBlock),
 }
 
-/// What blocked the return. The two causes are structurally disjoint: an Unknown dimension is
-/// absorbing under `combine` but not an ordered restriction, so it can never form a narrowing —
-/// a block is one or the other, never both.
+/// What blocked the return. The two causes are disjoint by ordering: an unresolved child fold
+/// blocks before any narrowing comparison runs (`BRN-14` resolves first; `T03` replaces this
+/// hard block with unresolved-identity merging), so a narrowing block always reads a fully
+/// established fold.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReturnBlock {
     Narrowing {
@@ -260,15 +265,17 @@ pub(crate) fn check_child_return(
         return Ok(ReturnCheck::Block(ReturnBlock::Unestablished(unestablished)));
     }
 
-    let candidate = current.combine(&fold);
-    if candidate == current {
+    let fold_bound = fold.bound();
+    let candidate = current.bound().combine(fold_bound);
+    if &candidate == current.bound() {
         return Ok(ReturnCheck::Allow);
     }
     let narrowing = Narrowing {
-        from: current.clone(),
+        from: current.bound().clone(),
         to: candidate.clone(),
     };
 
+    let fold_label = fold_bound.clone().into_label();
     let mut plans = vec![ReturnPlan::Accept(narrowing.clone())];
     if !registry.profile().confines_child_return() {
         return Ok(ReturnCheck::Block(ReturnBlock::Narrowing { narrowing, plans }));
@@ -277,12 +284,13 @@ pub(crate) fn check_child_return(
         if !sanitizer.on.output {
             continue;
         }
-        if sanitizer.transition.admits(&fold) != Adequacy::Holds {
+        if sanitizer.transition.admits(&fold_label) != Adequacy::Holds {
             continue;
         }
-        let sanitized = sanitizer.transition.derive(&fold);
-        let merged = current.combine(&sanitized);
-        if merged == current {
+        let sanitized = EstablishedLabel::from_label(&sanitizer.transition.derive(&fold_label))
+            .expect("a derivation of an established fold is established");
+        let merged = current.bound().combine(&sanitized);
+        if &merged == current.bound() {
             plans.push(ReturnPlan::Sanitize {
                 sanitizer: sanitizer.name.clone(),
                 residual: None,
@@ -291,7 +299,7 @@ pub(crate) fn check_child_return(
             plans.push(ReturnPlan::Sanitize {
                 sanitizer: sanitizer.name.clone(),
                 residual: Some(Narrowing {
-                    from: current.clone(),
+                    from: current.bound().clone(),
                     to: merged,
                 }),
             });
@@ -300,19 +308,18 @@ pub(crate) fn check_child_return(
     Ok(ReturnCheck::Block(ReturnBlock::Narrowing { narrowing, plans }))
 }
 
-fn strictly_improves(candidate: &Label, merged: &Label) -> bool {
+fn strictly_improves(candidate: &EstablishedLabel, merged: &EstablishedLabel) -> bool {
     &candidate.combine(merged) == candidate && merged != candidate
 }
 
-/// The child fold's unestablished facts — the values a cast must establish before this child's
-/// return can merge. Policy-independent by design: the runtime resolves them *before*
-/// the return-policy split, so a bound sanitizer's crossing gets the same resolution a raw one
-/// does (a sanitizer transforms content, never establishes a label fact).
+/// The child fold's unestablished facts — the sources a cast must establish before this child's
+/// return can merge, each named once with all its unresolved dimensions.
+/// Policy-independent by design: the runtime resolves them *before* the return-policy split, so
+/// a bound sanitizer's crossing gets the same resolution a raw one does (a sanitizer transforms
+/// content, never establishes a label fact).
 pub(crate) fn child_fold_unestablished(parent: &Views, child: &TrajectoryId) -> Vec<UnestablishedFact> {
     let fold = parent.branch_label(child);
-    let mut unestablished = Vec::new();
-    unestablished_dims(parent, child, &fold, &mut unestablished);
-    unestablished
+    crate::check::unestablished_facts(&fold, &[Dimension::Trust, Dimension::Audience])
 }
 
 /// What a child submits through `submit_result`, or the runtime submits for a chosen return
@@ -351,7 +358,7 @@ pub(crate) fn execute_child_return_plan(
     let fold = parent.branch_label(child);
     let (value, derivation, acceptance) = match (chosen, submission) {
         (ReturnPlan::Accept(narrowing), ReturnSubmission::Raw { body }) => (
-            LabeledValue::new(body, fold.clone()),
+            LabeledValue::new(body, fold.bound().clone().into_label()),
             ReturnDerivation::Raw,
             Some(narrowing),
         ),
@@ -371,7 +378,7 @@ pub(crate) fn execute_child_return_plan(
 
 fn sanitized_crossing(
     registry: &Registry,
-    fold: &Label,
+    fold: &PartialLabel,
     sanitizer: &SanitizerName,
     body: ValueBody,
     raw_digest: RawResultDigest,
@@ -379,16 +386,17 @@ fn sanitized_crossing(
     let registered = registry
         .sanitizer(sanitizer)
         .ok_or_else(|| BranchError::UnknownSanitizer(sanitizer.as_str().to_string()))?;
-    if matches!(fold.trust, Dim::Unknown) || matches!(fold.audience, Dim::Unknown) {
+    if !fold.is_fully_established() {
         return Err(BranchError::ReturnFoldUnestablished);
     }
     if !registered.on.output {
         return Err(BranchError::SanitizerNotOutput(sanitizer.as_str().to_string()));
     }
-    if registered.transition.admits(fold) != Adequacy::Holds {
+    let fold_label = fold.bound().clone().into_label();
+    if registered.transition.admits(&fold_label) != Adequacy::Holds {
         return Err(BranchError::TransitionSourceUnmet);
     }
-    let value = LabeledValue::new(body, registered.transition.derive(fold));
+    let value = LabeledValue::new(body, registered.transition.derive(&fold_label));
     let derivation = ReturnDerivation::Sanitized {
         sanitizer: sanitizer.clone(),
         raw_digest,
@@ -397,34 +405,14 @@ fn sanitized_crossing(
     Ok((value, derivation))
 }
 
-fn unestablished_dims(views: &Views, trajectory: &TrajectoryId, fold: &Label, out: &mut Vec<UnestablishedFact>) {
-    let trust_unknown = matches!(fold.trust, Dim::Unknown);
-    let audience_unknown = matches!(fold.audience, Dim::Unknown);
-    if !trust_unknown && !audience_unknown {
-        return;
-    }
-    for (id, label) in views.branch_values_of(trajectory) {
-        if trust_unknown && matches!(label.trust, Dim::Unknown) {
-            out.push(UnestablishedFact {
-                value: id,
-                dimension: Dimension::Trust,
-            });
-        }
-        if audience_unknown && matches!(label.audience, Dim::Unknown) {
-            out.push(UnestablishedFact {
-                value: id,
-                dimension: Dimension::Audience,
-            });
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use crate::authority::{Sanitizer, SanitizerPoints, Transition};
     use crate::fact::{CloseOutcome, EffectKind, EffectSet, Revision};
-    use crate::label::{Audience, Label, ReaderId, Trust};
+    use crate::label::{Audience, Dim, Label, ReaderId, Trust};
     use crate::projection::Projection;
     use crate::registry::{RegistryConfig, TrustChain};
     use crate::value::{
@@ -445,6 +433,14 @@ mod tests {
 
     fn known(trust: Trust, audience: Audience) -> Label {
         Label::new(Dim::Known(trust), Dim::Known(audience))
+    }
+
+    fn established(trust: Trust, audience: Audience) -> EstablishedLabel {
+        EstablishedLabel::new(trust, audience)
+    }
+
+    fn partial(trust: Trust, audience: Audience) -> PartialLabel {
+        PartialLabel::established(EstablishedLabel::new(trust, audience))
     }
 
     fn internal() -> Audience {
@@ -512,8 +508,14 @@ mod tests {
     fn fork_seeds_child_at_parent_current_label() {
         let log = forked(known(SUSPICIOUS, internal()));
         let projection = build(&log);
-        assert_eq!(projection.view(&child()).current_label(), known(SUSPICIOUS, internal()));
-        assert_ne!(projection.view(&child()).current_label(), Label::top());
+        assert_eq!(
+            projection.view(&child()).current_label(),
+            partial(SUSPICIOUS, internal())
+        );
+        assert_ne!(
+            projection.view(&child()).current_label(),
+            PartialLabel::established(EstablishedLabel::top())
+        );
     }
 
     #[test]
@@ -561,7 +563,7 @@ mod tests {
         }
         assert_eq!(
             projection.view(&parent()).current_label(),
-            known(SUSPICIOUS, internal())
+            partial(SUSPICIOUS, internal())
         );
     }
 
@@ -601,7 +603,7 @@ mod tests {
         assert_eq!(value.label.audience, Dim::Known(Audience::Public));
         assert_eq!(
             projection.view(&parent()).current_label(),
-            known(SUSPICIOUS, internal())
+            partial(SUSPICIOUS, internal())
         );
     }
 
@@ -672,20 +674,20 @@ mod tests {
         log.push(admit(child(), known(SUSPICIOUS, internal())));
         match check(&registry(), &log) {
             ReturnCheck::Block(ReturnBlock::Narrowing { narrowing, plans }) => {
-                assert_eq!(narrowing.from, known(TRUSTED, Audience::Public));
-                assert_eq!(narrowing.to, known(SUSPICIOUS, internal()));
+                assert_eq!(narrowing.from, established(TRUSTED, Audience::Public));
+                assert_eq!(narrowing.to, established(SUSPICIOUS, internal()));
                 assert_eq!(
                     plans,
                     vec![
                         ReturnPlan::Accept(Narrowing {
-                            from: known(TRUSTED, Audience::Public),
-                            to: known(SUSPICIOUS, internal()),
+                            from: established(TRUSTED, Audience::Public),
+                            to: established(SUSPICIOUS, internal()),
                         }),
                         ReturnPlan::Sanitize {
                             sanitizer: SanitizerName::new("declassify"),
                             residual: Some(Narrowing {
-                                from: known(TRUSTED, Audience::Public),
-                                to: known(SUSPICIOUS, Audience::Public),
+                                from: established(TRUSTED, Audience::Public),
+                                to: established(SUSPICIOUS, Audience::Public),
                             }),
                         },
                     ]
@@ -705,8 +707,8 @@ mod tests {
                     plans,
                     vec![
                         ReturnPlan::Accept(Narrowing {
-                            from: known(SUSPICIOUS, Audience::Public),
-                            to: known(SUSPICIOUS, internal()),
+                            from: established(SUSPICIOUS, Audience::Public),
+                            to: established(SUSPICIOUS, internal()),
                         }),
                         ReturnPlan::Sanitize {
                             sanitizer: SanitizerName::new("declassify"),
@@ -748,8 +750,8 @@ mod tests {
                 assert_eq!(
                     plans,
                     vec![ReturnPlan::Accept(Narrowing {
-                        from: known(TRUSTED, internal()),
-                        to: known(SUSPICIOUS, internal()),
+                        from: established(TRUSTED, internal()),
+                        to: established(SUSPICIOUS, internal()),
                     })]
                 );
             }
@@ -790,7 +792,7 @@ mod tests {
                     facts,
                     vec![UnestablishedFact {
                         value: unknown_value,
-                        dimension: Dimension::Trust,
+                        dimensions: BTreeSet::from([Dimension::Trust]),
                     }]
                 );
             }
@@ -812,16 +814,10 @@ mod tests {
             ReturnCheck::Block(ReturnBlock::Unestablished(facts)) => {
                 assert_eq!(
                     facts,
-                    vec![
-                        UnestablishedFact {
-                            value: ValueId::new(1),
-                            dimension: Dimension::Trust,
-                        },
-                        UnestablishedFact {
-                            value: ValueId::new(1),
-                            dimension: Dimension::Audience,
-                        },
-                    ]
+                    vec![UnestablishedFact {
+                        value: ValueId::new(1),
+                        dimensions: BTreeSet::from([Dimension::Trust, Dimension::Audience]),
+                    }]
                 );
             }
             other => panic!("expected the unestablished block, got {other:?}"),
@@ -890,8 +886,8 @@ mod tests {
 
     fn accept_blocked_family() -> ReturnPlan {
         ReturnPlan::Accept(Narrowing {
-            from: known(TRUSTED, Audience::Public),
-            to: known(SUSPICIOUS, internal()),
+            from: established(TRUSTED, Audience::Public),
+            to: established(SUSPICIOUS, internal()),
         })
     }
 
@@ -922,8 +918,8 @@ mod tests {
             } => {
                 assert_eq!(trajectory, &parent());
                 assert_eq!(child_return, &ChildReturnId::new(child(), 0));
-                assert_eq!(narrowing.from, known(TRUSTED, Audience::Public));
-                assert_eq!(narrowing.to, known(SUSPICIOUS, internal()));
+                assert_eq!(narrowing.from, established(TRUSTED, Audience::Public));
+                assert_eq!(narrowing.to, established(SUSPICIOUS, internal()));
             }
             other => panic!("expected ChildReturnAcceptance, got {other:?}"),
         }
@@ -939,7 +935,7 @@ mod tests {
         let projection = build(&log);
         assert_eq!(
             projection.view(&parent()).current_label(),
-            known(SUSPICIOUS, internal())
+            partial(SUSPICIOUS, internal())
         );
     }
 
@@ -949,8 +945,8 @@ mod tests {
         let chosen = ReturnPlan::Sanitize {
             sanitizer: SanitizerName::new("declassify"),
             residual: Some(Narrowing {
-                from: known(TRUSTED, Audience::Public),
-                to: known(SUSPICIOUS, Audience::Public),
+                from: established(TRUSTED, Audience::Public),
+                to: established(SUSPICIOUS, Audience::Public),
             }),
         };
         let batch = execute(
@@ -965,7 +961,7 @@ mod tests {
         .unwrap();
         match &batch.facts[1] {
             Fact::ChildReturnAcceptance { narrowing, .. } => {
-                assert_eq!(narrowing.to, known(SUSPICIOUS, Audience::Public));
+                assert_eq!(narrowing.to, established(SUSPICIOUS, Audience::Public));
             }
             other => panic!("expected ChildReturnAcceptance, got {other:?}"),
         }
@@ -973,7 +969,7 @@ mod tests {
         let projection = build(&log);
         assert_eq!(
             projection.view(&parent()).current_label(),
-            known(SUSPICIOUS, Audience::Public)
+            partial(SUSPICIOUS, Audience::Public)
         );
         assert!(log.iter().any(|f| matches!(
             f,
@@ -1011,7 +1007,7 @@ mod tests {
         let projection = build(&log);
         assert_eq!(
             projection.view(&parent()).current_label(),
-            known(SUSPICIOUS, Audience::Public)
+            partial(SUSPICIOUS, Audience::Public)
         );
     }
 
@@ -1040,8 +1036,8 @@ mod tests {
                 &ReturnPlan::Sanitize {
                     sanitizer: SanitizerName::new("declassify"),
                     residual: Some(Narrowing {
-                        from: known(TRUSTED, internal()),
-                        to: known(SUSPICIOUS, internal()),
+                        from: established(TRUSTED, internal()),
+                        to: established(SUSPICIOUS, internal()),
                     }),
                 },
                 ReturnSubmission::Derived {
@@ -1124,8 +1120,8 @@ mod tests {
                 &ReturnPlan::Sanitize {
                     sanitizer: SanitizerName::new("declassify"),
                     residual: Some(Narrowing {
-                        from: known(TRUSTED, Audience::Public),
-                        to: known(SUSPICIOUS, Audience::Public),
+                        from: established(TRUSTED, Audience::Public),
+                        to: established(SUSPICIOUS, Audience::Public),
                     }),
                 },
                 ReturnSubmission::Derived {
@@ -1143,8 +1139,8 @@ mod tests {
             &ReturnPlan::Sanitize {
                 sanitizer: SanitizerName::new("declassify"),
                 residual: Some(Narrowing {
-                    from: known(TRUSTED, Audience::Public),
-                    to: known(SUSPICIOUS, Audience::Public),
+                    from: established(TRUSTED, Audience::Public),
+                    to: established(SUSPICIOUS, Audience::Public),
                 }),
             },
             ReturnSubmission::Derived {
@@ -1394,7 +1390,7 @@ mod tests {
         );
         assert_eq!(
             projection.view(&parent()).current_label(),
-            known(SUSPICIOUS, internal())
+            partial(SUSPICIOUS, internal())
         );
     }
 
@@ -1420,7 +1416,7 @@ mod tests {
             dispatch: dispatch.clone(),
             tool: call.tool().clone(),
             arguments: call.canonical_arguments().clone(),
-            proposed_label: Label::top(),
+            proposed_label: EstablishedLabel::top(),
             proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
             dynamic_resolutions: Vec::new(),
         });
@@ -1446,7 +1442,7 @@ mod tests {
             dispatch: dispatch.clone(),
             tool: call.tool().clone(),
             arguments: call.canonical_arguments().clone(),
-            proposed_label: Label::top(),
+            proposed_label: EstablishedLabel::top(),
             proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
             dynamic_resolutions: Vec::new(),
         });

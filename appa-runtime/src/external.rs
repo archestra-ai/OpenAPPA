@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use appa_engine::check::Gap;
 use appa_engine::execute::AuthorityReview;
-use appa_engine::label::{Audience, DimValue, Label, ReaderId};
+use appa_engine::label::{Audience, Dim, EstablishedLabel, Label, PartialLabel, ReaderId};
 use appa_engine::names::{AuthorityName, DynamicResolverName};
 use appa_engine::projection::Views;
 use appa_engine::registry::TrustChain;
@@ -36,7 +36,7 @@ pub struct AuthorityRequest {
     authority: AuthorityName,
     tool: ToolName,
     digest: CanonicalDigest,
-    trajectory_label: Label,
+    trajectory_label: PartialLabel,
     arguments: Box<serde_json::value::RawValue>,
     gaps: Vec<Gap>,
 }
@@ -250,11 +250,12 @@ pub struct CastInput {
     pub body: String,
 }
 
-/// A cast's decision. `Unresolved` fails closed — the Unknown dimension stays Unknown. The engine
-/// still bounds a `Resolved` proposal by `may_cast`; this layer only proposes.
+/// A cast's decision: one complete source label, or a decline. `Unresolved` fails closed — the
+/// source stays unresolved. The engine still bounds a `Resolved` proposal by the whole-source
+/// validator; this layer only proposes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CastAnswer {
-    Resolved(DimValue),
+    Resolved(EstablishedLabel),
     Unresolved,
 }
 
@@ -274,11 +275,11 @@ struct CastWire {
 }
 
 impl CastBackend {
-    pub async fn resolve(&self, input: &CastInput, chain: &TrustChain) -> CastAnswer {
+    pub async fn resolve(&self, input: &CastInput, chain: &TrustChain, prior: &Label) -> CastAnswer {
         match self {
             CastBackend::Http { url, timeout, client } => {
                 match post_json::<CastWire>(client, url, *timeout, input).await {
-                    Some(wire) => parse_cast_answer(wire, chain),
+                    Some(wire) => parse_cast_answer(wire, chain, prior),
                     None => CastAnswer::Unresolved,
                 }
             }
@@ -286,27 +287,29 @@ impl CastBackend {
     }
 }
 
-fn parse_cast_answer(wire: CastWire, chain: &TrustChain) -> CastAnswer {
-    match (wire.trust, wire.audience) {
-        (Some(rank), None) => match chain.rank_of(&rank) {
-            Some(trust) => CastAnswer::Resolved(DimValue::Trust(trust)),
-            None => CastAnswer::Unresolved,
+fn parse_cast_answer(wire: CastWire, chain: &TrustChain, prior: &Label) -> CastAnswer {
+    let trust = match (wire.trust, &prior.trust) {
+        (Some(rank), _) => match chain.rank_of(&rank) {
+            Some(trust) => trust,
+            None => return CastAnswer::Unresolved,
         },
-        (None, Some(readers)) => match parse_readers(&readers) {
-            Some(audience) => CastAnswer::Resolved(DimValue::Audience(audience)),
-            None => CastAnswer::Unresolved,
+        (None, Dim::Known(trust)) => *trust,
+        (None, Dim::Unknown) => return CastAnswer::Unresolved,
+    };
+    let audience = match (wire.audience, &prior.audience) {
+        (Some(readers), _) => match parse_readers(&readers) {
+            Some(audience) => audience,
+            None => return CastAnswer::Unresolved,
         },
-        // A resolver must name exactly one dimension; anything else is a decline.
-        _ => CastAnswer::Unresolved,
-    }
+        (None, Dim::Known(audience)) => audience.clone(),
+        (None, Dim::Unknown) => return CastAnswer::Unresolved,
+    };
+    CastAnswer::Resolved(EstablishedLabel::new(trust, audience))
 }
 
 fn parse_readers(readers: &[String]) -> Option<Audience> {
     if readers.iter().any(|r| r == "public") {
         return (readers.len() == 1).then_some(Audience::Public);
-    }
-    if readers.is_empty() {
-        return None;
     }
     Some(Audience::restricted(readers.iter().map(ReaderId::new)))
 }
@@ -739,27 +742,45 @@ mod tests {
     }
 
     #[test]
-    fn cast_answer_parses_one_dimension_or_declines() {
+    fn cast_answer_composes_a_complete_label_or_declines() {
         let c = chain();
+        let audience_known = Label::new(Dim::Unknown, Dim::Known(Audience::Public));
         assert_eq!(
             parse_cast_answer(
                 CastWire {
                     trust: Some("suspicious".into()),
                     audience: None
                 },
-                &c
+                &c,
+                &audience_known,
             ),
-            CastAnswer::Resolved(DimValue::Trust(Trust::new(0)))
+            CastAnswer::Resolved(EstablishedLabel::new(Trust::new(0), Audience::Public))
         );
+        let trust_known = Label::new(Dim::Known(Trust::new(1)), Dim::Unknown);
         assert_eq!(
             parse_cast_answer(
                 CastWire {
                     trust: None,
                     audience: Some(vec!["public".into()])
                 },
-                &c
+                &c,
+                &trust_known,
             ),
-            CastAnswer::Resolved(DimValue::Audience(Audience::Public))
+            CastAnswer::Resolved(EstablishedLabel::new(Trust::new(1), Audience::Public))
+        );
+        assert_eq!(
+            parse_cast_answer(
+                CastWire {
+                    trust: None,
+                    audience: Some(vec![])
+                },
+                &c,
+                &trust_known,
+            ),
+            CastAnswer::Resolved(EstablishedLabel::new(
+                Trust::new(1),
+                Audience::restricted(std::iter::empty())
+            ))
         );
         assert_eq!(
             parse_cast_answer(
@@ -767,7 +788,8 @@ mod tests {
                     trust: Some("godmode".into()),
                     audience: None
                 },
-                &c
+                &c,
+                &audience_known,
             ),
             CastAnswer::Unresolved
         );
@@ -777,7 +799,8 @@ mod tests {
                     trust: None,
                     audience: None
                 },
-                &c
+                &c,
+                &audience_known,
             ),
             CastAnswer::Unresolved
         );
@@ -791,9 +814,10 @@ mod tests {
             timeout: Duration::from_secs(5),
             client: HttpClient::new(),
         };
+        let prior = Label::new(Dim::Unknown, Dim::Known(Audience::Public));
         assert_eq!(
-            backend.resolve(&CastInput { body: "x".into() }, &chain()).await,
-            CastAnswer::Resolved(DimValue::Trust(Trust::new(0)))
+            backend.resolve(&CastInput { body: "x".into() }, &chain(), &prior).await,
+            CastAnswer::Resolved(EstablishedLabel::new(Trust::new(0), Audience::Public))
         );
         handle.await.unwrap();
 
@@ -803,7 +827,7 @@ mod tests {
             client: HttpClient::new(),
         };
         assert_eq!(
-            dead.resolve(&CastInput { body: "x".into() }, &chain()).await,
+            dead.resolve(&CastInput { body: "x".into() }, &chain(), &prior).await,
             CastAnswer::Unresolved
         );
     }

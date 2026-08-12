@@ -147,9 +147,9 @@ Unannotated tools return data with an **Unknown** label state, representing unve
 | **Unannotated Tool Dispatch** | Succeeds and assigns **Unknown** label state to its output. |
 | **Unregistered Tool Dispatch** | Refused directly by the engine before execution. |
 | **Requirement Check (`requires`)** | Fails closed when consuming an **Unknown** label value. |
-| **Child Merge Boundary** | Unknown child returns merge and absorb like any read; registered casts may resolve them at the boundary. |
+| **Child Merge Boundary** | Unknown child returns merge like any read: unresolved identities cross while every known restriction holds. Registered casts resolve them where the return policy consumes the dimension. |
 
-An Unknown label state does not halt execution until a tool contract's `requires` clause explicitly checks the value. To resolve an **Unknown** state, deployments register a **cast** component that assigns concrete labels based on static rules or external evaluation services. This design allows deployments to start with a few high-risk tool annotations and incrementally expand policy coverage over time.
+An Unknown label state does not halt execution until a tool contract's `requires` clause explicitly checks the value. To resolve an **Unknown** state, deployments register a **cast** component that assigns the value's complete label based on static rules or external evaluation services. This design allows deployments to start with a few high-risk tool annotations and incrementally expand policy coverage over time.
 
 ## Deploy at the gateway alone, or add components for full coverage
 

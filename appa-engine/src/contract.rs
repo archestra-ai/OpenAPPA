@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::fact::{EffectKind, EffectSet};
-use crate::label::{Audience, Dim, Dimension, Label, ReaderId, Trust};
+use crate::label::{Audience, Dim, Dimension, EstablishedLabel, Label, ReaderId, Trust};
 use crate::names::{DynamicResolverName, MarkName, TagName};
 use crate::value::ToolName;
 
@@ -110,24 +110,23 @@ impl Delta {
         )
     }
 
-    /// The label a successful call would commit, on the check's clock: the current label folded
-    /// with the delta's **established** dimensions only. A pending-cast dimension contributes
-    /// identity here — its actual contribution folds at admission, at the resolved label, where
-    /// every later call re-checks against it. (Sound because load validation refuses a contract
-    /// that pairs a pending-cast dimension with a `requires` on that same dimension, so no check
-    /// this projection feeds can depend on the unestablished state.)
-    pub fn apply(&self, label: &Label) -> Label {
-        let established = Label::new(
+    /// The narrowing a successful call would commit, on the check's clock: the delta's
+    /// **established** dimensions only, as a meet operand. A pending-cast or dynamic dimension
+    /// contributes identity here — its actual contribution folds at admission, at the resolved
+    /// label, where every later call re-checks against it. (Sound because load validation
+    /// refuses a contract that pairs a pending-cast dimension with a `requires` on that same
+    /// dimension, so no check this projection feeds can depend on the unestablished state.)
+    pub fn established_narrowing(&self) -> EstablishedLabel {
+        EstablishedLabel::new(
             match &self.trust {
-                Some(Dim::Known(t)) => Dim::Known(*t),
-                Some(Dim::Unknown) | None => Dim::Known(Trust::new(u8::MAX)),
+                Some(Dim::Known(t)) => *t,
+                Some(Dim::Unknown) | None => Trust::new(u8::MAX),
             },
             match &self.audience {
-                Some(AudienceDelta::Static(a)) => Dim::Known(a.clone()),
-                Some(AudienceDelta::PendingCast | AudienceDelta::Dynamic(_)) | None => Dim::Known(Audience::Public),
+                Some(AudienceDelta::Static(a)) => a.clone(),
+                Some(AudienceDelta::PendingCast | AudienceDelta::Dynamic(_)) | None => Audience::Public,
             },
-        );
-        label.combine(&established)
+        )
     }
 
     pub fn pending_cast_dim(&self) -> Option<Dimension> {
@@ -220,9 +219,10 @@ impl ToolContract {
         label
     }
 
-    /// The output label recovered from the dynamic answer persisted on a dispatch. Admission uses
+    /// The output label recovered from the dynamic answer persisted on a dispatch. Admission —
+    /// and the runtime composing a whole-source pending-cast answer against it — uses
     /// this form, never the caller's in-memory resolution.
-    pub(crate) fn output_label_for_resolutions(&self, resolutions: &[PinnedDynamicResolution]) -> Label {
+    pub fn output_label_for_resolutions(&self, resolutions: &[PinnedDynamicResolution]) -> Label {
         let mut label = self.output_label();
         if let Some(AudienceDelta::Dynamic(binding)) = self.delta.as_ref().and_then(|delta| delta.audience.as_ref()) {
             let mut matching = resolutions.iter().filter(|resolution| resolution.binding() == binding);

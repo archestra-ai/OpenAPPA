@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::contract::PinnedDynamicResolution;
 use crate::fact::{BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ReturnPolicy, Revision};
-use crate::label::{Dim, DimValue, Label};
+use crate::label::{EstablishedLabel, Label, PartialLabel};
 use crate::names::{AuthorityName, SanitizerName};
 use crate::value::{
     CanonicalDigest, ChildReturnId, DispatchId, LabeledValue, Provenance, ToolName, TrajectoryId, ValueId,
@@ -136,13 +136,9 @@ impl Projection {
                         CloseOutcome::Indeterminate => {}
                     }
                 }
-                // A cast overrides its value's Unknown dimension in the fold; the body is untouched.
                 Fact::CastApplied { value, resolved, .. } => {
                     if let Some(v) = usize::try_from(value.index()).ok().and_then(|i| values.get_mut(i)) {
-                        match resolved {
-                            DimValue::Trust(t) => v.label.trust = Dim::Known(*t),
-                            DimValue::Audience(a) => v.label.audience = Dim::Known(a.clone()),
-                        }
+                        v.label = resolved.clone().into_label();
                     }
                 }
                 Fact::Ruling { .. } | Fact::Acceptance { .. } | Fact::ChildReturnAcceptance { .. } => {}
@@ -230,17 +226,23 @@ impl Projection {
             .map(|v| &v.label)
     }
 
-    fn fold_for(&self, trajectory: &TrajectoryId) -> Label {
+    fn fold_for(&self, trajectory: &TrajectoryId) -> PartialLabel {
         let seed = self
             .forks
             .iter()
             .find(|fork| &fork.child == trajectory)
-            .map(|fork| fork.seed.clone())
-            .unwrap_or_else(Label::top);
-        self.values
-            .iter()
-            .filter(|value| &value.trajectory == trajectory)
-            .fold(seed, |acc, value| acc.combine(&value.label))
+            .map(|fork| {
+                EstablishedLabel::from_label(&fork.seed)
+                    .expect("fork seeds are fully established (seed_child refuses unresolved parents)")
+            })
+            .unwrap_or_else(EstablishedLabel::top);
+        let mut fold = PartialLabel::established(seed);
+        for (i, value) in self.values.iter().enumerate() {
+            if &value.trajectory == trajectory {
+                fold.fold_value(ValueId::new(i as u64), &value.label);
+            }
+        }
+        fold
     }
 
     pub fn view<'a>(&'a self, trajectory: &'a TrajectoryId) -> Views<'a> {
@@ -296,16 +298,18 @@ impl Views<'_> {
             .is_some_and(|value| &value.trajectory == self.trajectory)
     }
 
-    /// The branch's current label: the restrictive fold of every value admitted to this trajectory,
-    /// seeded from its fork (a child begins at the parent's current label, never at `top()`).
-    /// Branch-local — a value in a sibling branch does not lower this fold.
-    pub fn current_label(&self) -> Label {
+    /// The branch's current partial label: the fold of every value admitted to this
+    /// trajectory, seeded from its fork (a child begins at the parent's current label, never at
+    /// top). Branch-local — a value in a sibling branch does not lower this fold. The
+    /// established bound carries every known restriction; the unresolved sets name
+    /// the sources casts have not yet established.
+    pub fn current_label(&self) -> PartialLabel {
         self.projection.fold_for(self.trajectory)
     }
 
     /// The branch-local fold of an arbitrary trajectory in the family — used to validate that a
     /// child's returned value does not raise trust above what the child legitimately holds.
-    pub fn branch_label(&self, trajectory: &TrajectoryId) -> Label {
+    pub fn branch_label(&self, trajectory: &TrajectoryId) -> PartialLabel {
         self.projection.fold_for(trajectory)
     }
 
@@ -351,26 +355,6 @@ impl Views<'_> {
     /// raw counts.
     pub fn has_ended(&self, branch: &TrajectoryId) -> bool {
         self.returns_by(branch) > 0 || self.projection.voided.contains(branch)
-    }
-
-    /// The values admitted to this branch, with their ids and labels — for finding the Unknown
-    /// dimensions a cast must resolve.
-    pub fn branch_values(&self) -> impl Iterator<Item = (ValueId, &Label)> {
-        self.branch_values_of(self.trajectory)
-    }
-
-    /// The values admitted to an arbitrary family trajectory — the return check names a child's
-    /// (or the parent's own) unresolved values from this one snapshot.
-    pub(crate) fn branch_values_of<'a>(
-        &'a self,
-        trajectory: &'a TrajectoryId,
-    ) -> impl Iterator<Item = (ValueId, &'a Label)> {
-        self.projection
-            .values
-            .iter()
-            .enumerate()
-            .filter(move |(_, v)| &v.trajectory == trajectory)
-            .map(|(i, v)| (ValueId::new(i as u64), &v.label))
     }
 
     /// How many dispatches of this digest this branch has already opened — the occurrence of the
@@ -457,6 +441,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_cast_fact_rebuilds_the_same_fold_as_a_resolved_admission() {
+        let resolved = EstablishedLabel::new(Trust::new(0), Audience::restricted([ReaderId::new("internal")]));
+        let via_cast = vec![
+            admit(
+                "t",
+                LabeledValue::new(ValueBody::new("body"), Label::new(Dim::Unknown, Dim::Unknown)),
+            ),
+            Fact::CastApplied {
+                trajectory: traj("t"),
+                value: ValueId::new(0),
+                resolved: resolved.clone(),
+                cast: crate::names::CastName::new("classifier"),
+            },
+        ];
+        let direct = vec![admit(
+            "t",
+            LabeledValue::new(ValueBody::new("body"), resolved.clone().into_label()),
+        )];
+
+        let cast_fold = Projection::build(&via_cast, Revision::new(2))
+            .view(&traj("t"))
+            .current_label();
+        let direct_fold = Projection::build(&direct, Revision::new(1))
+            .view(&traj("t"))
+            .current_label();
+        assert_eq!(cast_fold, direct_fold);
+        assert!(cast_fold.is_fully_established());
+        assert_eq!(cast_fold.bound(), &resolved);
+        let p = Projection::build(&via_cast, Revision::new(2));
+        assert_eq!(
+            p.view(&traj("t")).value_label(ValueId::new(0)),
+            Some(&resolved.into_label())
+        );
+    }
+
     fn dispatch(t: &str) -> DispatchId {
         let call = ResolvedCall::new(ToolName::new("tool"), crate::params::test_arguments(&json!({ "t": t })));
         DispatchId::new(traj(t), call.digest(), 0)
@@ -474,13 +494,18 @@ mod tests {
             admit("b", labeled(3, Audience::Public)),
         ];
         let p = build(&log);
-        let a = p.view(&traj("a")).current_label();
-        assert_eq!(a.trust, Dim::Known(Trust::new(1)));
-        assert_eq!(a.audience, Dim::Known(internal));
-        let b = p.view(&traj("b")).current_label();
-        assert_eq!(b.trust, Dim::Known(Trust::new(3)));
-        assert_eq!(b.audience, Dim::Known(Audience::Public));
-        assert_eq!(p.view(&traj("c")).current_label(), Label::top());
+        assert_eq!(
+            p.view(&traj("a")).current_label(),
+            PartialLabel::established(EstablishedLabel::new(Trust::new(1), internal))
+        );
+        assert_eq!(
+            p.view(&traj("b")).current_label(),
+            PartialLabel::established(EstablishedLabel::new(Trust::new(3), Audience::Public))
+        );
+        assert_eq!(
+            p.view(&traj("c")).current_label(),
+            PartialLabel::established(EstablishedLabel::top())
+        );
     }
 
     #[test]
@@ -492,7 +517,7 @@ mod tests {
                 dispatch: dispatch("a"),
                 tool: ToolName::new("tool"),
                 arguments: crate::params::test_arguments(&json!({ "t": "a" })),
-                proposed_label: Label::top(),
+                proposed_label: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 dynamic_resolutions: Vec::new(),
             },
@@ -518,7 +543,7 @@ mod tests {
                 dispatch: dispatch("a"),
                 tool: ToolName::new("tool"),
                 arguments: crate::params::test_arguments(&json!({ "t": "a" })),
-                proposed_label: Label::top(),
+                proposed_label: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 dynamic_resolutions: Vec::new(),
             },
@@ -543,7 +568,7 @@ mod tests {
                 dispatch: dispatch("a"),
                 tool: ToolName::new("tool"),
                 arguments: crate::params::test_arguments(&json!({ "t": "a" })),
-                proposed_label: Label::top(),
+                proposed_label: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 dynamic_resolutions: Vec::new(),
             },
@@ -683,7 +708,7 @@ mod tests {
                 dispatch: dispatch("a"),
                 tool: ToolName::new("fetch_meeting"),
                 arguments: crate::params::test_arguments(&json!({ "t": "a" })),
-                proposed_label: Label::top(),
+                proposed_label: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([]).unwrap(),
                 dynamic_resolutions: Vec::new(),
             },

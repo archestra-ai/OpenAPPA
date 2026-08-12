@@ -644,7 +644,10 @@ implementation = {{ builtin = "approve" }}
     assert_eq!(reviewed.tool, ToolName::new("wire"));
     assert_eq!(
         reviewed.trajectory_label,
-        Label::new(Dim::Known(Trust::new(1)), Dim::Known(Audience::Public))
+        appa_engine::label::PartialLabel::established(appa_engine::label::EstablishedLabel::new(
+            Trust::new(1),
+            Audience::Public
+        ))
     );
     assert_eq!(log.iter().filter(|fact| matches!(fact, Fact::Ruling { .. })).count(), 1);
     assert_eq!(effect_carriers(&log, "spend"), 1);
@@ -1085,7 +1088,7 @@ delta = { trust = "unknown" }
 
 [[cast]]
 name = "paranoid"
-constant = { trust = "suspicious" }
+constant = { trust = "suspicious", audience = { exactly = ["public"] } }
 "#,
         &[("scan", BuiltinTool::Echo("mail body".to_string()))],
     );
@@ -1196,7 +1199,7 @@ effects = { has_no = ["read"] }
 
 [[cast]]
 name = "paranoid"
-constant = { trust = "suspicious" }
+constant = { trust = "suspicious", audience = { exactly = ["public"] } }
 "#,
         &[
             ("scan", BuiltinTool::Echo("mail body".to_string())),
@@ -1261,7 +1264,7 @@ delta = { trust = "unknown" }
 
 [[cast]]
 name = "paranoid"
-constant = { trust = "suspicious" }
+constant = { trust = "suspicious", audience = { exactly = ["public"] } }
 "#,
         &[("scan", BuiltinTool::Echo("mail body".to_string()))],
     );
@@ -1374,7 +1377,7 @@ delta = {{ trust = "unknown" }}
 
 [[cast]]
 name = "classifier"
-resolver = {{ url = "{url}", may_cast = {{ trust = ["trusted"] }}, timeout_ms = 30000 }}
+resolver = {{ url = "{url}", may_cast = {{ trust = ["trusted"], audience = {{ cap = ["public"] }} }}, timeout_ms = 30000 }}
 "#
     );
     let mediated = mediator(&policy, &[("scan", BuiltinTool::Echo("mail body".to_string()))]);
@@ -1836,7 +1839,7 @@ delta = { trust = "unknown" }
 
 [[cast]]
 name = "paranoid"
-constant = { trust = "suspicious" }
+constant = { trust = "suspicious", audience = { exactly = ["public"] } }
 "#,
         &[("scan", BuiltinTool::Echo("mail body".to_string()))],
     );
@@ -2887,7 +2890,7 @@ delta = {{ trust = "unknown" }}
 
 [[cast]]
 name = "classifier"
-resolver = {{ url = "{resolver_url}", may_cast = {{ trust = ["suspicious"] }} }}
+resolver = {{ url = "{resolver_url}", may_cast = {{ trust = ["suspicious"], audience = {{ cap = ["public"] }} }} }}
 "#
     );
     let mediator = mediator(&policy, &[("scan", BuiltinTool::Echo("mailbox".to_string()))]);
@@ -2943,7 +2946,7 @@ delta = {{ audience = "unknown" }}
 
 [[cast]]
 name = "classifier"
-resolver = {{ url = "{resolver_url}", may_cast = {{ audience = {{ cap = ["finance"] }} }} }}
+resolver = {{ url = "{resolver_url}", may_cast = {{ trust = ["suspicious"], audience = {{ cap = ["finance"] }} }} }}
 "#
         );
         let mediator = mediator(&policy, &[("scan", BuiltinTool::Echo("mailbox".to_string()))]);
@@ -2986,7 +2989,7 @@ delta = {{ audience = "unknown" }}
 
 [[cast]]
 name = "classifier"
-resolver = {{ url = "{resolver_url}", may_cast = {{ audience = {{ cap = ["public"] }} }} }}
+resolver = {{ url = "{resolver_url}", may_cast = {{ trust = ["suspicious"], audience = {{ cap = ["public"] }} }} }}
 "#
     );
     let mediator = mediator(&policy, &[("scan", BuiltinTool::Echo("wiki article".to_string()))]);
@@ -3432,7 +3435,7 @@ trust = "suspicious"
 
 [[cast]]
 name = "assume-suspicious"
-constant = { trust = "suspicious" }
+constant = { trust = "suspicious", audience = { exactly = ["public"] } }
 "#;
     let mediated = mediator(
         policy,
@@ -3495,7 +3498,7 @@ audience = { includes = ["alice"] }
 
 [[cast]]
 name = "assume-suspicious"
-constant = { trust = "suspicious" }
+constant = { trust = "suspicious", audience = { exactly = ["bob"] } }
 "#;
     let mediated = mediator(
         policy,
@@ -3534,13 +3537,14 @@ constant = { trust = "suspicious" }
     );
     assert!(!tool_values(&log).iter().any(|(body, _)| *body == "must not run"));
     let payload = feedback_payload(&log, "send-call");
-    let residual = payload["unestablished"].as_array().expect("unestablished entries");
-    assert_eq!(residual.len(), 2, "both audience residuals are named");
-    for entry in residual {
-        assert_eq!(entry["dimension"], "Audience");
-        assert_eq!(entry["source_kind"], "tool_result");
-        assert!(entry.get("value").is_none(), "no internal id crosses to the model");
-    }
+    assert!(
+        payload.get("unestablished").is_none(),
+        "established sources leave no unestablished entry"
+    );
+    assert!(
+        !payload["requirement_gaps"].as_array().expect("gaps").is_empty(),
+        "the uncovered recipient surfaces as a coverable gap"
+    );
     turn.stop(StopReason::Cancelled).unwrap();
 }
 
@@ -3563,7 +3567,7 @@ trust = "trusted"
 
 [[cast]]
 name = "classifier"
-resolver = {{ url = "{resolver_url}", may_cast = {{ trust = ["trusted"] }} }}
+resolver = {{ url = "{resolver_url}", may_cast = {{ trust = ["trusted"], audience = {{ cap = ["public"] }} }} }}
 "#
     );
     let mediated = mediator(
@@ -3598,7 +3602,8 @@ resolver = {{ url = "{resolver_url}", may_cast = {{ trust = ["trusted"] }} }}
     let payload = feedback_payload(&log, "send-call");
     let residual = payload["unestablished"].as_array().expect("unestablished entries");
     assert_eq!(residual.len(), 1);
-    assert_eq!(residual[0]["dimension"], "Trust");
+    assert_eq!(residual[0]["dimensions"][0], "Trust");
+    assert_eq!(residual[0]["dimensions"][1], "Audience");
     assert_eq!(residual[0]["source_kind"], "tool_result");
     turn.stop(StopReason::Cancelled).unwrap();
 }
@@ -3626,10 +3631,6 @@ attention = ["signoff"]
 name = "officer"
 mandate = {{ attends = ["signoff"] }}
 implementation = {{ resolver = {{ url = "{officer_url}" }} }}
-
-[[cast]]
-name = "assume-trusted"
-constant = {{ trust = "trusted" }}
 "#
     );
     let mediated = mediator(
@@ -3668,7 +3669,9 @@ constant = {{ trust = "trusted" }}
     assert!(!offer["unestablished"].as_array().unwrap().is_empty());
 
     let gated = feedback_payload(&log, "exec-call");
-    assert_eq!(gated["unestablished"].as_array().unwrap()[0]["dimension"], "Audience");
+    let gated_dims = &gated["unestablished"].as_array().unwrap()[0]["dimensions"];
+    assert_eq!(gated_dims[0], "Trust");
+    assert_eq!(gated_dims[1], "Audience");
     assert!(
         !log.iter()
             .any(|fact| matches!(fact, Fact::Acceptance { .. } | Fact::Ruling { .. })),
@@ -3711,12 +3714,8 @@ builtin = "redact-email"
 return_sanitizer = "pii"
 
 [[cast]]
-name = "assume-suspicious"
-constant = { trust = "suspicious" }
-
-[[cast]]
-name = "assume-internal"
-constant = { audience = { exactly = ["internal"] } }
+name = "assume-internal-suspicious"
+constant = { trust = "suspicious", audience = { exactly = ["internal"] } }
 "#;
     let mediated = mediator(resolved, &[("scan", BuiltinTool::Echo("ask eve@corp.com".to_string()))]);
     let tenant = TenantId::new("tenant");
@@ -3746,8 +3745,8 @@ constant = { audience = { exactly = ["internal"] } }
         log.iter()
             .filter(|fact| matches!(fact, Fact::CastApplied { .. }))
             .count(),
-        2,
-        "both fold dimensions were established before the crossing"
+        1,
+        "one whole-source cast established the fold before the crossing"
     );
     assert!(log.iter().any(|fact| matches!(
         fact,
@@ -3803,7 +3802,12 @@ return_sanitizer = "pii"
     assert!(!log.iter().any(|fact| matches!(fact, Fact::ChildReturn { .. })));
     let payload = feedback_payload(&log, "return");
     let residual = payload["unestablished"].as_array().expect("unestablished entries");
-    assert_eq!(residual.len(), 2, "both fold dimensions are named");
+    assert_eq!(
+        residual.len(),
+        1,
+        "the source is named once, with all its dimensions"
+    );
+    assert_eq!(residual[0]["dimensions"].as_array().expect("dimensions").len(), 2);
     assert!(residual.iter().all(|entry| entry["source_kind"] == "tool_result"));
     child_turn.stop(StopReason::Cancelled).unwrap();
 }
@@ -3889,7 +3893,10 @@ builtin = "redact-email"
     let projection = Projection::build(&log, Revision::new(log.len() as u64));
     assert_eq!(
         projection.view(&session).current_label(),
-        Label::new(Dim::Known(Trust::new(1)), Dim::Known(Audience::Public))
+        appa_engine::label::PartialLabel::established(appa_engine::label::EstablishedLabel::new(
+            Trust::new(1),
+            Audience::Public
+        ))
     );
     assert!(log.iter().any(|fact| matches!(
         fact,

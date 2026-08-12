@@ -232,20 +232,22 @@ builtin = "attest-schema"
 
 ## Casts
 
-Unannotated tools return data in an `Unknown` label state. A `[[cast]]` resolves `Unknown` dimensions to concrete classifications using static rules or external classifiers.
+Unannotated tools return data in an `Unknown` label state. A `[[cast]]` resolves the whole value at once, using static rules or external classifiers: its answer is one complete label that preserves every dimension already established and makes every unresolved dimension concrete, admitted atomically or not at all.
 
 ```toml
 [[cast]]
 name     = "content-classifier"
 resolver = { url = "https://classifier.corp/resolve", timeout_ms = 10000,
-             may_cast = { trust = ["suspicious"] } } # Bounded resolver cast
+             may_cast = { trust = ["suspicious"],
+                          audience = { cap = ["public"] } } } # Complete product ceiling
 
 [cast.scope]
 tags = ["support"]                            # Applies only to values from tools with these tags
 
 [[cast]]
 name     = "paranoid-default"
-constant = { trust = "suspicious" }           # Unscoped constant fallback, registered last
+constant = { trust = "suspicious",
+             audience = { exactly = ["public"] } }  # Complete label; unscoped fallback, registered last
 ```
 
 Applicable casts — matched by scope tags — evaluate in registration order. Register constant casts last: a cast placed after a constant that covers it can never run, and the loader refuses it. The engine validates every resolver response against its declared `may_cast` ceiling before admitting the value. A `public` audience cap is an open gate: it lets a single resolver answer resolve a value to `public` and lift its audience restriction entirely — review it like any covering mandate.

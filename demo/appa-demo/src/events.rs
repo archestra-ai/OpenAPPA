@@ -179,8 +179,9 @@ pub fn fact_event(fact: &Fact, chain: &TrustChain) -> Vec<WireEvent> {
     }
 }
 
-fn label_text(label: &Label, chain: &TrustChain) -> String {
-    format!("trust={} audience={}", trust_text(label, chain), audience_text(label))
+fn label_text(label: &appa_engine::label::EstablishedLabel, chain: &TrustChain) -> String {
+    let as_label = label.clone().into_label();
+    format!("trust={} audience={}", trust_text(&as_label, chain), audience_text(&as_label))
 }
 
 pub fn current_label(
@@ -190,6 +191,18 @@ pub fn current_label(
     chain: &TrustChain,
 ) -> (String, String) {
     let projection = Projection::build(facts, revision);
-    let label = projection.view(root).current_label();
+    let fold = projection.view(root).current_label();
+    let label = Label::new(
+        if fold.is_established(appa_engine::label::Dimension::Trust) {
+            Dim::Known(fold.bound().trust)
+        } else {
+            Dim::Unknown
+        },
+        if fold.is_established(appa_engine::label::Dimension::Audience) {
+            Dim::Known(fold.bound().audience.clone())
+        } else {
+            Dim::Unknown
+        },
+    );
     (trust_text(&label, chain), audience_text(&label))
 }

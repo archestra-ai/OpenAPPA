@@ -7,7 +7,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use appa_engine::authority::{
-    Authority, Cast, CastResolution, CastTarget, Hint, Mandate, Sanitizer, SanitizerPoints, Scope, Transition,
+    Authority, Cast, CastResolution, Hint, Mandate, Sanitizer, SanitizerPoints, Scope, Transition,
 };
 use appa_engine::contract::{
     AudienceDelta, AudienceRequirement, Delta, DynamicAudienceBinding, HistoryRequirement, LabelRequirements,
@@ -16,7 +16,7 @@ use appa_engine::contract::{
 use appa_engine::engine::Engine;
 use appa_engine::fact::ReturnPolicy;
 use appa_engine::fact::{EffectKind, EffectSet};
-use appa_engine::label::{Audience, Dim, DimValue, Label, ReaderId, Trust};
+use appa_engine::label::{Audience, Dim, EstablishedLabel, Label, ReaderId, Trust};
 use appa_engine::names::{AuthorityName, CastName, DynamicResolverName, MarkName, SanitizerName, SurfaceName, TagName};
 use appa_engine::params::ToolParameters;
 use appa_engine::profile::{
@@ -774,7 +774,7 @@ struct RawIncludes {
 #[serde(deny_unknown_fields)]
 struct RawCast {
     name: String,
-    constant: Option<RawDimValue>,
+    constant: Option<RawConstantLabel>,
     resolver: Option<toml::Value>,
 }
 
@@ -788,9 +788,9 @@ impl RawCast {
             });
         }
         match (self.constant, self.resolver) {
-            (Some(dv), None) => Ok(Cast {
+            (Some(constant), None) => Ok(Cast {
                 name: CastName::new(self.name),
-                resolution: CastResolution::Constant(dv.convert(chain, &ctx)?),
+                resolution: CastResolution::Constant(constant.convert(chain, &ctx)?),
             }),
             (Some(_), Some(_)) => Err(bad_impl("cast", &self.name, "declares both constant and resolver")),
             (None, None) => Err(bad_impl("cast", &self.name, "declares neither constant nor resolver")),
@@ -801,21 +801,17 @@ impl RawCast {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawDimValue {
-    trust: Option<String>,
-    audience: Option<RawExactly>,
+struct RawConstantLabel {
+    trust: String,
+    audience: RawExactly,
 }
 
-impl RawDimValue {
-    fn convert(self, chain: &TrustChain, ctx: &str) -> Result<CastTarget, ConfigError> {
-        match (self.trust, self.audience) {
-            (Some(t), None) => Ok(DimValue::Trust(parse_trust(&t, chain, ctx)?)),
-            (None, Some(a)) => Ok(DimValue::Audience(parse_audience(&a.exactly, ctx)?)),
-            _ => Err(ConfigError::BadAudience {
-                context: ctx.to_string(),
-                reason: "a dimension value names exactly one of `trust` or `audience`".to_string(),
-            }),
-        }
+impl RawConstantLabel {
+    fn convert(self, chain: &TrustChain, ctx: &str) -> Result<EstablishedLabel, ConfigError> {
+        Ok(EstablishedLabel::new(
+            parse_trust(&self.trust, chain, ctx)?,
+            parse_audience(&self.audience.exactly, ctx)?,
+        ))
     }
 }
 

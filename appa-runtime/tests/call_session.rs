@@ -838,7 +838,7 @@ implementation = { builtin = "approve" }
     let payload: serde_json::Value = serde_json::from_str(json).expect("the payload line is JSON");
     let residual = payload["unestablished"].as_array().expect("unestablished entries");
     assert_eq!(residual.len(), 1);
-    assert_eq!(residual[0]["dimension"], "Trust");
+    assert_eq!(residual[0]["dimensions"][0], "Trust");
     assert_eq!(residual[0]["source_kind"], "tool_result");
     assert!(
         !payload["remedy_plans"].as_array().unwrap().is_empty(),
@@ -851,5 +851,8 @@ implementation = { builtin = "approve" }
     };
     let (_, json) = feedback.split_once('\n').expect("the gated refusal carries a payload");
     let payload: serde_json::Value = serde_json::from_str(json).expect("the gate payload is JSON");
-    assert_eq!(payload["unestablished"].as_array().unwrap()[0]["dimension"], "Trust");
+    assert_eq!(
+        payload["unestablished"].as_array().unwrap()[0]["dimensions"][0],
+        "Trust"
+    );
 }

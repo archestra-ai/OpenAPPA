@@ -1,20 +1,23 @@
 //! The two-outcome check: the pure evaluation of a proposed call against the trajectory.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec, ToolContract};
 use crate::fact::EffectKind;
-use crate::label::{Adequacy, Audience, Dim, Dimension, Label, ReaderId, Trust};
+use crate::label::{Adequacy, Audience, Dimension, EstablishedLabel, PartialLabel, ReaderId, Trust};
 use crate::names::{DynamicResolverName, MarkName};
 use crate::projection::Views;
 use crate::value::{ResolvedCall, ValueId};
 
-/// A value whose consumed dimension no registered cast has established — a missing fact, cleared
-/// by a cast landing, never by a ruling or a plan.
+/// A source whose consumed dimension no registered cast has established: named once,
+/// with every dimension still unresolved on it — a whole-source cast establishes them all in one
+/// fact. A missing fact, cleared by a cast landing, never by a ruling or a plan.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnestablishedFact {
     pub value: ValueId,
-    pub dimension: Dimension,
+    pub dimensions: BTreeSet<Dimension>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,10 +34,13 @@ pub enum Gap {
     Attention(MarkName),
 }
 
+/// A voluntary narrowing of the release frontier: committing this call moves the established
+/// bound down. The comparison and the recorded acceptance read bounds —
+/// unresolved sources remain alongside and are neither narrowed nor erased.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Narrowing {
-    pub from: Label,
-    pub to: Label,
+    pub from: EstablishedLabel,
+    pub to: EstablishedLabel,
 }
 
 /// The block as the check finds it — gaps, a narrowing, and/or unestablished values — before
@@ -64,30 +70,33 @@ pub(crate) struct StateEval {
     pub(crate) consumed: Vec<Dimension>,
 }
 
-/// The label the trajectory would hold after this call commits, on the check's clock. An
+/// The partial label the trajectory would hold after this call commits, on the check's clock:
+/// the bound narrowed by the delta's established dimensions, the unresolved sets untouched. An
 /// unannotated tool contributes identity here — like a pending-cast dimension, its Unknown
 /// contribution folds only at admission.
-pub(crate) fn committed_label(contract: &ToolContract, current: &Label) -> Label {
-    match &contract.delta {
-        Some(delta) => delta.apply(current),
-        None => current.clone(),
+pub(crate) fn committed_label(contract: &ToolContract, current: &PartialLabel) -> PartialLabel {
+    let mut committed = current.clone();
+    if let Some(delta) = &contract.delta {
+        committed.narrow_bound(&delta.established_narrowing());
     }
+    committed
 }
 
-pub(crate) fn committed_label_for_call(contract: &ToolContract, current: &Label, call: &ResolvedCall) -> Label {
-    let mut label = committed_label(contract, current);
+pub(crate) fn committed_label_for_call(
+    contract: &ToolContract,
+    current: &PartialLabel,
+    call: &ResolvedCall,
+) -> PartialLabel {
+    let mut committed = committed_label(contract, current);
     if let Some(crate::contract::Delta {
         audience: Some(crate::contract::AudienceDelta::Dynamic(binding)),
         ..
     }) = &contract.delta
         && let Some(audience) = call.dynamic_resolution(binding)
     {
-        label = label.combine(&Label::new(
-            Dim::Known(Trust::new(u8::MAX)),
-            Dim::Known(audience.clone()),
-        ));
+        committed.narrow_bound(&EstablishedLabel::new(Trust::new(u8::MAX), audience.clone()));
     }
-    label
+    committed
 }
 
 /// Evaluate one call against the branch views. Pure: a function of the contract, the views, and
@@ -105,7 +114,7 @@ pub(crate) fn evaluate(contract: &ToolContract, views: &Views, call: &ResolvedCa
     if eval.requirement_gaps.is_empty() && eval.narrowing.is_none() && eval.consumed.is_empty() {
         return CheckOutcome::Allow;
     }
-    let unestablished = unestablished_facts(views, &eval.consumed);
+    let unestablished = unestablished_facts(&current, &eval.consumed);
     CheckOutcome::Block(RawBlock {
         requirement_gaps: eval.requirement_gaps,
         narrowing: eval.narrowing,
@@ -123,7 +132,7 @@ pub(crate) fn evaluate(contract: &ToolContract, views: &Views, call: &ResolvedCa
 /// dimension nothing requires blocks nothing.
 pub(crate) fn evaluate_state(
     contract: &ToolContract,
-    current: &Label,
+    current: &PartialLabel,
     has_committed: &impl Fn(&EffectKind) -> bool,
     has_reserved: &impl Fn(&EffectKind) -> bool,
     call: &ResolvedCall,
@@ -131,10 +140,9 @@ pub(crate) fn evaluate_state(
     let committed = committed_label_for_call(contract, current, call);
     let consumed = consumed_unknown(contract, &committed, call);
 
-    // Clock 1: narrowing, on the committed label.
-    let narrowing = (&committed != current).then(|| Narrowing {
-        from: current.clone(),
-        to: committed.clone(),
+    let narrowing = (committed.bound() != current.bound()).then(|| Narrowing {
+        from: current.bound().clone(),
+        to: committed.bound().clone(),
     });
 
     let mut gaps = Vec::new();
@@ -157,10 +165,10 @@ pub(crate) fn evaluate_state(
     }
 }
 
-fn consumed_unknown(contract: &ToolContract, committed: &Label, call: &ResolvedCall) -> Vec<Dimension> {
+fn consumed_unknown(contract: &ToolContract, committed: &PartialLabel, call: &ResolvedCall) -> Vec<Dimension> {
     let mut dims = Vec::new();
     if let Some(floor) = contract.requires.label.trust_floor
-        && committed.trust.meets_floor(floor) == Adequacy::Unresolved
+        && committed.meets_floor(floor) == Adequacy::Unresolved
     {
         dims.push(Dimension::Trust);
     }
@@ -171,10 +179,10 @@ fn consumed_unknown(contract: &ToolContract, committed: &Label, call: &ResolvedC
         .iter()
         .any(|requirement| match requirement {
             AudienceRequirement::Includes(spec) => match resolve_recipients(spec, call) {
-                Some(recipients) => committed.audience.covers(&recipients) == Adequacy::Unresolved,
-                None => matches!(committed.audience, Dim::Unknown),
+                Some(recipients) => committed.covers(&recipients) == Adequacy::Unresolved,
+                None => !committed.is_established(Dimension::Audience),
             },
-            AudienceRequirement::Cap(cap) => committed.audience.within_cap(cap) == Adequacy::Unresolved,
+            AudienceRequirement::Cap(cap) => committed.within_cap(cap) == Adequacy::Unresolved,
         });
     if audience_unresolved {
         dims.push(Dimension::Audience);
@@ -182,45 +190,40 @@ fn consumed_unknown(contract: &ToolContract, committed: &Label, call: &ResolvedC
     dims
 }
 
-fn unestablished_facts(views: &Views, dims: &[Dimension]) -> Vec<UnestablishedFact> {
-    let mut facts = Vec::new();
-    let trust_unknown = dims.contains(&Dimension::Trust);
-    let audience_unknown = dims.contains(&Dimension::Audience);
-    if !trust_unknown && !audience_unknown {
-        return facts;
+/// The block's `unestablished` slot: every source unresolved on a consumed dimension,
+/// named once with all of its unresolved dimensions — a whole-source cast clears them together.
+/// The branch return check builds its report through this same function.
+pub(crate) fn unestablished_facts(current: &PartialLabel, dims: &[Dimension]) -> Vec<UnestablishedFact> {
+    let mut sources: BTreeSet<ValueId> = BTreeSet::new();
+    for dim in dims {
+        sources.extend(current.unresolved(*dim));
     }
-    for (id, label) in views.branch_values() {
-        if trust_unknown && matches!(label.trust, Dim::Unknown) {
-            facts.push(UnestablishedFact {
-                value: id,
-                dimension: Dimension::Trust,
-            });
-        }
-        if audience_unknown && matches!(label.audience, Dim::Unknown) {
-            facts.push(UnestablishedFact {
-                value: id,
-                dimension: Dimension::Audience,
-            });
-        }
-    }
-    facts
+    sources
+        .into_iter()
+        .map(|value| UnestablishedFact {
+            value,
+            dimensions: [Dimension::Trust, Dimension::Audience]
+                .into_iter()
+                .filter(|dim| current.is_unresolved(*dim, value))
+                .collect(),
+        })
+        .collect()
 }
 
-fn label_gaps(contract: &ToolContract, committed: &Label, call: &ResolvedCall, gaps: &mut Vec<Gap>) {
+fn label_gaps(contract: &ToolContract, committed: &PartialLabel, call: &ResolvedCall, gaps: &mut Vec<Gap>) {
     if let Some(floor) = contract.requires.label.trust_floor
-        && committed.trust.meets_floor(floor) == Adequacy::Fails
-        && let Dim::Known(actual) = committed.trust
+        && committed.meets_floor(floor) == Adequacy::Fails
     {
         gaps.push(Gap::TrustFloor {
             required: floor,
-            actual,
+            actual: committed.bound().trust,
         });
     }
     for requirement in &contract.requires.label.audience {
         match requirement {
             AudienceRequirement::Includes(spec) => match resolve_recipients(spec, call) {
                 Some(recipients) => {
-                    if committed.audience.covers(&recipients) == Adequacy::Fails {
+                    if committed.covers(&recipients) == Adequacy::Fails {
                         gaps.push(Gap::Includes { recipients });
                     }
                 }
@@ -230,7 +233,7 @@ fn label_gaps(contract: &ToolContract, committed: &Label, call: &ResolvedCall, g
                         argument: binding.argument.clone(),
                     }),
                     RecipientSpec::Placeholder(key) => {
-                        if !matches!(committed.audience, Dim::Unknown) {
+                        if committed.is_established(Dimension::Audience) {
                             gaps.push(Gap::Includes {
                                 recipients: unresolved_recipient(key),
                             });
@@ -242,7 +245,7 @@ fn label_gaps(contract: &ToolContract, committed: &Label, call: &ResolvedCall, g
                 },
             },
             AudienceRequirement::Cap(cap) => {
-                if committed.audience.within_cap(cap) == Adequacy::Fails {
+                if committed.within_cap(cap) == Adequacy::Fails {
                     gaps.push(Gap::Cap { cap: cap.clone() });
                 }
             }

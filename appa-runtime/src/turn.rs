@@ -12,7 +12,7 @@ use appa_engine::check::{CheckOutcome, Narrowing, UnestablishedFact};
 use appa_engine::contract::PinnedDynamicResolution;
 use appa_engine::execute::Ruling;
 use appa_engine::fact::{BoundaryKind, Fact, FactBatch, ProposedCall, ReturnPolicy, Revision};
-use appa_engine::label::{DimValue, Dimension};
+use appa_engine::label::{EstablishedLabel, Label};
 use appa_engine::names::{CastName, SanitizerName};
 use appa_engine::plan::{ExecutableRemedyPlan, RemedyPlan};
 use appa_engine::projection::Projection;
@@ -274,7 +274,7 @@ struct PendingCast {
     call: ResolvedCall,
     body: String,
     cast: CastName,
-    resolved: DimValue,
+    resolved: EstablishedLabel,
     narrowing: Narrowing,
     offered_round: u32,
 }
@@ -1372,20 +1372,26 @@ impl Turn {
                 return Err(TurnCancelled);
             }
             let body = value_body(log, target.value).unwrap_or_default().to_string();
+            let Some(prior) = value_label(log, target.value).cloned() else {
+                continue;
+            };
 
             for cast in &self.mediator.config().registry_config().casts {
-                let resolved: Option<DimValue> = match &cast.resolution {
-                    CastResolution::Constant(declared) if declared.dimension() == target.dimension => {
+                let resolved: Option<EstablishedLabel> = match &cast.resolution {
+                    CastResolution::Constant(declared) if cast.resolution.validate(&prior, declared).is_ok() => {
                         Some(declared.clone())
                     }
                     CastResolution::Constant(_) => None,
                     CastResolution::Resolver { .. } => match self.mediator.cast_backend(&cast.name) {
                         Some(backend) => {
                             let input = CastInput { body: body.clone() };
-                            let resolve = backend.resolve(&input, self.mediator.engine().registry().trust_chain());
+                            let resolve =
+                                backend.resolve(&input, self.mediator.engine().registry().trust_chain(), &prior);
                             match self.wait(budget, resolve).await? {
-                                Some(BackendCast::Resolved(dimension)) if dimension.dimension() == target.dimension => {
-                                    Some(dimension)
+                                Some(BackendCast::Resolved(answer))
+                                    if cast.resolution.validate(&prior, &answer).is_ok() =>
+                                {
+                                    Some(answer)
                                 }
                                 _ => None,
                             }
@@ -1413,7 +1419,7 @@ impl Turn {
                         let batch = self
                             .mediator
                             .engine()
-                            .admit_cast(&projection.view(&self.session), target, answer)
+                            .admit_cast(&projection.view(&self.session), target.value, answer)
                             .ok()?;
                         admitted = true;
                         Some(batch)
@@ -1452,22 +1458,25 @@ impl Turn {
     async fn resolve_output_cast(
         &self,
         body: &str,
-        dimension: Dimension,
+        output_label: &Label,
         budget: &RunBudget,
-    ) -> Result<Option<(CastName, DimValue)>, TurnCancelled> {
+    ) -> Result<Option<(CastName, EstablishedLabel)>, TurnCancelled> {
         for cast in &self.mediator.config().registry_config().casts {
             let resolved = match &cast.resolution {
-                CastResolution::Constant(declared) if declared.dimension() == dimension => Some(declared.clone()),
+                CastResolution::Constant(declared) if cast.resolution.validate(output_label, declared).is_ok() => {
+                    Some(declared.clone())
+                }
                 CastResolution::Constant(_) => None,
-                CastResolution::Resolver { may_cast } => match self.mediator.cast_backend(&cast.name) {
+                CastResolution::Resolver { .. } => match self.mediator.cast_backend(&cast.name) {
                     Some(backend) => {
                         let input = CastInput { body: body.to_string() };
-                        let resolve = backend.resolve(&input, self.mediator.engine().registry().trust_chain());
+                        let resolve =
+                            backend.resolve(&input, self.mediator.engine().registry().trust_chain(), output_label);
                         match self.wait(budget, resolve).await? {
-                            Some(BackendCast::Resolved(resolved))
-                                if resolved.dimension() == dimension && may_cast.admits(&resolved) =>
+                            Some(BackendCast::Resolved(answer))
+                                if cast.resolution.validate(output_label, &answer).is_ok() =>
                             {
-                                Some(resolved)
+                                Some(answer)
                             }
                             _ => None,
                         }
@@ -1490,7 +1499,7 @@ impl Turn {
         call: ResolvedCall,
         body: String,
         cast: CastName,
-        resolved: DimValue,
+        resolved: EstablishedLabel,
         narrowing: Narrowing,
     ) -> Result<(), TurnError> {
         let handle = format!("remedy-{}", self.next_handle);
@@ -1536,12 +1545,7 @@ impl Turn {
                     let projection = Projection::build(&log, revision);
                     self.mediator
                         .engine()
-                        .cast_narrowing(
-                            &projection.view(&self.session),
-                            &pending.dispatch,
-                            &pending.call,
-                            &pending.resolved,
-                        )
+                        .cast_narrowing(&projection.view(&self.session), &pending.call, &pending.resolved)
                         .expect("dispatched call is registered")
                 };
                 match narrowing {
@@ -1605,12 +1609,7 @@ impl Turn {
             let projection = Projection::build(&log, revision);
             self.mediator
                 .engine()
-                .cast_narrowing(
-                    &projection.view(&self.session),
-                    &pending.dispatch,
-                    &pending.call,
-                    &pending.resolved,
-                )
+                .cast_narrowing(&projection.view(&self.session), &pending.call, &pending.resolved)
                 .expect("dispatched call is registered")
         };
         let Some(narrowing) = narrowing else {
@@ -1727,7 +1726,7 @@ impl Turn {
         let contract = self.mediator.engine().registry().tool(call.tool());
         let pending_cast = contract.and_then(|contract| contract.pending_cast_dim());
         let mut withheld = None;
-        let mut cast_offer: Option<(CastName, DimValue, String)> = None;
+        let mut cast_offer: Option<(CastName, EstablishedLabel, String)> = None;
         let admission = match &outcome {
             ToolOutcome::Success {
                 body: BodyDisposition::Available(body),
@@ -1752,41 +1751,47 @@ impl Turn {
                 None => ResultAdmission::SuccessRaw {
                     body: ValueBody::new(body.clone()),
                 },
-                Some(dimension) => match self.resolve_output_cast(body, dimension, budget).await {
-                    Err(TurnCancelled) => return Ok(CallProgress::Cancelled),
-                    Ok(Some((cast, resolved))) => {
-                        let narrowing = {
-                            let (log, revision) = self.mediator.store().snapshot(&self.tenant, &self.session)?;
-                            let projection = Projection::build(&log, revision);
-                            self.mediator
-                                .engine()
-                                .cast_narrowing(&projection.view(&self.session), &dispatch, call, &resolved)
-                                .expect("dispatched call is registered")
-                        };
-                        if let Some(narrowing) = narrowing {
-                            self.offer_pending_cast(
-                                call_id,
-                                dispatch,
-                                call.clone(),
-                                body.clone(),
+                Some(_) => {
+                    let output_label = {
+                        let contract = contract.expect("pending_cast is Some only for a registered contract");
+                        contract.output_label_for_resolutions(call.dynamic_resolutions())
+                    };
+                    match self.resolve_output_cast(body, &output_label, budget).await {
+                        Err(TurnCancelled) => return Ok(CallProgress::Cancelled),
+                        Ok(Some((cast, resolved))) => {
+                            let narrowing = {
+                                let (log, revision) = self.mediator.store().snapshot(&self.tenant, &self.session)?;
+                                let projection = Projection::build(&log, revision);
+                                self.mediator
+                                    .engine()
+                                    .cast_narrowing(&projection.view(&self.session), call, &resolved)
+                                    .expect("dispatched call is registered")
+                            };
+                            if let Some(narrowing) = narrowing {
+                                self.offer_pending_cast(
+                                    call_id,
+                                    dispatch,
+                                    call.clone(),
+                                    body.clone(),
+                                    cast,
+                                    resolved,
+                                    narrowing,
+                                )?;
+                                return Ok(CallProgress::Go);
+                            }
+                            cast_offer = Some((cast.clone(), resolved.clone(), body.clone()));
+                            ResultAdmission::SuccessCast {
+                                body: ValueBody::new(body.clone()),
                                 cast,
                                 resolved,
-                                narrowing,
-                            )?;
-                            return Ok(CallProgress::Go);
+                            }
                         }
-                        cast_offer = Some((cast.clone(), resolved.clone(), body.clone()));
-                        ResultAdmission::SuccessCast {
-                            body: ValueBody::new(body.clone()),
-                            cast,
-                            resolved,
+                        Ok(None) => {
+                            withheld = Some(SEALED_UNRESOLVED);
+                            ResultAdmission::SuccessNoValue
                         }
                     }
-                    Ok(None) => {
-                        withheld = Some(SEALED_UNRESOLVED);
-                        ResultAdmission::SuccessNoValue
-                    }
-                },
+                }
             },
             ToolOutcome::Success {
                 body: BodyDisposition::RejectedTooLarge,
@@ -1806,7 +1811,7 @@ impl Turn {
                     let projection = Projection::build(&log, revision);
                     self.mediator
                         .engine()
-                        .cast_narrowing(&projection.view(&self.session), &dispatch, call, &resolved)
+                        .cast_narrowing(&projection.view(&self.session), call, &resolved)
                         .expect("dispatched call is registered")
                 };
                 match narrowing {
@@ -1905,6 +1910,8 @@ impl Turn {
                         | AdmitError::UnknownCast(_)
                         | AdmitError::ConstantMismatch
                         | AdmitError::CeilingExceeded
+                        | AdmitError::NonLiteralAnswer
+                        | AdmitError::EstablishedMismatch
                         | AdmitError::NarrowingUnaccepted
                         | AdmitError::AcceptanceMismatch
                         | AdmitError::OutputSanitizerBound
@@ -2147,6 +2154,15 @@ fn value_body(log: &[Fact], id: ValueId) -> Option<&str> {
     log.iter()
         .filter_map(|fact| match fact {
             Fact::ValueAdmitted { value, .. } => Some(value.body.as_str()),
+            _ => None,
+        })
+        .nth(id.index() as usize)
+}
+
+fn value_label(log: &[Fact], id: ValueId) -> Option<&Label> {
+    log.iter()
+        .filter_map(|fact| match fact {
+            Fact::ValueAdmitted { value, .. } => Some(&value.label),
             _ => None,
         })
         .nth(id.index() as usize)

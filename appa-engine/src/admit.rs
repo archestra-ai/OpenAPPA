@@ -2,14 +2,14 @@
 
 use thiserror::Error;
 
-use crate::authority::CastResolution;
-use crate::check::{Narrowing, UnestablishedFact};
+use crate::authority::CastRefusal;
+use crate::check::Narrowing;
 use crate::fact::{CloseOutcome, EffectSet, Fact, FactBatch};
-use crate::label::{Adequacy, Dim, DimValue, Label};
+use crate::label::{Adequacy, EstablishedLabel, Label};
 use crate::names::CastName;
 use crate::projection::Views;
 use crate::registry::Registry;
-use crate::value::{DispatchId, LabeledValue, Provenance, RawResultDigest, ResolvedCall, ValueBody};
+use crate::value::{DispatchId, LabeledValue, Provenance, RawResultDigest, ResolvedCall, ValueBody, ValueId};
 
 pub enum ResultAdmission {
     Failure,
@@ -19,18 +19,18 @@ pub enum ResultAdmission {
     SuccessCast {
         body: ValueBody,
         cast: CastName,
-        resolved: DimValue,
+        resolved: EstablishedLabel,
     },
     SuccessCastAccepted {
         body: ValueBody,
         cast: CastName,
-        resolved: DimValue,
+        resolved: EstablishedLabel,
         accepted: Narrowing,
     },
     SuccessCastLapsed {
         body: ValueBody,
         cast: CastName,
-        resolved: DimValue,
+        resolved: EstablishedLabel,
     },
     SuccessSanitized {
         body: ValueBody,
@@ -51,14 +51,18 @@ pub enum AdmitError {
     NotOpen,
     #[error("the contract declares a pending-cast output: only a cast-resolved admission may carry a value")]
     OutputPendingCast,
-    #[error("the contract declares no pending-cast output on the resolved dimension")]
+    #[error("the contract declares no pending-cast output")]
     NotPendingCast,
     #[error("no cast registered as {0}")]
     UnknownCast(String),
-    #[error("cast answer does not match the constant cast's declared target")]
+    #[error("cast answer does not match the constant cast's declared label")]
     ConstantMismatch,
     #[error("cast answer exceeds the resolver's may_cast ceiling")]
     CeilingExceeded,
+    #[error("cast answer holds a non-literal reader id")]
+    NonLiteralAnswer,
+    #[error("cast answer changes a dimension the output label already establishes")]
+    EstablishedMismatch,
     #[error("the cast resolution narrows the trajectory label: admission requires the agent's acceptance")]
     NarrowingUnaccepted,
     #[error("the accepted narrowing does not match the live trajectory state")]
@@ -106,77 +110,65 @@ pub(crate) fn observe_success(
     ))
 }
 
-pub(crate) fn pending_cast_narrowing(views: &Views, filled: &Label) -> Option<Narrowing> {
-    let from = views.current_label();
-    let to = from.combine(filled);
+pub(crate) fn pending_cast_narrowing(views: &Views, resolved: &EstablishedLabel) -> Option<Narrowing> {
+    let from = views.current_label().bound().clone();
+    let to = from.combine(resolved);
     if to == from { None } else { Some(Narrowing { from, to }) }
+}
+
+fn refusal_error(refusal: CastRefusal) -> AdmitError {
+    match refusal {
+        CastRefusal::NonLiteralReader => AdmitError::NonLiteralAnswer,
+        CastRefusal::ConstantMismatch => AdmitError::ConstantMismatch,
+        CastRefusal::EstablishedMismatch(_) => AdmitError::EstablishedMismatch,
+        CastRefusal::CeilingExceeded(_) => AdmitError::CeilingExceeded,
+    }
 }
 
 fn validate_cast_resolution(
     registry: &Registry,
     contract: &crate::contract::ToolContract,
+    output_label: &Label,
     cast: &CastName,
-    resolved: &DimValue,
+    resolved: &EstablishedLabel,
 ) -> Result<(), AdmitError> {
-    if contract.pending_cast_dim() != Some(resolved.dimension()) {
+    if contract.pending_cast_dim().is_none() {
         return Err(AdmitError::NotPendingCast);
     }
     let registered = registry
         .cast(cast)
         .ok_or_else(|| AdmitError::UnknownCast(cast.as_str().to_string()))?;
-    match &registered.resolution {
-        CastResolution::Constant(declared) => {
-            if resolved != declared {
-                return Err(AdmitError::ConstantMismatch);
-            }
-        }
-        CastResolution::Resolver { may_cast } => {
-            if !may_cast.admits(resolved) {
-                return Err(AdmitError::CeilingExceeded);
-            }
-        }
-    }
-    Ok(())
+    registered
+        .resolution
+        .validate(output_label, resolved)
+        .map_err(refusal_error)
 }
 
-fn cast_filled_output_label(output: Label, resolved: &DimValue) -> Label {
-    match resolved {
-        DimValue::Trust(t) => Label::new(Dim::Known(*t), output.audience),
-        DimValue::Audience(a) => Label::new(output.trust, Dim::Known(a.clone())),
-    }
-}
-
-pub(crate) fn cast_filled_dispatch_label(
-    contract: &crate::contract::ToolContract,
-    views: &Views,
-    dispatch: &DispatchId,
-    resolved: &DimValue,
-) -> Label {
-    let output = contract.output_label_for_resolutions(views.dynamic_resolutions(dispatch).unwrap_or_default());
-    cast_filled_output_label(output, resolved)
-}
-
+/// A registered cast's complete answer for one source: the whole label, never a
+/// single dimension.
 pub struct CastAnswer {
     pub cast: CastName,
-    pub resolved: DimValue,
+    pub resolved: EstablishedLabel,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CastError {
     #[error("no cast registered as {0}")]
     UnknownCast(String),
-    #[error("cast answer resolves a different dimension than the unresolved fact")]
-    DimensionMismatch,
     #[error("cast answer exceeds the resolver's may_cast ceiling")]
     CeilingExceeded,
-    #[error("cast answer does not match the constant cast's declared target")]
+    #[error("cast answer does not match the constant cast's declared label")]
     ConstantMismatch,
+    #[error("cast answer holds a non-literal reader id")]
+    NonLiteralAnswer,
+    #[error("cast answer changes a dimension the source already establishes")]
+    EstablishedMismatch,
     #[error("target value is unknown or out of range")]
     UnknownValue,
     #[error("target value belongs to another trajectory")]
     ForeignValue,
-    #[error("target value's dimension is already established")]
-    NotUnknown,
+    #[error("target value's label is already fully established")]
+    AlreadyEstablished,
 }
 
 pub(crate) fn admit_result(
@@ -249,9 +241,8 @@ pub(crate) fn admit_result(
             vec![close_success(), admit_value(output_label(), body)]
         }
         ResultAdmission::SuccessCast { body, cast, resolved } => {
-            validate_cast_resolution(registry, contract, &cast, &resolved)?;
-            let label = cast_filled_output_label(output_label(), &resolved);
-            if pending_cast_narrowing(views, &label).is_some() {
+            validate_cast_resolution(registry, contract, &output_label(), &cast, &resolved)?;
+            if pending_cast_narrowing(views, &resolved).is_some() {
                 return Err(AdmitError::NarrowingUnaccepted);
             }
             let raw_digest = RawResultDigest::of(body.as_str().as_bytes());
@@ -261,11 +252,10 @@ pub(crate) fn admit_result(
                     trajectory: trajectory.clone(),
                     dispatch: dispatch.clone(),
                     cast,
-                    dimension: resolved.dimension(),
-                    resolved,
+                    resolved: resolved.clone(),
                     raw_digest,
                 },
-                admit_value(label, body),
+                admit_value(resolved.into_label(), body),
             ]
         }
         ResultAdmission::SuccessCastAccepted {
@@ -274,9 +264,8 @@ pub(crate) fn admit_result(
             resolved,
             accepted,
         } => {
-            validate_cast_resolution(registry, contract, &cast, &resolved)?;
-            let label = cast_filled_output_label(output_label(), &resolved);
-            if pending_cast_narrowing(views, &label) != Some(accepted.clone()) {
+            validate_cast_resolution(registry, contract, &output_label(), &cast, &resolved)?;
+            if pending_cast_narrowing(views, &resolved) != Some(accepted.clone()) {
                 return Err(AdmitError::AcceptanceMismatch);
             }
             let raw_digest = RawResultDigest::of(body.as_str().as_bytes());
@@ -286,7 +275,6 @@ pub(crate) fn admit_result(
                     trajectory: trajectory.clone(),
                     dispatch: dispatch.clone(),
                     cast,
-                    dimension: resolved.dimension(),
                     resolved: resolved.clone(),
                     raw_digest,
                 },
@@ -295,7 +283,7 @@ pub(crate) fn admit_result(
                     dispatch: dispatch.clone(),
                     narrowing: accepted,
                 },
-                admit_value(label, body),
+                admit_value(resolved.into_label(), body),
             ]
         }
         ResultAdmission::SuccessSanitized {
@@ -328,7 +316,7 @@ pub(crate) fn admit_result(
             ]
         }
         ResultAdmission::SuccessCastLapsed { body, cast, resolved } => {
-            validate_cast_resolution(registry, contract, &cast, &resolved)?;
+            validate_cast_resolution(registry, contract, &output_label(), &cast, &resolved)?;
             let raw_digest = RawResultDigest::of(body.as_str().as_bytes());
             vec![
                 close_success(),
@@ -336,7 +324,6 @@ pub(crate) fn admit_result(
                     trajectory: trajectory.clone(),
                     dispatch: dispatch.clone(),
                     cast,
-                    dimension: resolved.dimension(),
                     resolved,
                     raw_digest,
                 },
@@ -347,47 +334,37 @@ pub(crate) fn admit_result(
     Ok(FactBatch::new(views.revision(), facts))
 }
 
+/// Validate a whole-source cast answer against the registered cast and the target value, then
+/// emit the one `CastApplied` fact: the complete resolution or nothing.
 pub(crate) fn admit_cast(
     registry: &Registry,
     views: &Views,
-    target: &UnestablishedFact,
+    value: ValueId,
     answer: CastAnswer,
 ) -> Result<FactBatch, CastError> {
     let cast = registry
         .cast(&answer.cast)
         .ok_or_else(|| CastError::UnknownCast(answer.cast.as_str().to_string()))?;
-    if answer.resolved.dimension() != target.dimension {
-        return Err(CastError::DimensionMismatch);
-    }
-    match &cast.resolution {
-        CastResolution::Constant(declared) => {
-            if &answer.resolved != declared {
-                return Err(CastError::ConstantMismatch);
-            }
-        }
-        CastResolution::Resolver { may_cast } => {
-            if !may_cast.admits(&answer.resolved) {
-                return Err(CastError::CeilingExceeded);
-            }
-        }
-    }
-    // A cast fills an Unknown of the caller's own branch-local value, never a sibling's.
-    if !views.owns_value(target.value) {
+    let prior = views.value_label(value).ok_or(CastError::UnknownValue)?;
+    // A cast establishes an Unknown of the caller's own branch-local value, never a sibling's.
+    if !views.owns_value(value) {
         return Err(CastError::ForeignValue);
     }
-    let label = views.value_label(target.value).ok_or(CastError::UnknownValue)?;
-    let is_unknown = match target.dimension {
-        crate::label::Dimension::Trust => matches!(label.trust, Dim::Unknown),
-        crate::label::Dimension::Audience => matches!(label.audience, Dim::Unknown),
-    };
-    if !is_unknown {
-        return Err(CastError::NotUnknown);
+    if EstablishedLabel::from_label(prior).is_some() {
+        return Err(CastError::AlreadyEstablished);
     }
+    cast.resolution
+        .validate(prior, &answer.resolved)
+        .map_err(|refusal| match refusal {
+            CastRefusal::NonLiteralReader => CastError::NonLiteralAnswer,
+            CastRefusal::ConstantMismatch => CastError::ConstantMismatch,
+            CastRefusal::EstablishedMismatch(_) => CastError::EstablishedMismatch,
+            CastRefusal::CeilingExceeded(_) => CastError::CeilingExceeded,
+        })?;
 
     let fact = Fact::CastApplied {
         trajectory: views.trajectory().clone(),
-        value: target.value,
-        dimension: target.dimension,
+        value,
         resolved: answer.resolved,
         cast: answer.cast,
     };
@@ -397,13 +374,13 @@ pub(crate) fn admit_cast(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::{Cast, CastCeiling, Sanitizer, SanitizerPoints, Transition};
+    use crate::authority::{Cast, CastCeiling, CastResolution, Sanitizer, SanitizerPoints, Transition};
     use crate::contract::{AudienceDelta, Delta, DynamicAudienceBinding, PinnedDynamicResolution, ToolContract};
     use crate::fact::{EffectKind, Revision};
-    use crate::label::{Audience, Dim, Dimension, ReaderId, Trust};
+    use crate::label::{Audience, Dim, PartialLabel, ReaderId, Trust};
     use crate::projection::Projection;
     use crate::registry::{RegistryConfig, TrustChain};
-    use crate::value::{LabeledValue, ToolName, TrajectoryId, ValueId};
+    use crate::value::{LabeledValue, ToolName, TrajectoryId};
     use serde_json::json;
 
     const SUSPICIOUS: Trust = Trust::new(0);
@@ -461,18 +438,18 @@ mod tests {
         };
         let const_cast = Cast {
             name: CastName::new("paranoid"),
-            resolution: CastResolution::Constant(DimValue::Trust(SUSPICIOUS)),
+            resolution: CastResolution::Constant(EstablishedLabel::new(SUSPICIOUS, internal())),
         };
         let audience_cast = Cast {
             name: CastName::new("roomer"),
-            resolution: CastResolution::Constant(DimValue::Audience(internal())),
+            resolution: CastResolution::Constant(EstablishedLabel::new(SUSPICIOUS, internal())),
         };
         let resolver_cast = Cast {
             name: CastName::new("classifier"),
             resolution: CastResolution::Resolver {
                 may_cast: CastCeiling {
                     trust: vec![SUSPICIOUS],
-                    audience: Some(Audience::restricted([ReaderId::new("finance"), ReaderId::new("audit")])),
+                    audience: Audience::restricted([ReaderId::new("finance"), ReaderId::new("audit")]),
                 },
             },
         };
@@ -534,7 +511,7 @@ mod tests {
             dispatch: dispatch.clone(),
             tool: call.tool().clone(),
             arguments: call.canonical_arguments().clone(),
-            proposed_label: Label::top(),
+            proposed_label: EstablishedLabel::top(),
             proposed_effects: EffectSet::new([EffectKind::new("read")]).unwrap(),
             dynamic_resolutions: Vec::new(),
         }];
@@ -568,16 +545,25 @@ mod tests {
             admit_cast(
                 &reg,
                 &p2.view(&sibling),
-                &UnestablishedFact {
-                    value: ValueId::new(0),
-                    dimension: Dimension::Trust,
-                },
+                ValueId::new(0),
                 CastAnswer {
                     cast: CastName::new("classifier"),
-                    resolved: DimValue::Trust(SUSPICIOUS),
+                    resolved: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
                 },
             ),
             Err(CastError::ForeignValue)
+        );
+        assert_eq!(
+            admit_cast(
+                &reg,
+                &p2.view(&sibling),
+                ValueId::new(99),
+                CastAnswer {
+                    cast: CastName::new("classifier"),
+                    resolved: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
+                },
+            ),
+            Err(CastError::UnknownValue)
         );
     }
 
@@ -668,24 +654,22 @@ mod tests {
         let log = unknown_value_log();
         let p = views_of(&log);
         let t = traj();
-        let target = UnestablishedFact {
-            value: ValueId::new(0),
-            dimension: Dimension::Trust,
-        };
         let batch = admit_cast(
             &reg,
             &p.view(&t),
-            &target,
+            ValueId::new(0),
             CastAnswer {
                 cast: CastName::new("classifier"),
-                resolved: DimValue::Trust(SUSPICIOUS),
+                resolved: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
             },
         )
         .unwrap();
         let mut next = log.clone();
         next.extend(batch.facts);
         let p2 = views_of(&next);
-        assert_eq!(p2.view(&t).current_label().trust, Dim::Known(SUSPICIOUS));
+        let current = p2.view(&t).current_label();
+        assert!(current.is_fully_established());
+        assert_eq!(current.bound().trust, SUSPICIOUS);
     }
 
     #[test]
@@ -694,18 +678,14 @@ mod tests {
         let log = unknown_value_log();
         let p = views_of(&log);
         let t = traj();
-        let target = UnestablishedFact {
-            value: ValueId::new(0),
-            dimension: Dimension::Trust,
-        };
         assert_eq!(
             admit_cast(
                 &reg,
                 &p.view(&t),
-                &target,
+                ValueId::new(0),
                 CastAnswer {
                     cast: CastName::new("classifier"),
-                    resolved: DimValue::Trust(Trust::new(1)),
+                    resolved: EstablishedLabel::new(Trust::new(1), Audience::Public),
                 }
             ),
             Err(CastError::CeilingExceeded)
@@ -713,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn cast_dimension_mismatch_and_already_known_rejected() {
+    fn a_mismatched_established_dimension_is_refused_whole() {
         let reg = registry();
         let log = unknown_value_log();
         let p = views_of(&log);
@@ -722,31 +702,49 @@ mod tests {
             admit_cast(
                 &reg,
                 &p.view(&t),
-                &UnestablishedFact {
-                    value: ValueId::new(0),
-                    dimension: Dimension::Trust,
-                },
+                ValueId::new(0),
                 CastAnswer {
                     cast: CastName::new("classifier"),
-                    resolved: DimValue::Audience(Audience::Public),
+                    resolved: EstablishedLabel::new(SUSPICIOUS, Audience::restricted([ReaderId::new("finance")])),
                 }
             ),
-            Err(CastError::DimensionMismatch)
+            Err(CastError::EstablishedMismatch)
         );
+    }
+
+    #[test]
+    fn a_second_resolution_after_the_first_admitted_answer_is_refused() {
+        let reg = registry();
+        let mut log = unknown_value_log();
+        let p = views_of(&log);
+        let t = traj();
+        let first = admit_cast(
+            &reg,
+            &p.view(&t),
+            ValueId::new(0),
+            CastAnswer {
+                cast: CastName::new("classifier"),
+                resolved: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
+            },
+        )
+        .unwrap();
+        log.extend(first.facts);
+        let p = views_of(&log);
         assert_eq!(
             admit_cast(
                 &reg,
                 &p.view(&t),
-                &UnestablishedFact {
-                    value: ValueId::new(0),
-                    dimension: Dimension::Audience,
-                },
+                ValueId::new(0),
                 CastAnswer {
-                    cast: CastName::new("classifier"),
-                    resolved: DimValue::Audience(Audience::restricted([ReaderId::new("finance")])),
+                    cast: CastName::new("paranoid"),
+                    resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
                 }
             ),
-            Err(CastError::NotUnknown)
+            Err(CastError::AlreadyEstablished)
+        );
+        assert_eq!(
+            p.view(&t).value_label(ValueId::new(0)),
+            Some(&EstablishedLabel::new(SUSPICIOUS, Audience::Public).into_label())
         );
     }
 
@@ -777,7 +775,7 @@ mod tests {
                 ResultAdmission::SuccessCast {
                     body: ValueBody::new("inbox contents"),
                     cast: CastName::new("paranoid"),
-                    resolved: DimValue::Trust(SUSPICIOUS),
+                    resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
                 },
             ),
             Err(AdmitError::NarrowingUnaccepted)
@@ -790,7 +788,7 @@ mod tests {
         let call = ResolvedCall::new(ToolName::new("poll_room"), crate::params::test_arguments(&json!({})));
         let (log, dispatch) = open_log(&call);
         let t = traj();
-        let attempt = |resolved: DimValue| {
+        let attempt = |audience: Audience| {
             let p = views_of(&log);
             admit_result(
                 &reg,
@@ -800,18 +798,18 @@ mod tests {
                 ResultAdmission::SuccessCast {
                     body: ValueBody::new("room roster"),
                     cast: CastName::new("classifier"),
-                    resolved,
+                    resolved: EstablishedLabel::new(SUSPICIOUS, audience),
                 },
             )
         };
-        let refused = [
+        for malformed in [
             Audience::restricted([ReaderId::new("@hr")]),
             Audience::restricted([ReaderId::new("public")]),
-            Audience::Public,
-            Audience::restricted([ReaderId::new("stranger")]),
-        ];
-        for answer in refused {
-            assert_eq!(attempt(DimValue::Audience(answer)), Err(AdmitError::CeilingExceeded));
+        ] {
+            assert_eq!(attempt(malformed), Err(AdmitError::NonLiteralAnswer));
+        }
+        for out_of_cap in [Audience::Public, Audience::restricted([ReaderId::new("stranger")])] {
+            assert_eq!(attempt(out_of_cap), Err(AdmitError::CeilingExceeded));
         }
     }
 
@@ -832,8 +830,8 @@ mod tests {
             name: CastName::new("librarian"),
             resolution: CastResolution::Resolver {
                 may_cast: CastCeiling {
-                    trust: vec![],
-                    audience: Some(Audience::Public),
+                    trust: vec![SUSPICIOUS],
+                    audience: Audience::Public,
                 },
             },
         };
@@ -858,13 +856,13 @@ mod tests {
                 ResultAdmission::SuccessCast {
                     body: ValueBody::new("wiki article"),
                     cast: CastName::new("librarian"),
-                    resolved: DimValue::Audience(resolved),
+                    resolved: EstablishedLabel::new(Trust::new(u8::MAX), resolved),
                 },
             )
         };
         assert_eq!(
             attempt(Audience::restricted([ReaderId::new("public")])),
-            Err(AdmitError::CeilingExceeded)
+            Err(AdmitError::NonLiteralAnswer)
         );
         let batch = attempt(Audience::Public).unwrap();
         match batch.facts.last().unwrap() {
@@ -891,7 +889,7 @@ mod tests {
                 ResultAdmission::SuccessCast {
                     body: ValueBody::new("room roster"),
                     cast: CastName::new("roomer"),
-                    resolved: DimValue::Audience(internal()),
+                    resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
                 },
             ),
             Err(AdmitError::NarrowingUnaccepted)
@@ -905,10 +903,10 @@ mod tests {
             ResultAdmission::SuccessCastAccepted {
                 body: ValueBody::new("room roster"),
                 cast: CastName::new("roomer"),
-                resolved: DimValue::Audience(internal()),
+                resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
                 accepted: Narrowing {
-                    from: Label::top(),
-                    to: Label::new(Dim::Known(SUSPICIOUS), Dim::Known(internal())),
+                    from: EstablishedLabel::top(),
+                    to: EstablishedLabel::new(SUSPICIOUS, internal()),
                 },
             },
         )
@@ -940,7 +938,7 @@ mod tests {
             dispatch: dispatch.clone(),
             tool: call.tool().clone(),
             arguments: call.canonical_arguments().clone(),
-            proposed_label: Label::top(),
+            proposed_label: EstablishedLabel::top(),
             proposed_effects: EffectSet::new([EffectKind::new("read")]).unwrap(),
             dynamic_resolutions: vec![PinnedDynamicResolution::from_answer(binding, Some(internal()))],
         }];
@@ -948,20 +946,24 @@ mod tests {
         let trajectory = traj();
         let views = projection.view(&trajectory);
         let expected = Narrowing {
-            from: Label::top(),
-            to: Label::new(Dim::Known(SUSPICIOUS), Dim::Known(internal())),
+            from: EstablishedLabel::top(),
+            to: EstablishedLabel::new(SUSPICIOUS, internal()),
         };
+        let resolved = EstablishedLabel::new(SUSPICIOUS, internal());
+        assert_eq!(pending_cast_narrowing(&views, &resolved), Some(expected.clone()));
         assert_eq!(
-            pending_cast_narrowing(
+            admit_result(
+                &reg,
                 &views,
-                &cast_filled_dispatch_label(
-                    reg.tool(call.tool()).unwrap(),
-                    &views,
-                    &dispatch,
-                    &DimValue::Trust(SUSPICIOUS),
-                ),
+                &dispatch,
+                &call,
+                ResultAdmission::SuccessCast {
+                    body: ValueBody::new("scan"),
+                    cast: CastName::new("classifier"),
+                    resolved: EstablishedLabel::new(SUSPICIOUS, Audience::restricted([ReaderId::new("finance")])),
+                },
             ),
-            Some(expected.clone())
+            Err(AdmitError::EstablishedMismatch)
         );
         assert_eq!(
             admit_result(
@@ -972,7 +974,7 @@ mod tests {
                 ResultAdmission::SuccessCast {
                     body: ValueBody::new("scan"),
                     cast: CastName::new("paranoid"),
-                    resolved: DimValue::Trust(SUSPICIOUS),
+                    resolved: resolved.clone(),
                 },
             ),
             Err(AdmitError::NarrowingUnaccepted)
@@ -986,7 +988,7 @@ mod tests {
             ResultAdmission::SuccessCastAccepted {
                 body: ValueBody::new("scan"),
                 cast: CastName::new("paranoid"),
-                resolved: DimValue::Trust(SUSPICIOUS),
+                resolved,
                 accepted: expected,
             },
         )
@@ -1051,7 +1053,7 @@ mod tests {
             ResultAdmission::SuccessCast {
                 body: ValueBody::new("inbox contents"),
                 cast: CastName::new("paranoid"),
-                resolved: DimValue::Trust(SUSPICIOUS),
+                resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
             },
         )
         .unwrap();
@@ -1061,7 +1063,7 @@ mod tests {
         ));
         assert!(matches!(
             &batch.facts[1],
-            Fact::OutputCastApplied { dimension: Dimension::Trust, resolved: DimValue::Trust(t), .. } if *t == SUSPICIOUS
+            Fact::OutputCastApplied { resolved, .. } if resolved == &EstablishedLabel::new(SUSPICIOUS, internal())
         ));
         match &batch.facts[2] {
             Fact::ValueAdmitted { value, .. } => {
@@ -1088,7 +1090,7 @@ mod tests {
                 ResultAdmission::SuccessCast {
                     body: ValueBody::new("inbox contents"),
                     cast: CastName::new("paranoid"),
-                    resolved: DimValue::Trust(SUSPICIOUS),
+                    resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
                 },
             ),
             Err(AdmitError::NarrowingUnaccepted)
@@ -1103,8 +1105,8 @@ mod tests {
         let p = views_of(&log);
         let t = traj();
         let accepted = Narrowing {
-            from: Label::top(),
-            to: Label::new(Dim::Known(SUSPICIOUS), Dim::Known(internal())),
+            from: EstablishedLabel::top(),
+            to: EstablishedLabel::new(SUSPICIOUS, internal()),
         };
         let batch = admit_result(
             &reg,
@@ -1114,7 +1116,7 @@ mod tests {
             ResultAdmission::SuccessCastAccepted {
                 body: ValueBody::new("inbox contents"),
                 cast: CastName::new("paranoid"),
-                resolved: DimValue::Trust(SUSPICIOUS),
+                resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
                 accepted: accepted.clone(),
             },
         )
@@ -1141,7 +1143,7 @@ mod tests {
         let mut next = log.clone();
         next.extend(batch.facts);
         let p2 = views_of(&next);
-        assert_eq!(p2.view(&t).current_label().trust, Dim::Known(SUSPICIOUS));
+        assert_eq!(p2.view(&t).current_label().bound().trust, SUSPICIOUS);
     }
 
     #[test]
@@ -1160,10 +1162,10 @@ mod tests {
                 ResultAdmission::SuccessCastAccepted {
                     body: ValueBody::new("inbox contents"),
                     cast: CastName::new("paranoid"),
-                    resolved: DimValue::Trust(SUSPICIOUS),
+                    resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
                     accepted: Narrowing {
-                        from: Label::top(),
-                        to: Label::new(Dim::Known(SUSPICIOUS), Dim::Known(Audience::Public)),
+                        from: EstablishedLabel::top(),
+                        to: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
                     },
                 },
             ),
@@ -1180,10 +1182,10 @@ mod tests {
                 ResultAdmission::SuccessCastAccepted {
                     body: ValueBody::new("inbox contents"),
                     cast: CastName::new("paranoid"),
-                    resolved: DimValue::Trust(SUSPICIOUS),
+                    resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
                     accepted: Narrowing {
-                        from: Label::top(),
-                        to: Label::new(Dim::Known(SUSPICIOUS), Dim::Known(Audience::Public)),
+                        from: EstablishedLabel::top(),
+                        to: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
                     },
                 },
             ),
@@ -1206,7 +1208,7 @@ mod tests {
             ResultAdmission::SuccessCastLapsed {
                 body: ValueBody::new("inbox contents"),
                 cast: CastName::new("paranoid"),
-                resolved: DimValue::Trust(SUSPICIOUS),
+                resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
             },
         )
         .unwrap();
@@ -1218,16 +1220,19 @@ mod tests {
         assert!(matches!(
             &batch.facts[1],
             Fact::OutputCastLapsed {
-                dimension: Dimension::Trust,
-                resolved: DimValue::Trust(tr),
+                resolved,
                 raw_digest,
                 ..
-            } if *tr == SUSPICIOUS && raw_digest == &RawResultDigest::of(b"inbox contents")
+            } if resolved == &EstablishedLabel::new(SUSPICIOUS, internal())
+                && raw_digest == &RawResultDigest::of(b"inbox contents")
         ));
         let mut next = log.clone();
         next.extend(batch.facts);
         let p2 = views_of(&next);
-        assert_eq!(p2.view(&t).current_label(), Label::top());
+        assert_eq!(
+            p2.view(&t).current_label(),
+            PartialLabel::established(EstablishedLabel::top())
+        );
         let (log, dispatch) = open_log(&call);
         let p = views_of(&log);
         assert_eq!(
@@ -1239,7 +1244,7 @@ mod tests {
                 ResultAdmission::SuccessCastLapsed {
                     body: ValueBody::new("inbox contents"),
                     cast: CastName::new("bogus"),
-                    resolved: DimValue::Trust(SUSPICIOUS),
+                    resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
                 },
             ),
             Err(AdmitError::UnknownCast("bogus".to_string()))
@@ -1252,7 +1257,7 @@ mod tests {
         let call = scan_call();
         let (log, dispatch) = open_log(&call);
         let t = traj();
-        let admission = |cast: &str, resolved: DimValue| ResultAdmission::SuccessCast {
+        let admission = |cast: &str, resolved: EstablishedLabel| ResultAdmission::SuccessCast {
             body: ValueBody::new("inbox contents"),
             cast: CastName::new(cast),
             resolved,
@@ -1262,19 +1267,25 @@ mod tests {
             admit_result(&reg, &p.view(&t), &dispatch, &call, adm)
         };
         assert_eq!(
-            attempt(admission("classifier", DimValue::Trust(Trust::new(1)))),
+            attempt(admission(
+                "classifier",
+                EstablishedLabel::new(Trust::new(1), internal())
+            )),
             Err(AdmitError::CeilingExceeded)
         );
         assert_eq!(
-            attempt(admission("paranoid", DimValue::Trust(Trust::new(1)))),
+            attempt(admission("paranoid", EstablishedLabel::new(Trust::new(1), internal()))),
             Err(AdmitError::ConstantMismatch)
         );
         assert_eq!(
-            attempt(admission("classifier", DimValue::Audience(Audience::Public))),
-            Err(AdmitError::NotPendingCast)
+            attempt(admission(
+                "classifier",
+                EstablishedLabel::new(SUSPICIOUS, Audience::restricted([ReaderId::new("finance")]))
+            )),
+            Err(AdmitError::EstablishedMismatch)
         );
         assert_eq!(
-            attempt(admission("bogus", DimValue::Trust(SUSPICIOUS))),
+            attempt(admission("bogus", EstablishedLabel::new(SUSPICIOUS, internal()))),
             Err(AdmitError::UnknownCast("bogus".to_string()))
         );
         let plain = get_call();
@@ -1289,7 +1300,7 @@ mod tests {
                 ResultAdmission::SuccessCast {
                     body: ValueBody::new("x"),
                     cast: CastName::new("paranoid"),
-                    resolved: DimValue::Trust(SUSPICIOUS),
+                    resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
                 },
             ),
             Err(AdmitError::NotPendingCast)
@@ -1332,7 +1343,7 @@ mod tests {
             ResultAdmission::SuccessCastLapsed {
                 body: ValueBody::new("mail"),
                 cast: CastName::new("paranoid"),
-                resolved: DimValue::Trust(SUSPICIOUS),
+                resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
             },
         )
         .unwrap();

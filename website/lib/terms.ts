@@ -103,11 +103,11 @@ const TERMS = {
     "A sanitizer application point: an admission the host can withhold — the child-return crossing, or a tool result at an application point the deployment confines. The derivation is admitted; the raw value is withheld.",
   from: "In a sanitizer mandate: the required source label state before the transition applies.",
   to: "In a sanitizer mandate: the exact target label state produced after the transition.",
-  constant: "In a cast: every Unknown on the dimension resolves to one declared state.",
+  constant: "In a cast: every covered Unknown value resolves to one declared complete label.",
   resolver:
     "The dynamic implementation of a registered external: authority rulings, cast decisions, sanitizer derivations, membership answers, or argument-to-reader-set answers.",
   may_cast:
-    "The ceiling on a cast resolver: the states it is allowed to resolve an Unknown value to.",
+    "The complete product ceiling on a cast resolver: the trust ranks and audience cap it may resolve an Unknown value within.",
   "[child]": "Run configuration for child sub-executions.",
   return_sanitizer: "Configured default sanitizer for all child sub-execution returns.",
   "attest-schema":

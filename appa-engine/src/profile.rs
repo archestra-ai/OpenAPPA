@@ -1158,11 +1158,17 @@ mod tests {
         cfg.casts = vec![
             crate::authority::Cast {
                 name: crate::names::CastName::new("paranoid"),
-                resolution: crate::authority::CastResolution::Constant(crate::label::DimValue::Trust(Trust::new(0))),
+                resolution: crate::authority::CastResolution::Constant(crate::label::EstablishedLabel::new(
+                    Trust::new(0),
+                    Audience::Public,
+                )),
             },
             crate::authority::Cast {
                 name: crate::names::CastName::new("yolo"),
-                resolution: crate::authority::CastResolution::Constant(crate::label::DimValue::Trust(Trust::new(1))),
+                resolution: crate::authority::CastResolution::Constant(crate::label::EstablishedLabel::new(
+                    Trust::new(1),
+                    Audience::Public,
+                )),
             },
         ];
         let officer = |name: &str| Authority {

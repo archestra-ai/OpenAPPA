@@ -73,14 +73,14 @@ struct WireBlock<'a> {
     fork: Option<&'a str>,
 }
 
-/// One unestablished entry on the wire: which rendered entry (ordinal), which dimension is
-/// missing, and what kind of value carries it. A value Unknown in both dimensions renders as two
-/// entries, each with its own ordinal. The ordinal duplicates the array index deliberately — it
-/// is the stable key the model can quote back, and the only identity the entry carries.
+/// One unestablished entry on the wire: which rendered entry (ordinal), the source's unresolved
+/// dimensions (`CHK-16` names the source once, with all of them), and what kind of value carries
+/// it. The ordinal duplicates the array index deliberately — it is the stable key the model can
+/// quote back, and the only identity the entry carries.
 #[derive(Serialize)]
 struct WireUnestablished {
     ordinal: usize,
-    dimension: Dimension,
+    dimensions: Vec<Dimension>,
     source_kind: &'static str,
 }
 
@@ -90,7 +90,7 @@ fn wire_unestablished(facts: &[UnestablishedFact], views: &Views) -> Vec<WireUne
         .enumerate()
         .map(|(ordinal, fact)| WireUnestablished {
             ordinal,
-            dimension: fact.dimension,
+            dimensions: fact.dimensions.iter().copied().collect(),
             source_kind: match views
                 .value_provenance(fact.value)
                 .expect("unestablished facts name admitted values of this append-only family")
@@ -396,7 +396,7 @@ mod tests {
     use super::*;
     use appa_engine::authority::{Authority, Mandate, Sanitizer, SanitizerPoints, Scope, Transition};
     use appa_engine::fact::{EffectKind, Revision};
-    use appa_engine::label::{Audience, Dim, Label, ReaderId, Trust};
+    use appa_engine::label::{Audience, Dim, EstablishedLabel, Label, ReaderId, Trust};
     use appa_engine::names::{AuthorityName, MarkName, SanitizerName};
     use appa_engine::plan::{PlanId, RedispatchPlan, RemedyStep, RequiredRuling};
     use appa_engine::projection::Projection;
@@ -480,11 +480,8 @@ mod tests {
 
     fn narrowing() -> Narrowing {
         Narrowing {
-            from: Label::new(Dim::Known(Trust::new(1)), Dim::Known(Audience::Public)),
-            to: Label::new(
-                Dim::Known(Trust::new(0)),
-                Dim::Known(Audience::restricted([ReaderId::new("internal")])),
-            ),
+            from: EstablishedLabel::new(Trust::new(1), Audience::Public),
+            to: EstablishedLabel::new(Trust::new(0), Audience::restricted([ReaderId::new("internal")])),
         }
     }
 
@@ -585,12 +582,9 @@ mod tests {
         });
         let payload = parsed(&feedback);
         assert_eq!(payload["requirement_gaps"].as_array().unwrap().len(), 0);
-        assert_eq!(payload["narrowing"]["from"]["trust"]["Known"], 1);
-        assert_eq!(payload["narrowing"]["to"]["trust"]["Known"], 0);
-        assert_eq!(
-            payload["narrowing"]["to"]["audience"]["Known"]["Restricted"][0],
-            "internal"
-        );
+        assert_eq!(payload["narrowing"]["from"]["trust"], 1);
+        assert_eq!(payload["narrowing"]["to"]["trust"], 0);
+        assert_eq!(payload["narrowing"]["to"]["audience"]["Restricted"][0], "internal");
         assert_eq!(payload["remedy_plans"][0]["accepts_narrowing"], true);
         assert_eq!(payload["remedy_plans"][0]["rulings"].as_array().unwrap().len(), 0);
         assert_eq!(payload["fork"], "confine the loss");
@@ -785,11 +779,8 @@ mod tests {
             FeedbackSurface::Root { can_fork: false },
         ));
         assert_eq!(payload["plan_id"], "remedy-3");
-        assert_eq!(payload["narrowing"]["from"]["trust"]["Known"], 1);
-        assert_eq!(
-            payload["narrowing"]["to"]["audience"]["Known"]["Restricted"][0],
-            "internal"
-        );
+        assert_eq!(payload["narrowing"]["from"]["trust"], 1);
+        assert_eq!(payload["narrowing"]["to"]["audience"]["Restricted"][0], "internal");
     }
 
     #[test]
@@ -825,7 +816,7 @@ mod tests {
         let facts: Vec<UnestablishedFact> = (0..3)
             .map(|id| UnestablishedFact {
                 value: ValueId::new(id),
-                dimension: Dimension::Trust,
+                dimensions: [Dimension::Trust].into(),
             })
             .collect();
 
@@ -851,7 +842,7 @@ mod tests {
         assert_eq!(entries.len(), 3);
         for (ordinal, kind) in ["user_input", "tool_result", "child_return"].iter().enumerate() {
             assert_eq!(entries[ordinal]["ordinal"], ordinal);
-            assert_eq!(entries[ordinal]["dimension"], "Trust");
+            assert_eq!(entries[ordinal]["dimensions"][0], "Trust");
             assert_eq!(entries[ordinal]["source_kind"], *kind);
             assert!(entries[ordinal].get("value").is_none());
             assert!(entries[ordinal].get("dispatch").is_none());

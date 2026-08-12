@@ -19,8 +19,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use appa_engine::authority::{
-    Authority, Cast, CastCeiling, CastResolution, CastTarget, Hint, Mandate, Sanitizer, SanitizerPoints, Scope,
-    Transition,
+    Authority, Cast, CastCeiling, CastResolution, Hint, Mandate, Sanitizer, SanitizerPoints, Scope, Transition,
 };
 use appa_engine::contract::{
     AudienceDelta, AudienceRequirement, Delta, DynamicAudienceBinding, HistoryRequirement, LabelRequirements,
@@ -29,7 +28,7 @@ use appa_engine::contract::{
 use appa_engine::engine::Engine;
 use appa_engine::fact::ReturnPolicy;
 use appa_engine::fact::{EffectKind, EffectSet};
-use appa_engine::label::{Audience, Dim, DimValue, Label, ReaderId, Trust};
+use appa_engine::label::{Audience, Dim, EstablishedLabel, Label, ReaderId, Trust};
 use appa_engine::names::{AuthorityName, CastName, DynamicResolverName, MarkName, SanitizerName, TagName};
 use appa_engine::params::ToolParameters;
 use appa_engine::profile::{BindingMode, DeploymentPolicy, ExecutorClass, PolicyDialectVersion, ProfileDeclaration};
@@ -858,7 +857,7 @@ struct RawTransformImpl {
 #[serde(deny_unknown_fields)]
 struct RawCast {
     name: String,
-    constant: Option<RawDimValue>,
+    constant: Option<RawConstantLabel>,
     resolver: Option<RawCastResolver>,
 }
 
@@ -866,10 +865,10 @@ impl RawCast {
     fn convert(self, chain: &TrustChain) -> Result<(Cast, Option<CastImpl>), ConfigError> {
         let ctx = format!("cast {}", self.name);
         match (self.constant, self.resolver) {
-            (Some(dv), None) => Ok((
+            (Some(constant), None) => Ok((
                 Cast {
                     name: CastName::new(self.name),
-                    resolution: CastResolution::Constant(dv.convert(chain, &ctx)?),
+                    resolution: CastResolution::Constant(constant.convert(chain, &ctx)?),
                 },
                 None,
             )),
@@ -895,21 +894,17 @@ impl RawCast {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawDimValue {
-    trust: Option<String>,
-    audience: Option<RawExactly>,
+struct RawConstantLabel {
+    trust: String,
+    audience: RawExactly,
 }
 
-impl RawDimValue {
-    fn convert(self, chain: &TrustChain, ctx: &str) -> Result<CastTarget, ConfigError> {
-        match (self.trust, self.audience) {
-            (Some(t), None) => Ok(DimValue::Trust(parse_trust(&t, chain, ctx)?)),
-            (None, Some(a)) => Ok(DimValue::Audience(parse_audience(&a.exactly, ctx)?)),
-            _ => Err(ConfigError::BadAudience {
-                context: ctx.to_string(),
-                reason: "a dimension value names exactly one of `trust` or `audience`".to_string(),
-            }),
-        }
+impl RawConstantLabel {
+    fn convert(self, chain: &TrustChain, ctx: &str) -> Result<EstablishedLabel, ConfigError> {
+        Ok(EstablishedLabel::new(
+            parse_trust(&self.trust, chain, ctx)?,
+            parse_audience(&self.audience.exactly, ctx)?,
+        ))
     }
 }
 
@@ -924,9 +919,8 @@ struct RawCastResolver {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawCastCeiling {
-    #[serde(default)]
     trust: Vec<String>,
-    audience: Option<RawCapSet>,
+    audience: RawCapSet,
 }
 
 #[derive(Deserialize)]
@@ -943,7 +937,7 @@ impl RawCastCeiling {
                 .iter()
                 .map(|t| parse_trust(t, chain, ctx))
                 .collect::<Result<_, _>>()?,
-            audience: self.audience.map(|set| parse_audience(&set.cap, ctx)).transpose()?,
+            audience: parse_audience(&self.audience.cap, ctx)?,
         })
     }
 }
@@ -1452,7 +1446,7 @@ delta = {}
 version = 1
 [[cast]]
 name = "paranoid"
-constant = { trust = "suspicious" }
+constant = { trust = "suspicious", audience = { exactly = ["public"] } }
 "#,
         );
         assert_eq!(cfg.cast_impl(&CastName::new("paranoid")), None);
@@ -1487,9 +1481,7 @@ resolver = { url = "https://c/resolve", timeout_ms = 10000, may_cast = { trust =
             CastResolution::Resolver {
                 may_cast: CastCeiling {
                     trust: vec![Trust::new(0)],
-                    audience: Some(Audience::restricted(
-                        [ReaderId::new("finance"), ReaderId::new("audit"),]
-                    )),
+                    audience: Audience::restricted([ReaderId::new("finance"), ReaderId::new("audit")]),
                 },
             }
         );
@@ -1681,8 +1673,8 @@ builtin = "redact-email"
             err(r#"version = 1
 [[cast]]
 name = "c"
-constant = { trust = "suspicious" }
-resolver = { url = "x", may_cast = { trust = ["suspicious"] } }
+constant = { trust = "suspicious", audience = { exactly = ["public"] } }
+resolver = { url = "x", may_cast = { trust = ["suspicious"], audience = { cap = ["public"] } } }
 "#),
             ConfigError::BadImplementation { .. }
         ));
@@ -1771,7 +1763,7 @@ resolver = { url = "https://c", may_cast = { audience = [{ exactly = ["public"] 
 version = 1
 [[cast]]
 name = "c"
-resolver = { url = "https://c", may_cast = { audience = { cap = ["public"] } } }
+resolver = { url = "https://c", may_cast = { trust = ["suspicious"], audience = { cap = ["public"] } } }
 "#,
         );
         let cast = cfg.registry_config().casts.first().expect("cast registered");
@@ -1779,8 +1771,8 @@ resolver = { url = "https://c", may_cast = { audience = { cap = ["public"] } } }
             cast.resolution,
             CastResolution::Resolver {
                 may_cast: CastCeiling {
-                    trust: vec![],
-                    audience: Some(Audience::Public),
+                    trust: vec![Trust::new(0)],
+                    audience: Audience::Public,
                 },
             }
         );
@@ -1792,7 +1784,7 @@ resolver = { url = "https://c", may_cast = { audience = { cap = ["public"] } } }
             err(r#"version = 1
 [[cast]]
 name = "c"
-resolver = { url = "https://c", may_cast = { audience = { cap = ["@auditors"] } } }
+resolver = { url = "https://c", may_cast = { trust = ["suspicious"], audience = { cap = ["@auditors"] } } }
 "#),
             ConfigError::BadAudience { .. }
         ));

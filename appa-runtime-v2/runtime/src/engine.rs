@@ -12,7 +12,7 @@ use appa_engine::contract::{
 use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityReview, PlanError, Ruling};
 use appa_engine::fact::{Fact, FactBatch, ReturnPolicy, Revision};
-use appa_engine::label::{Audience, Label, ReaderId};
+use appa_engine::label::{Audience, ReaderId};
 use appa_engine::plan::{ExecutableRemedyPlan, PlannedBlock, RemedyPlan};
 use appa_engine::projection::{Projection, Views};
 use appa_engine::value::{
@@ -1170,7 +1170,7 @@ fn authority_payload(
     })
 }
 
-fn label_wire(label: &Label) -> serde_json::Value {
+fn label_wire(label: &appa_engine::label::PartialLabel) -> serde_json::Value {
     serde_json::json!(format!("{label:?}"))
 }
 
@@ -1242,10 +1242,11 @@ fn unestablished_feedback(views: &Views, facts: &[UnestablishedFact]) -> String 
     let entries: Vec<String> = facts
         .iter()
         .map(|fact| {
+            let dims: Vec<String> = fact.dimensions.iter().map(|dim| format!("{dim:?}")).collect();
             format!(
-                "{} has an unestablished {:?} dimension",
+                "{} has unestablished dimensions: {}",
                 unestablished_source(views, fact.value),
-                fact.dimension
+                dims.join(", ")
             )
         })
         .collect();

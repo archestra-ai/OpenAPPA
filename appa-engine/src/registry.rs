@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::authority::{Authority, Cast, CastResolution, CastTarget, Hint, Sanitizer, Transition};
+use crate::authority::{Authority, Cast, CastResolution, Hint, Sanitizer, Transition};
 use crate::contract::{AudienceDelta, AudienceRequirement, RecipientSpec, ToolContract};
 use crate::label::{Adequacy, Audience, Dim, Dimension, Trust};
 use crate::names::{AuthorityName, CastName, SanitizerName};
@@ -93,8 +93,6 @@ pub enum LoadError {
     DuplicateCast(String),
     #[error("authority {0} has an empty mandate (covers nothing)")]
     EmptyMandate(String),
-    #[error("resolver cast {0} declares an empty may_cast ceiling")]
-    EmptyCastCeiling(String),
     #[error("trust rank {rank} out of the chain (length {len}) in {context}")]
     RankOutOfChain { rank: u8, len: usize, context: String },
     #[error("tool {0} declares both output dimensions pending-cast (a cast resolves exactly one)")]
@@ -448,25 +446,18 @@ impl Registry {
         for cast in config.casts {
             match &cast.resolution {
                 CastResolution::Resolver { may_cast } => {
-                    if may_cast.is_empty() {
-                        return Err(LoadError::EmptyCastCeiling(cast.name.as_str().to_string()));
-                    }
                     for rank in &may_cast.trust {
                         check_rank(&config.trust_chain, Some(*rank), || {
                             format!("cast {} may_cast", cast.name.as_str())
                         })?;
                     }
-                    if let Some(cap) = &may_cast.audience {
-                        check_readers(cap, || format!("cast {} may_cast", cast.name.as_str()))?;
-                    }
+                    check_readers(&may_cast.audience, || format!("cast {} may_cast", cast.name.as_str()))?;
                 }
-                CastResolution::Constant(CastTarget::Trust(rank)) => {
-                    check_rank(&config.trust_chain, Some(*rank), || {
+                CastResolution::Constant(constant) => {
+                    check_rank(&config.trust_chain, Some(constant.trust), || {
                         format!("cast {} constant", cast.name.as_str())
                     })?;
-                }
-                CastResolution::Constant(CastTarget::Audience(audience)) => {
-                    check_readers(audience, || format!("cast {} constant", cast.name.as_str()))?;
+                    check_readers(&constant.audience, || format!("cast {} constant", cast.name.as_str()))?;
                 }
             }
             if casts.insert(cast.name.clone(), cast.clone()).is_some() {
@@ -628,11 +619,12 @@ fn check_hint(hint: Option<&Hint>, context: impl Fn() -> String) -> Result<(), L
 mod tests {
     use super::*;
     use crate::authority::SanitizerPoints;
-    use crate::authority::{CastCeiling, CastTarget, Mandate, Scope};
+    use crate::authority::{CastCeiling, Mandate, Scope};
     use crate::contract::{
         AudienceRequirement, Delta, DynamicAudienceBinding, HistoryRequirement, LabelRequirements, Requires,
     };
     use crate::fact::{EffectKind, EffectSet};
+    use crate::label::EstablishedLabel;
     use crate::label::{Audience, ReaderId, Trust};
     use crate::names::{AuthorityName, MarkName};
 
@@ -736,13 +728,16 @@ mod tests {
             "classifier",
             CastResolution::Resolver {
                 may_cast: CastCeiling {
-                    trust: vec![],
-                    audience: Some(named.clone()),
+                    trust: vec![Trust::new(0)],
+                    audience: named.clone(),
                 },
             },
         )];
         let mut constant = base();
-        constant.casts = vec![cast("paranoid", CastResolution::Constant(CastTarget::Audience(named)))];
+        constant.casts = vec![cast(
+            "paranoid",
+            CastResolution::Constant(EstablishedLabel::new(Trust::new(0), named)),
+        )];
 
         vec![
             ("tool emit delta", delta),
@@ -882,18 +877,18 @@ mod tests {
     }
 
     #[test]
-    fn refuses_empty_resolver_ceiling() {
+    fn an_audience_only_ceiling_loads() {
         let mut cfg = base();
         cfg.casts = vec![Cast {
             name: CastName::new("classifier"),
             resolution: CastResolution::Resolver {
-                may_cast: CastCeiling::default(),
+                may_cast: CastCeiling {
+                    trust: vec![],
+                    audience: Audience::Public,
+                },
             },
         }];
-        assert!(matches!(
-            Registry::build_covered(cfg),
-            Err(LoadError::EmptyCastCeiling(name)) if name == "classifier"
-        ));
+        assert!(Registry::build_covered(cfg).is_ok());
     }
 
     #[test]
@@ -1055,7 +1050,7 @@ mod tests {
         let mut cfg = base();
         cfg.casts = vec![Cast {
             name: CastName::new("paranoid"),
-            resolution: CastResolution::Constant(CastTarget::Trust(Trust::new(0))),
+            resolution: CastResolution::Constant(EstablishedLabel::new(Trust::new(0), Audience::Public)),
         }];
         assert!(Registry::build_covered(cfg).is_ok());
     }

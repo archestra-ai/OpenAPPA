@@ -4,48 +4,33 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-/// One dimension's value: established ([`Dim::Known`]) or not ([`Dim::Unknown`]).
+use crate::value::ValueId;
+
+/// One dimension of one value's contribution: established ([`Dim::Known`]) or not
+/// ([`Dim::Unknown`]).
 ///
 /// `Unknown` is not a rank on any scale — `trusted < unknown < suspicious` does not exist. It
-/// means the dimension has not been established yet. It is **absorbing** under the fold: folding
-/// any value whose dimension is `Unknown` yields `Unknown`, so the fold never silently invents an
-/// established value. The check layer turns a folded `Unknown` into an *unresolved* report naming
-/// the offending values, to be filled in later by a registered cast.
+/// means this source's contribution has not been established yet. Under the fold it is identity
+/// for the established bound and absorbing only for the source's identity, which joins the
+/// dimension's unresolved set until a registered cast establishes the whole source.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Dim<T> {
     Known(T),
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Dimension {
     Trust,
     Audience,
 }
 
-/// A concrete state for one dimension — the target a cast resolves an Unknown to, or a resolved
-/// override. Fills exactly one dimension (never both), preserving the known dimension and content.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DimValue {
-    Trust(Trust),
-    Audience(Audience),
-}
-
-impl DimValue {
-    pub fn dimension(&self) -> Dimension {
-        match self {
-            DimValue::Trust(_) => Dimension::Trust,
-            DimValue::Audience(_) => Dimension::Audience,
-        }
-    }
-}
-
 /// Three-valued outcome of one adequacy test.
 ///
 /// A requirement is *checked*, never folded. [`Adequacy::Unresolved`] is returned when the
-/// trajectory side is [`Dim::Unknown`]: the check cannot decide until a cast resolves the
-/// dimension. It is deliberately distinct from [`Adequacy::Fails`] — an unresolved dimension is
-/// not a violation, it is a missing fact.
+/// consumed dimension still has unresolved sources: the check cannot decide until a cast
+/// resolves them. It is deliberately distinct from [`Adequacy::Fails`] — an unresolved
+/// dimension is not a violation, it is a missing fact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Adequacy {
     Holds,
@@ -142,16 +127,14 @@ impl Audience {
     }
 }
 
-fn combine_dim<T>(a: &Dim<T>, b: &Dim<T>, f: impl Fn(&T, &T) -> T) -> Dim<T> {
-    match (a, b) {
-        (Dim::Known(x), Dim::Known(y)) => Dim::Known(f(x, y)),
-        _ => Dim::Unknown,
-    }
+fn bool_adequacy(holds: bool) -> Adequacy {
+    if holds { Adequacy::Holds } else { Adequacy::Fails }
 }
 
 impl Dim<Trust> {
-    /// Does the trajectory's trust meet `floor`? A tool requiring rank `floor` accepts anything at
-    /// or above it; an unestablished dimension is [`Adequacy::Unresolved`].
+    /// Does this one value's trust meet `floor`? An unestablished contribution is
+    /// [`Adequacy::Unresolved`]. Per-value checks (a sanitizer's `from`, a cast's exact-match)
+    /// use this; trajectory-side checks go through [`PartialLabel`].
     pub fn meets_floor(&self, floor: Trust) -> Adequacy {
         match self {
             Dim::Unknown => Adequacy::Unresolved,
@@ -176,16 +159,7 @@ impl Dim<Audience> {
     }
 }
 
-fn bool_adequacy(holds: bool) -> Adequacy {
-    if holds { Adequacy::Holds } else { Adequacy::Fails }
-}
-
-/// The full label: the product of the two dimensions.
-///
-/// [`Label::combine`] is the only way one label affects another, and it only ever narrows, so a
-/// permissive delta — raising trust, adding readers — is unrepresentable by construction. Raising
-/// a dimension is never a fold; it happens only on a *new* derived value through a registered cast
-/// or authority (later slices).
+/// One value's contribution: the product of the two dimensions, each possibly `Unknown`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Label {
     pub trust: Dim<Trust>,
@@ -197,21 +171,181 @@ impl Label {
         Label { trust, audience }
     }
 
-    /// The fold identity: maximally permissive (top trust, public audience) — the label of a
-    /// trajectory before any value is folded in. `top().combine(x) == x` for every established
-    /// `x`. Top trust is `u8::MAX`, an upper bound on any configured chain rank, so it clears
-    /// every floor; audience `Public` includes every recipient.
+    /// The identity contribution: maximally permissive (top trust, public audience). Folding it
+    /// into any [`PartialLabel`] changes nothing. Top trust is `u8::MAX`, an upper bound on any
+    /// configured chain rank, so it clears every floor; audience `Public` includes every
+    /// recipient.
     pub fn top() -> Label {
-        Label::new(Dim::Known(Trust::new(u8::MAX)), Dim::Known(Audience::Public))
+        EstablishedLabel::top().into_label()
     }
 
-    /// Restrictive fold: minimum trust, intersect audience. Commutative, associative, idempotent;
-    /// `Unknown` absorbs in either dimension.
-    pub fn combine(&self, other: &Label) -> Label {
-        Label {
-            trust: combine_dim(&self.trust, &other.trust, |a, b| a.combine(*b)),
-            audience: combine_dim(&self.audience, &other.audience, Audience::combine),
+    /// This contribution as a meet operand on established bounds: a known dimension carries its
+    /// value, an unknown one the meet identity (unknown is identity for the bound; its
+    /// source identity is tracked separately by the fold).
+    pub fn established_part(&self) -> EstablishedLabel {
+        EstablishedLabel::new(
+            match &self.trust {
+                Dim::Known(t) => *t,
+                Dim::Unknown => Trust::new(u8::MAX),
+            },
+            match &self.audience {
+                Dim::Known(a) => a.clone(),
+                Dim::Unknown => Audience::Public,
+            },
+        )
+    }
+}
+
+/// A fully established label: both dimensions concrete, no `Unknown` representable.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EstablishedLabel {
+    pub trust: Trust,
+    pub audience: Audience,
+}
+
+impl EstablishedLabel {
+    pub fn new(trust: Trust, audience: Audience) -> Self {
+        EstablishedLabel { trust, audience }
+    }
+
+    pub fn top() -> Self {
+        EstablishedLabel::new(Trust::new(u8::MAX), Audience::Public)
+    }
+
+    /// The restrictive meet: minimum trust, intersect audience. Commutative, associative,
+    /// idempotent, and it never widens either dimension.
+    pub fn combine(&self, other: &EstablishedLabel) -> EstablishedLabel {
+        EstablishedLabel {
+            trust: self.trust.combine(other.trust),
+            audience: self.audience.combine(&other.audience),
         }
+    }
+
+    pub fn into_label(self) -> Label {
+        Label::new(Dim::Known(self.trust), Dim::Known(self.audience))
+    }
+
+    /// The established dimensions of `label`, when both are. A value whose label has any
+    /// `Unknown` dimension has no established form.
+    pub fn from_label(label: &Label) -> Option<EstablishedLabel> {
+        match (&label.trust, &label.audience) {
+            (Dim::Known(t), Dim::Known(a)) => Some(EstablishedLabel::new(*t, a.clone())),
+            _ => None,
+        }
+    }
+}
+
+/// The trajectory projection's partial label: per dimension, the established bound
+/// folded from every known contribution plus the set of source values whose contribution is
+/// still `Unknown`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartialLabel {
+    bound: EstablishedLabel,
+    unresolved_trust: BTreeSet<ValueId>,
+    unresolved_audience: BTreeSet<ValueId>,
+}
+
+impl PartialLabel {
+    /// A fully established state: `bound` with no unresolved sources. The monoid identity is
+    /// `established(EstablishedLabel::top())`.
+    pub fn established(bound: EstablishedLabel) -> Self {
+        PartialLabel {
+            bound,
+            unresolved_trust: BTreeSet::new(),
+            unresolved_audience: BTreeSet::new(),
+        }
+    }
+
+    /// Fold one admitted value's contribution: a known dimension meets into the
+    /// bound; an unknown dimension records the source in that dimension's unresolved set.
+    pub fn fold_value(&mut self, source: ValueId, label: &Label) {
+        match &label.trust {
+            Dim::Known(t) => self.bound.trust = self.bound.trust.combine(*t),
+            Dim::Unknown => {
+                self.unresolved_trust.insert(source);
+            }
+        }
+        match &label.audience {
+            Dim::Known(a) => self.bound.audience = self.bound.audience.combine(a),
+            Dim::Unknown => {
+                self.unresolved_audience.insert(source);
+            }
+        }
+    }
+
+    /// Narrow the established bound by `by`, leaving the unresolved sets untouched — the
+    /// committed-label clock: a delta narrows what is known and adds no source.
+    pub fn narrow_bound(&mut self, by: &EstablishedLabel) {
+        self.bound = self.bound.combine(by);
+    }
+
+    pub fn combine(&self, other: &PartialLabel) -> PartialLabel {
+        PartialLabel {
+            bound: self.bound.combine(&other.bound),
+            unresolved_trust: self.unresolved_trust.union(&other.unresolved_trust).copied().collect(),
+            unresolved_audience: self
+                .unresolved_audience
+                .union(&other.unresolved_audience)
+                .copied()
+                .collect(),
+        }
+    }
+
+    /// The established bound: every known restriction, readable even while sources
+    /// stay unresolved. The narrowing check and sanitizer residual comparisons read
+    /// exactly this.
+    pub fn bound(&self) -> &EstablishedLabel {
+        &self.bound
+    }
+
+    pub fn unresolved(&self, dim: Dimension) -> impl Iterator<Item = ValueId> + '_ {
+        match dim {
+            Dimension::Trust => self.unresolved_trust.iter().copied(),
+            Dimension::Audience => self.unresolved_audience.iter().copied(),
+        }
+    }
+
+    /// Is `source` still unresolved on `dim`? Set membership, for per-source reporting
+    /// without rescanning the whole unresolved set.
+    pub fn is_unresolved(&self, dim: Dimension, source: ValueId) -> bool {
+        match dim {
+            Dimension::Trust => self.unresolved_trust.contains(&source),
+            Dimension::Audience => self.unresolved_audience.contains(&source),
+        }
+    }
+
+    pub fn is_established(&self, dim: Dimension) -> bool {
+        match dim {
+            Dimension::Trust => self.unresolved_trust.is_empty(),
+            Dimension::Audience => self.unresolved_audience.is_empty(),
+        }
+    }
+
+    pub fn is_fully_established(&self) -> bool {
+        self.unresolved_trust.is_empty() && self.unresolved_audience.is_empty()
+    }
+
+    /// Does the trajectory's trust meet `floor`? Consuming an unresolved dimension is
+    /// [`Adequacy::Unresolved`]; otherwise the bound decides.
+    pub fn meets_floor(&self, floor: Trust) -> Adequacy {
+        if !self.unresolved_trust.is_empty() {
+            return Adequacy::Unresolved;
+        }
+        bool_adequacy(self.bound.trust >= floor)
+    }
+
+    pub fn covers(&self, recipients: &Audience) -> Adequacy {
+        if !self.unresolved_audience.is_empty() {
+            return Adequacy::Unresolved;
+        }
+        bool_adequacy(self.bound.audience.includes(recipients))
+    }
+
+    pub fn within_cap(&self, cap: &Audience) -> Adequacy {
+        if !self.unresolved_audience.is_empty() {
+            return Adequacy::Unresolved;
+        }
+        bool_adequacy(self.bound.audience.within(cap))
     }
 }
 
@@ -239,81 +373,146 @@ mod tests {
             .prop_map(|(trust, audience)| Label::new(trust, audience))
     }
 
+    fn established_strategy() -> impl Strategy<Value = EstablishedLabel> {
+        (trust_strategy(), audience_strategy()).prop_map(|(t, a)| EstablishedLabel::new(t, a))
+    }
+
+    fn partial_strategy() -> impl Strategy<Value = PartialLabel> {
+        (established_strategy(), prop::collection::vec(label_strategy(), 0..6)).prop_map(|(start, values)| {
+            let mut partial = PartialLabel::established(start);
+            for (i, label) in values.iter().enumerate() {
+                partial.fold_value(ValueId::new(i as u64), label);
+            }
+            partial
+        })
+    }
+
     proptest! {
         #[test]
-        fn combine_is_commutative(a in label_strategy(), b in label_strategy()) {
+        fn combine_is_commutative(a in partial_strategy(), b in partial_strategy()) {
             prop_assert_eq!(a.combine(&b), b.combine(&a));
         }
 
         #[test]
-        fn combine_is_associative(a in label_strategy(), b in label_strategy(), c in label_strategy()) {
+        fn combine_is_associative(a in partial_strategy(), b in partial_strategy(), c in partial_strategy()) {
             prop_assert_eq!(a.combine(&b).combine(&c), a.combine(&b.combine(&c)));
         }
 
         #[test]
-        fn combine_is_idempotent(a in label_strategy()) {
+        fn combine_is_idempotent(a in partial_strategy()) {
             prop_assert_eq!(a.combine(&a), a.clone());
         }
 
         #[test]
-        fn combine_never_widens(a in label_strategy(), b in label_strategy()) {
+        fn established_top_is_identity(a in partial_strategy()) {
+            let identity = PartialLabel::established(EstablishedLabel::top());
+            prop_assert_eq!(identity.combine(&a), a.clone());
+            prop_assert_eq!(a.combine(&identity), a.clone());
+        }
+
+        #[test]
+        fn combine_never_widens(a in partial_strategy(), b in partial_strategy()) {
             let folded = a.combine(&b);
-            if let (Dim::Known(ft), Dim::Known(at), Dim::Known(bt)) =
-                (&folded.trust, &a.trust, &b.trust)
-            {
-                prop_assert!(ft <= at && ft <= bt);
+            prop_assert!(folded.bound().trust <= a.bound().trust);
+            prop_assert!(folded.bound().trust <= b.bound().trust);
+            prop_assert!(folded.bound().audience.within(&a.bound().audience));
+            prop_assert!(folded.bound().audience.within(&b.bound().audience));
+        }
+
+        #[test]
+        fn fold_keeps_known_restrictions_under_unknown(a in partial_strategy(), v in label_strategy()) {
+            let before = a.clone();
+            let source = ValueId::new(1000);
+            let mut after = a;
+            after.fold_value(source, &v);
+
+            prop_assert!(after.bound().trust <= before.bound().trust);
+            prop_assert!(after.bound().audience.within(&before.bound().audience));
+            match &v.trust {
+                Dim::Unknown => {
+                    prop_assert_eq!(after.bound().trust, before.bound().trust);
+                    prop_assert!(after.unresolved(Dimension::Trust).any(|id| id == source));
+                }
+                Dim::Known(_) => {
+                    prop_assert!(!after.unresolved(Dimension::Trust).any(|id| id == source));
+                }
             }
-            if let (Dim::Known(fa), Dim::Known(aa), Dim::Known(ba)) =
-                (&folded.audience, &a.audience, &b.audience)
-            {
-                prop_assert_eq!(fa.within(aa), true);
-                prop_assert_eq!(fa.within(ba), true);
+            match &v.audience {
+                Dim::Unknown => {
+                    prop_assert_eq!(&after.bound().audience, &before.bound().audience);
+                    prop_assert!(after.unresolved(Dimension::Audience).any(|id| id == source));
+                }
+                Dim::Known(_) => {
+                    prop_assert!(!after.unresolved(Dimension::Audience).any(|id| id == source));
+                }
             }
         }
 
         #[test]
-        fn top_is_identity(a in label_strategy()) {
-            prop_assert_eq!(Label::top().combine(&a), a.clone());
-        }
-
-        #[test]
-        fn unknown_absorbs(a in label_strategy()) {
-            let all_unknown = Label::new(Dim::Unknown, Dim::Unknown);
-            let folded = a.combine(&all_unknown);
-            prop_assert_eq!(folded.trust, Dim::Unknown);
-            prop_assert_eq!(folded.audience, Dim::Unknown);
+        fn fully_established_start_decides_every_test(start in established_strategy()) {
+            let partial = PartialLabel::established(start.clone());
+            prop_assert!(partial.is_fully_established());
+            prop_assert_eq!(partial.meets_floor(start.trust), Adequacy::Holds);
+            prop_assert_eq!(partial.within_cap(&Audience::Public), Adequacy::Holds);
         }
     }
 
     #[test]
     fn floor_holds_at_or_above() {
         let floor = Trust::new(2);
-        assert_eq!(Dim::Known(Trust::new(2)).meets_floor(floor), Adequacy::Holds);
-        assert_eq!(Dim::Known(Trust::new(3)).meets_floor(floor), Adequacy::Holds);
-        assert_eq!(Dim::Known(Trust::new(1)).meets_floor(floor), Adequacy::Fails);
-        assert_eq!(Dim::<Trust>::Unknown.meets_floor(floor), Adequacy::Unresolved);
+        let at = PartialLabel::established(EstablishedLabel::new(Trust::new(2), Audience::Public));
+        let above = PartialLabel::established(EstablishedLabel::new(Trust::new(3), Audience::Public));
+        let below = PartialLabel::established(EstablishedLabel::new(Trust::new(1), Audience::Public));
+        assert_eq!(at.meets_floor(floor), Adequacy::Holds);
+        assert_eq!(above.meets_floor(floor), Adequacy::Holds);
+        assert_eq!(below.meets_floor(floor), Adequacy::Fails);
+
+        let mut unresolved = above;
+        unresolved.fold_value(ValueId::new(0), &Label::new(Dim::Unknown, Dim::Known(Audience::Public)));
+        assert_eq!(unresolved.meets_floor(floor), Adequacy::Unresolved);
     }
 
     #[test]
     fn includes_and_cap_relations() {
         let internal = Audience::restricted([ReaderId::new("a"), ReaderId::new("b")]);
         let just_a = Audience::restricted([ReaderId::new("a")]);
+        let with = |audience: Audience| PartialLabel::established(EstablishedLabel::new(Trust::new(1), audience));
 
-        assert_eq!(Dim::Known(internal.clone()).covers(&just_a), Adequacy::Holds);
-        assert_eq!(Dim::Known(just_a.clone()).covers(&internal), Adequacy::Fails);
-        assert_eq!(Dim::Known(Audience::Public).covers(&internal), Adequacy::Holds);
-        assert_eq!(Dim::Known(internal.clone()).covers(&Audience::Public), Adequacy::Fails);
-        assert_eq!(Dim::Known(just_a).within_cap(&internal), Adequacy::Holds);
-        assert_eq!(Dim::Known(internal).within_cap(&Audience::Public), Adequacy::Holds);
-        assert_eq!(Dim::<Audience>::Unknown.covers(&Audience::Public), Adequacy::Unresolved);
+        assert_eq!(with(internal.clone()).covers(&just_a), Adequacy::Holds);
+        assert_eq!(with(just_a.clone()).covers(&internal), Adequacy::Fails);
+        assert_eq!(with(Audience::Public).covers(&internal), Adequacy::Holds);
+        assert_eq!(with(internal.clone()).covers(&Audience::Public), Adequacy::Fails);
+        assert_eq!(with(just_a).within_cap(&internal), Adequacy::Holds);
+        assert_eq!(with(internal.clone()).within_cap(&Audience::Public), Adequacy::Holds);
+
+        let mut unresolved = with(internal);
+        unresolved.fold_value(ValueId::new(0), &Label::new(Dim::Known(Trust::new(1)), Dim::Unknown));
+        assert_eq!(unresolved.covers(&Audience::Public), Adequacy::Unresolved);
+        assert_eq!(unresolved.within_cap(&Audience::Public), Adequacy::Unresolved);
+        assert_eq!(unresolved.meets_floor(Trust::new(1)), Adequacy::Holds);
+    }
+
+    #[test]
+    fn a_partial_label_round_trips_through_serde_verbatim() {
+        let mut fold = PartialLabel::established(EstablishedLabel::new(
+            Trust::new(1),
+            Audience::restricted([ReaderId::new("internal"), ReaderId::new("audit")]),
+        ));
+        fold.fold_value(ValueId::new(3), &Label::new(Dim::Unknown, Dim::Known(Audience::Public)));
+        fold.fold_value(ValueId::new(7), &Label::new(Dim::Known(Trust::new(0)), Dim::Unknown));
+
+        let bytes = serde_json::to_string(&fold).expect("a partial label serializes");
+        let back: PartialLabel = serde_json::from_str(&bytes).expect("and deserializes");
+        assert_eq!(back, fold);
+        assert_eq!(serde_json::to_string(&back).unwrap(), bytes);
     }
 
     #[test]
     fn intersect_shrinks_readers() {
         let ab = Audience::restricted([ReaderId::new("a"), ReaderId::new("b")]);
         let bc = Audience::restricted([ReaderId::new("b"), ReaderId::new("c")]);
-        let folded = Label::new(Dim::Known(Trust::new(1)), Dim::Known(ab))
-            .combine(&Label::new(Dim::Known(Trust::new(1)), Dim::Known(bc)));
-        assert_eq!(folded.audience, Dim::Known(Audience::restricted([ReaderId::new("b")])));
+        let mut partial = PartialLabel::established(EstablishedLabel::new(Trust::new(1), ab));
+        partial.fold_value(ValueId::new(0), &Label::new(Dim::Known(Trust::new(1)), Dim::Known(bc)));
+        assert_eq!(partial.bound().audience, Audience::restricted([ReaderId::new("b")]));
     }
 }

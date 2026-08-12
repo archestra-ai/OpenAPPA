@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::fact::EffectKind;
-use crate::label::{Adequacy, Audience, Dim, DimValue, Dimension, Label, ReaderId, Trust};
+use crate::label::{Adequacy, Audience, Dim, Dimension, EstablishedLabel, Label, ReaderId, Trust};
 use crate::names::{AuthorityName, CastName, MarkName, SanitizerName, TagName};
 
 /// Operator prose on a registered authority or sanitizer: why this entry exists, in the
@@ -24,8 +24,6 @@ impl Hint {
         &self.0
     }
 }
-
-pub type CastTarget = DimValue;
 
 /// What an authority's ruling may cover. Each power names its currency; a mandate covering nothing
 /// is a loud load error (the empty-remedy proof depends on it — see [`Mandate::is_empty`]).
@@ -125,38 +123,23 @@ pub struct Sanitizer {
     pub hint: Option<Hint>,
 }
 
-/// The ceiling a resolver-implemented cast may not exceed. Trust: the admissible target
-/// ranks. Audience: a cap the resolved audience must stay within — a `public` cap is the open gate
-/// that admits a Public resolution; `None` withholds the dimension entirely. At least one
-/// dimension must be declared (a resolver that may cast to nothing is inert).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// The complete product ceiling a resolver-implemented cast may not exceed: the
+/// admissible target trust ranks and a cap the resolved audience must stay within. A `public`
+/// cap is the open gate that admits a Public resolution. An empty trust list means
+/// the cast can never fill an unresolved trust dimension — it still serves sources whose
+/// trust is already established, so only the catalogue-aware reachability pass
+/// can prove a ceiling dead at load.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CastCeiling {
     pub trust: Vec<Trust>,
-    pub audience: Option<Audience>,
+    pub audience: Audience,
 }
 
 impl CastCeiling {
-    pub fn is_empty(&self) -> bool {
-        self.trust.is_empty() && self.audience.is_none()
-    }
-
-    /// Is `target` an admissible resolution under this ceiling? Trust: rank membership. Audience:
-    /// the resolution must stay within the declared cap — Public is within only a `public` cap —
-    /// and a restricted set must hold literal reader IDs: never the reserved `public` spelling,
-    /// never a group.
-    pub fn admits(&self, target: &CastTarget) -> bool {
-        match target {
-            DimValue::Trust(t) => self.trust.contains(t),
-            DimValue::Audience(resolved) => match &self.audience {
-                None => false,
-                Some(cap) => {
-                    let literal_ids = match resolved {
-                        Audience::Public => true,
-                        Audience::Restricted(readers) => readers.iter().all(ReaderId::is_literal),
-                    };
-                    literal_ids && resolved.within(cap)
-                }
-            },
+    fn admits_unresolved(&self, answer: &EstablishedLabel, dim: Dimension) -> bool {
+        match dim {
+            Dimension::Trust => self.trust.contains(&answer.trust),
+            Dimension::Audience => answer.audience.within(&self.audience),
         }
     }
 }
@@ -164,10 +147,69 @@ impl CastCeiling {
 /// How a cast resolves — constant XOR resolver, never both (unrepresentable here by construction).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CastResolution {
-    Constant(CastTarget),
+    Constant(EstablishedLabel),
     Resolver { may_cast: CastCeiling },
 }
 
+/// Why a complete cast answer is not admissible for its source. The one
+/// validator both admission paths and replay consume — no caller re-derives these rules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CastRefusal {
+    NonLiteralReader,
+    ConstantMismatch,
+    EstablishedMismatch(Dimension),
+    CeilingExceeded(Dimension),
+}
+
+impl CastResolution {
+    /// Validate `answer` as the complete resolution of a source whose
+    /// per-value label is `prior`. Every dimension `prior` already establishes must match
+    /// exactly; every formerly unresolved dimension must clear the declared ceiling (resolver)
+    /// or carry the declared constant, which admits only the constant label itself. A
+    /// restricted resolved audience must hold literal reader IDs: never the reserved `public`
+    /// spelling, never a group.
+    pub fn validate(&self, prior: &Label, answer: &EstablishedLabel) -> Result<(), CastRefusal> {
+        let literal_ids = match &answer.audience {
+            Audience::Public => true,
+            Audience::Restricted(readers) => readers.iter().all(ReaderId::is_literal),
+        };
+        if !literal_ids {
+            return Err(CastRefusal::NonLiteralReader);
+        }
+        if let CastResolution::Constant(constant) = self
+            && answer != constant
+        {
+            return Err(CastRefusal::ConstantMismatch);
+        }
+        for dim in [Dimension::Trust, Dimension::Audience] {
+            let established = match dim {
+                Dimension::Trust => matches!(prior.trust, Dim::Known(_)),
+                Dimension::Audience => matches!(prior.audience, Dim::Known(_)),
+            };
+            if established {
+                let matches_prior = match dim {
+                    Dimension::Trust => matches!(prior.trust, Dim::Known(t) if t == answer.trust),
+                    Dimension::Audience => {
+                        matches!(&prior.audience, Dim::Known(a) if *a == answer.audience)
+                    }
+                };
+                if !matches_prior {
+                    return Err(CastRefusal::EstablishedMismatch(dim));
+                }
+                continue;
+            }
+            if let CastResolution::Resolver { may_cast } = self
+                && !may_cast.admits_unresolved(answer, dim)
+            {
+                return Err(CastRefusal::CeilingExceeded(dim));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A registered cast that establishes an Unknown value's complete label. Tag scope and
+/// registration-order request routing are `T05`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cast {
     pub name: CastName,
@@ -182,47 +224,115 @@ mod tests {
         Audience::restricted(ids.iter().copied().map(ReaderId::new))
     }
 
-    fn audience_ceiling(cap: Audience) -> CastCeiling {
-        CastCeiling {
-            trust: vec![],
-            audience: Some(cap),
+    fn resolver(trust: &[u8], cap: Audience) -> CastResolution {
+        CastResolution::Resolver {
+            may_cast: CastCeiling {
+                trust: trust.iter().copied().map(Trust::new).collect(),
+                audience: cap,
+            },
         }
+    }
+
+    fn both_unknown() -> Label {
+        Label::new(Dim::Unknown, Dim::Unknown)
+    }
+
+    fn answer(trust: u8, audience: Audience) -> EstablishedLabel {
+        EstablishedLabel::new(Trust::new(trust), audience)
     }
 
     #[test]
     fn an_audience_ceiling_is_a_cap_not_an_enumeration() {
-        let ceiling = audience_ceiling(readers(&["finance", "audit"]));
-        assert!(ceiling.admits(&DimValue::Audience(readers(&["finance"]))));
-        assert!(ceiling.admits(&DimValue::Audience(readers(&["finance", "audit"]))));
-        assert!(!ceiling.admits(&DimValue::Audience(readers(&["finance", "stranger"]))));
+        let cast = resolver(&[0], readers(&["finance", "audit"]));
+        assert_eq!(
+            cast.validate(&both_unknown(), &answer(0, readers(&["finance"]))),
+            Ok(())
+        );
+        assert_eq!(
+            cast.validate(&both_unknown(), &answer(0, readers(&["finance", "audit"]))),
+            Ok(())
+        );
+        assert_eq!(
+            cast.validate(&both_unknown(), &answer(0, readers(&["finance", "stranger"]))),
+            Err(CastRefusal::CeilingExceeded(Dimension::Audience))
+        );
     }
 
     #[test]
     fn a_public_resolution_is_admitted_only_under_a_public_cap() {
-        let wide = audience_ceiling(Audience::Public);
-        assert!(wide.admits(&DimValue::Audience(Audience::Public)));
-        assert!(wide.admits(&DimValue::Audience(readers(&["anyone"]))));
-        let narrow = audience_ceiling(readers(&["finance"]));
-        assert!(!narrow.admits(&DimValue::Audience(Audience::Public)));
+        let wide = resolver(&[0], Audience::Public);
+        assert_eq!(wide.validate(&both_unknown(), &answer(0, Audience::Public)), Ok(()));
+        assert_eq!(wide.validate(&both_unknown(), &answer(0, readers(&["anyone"]))), Ok(()));
+        let narrow = resolver(&[0], readers(&["finance"]));
+        assert_eq!(
+            narrow.validate(&both_unknown(), &answer(0, Audience::Public)),
+            Err(CastRefusal::CeilingExceeded(Dimension::Audience))
+        );
     }
 
     #[test]
     fn a_resolution_must_hold_literal_reader_ids() {
-        let wide = audience_ceiling(Audience::Public);
-        assert!(!wide.admits(&DimValue::Audience(readers(&["@hr"]))));
-        assert!(!wide.admits(&DimValue::Audience(readers(&["public"]))));
-        assert!(!wide.admits(&DimValue::Audience(readers(&["ap@corp", "@hr"]))));
-        assert!(wide.admits(&DimValue::Audience(readers(&["ap@corp"]))));
+        let wide = resolver(&[0], Audience::Public);
+        for bad in [readers(&["@hr"]), readers(&["public"]), readers(&["ap@corp", "@hr"])] {
+            assert_eq!(
+                wide.validate(&both_unknown(), &answer(0, bad)),
+                Err(CastRefusal::NonLiteralReader)
+            );
+        }
+        assert_eq!(
+            wide.validate(&both_unknown(), &answer(0, readers(&["ap@corp"]))),
+            Ok(())
+        );
     }
 
     #[test]
-    fn an_undeclared_audience_dimension_admits_nothing() {
-        let trust_only = CastCeiling {
-            trust: vec![Trust::new(0)],
-            audience: None,
-        };
-        assert!(!trust_only.admits(&DimValue::Audience(readers(&["finance"]))));
-        assert!(trust_only.admits(&DimValue::Trust(Trust::new(0))));
-        assert!(!trust_only.admits(&DimValue::Trust(Trust::new(1))));
+    fn both_ceilings_bound_the_answer_independently() {
+        let cast = resolver(&[1], readers(&["finance"]));
+        assert_eq!(
+            cast.validate(&both_unknown(), &answer(1, readers(&["finance"]))),
+            Ok(())
+        );
+        assert_eq!(
+            cast.validate(&both_unknown(), &answer(2, readers(&["finance"]))),
+            Err(CastRefusal::CeilingExceeded(Dimension::Trust))
+        );
+        assert_eq!(
+            cast.validate(&both_unknown(), &answer(1, readers(&["stranger"]))),
+            Err(CastRefusal::CeilingExceeded(Dimension::Audience))
+        );
+    }
+
+    #[test]
+    fn an_established_dimension_must_match_exactly() {
+        let cast = resolver(&[1], readers(&["finance"]));
+        let trust_known = Label::new(Dim::Known(Trust::new(3)), Dim::Unknown);
+        assert_eq!(cast.validate(&trust_known, &answer(3, readers(&["finance"]))), Ok(()));
+        assert_eq!(
+            cast.validate(&trust_known, &answer(1, readers(&["finance"]))),
+            Err(CastRefusal::EstablishedMismatch(Dimension::Trust))
+        );
+        let audience_known = Label::new(Dim::Unknown, Dim::Known(Audience::Public));
+        assert_eq!(cast.validate(&audience_known, &answer(1, Audience::Public)), Ok(()));
+        assert_eq!(
+            cast.validate(&audience_known, &answer(1, readers(&["finance"]))),
+            Err(CastRefusal::EstablishedMismatch(Dimension::Audience))
+        );
+    }
+
+    #[test]
+    fn a_constant_admits_exactly_its_declared_label_where_it_agrees() {
+        let constant = CastResolution::Constant(answer(0, Audience::Public));
+        assert_eq!(constant.validate(&both_unknown(), &answer(0, Audience::Public)), Ok(()));
+        assert_eq!(
+            constant.validate(&both_unknown(), &answer(1, Audience::Public)),
+            Err(CastRefusal::ConstantMismatch)
+        );
+        let agreeing = Label::new(Dim::Known(Trust::new(0)), Dim::Unknown);
+        assert_eq!(constant.validate(&agreeing, &answer(0, Audience::Public)), Ok(()));
+        let disagreeing = Label::new(Dim::Known(Trust::new(2)), Dim::Unknown);
+        assert_eq!(
+            constant.validate(&disagreeing, &answer(0, Audience::Public)),
+            Err(CastRefusal::EstablishedMismatch(Dimension::Trust))
+        );
     }
 }

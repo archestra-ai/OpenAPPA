@@ -4,11 +4,11 @@ use thiserror::Error;
 
 use crate::admit::{self, AdmitError, CastAnswer, CastError, ResultAdmission};
 use crate::branch::{self, BranchError, ReturnSubmission};
-use crate::check::{self, CheckOutcome, Narrowing, RawBlock, UnestablishedFact};
+use crate::check::{self, CheckOutcome, Narrowing, RawBlock};
 use crate::contract::ToolContract;
 use crate::execute::{self, PlanError, Ruling};
 use crate::fact::{Fact, FactBatch, ReturnPolicy, Revision};
-use crate::label::DimValue;
+use crate::label::EstablishedLabel;
 use crate::params::{ArgumentError, CanonicalArguments};
 use crate::plan::{self, PlannedBlock};
 use crate::profile::{self, DeploymentPolicy, DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentityV1};
@@ -66,6 +66,18 @@ pub enum ReplayError {
     InvalidPayload(ArgumentError),
     #[error("dispatched call digest does not match its persisted tool and arguments")]
     DigestMismatch,
+    #[error("cast record names a value not admitted earlier in the log")]
+    CastBeforeSource,
+    #[error("cast record's trajectory did not admit the value it resolves")]
+    ForeignResolution,
+    #[error("cast record resolves a source that is already fully established")]
+    RepeatResolution,
+    #[error("cast record names unregistered cast {0}")]
+    UnknownCast(String),
+    #[error("cast record's resolution is not admissible for its source under the registered cast")]
+    InadmissibleResolution,
+    #[error("fork record carries an unestablished seed")]
+    UnestablishedForkSeed,
 }
 
 /// The pure decision core, owning its static capability: the immutable registry (which carries
@@ -266,23 +278,19 @@ impl Engine {
         admit::observe_success(&self.registry, views, dispatch, call)
     }
 
-    /// The narrowing admitting a cast-resolved value of `call` would fold into the live trajectory
-    /// label, or `None` when it does not move it — the whole filled label, established dimensions
-    /// included (see `admit::pending_cast_narrowing`). The runtime derives the acceptance offer
-    /// from this; admission re-derives it under the family lock, so a stale offer refuses by value
-    /// (D2).
+    /// The narrowing admitting a cast-resolved value of `call` would fold into the live
+    /// established bound, or `None` when it does not move it — the whole resolved label,
+    /// established dimensions included (see `admit::pending_cast_narrowing`). The runtime derives
+    /// the acceptance offer from this; admission re-derives it under the family lock, so a stale
+    /// offer refuses by value (D2).
     pub fn cast_narrowing(
         &self,
         views: &Views,
-        dispatch: &DispatchId,
         call: &ResolvedCall,
-        resolved: &DimValue,
+        resolved: &EstablishedLabel,
     ) -> Result<Option<Narrowing>, EngineError> {
-        let contract = self.validated_contract(call)?;
-        Ok(admit::pending_cast_narrowing(
-            views,
-            &admit::cast_filled_dispatch_label(contract, views, dispatch, resolved),
-        ))
+        self.validated_contract(call)?;
+        Ok(admit::pending_cast_narrowing(views, resolved))
     }
 
     /// Attach the sound remedies to a raw block: executable plans and prose recommendations. An empty
@@ -293,13 +301,15 @@ impl Engine {
         Ok(plan::plan(&self.registry, views, call, raw))
     }
 
+    /// Establish an admitted Unknown value's complete label by a validated whole-source cast
+    /// answer: one `CastApplied` fact or nothing.
     pub fn admit_cast(
         &self,
         views: &Views,
-        target: &UnestablishedFact,
+        value: crate::value::ValueId,
         answer: CastAnswer,
     ) -> Result<FactBatch, CastError> {
-        admit::admit_cast(&self.registry, views, target, answer)
+        admit::admit_cast(&self.registry, views, value, answer)
     }
 
     /// Seed a child branch at the parent's current label with an immutable fork binding carrying
@@ -357,33 +367,75 @@ impl Engine {
         branch::execute_child_return_plan(&self.registry, parent, child, chosen, submission)
     }
 
-    /// Validate every persisted dispatched call against this registry before its log is
-    /// trusted as replay input: the named tool must be registered, the persisted payload
-    /// must satisfy that tool's compiled schema, and the recomputed digest must match the
-    /// `DispatchId`. A `CanonicalArguments` cannot prove which schema
-    /// it was validated against, so replay re-establishes the binding here.
+    /// Validate persisted facts against this registry before the log is trusted as replay
+    /// input: sequentially, failing at the first impossible record.
     pub fn validate_replay(&self, facts: &[Fact]) -> Result<(), ReplayError> {
+        struct ReplayValue<'a> {
+            label: &'a crate::label::Label,
+            trajectory: &'a TrajectoryId,
+            resolved: bool,
+        }
+        let mut values: Vec<ReplayValue<'_>> = Vec::new();
         for fact in facts {
-            let Fact::DispatchOpened {
-                dispatch,
-                tool,
-                arguments,
-                ..
-            } = fact
-            else {
-                continue;
-            };
-            let contract = self
-                .registry
-                .tool(tool)
-                .ok_or_else(|| ReplayError::UnknownTool(tool.as_str().to_string()))?;
-            contract
-                .parameters
-                .validate(arguments.value())
-                .map_err(ReplayError::InvalidPayload)?;
-            let recomputed = crate::value::CanonicalDigest::of_call(tool, arguments);
-            if dispatch.digest() != &recomputed {
-                return Err(ReplayError::DigestMismatch);
+            match fact {
+                Fact::DispatchOpened {
+                    dispatch,
+                    tool,
+                    arguments,
+                    ..
+                } => {
+                    let contract = self
+                        .registry
+                        .tool(tool)
+                        .ok_or_else(|| ReplayError::UnknownTool(tool.as_str().to_string()))?;
+                    contract
+                        .parameters
+                        .validate(arguments.value())
+                        .map_err(ReplayError::InvalidPayload)?;
+                    let recomputed = crate::value::CanonicalDigest::of_call(tool, arguments);
+                    if dispatch.digest() != &recomputed {
+                        return Err(ReplayError::DigestMismatch);
+                    }
+                }
+                Fact::ValueAdmitted { trajectory, value, .. } => {
+                    values.push(ReplayValue {
+                        label: &value.label,
+                        trajectory,
+                        resolved: false,
+                    });
+                }
+                Fact::CastApplied {
+                    trajectory,
+                    value,
+                    resolved,
+                    cast,
+                } => {
+                    let source = usize::try_from(value.index())
+                        .ok()
+                        .and_then(|i| values.get_mut(i))
+                        .ok_or(ReplayError::CastBeforeSource)?;
+                    if trajectory != source.trajectory {
+                        return Err(ReplayError::ForeignResolution);
+                    }
+                    if source.resolved || EstablishedLabel::from_label(source.label).is_some() {
+                        return Err(ReplayError::RepeatResolution);
+                    }
+                    let registered = self
+                        .registry
+                        .cast(cast)
+                        .ok_or_else(|| ReplayError::UnknownCast(cast.as_str().to_string()))?;
+                    if registered.resolution.validate(source.label, resolved).is_err() {
+                        return Err(ReplayError::InadmissibleResolution);
+                    }
+                    source.resolved = true;
+                }
+                Fact::Boundary {
+                    kind: crate::fact::BoundaryKind::Fork { seed, .. },
+                    ..
+                } if EstablishedLabel::from_label(seed).is_none() => {
+                    return Err(ReplayError::UnestablishedForkSeed);
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -425,7 +477,9 @@ pub(crate) fn opened_dispatch(contract: &ToolContract, views: &Views, call: &Res
         dispatch: dispatch.clone(),
         tool: call.tool().clone(),
         arguments: call.canonical_arguments().clone(),
-        proposed_label: check::committed_label_for_call(contract, &views.current_label(), call),
+        proposed_label: check::committed_label_for_call(contract, &views.current_label(), call)
+            .bound()
+            .clone(),
         proposed_effects: contract.emits.clone(),
         dynamic_resolutions: call.dynamic_resolutions().to_vec(),
     };
@@ -434,17 +488,20 @@ pub(crate) fn opened_dispatch(contract: &ToolContract, views: &Views, call: &Res
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use crate::check::Gap;
     use crate::contract::{
         AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, RecipientSpec, Requires, ToolContract,
     };
     use crate::fact::{EffectKind, EffectSet, Fact, Revision};
+    use crate::label::PartialLabel;
     use crate::label::{Audience, Dim, Dimension, Label, ReaderId, Trust};
     use crate::names::MarkName;
     use crate::projection::Projection;
     use crate::registry::{RegistryConfig, TrustChain};
-    use crate::value::{LabeledValue, Provenance, ToolName, TrajectoryId, ValueBody};
+    use crate::value::{LabeledValue, Provenance, ToolName, TrajectoryId, ValueBody, ValueId};
     use serde_json::json;
 
     const SUSPICIOUS: Trust = Trust::new(0);
@@ -487,6 +544,14 @@ mod tests {
 
     fn known(trust: Trust, audience: Audience) -> Label {
         Label::new(Dim::Known(trust), Dim::Known(audience))
+    }
+
+    fn established(trust: Trust, audience: Audience) -> EstablishedLabel {
+        EstablishedLabel::new(trust, audience)
+    }
+
+    fn partial(trust: Trust, audience: Audience) -> PartialLabel {
+        PartialLabel::established(EstablishedLabel::new(trust, audience))
     }
 
     fn call(tool: &str, args: serde_json::Value) -> ResolvedCall {
@@ -692,8 +757,8 @@ mod tests {
                 assert_eq!(
                     block.narrowing,
                     Some(crate::check::Narrowing {
-                        from: known(TRUSTED, both),
-                        to: known(TRUSTED, Audience::restricted([ReaderId::new("a")])),
+                        from: established(TRUSTED, both),
+                        to: established(TRUSTED, Audience::restricted([ReaderId::new("a")])),
                     })
                 );
                 assert!(block.unestablished.is_empty());
@@ -1031,7 +1096,7 @@ mod tests {
                 assert!(b.requirement_gaps.is_empty());
                 assert!(b.narrowing.is_some(), "the audience narrowing reports alongside");
                 assert_eq!(b.unestablished.len(), 1);
-                assert_eq!(b.unestablished[0].dimension, Dimension::Trust);
+                assert_eq!(b.unestablished[0].dimensions, BTreeSet::from([Dimension::Trust]));
             }
             other => panic!("expected an unestablished block, got {other:?}"),
         }
@@ -1064,10 +1129,129 @@ mod tests {
                 assert_eq!(b.requirement_gaps, vec![Gap::Attention(MarkName::new("signoff"))]);
                 assert!(b.narrowing.is_some());
                 assert_eq!(b.unestablished.len(), 1);
-                assert_eq!(b.unestablished[0].dimension, Dimension::Trust);
+                assert_eq!(b.unestablished[0].dimensions, BTreeSet::from([Dimension::Trust]));
             }
             other => panic!("expected a three-slot block, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_gap_and_an_unestablished_source_split_by_dimension() {
+        let vault = ToolContract {
+            name: ToolName::new("vault"),
+            tags: vec![],
+            delta: Some(Delta {
+                trust: None,
+                audience: None,
+            }),
+            parameters: crate::params::ToolParameters::open(),
+            emits: EffectSet::default(),
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(TRUSTED),
+                    audience: vec![crate::contract::AudienceRequirement::Cap(Audience::restricted([
+                        ReaderId::new("internal"),
+                    ]))],
+                },
+                ..Requires::default()
+            },
+        };
+        let e = engine(vec![vault]);
+        let log = vec![user_value(Label::new(Dim::Known(SUSPICIOUS), Dim::Unknown))];
+        match check(&e, &log, &call("vault", json!({}))) {
+            CheckOutcome::Block(b) => {
+                assert_eq!(
+                    b.requirement_gaps,
+                    vec![Gap::TrustFloor {
+                        required: TRUSTED,
+                        actual: SUSPICIOUS,
+                    }]
+                );
+                assert_eq!(b.unestablished.len(), 1);
+                assert_eq!(b.unestablished[0].dimensions, BTreeSet::from([Dimension::Audience]));
+            }
+            other => panic!("expected a gap+unestablished block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replay_refuses_malformed_cast_history() {
+        let classifier = crate::authority::Cast {
+            name: crate::names::CastName::new("classifier"),
+            resolution: crate::authority::CastResolution::Resolver {
+                may_cast: crate::authority::CastCeiling {
+                    trust: vec![SUSPICIOUS],
+                    audience: Audience::Public,
+                },
+            },
+        };
+        let cfg = RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: vec![],
+            authorities: vec![],
+            sanitizers: vec![],
+            casts: vec![classifier],
+        };
+        let e = open_engine(cfg);
+        let cast_fact = |value: u64, resolved: EstablishedLabel, cast: &str| Fact::CastApplied {
+            trajectory: traj(),
+            value: crate::value::ValueId::new(value),
+            resolved,
+            cast: crate::names::CastName::new(cast),
+        };
+        let unknown_source = user_value(Label::new(Dim::Unknown, Dim::Known(Audience::Public)));
+        let good = cast_fact(0, established(SUSPICIOUS, Audience::Public), "classifier");
+
+        assert_eq!(e.validate_replay(&[unknown_source.clone(), good.clone()]), Ok(()));
+        assert_eq!(
+            e.validate_replay(std::slice::from_ref(&good)),
+            Err(ReplayError::CastBeforeSource)
+        );
+        assert_eq!(
+            e.validate_replay(&[unknown_source.clone(), good.clone(), good.clone()]),
+            Err(ReplayError::RepeatResolution)
+        );
+        assert_eq!(
+            e.validate_replay(&[user_value(known(TRUSTED, Audience::Public)), good.clone()]),
+            Err(ReplayError::RepeatResolution)
+        );
+        assert!(matches!(
+            e.validate_replay(&[
+                unknown_source.clone(),
+                cast_fact(0, established(SUSPICIOUS, Audience::Public), "bogus")
+            ]),
+            Err(ReplayError::UnknownCast(name)) if name == "bogus"
+        ));
+        assert_eq!(
+            e.validate_replay(&[
+                unknown_source.clone(),
+                Fact::CastApplied {
+                    trajectory: TrajectoryId::new("sibling"),
+                    value: crate::value::ValueId::new(0),
+                    resolved: established(SUSPICIOUS, Audience::Public),
+                    cast: crate::names::CastName::new("classifier"),
+                }
+            ]),
+            Err(ReplayError::ForeignResolution)
+        );
+        assert_eq!(
+            e.validate_replay(&[
+                unknown_source,
+                cast_fact(0, established(TRUSTED, Audience::Public), "classifier")
+            ]),
+            Err(ReplayError::InadmissibleResolution)
+        );
+        assert_eq!(
+            e.validate_replay(&[Fact::Boundary {
+                trajectory: TrajectoryId::new("child"),
+                kind: crate::fact::BoundaryKind::Fork {
+                    parent: traj(),
+                    seed: Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
+                    return_policy: crate::fact::ReturnPolicy::Raw,
+                },
+            }]),
+            Err(ReplayError::UnestablishedForkSeed)
+        );
     }
 
     fn unannotated_tool(name: &str) -> ToolContract {
@@ -1107,8 +1291,11 @@ mod tests {
         log.extend(batch.facts);
         let p = Projection::build(&log, Revision::new(log.len() as u64));
         let current = p.view(&t).current_label();
-        assert_eq!(current.trust, Dim::Unknown);
-        assert_eq!(current.audience, Dim::Unknown);
+        assert_eq!(current.bound(), &EstablishedLabel::new(TRUSTED, Audience::Public));
+        assert!(!current.is_established(Dimension::Trust));
+        assert!(!current.is_established(Dimension::Audience));
+        assert!(current.unresolved(Dimension::Trust).any(|id| id == ValueId::new(1)));
+        assert!(current.unresolved(Dimension::Audience).any(|id| id == ValueId::new(1)));
     }
 
     #[test]
@@ -1119,8 +1306,13 @@ mod tests {
         match check(&e, &log, &call("get_ticket", json!({}))) {
             CheckOutcome::Block(b) => {
                 assert!(b.requirement_gaps.is_empty());
-                assert_eq!(b.unestablished.len(), 1);
-                assert_eq!(b.unestablished[0].dimension, Dimension::Trust);
+                assert_eq!(
+                    b.unestablished,
+                    vec![crate::check::UnestablishedFact {
+                        value: ValueId::new(0),
+                        dimensions: BTreeSet::from([Dimension::Trust, Dimension::Audience]),
+                    }]
+                );
             }
             other => panic!("expected an unestablished block, got {other:?}"),
         }
@@ -1178,7 +1370,7 @@ mod tests {
             CheckOutcome::Block(b) => {
                 assert!(b.requirement_gaps.is_empty(), "the sentinel gap must be masked");
                 assert_eq!(b.unestablished.len(), 1);
-                assert_eq!(b.unestablished[0].dimension, Dimension::Audience);
+                assert_eq!(b.unestablished[0].dimensions, BTreeSet::from([Dimension::Audience]));
             }
             other => panic!("expected an unestablished block on an Unknown audience, got {other:?}"),
         }
@@ -1330,7 +1522,7 @@ mod tests {
             dispatch: DispatchId::new(traj(), minted_from.digest(), 0),
             tool: ToolName::new(tool),
             arguments: crate::params::test_arguments(&payload),
-            proposed_label: known(TRUSTED, Audience::Public),
+            proposed_label: established(TRUSTED, Audience::Public),
             proposed_effects: EffectSet::default(),
             dynamic_resolutions: vec![],
         };
@@ -1390,7 +1582,7 @@ mod tests {
             covers: chosen.required[0].covers.clone(),
             reviewed: crate::execute::AuthorityReview {
                 tool: ToolName::new("wire"),
-                trajectory_label: known(SUSPICIOUS, Audience::Public),
+                trajectory_label: partial(SUSPICIOUS, Audience::Public),
             },
         };
         let batch = e.execute_remedy_plan(&views, &chosen, &wire_call, &[ruling]).unwrap();
@@ -1411,7 +1603,7 @@ mod tests {
         let batch = e.open_dispatch(&p.view(&t), &call("get_ticket", json!({}))).unwrap();
         match &batch.facts[0] {
             Fact::DispatchOpened { proposed_label, .. } => {
-                assert_eq!(*proposed_label, known(TRUSTED, internal));
+                assert_eq!(*proposed_label, established(TRUSTED, internal));
             }
             other => panic!("expected DispatchOpened, got {other:?}"),
         }

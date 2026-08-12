@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::authority::Transition;
 use crate::check::{Gap, Narrowing};
 use crate::execute::AuthorityReview;
-use crate::label::{DimValue, Dimension, Label};
+use crate::label::{EstablishedLabel, Label};
 use crate::names::{AuthorityName, CastName, SanitizerName};
 use crate::plan::PlanId;
 use crate::profile::{DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentityV1};
@@ -170,7 +170,7 @@ pub enum Fact {
         dispatch: DispatchId,
         tool: ToolName,
         arguments: crate::params::CanonicalArguments,
-        proposed_label: Label,
+        proposed_label: EstablishedLabel,
         proposed_effects: EffectSet,
         #[serde(default)]
         dynamic_resolutions: Vec<crate::contract::PinnedDynamicResolution>,
@@ -212,16 +212,14 @@ pub enum Fact {
     CastApplied {
         trajectory: TrajectoryId,
         value: ValueId,
-        dimension: Dimension,
-        resolved: DimValue,
+        resolved: EstablishedLabel,
         cast: CastName,
     },
     OutputCastApplied {
         trajectory: TrajectoryId,
         dispatch: DispatchId,
         cast: CastName,
-        dimension: Dimension,
-        resolved: DimValue,
+        resolved: EstablishedLabel,
         raw_digest: RawResultDigest,
     },
     OutputCastAccepted {
@@ -233,8 +231,7 @@ pub enum Fact {
         trajectory: TrajectoryId,
         dispatch: DispatchId,
         cast: CastName,
-        dimension: Dimension,
-        resolved: DimValue,
+        resolved: EstablishedLabel,
         raw_digest: RawResultDigest,
     },
     OutputSanitizerBound {

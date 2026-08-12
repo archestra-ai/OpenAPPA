@@ -110,7 +110,7 @@ builtin = "redact-email"
 
 [[cast]]
 name = "classifier"
-resolver = { url = "http://classify.internal/resolve", may_cast = { trust = ["suspicious"] } }
+resolver = { url = "http://classify.internal/resolve", may_cast = { trust = ["suspicious"], audience = { cap = ["public"] } } }
 "#,
         ),
         BTreeMap::new(),
@@ -335,7 +335,12 @@ return_sanitizer = "redact"
 
     let (facts, revision) = mediator.snapshot(&tenant, &parent).expect("family snapshot");
     let projection = Projection::build(&facts, revision);
-    assert_eq!(projection.view(&child).current_label(), parent_label);
+    assert_eq!(
+        projection.view(&child).current_label(),
+        appa_engine::label::PartialLabel::established(
+            appa_engine::label::EstablishedLabel::from_label(&parent_label).expect("fixture label is established")
+        )
+    );
     let fork = facts
         .iter()
         .find_map(|fact| match fact {

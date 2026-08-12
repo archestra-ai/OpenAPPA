@@ -521,6 +521,8 @@ impl Core {
                     | AdmitError::UnknownCast(_)
                     | AdmitError::ConstantMismatch
                     | AdmitError::CeilingExceeded
+                    | AdmitError::NonLiteralAnswer
+                    | AdmitError::EstablishedMismatch
                     | AdmitError::NarrowingUnaccepted
                     | AdmitError::AcceptanceMismatch
                     | AdmitError::AlreadySucceeded
