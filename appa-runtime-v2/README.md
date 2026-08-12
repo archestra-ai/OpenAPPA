@@ -40,6 +40,11 @@ max_body_bytes = 65536
 Implementation bindings (authority and sanitizer endpoints) live in
 `[externals]`, never inline in the policy.
 
+`examples/claude-code.appa.toml` is a complete starting point: it
+releases every built-in Claude Code tool with the neutral annotation
+and marks the web tools' results suspicious. Pass it directly with
+`--config examples/claude-code.appa.toml`.
+
 ### 3. Start the process
 
 ```sh
