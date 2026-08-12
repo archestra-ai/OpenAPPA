@@ -16,7 +16,8 @@ use appa_engine::label::{Audience, Label, ReaderId};
 use appa_engine::plan::{ExecutableRemedyPlan, PlannedBlock, RemedyPlan};
 use appa_engine::projection::{Projection, Views};
 use appa_engine::value::{
-    CanonicalDigest, DispatchId as EngineDispatchId, RawResultDigest, ResolvedCall, ToolName, ValueBody,
+    CanonicalDigest, DispatchId as EngineDispatchId, Provenance, RawResultDigest, ResolvedCall, ToolName, ValueBody,
+    ValueId,
 };
 
 use crate::api::OutcomeBody;
@@ -491,7 +492,7 @@ impl RuntimeEngine {
                     ));
                     offer_ids.push(id);
                 }
-                let text = block_feedback(&planned, &offer_ids);
+                let text = block_feedback(views, &planned, &offer_ids);
                 let mut decision = EngineDecision::deliver(Next::ModelResponse {
                     invocations: Vec::new(),
                     feedback: vec![Feedback {
@@ -677,7 +678,7 @@ impl RuntimeEngine {
         };
         if !raw.unestablished.is_empty() {
             return Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Declined {
-                feedback: unestablished_feedback(&raw.unestablished),
+                feedback: unestablished_feedback(views, &raw.unestablished),
             })));
         }
         let planned = self
@@ -771,7 +772,7 @@ impl RuntimeEngine {
             }
             Err(PlanError::Unestablished(facts)) => {
                 Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Declined {
-                    feedback: unestablished_feedback(&facts),
+                    feedback: unestablished_feedback(views, &facts),
                 })))
             }
             Err(error) => Ok(retire_declined(
@@ -948,7 +949,7 @@ impl RuntimeEngine {
             }
             ReturnCheck::Block(ReturnBlock::Unestablished(facts)) => {
                 Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
-                    feedback: unestablished_feedback(&facts),
+                    feedback: unestablished_feedback(parent_views, &facts),
                     offers: Vec::new(),
                 })))
             }
@@ -1209,13 +1210,39 @@ fn gap_text(gap: &appa_engine::check::Gap) -> String {
     }
 }
 
-fn unestablished_feedback(facts: &[UnestablishedFact]) -> String {
+/// Name a blocked value by where it came from, keeping its id: `ValueId(0)` alone tells the model
+/// nothing, and the id stays because the trail cites it.
+///
+/// Only a value the receiving trajectory admitted itself is named this way. A blocked child return
+/// is parent-facing while its facts are the child's, and `submit_result` is the ONLY channel
+/// carrying child-derived data back: naming the tool the child chose would make this
+/// feedback a second one, so a value the scope does not own stays id-only.
+fn unestablished_source(views: &Views, value: ValueId) -> String {
+    if !views.owns_value(value) {
+        return format!("value {value:?}");
+    }
+    let source = match views.value_provenance(value) {
+        Some(Provenance::ToolResult { dispatch }) => views
+            .dispatch_tool(dispatch)
+            .map(|tool| format!("the result of {}", tool.as_str())),
+        Some(Provenance::UserInput) => Some("your prompt".to_string()),
+        Some(Provenance::ChildReturn { .. }) => Some("a subagent's return".to_string()),
+        None => None,
+    };
+    match source {
+        Some(source) => format!("{source} ({value:?})"),
+        None => format!("value {value:?}"),
+    }
+}
+
+fn unestablished_feedback(views: &Views, facts: &[UnestablishedFact]) -> String {
     let entries: Vec<String> = facts
         .iter()
         .map(|fact| {
             format!(
-                "value {:?} has an unestablished {:?} dimension",
-                fact.value, fact.dimension
+                "{} has an unestablished {:?} dimension",
+                unestablished_source(views, fact.value),
+                fact.dimension
             )
         })
         .collect();
@@ -1225,7 +1252,7 @@ fn unestablished_feedback(facts: &[UnestablishedFact]) -> String {
     )
 }
 
-fn block_feedback(planned: &PlannedBlock, offers: &[OfferId]) -> String {
+fn block_feedback(views: &Views, planned: &PlannedBlock, offers: &[OfferId]) -> String {
     let mut lines = vec!["[appa] this call is blocked.".to_string()];
     for gap in &planned.raw.requirement_gaps {
         lines.push(format!("- {}", gap_text(gap)));
@@ -1237,7 +1264,10 @@ fn block_feedback(planned: &PlannedBlock, offers: &[OfferId]) -> String {
         ));
     }
     if !planned.raw.unestablished.is_empty() {
-        lines.push(format!("- {}", unestablished_feedback(&planned.raw.unestablished)));
+        lines.push(format!(
+            "- {}",
+            unestablished_feedback(views, &planned.raw.unestablished)
+        ));
     }
     let mut offer_iter = offers.iter();
     for plan in &planned.plans {

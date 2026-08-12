@@ -6,7 +6,9 @@ use crate::contract::PinnedDynamicResolution;
 use crate::fact::{BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ReturnPolicy, Revision};
 use crate::label::{Dim, DimValue, Label};
 use crate::names::{AuthorityName, SanitizerName};
-use crate::value::{CanonicalDigest, ChildReturnId, DispatchId, LabeledValue, Provenance, TrajectoryId, ValueId};
+use crate::value::{
+    CanonicalDigest, ChildReturnId, DispatchId, LabeledValue, Provenance, ToolName, TrajectoryId, ValueId,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AdmittedValue {
@@ -44,6 +46,7 @@ pub struct Projection {
     reservations: BTreeMap<DispatchId, EffectSet>,
     succeeded: BTreeSet<DispatchId>,
     opened: Vec<OpenedDispatch>,
+    dispatch_tools: BTreeMap<DispatchId, ToolName>,
     boundaries: Vec<TrajectoryId>,
     forks: Vec<Fork>,
     child_returns: Vec<ReturnedChild>,
@@ -72,6 +75,7 @@ impl Projection {
         let mut reservations = BTreeMap::new();
         let mut succeeded = BTreeSet::new();
         let mut opened = Vec::new();
+        let mut dispatch_tools = BTreeMap::new();
         let mut boundaries = Vec::new();
         let mut forks = Vec::new();
         let mut child_returns = Vec::new();
@@ -94,11 +98,13 @@ impl Projection {
                 Fact::DispatchOpened {
                     trajectory,
                     dispatch,
+                    tool,
                     proposed_effects,
                     dynamic_resolutions: resolutions,
                     ..
                 } => {
                     dynamic_resolutions.insert(dispatch.clone(), resolutions.clone());
+                    dispatch_tools.insert(dispatch.clone(), tool.clone());
                     open.insert(dispatch.clone());
                     reservations.insert(dispatch.clone(), proposed_effects.clone());
                     opened.push(OpenedDispatch {
@@ -201,6 +207,7 @@ impl Projection {
             reservations,
             succeeded,
             opened,
+            dispatch_tools,
             boundaries,
             forks,
             child_returns,
@@ -271,6 +278,12 @@ impl Views<'_> {
             .ok()
             .and_then(|i| self.projection.values.get(i))
             .map(|value| &value.provenance)
+    }
+
+    /// The tool an opened dispatch called — what names the producer behind a
+    /// [`Provenance::ToolResult`]. Read-only audit context; the fold never consumes it.
+    pub fn dispatch_tool(&self, dispatch: &DispatchId) -> Option<&ToolName> {
+        self.projection.dispatch_tools.get(dispatch)
     }
 
     /// Does this value belong to the scoped trajectory? A cast may only resolve its own branch's
@@ -659,6 +672,44 @@ mod tests {
             without.view(&traj("a")).current_label()
         );
         assert!(!with.view(&traj("a")).has_effect(&egress));
+    }
+
+    #[test]
+    fn a_tool_results_provenance_resolves_to_its_producing_tool() {
+        let log = vec![
+            Fact::DispatchOpened {
+                trajectory: traj("a"),
+                dispatch: dispatch("a"),
+                tool: ToolName::new("fetch_meeting"),
+                arguments: crate::params::test_arguments(&json!({ "t": "a" })),
+                proposed_label: Label::top(),
+                proposed_effects: EffectSet::new([]).unwrap(),
+                dynamic_resolutions: Vec::new(),
+            },
+            Fact::ValueAdmitted {
+                trajectory: traj("a"),
+                value: labeled(1, Audience::Public),
+                provenance: Provenance::ToolResult {
+                    dispatch: dispatch("a"),
+                },
+            },
+            admit("a", labeled(1, Audience::Public)),
+        ];
+        let p = build(&log);
+        let a = traj("a");
+        let view = p.view(&a);
+        let Some(Provenance::ToolResult { dispatch: produced }) = view.value_provenance(ValueId::new(0)) else {
+            panic!("the admitted value carries its dispatch provenance");
+        };
+        assert_eq!(
+            view.dispatch_tool(produced).map(ToolName::as_str),
+            Some("fetch_meeting")
+        );
+        assert!(matches!(
+            view.value_provenance(ValueId::new(1)),
+            Some(Provenance::UserInput)
+        ));
+        assert!(view.dispatch_tool(&dispatch("b")).is_none());
     }
 
     #[test]

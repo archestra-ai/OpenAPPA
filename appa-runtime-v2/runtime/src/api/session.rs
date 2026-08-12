@@ -1953,9 +1953,13 @@ name = "execute_remedy_plan"
             })
             .await
             .expect("the block is delivered");
-        let ToolCallDecision::Deny { .. } = decision else {
+        let ToolCallDecision::Deny { feedback } = decision else {
             panic!("a consumed Unknown dimension must block the sink");
         };
+        assert!(
+            feedback.contains("the result of fetch (ValueId(0))"),
+            "the block must name the producing tool: {feedback}"
+        );
         assert!(
             runtime
                 .inner
@@ -2022,9 +2026,17 @@ name = "execute_remedy_plan"
             .on_child_end(Some("summary of untrusted data".to_string()))
             .await
             .expect("the block is delivered");
-        let crate::api::ChildReturnDecision::Blocked { .. } = blocked else {
+        let crate::api::ChildReturnDecision::Blocked { feedback } = blocked else {
             panic!("an Unknown fold must block the merge");
         };
+        assert!(
+            !feedback.contains("fetch"),
+            "a parent-facing block must not name the child's tool: {feedback}"
+        );
+        assert!(
+            feedback.contains("value ValueId(0)"),
+            "the blocked value is still named by its id: {feedback}"
+        );
         assert!(
             runtime.session(&TrajectoryId("cc:child".to_string())).is_ok(),
             "the child stays unended while its crossing is pending",
