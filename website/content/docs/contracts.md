@@ -97,6 +97,7 @@ A tool contract is typically four lines long. Use this checklist during policy r
 | **Dynamic Recipients** | Static readers when an ACL depends on an argument. | Use a placeholder for a literal recipient, or a dynamic resolver for an argument-derived reader set. | Static readers can ignore the proposed argument; dynamic resolution pins the ACL answer. |
 | **Combined Read & Release** | Single tool `share_doc(doc, recipient)` fetching and releasing in one step. | Split into `fetch_doc` (read) and `grant_doc_access` (release). | Combined tools force authorities to approve releases before content is fetched. |
 | **Authority Mandates** | Overly permissive mandates like `can_cover_readers = { may_add = ["public"] }`. | Restrict authority `mandate` and `scope.tags` to the minimum necessary desk. | Authorities cannot exceed mandates, but overly broad mandates weaken review gates. |
+| **Auto-Approval Wiring** | `builtin = "approve"` behind a wide mandate — an automated yes across everything the mandate covers. | Keep auto-approval mandates narrow; reserve wide mandates for `hitl` or a reviewed resolver. | Mandate powers do not depend on the implementation behind them: the open gate is legitimate, deliberate, and visible in review. |
 | **Hint Accuracy** | A `hint` describing a power the mandate does not hold, or content the sanitizer does not remove. | Restate the declared mandate in your own words: say what the entity covers or strips, and nothing more. | A hint reaches the agent with every plan naming the entity, and grants nothing. A misleading one steers plan choice wrongly and misleads review. |
 
 ## Tools
@@ -164,6 +165,7 @@ resolver = { url = "https://approver.corp/rule", timeout_ms = 30000 }
 |---|---|---|
 | **`builtin = "hitl"`** | Prompts a human reviewer in the loop. | Highest audit fidelity; presents exact arguments and label context to a human. |
 | **`builtin = "approve"`** | Auto-approves matching gaps in-process. | Intentionally opens an automated policy bypass within declared mandate limits. |
+| **`builtin = "<module name>"`** | A deployer builtin module: your own compiled code, loaded by the runtime at startup and called in-process. | Same mandate ceiling as any implementation; the module is deployer trusted code with the runtime's own privileges. |
 | **`resolver = { url = ... }`** | Queries a privileged external service. | Receives call digest, rendered payload, and review context; decision is logged verbatim. |
 
 ## Sanitizers
@@ -187,6 +189,15 @@ tags = ["support"]                             # Applies only to values from too
 [sanitizer.implementation]
 builtin = "redact-email"
 ```
+
+### Sanitizer implementation modes
+
+| Implementation | Description | Audit Properties |
+|---|---|---|
+| **`builtin = "redact-email"`** | The stock in-process redactor: replaces email-like tokens with a fixed placeholder. | Deterministic and offline; registering it vouches for exactly that transform. |
+| **`builtin = "attest-schema"`** | The reserved quarantine-exit sanitizer; engine-held, no service behind it. | Derives the return unchanged; claims instruction-cleanliness only. |
+| **`builtin = "<module name>"`** | A deployer builtin module: your own compiled scrubber, loaded at startup and called in-process. | Same mandate ceiling as any implementation; deployer trusted code. |
+| **`resolver = { url = ... }`** | A scrubbing service behind an endpoint. | The derivation is re-validated against the declared transition before admission. |
 
 A mandate binds exactly one dimension. Trust is declared on the same terms, as a floor the source must meet and the rank the derivation carries — this is how a scrubber vouches untrusted fetched text back up:
 

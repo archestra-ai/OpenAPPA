@@ -13,11 +13,15 @@ path = "src/main.rs"
 
 [dependencies]
 appa-adapter-claude-code = { path = "../adapters/claude-code" }
+# The builtin-module ABI: one source of truth for the descriptor,
+# statuses, and version shared with deployer modules.
+appa-builtin = { path = "../../appa-builtin" }
 appa-engine = { workspace = true }
 appa-policy = { workspace = true }
 appa-runtime-api = { path = "../api" }
 axum = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
+libloading = "0.9"
 rand = "0.10"
 reqwest = { workspace = true }
 # `server` carries the tool macros' schema derive; `transport-streamable-http-server`

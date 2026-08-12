@@ -19,8 +19,8 @@ fn the_reexported_vocabulary(
     let _: ToolOutcome = outcome;
 }
 
-fn the_declared_runtime(config: Config, db: PathBuf) {
-    let opened: Result<Runtime, OpenError> = Runtime::open(config, db);
+fn the_declared_runtime(config: Config, db: PathBuf, modules: Option<PathBuf>) {
+    let opened: Result<Runtime, OpenError> = Runtime::open(config, db, modules);
     drop(opened);
 }
 

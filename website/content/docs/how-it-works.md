@@ -20,7 +20,7 @@ By evaluating checks *before* tool dispatch, OpenAPPA prevents agents from getti
 
 Policy definitions remain strictly declarative: contracts, authorities, sanitizers, and casts are simple data configurations. Developers do not write static allow or block rules for every tool interaction. Instead, they declare tool contracts—specifying what permissions a tool requires (`requires`), how its output restricts security labels (`delta`), and what side effects it causes (`effects`). From these contracts and the trajectory's current label, OpenAPPA automatically derives whether an action is permitted, blocked, or remediable across any multi-step workflow.
 
-Imperative or model-based judgment—if necessary—lives outside the engine in registered external components such as regex filters, classification models, or human approval queues. These external components follow the exact same policy rules: an authority mandate caps which policy gaps a human or service can approve, while a sanitizer mandate bounds the exact label transition a scrubber can claim.
+Imperative or model-based judgment—if necessary—lives outside the engine in registered components such as regex filters, classification models, or human approval queues. A component runs behind an HTTP endpoint (a `resolver`); an authority or sanitizer may instead run in-process (a `builtin` — a stock implementation or your own compiled module). Either way it follows the exact same policy rules: an authority mandate caps which policy gaps a human or service can approve, while a sanitizer mandate bounds the exact label transition a scrubber can claim.
 
 Either kind may also carry a `hint`: a sentence, in the operator's own words, on what the component is for. The hint travels with every remedy plan naming that component, so an agent choosing among plans reads stated purpose rather than a bare name, and a reviewer reads intent beside the mandate. A hint grants nothing—the mandate remains the only bound on power.
 
@@ -170,7 +170,7 @@ OpenAPPA guarantees hold strictly within defined system boundaries. The engine a
 | **Log is durable and strictly ordered** | Trajectory verification depends on total ordering and persistence of log entries. |
 | **The harness executes faithfully where unenforced** | For tools without a tool gateway or hook, the framework is assumed to run approved calls unchanged, once, and to echo conversations honestly. A visible break is refused, with an operator alert recommended — not defended against. |
 
-In short: declarative tool contracts set automatic bounds, while external components handle dynamic cases like human approvals or content scanners. As long as the execution log is persisted, OpenAPPA ensures every decision remains provable and auditable under your team's security mandates.
+In short: declarative tool contracts set automatic bounds, while registered components — services or builtins — handle dynamic cases like human approvals or content scanners. As long as the execution log is persisted, OpenAPPA ensures every decision remains provable and auditable under your team's security mandates.
 
 ## Existing checks map onto registered engine components
 
@@ -181,7 +181,7 @@ Deployments migrate existing security controls into OpenAPPA by registering them
 | Human review / HITL prompts | `builtin = "hitl"` Authority |
 | Custom approval webhooks / LLM evaluators | Authority Resolver |
 | Content scanners & trust classifiers | Cast Resolver |
-| Regex / ML PII scrubbers & redactors | Sanitizer |
+| Regex / ML PII scrubbers & redactors | Sanitizer (`builtin = "redact-email"`, your own builtin module, or a resolver) |
 | Directory / IAM group lookups | Membership Resolver |
 | Imperative `if/else` access checks | Tool Contracts |
 

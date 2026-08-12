@@ -753,7 +753,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let db = dir.path().join("appa.db");
         std::fs::write(&db, b"not a sqlite database at all").expect("the file writes");
-        match Runtime::open(config(), db) {
+        match Runtime::open(config(), db, None) {
             Err(OpenError::Damaged(_) | OpenError::Storage(_)) => {}
             other => panic!("a damaged database must refuse to open, opened={}", other.is_ok()),
         }
@@ -1603,7 +1603,7 @@ delta = {}
     #[test]
     fn a_policy_in_the_documented_dialect_builds_the_engine() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        assert!(Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db")).is_ok());
+        assert!(Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None).is_ok());
     }
 
     #[test]
@@ -1611,7 +1611,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let config = config_with("version = 1\nstray_key = true\n", None);
         assert!(matches!(
-            Runtime::open(config, dir.path().join("appa.db")),
+            Runtime::open(config, dir.path().join("appa.db"), None),
             Err(OpenError::Policy(_)),
         ));
     }
@@ -1629,7 +1629,7 @@ attends = ["irreversible"]
 builtin = "approve"
 "#;
         assert!(matches!(
-            Runtime::open(config_with(policy, None), dir.path().join("appa.db")),
+            Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None),
             Err(OpenError::Policy(
                 appa_policy::ConfigError::ForbiddenInlineBinding { .. }
             )),
@@ -1647,7 +1647,7 @@ name = "approver"
 attends = ["irreversible"]
 "#;
         assert!(matches!(
-            Runtime::open(config_with(policy, None), dir.path().join("appa.db")),
+            Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None),
             Err(OpenError::UnboundExternal { kind: "authority", .. }),
         ));
     }
@@ -1662,7 +1662,7 @@ name = "fetch"
 delta = { trust = "unknown" }
 "#;
         assert!(matches!(
-            Runtime::open(config_with(policy, None), dir.path().join("appa.db")),
+            Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None),
             Err(OpenError::UnsupportedPolicy(_)),
         ));
     }
@@ -1677,7 +1677,7 @@ name = "channel-class"
 constant = { trust = "trusted" }
 "#;
         assert!(matches!(
-            Runtime::open(config_with(policy, None), dir.path().join("appa.db")),
+            Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None),
             Err(OpenError::UnsupportedPolicy(_)),
         ));
     }
@@ -1691,7 +1691,7 @@ version = 1
 name = "execute_remedy_plan"
 "#;
         assert!(matches!(
-            Runtime::open(config_with(policy, None), dir.path().join("appa.db")),
+            Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None),
             Err(OpenError::ReservedTool(_)),
         ));
     }
@@ -1699,8 +1699,8 @@ name = "execute_remedy_plan"
     #[tokio::test]
     async fn an_allowed_call_is_released_with_canonical_bytes() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime =
-            Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db")).expect("the deployment opens");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let decision = session
             .on_tool_call(fetch(serde_json::json!({"b": 1, "a": 2})))
@@ -1727,8 +1727,8 @@ name = "execute_remedy_plan"
     #[tokio::test]
     async fn a_success_admits_the_raw_result_and_closes() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime =
-            Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db")).expect("the deployment opens");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         session
             .on_tool_call(fetch(serde_json::json!({"a": 1})))
@@ -1758,8 +1758,8 @@ name = "execute_remedy_plan"
     #[tokio::test]
     async fn a_failure_closes_with_no_effects_and_an_indeterminate_leaves_the_reservation() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime =
-            Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db")).expect("the deployment opens");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         session
             .on_tool_call(fetch(serde_json::json!({"a": 1})))
@@ -1798,8 +1798,8 @@ name = "execute_remedy_plan"
     #[tokio::test]
     async fn an_invalid_argument_call_returns_deny_feedback() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime =
-            Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db")).expect("the deployment opens");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let decision = session
             .on_tool_call(fetch(serde_json::json!({"a": "not a number"})))
@@ -1821,8 +1821,8 @@ name = "execute_remedy_plan"
     #[tokio::test]
     async fn an_unknown_tool_call_returns_deny_feedback() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime =
-            Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db")).expect("the deployment opens");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let decision = session
             .on_tool_call(ProposedCall {
@@ -1839,7 +1839,8 @@ name = "execute_remedy_plan"
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let db = dir.path().join("appa.db");
         {
-            let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), db.clone()).expect("the deployment opens");
+            let runtime =
+                Runtime::open(config_with(FETCH_AND_SEND, None), db.clone(), None).expect("the deployment opens");
             let mut session = runtime.create_session(root()).expect("a fresh id opens");
             session
                 .on_tool_call(fetch(serde_json::json!({"a": 1})))
@@ -1855,7 +1856,7 @@ name = "execute_remedy_plan"
                 .await
                 .expect("the result is admitted");
         }
-        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), db).expect("the deployment reopens");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), db, None).expect("the deployment reopens");
         let mut session = runtime.session(&root()).expect("the trajectory reopens");
         let decision = session
             .on_tool_call(fetch(serde_json::json!({"a": 2})))
@@ -1867,8 +1868,8 @@ name = "execute_remedy_plan"
     #[tokio::test]
     async fn an_undecodable_batch_row_is_refused() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime =
-            Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db")).expect("the deployment opens");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         runtime
             .inner
@@ -1893,8 +1894,8 @@ name = "execute_remedy_plan"
     #[tokio::test]
     async fn a_corrupt_batch_row_is_refused_before_any_decision() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime =
-            Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db")).expect("the deployment opens");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         session
             .on_tool_call(fetch(serde_json::json!({"a": 1})))
@@ -1928,8 +1929,8 @@ name = "execute_remedy_plan"
     #[tokio::test]
     async fn an_unestablished_block_is_terminal_feedback() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime =
-            Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db")).expect("the deployment opens");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         session
             .on_tool_call(fetch(serde_json::json!({"a": 1})))
@@ -1968,8 +1969,8 @@ name = "execute_remedy_plan"
     #[tokio::test]
     async fn a_child_is_seeded_and_a_clean_return_crosses() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime =
-            Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db")).expect("the deployment opens");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let mut child = session
             .on_child_start(TrajectoryId("cc:child".to_string()))
@@ -1997,8 +1998,8 @@ name = "execute_remedy_plan"
     #[tokio::test]
     async fn a_child_return_with_unknown_fold_blocks_without_offers() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime =
-            Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db")).expect("the deployment opens");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let mut child = session
             .on_child_start(TrajectoryId("cc:child".to_string()))
@@ -2071,7 +2072,7 @@ attends = ["irreversible"]
     async fn an_authority_approval_authorizes_the_exact_call() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let url = stub(serde_json::json!({"ruling": "approve"})).await;
-        let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"))
+        let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
 
@@ -2106,7 +2107,7 @@ attends = ["irreversible"]
     async fn a_denial_retires_plans_naming_the_denier_and_sticks() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let url = stub(serde_json::json!({"ruling": "deny", "reason": "no"})).await;
-        let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"))
+        let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
 
@@ -2142,7 +2143,7 @@ attends = ["irreversible"]
     async fn a_denial_retires_only_the_owning_trajectorys_offers() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let url = stub(serde_json::json!({"ruling": "deny", "reason": "no"})).await;
-        let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"))
+        let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
         let first_id = root();
         let second_id = TrajectoryId("cc:second-root".to_string());
@@ -2184,7 +2185,7 @@ attends = ["irreversible"]
     async fn an_abstain_keeps_the_offer() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let url = stub(serde_json::json!({"note": "still thinking"})).await;
-        let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"))
+        let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
 
@@ -2207,7 +2208,7 @@ attends = ["irreversible"]
     async fn a_failed_commit_leaves_the_offer_standing() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let url = stub(serde_json::json!({"ruling": "approve"})).await;
-        let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"))
+        let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
 
@@ -2230,12 +2231,13 @@ attends = ["irreversible"]
         let url = stub(serde_json::json!({"ruling": "approve"})).await;
         let db = dir.path().join("appa.db");
         let offer = {
-            let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), db.clone()).expect("the deployment opens");
+            let runtime =
+                Runtime::open(config_with(ATTENTION, Some(&url)), db.clone(), None).expect("the deployment opens");
             let mut session = runtime.create_session(root()).expect("a fresh id opens");
             session.on_tool_call(wire(500)).await.expect("the block is delivered");
             surfaced_offer(&runtime)
         };
-        let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), db).expect("the deployment reopens");
+        let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), db, None).expect("the deployment reopens");
         let mut session = runtime.session(&root()).expect("the trajectory reopens");
         assert!(matches!(
             session.on_remedy(offer).await.expect("the decline is delivered"),
@@ -2273,8 +2275,8 @@ return_sanitizer = "scrub"
     async fn a_sanitized_child_return_crosses_as_the_derivation() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let url = stub(serde_json::json!({"body": "scrubbed"})).await;
-        let runtime =
-            Runtime::open(sanitized_config(Some(&url)), dir.path().join("appa.db")).expect("the deployment opens");
+        let runtime = Runtime::open(sanitized_config(Some(&url)), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let mut child = session
             .on_child_start(TrajectoryId("cc:child".to_string()))
@@ -2295,8 +2297,8 @@ return_sanitizer = "scrub"
     async fn sanitizer_no_answer_fails_closed() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let url = stub(serde_json::json!(42)).await;
-        let runtime =
-            Runtime::open(sanitized_config(Some(&url)), dir.path().join("appa.db")).expect("the deployment opens");
+        let runtime = Runtime::open(sanitized_config(Some(&url)), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let mut child = session
             .on_child_start(TrajectoryId("cc:child".to_string()))
@@ -2374,7 +2376,8 @@ audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
     async fn a_bound_sanitizer_derivation_replaces_the_raw() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let url = stub(serde_json::json!({"body": "scrubbed"})).await;
-        let runtime = Runtime::open(narrowing_config(&url), dir.path().join("appa.db")).expect("the deployment opens");
+        let runtime =
+            Runtime::open(narrowing_config(&url), dir.path().join("appa.db"), None).expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         assert!(matches!(
             session.on_tool_call(leak()).await.expect("the block is delivered"),
@@ -2402,7 +2405,8 @@ audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
     async fn a_bound_sanitizer_no_answer_closes_valueless() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let url = stub(serde_json::json!(42)).await;
-        let runtime = Runtime::open(narrowing_config(&url), dir.path().join("appa.db")).expect("the deployment opens");
+        let runtime =
+            Runtime::open(narrowing_config(&url), dir.path().join("appa.db"), None).expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         assert!(matches!(
             session.on_tool_call(leak()).await.expect("the block is delivered"),

@@ -79,6 +79,8 @@ pub(crate) enum ChildReturnDecision {
 pub enum OpenError {
     #[error("configuration refused: {0}")]
     Config(#[from] crate::config::ConfigError),
+    #[error("builtin modules refused: {0}")]
+    Modules(String),
     #[error("policy refused: {0}")]
     Policy(appa_policy::ConfigError),
     #[error("unsupported policy: {0}")]
@@ -160,28 +162,38 @@ struct Inner {
 }
 
 impl Runtime {
-    /// Opens the engine and the store. The `[policy]` table compiles
-    /// through the documented dialect into the engine's registry —
-    /// every surface and algebraic load lint runs here, and a policy
-    /// this deployment cannot honor is refused before anything opens.
-    pub fn open(config: Config, db: PathBuf) -> Result<Runtime, OpenError> {
+    /// Opens the modules, the engine, and the store. The `[policy]`
+    /// table compiles through the documented dialect into the engine's
+    /// registry — every surface and algebraic load lint runs here, and
+    /// a policy this deployment cannot honor is refused before
+    /// anything opens.
+    pub fn open(config: Config, db: PathBuf, modules: Option<PathBuf>) -> Result<Runtime, OpenError> {
         let text = toml::to_string(&config.policy)
             .map_err(|error| OpenError::UnsupportedPolicy(format!("the policy table does not serialize: {error}")))?;
         let policy = appa_policy::Config::from_toml_str(&text).map_err(OpenError::Policy)?;
         validate_deployment(&policy, &config)?;
         let engine = appa_engine::engine::Engine::new(policy.registry().clone());
         let seam = EngineSeam::Real(RuntimeEngine::new(engine, policy.child_return_policy()));
-        Runtime::with_engine(config, db, seam)
+        Runtime::with_engine(config, db, modules, seam)
     }
 
     /// The tests' entry: the same runtime over an engine seam whose
-    /// queue the test controls.
+    /// queue the test controls, with no modules directory.
     #[cfg(test)]
     pub(crate) fn open_with_engine(config: Config, db: PathBuf, engine: EngineSeam) -> Result<Runtime, OpenError> {
-        Runtime::with_engine(config, db, engine)
+        Runtime::with_engine(config, db, None, engine)
     }
 
-    fn with_engine(config: Config, db: PathBuf, engine: EngineSeam) -> Result<Runtime, OpenError> {
+    fn with_engine(
+        config: Config,
+        db: PathBuf,
+        modules: Option<PathBuf>,
+        engine: EngineSeam,
+    ) -> Result<Runtime, OpenError> {
+        let registry =
+            crate::builtins::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
+        let externals = ExternalServices::new(config.externals.clone(), registry)
+            .map_err(|error| OpenError::Modules(error.to_string()))?;
         let store = Store::open(&db).map_err(|error| match error {
             StoreError::Damaged { path, detail } => OpenError::Damaged(format!("{path}: {detail}")),
             error => OpenError::Storage(error.to_string()),
@@ -191,7 +203,6 @@ impl Runtime {
             StoreError::PolicyMismatch { stored, supplied } => OpenError::PolicyMismatch { stored, supplied },
             error => OpenError::Storage(error.to_string()),
         })?;
-        let externals = ExternalServices::new(config.externals.clone());
         Ok(Runtime {
             inner: Arc::new(Inner {
                 store,

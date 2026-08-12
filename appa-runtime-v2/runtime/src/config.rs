@@ -16,16 +16,26 @@ pub struct Config {
     pub externals: Externals,
 }
 
-/// The external-service endpoints: authorities, sanitizers,
-/// and the dynamic resolver. Every call carries an explicit timeout
+/// The registered externals: authorities, sanitizers, and
+/// the dynamic resolver. Every HTTP call carries an explicit timeout
 /// and byte cap and fails closed.
 #[derive(Debug, Clone)]
 pub struct Externals {
     pub timeout: Duration,
     pub max_body_bytes: usize,
-    pub authorities: BTreeMap<String, Endpoint>,
-    pub sanitizers: BTreeMap<String, Endpoint>,
+    pub authorities: BTreeMap<String, Implementation>,
+    pub sanitizers: BTreeMap<String, Implementation>,
     pub dynamic: Option<Endpoint>,
+}
+
+/// How a registered authority or sanitizer is implemented — `builtin`
+/// or `resolver`, a closed choice per entry. Only these two
+/// kinds have builtin implementations; the dynamic resolver stays
+/// HTTP-only.
+#[derive(Debug, Clone)]
+pub enum Implementation {
+    Resolver(Endpoint),
+    Builtin(String),
 }
 
 /// One external endpoint: a validated URL plus its bearer token, if
@@ -94,6 +104,16 @@ pub enum ConfigError {
     ZeroTimeout,
     #[error("externals.max_body_bytes must be greater than zero")]
     ZeroByteCap,
+    #[error("the {section} entry {name:?} must name exactly one of url or builtin, and only url takes token_env")]
+    ImplementationChoice { section: &'static str, name: String },
+    #[error("the {section} entry {name:?} cannot be builtin: only authorities and sanitizers can")]
+    BuiltinNotAllowed { section: &'static str, name: String },
+    #[error("the {section} entry {name:?} names the builtin {builtin:?}, which is not a valid implementation name")]
+    InvalidBuiltinName {
+        section: &'static str,
+        name: String,
+        builtin: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,17 +129,18 @@ struct RawExternals {
     timeout_ms: u64,
     max_body_bytes: usize,
     #[serde(default)]
-    authorities: BTreeMap<String, RawEndpoint>,
+    authorities: BTreeMap<String, RawImplementation>,
     #[serde(default)]
-    sanitizers: BTreeMap<String, RawEndpoint>,
-    dynamic: Option<RawEndpoint>,
+    sanitizers: BTreeMap<String, RawImplementation>,
+    dynamic: Option<RawImplementation>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawEndpoint {
-    url: String,
+struct RawImplementation {
+    url: Option<String>,
     token_env: Option<String>,
+    builtin: Option<String>,
 }
 
 impl Config {
@@ -147,29 +168,88 @@ impl Config {
             externals: Externals {
                 timeout: Duration::from_millis(raw.externals.timeout_ms),
                 max_body_bytes: raw.externals.max_body_bytes,
-                authorities: resolve_endpoints("authorities", raw.externals.authorities, &lookup)?,
-                sanitizers: resolve_endpoints("sanitizers", raw.externals.sanitizers, &lookup)?,
+                authorities: resolve_implementations("authorities", raw.externals.authorities, &lookup)?,
+                sanitizers: resolve_implementations("sanitizers", raw.externals.sanitizers, &lookup)?,
                 dynamic: raw
                     .externals
                     .dynamic
-                    .map(|endpoint| resolve_endpoint("dynamic", "dynamic".to_string(), endpoint, &lookup))
+                    .map(|endpoint| {
+                        let raw = endpoint_only("dynamic", "dynamic", endpoint)?;
+                        resolve_endpoint("dynamic", "dynamic".to_string(), raw, &lookup)
+                    })
                     .transpose()?,
             },
         })
     }
 }
 
-fn resolve_endpoints(
+fn resolve_implementations(
     section: &'static str,
-    raw: BTreeMap<String, RawEndpoint>,
+    raw: BTreeMap<String, RawImplementation>,
     lookup: &impl Fn(&str) -> Option<String>,
-) -> Result<BTreeMap<String, Endpoint>, ConfigError> {
+) -> Result<BTreeMap<String, Implementation>, ConfigError> {
     raw.into_iter()
-        .map(|(name, endpoint)| {
-            let resolved = resolve_endpoint(section, name.clone(), endpoint, lookup)?;
-            Ok((name, resolved))
+        .map(|(name, entry)| {
+            let RawImplementation {
+                url,
+                token_env,
+                builtin,
+            } = entry;
+            let implementation = match (url, builtin) {
+                (Some(url), None) => {
+                    let endpoint = RawEndpoint { url, token_env };
+                    Implementation::Resolver(resolve_endpoint(section, name.clone(), endpoint, lookup)?)
+                }
+                (None, Some(builtin)) => {
+                    if token_env.is_some() {
+                        return Err(ConfigError::ImplementationChoice {
+                            section,
+                            name: name.clone(),
+                        });
+                    }
+                    if !crate::builtins::valid_implementation_name(&builtin) {
+                        return Err(ConfigError::InvalidBuiltinName {
+                            section,
+                            name: name.clone(),
+                            builtin,
+                        });
+                    }
+                    Implementation::Builtin(builtin)
+                }
+                _ => {
+                    return Err(ConfigError::ImplementationChoice {
+                        section,
+                        name: name.clone(),
+                    });
+                }
+            };
+            Ok((name, implementation))
         })
         .collect()
+}
+
+fn endpoint_only(section: &'static str, name: &str, entry: RawImplementation) -> Result<RawEndpoint, ConfigError> {
+    if entry.builtin.is_some() {
+        return Err(ConfigError::BuiltinNotAllowed {
+            section,
+            name: name.to_string(),
+        });
+    }
+    match entry.url {
+        Some(url) => Ok(RawEndpoint {
+            url,
+            token_env: entry.token_env,
+        }),
+        None => Err(ConfigError::ImplementationChoice {
+            section,
+            name: name.to_string(),
+        }),
+    }
+}
+
+struct RawEndpoint {
+    url: String,
+    token_env: Option<String>,
 }
 
 fn resolve_endpoint(
@@ -342,5 +422,48 @@ mod tests {
     fn an_unreadable_path_is_a_named_refusal() {
         let missing = Path::new("/nonexistent/appa.toml");
         assert!(matches!(Config::load(missing), Err(ConfigError::Unreadable { .. }),));
+    }
+
+    #[test]
+    fn a_builtin_entry_loads_for_authorities_and_sanitizers_only() {
+        let text = format!(
+            "{MINIMAL}\n[externals.authorities.auto]\nbuiltin = \"approve\"\n\n[externals.sanitizers.pii]\nbuiltin = \"redact-email\"\n"
+        );
+        let config = parse(&text).expect("builtin entries validate");
+        assert!(matches!(
+            config.externals.authorities.get("auto"),
+            Some(Implementation::Builtin(name)) if name == "approve",
+        ));
+        assert!(matches!(
+            config.externals.sanitizers.get("pii"),
+            Some(Implementation::Builtin(name)) if name == "redact-email",
+        ));
+
+        let text = format!("{MINIMAL}\n[externals.dynamic]\nbuiltin = \"approve\"\n");
+        assert!(matches!(parse(&text), Err(ConfigError::BuiltinNotAllowed { .. })));
+    }
+
+    #[test]
+    fn an_entry_names_exactly_one_implementation() {
+        let both =
+            format!("{MINIMAL}\n[externals.authorities.auto]\nurl = \"https://a.example\"\nbuiltin = \"approve\"\n");
+        assert!(matches!(parse(&both), Err(ConfigError::ImplementationChoice { .. })));
+
+        let neither = format!("{MINIMAL}\n[externals.authorities.auto]\n");
+        assert!(matches!(parse(&neither), Err(ConfigError::ImplementationChoice { .. })));
+
+        let token = format!("{MINIMAL}\n[externals.authorities.auto]\nbuiltin = \"approve\"\ntoken_env = \"APPA_X\"\n");
+        assert!(matches!(parse(&token), Err(ConfigError::ImplementationChoice { .. })));
+    }
+
+    #[test]
+    fn a_builtin_name_outside_the_grammar_is_refused() {
+        for bad in ["Upper", "under_score", "-lead", ""] {
+            let text = format!("{MINIMAL}\n[externals.sanitizers.pii]\nbuiltin = \"{bad}\"\n");
+            assert!(
+                matches!(parse(&text), Err(ConfigError::InvalidBuiltinName { .. })),
+                "builtin name {bad:?} must refuse",
+            );
+        }
     }
 }

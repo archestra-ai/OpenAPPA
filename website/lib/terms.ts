@@ -70,6 +70,8 @@ const TERMS = {
   attention: "Named marks demanding a fresh ruling on every dispatch.",
   'builtin = "hitl"':
     "The built-in human-in-the-loop authority: elicitation hosted by the harness rather than a remote resolver.",
+  'builtin = "approve"':
+    "The stock in-process authority that approves every consult within its mandate. An open gate the deployer chose deliberately — legitimate and visible in review.",
 
   /* Sanitizers and Casts */
   on: "Where a sanitizer may apply: tool_output at an admission the host can withhold — a child return, or a tool result at a confined application point; tool_input as whole-argument substitution at dispatch.",
@@ -88,6 +90,8 @@ const TERMS = {
   return_sanitizer: "Configured default sanitizer for all child sub-execution returns.",
   "attest-schema":
     "The reserved builtin sanitizer of the quarantine exit: raises trust on a child return whose structure is shape-bounded (values the schema declares and bounds — no free text) and was bound at fork, up to the parent's fork-time rank. Claims instruction-cleanliness only.",
+  'builtin = "redact-email"':
+    "The stock in-process sanitizer that replaces every email-like token in a value with a fixed placeholder, deriving under its declared mandate.",
 
   /* Refusals & Model Terms */
   requirement_gaps: "Returned on a refusal: the unmet entries of requires.",

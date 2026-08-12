@@ -26,6 +26,9 @@ struct Args {
     #[arg(long, env = "APPA_DB", default_value = "appa.db")]
     db: PathBuf,
 
+    #[arg(long, env = "APPA_MODULES_DIR")]
+    modules_dir: Option<PathBuf>,
+
     #[arg(long, default_value = "127.0.0.1:8787")]
     listen: SocketAddr,
 
@@ -107,7 +110,7 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let runtime = match Runtime::open(config, args.db) {
+    let runtime = match Runtime::open(config, args.db, args.modules_dir) {
         Ok(runtime) => Arc::new(runtime),
         Err(error) => {
             eprintln!("appa-runtime-v2: {error}");

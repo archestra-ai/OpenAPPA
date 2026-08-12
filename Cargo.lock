@@ -107,6 +107,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "appa-builtin"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "appa-dojo-sidecar"
 version = "0.0.0"
 dependencies = [
@@ -143,6 +152,18 @@ dependencies = [
  "tokio",
  "tokio-util",
 ]
+
+[[package]]
+name = "appa-module-fixture"
+version = "0.0.0"
+dependencies = [
+ "appa-builtin",
+ "serde_json",
+]
+
+[[package]]
+name = "appa-module-fixture-bad"
+version = "0.0.0"
 
 [[package]]
 name = "appa-policy"
@@ -183,11 +204,13 @@ name = "appa-runtime-v2"
 version = "0.0.0"
 dependencies = [
  "appa-adapter-claude-code",
+ "appa-builtin",
  "appa-engine",
  "appa-policy",
  "appa-runtime-api",
  "axum",
  "clap",
+ "libloading",
  "rand 0.10.2",
  "reqwest",
  "rmcp",
@@ -1015,6 +1038,16 @@ name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+
+[[package]]
+name = "libloading"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
 
 [[package]]
 name = "libsqlite3-sys"

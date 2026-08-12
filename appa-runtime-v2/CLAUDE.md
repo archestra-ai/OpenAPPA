@@ -18,7 +18,9 @@ Three crates, one binary, one process:
 - `runtime/` (package `appa-runtime-v2`, binary `appa-runtime-v2`) —
   everything else: the runtime API and internal `Session` event model,
   the `hooks` dispatcher, the HTTP server, the MCP endpoint, the
-  store, the externals, and the engine boundary.
+  store, the externals, the builtin modules (`builtins.rs` — stock
+  implementations plus the `--modules-dir` loader over the
+  `appa-builtin` ABI crate at the repo root), and the engine boundary.
 
 The plugin (`plugin/`) and the marketplace manifest stay at this
 folder's top level, beside the crates.

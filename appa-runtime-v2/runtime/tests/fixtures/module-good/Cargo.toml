@@ -1,0 +1,15 @@
+[package]
+name = "appa-module-fixture"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+appa-builtin = { path = "../../../../../appa-builtin" }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
