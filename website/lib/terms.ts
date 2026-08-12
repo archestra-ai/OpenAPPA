@@ -9,6 +9,28 @@ const TERMS = {
   trust_chain:
     "The ordered list of trust ranks, least-trusted first. Omitted, it defaults to suspicious < trusted.",
 
+  /* Core Engine Concepts */
+  label:
+    "The security state attached to a trajectory, tracking allowed readers (audience) and trust rank.",
+  log:
+    "The append-only execution history recording tool dispatches, narrowing acceptances, authority approvals, and denials.",
+  authority:
+    "A registered external component (such as a human review prompt or approval service) empowered to approve specific out-of-bounds actions.",
+  authorities:
+    "Registered external components empowered to approve specific out-of-bounds actions under pre-configured mandates.",
+  sanitizer:
+    "A registered component (such as a PII scrubber or schema validator) that derives cleaner outputs to restore lost reach or raise trust.",
+  sanitizers:
+    "Registered components that derive cleaner outputs to restore lost reach or raise trust.",
+  cast:
+    "A registered component that resolves an Unknown label dimension to a concrete state under pre-configured ceilings.",
+  casts:
+    "Registered components that resolve Unknown label dimensions to concrete audience or trust states.",
+  remedy:
+    "An actionable path returned on a policy refusal explaining how to unblock execution safely.",
+  remedies:
+    "Actionable paths returned on a policy refusal explaining how to unblock execution safely (e.g. human approval, sanitizer, or narrowing acceptance).",
+
   /* Tool contracts */
   delta:
     "The label contribution of an admitted call result. A delta never expands permissions: it intersects reader sets, lowers the trust rank, or leaves the trajectory label unchanged.",

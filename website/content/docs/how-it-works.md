@@ -5,13 +5,13 @@ order: 2
 description: The whole model in one sitting — what OpenAPPA guarantees and what it costs.
 ---
 
-## OpenAPPA enforces information-flow policy before tool dispatch
+## OpenAPPA enforces information-flow policy proactively
 
 OpenAPPA sits between an agent and its tools to answer one question before every action: *is this data allowed to go to this destination?*
 
-APPA stands for **Agentic Permissions Policy Algebra**. It provides a formal system to track data sensitivity and trust as an agent executes. Instead of blindly blocking tasks when sensitive data is touched, APPA calculates exact label flow and presents the agent with valid, actionable remedies—such as isolating reads in child branches, invoking sanitizers, or requesting targeted approvals—so the agent stays productive without violating policy.
+Powered by **APPA** (**Agentic Permissions Policy Algebra**), it provides a formal system to track data sensitivity and trust as an agent executes. When an action would violate policy, OpenAPPA does not simply throw a generic error. Instead, it calculates exact label flow and presents the agent with valid, actionable **remedy plans**—such as requesting human approval, scrubbing sensitive fields, or isolating reads in a sub-execution—so the agent can self-correct and finish its task safely.
 
-By evaluating checks *before* tool dispatch, OpenAPPA prevents agents from getting stranded mid-task. Every refusal presents the sound options that exist: approve the exact call, sanitize the data, satisfy a prerequisite, or accept a narrower label.
+Because policy checks happen prospectively (before actions execute), sensitive data is never exposed to unauthorized tools, and the agent is never left stranded mid-workflow.
 
 | Runtime State | Engine Semantics |
 |---|---|
@@ -203,6 +203,6 @@ Adopting OpenAPPA shifts your security model from manual code checks to formal a
 ## Next steps
 
 - [Reading a policy](/docs/contracts): Guide to reviewing and writing policy configuration.
-- [Evaluating OpenAPPA](/docs/evaluation): Empirical paper results on multi-step workflows and bench-corp.
+- [Benchmarks](/docs/evaluation): Empirical paper results on multi-step workflows and bench-corp.
 - `docs/spec.md`: Normative specification containing all formal rule identifiers.
 - `docs/rationale.md`: Design rationales behind algebraic invariants and label dimensions.

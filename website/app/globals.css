@@ -523,12 +523,13 @@ samp {
   line-height: 1.6;
 }
 
-.prose pre code {
+.prose pre code,
+.prose a code {
   background: none;
   border: none;
   padding: 0;
-  font-size: 13px;
-  color: var(--text);
+  font-size: inherit;
+  color: inherit;
 }
 
 .prose blockquote {
