@@ -2465,4 +2465,208 @@ confined_results = ["leak"]
             "the valueless success closed the dispatch",
         );
     }
+
+    const MARKED: &str = r#"
+version = 1
+
+[[policy.tool]]
+name = "fetch"
+parameters = { type = "object", properties = { b = { type = "integer" }, a = { type = "integer" } } }
+
+[[policy.tool]]
+name = "mark"
+parameters = { type = "object", properties = { a = { type = "integer" } } }
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "bare"
+parameters = { type = "object", properties = { a = { type = "integer" } } }
+delta = {}
+
+[policy.deployment]
+context_control = true
+"#;
+
+    fn mark() -> ProposedCall {
+        ProposedCall {
+            tool: "mark".to_string(),
+            arguments: serde_json::json!({"a": 1}),
+        }
+    }
+
+    async fn admit_success(runtime: &Runtime, session: &mut Session, call: ProposedCall) {
+        let decision = session.on_tool_call(call.clone()).await.expect("the call is decided");
+        if matches!(decision, ToolCallDecision::Deny { .. }) {
+            let offers = runtime
+                .inner
+                .store
+                .surfaced_offers(session.trajectory())
+                .expect("the offer query runs");
+            let offer = offers
+                .first()
+                .expect("the narrowing block surfaced its acceptance")
+                .clone();
+            assert!(matches!(
+                session.on_remedy(offer).await.expect("the acceptance executes"),
+                RemedyDecision::Authorized { .. },
+            ));
+            assert_eq!(
+                session
+                    .on_tool_call(call.clone())
+                    .await
+                    .expect("the re-proposal resumes"),
+                ToolCallDecision::Allow,
+            );
+        }
+        let kept = session
+            .on_tool_result(
+                call,
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("data".to_string()),
+                },
+            )
+            .await
+            .expect("the result is admitted");
+        assert_eq!(kept, ToolResultDecision::Keep, "the fixture result must actually admit");
+    }
+
+    #[test]
+    fn a_fresh_root_status_renders_the_neutral_label() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime =
+            Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
+        runtime.create_session(root()).expect("a fresh id opens");
+        let status = runtime.status(&root()).expect("a fresh root answers");
+        assert_eq!(status.trajectory, "cc:root");
+        assert_eq!(status.trust, "trusted");
+        assert_eq!(status.audience, "public");
+    }
+
+    #[tokio::test]
+    async fn a_suspicious_admission_narrows_the_status_irreversibly() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime =
+            Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        admit_success(&runtime, &mut session, mark()).await;
+        assert_eq!(runtime.status(&root()).expect("the root answers").trust, "suspicious");
+        admit_success(
+            &runtime,
+            &mut session,
+            ProposedCall {
+                tool: "bare".to_string(),
+                arguments: serde_json::json!({"a": 2}),
+            },
+        )
+        .await;
+        let status = runtime.status(&root()).expect("the root answers");
+        assert_eq!(status.trust, "suspicious", "the fold never widens");
+        assert_eq!(status.audience, "public", "a neutral admission resolves cleanly");
+    }
+
+    #[tokio::test]
+    async fn an_unresolved_dimension_renders_unknown() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime =
+            Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        admit_success(&runtime, &mut session, fetch(serde_json::json!({"a": 1}))).await;
+        let status = runtime.status(&root()).expect("the root answers");
+        assert_eq!(status.trust, "unknown");
+        assert_eq!(status.audience, "unknown");
+    }
+
+    #[tokio::test]
+    async fn the_status_read_appends_nothing_and_outlives_the_session() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime =
+            Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        admit_success(&runtime, &mut session, mark()).await;
+
+        assert!(runtime.status(&TrajectoryId("cc:ghost".to_string())).is_none());
+
+        let (_, before) = runtime.inner.store.load_log(&root()).expect("the log loads");
+        runtime.status(&root()).expect("the root answers");
+        runtime.status(&root()).expect("the root answers again");
+        let (_, after) = runtime.inner.store.load_log(&root()).expect("the log loads");
+        assert_eq!(before, after, "a status read appends nothing");
+
+        runtime
+            .inner
+            .store
+            .commit_event(
+                &root(),
+                EventWrite {
+                    batch: None,
+                    records: vec![crate::store::RuntimeRecord::End { id: root() }],
+                },
+            )
+            .expect("the end record commits");
+        assert!(matches!(runtime.session(&root()), Err(SessionError::Ended)));
+        assert_eq!(
+            runtime
+                .status(&root())
+                .expect("an ended trajectory still answers")
+                .trust,
+            "suspicious",
+        );
+    }
+
+    #[tokio::test]
+    async fn an_untrusted_log_answers_no_status() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime =
+            Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
+        runtime.create_session(root()).expect("a fresh id opens");
+        runtime
+            .inner
+            .store
+            .commit_event(
+                &root(),
+                EventWrite {
+                    batch: Some(BatchAppend {
+                        bytes: b"not engine facts".to_vec(),
+                        based_on: Revision(0),
+                    }),
+                    records: Vec::new(),
+                },
+            )
+            .expect("the store appends opaque bytes");
+        assert!(runtime.status(&root()).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_childs_fold_stays_out_of_the_root_status() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime =
+            Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let child_id = TrajectoryId("cc:child".to_string());
+        let mut child = session.on_child_start(child_id.clone()).expect("the child opens");
+        admit_success(&runtime, &mut child, mark()).await;
+
+        let (log, _) = runtime.inner.store.load_log(&root()).expect("the family log loads");
+        let view = runtime
+            .inner
+            .engine
+            .rebuild_view(&log, &child_id)
+            .expect("the family log replays");
+        let child_status = runtime
+            .inner
+            .engine
+            .trajectory_status(&view)
+            .expect("the child's branch renders");
+        assert_eq!(
+            child_status.trust, "suspicious",
+            "the child's admission narrowed its branch"
+        );
+
+        assert_eq!(
+            runtime.status(&root()).expect("the root answers").trust,
+            "trusted",
+            "a dirty child never moves the root fold",
+        );
+        assert!(runtime.status(&child_id).is_none(), "the status read is root-only");
+    }
 }

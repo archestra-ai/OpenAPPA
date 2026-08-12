@@ -19,7 +19,8 @@ appa-builtin = { path = "../../appa-builtin" }
 appa-engine = { workspace = true }
 appa-policy = { workspace = true }
 appa-runtime-api = { path = "../api" }
-axum = { workspace = true }
+# `query` decodes the statusline's one GET parameter (`/status`).
+axum = { workspace = true, features = ["query"] }
 clap = { version = "4", features = ["derive", "env"] }
 libloading = "0.9"
 rand = "0.10"

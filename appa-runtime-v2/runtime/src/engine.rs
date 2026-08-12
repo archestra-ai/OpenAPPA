@@ -12,7 +12,7 @@ use appa_engine::contract::{
 use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityReview, PlanError, Ruling};
 use appa_engine::fact::{Fact, FactBatch, ReturnPolicy, Revision};
-use appa_engine::label::{Audience, ReaderId};
+use appa_engine::label::{Audience, Dimension, ReaderId, Trust};
 use appa_engine::plan::{ExecutableRemedyPlan, PlannedBlock, RemedyPlan};
 use appa_engine::projection::{Projection, Views};
 use appa_engine::value::{
@@ -243,6 +243,17 @@ pub enum EngineView {
     Test,
 }
 
+/// One trajectory's current label rendered for a display surface — the
+/// statusline. Chain names and reader ids as plain strings: no label type
+/// leaves the engine boundary. A projection of the log;
+/// it gates nothing.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TrajectoryStatus {
+    pub trajectory: String,
+    pub trust: String,
+    pub audience: String,
+}
+
 /// The one engine boundary the session drives: the real engine, or
 /// the tests' enqueued-decision seam.
 // One seam exists per process, so the size gap against the cfg(test) variant buys no box.
@@ -303,6 +314,21 @@ impl EngineSeam {
             EngineSeam::Real(engine) => engine.apply_offers(mutations),
             #[cfg(test)]
             EngineSeam::Test(_) => {}
+        }
+    }
+
+    /// Render one trajectory's current label from the rebuilt view, for the
+    /// statusline. A projection read: no engine event, no fact, nothing
+    /// gated.
+    pub fn trajectory_status(&self, view: &EngineView) -> Option<TrajectoryStatus> {
+        match self {
+            EngineSeam::Real(engine) => engine.trajectory_status(view),
+            #[cfg(test)]
+            EngineSeam::Test(_) => Some(TrajectoryStatus {
+                trajectory: String::new(),
+                trust: String::new(),
+                audience: String::new(),
+            }),
         }
     }
 }
@@ -378,6 +404,53 @@ impl RuntimeEngine {
         let raw = serde_json::to_vec(&call.arguments).ok()?;
         let resolved = self.engine.resolve_call(ToolName::new(call.tool.clone()), &raw).ok()?;
         Some(resolved.canonical_arguments().canonical_bytes().to_vec())
+    }
+
+    fn trajectory_status(&self, view: &EngineView) -> Option<TrajectoryStatus> {
+        let (facts, revision, trajectory) = match view {
+            EngineView::Real {
+                facts,
+                revision,
+                trajectory,
+            } => (facts, revision, trajectory),
+            #[cfg(test)]
+            EngineView::Test => unreachable!("a test view never reaches the real engine"),
+        };
+        let projection = Projection::build(facts, *revision);
+        let label = projection.view(&engine_id(trajectory)).current_label();
+        let chain = self.engine.registry().trust_chain();
+        let trust = if label.is_established(Dimension::Trust) {
+            let bound = label.bound().trust;
+            if bound == Trust::new(u8::MAX) {
+                chain
+                    .name_of(Trust::new((chain.len() - 1) as u8))
+                    .expect("a validated chain names its top rank")
+                    .to_string()
+            } else {
+                match chain.name_of(bound) {
+                    Some(name) => name.to_string(),
+                    None => {
+                        tracing::warn!(
+                            rank = bound.rank(),
+                            "status render refused: the trust bound has no chain name"
+                        );
+                        return None;
+                    }
+                }
+            }
+        } else {
+            "unknown".to_string()
+        };
+        let audience = if label.is_established(Dimension::Audience) {
+            audience_wire(&label.bound().audience)
+        } else {
+            "unknown".to_string()
+        };
+        Some(TrajectoryStatus {
+            trajectory: terminal_safe(&trajectory.0),
+            trust: terminal_safe(&trust),
+            audience: terminal_safe(&audience),
+        })
     }
 
     fn handle(&self, view: &EngineView, event: EngineEvent) -> Result<EngineDecision, EngineRefusal> {
@@ -1170,6 +1243,54 @@ fn authority_payload(
     })
 }
 
+fn audience_wire(audience: &Audience) -> String {
+    match audience {
+        Audience::Public => "public".to_string(),
+        Audience::Restricted(readers) if readers.is_empty() => "∅".to_string(),
+        Audience::Restricted(readers) => {
+            let shown: Vec<&str> = readers.iter().take(3).map(ReaderId::as_str).collect();
+            let rest = readers.len().saturating_sub(3);
+            if rest > 0 {
+                format!("{}+{rest}", shown.join(","))
+            } else {
+                shown.join(",")
+            }
+        }
+    }
+}
+
+fn terminal_safe(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() || is_format(c) { '\u{FFFD}' } else { c })
+        .collect()
+}
+
+const fn is_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
+    )
+}
+
 fn label_wire(label: &appa_engine::label::PartialLabel) -> serde_json::Value {
     serde_json::json!(format!("{label:?}"))
 }
@@ -1366,6 +1487,42 @@ impl TestSeam {
 
 #[cfg(test)]
 mod tests {
+    use super::{audience_wire, terminal_safe};
+    use appa_engine::label::{Audience, ReaderId};
+    use std::collections::BTreeSet;
+
+    fn restricted(ids: &[&str]) -> Audience {
+        Audience::Restricted(ids.iter().map(|id| ReaderId::new((*id).to_string())).collect())
+    }
+
+    #[test]
+    fn audience_wire_spells_every_reader_shape() {
+        assert_eq!(audience_wire(&Audience::Public), "public");
+        assert_eq!(audience_wire(&Audience::Restricted(BTreeSet::new())), "∅");
+        assert_eq!(audience_wire(&restricted(&["hr"])), "hr");
+        assert_eq!(
+            audience_wire(&restricted(&["d@x", "a@x", "c@x", "b@x"])),
+            "a@x,b@x,c@x+1",
+            "sorted, three shown, the rest counted",
+        );
+    }
+
+    #[test]
+    fn terminal_safe_replaces_control_and_format_characters() {
+        assert_eq!(terminal_safe("trusted"), "trusted");
+        assert_eq!(terminal_safe("a\u{1b}[31mred"), "a\u{FFFD}[31mred");
+        assert_eq!(
+            terminal_safe("x\u{202E}rlo\u{200B}z\u{FEFF}"),
+            "x\u{FFFD}rlo\u{FFFD}z\u{FFFD}"
+        );
+        assert_eq!(terminal_safe("tru\u{200B}sted"), "tru\u{FFFD}sted");
+        assert_ne!(
+            terminal_safe("tru\u{206A}sted"),
+            "trusted",
+            "the full Cf range replaces"
+        );
+    }
+
     #[test]
     fn only_the_api_module_calls_the_boundary() {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");

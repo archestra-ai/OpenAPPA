@@ -6,6 +6,7 @@ mod session;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub use crate::engine::TrajectoryStatus;
 pub use appa_runtime_api::{OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
 pub(crate) use session::{Session, is_control_tool};
 
@@ -237,6 +238,39 @@ impl Runtime {
             return Err(SessionError::Ended);
         }
         Ok(Session::attach(Arc::clone(&self.inner), row.id, row.family))
+    }
+
+    pub fn status(&self, id: &TrajectoryId) -> Option<TrajectoryStatus> {
+        let row = match self.inner.store.trajectory(id) {
+            Ok(Some(row)) => row,
+            Ok(None) => {
+                tracing::debug!(trajectory = %id.0, "status read refused: unknown trajectory");
+                return None;
+            }
+            Err(error) => {
+                tracing::debug!(trajectory = %id.0, %error, "status read refused at the store");
+                return None;
+            }
+        };
+        if row.family != row.id {
+            tracing::debug!(trajectory = %id.0, "status read refused: not a root trajectory");
+            return None;
+        }
+        let (log, _revision) = match self.inner.store.load_log(&row.family) {
+            Ok(log) => log,
+            Err(error) => {
+                tracing::debug!(trajectory = %id.0, %error, "status read refused at the store");
+                return None;
+            }
+        };
+        let view = match self.inner.engine.rebuild_view(&log, id) {
+            Ok(view) => view,
+            Err(refusal) => {
+                tracing::warn!(trajectory = %id.0, %refusal, "status read refused the persisted log");
+                return None;
+            }
+        };
+        self.inner.engine.trajectory_status(&view)
     }
 
     /// Which trajectory a surfaced offer routes to. The MCP endpoint

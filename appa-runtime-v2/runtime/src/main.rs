@@ -89,6 +89,23 @@ async fn health() -> &'static str {
     "ok"
 }
 
+#[derive(serde::Deserialize)]
+struct StatusQuery {
+    trajectory: String,
+}
+
+async fn status(
+    State(state): State<AppState>,
+    query: Result<axum::extract::Query<StatusQuery>, axum::extract::rejection::QueryRejection>,
+) -> Result<axum::Json<appa_runtime_v2::api::TrajectoryStatus>, axum::http::StatusCode> {
+    let query = query.map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
+    let id = appa_runtime_v2::api::TrajectoryId(query.0.trajectory);
+    match state.runtime.status(&id) {
+        Some(status) => Ok(axum::Json(status)),
+        None => Err(axum::http::StatusCode::NOT_FOUND),
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let args = Args::parse();
@@ -124,6 +141,7 @@ async fn main() -> ExitCode {
     };
     let app = axum::Router::new()
         .route("/health", get(health))
+        .route("/status", get(status))
         .route("/hook", post(hook))
         .nest_service("/mcp", mcp::service(runtime))
         .with_state(state);
@@ -135,7 +153,7 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    tracing::info!(listen = %args.listen, "appa-runtime-v2 serving /hook, /mcp, and /health");
+    tracing::info!(listen = %args.listen, "appa-runtime-v2 serving /hook, /mcp, /status, and /health");
     match axum::serve(listener, app).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

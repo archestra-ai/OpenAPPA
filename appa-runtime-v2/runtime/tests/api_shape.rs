@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use appa_runtime_api::{
     Actor, Codec, HookDecision, HookEvent, OutcomeBody, ParseRefusal, ProposedCall, ToolOutcome, TrajectoryId,
 };
-use appa_runtime_v2::api::{OpenError, Runtime};
+use appa_runtime_v2::api::{OpenError, Runtime, TrajectoryStatus};
 use appa_runtime_v2::config::Config;
 use appa_runtime_v2::hooks;
 
@@ -94,6 +94,13 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
             let _: String = message;
         }
         ToolOutcome::Indeterminate => {}
+    }
+}
+
+fn the_declared_status(runtime: &Runtime, id: &TrajectoryId) {
+    let status: Option<TrajectoryStatus> = runtime.status(id);
+    if let Some(status) = status {
+        let _: (String, String, String) = (status.trajectory, status.trust, status.audience);
     }
 }
 
