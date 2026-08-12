@@ -8,6 +8,7 @@ use crate::execute::AuthorityReview;
 use crate::label::{DimValue, Dimension, Label};
 use crate::names::{AuthorityName, CastName, SanitizerName};
 use crate::plan::PlanId;
+use crate::profile::{DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentityV1};
 use crate::value::{
     CanonicalDigest, ChildReturnId, DispatchId, LabeledValue, Provenance, RawResultDigest, ToolCallId, ToolName,
     TrajectoryId, ValueId,
@@ -142,6 +143,13 @@ pub enum CloseOutcome {
 /// (`dead_code = "deny"` keeps the enum honest — no speculative records).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Fact {
+    TrajectoryOpened {
+        trajectory: TrajectoryId,
+        dialect: PolicyDialectVersion,
+        profile: DeploymentProfile,
+        policy_digest: PolicyIdentityV1,
+        open_vectors: Vec<OpenVector>,
+    },
     ValueAdmitted {
         trajectory: TrajectoryId,
         value: LabeledValue,
@@ -257,7 +265,8 @@ pub enum Fact {
 impl Fact {
     pub fn trajectory(&self) -> &TrajectoryId {
         match self {
-            Fact::ValueAdmitted { trajectory, .. }
+            Fact::TrajectoryOpened { trajectory, .. }
+            | Fact::ValueAdmitted { trajectory, .. }
             | Fact::AssistantMessage { trajectory, .. }
             | Fact::BlockFeedback { trajectory, .. }
             | Fact::DispatchOpened { trajectory, .. }

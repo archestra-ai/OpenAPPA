@@ -92,7 +92,6 @@ impl ForkedSession {
 /// The assembled policy mediator. It deliberately owns no inference client or turn state machine.
 pub struct Mediator {
     config: Config,
-    engine: Engine,
     store: SessionStore,
     tool_backends: BTreeMap<ToolName, ToolBackend>,
     authority_backends: BTreeMap<AuthorityName, AuthorityBackend>,
@@ -119,10 +118,9 @@ impl Mediator {
         mut supplied_tool_backends: BTreeMap<ToolName, ToolBackend>,
     ) -> Result<Mediator, InitError> {
         let client = HttpClient::new();
-        let engine = Engine::new(config.registry().clone());
 
         let mut tool_backends = BTreeMap::new();
-        for contract in engine.registry().tools() {
+        for contract in config.engine().registry().tools() {
             let name = &contract.name;
             if is_reserved(name.as_str()) {
                 return Err(InitError::ReservedToolConflict(name.as_str().to_string()));
@@ -149,7 +147,7 @@ impl Mediator {
         }
 
         let mut authority_backends = BTreeMap::new();
-        for authority in engine.registry().authorities() {
+        for authority in config.engine().registry().authorities() {
             let backend = match config.authority_impl(&authority.name) {
                 Some(AuthorityImpl::Builtin(builtin)) => AuthorityBackend::Builtin(*builtin),
                 Some(AuthorityImpl::HttpResolver { url, timeout_ms }) => AuthorityBackend::Http {
@@ -207,7 +205,6 @@ impl Mediator {
 
         Ok(Mediator {
             config,
-            engine,
             store: SessionStore::new(),
             tool_backends,
             authority_backends,
@@ -223,7 +220,7 @@ impl Mediator {
     }
 
     pub fn engine(&self) -> &Engine {
-        &self.engine
+        self.config.engine()
     }
 
     pub fn store(&self) -> &SessionStore {
@@ -263,10 +260,11 @@ impl Mediator {
 
     pub fn advertised_tools(&self, is_child: bool, can_fork: bool) -> Vec<WireTool> {
         let mut tools: Vec<WireTool> = self
-            .engine
+            .config
+            .engine()
             .registry()
             .tools()
-            .map(|contract| policy_tool_schema(contract, self.engine.registry().trust_chain()))
+            .map(|contract| policy_tool_schema(contract, self.config.engine().registry().trust_chain()))
             .collect();
         tools.push(remedy_tool_schema(can_fork));
         if can_fork {
@@ -283,19 +281,17 @@ impl Mediator {
     }
 
     pub fn fork_session(&self, tenant: &TenantId, parent: &TrajectoryId) -> Result<TrajectoryId, StoreError> {
-        let return_policy = self.config.child_return_policy();
         let (child, _) = self.store.fork(tenant, parent, |child, facts, revision| {
             let projection = Projection::build(facts, revision);
-            self.engine.seed_child(&projection.view(parent), child, return_policy)
+            self.config.engine().seed_child(&projection.view(parent), child)
         })?;
         Ok(child)
     }
 
     pub fn fork_session_reserved(&self, tenant: &TenantId, parent: &TrajectoryId) -> Result<ForkedSession, StoreError> {
-        let return_policy = self.config.child_return_policy();
         let (session, _, lease) = self.store.fork_reserved(tenant, parent, |child, facts, revision| {
             let projection = Projection::build(facts, revision);
-            self.engine.seed_child(&projection.view(parent), child, return_policy)
+            self.config.engine().seed_child(&projection.view(parent), child)
         })?;
         Ok(ForkedSession {
             session,

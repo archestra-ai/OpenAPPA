@@ -29,7 +29,7 @@ fn mediator(policy: &str, tools: &[(&str, BuiltinTool)]) -> Arc<Mediator> {
 fn rendered_call(name: &str, arguments: serde_json::Value) -> ResolvedCall {
     let policy = format!("version = 1\n[[tool]]\nname = {name:?}\n");
     let config = appa_runtime::Config::from_toml_str(&policy).expect("the test policy loads");
-    let engine = appa_engine::engine::Engine::new(config.registry().clone());
+    let engine = config.engine().clone();
     let raw = serde_json::to_vec(&arguments).expect("test arguments serialize");
     engine
         .resolve_call(ToolName::new(name), &raw)

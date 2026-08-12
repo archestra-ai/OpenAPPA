@@ -87,7 +87,7 @@ impl CallSession {
     /// transcript fact is authored — the framework delivers the feedback (e.g. as a hook skip).
     pub async fn check_call(&mut self, call: RenderedCall) -> Result<CallDecision, CallError> {
         self.guard_ready()?;
-        let resolved = match common::resolve_call(&self.core.engine, call.tool.clone(), &call.arguments) {
+        let resolved = match common::resolve_call(self.core.config.engine(), call.tool.clone(), &call.arguments) {
             Ok(resolved) => resolved,
             Err(error) => {
                 return Ok(CallDecision::Block {

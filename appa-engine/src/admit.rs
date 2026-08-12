@@ -509,7 +509,7 @@ mod tests {
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
             requires: Default::default(),
         };
-        Registry::build(RegistryConfig {
+        Registry::build_covered(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: vec![get, scan, poll, dynamic_scan],
             authorities: vec![],
@@ -837,7 +837,7 @@ mod tests {
                 },
             },
         };
-        let reg = Registry::build(RegistryConfig {
+        let reg = Registry::build_covered(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: vec![fetch],
             authorities: vec![],

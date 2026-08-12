@@ -55,7 +55,6 @@ pub(crate) fn uninformed_acceptance_feedback(handle: &str) -> String {
 
 pub(crate) struct Core {
     pub(crate) config: Config,
-    pub(crate) engine: Engine,
     pub(crate) store: SessionStore,
     pub(crate) tenant: TenantId,
     pub(crate) session: TrajectoryId,
@@ -102,7 +101,6 @@ impl Core {
     /// half-works.
     pub(crate) fn open(config: Config, options: SdkOptions) -> Result<Core, OpenError> {
         validate_policy(&config)?;
-        let engine = Engine::new(config.registry().clone());
         let authorities = assemble::authority_backends(&config);
         let dynamic_resolvers = assemble::dynamic_resolver_backends(&config);
         let store = SessionStore::new();
@@ -110,7 +108,6 @@ impl Core {
         let session = store.create_session(tenant.clone());
         Ok(Core {
             config,
-            engine,
             store,
             tenant,
             session,
@@ -139,7 +136,8 @@ impl Core {
                 return Err(ToolSurfaceError::Duplicate(tool.function.name.clone()));
             }
             if self
-                .engine
+                .config
+                .engine()
                 .registry()
                 .tool(&ToolName::new(tool.function.name.clone()))
                 .is_none()
@@ -147,7 +145,7 @@ impl Core {
                 return Err(ToolSurfaceError::UnknownTool(tool.function.name.clone()));
             }
         }
-        for contract in self.engine.registry().tools() {
+        for contract in self.config.engine().registry().tools() {
             if !seen.contains(contract.name.as_str()) {
                 return Err(ToolSurfaceError::MissingTool(contract.name.as_str().to_string()));
             }
@@ -155,7 +153,8 @@ impl Core {
         let mut bound = surface;
         for tool in &mut bound {
             let contract = self
-                .engine
+                .config
+                .engine()
                 .registry()
                 .tool(&ToolName::new(tool.function.name.clone()))
                 .expect("the surface names only registered tools");
@@ -177,7 +176,7 @@ impl Core {
     /// missing argument, missing backend, timeout, or malformed answer pins no audience and leaves
     /// the engine's fail-closed dynamic gap or Unknown output standing.
     pub(crate) async fn resolve_dynamic_call(&self, call: ResolvedCall) -> ResolvedCall {
-        let Some(contract) = self.engine.registry().tool(call.tool()) else {
+        let Some(contract) = self.config.engine().registry().tool(call.tool()) else {
             return call;
         };
         let mut resolutions = Vec::new();
@@ -229,17 +228,25 @@ impl Core {
         let (log, rev) = self.store.snapshot(&self.tenant, &self.session)?;
         let projection = Projection::build(&log, rev);
         let views = projection.view(&self.session);
-        match self.engine.check(&views, &call) {
+        match self.config.engine().check(&views, &call) {
             Err(_) => Ok(Checked::Feedback("no such tool is registered".to_string())),
             Ok(CheckOutcome::Block(raw)) => {
                 let planned = self
-                    .engine
+                    .config
+                    .engine()
                     .plan(&views, &call, &raw)
                     .expect("checked tool is registered");
                 let surface = self.surface()?;
                 let has_offers = planned.plans.iter().any(|plan| plan.executable().is_some());
                 let feedback = if !has_offers {
-                    crate::feedback::block_feedback(self.engine.registry(), &raw, &planned, &[], surface, &views)
+                    crate::feedback::block_feedback(
+                        self.config.engine().registry(),
+                        &raw,
+                        &planned,
+                        &[],
+                        surface,
+                        &views,
+                    )
                 } else {
                     let attempts = self.remedy_attempts.entry(call.digest()).or_insert(0);
                     *attempts += 1;
@@ -259,7 +266,7 @@ impl Core {
                         })
                         .collect();
                     let feedback = crate::feedback::block_feedback(
-                        self.engine.registry(),
+                        self.config.engine().registry(),
                         &raw,
                         &planned,
                         &offers,
@@ -316,7 +323,7 @@ impl Core {
         let (log, rev) = self.store.snapshot(&self.tenant, &self.session)?;
         let projection = Projection::build(&log, rev);
         let views = projection.view(&self.session);
-        let outcome = self.engine.check(&views, &call);
+        let outcome = self.config.engine().check(&views, &call);
         if let Ok(CheckOutcome::Block(raw)) = &outcome
             && !raw.unestablished.is_empty()
         {
@@ -335,7 +342,8 @@ impl Core {
 
         let still_offered = match &outcome {
             Ok(CheckOutcome::Block(raw)) => self
-                .engine
+                .config
+                .engine()
                 .plan(&views, &call, raw)
                 .expect("pending call is registered")
                 .plans
@@ -391,7 +399,7 @@ impl Core {
                         }
                     }
                     let feedback = crate::feedback::denial_feedback(
-                        self.engine.registry(),
+                        self.config.engine().registry(),
                         &self.pending_blocks[cohort_index].offers,
                         surface,
                     );
@@ -400,7 +408,7 @@ impl Core {
                 }
                 AuthorityAnswer::Abstain => {
                     let feedback = crate::feedback::no_answer_feedback(
-                        self.engine.registry(),
+                        self.config.engine().registry(),
                         plan_id,
                         &self.pending_blocks[cohort_index].offers,
                         self.surface()?,
@@ -410,7 +418,11 @@ impl Core {
             }
         }
 
-        let batch = match self.engine.execute_remedy_plan(&views, &chosen, &call, &rulings) {
+        let batch = match self
+            .config
+            .engine()
+            .execute_remedy_plan(&views, &chosen, &call, &rulings)
+        {
             Ok(batch) => batch,
             Err(appa_engine::execute::PlanError::Unestablished(facts)) => {
                 return Ok(Remedied::Feedback(crate::feedback::unestablished_gate_feedback(
@@ -457,7 +469,7 @@ impl Core {
         self.store.finalize(&self.tenant, &self.session, |facts, rev| {
             let projection = Projection::build(facts, rev);
             let views = projection.view(&self.session);
-            let batch = self.engine.open_dispatch(&views, call).ok()?;
+            let batch = self.config.engine().open_dispatch(&views, call).ok()?;
             dispatch = Some(DispatchId::new(
                 self.session.clone(),
                 call.digest(),
@@ -483,7 +495,7 @@ impl Core {
             let projection = Projection::build(facts, rev);
             let views = projection.view(&self.session);
             let admission = slot.take()?;
-            match self.engine.admit_result(&views, dispatch, call, admission) {
+            match self.config.engine().admit_result(&views, dispatch, call, admission) {
                 Ok(batch) => {
                     let value = batch.facts.iter().find_map(|fact| match fact {
                         Fact::ValueAdmitted {
@@ -636,7 +648,7 @@ pub(crate) fn invalid_call_feedback(error: &EngineError) -> String {
 pub(crate) fn test_call(tool: &str, arguments: serde_json::Value) -> ResolvedCall {
     let policy = format!("version = 1\n[[tool]]\nname = {tool:?}\n");
     let config = Config::from_toml_str(&policy).expect("the test tool policy loads");
-    let engine = Engine::new(config.registry().clone());
+    let engine = config.engine().clone();
     let raw = serde_json::to_vec(&arguments).expect("test arguments serialize");
     engine
         .resolve_call(ToolName::new(tool), &raw)
@@ -752,7 +764,7 @@ implementation = {{ resolver = {{ url = "{url}", timeout_ms = 2000 }} }}
         let mut core = Core::open(config, SdkOptions::default()).expect("policy is SDK-supported");
         core.admit_user_turn("send it".to_string()).unwrap();
         let send = resolve_call(
-            &core.engine,
+            core.config.engine(),
             ToolName::new("send_email"),
             &serde_json::json!({"to": "x"}),
         )

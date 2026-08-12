@@ -119,6 +119,40 @@ pub enum LoadError {
         "{context}: {reader:?} is not a literal reader ID — `public` names the whole audience, and the `@` mark is reserved for groups a membership resolver expands"
     )]
     NonLiteralReader { context: String, reader: String },
+    #[error(
+        "deployment starting label: the {dimension:?} dimension is unestablished — an unknown starting dimension has no source value a cast could resolve"
+    )]
+    UnresolvedStartingDimension { dimension: Dimension },
+    #[error("the deployment declaration names unregistered tool {tool} in {slot}")]
+    UnknownDeploymentTool {
+        slot: crate::profile::CoverageSlot,
+        tool: String,
+    },
+    #[error(
+        "tool {tool} is provider-run and cannot be a confined result point: its result reaches the model inside the inference call, before any host could withhold it"
+    )]
+    ConfinedProviderRun { tool: String },
+    #[error(
+        "tool {tool} declares a pending-cast delta but the deployment does not confine its result point — the offer needs a raw result the model has not seen"
+    )]
+    PendingCastUnconfined { tool: String },
+    #[error(
+        "sanitizer {sanitizer} registers on tool_output but the deployment confines no application point — neither a result point nor the child-return crossing"
+    )]
+    OutputSanitizerUncovered { sanitizer: String },
+    #[error("[child] declares a return binding but the deployment does not control child context")]
+    ChildWithoutContextControl,
+    #[error("[child] return_sanitizer names unregistered sanitizer {0}")]
+    ChildReturnSanitizerUnknown(String),
+    #[error("[child] return_sanitizer {0} is not registered for tool output")]
+    ChildReturnSanitizerNotOutput(String),
+    #[error(
+        "provider-run tool {tool} declares {construct}: a provider-run contract may declare only a static delta"
+    )]
+    ProviderRunConstruct {
+        tool: String,
+        construct: crate::profile::ProviderRunConstruct,
+    },
 }
 
 /// The planner cap: the most alternatives one current-stage plan menu may hold — per
@@ -151,6 +185,7 @@ pub const MAX_HINT_CHARS: usize = 512;
 
 fn worst_case_plan_alternatives(
     tool: &ToolContract,
+    confined: bool,
     tools: &BTreeMap<ToolName, ToolContract>,
     authorities: &[Authority],
     sanitizers: &[Sanitizer],
@@ -225,6 +260,7 @@ fn worst_case_plan_alternatives(
     }
     let output = tool.output_label();
     let applicable = match tool.pending_cast_dim() {
+        _ if !confined => 0,
         Some(_) => 0,
         None if matches!(
             tool.delta.as_ref().and_then(|delta| delta.audience.as_ref()),
@@ -269,25 +305,39 @@ fn worst_case_plan_alternatives(
     count.saturating_add(redispatches)
 }
 
-fn worst_case_return_alternatives(sanitizers: &[Sanitizer]) -> u128 {
+fn worst_case_return_alternatives(sanitizers: &[Sanitizer], confined_child_return: bool) -> u128 {
+    if !confined_child_return {
+        return 1;
+    }
     1u128.saturating_add(sanitizers.iter().filter(|sanitizer| sanitizer.on.output).count() as u128)
 }
 
+/// The validated, indexed, immutable registry: the engine's whole static capability, contracts
+/// and coverage together. The deployment profile splits the catalogue at build: provider-run
+/// tools live apart from the checkable contracts, so the check, plan enumeration,
+/// redispatch offers, and the planner-cap bound exclude them by construction — no call site
+/// filters. The profile itself rides along, so plan and branch enumeration read confinement and
+/// context control from the one capability object they already hold.
 #[derive(Clone, Debug)]
 pub struct Registry {
     trust_chain: TrustChain,
     tools: BTreeMap<ToolName, ToolContract>,
+    provider_run: BTreeMap<ToolName, ToolContract>,
     authorities: Vec<Authority>,
     sanitizers: BTreeMap<SanitizerName, Sanitizer>,
     casts: BTreeMap<CastName, Cast>,
+    profile: crate::profile::DeploymentProfile,
 }
 
 impl Registry {
-    pub fn build(config: RegistryConfig) -> Result<Registry, LoadError> {
-        Registry::build_with_cap(config, PlannerCap::default())
-    }
-
-    pub fn build_with_cap(config: RegistryConfig, planner_cap: PlannerCap) -> Result<Registry, LoadError> {
+    /// Build and validate the catalogue under the deployment profile: structural lints, the
+    /// provider-run split, and the profile-exact planner-cap bound. The profile-blind
+    /// form does not exist — [`crate::engine::Engine::open`] is the one public path here.
+    pub(crate) fn build(
+        config: RegistryConfig,
+        planner_cap: PlannerCap,
+        profile: crate::profile::DeploymentProfile,
+    ) -> Result<Registry, LoadError> {
         config.trust_chain.validate()?;
 
         // Sanitizers index first: the child return-sanitizer binding validates against them.
@@ -311,6 +361,7 @@ impl Registry {
         }
 
         let mut tools = BTreeMap::new();
+        let mut provider_run = BTreeMap::new();
         for tool in config.tools {
             let declared_trust = match tool.delta.as_ref().and_then(|d| d.trust.as_ref()) {
                 Some(Dim::Known(t)) => Some(*t),
@@ -337,7 +388,12 @@ impl Registry {
                 }
             }
             validate_pending_cast(&tool)?;
-            if tools.insert(tool.name.clone(), tool.clone()).is_some() {
+            let split = if profile.is_provider_run(&tool.name) {
+                &mut provider_run
+            } else {
+                &mut tools
+            };
+            if split.insert(tool.name.clone(), tool.clone()).is_some() {
                 return Err(LoadError::DuplicateTool(tool.name.as_str().to_string()));
             }
         }
@@ -365,7 +421,13 @@ impl Registry {
 
         let sanitizer_list: Vec<Sanitizer> = sanitizers.values().cloned().collect();
         for tool in tools.values() {
-            let count = worst_case_plan_alternatives(tool, &tools, &config.authorities, &sanitizer_list);
+            let count = worst_case_plan_alternatives(
+                tool,
+                profile.confines_result(&tool.name),
+                &tools,
+                &config.authorities,
+                &sanitizer_list,
+            );
             if count > planner_cap.0 {
                 return Err(LoadError::TooManyPlanAlternatives {
                     tool: tool.name.as_str().to_string(),
@@ -374,7 +436,7 @@ impl Registry {
                 });
             }
         }
-        let confined = worst_case_return_alternatives(&sanitizer_list);
+        let confined = worst_case_return_alternatives(&sanitizer_list, profile.confines_child_return());
         if confined > planner_cap.0 {
             return Err(LoadError::TooManyReturnPlanAlternatives {
                 count: confined,
@@ -415,10 +477,16 @@ impl Registry {
         Ok(Registry {
             trust_chain: config.trust_chain,
             tools,
+            provider_run,
             authorities: config.authorities,
             sanitizers,
             casts,
+            profile,
         })
+    }
+
+    pub fn profile(&self) -> &crate::profile::DeploymentProfile {
+        &self.profile
     }
 
     pub fn trust_chain(&self) -> &TrustChain {
@@ -427,6 +495,16 @@ impl Registry {
 
     pub fn tool(&self, name: &ToolName) -> Option<&ToolContract> {
         self.tools.get(name)
+    }
+
+    /// The declared contract of a provider-run tool: never checked or planned; its
+    /// static `delta` is what an exposed result is admitted under.
+    pub fn provider_run_contract(&self, name: &ToolName) -> Option<&ToolContract> {
+        self.provider_run.get(name)
+    }
+
+    pub fn provider_run_contracts(&self) -> impl Iterator<Item = &ToolContract> {
+        self.provider_run.values()
     }
 
     pub fn tools(&self) -> impl Iterator<Item = &ToolContract> {
@@ -451,6 +529,21 @@ impl Registry {
 
     pub fn cast(&self, name: &CastName) -> Option<&Cast> {
         self.casts.get(name)
+    }
+}
+
+#[cfg(test)]
+impl Registry {
+    pub(crate) fn build_covered(config: RegistryConfig) -> Result<Registry, LoadError> {
+        Registry::build_covered_with_cap(config, PlannerCap::default())
+    }
+
+    pub(crate) fn build_covered_with_cap(
+        config: RegistryConfig,
+        planner_cap: PlannerCap,
+    ) -> Result<Registry, LoadError> {
+        let profile = crate::profile::covering_profile(&config);
+        Registry::build(config, planner_cap, profile)
     }
 }
 
@@ -487,7 +580,11 @@ fn validate_pending_cast(tool: &ToolContract) -> Result<(), LoadError> {
     }
 }
 
-fn check_rank(chain: &TrustChain, rank: Option<Trust>, context: impl Fn() -> String) -> Result<(), LoadError> {
+pub(crate) fn check_rank(
+    chain: &TrustChain,
+    rank: Option<Trust>,
+    context: impl Fn() -> String,
+) -> Result<(), LoadError> {
     match rank {
         Some(t) if !chain.contains_rank(t) => Err(LoadError::RankOutOfChain {
             rank: t.rank(),
@@ -498,7 +595,12 @@ fn check_rank(chain: &TrustChain, rank: Option<Trust>, context: impl Fn() -> Str
     }
 }
 
-fn check_readers(audience: &Audience, context: impl Fn() -> String) -> Result<(), LoadError> {
+/// Every reader ID a declaration names must be literal. `public` is a reserved
+/// audience *state* — [`Audience::Public`] carries it, so it is never a member of a restricted set —
+/// and the `@` mark names a group only a membership resolver may expand. This surface registers no
+/// membership resolver, so a group mention could never resolve; refusing it here keeps it from
+/// reaching the algebra as an opaque atom that silently matches nobody.
+pub(crate) fn check_readers(audience: &Audience, context: impl Fn() -> String) -> Result<(), LoadError> {
     let Audience::Restricted(readers) = audience else {
         return Ok(());
     };
@@ -658,7 +760,7 @@ mod tests {
     fn every_declared_audience_refuses_a_reserved_or_group_reader() {
         for reserved in ["public", "@auditors"] {
             for (context, cfg) in audience_sites(reserved) {
-                match Registry::build(cfg) {
+                match Registry::build_covered(cfg) {
                     Err(LoadError::NonLiteralReader {
                         context: reported,
                         reader,
@@ -683,7 +785,7 @@ mod tests {
         ]))];
         cfg.tools = vec![spoiled];
         assert!(matches!(
-            Registry::build(cfg),
+            Registry::build_covered(cfg),
             Err(LoadError::NonLiteralReader { reader, .. }) if reader == "public"
         ));
     }
@@ -691,7 +793,10 @@ mod tests {
     #[test]
     fn the_group_mark_is_a_prefix_and_never_a_substring() {
         for (context, cfg) in audience_sites("ap@corp.example") {
-            assert!(Registry::build(cfg).is_ok(), "{context} refused an ordinary reader ID");
+            assert!(
+                Registry::build_covered(cfg).is_ok(),
+                "{context} refused an ordinary reader ID"
+            );
         }
     }
 
@@ -707,13 +812,13 @@ mod tests {
             scope: Scope::default(),
             hint: None,
         }];
-        assert!(Registry::build(public_ceiling).is_ok());
+        assert!(Registry::build_covered(public_ceiling).is_ok());
 
         let mut empty_cap = base();
         let mut cap_tool = tool("emit");
         cap_tool.requires.label.audience = vec![AudienceRequirement::Cap(Audience::restricted([]))];
         empty_cap.tools = vec![cap_tool];
-        assert!(Registry::build(empty_cap).is_ok());
+        assert!(Registry::build_covered(empty_cap).is_ok());
     }
 
     #[test]
@@ -730,7 +835,7 @@ mod tests {
         let mut cfg = base();
         cfg.tools = vec![tool("get"), tool("send")];
         cfg.authorities = vec![attends_authority("officer")];
-        let reg = Registry::build(cfg).unwrap();
+        let reg = Registry::build_covered(cfg).unwrap();
         assert!(reg.tool(&ToolName::new("get")).is_some());
         assert!(reg.authority(&AuthorityName::new("officer")).is_some());
     }
@@ -740,7 +845,7 @@ mod tests {
         let mut cfg = base();
         cfg.tools = vec![tool("dup"), tool("dup")];
         assert!(matches!(
-            Registry::build(cfg),
+            Registry::build_covered(cfg),
             Err(LoadError::DuplicateTool(name)) if name == "dup"
         ));
     }
@@ -755,7 +860,7 @@ mod tests {
             hint: None,
         }];
         assert!(matches!(
-            Registry::build(cfg),
+            Registry::build_covered(cfg),
             Err(LoadError::EmptyMandate(name)) if name == "noop"
         ));
     }
@@ -771,7 +876,7 @@ mod tests {
             ..tool("over")
         }];
         assert!(matches!(
-            Registry::build(cfg),
+            Registry::build_covered(cfg),
             Err(LoadError::RankOutOfChain { rank: 9, .. })
         ));
     }
@@ -786,7 +891,7 @@ mod tests {
             },
         }];
         assert!(matches!(
-            Registry::build(cfg),
+            Registry::build_covered(cfg),
             Err(LoadError::EmptyCastCeiling(name)) if name == "classifier"
         ));
     }
@@ -796,7 +901,7 @@ mod tests {
         let mut cfg = base();
         cfg.trust_chain = TrustChain::new((0..=MAX_RANKS).map(|i| i.to_string()).collect());
         assert!(matches!(
-            Registry::build(cfg),
+            Registry::build_covered(cfg),
             Err(LoadError::TrustChainTooLong { len, max }) if len == MAX_RANKS + 1 && max == MAX_RANKS
         ));
     }
@@ -806,7 +911,7 @@ mod tests {
         let mut cfg = base();
         cfg.trust_chain = TrustChain::new(vec!["low".into(), "high".into(), "low".into()]);
         assert!(matches!(
-            Registry::build(cfg),
+            Registry::build_covered(cfg),
             Err(LoadError::DuplicateRank(name)) if name == "low"
         ));
     }
@@ -822,7 +927,7 @@ mod tests {
             ..tool("scan")
         }];
         assert!(matches!(
-            Registry::build(cfg),
+            Registry::build_covered(cfg),
             Err(LoadError::DualPendingCast(name)) if name == "scan"
         ));
     }
@@ -848,7 +953,7 @@ mod tests {
             ..tool("scan")
         }];
         assert!(matches!(
-            Registry::build(cfg),
+            Registry::build_covered(cfg),
             Err(LoadError::PendingCastWithRequirement {
                 dimension: Dimension::Trust,
                 ..
@@ -871,7 +976,7 @@ mod tests {
             ..tool("scan")
         }];
         assert!(matches!(
-            Registry::build(cfg),
+            Registry::build_covered(cfg),
             Err(LoadError::PendingCastWithRequirement {
                 dimension: Dimension::Audience,
                 ..
@@ -893,7 +998,7 @@ mod tests {
             },
             ..tool("scan")
         }];
-        assert!(Registry::build(cfg).is_ok());
+        assert!(Registry::build_covered(cfg).is_ok());
     }
 
     #[test]
@@ -913,7 +1018,7 @@ mod tests {
             ..tool("send")
         }];
         assert!(matches!(
-            Registry::build(cfg),
+            Registry::build_covered(cfg),
             Err(LoadError::UnannotatedWithLabelRequirement(name)) if name == "send"
         ));
 
@@ -928,7 +1033,7 @@ mod tests {
             },
             ..tool("send")
         }];
-        assert!(Registry::build(cfg).is_ok());
+        assert!(Registry::build_covered(cfg).is_ok());
 
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
@@ -942,7 +1047,7 @@ mod tests {
             },
             ..tool("send")
         }];
-        assert!(Registry::build(cfg).is_ok());
+        assert!(Registry::build_covered(cfg).is_ok());
     }
 
     #[test]
@@ -952,7 +1057,7 @@ mod tests {
             name: CastName::new("paranoid"),
             resolution: CastResolution::Constant(CastTarget::Trust(Trust::new(0))),
         }];
-        assert!(Registry::build(cfg).is_ok());
+        assert!(Registry::build_covered(cfg).is_ok());
     }
 
     fn n_squared_config(n: usize) -> RegistryConfig {
@@ -978,9 +1083,9 @@ mod tests {
 
     #[test]
     fn the_default_planner_cap_refuses_an_over_wide_registry_at_sixty_four() {
-        assert!(Registry::build(n_squared_config(8)).is_ok());
+        assert!(Registry::build_covered(n_squared_config(8)).is_ok());
         assert!(matches!(
-            Registry::build(n_squared_config(9)),
+            Registry::build_covered(n_squared_config(9)),
             Err(LoadError::TooManyPlanAlternatives { count: 81, max: 64, .. })
         ));
     }
@@ -1009,7 +1114,7 @@ mod tests {
         cfg.sanitizers = (0..16).map(sanitizer).collect();
         let cap = PlannerCap::new(16).expect("nonzero");
         assert!(matches!(
-            Registry::build_with_cap(cfg, cap),
+            Registry::build_covered_with_cap(cfg, cap),
             Err(LoadError::TooManyPlanAlternatives { count: 17, max: 16, .. })
         ));
     }
@@ -1018,13 +1123,13 @@ mod tests {
     fn a_configured_planner_cap_replaces_the_default_bound() {
         let cap = PlannerCap::new(9).expect("nonzero");
         assert!(matches!(
-            Registry::build_with_cap(n_squared_config(4), cap),
+            Registry::build_covered_with_cap(n_squared_config(4), cap),
             Err(LoadError::TooManyPlanAlternatives { count: 16, max: 9, .. })
         ));
-        assert!(Registry::build_with_cap(n_squared_config(3), cap).is_ok());
+        assert!(Registry::build_covered_with_cap(n_squared_config(3), cap).is_ok());
 
         let raised = PlannerCap::new(100).expect("nonzero");
-        assert!(Registry::build_with_cap(n_squared_config(9), raised).is_ok());
+        assert!(Registry::build_covered_with_cap(n_squared_config(9), raised).is_ok());
     }
 
     #[test]
@@ -1070,9 +1175,9 @@ mod tests {
     #[test]
     fn the_bound_counts_every_direct_prior_emitter() {
         let cap = PlannerCap::new(4).expect("nonzero");
-        assert!(Registry::build_with_cap(prior_target_config(3), cap).is_ok());
+        assert!(Registry::build_covered_with_cap(prior_target_config(3), cap).is_ok());
         assert!(matches!(
-            Registry::build_with_cap(prior_target_config(4), cap),
+            Registry::build_covered_with_cap(prior_target_config(4), cap),
             Err(LoadError::TooManyPlanAlternatives { count: 5, max: 4, ref tool }) if tool == "wire"
         ));
     }
@@ -1116,9 +1221,9 @@ mod tests {
     #[test]
     fn the_bound_counts_only_static_restricted_contributions_for_a_cap() {
         let cap = PlannerCap::new(4).expect("nonzero");
-        assert!(Registry::build_with_cap(cap_target_config(3), cap).is_ok());
+        assert!(Registry::build_covered_with_cap(cap_target_config(3), cap).is_ok());
         assert!(matches!(
-            Registry::build_with_cap(cap_target_config(4), cap),
+            Registry::build_covered_with_cap(cap_target_config(4), cap),
             Err(LoadError::TooManyPlanAlternatives { count: 5, max: 4, ref tool }) if tool == "send"
         ));
     }
@@ -1128,11 +1233,11 @@ mod tests {
         let mut cfg = cap_target_config(4);
         let cap = PlannerCap::new(4).expect("nonzero");
         assert!(matches!(
-            Registry::build_with_cap(cfg.clone(), cap),
+            Registry::build_covered_with_cap(cfg.clone(), cap),
             Err(LoadError::TooManyPlanAlternatives { count: 5, max: 4, .. })
         ));
         cfg.tools[0].requires.label.audience = vec![AudienceRequirement::Cap(Audience::Public)];
-        assert!(Registry::build_with_cap(cfg, cap).is_ok());
+        assert!(Registry::build_covered_with_cap(cfg, cap).is_ok());
     }
 
     #[test]
@@ -1152,7 +1257,7 @@ mod tests {
             Some(AudienceDelta::Static(Audience::restricted([ReaderId::new("a")])));
         let mut cfg = base();
         cfg.tools = vec![target, fixer];
-        assert!(Registry::build_with_cap(cfg, PlannerCap::new(2).expect("nonzero")).is_ok());
+        assert!(Registry::build_covered_with_cap(cfg, PlannerCap::new(2).expect("nonzero")).is_ok());
     }
 
     #[test]
@@ -1171,7 +1276,7 @@ mod tests {
         cfg.authorities = (0..3).map(|i| officer(format!("officer{i}"))).collect();
         let cap = PlannerCap::new(5).expect("nonzero");
         assert!(matches!(
-            Registry::build_with_cap(cfg, cap),
+            Registry::build_covered_with_cap(cfg, cap),
             Err(LoadError::TooManyPlanAlternatives { count: 6, max: 5, ref tool }) if tool == "wire"
         ));
     }
@@ -1183,10 +1288,10 @@ mod tests {
         cfg.sanitizers = (0..5).map(output_sanitizer).collect();
         let cap = PlannerCap::new(4).expect("nonzero");
         assert!(matches!(
-            Registry::build_with_cap(cfg.clone(), cap),
+            Registry::build_covered_with_cap(cfg.clone(), cap),
             Err(LoadError::TooManyReturnPlanAlternatives { count: 6, max: 4 })
         ));
-        assert!(Registry::build_with_cap(cfg, PlannerCap::new(6).expect("nonzero")).is_ok());
+        assert!(Registry::build_covered_with_cap(cfg, PlannerCap::new(6).expect("nonzero")).is_ok());
     }
 
     #[test]
@@ -1197,6 +1302,6 @@ mod tests {
         let mut cfg = base();
         cfg.tools = vec![narrowing];
         cfg.sanitizers = (0..5).map(output_sanitizer).collect();
-        assert!(Registry::build_with_cap(cfg, PlannerCap::new(8).expect("nonzero")).is_ok());
+        assert!(Registry::build_covered_with_cap(cfg, PlannerCap::new(8).expect("nonzero")).is_ok());
     }
 }

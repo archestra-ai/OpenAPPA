@@ -86,6 +86,7 @@ impl Projection {
 
         for fact in log {
             match fact {
+                Fact::TrajectoryOpened { .. } => {}
                 Fact::ValueAdmitted {
                     trajectory,
                     value,

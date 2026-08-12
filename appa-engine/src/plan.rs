@@ -429,6 +429,9 @@ fn narrowing_remedies(
         accept: Some(narrowing.clone()),
         sanitize: None,
     }];
+    if !registry.profile().confines_result(&contract.name) {
+        return settlements;
+    }
     let output = contract.output_label_for_call(call);
     for sanitizer in applicable_output_sanitizers(registry, contract, &output) {
         let Some(sanitized) = sanitized_commit(current, &output, sanitizer) else {
@@ -554,7 +557,7 @@ mod tests {
     }
 
     fn build(config: RegistryConfig) -> Registry {
-        Registry::build(config).unwrap()
+        Registry::build_covered(config).unwrap()
     }
 
     fn user_value(label: Label) -> Fact {
@@ -2718,7 +2721,7 @@ mod tests {
                 s
             }).collect();
 
-            let built = Registry::build(RegistryConfig {
+            let built = Registry::build_covered(RegistryConfig {
                 trust_chain: chain(),
                 tools,
                 authorities,
@@ -2806,7 +2809,7 @@ mod tests {
                 s.name = SanitizerName::new(format!("s{i}"));
                 s
             }).collect();
-            let built = Registry::build(RegistryConfig {
+            let built = Registry::build_covered(RegistryConfig {
                 trust_chain: chain(),
                 tools,
                 authorities,
@@ -2937,7 +2940,7 @@ mod tests {
                 a.name = AuthorityName::new(format!("a{i}"));
                 if a.mandate.is_empty() { None } else { Some(a) }
             }).collect();
-            let built = Registry::build(RegistryConfig {
+            let built = Registry::build_covered(RegistryConfig {
                 trust_chain: chain(),
                 tools,
                 authorities: authorities.clone(),

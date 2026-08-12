@@ -245,6 +245,8 @@ pub enum EngineView {
 
 /// The one engine boundary the session drives: the real engine, or
 /// the tests' enqueued-decision seam.
+// One seam exists per process, so the size gap against the cfg(test) variant buys no box.
+#[cfg_attr(test, expect(clippy::large_enum_variant))]
 pub enum EngineSeam {
     Real(RuntimeEngine),
     #[cfg(test)]
@@ -306,11 +308,10 @@ impl EngineSeam {
 }
 
 /// The real engine behind the seam: the immutable registry-backed decision
-/// core plus the deployment's child-return binding and this process's offer
-/// cache.
+/// core plus this process's offer cache. The deployment's child-return
+/// binding is the engine's own validated state.
 pub struct RuntimeEngine {
     engine: Engine,
-    child_return: ReturnPolicy,
     offers: Mutex<OfferCache>,
 }
 
@@ -322,10 +323,9 @@ struct OfferCache {
 const OFFER_CACHE_CAP: usize = 1024;
 
 impl RuntimeEngine {
-    pub fn new(engine: Engine, child_return: ReturnPolicy) -> RuntimeEngine {
+    pub fn new(engine: Engine) -> RuntimeEngine {
         RuntimeEngine {
             engine,
-            child_return,
             offers: Mutex::new(OfferCache {
                 entries: HashMap::new(),
                 staged: 0,
@@ -419,7 +419,7 @@ impl RuntimeEngine {
                 let child_id = engine_id(&child);
                 let batch = self
                     .engine
-                    .seed_child(&views, &child_id, self.child_return.clone())
+                    .seed_child(&views, &child_id)
                     .map_err(|error| EngineRefusal::Invariant {
                         detail: format!("seeding child {}: {error}", child.0),
                     })?;
@@ -505,6 +505,9 @@ impl RuntimeEngine {
             }
             Err(EngineError::UnknownTool(tool)) => Ok(deny(format!(
                 "[appa] unknown tool {tool}: not in this deployment's policy"
+            ))),
+            Err(EngineError::ProviderRunTool(tool)) => Ok(deny(format!(
+                "[appa] tool {tool} is provider-run: it executes inside the inference call and cannot be proposed as a tool call"
             ))),
             Err(EngineError::InvalidCall(error)) => Ok(deny(format!("[appa] invalid call: {error}"))),
             Err(EngineError::NotAllowed) => Err(EngineRefusal::Invariant {

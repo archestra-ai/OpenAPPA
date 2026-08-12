@@ -26,11 +26,13 @@ use appa_engine::contract::{
     AudienceDelta, AudienceRequirement, Delta, DynamicAudienceBinding, HistoryRequirement, LabelRequirements,
     RecipientSpec, Requires, ToolContract,
 };
+use appa_engine::engine::Engine;
 use appa_engine::fact::ReturnPolicy;
 use appa_engine::fact::{EffectKind, EffectSet};
 use appa_engine::label::{Audience, Dim, DimValue, Label, ReaderId, Trust};
 use appa_engine::names::{AuthorityName, CastName, DynamicResolverName, MarkName, SanitizerName, TagName};
 use appa_engine::params::ToolParameters;
+use appa_engine::profile::{BindingMode, DeploymentPolicy, ExecutorClass, PolicyDialectVersion, ProfileDeclaration};
 use appa_engine::registry::{LoadError, PlannerCap, Registry, RegistryConfig, TrustChain};
 use appa_engine::value::ToolName;
 
@@ -134,7 +136,7 @@ pub struct DynamicResolverImpl {
 /// algebraic load lints, so a returned `Config` is always loadable.
 #[derive(Clone, Debug)]
 pub struct Config {
-    registry: Registry,
+    engine: Engine,
     registry_config: RegistryConfig,
     boundary_label: Label,
     authority_impls: BTreeMap<AuthorityName, AuthorityImpl>,
@@ -247,9 +249,6 @@ impl Config {
             sanitizers,
             casts,
         };
-        // Run the engine's algebraic load lints now, so a returned Config is always loadable.
-        let registry = Registry::build_with_cap(registry_config.clone(), planner_cap)?;
-
         let child_return = match raw.child {
             None => ReturnPolicy::Raw,
             Some(RawChild { return_sanitizer: None }) => {
@@ -263,7 +262,7 @@ impl Config {
                 return_sanitizer: Some(sanitizer),
             }) => {
                 let name = SanitizerName::new(sanitizer);
-                match registry.sanitizer(&name) {
+                match registry_config.sanitizers.iter().find(|s| s.name == name) {
                     Some(s) if s.on.output => ReturnPolicy::Sanitized(name),
                     Some(_) => {
                         return Err(ConfigError::BadImplementation {
@@ -283,8 +282,26 @@ impl Config {
             }
         };
 
+        let profile = ProfileDeclaration {
+            starting_label: boundary_label.clone(),
+            context_control: true,
+            dispatch: ExecutorClass::Enforced,
+            executor_exceptions: BTreeMap::new(),
+            confined_results: registry_config.tools.iter().map(|tool| tool.name.clone()).collect(),
+            confined_child_return: true,
+            provider_surfaces: BTreeMap::new(),
+            binding: BindingMode::Harness,
+        };
+        let engine = Engine::open(DeploymentPolicy {
+            registry: registry_config.clone(),
+            planner_cap,
+            dialect: PolicyDialectVersion::new(SUPPORTED_VERSION),
+            child_return: child_return.clone(),
+            profile,
+        })?;
+
         Ok(Config {
-            registry,
+            engine,
             registry_config,
             boundary_label,
             authority_impls,
@@ -296,8 +313,12 @@ impl Config {
         })
     }
 
+    pub fn engine(&self) -> &Engine {
+        &self.engine
+    }
+
     pub fn registry(&self) -> &Registry {
-        &self.registry
+        self.engine.registry()
     }
 
     /// The label assigned to every north user turn (RP1) — a server policy default, never client
@@ -1820,8 +1841,16 @@ delta = { audience = { exactly = ["@team"] } }
             sanitizers: vec![],
             casts: vec![],
         };
+        let no_coverage =
+            ProfileDeclaration::no_coverage(&TrustChain::new(vec!["suspicious".to_string(), "trusted".to_string()]));
         assert!(matches!(
-            Registry::build(direct),
+            Engine::open(DeploymentPolicy {
+                registry: direct,
+                planner_cap: PlannerCap::default(),
+                dialect: PolicyDialectVersion::new(1),
+                child_return: ReturnPolicy::Raw,
+                profile: no_coverage,
+            }),
             Err(LoadError::NonLiteralReader { reader, .. }) if reader == "@team"
         ));
     }

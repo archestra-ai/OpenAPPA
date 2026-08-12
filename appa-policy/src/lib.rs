@@ -1,7 +1,7 @@
 //! The spec's policy-dialect compiler: the configuration dialect (TOML) → the engine's
 //! [`RegistryConfig`] for runtime v2.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -13,11 +13,16 @@ use appa_engine::contract::{
     AudienceDelta, AudienceRequirement, Delta, DynamicAudienceBinding, HistoryRequirement, LabelRequirements,
     RecipientSpec, Requires, ToolContract,
 };
+use appa_engine::engine::Engine;
 use appa_engine::fact::ReturnPolicy;
 use appa_engine::fact::{EffectKind, EffectSet};
 use appa_engine::label::{Audience, Dim, DimValue, Label, ReaderId, Trust};
-use appa_engine::names::{AuthorityName, CastName, DynamicResolverName, MarkName, SanitizerName, TagName};
+use appa_engine::names::{AuthorityName, CastName, DynamicResolverName, MarkName, SanitizerName, SurfaceName, TagName};
 use appa_engine::params::ToolParameters;
+use appa_engine::profile::{
+    BindingMode, DeploymentPolicy, ExecutorClass, PolicyDialectVersion, ProfileDeclaration, SurfaceMode,
+    neutral_starting_label,
+};
 use appa_engine::registry::{LoadError, PlannerCap, Registry, RegistryConfig, TrustChain};
 use appa_engine::value::ToolName;
 
@@ -73,18 +78,26 @@ pub enum ConfigError {
     DynamicArgumentNotString { tool: String, argument: String },
     #[error("[limits] planner_cap is 0: a tool's worst case is at least one plan, so a zero cap refuses every tool")]
     ZeroPlannerCap,
+    #[error("[deployment] {field}: expected one of {expected}, found {found:?}")]
+    BadDeploymentToken {
+        field: &'static str,
+        expected: &'static str,
+        found: String,
+    },
+    #[error("[deployment] names tool {tool} in both assumed_tools and provider_run_tools")]
+    ConflictingExecutorException { tool: String },
     #[error("registry rejected: {0}")]
     Registry(#[from] LoadError),
 }
 
-/// A fully parsed and **fully validated** policy: the immutable engine [`Registry`] plus the
-/// normalized declarations used for policy identity. Runtime-v2 owns implementation bindings.
+/// A fully parsed and **fully validated** policy: the opened [`Engine`] — registry, deployment
+/// profile, and policy identity behind the one validated constructor — plus the
+/// normalized declarations. Runtime-v2 owns implementation bindings.
 #[derive(Clone, Debug)]
 pub struct Config {
-    registry: Registry,
+    engine: Engine,
     registry_config: RegistryConfig,
     boundary_label: Label,
-    child_return: ReturnPolicy,
 }
 
 impl Config {
@@ -166,16 +179,6 @@ impl Config {
             Some(cap) => PlannerCap::new(cap).ok_or(ConfigError::ZeroPlannerCap)?,
         };
 
-        let registry_config = RegistryConfig {
-            trust_chain,
-            tools,
-            authorities,
-            sanitizers,
-            casts,
-        };
-        // Run the engine's algebraic load lints now, so a returned Config is always loadable.
-        let registry = Registry::build_with_cap(registry_config.clone(), planner_cap)?;
-
         let child_return = match raw.child {
             None => ReturnPolicy::Raw,
             Some(RawChild { return_sanitizer: None }) => {
@@ -189,7 +192,7 @@ impl Config {
                 return_sanitizer: Some(sanitizer),
             }) => {
                 let name = SanitizerName::new(sanitizer);
-                match registry.sanitizer(&name) {
+                match sanitizers.iter().find(|s| s.name == name) {
                     Some(s) if s.on.output => ReturnPolicy::Sanitized(name),
                     Some(_) => {
                         return Err(ConfigError::BadImplementation {
@@ -209,16 +212,39 @@ impl Config {
             }
         };
 
+        let profile = match raw.deployment {
+            Some(deployment) => deployment.convert(&trust_chain)?,
+            None => ProfileDeclaration::no_coverage(&trust_chain),
+        };
+
+        let registry_config = RegistryConfig {
+            trust_chain,
+            tools,
+            authorities,
+            sanitizers,
+            casts,
+        };
+        let engine = Engine::open(DeploymentPolicy {
+            registry: registry_config.clone(),
+            planner_cap,
+            dialect: PolicyDialectVersion::new(SUPPORTED_VERSION),
+            child_return,
+            profile,
+        })?;
+
         Ok(Config {
-            registry,
+            engine,
             registry_config,
             boundary_label,
-            child_return,
         })
     }
 
+    pub fn engine(&self) -> &Engine {
+        &self.engine
+    }
+
     pub fn registry(&self) -> &Registry {
-        &self.registry
+        self.engine.registry()
     }
 
     /// The label assigned to every north user turn (RP1) — a server policy default, never client
@@ -229,12 +255,6 @@ impl Config {
 
     pub fn registry_config(&self) -> &RegistryConfig {
         &self.registry_config
-    }
-
-    /// The fork return policy this configuration binds to every child (RP6): the `[child]` static
-    /// binding when one is declared, else raw returns under the narrowing check.
-    pub fn child_return_policy(&self) -> ReturnPolicy {
-        self.child_return.clone()
     }
 }
 
@@ -256,6 +276,103 @@ struct RawConfig {
     dynamic_resolver: Vec<RawDynamicResolver>,
     child: Option<RawChild>,
     limits: Option<RawLimits>,
+    deployment: Option<RawDeployment>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDeployment {
+    starting_label: Option<RawStartingLabel>,
+    binding: Option<BindingMode>,
+    context_control: Option<bool>,
+    dispatch: Option<ExecutorClass>,
+    #[serde(default)]
+    assumed_tools: Vec<String>,
+    #[serde(default)]
+    provider_run_tools: Vec<String>,
+    #[serde(default)]
+    confined_results: Vec<String>,
+    confined_child_return: Option<bool>,
+    #[serde(default)]
+    provider_surfaces: BTreeMap<String, SurfaceMode>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawStartingLabel {
+    trust: Option<String>,
+    audience: Option<RawStartingAudience>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawStartingAudience {
+    Token(String),
+    Exactly(RawExactly),
+}
+
+impl RawDeployment {
+    fn convert(self, chain: &TrustChain) -> Result<ProfileDeclaration, ConfigError> {
+        let neutral = neutral_starting_label(chain);
+        let starting_label = match self.starting_label {
+            Some(label) => {
+                let trust = match label.trust {
+                    Some(name) => parse_trust(&name, chain, "deployment starting_label")?,
+                    None => match neutral.trust {
+                        Dim::Known(top) => top,
+                        Dim::Unknown => unreachable!("the neutral starting label is established"),
+                    },
+                };
+                let audience = match label.audience {
+                    None => Audience::Public,
+                    Some(RawStartingAudience::Token(token)) if token == "public" => Audience::Public,
+                    Some(RawStartingAudience::Token(token)) => {
+                        return Err(ConfigError::BadDeploymentToken {
+                            field: "starting_label audience",
+                            expected: r#""public" or { exactly = [...] }"#,
+                            found: token,
+                        });
+                    }
+                    Some(RawStartingAudience::Exactly(a)) => {
+                        parse_audience(&a.exactly, "deployment starting_label audience")?
+                    }
+                };
+                Label::new(Dim::Known(trust), Dim::Known(audience))
+            }
+            None => neutral,
+        };
+
+        let mut executor_exceptions = BTreeMap::new();
+        for name in self.assumed_tools {
+            executor_exceptions.insert(ToolName::new(name), ExecutorClass::Assumed);
+        }
+        for name in self.provider_run_tools {
+            let tool = ToolName::new(name);
+            if executor_exceptions
+                .insert(tool.clone(), ExecutorClass::ProviderRun)
+                .is_some_and(|previous| previous != ExecutorClass::ProviderRun)
+            {
+                return Err(ConfigError::ConflictingExecutorException {
+                    tool: tool.as_str().to_string(),
+                });
+            }
+        }
+
+        Ok(ProfileDeclaration {
+            starting_label,
+            context_control: self.context_control.unwrap_or(false),
+            dispatch: self.dispatch.unwrap_or(ExecutorClass::Assumed),
+            executor_exceptions,
+            confined_results: self.confined_results.into_iter().map(ToolName::new).collect(),
+            confined_child_return: self.confined_child_return.unwrap_or(false),
+            provider_surfaces: self
+                .provider_surfaces
+                .into_iter()
+                .map(|(surface, mode)| (SurfaceName::new(surface), mode))
+                .collect(),
+            binding: self.binding.unwrap_or(BindingMode::Harness),
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -835,6 +952,10 @@ name = "pii"
 on = ["tool_output"]
 [sanitizer.mandate]
 audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+
+[deployment]
+dispatch = "enforced"
+confined_results = ["lookup"]
 "#;
 
     #[test]
@@ -898,6 +1019,88 @@ audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
             Config::from_toml_str(&wrong_type),
             Err(ConfigError::DynamicArgumentNotString { .. })
         ));
+    }
+
+    #[test]
+    fn the_deployment_table_compiles_into_the_validated_profile() {
+        let config = Config::from_toml_str(DECLARATIONS).expect("the v2 policy compiles");
+        let profile = config.engine().profile();
+        assert_eq!(
+            profile.executor_class(&ToolName::new("lookup")),
+            ExecutorClass::Enforced
+        );
+        assert!(profile.confines_result(&ToolName::new("lookup")));
+        assert!(!profile.confines_result(&ToolName::new("send")));
+        assert_eq!(profile.binding(), BindingMode::Harness);
+        assert!(!profile.context_control());
+        assert_eq!(
+            profile.starting_label(),
+            &neutral_starting_label(config.registry().trust_chain())
+        );
+    }
+
+    #[test]
+    fn an_absent_deployment_table_is_the_no_coverage_default_and_refuses_covered_constructs() {
+        let plain = Config::from_toml_str("version = 1\n[[tool]]\nname = \"t\"\ndelta = {}\n").expect("loads");
+        assert_eq!(
+            plain.engine().profile().executor_class(&ToolName::new("t")),
+            ExecutorClass::Assumed
+        );
+        assert_eq!(plain.engine().open_vectors().len(), 1);
+        let uncovered = DECLARATIONS.replace(
+            "[deployment]\ndispatch = \"enforced\"\nconfined_results = [\"lookup\"]\n",
+            "",
+        );
+        assert!(matches!(
+            Config::from_toml_str(&uncovered),
+            Err(ConfigError::Registry(LoadError::OutputSanitizerUncovered { .. }))
+        ));
+    }
+
+    #[test]
+    fn deployment_tokens_and_exception_conflicts_are_load_errors() {
+        let base = "version = 1\n[[tool]]\nname = \"t\"\ndelta = {}\n";
+        let with = |table: &str| format!("{base}\n[deployment]\n{table}\n");
+        for bad_token in [
+            "dispatch = \"trusted\"",
+            "binding = \"content\"",
+            "provider_surfaces = { web_search = \"proxied\" }",
+        ] {
+            assert!(matches!(
+                Config::from_toml_str(&with(bad_token)),
+                Err(ConfigError::Parse(_))
+            ));
+        }
+        assert!(matches!(
+            Config::from_toml_str(&with("starting_label = { audience = \"everyone\" }")),
+            Err(ConfigError::BadDeploymentToken {
+                field: "starting_label audience",
+                ..
+            })
+        ));
+        assert!(matches!(
+            Config::from_toml_str(&with("assumed_tools = [\"t\"]\nprovider_run_tools = [\"t\"]")),
+            Err(ConfigError::ConflictingExecutorException { tool }) if tool == "t"
+        ));
+        assert!(matches!(
+            Config::from_toml_str(&with("confined_results = [\"ghost\"]")),
+            Err(ConfigError::Registry(LoadError::UnknownDeploymentTool { .. }))
+        ));
+    }
+
+    #[test]
+    fn hints_and_limits_never_move_the_policy_identity() {
+        let identity = |source: &str| Config::from_toml_str(source).expect("loads").engine().identity();
+        let base = identity(DECLARATIONS);
+        let hinted = DECLARATIONS.replace(
+            "name = \"approver\"",
+            "name = \"approver\"\nhint = \"the wire-approval desk\"",
+        );
+        assert_eq!(identity(&hinted), base);
+        let capped = format!("{DECLARATIONS}\n[limits]\nplanner_cap = 7\n");
+        assert_eq!(identity(&capped), base);
+        let weakened = DECLARATIONS.replace("dispatch = \"enforced\"", "dispatch = \"assumed\"");
+        assert_ne!(identity(&weakened), base);
     }
 
     #[test]

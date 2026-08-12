@@ -26,6 +26,7 @@ pub mod label;
 pub mod names;
 pub mod params;
 pub mod plan;
+pub mod profile;
 pub mod projection;
 pub mod registry;
 pub mod value;

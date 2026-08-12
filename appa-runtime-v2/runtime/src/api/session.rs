@@ -707,7 +707,7 @@ mod tests {
             "#,
         )
         .expect("the fixture policy compiles");
-        let engine = appa_engine::engine::Engine::new(policy.registry().clone());
+        let engine = policy.engine().clone();
         let call = engine
             .resolve_call(appa_engine::value::ToolName::new("Bash"), br#"{"command":"ls"}"#)
             .expect("the fixture call resolves through the engine");
@@ -1568,6 +1568,10 @@ parameters = { type = "object", properties = { b = { type = "integer" }, a = { t
 name = "send"
 requires = { trust = "trusted" }
 delta = {}
+
+# The child tests fork under this fixture; branching takes declared context control.
+[policy.deployment]
+context_control = true
 "#;
 
     fn root() -> TrajectoryId {
@@ -1660,6 +1664,24 @@ version = 1
 [[policy.tool]]
 name = "fetch"
 delta = { trust = "unknown" }
+[policy.deployment]
+confined_results = ["fetch"]
+"#;
+        assert!(matches!(
+            Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None),
+            Err(OpenError::UnsupportedPolicy(_)),
+        ));
+    }
+
+    #[test]
+    fn a_non_neutral_starting_label_refuses_open() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let policy = r#"
+version = 1
+[[policy.tool]]
+name = "fetch"
+[policy.deployment]
+starting_label = { trust = "suspicious" }
 "#;
         assert!(matches!(
             Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None),
@@ -2268,6 +2290,10 @@ audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
 
 [policy.child]
 return_sanitizer = "scrub"
+
+[policy.deployment]
+context_control = true
+confined_child_return = true
 "#;
 
     fn sanitized_config(url: Option<&str>) -> Config {
@@ -2341,6 +2367,9 @@ name = "scrub"
 on = ["tool_output"]
 [policy.sanitizer.mandate]
 audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+
+[policy.deployment]
+confined_results = ["leak"]
 "#;
 
     fn narrowing_config(url: &str) -> Config {

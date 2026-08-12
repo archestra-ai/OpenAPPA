@@ -39,3 +39,6 @@ name_newtype!(
 name_newtype!(
     TagName
 );
+name_newtype!(
+    SurfaceName
+);

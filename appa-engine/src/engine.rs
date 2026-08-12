@@ -7,22 +7,51 @@ use crate::branch::{self, BranchError, ReturnSubmission};
 use crate::check::{self, CheckOutcome, Narrowing, RawBlock, UnestablishedFact};
 use crate::contract::ToolContract;
 use crate::execute::{self, PlanError, Ruling};
-use crate::fact::{Fact, FactBatch, ReturnPolicy};
+use crate::fact::{Fact, FactBatch, ReturnPolicy, Revision};
 use crate::label::DimValue;
 use crate::params::{ArgumentError, CanonicalArguments};
 use crate::plan::{self, PlannedBlock};
+use crate::profile::{self, DeploymentPolicy, DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentityV1};
 use crate::projection::Views;
-use crate::registry::Registry;
+use crate::registry::{LoadError, Registry};
 use crate::value::{DispatchId, ResolvedCall, ToolName, TrajectoryId};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum EngineError {
     #[error("no contract registered for tool {0}")]
     UnknownTool(String),
+    #[error(
+        "tool {0} is provider-run: it executes inside the inference call, so no executor of this deployment can run a proposed call naming it"
+    )]
+    ProviderRunTool(String),
     #[error("invalid call: {0}")]
     InvalidCall(ArgumentError),
     #[error("the call does not pass the check as-is — remedy or accept it first")]
     NotAllowed,
+}
+
+/// Why a family log's durable opening record cannot be trusted on cold replay: the
+/// strict verifier refuses a log whose opening is missing, displaced, duplicated, foreign, or
+/// inconsistent with the supplied policy. Distinct from [`ReplayError`], the per-dispatch payload
+/// choke point — the complete transition validator is `T31`.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum OpeningReplayError {
+    #[error("the family log carries no TrajectoryOpened record")]
+    Missing,
+    #[error("the TrajectoryOpened record is not the family's first record")]
+    NotFirst,
+    #[error("the family log carries more than one TrajectoryOpened record")]
+    Duplicate,
+    #[error("the opening record names trajectory {found}, not the root being replayed")]
+    WrongTrajectory { found: String },
+    #[error("the opening record carries policy dialect version {found}, which this engine does not support")]
+    UnsupportedDialect { found: u32 },
+    #[error("the opening record's policy digest does not match the supplied policy")]
+    DigestMismatch,
+    #[error("the opening record's declaration does not match the supplied policy's validated profile")]
+    ProfileMismatch,
+    #[error("the opening record's open vectors are not the set derived from its declaration")]
+    VectorMismatch,
 }
 
 /// Why a persisted log cannot be trusted as replay input: a dispatched call whose payload
@@ -39,28 +68,133 @@ pub enum ReplayError {
     DigestMismatch,
 }
 
+/// The pure decision core, owning its static capability: the immutable registry (which carries
+/// the validated deployment profile), the deployment's immutable child-return binding, and the
+/// policy identity the durable opening binds.
 #[derive(Clone, Debug)]
 pub struct Engine {
     registry: Registry,
+    identity: PolicyIdentityV1,
+    dialect: PolicyDialectVersion,
+    child_return: ReturnPolicy,
 }
 
 impl Engine {
-    pub fn new(registry: Registry) -> Self {
-        Engine { registry }
+    /// The one validated constructor: policy and declaration validate together in one
+    /// load — the structural registry lints and provider-run split, the profile-exact planner-cap
+    /// bound, and the pure policy × profile coverage matrix. No profile-blind path to
+    /// a check or a plan exists.
+    pub fn open(policy: DeploymentPolicy) -> Result<Engine, LoadError> {
+        let DeploymentPolicy {
+            registry: config,
+            planner_cap,
+            dialect,
+            child_return,
+            profile: declaration,
+        } = policy;
+        let profile = DeploymentProfile::declare(declaration.clone())?;
+        let identity = PolicyIdentityV1::of(&config, &child_return, &profile);
+        let registry = Registry::build(config, planner_cap, profile)?;
+        profile::validate_coverage(&registry, &declaration, &child_return)?;
+        Ok(Engine {
+            registry,
+            identity,
+            dialect,
+            child_return,
+        })
     }
 
     pub fn registry(&self) -> &Registry {
         &self.registry
     }
 
+    pub fn profile(&self) -> &DeploymentProfile {
+        self.registry.profile()
+    }
+
+    pub fn identity(&self) -> PolicyIdentityV1 {
+        self.identity
+    }
+
+    /// The open vectors derived from the validated declaration and the registered tool set —
+    /// recomputed, never stored, so they cannot drift from the profile.
+    pub fn open_vectors(&self) -> Vec<OpenVector> {
+        let tools = self
+            .registry
+            .tools()
+            .map(|tool| &tool.name)
+            .chain(self.registry.provider_run_contracts().map(|tool| &tool.name));
+        profile::derive_open_vectors(self.profile(), tools)
+    }
+
+    /// The opening batch of a fresh root trajectory family: one `TrajectoryOpened`
+    /// record against the empty log. The runtime appends it before any other family event.
+    pub fn open_trajectory(&self, trajectory: &TrajectoryId) -> FactBatch {
+        FactBatch::new(
+            Revision::ZERO,
+            vec![Fact::TrajectoryOpened {
+                trajectory: trajectory.clone(),
+                dialect: self.dialect,
+                profile: self.profile().clone(),
+                policy_digest: self.identity,
+                open_vectors: self.open_vectors(),
+            }],
+        )
+    }
+
+    /// The strict cold-replay verifier of the durable opening: exactly one
+    /// `TrajectoryOpened`, first in the family log, naming the replayed root, at a supported
+    /// dialect, carrying the supplied policy's digest, declaration, and derived vectors. The
+    /// recorded declaration must equal this engine's validated profile byte for byte — which
+    /// subsumes re-running the coverage matrix over it — and the recorded vectors must rederive
+    /// from it exactly.
+    pub fn verify_opening(&self, facts: &[Fact], trajectory: &TrajectoryId) -> Result<(), OpeningReplayError> {
+        let mut openings = facts.iter().enumerate().filter_map(|(index, fact)| match fact {
+            Fact::TrajectoryOpened {
+                trajectory,
+                dialect,
+                profile,
+                policy_digest,
+                open_vectors,
+            } => Some((index, trajectory, dialect, profile, policy_digest, open_vectors)),
+            _ => None,
+        });
+        let Some((index, recorded_trajectory, dialect, recorded_profile, policy_digest, open_vectors)) =
+            openings.next()
+        else {
+            return Err(OpeningReplayError::Missing);
+        };
+        if openings.next().is_some() {
+            return Err(OpeningReplayError::Duplicate);
+        }
+        if index != 0 {
+            return Err(OpeningReplayError::NotFirst);
+        }
+        if recorded_trajectory != trajectory {
+            return Err(OpeningReplayError::WrongTrajectory {
+                found: recorded_trajectory.as_str().to_string(),
+            });
+        }
+        if *dialect != self.dialect {
+            return Err(OpeningReplayError::UnsupportedDialect { found: dialect.value() });
+        }
+        if policy_digest != &self.identity {
+            return Err(OpeningReplayError::DigestMismatch);
+        }
+        if recorded_profile != self.profile() {
+            return Err(OpeningReplayError::ProfileMismatch);
+        }
+        if open_vectors != &self.open_vectors() {
+            return Err(OpeningReplayError::VectorMismatch);
+        }
+        Ok(())
+    }
+
     /// Convert untrusted provider bytes into the only call representation accepted by this
     /// engine. Tool lookup, strict JSON scanning, schema validation, and RFC 8785 rendering
     /// happen together, so outer runtimes cannot construct a call under a different schema.
     pub fn resolve_call(&self, tool: ToolName, raw_arguments: &[u8]) -> Result<ResolvedCall, EngineError> {
-        let contract = self
-            .registry
-            .tool(&tool)
-            .ok_or_else(|| EngineError::UnknownTool(tool.as_str().to_string()))?;
+        let contract = self.checkable_contract(&tool)?;
         let arguments =
             CanonicalArguments::from_raw(raw_arguments, &contract.parameters).map_err(EngineError::InvalidCall)?;
         Ok(ResolvedCall::new(tool, arguments))
@@ -101,6 +235,9 @@ impl Engine {
         call: &ResolvedCall,
         rulings: &[Ruling],
     ) -> Result<FactBatch, PlanError> {
+        if self.registry.provider_run_contract(call.tool()).is_some() {
+            return Err(PlanError::ProviderRunTool(call.tool().as_str().to_string()));
+        }
         execute::execute_remedy_plan(&self.registry, views, chosen, call, rulings)
     }
 
@@ -166,14 +303,11 @@ impl Engine {
     }
 
     /// Seed a child branch at the parent's current label with an immutable fork binding carrying
-    /// its return policy. See [`crate::branch`].
-    pub fn seed_child(
-        &self,
-        parent: &Views,
-        child: &TrajectoryId,
-        return_policy: ReturnPolicy,
-    ) -> Result<FactBatch, BranchError> {
-        branch::seed_child(&self.registry, parent, child, return_policy)
+    /// the deployment's `[child]` return policy — the binding is the engine's validated state,
+    /// never a caller-supplied per-fork choice. Branching exists only where the
+    /// deployment declares context control. See [`crate::branch`].
+    pub fn seed_child(&self, parent: &Views, child: &TrajectoryId) -> Result<FactBatch, BranchError> {
+        branch::seed_child(&self.registry, parent, child, self.child_return.clone())
     }
 
     /// Record a child's returned value at an engine-derived label AND merge it into the direct
@@ -255,10 +389,18 @@ impl Engine {
         Ok(())
     }
 
+    fn checkable_contract(&self, tool: &ToolName) -> Result<&ToolContract, EngineError> {
+        self.registry.tool(tool).ok_or_else(|| {
+            if self.registry.provider_run_contract(tool).is_some() {
+                EngineError::ProviderRunTool(tool.as_str().to_string())
+            } else {
+                EngineError::UnknownTool(tool.as_str().to_string())
+            }
+        })
+    }
+
     fn contract(&self, call: &ResolvedCall) -> Result<&ToolContract, EngineError> {
-        self.registry
-            .tool(call.tool())
-            .ok_or_else(|| EngineError::UnknownTool(call.tool().as_str().to_string()))
+        self.checkable_contract(call.tool())
     }
 
     fn validated_contract(&self, call: &ResolvedCall) -> Result<&ToolContract, EngineError> {
@@ -320,7 +462,19 @@ mod tests {
             sanitizers: vec![],
             casts: vec![],
         };
-        Engine::new(Registry::build(cfg).unwrap())
+        open_engine(cfg)
+    }
+
+    fn open_engine(cfg: RegistryConfig) -> Engine {
+        let profile = crate::profile::covering_declaration(&cfg);
+        Engine::open(DeploymentPolicy {
+            registry: cfg,
+            planner_cap: crate::registry::PlannerCap::default(),
+            dialect: PolicyDialectVersion::new(1),
+            child_return: ReturnPolicy::Raw,
+            profile,
+        })
+        .unwrap()
     }
 
     fn user_value(label: Label) -> Fact {
@@ -1065,7 +1219,7 @@ mod tests {
             sanitizers: vec![],
             casts: vec![],
         };
-        let e = Engine::new(Registry::build(cfg).unwrap());
+        let e = open_engine(cfg);
         let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
         let p = Projection::build(&log, Revision::new(log.len() as u64));
         let t = traj();
@@ -1218,7 +1372,7 @@ mod tests {
             sanitizers: vec![],
             casts: vec![],
         };
-        let e = Engine::new(Registry::build(cfg).unwrap());
+        let e = open_engine(cfg);
         let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
         let p = Projection::build(&log, Revision::new(1));
         let t = traj();
@@ -1261,5 +1415,298 @@ mod tests {
             }
             other => panic!("expected DispatchOpened, got {other:?}"),
         }
+    }
+
+    fn plain_tool(name: &str) -> ToolContract {
+        ToolContract {
+            name: ToolName::new(name),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
+            emits: EffectSet::default(),
+            requires: Requires::default(),
+        }
+    }
+
+    fn engine_with_provider_run(tools: Vec<ToolContract>, provider_run: &[&str]) -> Engine {
+        let cfg = RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools,
+            authorities: vec![],
+            sanitizers: vec![],
+            casts: vec![],
+        };
+        let mut declaration = crate::profile::covering_declaration(&cfg);
+        for name in provider_run {
+            declaration
+                .executor_exceptions
+                .insert(ToolName::new(*name), crate::profile::ExecutorClass::ProviderRun);
+            declaration.confined_results.remove(&ToolName::new(*name));
+        }
+        Engine::open(DeploymentPolicy {
+            registry: cfg,
+            planner_cap: crate::registry::PlannerCap::default(),
+            dialect: PolicyDialectVersion::new(1),
+            child_return: ReturnPolicy::Raw,
+            profile: declaration,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_proposal_naming_a_provider_run_tool_is_malformed_at_every_fresh_entry_point() {
+        let e = engine_with_provider_run(vec![plain_tool("search")], &["search"]);
+        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let p = Projection::build(&log, Revision::new(1));
+        let t = traj();
+        let views = p.view(&t);
+        let proposed = call("search", json!({}));
+        assert!(matches!(
+            e.check(&views, &proposed),
+            Err(EngineError::ProviderRunTool(name)) if name == "search"
+        ));
+        assert!(matches!(
+            e.open_dispatch(&views, &proposed),
+            Err(EngineError::ProviderRunTool(_))
+        ));
+        let raw = crate::check::RawBlock {
+            requirement_gaps: vec![],
+            narrowing: None,
+            unestablished: vec![],
+        };
+        assert!(matches!(
+            e.plan(&views, &proposed, &raw),
+            Err(EngineError::ProviderRunTool(_))
+        ));
+        assert!(matches!(
+            e.resolve_call(ToolName::new("search"), b"{}"),
+            Err(EngineError::ProviderRunTool(_))
+        ));
+        let fabricated = plan::ExecutableRemedyPlan {
+            id: plan::PlanId::new(0),
+            steps: vec![],
+            required: vec![],
+        };
+        assert!(matches!(
+            e.execute_remedy_plan(&views, &fabricated, &proposed, &[]),
+            Err(PlanError::ProviderRunTool(name)) if name == "search"
+        ));
+    }
+
+    #[test]
+    fn provider_run_tools_leave_every_plan_family() {
+        let mut target = plain_tool("wire");
+        target.requires = Requires {
+            history: vec![HistoryRequirement::Prior(EffectKind::new("k"))],
+            ..Requires::default()
+        };
+        let mut emitter = plain_tool("emit");
+        emitter.emits = EffectSet::new([EffectKind::new("k")]).unwrap();
+        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let offered_tools = |e: &Engine| -> Vec<String> {
+            let p = Projection::build(&log, Revision::new(1));
+            let t = traj();
+            let wire = call("wire", json!({}));
+            let raw = match e.check(&p.view(&t), &wire).unwrap() {
+                CheckOutcome::Block(raw) => raw,
+                other => panic!("expected a block, got {other:?}"),
+            };
+            e.plan(&p.view(&t), &wire, &raw)
+                .unwrap()
+                .plans
+                .iter()
+                .filter_map(|plan| match plan {
+                    plan::RemedyPlan::Redispatch(redispatch) => Some(redispatch.tool().as_str().to_string()),
+                    plan::RemedyPlan::Executable(_) => None,
+                })
+                .collect()
+        };
+        let enforced = engine(vec![target.clone(), emitter.clone()]);
+        assert_eq!(offered_tools(&enforced), ["emit"]);
+        let split = engine_with_provider_run(vec![target, emitter], &["emit"]);
+        assert_eq!(offered_tools(&split), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_opening_batch_carries_the_identity_and_derived_vectors() {
+        let e = engine_with_provider_run(vec![plain_tool("send"), plain_tool("search")], &["search"]);
+        let t = traj();
+        let batch = e.open_trajectory(&t);
+        assert_eq!(batch.basis, Revision::ZERO);
+        match batch.facts.as_slice() {
+            [
+                Fact::TrajectoryOpened {
+                    trajectory,
+                    dialect,
+                    profile,
+                    policy_digest,
+                    open_vectors,
+                },
+            ] => {
+                assert_eq!(trajectory, &t);
+                assert_eq!(*dialect, PolicyDialectVersion::new(1));
+                assert_eq!(profile, e.profile());
+                assert_eq!(*policy_digest, e.identity());
+                assert_eq!(open_vectors, &e.open_vectors());
+                assert_eq!(open_vectors.len(), 1);
+            }
+            other => panic!("expected exactly the opening record, got {other:?}"),
+        }
+        let wire = serde_json::to_string(&batch.facts).unwrap();
+        assert_eq!(serde_json::from_str::<Vec<Fact>>(&wire).unwrap(), batch.facts);
+    }
+
+    #[test]
+    fn cold_replay_verifies_the_opening_strictly() {
+        let e = engine_with_provider_run(vec![plain_tool("send"), plain_tool("search")], &["search"]);
+        let t = traj();
+        let opening = e.open_trajectory(&t).facts.remove(0);
+        let admitted = user_value(known(TRUSTED, Audience::Public));
+
+        assert_eq!(e.verify_opening(&[opening.clone(), admitted.clone()], &t), Ok(()));
+        assert_eq!(
+            e.verify_opening(std::slice::from_ref(&admitted), &t),
+            Err(OpeningReplayError::Missing)
+        );
+        assert_eq!(
+            e.verify_opening(&[admitted.clone(), opening.clone()], &t),
+            Err(OpeningReplayError::NotFirst)
+        );
+        assert_eq!(
+            e.verify_opening(&[opening.clone(), opening.clone()], &t),
+            Err(OpeningReplayError::Duplicate)
+        );
+        assert_eq!(
+            e.verify_opening(std::slice::from_ref(&opening), &TrajectoryId::new("other")),
+            Err(OpeningReplayError::WrongTrajectory { found: "t".to_string() })
+        );
+
+        let mutated = |mutate: &dyn Fn(&mut Fact)| {
+            let mut fact = opening.clone();
+            mutate(&mut fact);
+            e.verify_opening(&[fact], &t)
+        };
+        assert_eq!(
+            mutated(&|fact| {
+                if let Fact::TrajectoryOpened { dialect, .. } = fact {
+                    *dialect = PolicyDialectVersion::new(9);
+                }
+            }),
+            Err(OpeningReplayError::UnsupportedDialect { found: 9 })
+        );
+        assert_eq!(
+            mutated(&|fact| {
+                if let Fact::TrajectoryOpened { policy_digest, .. } = fact {
+                    let other = engine(vec![plain_tool("send")]);
+                    *policy_digest = other.identity();
+                }
+            }),
+            Err(OpeningReplayError::DigestMismatch)
+        );
+        assert_eq!(
+            mutated(&|fact| {
+                if let Fact::TrajectoryOpened { profile, .. } = fact {
+                    let other = engine(vec![plain_tool("send")]);
+                    *profile = other.profile().clone();
+                }
+            }),
+            Err(OpeningReplayError::ProfileMismatch)
+        );
+        assert_eq!(
+            mutated(&|fact| {
+                if let Fact::TrajectoryOpened { open_vectors, .. } = fact {
+                    open_vectors.clear();
+                }
+            }),
+            Err(OpeningReplayError::VectorMismatch)
+        );
+    }
+
+    #[test]
+    fn branching_takes_declared_context_control() {
+        let cfg = RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: vec![plain_tool("send")],
+            authorities: vec![],
+            sanitizers: vec![],
+            casts: vec![],
+        };
+        let mut declaration = crate::profile::covering_declaration(&cfg);
+        declaration.context_control = false;
+        let e = Engine::open(DeploymentPolicy {
+            registry: cfg,
+            planner_cap: crate::registry::PlannerCap::default(),
+            dialect: PolicyDialectVersion::new(1),
+            child_return: ReturnPolicy::Raw,
+            profile: declaration,
+        })
+        .unwrap();
+        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let p = Projection::build(&log, Revision::new(1));
+        let t = traj();
+        assert_eq!(
+            e.seed_child(&p.view(&t), &TrajectoryId::new("t:child")),
+            Err(crate::branch::BranchError::ContextUncontrolled)
+        );
+    }
+
+    #[test]
+    fn a_fork_carries_the_deployments_child_return_binding() {
+        let mut cfg = RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: vec![plain_tool("send")],
+            authorities: vec![],
+            sanitizers: vec![],
+            casts: vec![],
+        };
+        cfg.sanitizers = vec![crate::authority::Sanitizer {
+            name: crate::names::SanitizerName::new("redactor"),
+            on: crate::authority::SanitizerPoints {
+                input: false,
+                output: true,
+            },
+            transition: crate::authority::Transition::Trust {
+                from_floor: SUSPICIOUS,
+                to: TRUSTED,
+            },
+            hint: None,
+        }];
+        let bound = ReturnPolicy::Sanitized(crate::names::SanitizerName::new("redactor"));
+        let e = Engine::open(DeploymentPolicy {
+            registry: cfg.clone(),
+            planner_cap: crate::registry::PlannerCap::default(),
+            dialect: PolicyDialectVersion::new(1),
+            child_return: bound.clone(),
+            profile: crate::profile::covering_declaration(&cfg),
+        })
+        .unwrap();
+        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let p = Projection::build(&log, Revision::new(1));
+        let t = traj();
+        let batch = e.seed_child(&p.view(&t), &TrajectoryId::new("t:child")).unwrap();
+        match batch.facts.as_slice() {
+            [
+                Fact::Boundary {
+                    kind: crate::fact::BoundaryKind::Fork { return_policy, .. },
+                    ..
+                },
+            ] => assert_eq!(return_policy, &bound),
+            other => panic!("expected the fork binding, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_opening_record_is_inert_in_projection_and_replay_validation() {
+        let e = engine(vec![plain_tool("send")]);
+        let t = traj();
+        let opening = e.open_trajectory(&t).facts.remove(0);
+        let admitted = user_value(known(SUSPICIOUS, Audience::Public));
+        let with = [opening.clone(), admitted.clone()];
+        let without = [admitted];
+        let p_with = Projection::build(&with, Revision::new(2));
+        let p_without = Projection::build(&without, Revision::new(1));
+        assert_eq!(p_with.view(&t).current_label(), p_without.view(&t).current_label());
+        assert_eq!(p_with.view(&t).boundary_count(), p_without.view(&t).boundary_count());
+        assert_eq!(e.validate_replay(&with), Ok(()));
     }
 }

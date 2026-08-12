@@ -35,6 +35,8 @@ pub struct AuthorityReview {
 pub enum PlanError {
     #[error("no contract registered for tool {0}")]
     UnknownTool(String),
+    #[error("tool {0} is provider-run: no executor of this deployment can run a proposed call naming it")]
+    ProviderRunTool(String),
     #[error("invalid call: {0}")]
     InvalidCall(crate::params::ArgumentError),
     #[error("the call is not blocked — dispatch it directly")]
@@ -252,7 +254,7 @@ mod tests {
             scope: Scope::default(),
             hint: None,
         };
-        Registry::build(crate::registry::RegistryConfig {
+        Registry::build_covered(crate::registry::RegistryConfig {
             trust_chain: chain(),
             tools: vec![wire],
             authorities: vec![officer],
@@ -356,7 +358,7 @@ mod tests {
             scope: Scope::default(),
             hint: None,
         };
-        let registry = Registry::build(crate::registry::RegistryConfig {
+        let registry = Registry::build_covered(crate::registry::RegistryConfig {
             trust_chain: chain(),
             tools: vec![guard],
             authorities: vec![keeper],
@@ -419,7 +421,7 @@ mod tests {
             scope: Scope::default(),
             hint: None,
         };
-        let registry = Registry::build(crate::registry::RegistryConfig {
+        let registry = Registry::build_covered(crate::registry::RegistryConfig {
             trust_chain: chain(),
             tools: vec![vault],
             authorities: vec![steward],
@@ -587,7 +589,7 @@ mod tests {
                 ..Requires::default()
             },
         };
-        let registry = Registry::build(crate::registry::RegistryConfig {
+        let registry = Registry::build_covered(crate::registry::RegistryConfig {
             trust_chain: chain(),
             tools: vec![wire],
             authorities: vec![officer, attends_only],
@@ -639,7 +641,7 @@ mod tests {
             scope: Scope::default(),
             hint: None,
         };
-        let registry = Registry::build(crate::registry::RegistryConfig {
+        let registry = Registry::build_covered(crate::registry::RegistryConfig {
             trust_chain: chain(),
             tools: vec![wire],
             authorities: vec![a1, a2],
@@ -732,7 +734,7 @@ mod tests {
             scope: Scope::default(),
             hint: None,
         };
-        let registry = Registry::build(crate::registry::RegistryConfig {
+        let registry = Registry::build_covered(crate::registry::RegistryConfig {
             trust_chain: chain(),
             tools: vec![post],
             authorities: vec![steward],
@@ -774,7 +776,7 @@ mod tests {
             emits: EffectSet::default(),
             requires: Requires::default(),
         };
-        Registry::build(crate::registry::RegistryConfig {
+        Registry::build_covered(crate::registry::RegistryConfig {
             trust_chain: chain(),
             tools: vec![get],
             authorities: vec![],

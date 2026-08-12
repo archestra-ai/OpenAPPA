@@ -172,8 +172,7 @@ impl Runtime {
             .map_err(|error| OpenError::UnsupportedPolicy(format!("the policy table does not serialize: {error}")))?;
         let policy = appa_policy::Config::from_toml_str(&text).map_err(OpenError::Policy)?;
         validate_deployment(&policy, &config)?;
-        let engine = appa_engine::engine::Engine::new(policy.registry().clone());
-        let seam = EngineSeam::Real(RuntimeEngine::new(engine, policy.child_return_policy()));
+        let seam = EngineSeam::Real(RuntimeEngine::new(policy.engine().clone()));
         Runtime::with_engine(config, db, modules, seam)
     }
 
@@ -252,6 +251,29 @@ impl Runtime {
 }
 
 fn validate_deployment(policy: &appa_policy::Config, config: &Config) -> Result<(), OpenError> {
+    let profile = policy.engine().profile();
+    if profile.starting_label() != &appa_engine::profile::neutral_starting_label(policy.registry().trust_chain()) {
+        return Err(OpenError::UnsupportedPolicy(
+            "[deployment] starting_label — the root fold is not yet initialized from the opening record (T17/T40), so a non-neutral starting label would silently not apply".to_string(),
+        ));
+    }
+    if profile.binding() == appa_engine::profile::BindingMode::Token {
+        return Err(OpenError::UnsupportedPolicy(
+            "[deployment] binding = \"token\" — this runtime binds trajectories by harness session ids"
+                .to_string(),
+        ));
+    }
+    if profile.provider_surfaces().next().is_some() {
+        return Err(OpenError::UnsupportedPolicy(
+            "[deployment] provider_surfaces — this runtime never sees provider requests, so it can neither mediate a surface nor strip an undeclared one".to_string(),
+        ));
+    }
+    if policy.registry().provider_run_contracts().next().is_some() {
+        return Err(OpenError::UnsupportedPolicy(
+            "[deployment] provider_run_tools — this runtime never sees inference responses, so it cannot admit a provider-run result".to_string(),
+        ));
+    }
+
     let rc = policy.registry_config();
     // Cast resolution is not wired in this runtime: an accepted
     // declaration would sit inert while unestablished blocks stay

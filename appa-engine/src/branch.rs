@@ -12,6 +12,10 @@ use crate::value::{ChildReturnId, LabeledValue, Provenance, RawResultDigest, Tra
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum BranchError {
+    #[error(
+        "the deployment does not control child context — branching exists only in context-controlling deployments"
+    )]
+    ContextUncontrolled,
     #[error("a trajectory cannot fork itself")]
     SelfFork,
     #[error("the child is already forked from a parent (reparenting refused)")]
@@ -57,6 +61,9 @@ pub(crate) fn seed_child(
     child: &TrajectoryId,
     return_policy: ReturnPolicy,
 ) -> Result<FactBatch, BranchError> {
+    if !registry.profile().context_control() {
+        return Err(BranchError::ContextUncontrolled);
+    }
     if child == parent.trajectory() {
         return Err(BranchError::SelfFork);
     }
@@ -263,6 +270,9 @@ pub(crate) fn check_child_return(
     };
 
     let mut plans = vec![ReturnPlan::Accept(narrowing.clone())];
+    if !registry.profile().confines_child_return() {
+        return Ok(ReturnCheck::Block(ReturnBlock::Narrowing { narrowing, plans }));
+    }
     for sanitizer in registry.sanitizers() {
         if !sanitizer.on.output {
             continue;
@@ -462,7 +472,7 @@ mod tests {
             },
             hint: None,
         };
-        Registry::build(RegistryConfig {
+        Registry::build_covered(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: vec![],
             authorities: vec![],
@@ -632,7 +642,7 @@ mod tests {
             },
             hint: None,
         };
-        Registry::build(RegistryConfig {
+        Registry::build_covered(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: vec![],
             authorities: vec![],

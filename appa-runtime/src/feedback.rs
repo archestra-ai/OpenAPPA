@@ -420,7 +420,7 @@ mod tests {
             scope: Scope::default(),
             hint: Some(Hint::new(format!("what {name} is for"))),
         };
-        Registry::build(RegistryConfig {
+        let config = RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: vec![],
             authorities: vec![authority("officer"), authority("officer-a"), authority("officer-b")],
@@ -437,8 +437,27 @@ mod tests {
                 hint: Some(Hint::new("drops personal details")),
             }],
             casts: vec![],
+        };
+        let profile = appa_engine::profile::ProfileDeclaration {
+            starting_label: appa_engine::profile::neutral_starting_label(&config.trust_chain),
+            context_control: true,
+            dispatch: appa_engine::profile::ExecutorClass::Enforced,
+            executor_exceptions: Default::default(),
+            confined_results: Default::default(),
+            confined_child_return: true,
+            provider_surfaces: Default::default(),
+            binding: appa_engine::profile::BindingMode::Harness,
+        };
+        appa_engine::engine::Engine::open(appa_engine::profile::DeploymentPolicy {
+            registry: config,
+            planner_cap: appa_engine::registry::PlannerCap::default(),
+            dialect: appa_engine::profile::PolicyDialectVersion::new(1),
+            child_return: appa_engine::fact::ReturnPolicy::Raw,
+            profile,
         })
         .expect("the fixture registry loads")
+        .registry()
+        .clone()
     }
 
     fn every_gap() -> Vec<Gap> {
