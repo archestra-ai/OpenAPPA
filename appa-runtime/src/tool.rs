@@ -52,8 +52,9 @@ impl Default for HttpClient {
     }
 }
 
-/// A call rendered for south execution: the tool and its concrete arguments. Derived from the
-/// engine's [`ResolvedCall`]; the argument-reference bookkeeping stays engine-side.
+/// A call rendered for the host boundary: the tool and its parsed arguments. Derived from the
+/// engine's [`ResolvedCall`]. The runtime's own south dispatch does **not** go through this type —
+/// it sends the canonical argument bytes verbatim; this is the SDK host surface.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenderedCall {
     pub tool: ToolName,
@@ -65,6 +66,22 @@ impl RenderedCall {
         RenderedCall {
             tool: call.tool().clone(),
             arguments: call.arguments().clone(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct WireCall<'a> {
+    tool: &'a ToolName,
+    arguments: Box<serde_json::value::RawValue>,
+}
+
+impl<'a> WireCall<'a> {
+    fn of(call: &'a ResolvedCall) -> Self {
+        let text = call.canonical_arguments().canonical_text().to_owned();
+        WireCall {
+            tool: call.tool(),
+            arguments: serde_json::value::RawValue::from_string(text).expect("canonical bytes are one JSON value"),
         }
     }
 }
@@ -137,13 +154,13 @@ impl HttpTool {
         }
     }
 
-    async fn invoke(&self, call: &RenderedCall, cap: usize) -> ToolOutcome {
+    async fn invoke(&self, call: &ResolvedCall, cap: usize) -> ToolOutcome {
         let response = match self
             .client
             .inner()
             .post(&self.url)
             .timeout(self.timeout)
-            .json(call)
+            .json(&WireCall::of(call))
             .send()
             .await
         {
@@ -203,7 +220,7 @@ pub enum ToolBackend {
 }
 
 impl ToolBackend {
-    pub async fn invoke(&self, call: &RenderedCall, cap: usize) -> ToolOutcome {
+    pub async fn invoke(&self, call: &ResolvedCall, cap: usize) -> ToolOutcome {
         match self {
             ToolBackend::Builtin(builtin) => builtin.invoke(cap),
             ToolBackend::Http(http) => http.invoke(call, cap).await,
@@ -216,11 +233,12 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn call() -> RenderedCall {
-        RenderedCall {
-            tool: ToolName::new("t"),
-            arguments: json!({ "k": "v" }),
-        }
+    fn call() -> ResolvedCall {
+        resolved(json!({ "k": "v" }))
+    }
+
+    fn resolved(arguments: serde_json::Value) -> ResolvedCall {
+        crate::common::test_call("t", arguments)
     }
 
     #[tokio::test]
@@ -313,14 +331,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_tool_posts_rendered_call_across_a_real_socket() {
+    async fn http_tool_posts_the_canonical_argument_bytes_across_a_real_socket() {
         let (addr, server) = spawn_capture_server("200 OK", "done").await;
         let tool = HttpTool::new(
             format!("http://{addr}/invoke"),
             Duration::from_secs(5),
             HttpClient::new(),
         );
-        let outcome = tool.invoke(&call(), DEFAULT_BODY_CAP_BYTES).await;
+        let call = resolved(json!({ "total": 1.0, "π": "pi" }));
+        let outcome = tool.invoke(&call, DEFAULT_BODY_CAP_BYTES).await;
         assert_eq!(
             outcome,
             ToolOutcome::Success {
@@ -331,8 +350,9 @@ mod tests {
         let request = server.await.unwrap();
         assert!(request.starts_with("POST /invoke "), "request line: {request:?}");
         let body = request.split("\r\n\r\n").nth(1).expect("request has a body");
-        let parsed: RenderedCall = serde_json::from_str(body).expect("body is a RenderedCall");
-        assert_eq!(parsed, call());
+        let canonical = call.canonical_arguments().canonical_text().to_owned();
+        assert_eq!(body, format!(r#"{{"tool":"t","arguments":{canonical}}}"#));
+        assert!(body.contains(r#""total":1,"#), "the float re-rendered: {body:?}");
     }
 
     #[tokio::test]

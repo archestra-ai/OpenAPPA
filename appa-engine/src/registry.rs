@@ -553,6 +553,7 @@ mod tests {
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires::default(),
         }

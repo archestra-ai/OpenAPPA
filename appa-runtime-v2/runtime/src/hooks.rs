@@ -215,14 +215,18 @@ mod tests {
         let runtime = open_test_runtime(&dir);
         for event in fixtures() {
             match event["hook_event_name"].as_str().expect("each fixture names its hook") {
-                "UserPromptSubmit" => testing::enqueue_done(&runtime),
+                "UserPromptSubmit" => {}
                 "PreToolUse" if event["tool_name"] != CONTROL_TOOL_FIXTURE_NAME => testing::enqueue_release(
                     &runtime,
                     &format!("d-{}", event["tool_use_id"].as_str().unwrap_or("fixture")),
                     event["tool_name"].as_str().expect("the fixture names a tool"),
                     &event["tool_input"],
                 ),
-                "PostToolUse" => testing::enqueue_keep_output(&runtime),
+                "PostToolUse" if event["tool_name"] != CONTROL_TOOL_FIXTURE_NAME => {
+                    testing::enqueue_done(&runtime);
+                    testing::enqueue_keep_output(&runtime);
+                }
+                "SubagentStart" => testing::enqueue_done(&runtime),
                 "SubagentStop" => {
                     testing::enqueue_value(&runtime, event["last_assistant_message"].as_str().unwrap_or_default())
                 }
@@ -326,6 +330,7 @@ mod tests {
         });
         call_hook(&runtime, &serde_json::to_vec(&pre).expect("serializes")).await;
 
+        testing::enqueue_done(&runtime);
         testing::enqueue_replace_output(&runtime, "the output is confined");
         let post = serde_json::json!({
             "hook_event_name": "PostToolUse",
@@ -407,6 +412,7 @@ mod tests {
     async fn a_control_call_passes_even_on_an_ended_trajectory() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_test_runtime(&dir);
+        testing::enqueue_done(&runtime);
         let start = serde_json::json!({
             "hook_event_name": "SubagentStart",
             "session_id": "s1",

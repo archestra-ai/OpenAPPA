@@ -5,9 +5,11 @@ every step before it happens: the user's prompt, each tool call, each
 tool result, and each child agent's start and finish. If the process
 does not answer, the action is blocked — silence never means yes.
 
-Until the real decision engine is integrated, the process runs a mock
-engine that permits everything and logs a warning saying so. The
-wiring is real; the policy is not enforced yet.
+The process runs the real APPA decision engine: the `[policy]` table
+in `appa.toml` compiles into the engine's registry at startup, and a
+policy the deployment cannot honor refuses to start. Every decision is
+persisted as engine facts in the SQLite log, and a reopened database
+re-validates its persisted log before it is trusted.
 
 ## Quickstart
 
@@ -19,16 +21,24 @@ cargo build -p appa-runtime-v2
 
 ### 2. Write the configuration
 
-`appa.toml` holds the policy (empty until the real engine arrives) and
-the settings for calls to outside services:
+`appa.toml` holds the policy — the dialect the policy-review guide
+documents, nested under `[policy]` — and the settings for calls to
+outside services. A minimal file that releases one tool:
 
 ```toml
 [policy]
+version = 1
+
+[[policy.tool]]
+name = "Bash"
 
 [externals]
 timeout_ms = 5000
 max_body_bytes = 65536
 ```
+
+Implementation bindings (authority and sanitizer endpoints) live in
+`[externals]`, never inline in the policy.
 
 ### 3. Start the process
 
@@ -42,12 +52,6 @@ accepts loopback addresses only. Useful flags: `--listen
 decision, `-vv` for full detail. `--adapter` picks the harness codec
 the process loads; `claude-code` is the default and the only one
 today.
-
-`--mock offer` swaps the permissive mock for one that first blocks
-every call with a narrowing offer; the session then accepts each call
-through `execute_remedy_plan` before it runs. Slow and chatty, but it
-shows the whole remedy loop working. Use a fresh `--db` path when
-switching modes.
 
 Start the process before the session. While it is down, every action
 in a gated session is blocked, and that cannot be automated from
@@ -99,5 +103,5 @@ sqlite3 appa.db 'SELECT trajectory, tool, state FROM dispatches;'
 - **`docs/runtime.md`** is the contract the crates in this directory
   implement — the process (`runtime/`), the shared vocabulary
   (`api/`), and the Claude Code adapter (`adapters/claude-code/`) —
-  and the directory's `CLAUDE.md` describes the layout, the
-  mock-engine status, and how the real engine plugs in.
+  and the directory's `CLAUDE.md` describes the layout and the
+  engine-boundary status.

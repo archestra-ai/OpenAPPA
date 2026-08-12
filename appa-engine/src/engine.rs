@@ -9,17 +9,34 @@ use crate::contract::ToolContract;
 use crate::execute::{self, PlanError, Ruling};
 use crate::fact::{Fact, FactBatch, ReturnPolicy};
 use crate::label::DimValue;
+use crate::params::{ArgumentError, CanonicalArguments};
 use crate::plan::{self, PlannedBlock};
 use crate::projection::Views;
 use crate::registry::Registry;
-use crate::value::{DispatchId, ResolvedCall, TrajectoryId};
+use crate::value::{DispatchId, ResolvedCall, ToolName, TrajectoryId};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum EngineError {
     #[error("no contract registered for tool {0}")]
     UnknownTool(String),
+    #[error("invalid call: {0}")]
+    InvalidCall(ArgumentError),
     #[error("the call does not pass the check as-is — remedy or accept it first")]
     NotAllowed,
+}
+
+/// Why a persisted log cannot be trusted as replay input: a dispatched call whose payload
+/// does not validate against the registered contract it names, or whose digest does not
+/// match its own arguments. This is the minimal replay choke point a
+/// payload-bearing `DispatchOpened` requires; the complete transition validator is `T31`.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ReplayError {
+    #[error("dispatched call names unregistered tool {0}")]
+    UnknownTool(String),
+    #[error("dispatched call payload fails its registered schema: {0}")]
+    InvalidPayload(ArgumentError),
+    #[error("dispatched call digest does not match its persisted tool and arguments")]
+    DigestMismatch,
 }
 
 #[derive(Clone, Debug)]
@@ -36,12 +53,25 @@ impl Engine {
         &self.registry
     }
 
+    /// Convert untrusted provider bytes into the only call representation accepted by this
+    /// engine. Tool lookup, strict JSON scanning, schema validation, and RFC 8785 rendering
+    /// happen together, so outer runtimes cannot construct a call under a different schema.
+    pub fn resolve_call(&self, tool: ToolName, raw_arguments: &[u8]) -> Result<ResolvedCall, EngineError> {
+        let contract = self
+            .registry
+            .tool(&tool)
+            .ok_or_else(|| EngineError::UnknownTool(tool.as_str().to_string()))?;
+        let arguments =
+            CanonicalArguments::from_raw(raw_arguments, &contract.parameters).map_err(EngineError::InvalidCall)?;
+        Ok(ResolvedCall::new(tool, arguments))
+    }
+
     /// Evaluate a proposed call: allow, or block carrying everything that stopped it at once —
     /// the requirement gaps, the narrowing where one fired, and the values whose consumed
     /// dimension no cast has established. Resolution is the runtime's job;
     /// the runtime re-checks after each landed cast, so a surfaced block is the residual.
     pub fn check(&self, views: &Views, call: &ResolvedCall) -> Result<CheckOutcome, EngineError> {
-        let contract = self.contract(call)?;
+        let contract = self.validated_contract(call)?;
         Ok(check::evaluate(contract, views, call))
     }
 
@@ -51,7 +81,7 @@ impl Engine {
     /// the engine never emits an appendable dispatch for a call it would not allow. Folds nothing —
     /// the label folds only when the result value is admitted.
     pub fn open_dispatch(&self, views: &Views, call: &ResolvedCall) -> Result<FactBatch, EngineError> {
-        let contract = self.contract(call)?;
+        let contract = self.validated_contract(call)?;
         match check::evaluate(contract, views, call) {
             CheckOutcome::Allow => {
                 let (_, fact) = opened_dispatch(contract, views, call);
@@ -111,7 +141,7 @@ impl Engine {
         call: &ResolvedCall,
         resolved: &DimValue,
     ) -> Result<Option<Narrowing>, EngineError> {
-        let contract = self.contract(call)?;
+        let contract = self.validated_contract(call)?;
         Ok(admit::pending_cast_narrowing(
             views,
             &admit::cast_filled_dispatch_label(contract, views, dispatch, resolved),
@@ -122,7 +152,7 @@ impl Engine {
     /// result (no plans, no curative recommendation) is a proof the block is unliftable over the
     /// implemented remedy subset — see [`crate::plan`].
     pub fn plan(&self, views: &Views, call: &ResolvedCall, raw: &RawBlock) -> Result<PlannedBlock, EngineError> {
-        self.contract(call)?;
+        self.validated_contract(call)?;
         Ok(plan::plan(&self.registry, views, call, raw))
     }
 
@@ -193,10 +223,51 @@ impl Engine {
         branch::execute_child_return_plan(&self.registry, parent, child, chosen, submission)
     }
 
+    /// Validate every persisted dispatched call against this registry before its log is
+    /// trusted as replay input: the named tool must be registered, the persisted payload
+    /// must satisfy that tool's compiled schema, and the recomputed digest must match the
+    /// `DispatchId`. A `CanonicalArguments` cannot prove which schema
+    /// it was validated against, so replay re-establishes the binding here.
+    pub fn validate_replay(&self, facts: &[Fact]) -> Result<(), ReplayError> {
+        for fact in facts {
+            let Fact::DispatchOpened {
+                dispatch,
+                tool,
+                arguments,
+                ..
+            } = fact
+            else {
+                continue;
+            };
+            let contract = self
+                .registry
+                .tool(tool)
+                .ok_or_else(|| ReplayError::UnknownTool(tool.as_str().to_string()))?;
+            contract
+                .parameters
+                .validate(arguments.value())
+                .map_err(ReplayError::InvalidPayload)?;
+            let recomputed = crate::value::CanonicalDigest::of_call(tool, arguments);
+            if dispatch.digest() != &recomputed {
+                return Err(ReplayError::DigestMismatch);
+            }
+        }
+        Ok(())
+    }
+
     fn contract(&self, call: &ResolvedCall) -> Result<&ToolContract, EngineError> {
         self.registry
             .tool(call.tool())
             .ok_or_else(|| EngineError::UnknownTool(call.tool().as_str().to_string()))
+    }
+
+    fn validated_contract(&self, call: &ResolvedCall) -> Result<&ToolContract, EngineError> {
+        let contract = self.contract(call)?;
+        contract
+            .parameters
+            .validate(call.arguments())
+            .map_err(EngineError::InvalidCall)?;
+        Ok(contract)
     }
 }
 
@@ -204,14 +275,14 @@ impl Engine {
 /// commit on success, and its occurrence (a repeat identical call is a new dispatch). Shared by the
 /// clean-allow path ([`Engine::open_dispatch`]) and atomic plan execution ([`crate::execute`]).
 pub(crate) fn opened_dispatch(contract: &ToolContract, views: &Views, call: &ResolvedCall) -> (DispatchId, Fact) {
-    let dispatch = DispatchId::new(
-        views.trajectory().clone(),
-        call.digest(),
-        views.dispatch_count(&call.digest()),
-    );
+    let digest = call.digest();
+    let occurrence = views.dispatch_count(&digest);
+    let dispatch = DispatchId::new(views.trajectory().clone(), digest, occurrence);
     let fact = Fact::DispatchOpened {
         trajectory: views.trajectory().clone(),
         dispatch: dispatch.clone(),
+        tool: call.tool().clone(),
+        arguments: call.canonical_arguments().clone(),
         proposed_label: check::committed_label_for_call(contract, &views.current_label(), call),
         proposed_effects: contract.emits.clone(),
         dynamic_resolutions: call.dynamic_resolutions().to_vec(),
@@ -265,7 +336,7 @@ mod tests {
     }
 
     fn call(tool: &str, args: serde_json::Value) -> ResolvedCall {
-        ResolvedCall::new(ToolName::new(tool), args, vec![])
+        ResolvedCall::new(ToolName::new(tool), crate::params::test_arguments(&args))
     }
 
     fn check(engine: &Engine, log: &[Fact], call: &ResolvedCall) -> CheckOutcome {
@@ -282,6 +353,7 @@ mod tests {
                 trust: None,
                 audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
             }),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -299,6 +371,7 @@ mod tests {
             name: ToolName::new("pay"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new(emits.map(EffectKind::new)).unwrap(),
             requires: Requires::default(),
         };
@@ -355,6 +428,7 @@ mod tests {
                 trust: Some(Dim::Unknown),
                 audience: None,
             }),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires::default(),
         };
@@ -383,6 +457,7 @@ mod tests {
             name: ToolName::new("send_email"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("egress")]).unwrap(),
             requires: Requires {
                 label: LabelRequirements {
@@ -414,6 +489,7 @@ mod tests {
             name: ToolName::new("delete_db"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 history: vec![
@@ -443,6 +519,7 @@ mod tests {
                 trust: None,
                 audience: Some(Dim::Known(Audience::restricted([ReaderId::new("a")])).into()),
             }),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -480,6 +557,7 @@ mod tests {
                 trust: Some(Dim::Known(SUSPICIOUS)),
                 audience: None,
             }),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -516,6 +594,7 @@ mod tests {
                 trust: None,
                 audience: Some(Dim::Known(a_reader.clone()).into()),
             }),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -542,6 +621,7 @@ mod tests {
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new(kind)]).unwrap(),
             requires: Requires::default(),
         }
@@ -552,6 +632,7 @@ mod tests {
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 history: vec![requirement],
@@ -702,6 +783,7 @@ mod tests {
             name: ToolName::new("selfguard"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("email.sent")]).unwrap(),
             requires: Requires {
                 history: vec![HistoryRequirement::NoPrior(EffectKind::new("email.sent"))],
@@ -730,6 +812,7 @@ mod tests {
                 trust: Some(Dim::Unknown),
                 audience: None,
             }),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
             requires: Requires::default(),
         };
@@ -768,6 +851,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 attention: vec![MarkName::new("signoff")],
@@ -808,6 +892,7 @@ mod tests {
                 trust: None,
                 audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
             }),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -836,6 +921,7 @@ mod tests {
             name: ToolName::new(name),
             tags: vec![],
             delta: None,
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires::default(),
         }
@@ -916,6 +1002,7 @@ mod tests {
             name: ToolName::new("send_email"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -952,6 +1039,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -998,6 +1086,165 @@ mod tests {
                 actual: SUSPICIOUS,
             }]
         );
+    }
+
+    fn strict_tool(name: &str) -> ToolContract {
+        ToolContract {
+            name: ToolName::new(name),
+            tags: vec![],
+            parameters: crate::params::ToolParameters::compile(&json!({
+                "type": "object",
+                "properties": { "to": { "type": "string" } },
+                "required": ["to"],
+            }))
+            .unwrap(),
+            delta: Some(Delta::NONE),
+            emits: EffectSet::default(),
+            requires: Requires::default(),
+        }
+    }
+
+    #[test]
+    fn schema_invalid_arguments_are_an_invalid_call_at_every_fresh_entry_point() {
+        let e = engine(vec![strict_tool("send")]);
+        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let p = Projection::build(&log, Revision::new(1));
+        let t = traj();
+        let views = p.view(&t);
+        let bogus = call("send", json!({ "bogus": 1 }));
+        assert!(matches!(e.check(&views, &bogus), Err(EngineError::InvalidCall(_))));
+        assert!(matches!(
+            e.open_dispatch(&views, &bogus),
+            Err(EngineError::InvalidCall(_))
+        ));
+        let raw = crate::check::RawBlock {
+            requirement_gaps: vec![],
+            narrowing: None,
+            unestablished: vec![],
+        };
+        assert!(matches!(e.plan(&views, &bogus, &raw), Err(EngineError::InvalidCall(_))));
+        let fabricated = plan::ExecutableRemedyPlan {
+            id: plan::PlanId::new(0),
+            steps: vec![],
+            required: vec![],
+        };
+        assert!(matches!(
+            e.execute_remedy_plan(&views, &fabricated, &bogus, &[]),
+            Err(PlanError::InvalidCall(_))
+        ));
+        assert_eq!(
+            e.check(&views, &call("send", json!({ "to": "hr" }))).unwrap(),
+            CheckOutcome::Allow
+        );
+    }
+
+    #[test]
+    fn resolve_call_owns_tool_lookup_scanning_and_schema_binding() {
+        let e = engine(vec![strict_tool("send")]);
+
+        let resolved = e
+            .resolve_call(ToolName::new("send"), br#"{ "to": "hr" }"#)
+            .expect("the registered schema accepts the call");
+        assert_eq!(resolved.canonical_arguments().canonical_text(), r#"{"to":"hr"}"#);
+
+        assert!(matches!(
+            e.resolve_call(ToolName::new("send"), br#"{"to":"hr","to":"finance"}"#),
+            Err(EngineError::InvalidCall(ArgumentError::DuplicateKey(key))) if key == "to"
+        ));
+        assert!(matches!(
+            e.resolve_call(ToolName::new("send"), br#"{"bogus":true}"#),
+            Err(EngineError::InvalidCall(ArgumentError::Schema(_)))
+        ));
+        assert_eq!(
+            e.resolve_call(ToolName::new("ghost"), br#"{}"#),
+            Err(EngineError::UnknownTool("ghost".to_string()))
+        );
+    }
+
+    #[test]
+    fn replay_refuses_a_corrupt_dispatched_call() {
+        let e = engine(vec![strict_tool("send")]);
+        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let good = call("send", json!({ "to": "hr" }));
+        let p = Projection::build(&log, Revision::new(1));
+        let batch = e.open_dispatch(&p.view(&traj()), &good).unwrap();
+        log.extend(batch.facts);
+        assert_eq!(e.validate_replay(&log), Ok(()));
+
+        let opened = |tool: &str, payload: serde_json::Value, minted_from: &ResolvedCall| Fact::DispatchOpened {
+            trajectory: traj(),
+            dispatch: DispatchId::new(traj(), minted_from.digest(), 0),
+            tool: ToolName::new(tool),
+            arguments: crate::params::test_arguments(&payload),
+            proposed_label: known(TRUSTED, Audience::Public),
+            proposed_effects: EffectSet::default(),
+            dynamic_resolutions: vec![],
+        };
+        let ghost_call = call("ghost", json!({}));
+        assert!(matches!(
+            e.validate_replay(&[opened("ghost", json!({}), &ghost_call)]),
+            Err(ReplayError::UnknownTool(name)) if name == "ghost"
+        ));
+        let smuggled = call("send", json!({ "bogus": 1 }));
+        assert!(matches!(
+            e.validate_replay(&[opened("send", json!({ "bogus": 1 }), &smuggled)]),
+            Err(ReplayError::InvalidPayload(_))
+        ));
+        assert!(matches!(
+            e.validate_replay(&[opened("send", json!({ "to": "hr" }), &smuggled)]),
+            Err(ReplayError::DigestMismatch)
+        ));
+    }
+
+    #[test]
+    fn the_dispatched_payload_is_persisted_exactly_once() {
+        use crate::authority::{Authority, Mandate, Scope};
+        use crate::names::AuthorityName;
+        let mut wire = strict_tool("wire");
+        wire.requires.label.trust_floor = Some(TRUSTED);
+        let officer = Authority {
+            name: AuthorityName::new("officer"),
+            mandate: Mandate {
+                trust_ceiling: Some(TRUSTED),
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        };
+        let cfg = RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: vec![wire],
+            authorities: vec![officer],
+            sanitizers: vec![],
+            casts: vec![],
+        };
+        let e = Engine::new(Registry::build(cfg).unwrap());
+        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let p = Projection::build(&log, Revision::new(1));
+        let t = traj();
+        let views = p.view(&t);
+        let wire_call = call("wire", json!({ "to": "distinctive-recipient-hr" }));
+        let raw = match e.check(&views, &wire_call).unwrap() {
+            CheckOutcome::Block(raw) => raw,
+            other => panic!("expected a block, got {other:?}"),
+        };
+        let planned = e.plan(&views, &wire_call, &raw).unwrap();
+        let chosen = planned.plans[0].executable().expect("an authority plan").clone();
+        let ruling = crate::execute::Ruling {
+            dispatch: DispatchId::new(t.clone(), wire_call.digest(), 0),
+            authority: AuthorityName::new("officer"),
+            covers: chosen.required[0].covers.clone(),
+            reviewed: crate::execute::AuthorityReview {
+                tool: ToolName::new("wire"),
+                trajectory_label: known(SUSPICIOUS, Audience::Public),
+            },
+        };
+        let batch = e.execute_remedy_plan(&views, &chosen, &wire_call, &[ruling]).unwrap();
+        let serialized = serde_json::to_string(&batch.facts).unwrap();
+        assert_eq!(serialized.matches("distinctive-recipient-hr").count(), 1);
+        assert!(matches!(batch.facts.last().unwrap(), Fact::DispatchOpened { .. }));
+        let restored: Vec<Fact> = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(restored, batch.facts);
     }
 
     #[test]

@@ -10,8 +10,8 @@ pub use appa_runtime_api::{OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId}
 pub(crate) use session::{Session, is_control_tool};
 
 use crate::config::Config;
+use crate::engine::{EngineRefusal, EngineSeam, RuntimeEngine};
 use crate::external::ExternalServices;
-use crate::mock_engine::MockEngine;
 use crate::store::{Store, StoreError};
 
 /// Identity of one open dispatch: a released call the harness is
@@ -56,14 +56,10 @@ pub(crate) enum ToolResultDecision {
     Replace { placeholder: String },
 }
 
-/// Outcome of one `execute_remedy_plan(offer_id)` call. `Declined` is
-/// a denial: it ends every offer naming the denying authority for this
-/// call. `NoAnswer` leaves the offer standing.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum RemedyDecision {
     Authorized { call: AuthorizedCall },
     Returned { value: String },
-    Staged { feedback: String },
     Declined { feedback: String },
     NoAnswer { feedback: String },
 }
@@ -83,6 +79,14 @@ pub(crate) enum ChildReturnDecision {
 pub enum OpenError {
     #[error("configuration refused: {0}")]
     Config(#[from] crate::config::ConfigError),
+    #[error("policy refused: {0}")]
+    Policy(appa_policy::ConfigError),
+    #[error("unsupported policy: {0}")]
+    UnsupportedPolicy(String),
+    #[error("policy declares reserved tool name {0}")]
+    ReservedTool(String),
+    #[error("policy names {kind} {name}, which has no [externals] binding")]
+    UnboundExternal { kind: &'static str, name: String },
     #[error("the database is damaged: {0}")]
     Damaged(String),
     #[error("the database belongs to policy digest {stored}, not {supplied}")]
@@ -127,8 +131,21 @@ pub(crate) enum EventError {
     Contended { attempts: u32 },
     #[error("the engine returned a follow-up this event cannot deliver")]
     UnexpectedDecision,
+    #[error("the persisted log is refused: {0}")]
+    UntrustedLog(String),
+    #[error("engine invariant breach: {0}")]
+    EngineInvariant(String),
     #[error("storage failure: {0}")]
     Storage(String),
+}
+
+impl From<EngineRefusal> for EventError {
+    fn from(refusal: EngineRefusal) -> EventError {
+        match refusal {
+            EngineRefusal::UntrustedLog { detail } => EventError::UntrustedLog(detail),
+            EngineRefusal::Invariant { detail } => EventError::EngineInvariant(detail),
+        }
+    }
 }
 
 pub struct Runtime {
@@ -137,36 +154,34 @@ pub struct Runtime {
 
 struct Inner {
     store: Store,
-    engine: MockEngine,
+    engine: EngineSeam,
     externals: ExternalServices,
     config: Config,
 }
 
 impl Runtime {
-    /// Opens the store and the engine. The policy would be validated
-    /// against the coverage declaration here; the
-    /// mock engine skips that and says so loudly.
+    /// Opens the engine and the store. The `[policy]` table compiles
+    /// through the documented dialect into the engine's registry —
+    /// every surface and algebraic load lint runs here, and a policy
+    /// this deployment cannot honor is refused before anything opens.
     pub fn open(config: Config, db: PathBuf) -> Result<Runtime, OpenError> {
-        Runtime::with_engine(config, db, MockEngine::permissive())
+        let text = toml::to_string(&config.policy)
+            .map_err(|error| OpenError::UnsupportedPolicy(format!("the policy table does not serialize: {error}")))?;
+        let policy = appa_policy::Config::from_toml_str(&text).map_err(OpenError::Policy)?;
+        validate_deployment(&policy, &config)?;
+        let engine = appa_engine::engine::Engine::new(policy.registry().clone());
+        let seam = EngineSeam::Real(RuntimeEngine::new(engine, policy.child_return_policy()));
+        Runtime::with_engine(config, db, seam)
     }
 
-    /// Opens the same runtime over the offer-mode mock: every call is
-    /// first blocked with a narrowing offer the model accepts through
-    /// `execute_remedy_plan`. Mock-era only — `docs/runtime.md`
-    /// declares `open` alone, and this constructor is deleted at
-    /// engine integration.
-    pub fn open_offer_mode(config: Config, db: PathBuf) -> Result<Runtime, OpenError> {
-        Runtime::with_engine(config, db, MockEngine::offer_mode())
-    }
-
-    /// The tests' entry: the same runtime over an engine whose queue
-    /// the test controls.
+    /// The tests' entry: the same runtime over an engine seam whose
+    /// queue the test controls.
     #[cfg(test)]
-    pub(crate) fn open_with_engine(config: Config, db: PathBuf, engine: MockEngine) -> Result<Runtime, OpenError> {
+    pub(crate) fn open_with_engine(config: Config, db: PathBuf, engine: EngineSeam) -> Result<Runtime, OpenError> {
         Runtime::with_engine(config, db, engine)
     }
 
-    fn with_engine(config: Config, db: PathBuf, engine: MockEngine) -> Result<Runtime, OpenError> {
+    fn with_engine(config: Config, db: PathBuf, engine: EngineSeam) -> Result<Runtime, OpenError> {
         let store = Store::open(&db).map_err(|error| match error {
             StoreError::Damaged { path, detail } => OpenError::Damaged(format!("{path}: {detail}")),
             error => OpenError::Storage(error.to_string()),
@@ -225,6 +240,61 @@ impl Runtime {
     }
 }
 
+fn validate_deployment(policy: &appa_policy::Config, config: &Config) -> Result<(), OpenError> {
+    let rc = policy.registry_config();
+    // Cast resolution is not wired in this runtime: an accepted
+    // declaration would sit inert while unestablished blocks stay
+    // terminal, so the declaration itself is refused.
+    if !rc.casts.is_empty() {
+        return Err(OpenError::UnsupportedPolicy(
+            "[[cast]] declarations — cast resolution is not wired in this runtime".to_string(),
+        ));
+    }
+    for tool in &rc.tools {
+        let name = tool.name.as_str();
+        if tool.pending_cast_dim().is_some() {
+            return Err(OpenError::UnsupportedPolicy(format!(
+                "tool {name} declares a pending-cast (\"unknown\") delta — cast resolution is not wired in this runtime"
+            )));
+        }
+        if is_control_tool(name) {
+            return Err(OpenError::ReservedTool(name.to_string()));
+        }
+    }
+    for authority in &rc.authorities {
+        let name = authority.name.as_str();
+        if !config.externals.authorities.contains_key(name) {
+            return Err(OpenError::UnboundExternal {
+                kind: "authority",
+                name: name.to_string(),
+            });
+        }
+    }
+    for sanitizer in &rc.sanitizers {
+        let name = sanitizer.name.as_str();
+        if !config.externals.sanitizers.contains_key(name) {
+            return Err(OpenError::UnboundExternal {
+                kind: "sanitizer",
+                name: name.to_string(),
+            });
+        }
+    }
+    let dynamic_binding = rc.tools.iter().find_map(|tool| {
+        crate::engine::dynamic_bindings(tool)
+            .next()
+            .map(|binding| binding.resolver.as_str().to_string())
+    });
+    if let Some(resolver) = dynamic_binding
+        && config.externals.dynamic.is_none()
+    {
+        return Err(OpenError::UnboundExternal {
+            kind: "dynamic resolver",
+            name: resolver,
+        });
+    }
+    Ok(())
+}
+
 fn policy_digest(policy: &toml::Value) -> String {
     use sha2::{Digest, Sha256};
     let canonical = toml::to_string(policy).unwrap_or_default();
@@ -234,21 +304,31 @@ fn policy_digest(policy: &toml::Value) -> String {
 }
 
 /// Plain-data helpers for tests outside this module — the adapter and
-/// MCP tests — so they can drive the test-mode engine without naming
-/// the boundary (`IMP-1`; the source-scan test holds for test code
-/// too).
+/// MCP tests — so they can drive the test seam without naming the
+/// boundary (the source-scan structural guard holds for test
+/// code too).
 #[cfg(test)]
 pub(crate) mod testing {
-    use crate::mock_engine::{EngineDecision, Feedback, MockEngine, Next, Presentation, ReleasedCall};
+    use crate::engine::{
+        EngineDecision, EngineSeam, Feedback, Next, OfferMutations, Presentation, ReleasedCall, TestSeam,
+    };
 
     use super::{Config, DispatchId, OfferId, ProposedCall, Runtime};
 
     pub(crate) fn runtime(config: Config, db: std::path::PathBuf) -> Runtime {
-        Runtime::open_with_engine(config, db, MockEngine::test_mode()).expect("a fresh test runtime opens")
+        Runtime::open_with_engine(config, db, EngineSeam::Test(TestSeam::new())).expect("a fresh test runtime opens")
     }
 
     fn enqueue(runtime: &Runtime, then: Next) {
-        runtime.inner.engine.enqueue(EngineDecision { append: None, then });
+        let EngineSeam::Test(seam) = &runtime.inner.engine else {
+            panic!("testing helpers drive the test seam only");
+        };
+        seam.enqueue(EngineDecision {
+            append: None,
+            then,
+            offers: OfferMutations::default(),
+            ends_child: None,
+        });
     }
 
     pub(crate) fn enqueue_done(runtime: &Runtime) {
@@ -295,7 +375,6 @@ pub(crate) mod testing {
             runtime,
             Next::PresentToModel(Presentation::ReplaceOutput {
                 placeholder: placeholder.to_string(),
-                offers: Vec::new(),
             }),
         );
     }

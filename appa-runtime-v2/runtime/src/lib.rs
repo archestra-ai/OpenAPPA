@@ -5,7 +5,6 @@ pub mod config;
 pub mod hooks;
 pub mod mcp;
 
+mod engine;
 mod external;
-#[cfg_attr(not(test), allow(dead_code))]
-mod mock_engine;
 mod store;

@@ -13,6 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 appa-adapter-claude-code = { path = "../adapters/claude-code" }
+appa-engine = { workspace = true }
+appa-policy = { workspace = true }
 appa-runtime-api = { path = "../api" }
 axum = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }

@@ -8,7 +8,9 @@ publish = false
 appa-engine = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+# `raw_value` carries the engine's canonical argument bytes verbatim onto south and authority
+# wires (`RUL-3`: dispatch exactly the bytes the digest binds, never a re-rendering).
+serde_json = { workspace = true, features = ["raw_value"] }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

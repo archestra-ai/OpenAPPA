@@ -5,7 +5,10 @@ use std::time::Duration;
 
 const CONFIG: &str = r#"
 [policy]
-statement = "mock era: the engine validates nothing"
+version = 1
+
+[[policy.tool]]
+name = "Bash"
 
 [externals]
 timeout_ms = 5000
@@ -195,10 +198,7 @@ fn a_changed_policy_refuses_the_old_database() {
     wait_for_health(&mut server);
     drop(server);
 
-    let changed = write_config(
-        dir.path(),
-        &CONFIG.replace("mock era: the engine validates nothing", "a different policy"),
-    );
+    let changed = write_config(dir.path(), &CONFIG.replace("name = \"Bash\"", "name = \"Read\""));
     expect_startup_refusal(&changed, &db, "policy digest");
 }
 

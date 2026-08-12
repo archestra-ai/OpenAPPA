@@ -26,6 +26,16 @@ fn mediator(policy: &str, tools: &[(&str, BuiltinTool)]) -> Arc<Mediator> {
     Arc::new(Mediator::new(config, tools).expect("mediator assembles"))
 }
 
+fn rendered_call(name: &str, arguments: serde_json::Value) -> ResolvedCall {
+    let policy = format!("version = 1\n[[tool]]\nname = {name:?}\n");
+    let config = appa_runtime::Config::from_toml_str(&policy).expect("the test policy loads");
+    let engine = appa_engine::engine::Engine::new(config.registry().clone());
+    let raw = serde_json::to_vec(&arguments).expect("test arguments serialize");
+    engine
+        .resolve_call(ToolName::new(name), &raw)
+        .expect("test arguments are dialect-valid")
+}
+
 fn call(id: &str, name: &str, arguments: &str) -> WireToolCall {
     WireToolCall {
         id: id.to_string(),
@@ -223,6 +233,80 @@ delta = {}
 }
 
 #[tokio::test]
+async fn a_wire_proposal_with_duplicate_keys_is_refused_and_opens_no_dispatch() {
+    // `RUL-3`: the strict scanner runs over the provider's raw argument text, so a duplicate key
+    // a lossy parse would collapse (last-wins) is refused as an invalid call — never dispatched.
+    let mediator = mediator(
+        "version = 1\n[[tool]]\nname = \"wire\"\ndelta = {}\n",
+        &[("wire", BuiltinTool::Echo("paid".to_string()))],
+    );
+    let tenant = TenantId::new("tenant");
+    let session = mediator.create_session(tenant.clone());
+    let mut budget = RunBudget::default();
+
+    let mut turn = begin(&mediator, &tenant, &session, "pay").await;
+    assert!(matches!(
+        turn.mediate(
+            calls(vec![call("dup", "wire", r#"{"amount":1,"amount":2}"#)]),
+            &mut budget
+        )
+        .await
+        .unwrap(),
+        Step::Continue
+    ));
+    let log = facts(&mediator, &tenant, &session);
+    assert!(!log.iter().any(|fact| matches!(fact, Fact::DispatchOpened { .. })));
+    let feedback = log
+        .iter()
+        .find_map(|fact| match fact {
+            Fact::BlockFeedback { call_id, content, .. } if call_id.as_str() == "dup" => Some(content.clone()),
+            _ => None,
+        })
+        .expect("the refusal reaches the model");
+    assert!(feedback.contains("invalid call"), "unexpected feedback: {feedback}");
+    turn.stop(StopReason::Cancelled).unwrap();
+}
+
+#[tokio::test]
+async fn an_oversized_wire_payload_is_refused_without_being_recorded() {
+    let mediator = mediator(
+        "version = 1\n[[tool]]\nname = \"wire\"\ndelta = {}\n",
+        &[("wire", BuiltinTool::Echo("paid".to_string()))],
+    );
+    let tenant = TenantId::new("tenant");
+    let session = mediator.create_session(tenant.clone());
+    let mut budget = RunBudget::default();
+
+    let mut turn = begin(&mediator, &tenant, &session, "pay").await;
+    let oversized = format!(r#"{{"pad":"{}"}}"#, "x".repeat(appa_engine::params::MAX_ARGUMENT_BYTES));
+    assert!(matches!(
+        turn.mediate(calls(vec![call("big", "wire", &oversized)]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    let log = facts(&mediator, &tenant, &session);
+    assert!(!log.iter().any(|fact| matches!(fact, Fact::DispatchOpened { .. })));
+    let recorded = log
+        .iter()
+        .find_map(|fact| match fact {
+            Fact::AssistantMessage { calls, .. } => calls.first().map(|proposed| proposed.arguments.clone()),
+            _ => None,
+        })
+        .expect("the assistant round is recorded");
+    assert_eq!(recorded, serde_json::json!({}));
+    let feedback = log
+        .iter()
+        .find_map(|fact| match fact {
+            Fact::BlockFeedback { call_id, content, .. } if call_id.as_str() == "big" => Some(content.clone()),
+            _ => None,
+        })
+        .expect("the refusal reaches the model");
+    assert!(feedback.contains("invalid call"), "unexpected feedback: {feedback}");
+    turn.stop(StopReason::Cancelled).unwrap();
+}
+
+#[tokio::test]
 async fn a_dynamic_output_resolves_once_and_its_dispatch_snapshot_governs_admission() {
     let (resolver_url, requests, server) = spawn_repeating_response(r#"{"version":1,"readers":["internal"]}"#).await;
     let policy = format!(
@@ -415,11 +499,6 @@ implementation = {{ resolver = {{ url = "{url}" }} }}
 
 #[tokio::test]
 async fn a_denial_consumes_every_offer_naming_the_denying_authority() {
-    // `RMD-6`: a denial consumes every offered plan naming the denying authority for this rendered
-    // call, so an advertised alternative is always executable. `broad` covers both gaps, so it is
-    // named by both offered plans; denying it must retire both, not just the one consulted.
-    // (A consult that returns no answer is the complement and consumes nothing — the no-answer
-    // tests below cover it.)
     let (deny_url, consults, deny_server) = spawn_counting_authority("deny");
     let policy = format!(
         r#"
@@ -452,7 +531,6 @@ implementation = {{ builtin = "approve" }}
     let mut turn = begin(&mediated, &tenant, &session, "pay").await;
     let mut budget = RunBudget::default();
 
-    // The block offers two plans: {broad: floor+mark} and {broad: floor, mark-only: mark}.
     assert!(matches!(
         turn.mediate(calls(vec![call("blocked", "wire", "{}")]), &mut budget)
             .await
@@ -460,7 +538,6 @@ implementation = {{ builtin = "approve" }}
         Step::Continue
     ));
 
-    // Executing the first consults `broad`, which denies.
     assert!(matches!(
         turn.mediate(
             calls(vec![call("denied", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-0"}"#)]),
@@ -472,7 +549,6 @@ implementation = {{ builtin = "approve" }}
     ));
     assert_eq!(consults.load(Ordering::SeqCst), 1);
 
-    // remedy-1 also names `broad`, so the denial retired it too: the handle no longer resolves.
     assert!(matches!(
         turn.mediate(
             calls(vec![call("stale", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-1"}"#)]),
@@ -482,10 +558,6 @@ implementation = {{ builtin = "approve" }}
         .unwrap(),
         Step::Continue
     ));
-    // The denier is never consulted again — which is the whole of `RMD-6`. Retiring only the
-    // consulted offer would have left remedy-1 live and sent a second request here.
-    // Reverting the Deny arm takes this count from 1 to 2, which is what makes the assertion
-    // discriminating rather than merely true.
     assert_eq!(consults.load(Ordering::SeqCst), 1);
     let log = facts(&mediated, &tenant, &session);
     assert!(!log.iter().any(|fact| matches!(fact, Fact::DispatchOpened { .. })));
@@ -574,7 +646,6 @@ implementation = {{ builtin = "approve" }}
         reviewed.trajectory_label,
         Label::new(Dim::Known(Trust::new(1)), Dim::Known(Audience::Public))
     );
-    assert!(reviewed.arg_refs.is_empty());
     assert_eq!(log.iter().filter(|fact| matches!(fact, Fact::Ruling { .. })).count(), 1);
     assert_eq!(effect_carriers(&log, "spend"), 1);
     turn.stop(StopReason::Cancelled).unwrap();
@@ -582,10 +653,6 @@ implementation = {{ builtin = "approve" }}
 
 #[tokio::test]
 async fn a_no_answer_consult_leaves_the_offer_executable_and_appends_nothing() {
-    // `RMD-6`: a consult that returns no answer consumes nothing — the offer stands and may be
-    // executed again — and it appends no governance event. The budget pins
-    // one blocked proposal, so the successful retry is provably the surviving handle rather
-    // than a fresh proposal cohort (`RMD-7`: rate control never surfaces as a lost offer).
     let (url, consults, server) = spawn_scripted_authority(vec!["maybe", "approve"]);
     let policy = format!(
         r#"
@@ -631,7 +698,6 @@ implementation = {{ resolver = {{ url = "{url}" }} }}
     assert!(!log.iter().any(|fact| matches!(fact, Fact::Ruling { .. })));
     assert!(!log.iter().any(|fact| matches!(fact, Fact::Acceptance { .. })));
     assert!(!log.iter().any(|fact| matches!(fact, Fact::DispatchOpened { .. })));
-    // The no-answer feedback relists the standing offer under the same handle.
     let payload = feedback_payload(&log, "first");
     let handles: Vec<&str> = payload["remedy_plans"]
         .as_array()
@@ -641,7 +707,6 @@ implementation = {{ resolver = {{ url = "{url}" }} }}
         .collect();
     assert_eq!(handles, ["remedy-0"]);
 
-    // The same handle executes again; this time the consult approves and the call dispatches.
     assert!(matches!(
         turn.mediate(
             calls(vec![call("retry", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-0"}"#)]),
@@ -661,8 +726,6 @@ implementation = {{ resolver = {{ url = "{url}" }} }}
 
 #[tokio::test]
 async fn a_no_answer_consult_leaves_sibling_offers_untouched() {
-    // The complement of the denial sweep: `broad` returns no answer on the consulted plan, and
-    // both offers — the consulted one included — stay live; the sibling then authorizes.
     let (url, consults, server) = spawn_scripted_authority(vec!["maybe", "approve"]);
     let policy = format!(
         r#"
@@ -695,7 +758,6 @@ implementation = {{ builtin = "approve" }}
     let mut turn = begin(&mediated, &tenant, &session, "pay").await;
     let mut budget = RunBudget::default();
 
-    // The block offers two plans: {broad: floor+mark} and {broad: floor, mark-only: mark}.
     assert!(matches!(
         turn.mediate(calls(vec![call("blocked", "wire", "{}")]), &mut budget)
             .await
@@ -725,7 +787,6 @@ implementation = {{ builtin = "approve" }}
         .collect();
     assert_eq!(handles, ["remedy-0", "remedy-1"]);
 
-    // The sibling stays executable: `broad` is consulted afresh and now approves.
     assert!(matches!(
         turn.mediate(
             calls(vec![call("sibling", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-1"}"#)]),
@@ -745,10 +806,6 @@ implementation = {{ builtin = "approve" }}
 
 #[tokio::test]
 async fn a_partial_approval_lands_nothing_when_a_later_consult_returns_no_answer() {
-    // Plan execution is atomic: when a later consult returns no answer, the earlier
-    // authority's approval is discarded with it — nothing lands short of dispatch —
-    // and the retry consults the earlier authority afresh rather than reusing the discarded
-    // approval.
     let (floor_url, floor_consults, floor_server) = spawn_scripted_authority(vec!["approve"]);
     let (mark_url, mark_consults, mark_server) = spawn_scripted_authority(vec!["maybe", "approve"]);
     let policy = format!(
@@ -782,7 +839,6 @@ implementation = {{ resolver = {{ url = "{mark_url}" }} }}
     let mut turn = begin(&mediated, &tenant, &session, "pay").await;
     let mut budget = RunBudget::default();
 
-    // One plan: {floor-officer: floor, mark-officer: mark}, consulted in gap order.
     assert!(matches!(
         turn.mediate(calls(vec![call("blocked", "wire", "{}")]), &mut budget)
             .await
@@ -825,9 +881,6 @@ implementation = {{ resolver = {{ url = "{mark_url}" }} }}
 
 #[tokio::test]
 async fn a_denial_lands_as_a_fact_and_excludes_the_authority_in_later_turns() {
-    // `RMD-16`: the denial is a recorded governance event, and the exclusion replays from the
-    // log — a later turn's block of the same rendered call offers only the sibling authority and
-    // never consults the denier again. Changed arguments change the digest and lift it.
     let (deny_url, consults, deny_server) = spawn_counting_authority("deny");
     let policy = format!(
         r#"
@@ -875,7 +928,7 @@ implementation = {{ builtin = "approve" }}
         Step::Continue
     ));
     assert_eq!(consults.load(Ordering::SeqCst), 1);
-    let rendered = ResolvedCall::new(ToolName::new("wire"), serde_json::json!({"amount": 1}), Vec::new());
+    let rendered = rendered_call("wire", serde_json::json!({"amount": 1}));
     let log = facts(&mediated, &tenant, &session);
     let denials: Vec<&Fact> = log.iter().filter(|fact| matches!(fact, Fact::Denial { .. })).collect();
     assert_eq!(denials.len(), 1);
@@ -884,8 +937,6 @@ implementation = {{ builtin = "approve" }}
         Fact::Denial { digest, authority, .. }
             if *digest == rendered.digest() && authority.as_str() == "floor-a"
     ));
-    // A same-turn re-proposal of the denied rendered call already excludes the denier: the
-    // exclusion reads from the log at enumeration, not from turn memory.
     assert!(matches!(
         turn.mediate(calls(vec![call("re-propose", "wire", r#"{"amount":1}"#)]), &mut budget)
             .await
@@ -898,11 +949,8 @@ implementation = {{ builtin = "approve" }}
         turn.mediate(final_answer("later"), &mut budget).await.unwrap(),
         Step::Final(_)
     ));
-    // Release the turn lease before beginning the next turn on the same trajectory.
     drop(turn);
 
-    // A fresh turn re-blocks the same rendered call: the exclusion replays from the log, so only
-    // the sibling is offered, it executes, and the denier's resolver is never consulted again.
     let mut turn = begin(&mediated, &tenant, &session, "pay again").await;
     assert!(matches!(
         turn.mediate(calls(vec![call("again", "wire", r#"{"amount":1}"#)]), &mut budget)
@@ -927,7 +975,6 @@ implementation = {{ builtin = "approve" }}
     let log = facts(&mediated, &tenant, &session);
     assert_eq!(effect_carriers(&log, "spend"), 1);
 
-    // Changed arguments change the digest and lift the exclusion: both authorities are offered.
     assert!(matches!(
         turn.mediate(calls(vec![call("fresh", "wire", r#"{"amount":2}"#)]), &mut budget)
             .await
@@ -949,8 +996,6 @@ implementation = {{ builtin = "approve" }}
 
 #[tokio::test]
 async fn a_denial_names_only_the_actual_denier_in_a_multi_authority_plan() {
-    // A plan can require several authorities; only the one that answered Deny is recorded and
-    // excluded. The sibling plan routing the mark elsewhere stays offered and executes.
     let (deny_url, consults, deny_server) = spawn_counting_authority("deny");
     let policy = format!(
         r#"
@@ -988,7 +1033,6 @@ implementation = {{ builtin = "approve" }}
     let mut budget = RunBudget::default();
     let mut turn = begin(&mediated, &tenant, &session, "pay").await;
 
-    // Two plans: {floor-officer, mark-a} and {floor-officer, mark-b}.
     assert!(matches!(
         turn.mediate(calls(vec![call("blocked", "wire", "{}")]), &mut budget)
             .await
@@ -1009,10 +1053,8 @@ implementation = {{ builtin = "approve" }}
     let denials: Vec<&Fact> = log.iter().filter(|fact| matches!(fact, Fact::Denial { .. })).collect();
     assert_eq!(denials.len(), 1);
     assert!(matches!(denials[0], Fact::Denial { authority, .. } if authority.as_str() == "mark-a"));
-    // The approving floor-officer's answer landed nothing: the plan stopped short of dispatch.
     assert!(!log.iter().any(|fact| matches!(fact, Fact::Ruling { .. })));
 
-    // The sibling plan does not name mark-a and executes with both its rulings recorded.
     assert!(matches!(
         turn.mediate(
             calls(vec![call("sibling", EXECUTE_REMEDY_PLAN, r#"{"plan_id":"remedy-1"}"#)]),
@@ -1122,7 +1164,6 @@ constant = { trust = "suspicious" }
     );
 }
 
-/// Facts carrying the named committed effect — the checkpoint or a close, wherever it landed.
 fn effect_carriers(log: &[Fact], kind: &str) -> usize {
     log.iter()
         .filter(|fact| match fact {
@@ -1138,9 +1179,6 @@ fn effect_carriers(log: &[Fact], kind: &str) -> usize {
 
 #[tokio::test]
 async fn a_pending_cast_success_commits_effects_before_its_offer_resolves() {
-    // The external effect happened the moment the tool succeeded; the success checkpoint commits
-    // it immediately, so a later call's no_prior(read) in the SAME round sees it — the raw body
-    // stays confined behind the offer. Acceptance later folds the value without a second effect.
     let mediated = mediator(
         r#"
 version = 1
@@ -1180,10 +1218,8 @@ constant = { trust = "suspicious" }
         Step::Continue
     ));
     let log = facts(&mediated, &tenant, &session);
-    // The checkpoint committed the effect while the dispatch stays open and the body confined...
     assert_eq!(effect_carriers(&log, "read"), 1);
     assert!(tool_values(&log).is_empty());
-    // ...so the same-round audit call failed its no_prior(read) and never dispatched.
     assert_eq!(
         log.iter()
             .filter(|fact| matches!(fact, Fact::DispatchOpened { .. }))
@@ -1209,7 +1245,6 @@ constant = { trust = "suspicious" }
         tool_values(&log).iter().map(|(body, _)| *body).collect::<Vec<_>>(),
         ["mail body"]
     );
-    // The close contributed no duplicate: the one effect carrier is still the checkpoint.
     assert_eq!(effect_carriers(&log, "read"), 1);
 }
 
@@ -1255,10 +1290,6 @@ constant = { trust = "suspicious" }
 
 #[tokio::test]
 async fn a_bound_sanitizer_await_finds_the_effects_already_committed() {
-    // `LOG-2`'s order made observable: the tool succeeded and its bound sanitizer derivation is
-    // still in flight, held by the gated server. Mid-await, the family history already shows the
-    // committed effect with its reservation settled, the dispatch still open, and no value — then
-    // the released derivation admits with the close carrying no duplicate effects.
     let (url, arrived, release) = spawn_gated_response(r#"{"body":"[redacted]"}"#);
     let policy = format!(
         r#"
@@ -1331,9 +1362,6 @@ resolver = {{ url = "{url}", timeout_ms = 30000 }}
 
 #[tokio::test]
 async fn a_pending_cast_await_finds_the_effects_already_committed() {
-    // The same order on the cast path: the checkpoint lands before the runtime awaits the cast
-    // resolver, so the effect and its settled reservation are visible mid-resolution — then a
-    // non-narrowing answer admits the value with no second carrier.
     let (url, arrived, release) = spawn_gated_response(r#"{"trust":"trusted"}"#);
     let policy = format!(
         r#"
@@ -1396,9 +1424,6 @@ resolver = {{ url = "{url}", may_cast = {{ trust = ["trusted"] }}, timeout_ms = 
 
 #[tokio::test]
 async fn a_cancellation_after_typed_success_cannot_unmake_the_effects() {
-    // The tool succeeded; while its bound sanitizer derivation hangs, the turn is cancelled. The
-    // checkpoint had already committed the effects, so the teardown closes the dispatch
-    // success-family with no duplicate carrier and admits nothing.
     let (url, arrived, _release) = spawn_gated_response(r#"{"body":"[redacted]"}"#);
     let policy = format!(
         r#"
@@ -1465,9 +1490,6 @@ resolver = {{ url = "{url}", timeout_ms = 30000 }}
 
 #[tokio::test]
 async fn ordinary_narrowing_acceptance_requires_a_later_round() {
-    // Informed acceptance holds for ordinary soft blocks as for pending casts: an acceptance
-    // authored in the same assistant response that triggered the offer predates it and is
-    // refused; the same offer executes in the next round.
     let mediated = mediator(
         r#"
 version = 1
@@ -1522,8 +1544,6 @@ delta = { audience = { exactly = ["internal"] } }
 
 #[tokio::test]
 async fn an_authority_only_plan_executes_in_its_offering_round() {
-    // The round gate binds acceptances, not rulings: a plan with no Accept step is executable in
-    // the very round that offered it.
     let mediated = mediator(
         r#"
 version = 1
@@ -1564,12 +1584,6 @@ implementation = { builtin = "approve" }
 
 #[tokio::test]
 async fn a_mixed_plan_consults_no_authority_before_the_acceptance_gate() {
-    // `wire` both narrows the audience (delta → acceptance) and demands attention (gap →
-    // ruling), so its one plan is acceptance-first. Executing it in the round that
-    // surfaced the offer refuses at the informed-acceptance gate before any authority IO: the
-    // counting authority sees zero consultations and no acceptance, ruling, or dispatch lands.
-    // The same plan in the next round consults exactly once and lands the one canonical batch —
-    // acceptance, then the ruling, then the dispatch, adjacent in the log.
     let (url, consults, _server) = spawn_counting_authority("approve");
     let policy = format!(
         r#"
@@ -1654,11 +1668,6 @@ implementation = {{ resolver = {{ url = "{url}", timeout_ms = 2000 }} }}
 
 #[tokio::test]
 async fn return_offers_run_cheapest_first_and_the_free_crossing_leads_the_feedback() {
-    // The menu a blocked return offers is ordered by what each plan costs the parent: a
-    // residual-free sanitize crosses the value and narrows nothing, raw acceptance narrows
-    // permanently. A child reads the menu as "how do I return this" and takes the first entry, so
-    // the ordering is the affordance — and the prose names the free crossing rather than leading
-    // with the void return, which is only the best move when no free crossing exists.
     let mediated = mediator(
         r#"
 version = 1
@@ -1708,8 +1717,6 @@ builtin = "redact-email"
             _ => None,
         })
         .expect("the blocked return answers the submit");
-    // The property, not the phrasing: the free crossing is named in the prose, ahead of the menu
-    // every plan is listed in. A child that reads only the first sentences still sees it.
     let named_at = content
         .find(&format!("\"{sanitize}\""))
         .unwrap_or_else(|| panic!("the free crossing is never named: {content}"));
@@ -3080,7 +3087,7 @@ delta = {{}}
         Step::Continue
     ));
     let log = facts(&mediator, &tenant, &session);
-    let guard = ResolvedCall::new(ToolName::new("guard"), serde_json::json!({}), Vec::new());
+    let guard = rendered_call("guard", serde_json::json!({}));
     assert!(
         !log.iter().any(|fact| matches!(
             fact,
@@ -3181,7 +3188,7 @@ delta = {{}}
         .collect();
     assert_eq!(opened, closed);
     assert_eq!(opened.len(), 1);
-    let slow = ResolvedCall::new(ToolName::new("slow"), serde_json::json!({}), Vec::new());
+    let slow = rendered_call("slow", serde_json::json!({}));
     assert_eq!(opened[0].digest(), &slow.digest());
     assert!(!log.iter().any(|fact| matches!(
         fact,

@@ -778,9 +778,7 @@ mod tests {
         use appa_engine::check::UnestablishedFact;
         use appa_engine::fact::Fact;
         use appa_engine::label::Dimension;
-        use appa_engine::value::{
-            ChildReturnId, DispatchId, LabeledValue, Provenance, ResolvedCall, ToolName, ValueBody, ValueId,
-        };
+        use appa_engine::value::{ChildReturnId, DispatchId, LabeledValue, Provenance, ValueBody, ValueId};
 
         let session = TrajectoryId::new("session");
         let child = TrajectoryId::new("child");
@@ -792,7 +790,7 @@ mod tests {
         };
         let dispatch = DispatchId::new(
             session.clone(),
-            ResolvedCall::new(ToolName::new("scan"), serde_json::json!({}), vec![]).digest(),
+            crate::common::test_call("scan", serde_json::json!({})).digest(),
             0,
         );
         let log = vec![

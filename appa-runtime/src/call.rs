@@ -2,8 +2,6 @@
 
 use thiserror::Error;
 
-use appa_engine::value::ResolvedCall;
-
 use crate::common::{self, Admission, Checked, Core, Remedied};
 use crate::store::StoreError;
 use crate::tool::{RenderedCall, ToolOutcome};
@@ -89,7 +87,14 @@ impl CallSession {
     /// transcript fact is authored — the framework delivers the feedback (e.g. as a hook skip).
     pub async fn check_call(&mut self, call: RenderedCall) -> Result<CallDecision, CallError> {
         self.guard_ready()?;
-        let resolved = ResolvedCall::new(call.tool.clone(), call.arguments.clone(), Vec::new());
+        let resolved = match common::resolve_call(&self.core.engine, call.tool.clone(), &call.arguments) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                return Ok(CallDecision::Block {
+                    feedback: common::invalid_call_feedback(&error),
+                });
+            }
+        };
         let resolved = self.core.resolve_dynamic_call(resolved).await;
         match self.core.check_ordinary(resolved.clone())? {
             Checked::Feedback(feedback) => Ok(CallDecision::Block { feedback }),

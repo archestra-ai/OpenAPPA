@@ -12,7 +12,7 @@ use crate::names::AuthorityName;
 use crate::plan::{self, covers_gap};
 use crate::projection::Views;
 use crate::registry::Registry;
-use crate::value::{DispatchId, Provenance, ResolvedCall, ValueId};
+use crate::value::{DispatchId, ResolvedCall};
 
 /// A ruling the runtime gathered from an authority for one **specific pending dispatch**: the exact
 /// [`DispatchId`] (trajectory + canonical digest + occurrence) it was approved for, the mandate it
@@ -29,20 +29,14 @@ pub struct Ruling {
 pub struct AuthorityReview {
     pub tool: crate::value::ToolName,
     pub trajectory_label: Label,
-    pub arg_refs: Vec<ReviewedRef>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReviewedRef {
-    pub value: ValueId,
-    pub label: Label,
-    pub provenance: Provenance,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PlanError {
     #[error("no contract registered for tool {0}")]
     UnknownTool(String),
+    #[error("invalid call: {0}")]
+    InvalidCall(crate::params::ArgumentError),
     #[error("the call is not blocked — dispatch it directly")]
     NotBlocked,
     #[error("the call has an unestablished dimension — a fact clears it, never a plan")]
@@ -77,6 +71,10 @@ pub(crate) fn execute_remedy_plan(
     let contract = registry
         .tool(call.tool())
         .ok_or_else(|| PlanError::UnknownTool(call.tool().as_str().to_string()))?;
+    contract
+        .parameters
+        .validate(call.arguments())
+        .map_err(PlanError::InvalidCall)?;
 
     let block = match check::evaluate(contract, views, call) {
         CheckOutcome::Block(block) => block,
@@ -114,18 +112,6 @@ pub(crate) fn execute_remedy_plan(
     for ruling in rulings {
         if ruling.reviewed.tool != contract.name || ruling.reviewed.trajectory_label != live_label {
             return Err(PlanError::ReviewMismatch);
-        }
-        let reviewed_ids: Vec<ValueId> = ruling.reviewed.arg_refs.iter().map(|r| r.value).collect();
-        if reviewed_ids != call.arg_refs() {
-            return Err(PlanError::ReviewMismatch);
-        }
-        for reviewed in &ruling.reviewed.arg_refs {
-            let resolves = views.owns_value(reviewed.value)
-                && views.value_label(reviewed.value) == Some(&reviewed.label)
-                && views.value_provenance(reviewed.value) == Some(&reviewed.provenance);
-            if !resolves {
-                return Err(PlanError::ReviewMismatch);
-            }
         }
     }
 
@@ -247,6 +233,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -276,7 +263,7 @@ mod tests {
     }
 
     fn call(tool: &str, args: serde_json::Value) -> ResolvedCall {
-        ResolvedCall::new(ToolName::new(tool), args, vec![])
+        ResolvedCall::new(ToolName::new(tool), crate::params::test_arguments(&args))
     }
 
     fn floor_gap() -> Gap {
@@ -290,7 +277,6 @@ mod tests {
         AuthorityReview {
             tool: ToolName::new("wire"),
             trajectory_label: known(SUSPICIOUS, Audience::Public),
-            arg_refs: vec![],
         }
     }
 
@@ -352,6 +338,7 @@ mod tests {
             name: ToolName::new("guard"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 history: vec![crate::contract::HistoryRequirement::NoPrior(EffectKind::new(
@@ -383,6 +370,8 @@ mod tests {
             Fact::DispatchOpened {
                 trajectory: traj(),
                 dispatch: DispatchId::new(traj(), seed.digest(), 0),
+                tool: seed.tool().clone(),
+                arguments: seed.canonical_arguments().clone(),
                 proposed_label: known(TRUSTED, Audience::Public),
                 proposed_effects: EffectSet::new([EffectKind::new("email.sent")]).unwrap(),
                 dynamic_resolutions: vec![],
@@ -395,7 +384,6 @@ mod tests {
             reviewed: AuthorityReview {
                 tool: ToolName::new("guard"),
                 trajectory_label: known(TRUSTED, Audience::Public),
-                arg_refs: vec![],
             },
             covers: vec![Gap::NoPrior(EffectKind::new("email.sent"))],
         };
@@ -411,6 +399,7 @@ mod tests {
             name: ToolName::new("vault"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -449,7 +438,6 @@ mod tests {
             reviewed: AuthorityReview {
                 tool: ToolName::new("vault"),
                 trajectory_label: Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
-                arg_refs: vec![],
             },
             covers: vec![Gap::Attention(MarkName::new("signoff"))],
         };
@@ -488,6 +476,8 @@ mod tests {
             Fact::DispatchOpened {
                 trajectory: traj(),
                 dispatch: prior,
+                tool: wire.tool().clone(),
+                arguments: wire.canonical_arguments().clone(),
                 proposed_label: Label::top(),
                 proposed_effects: EffectSet::default(),
                 dynamic_resolutions: Vec::new(),
@@ -587,6 +577,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -623,6 +614,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 attention: vec![MarkName::new("m1"), MarkName::new("m2")],
@@ -659,7 +651,6 @@ mod tests {
         let review = AuthorityReview {
             tool: ToolName::new("wire"),
             trajectory_label: known(TRUSTED, Audience::Public),
-            arg_refs: vec![],
         };
         let rulings = vec![
             Ruling {
@@ -689,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn a_false_or_dangling_review_is_refused() {
+    fn a_false_review_is_refused() {
         let registry = registry();
         let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
         let with_review = |reviewed: AuthorityReview| Ruling {
@@ -714,23 +705,6 @@ mod tests {
             run(&registry, &log, &call("wire", json!({})), &[with_review(wrong_tool)]),
             Err(PlanError::ReviewMismatch)
         );
-        let dangling = AuthorityReview {
-            arg_refs: vec![ReviewedRef {
-                value: ValueId::new(7),
-                label: known(SUSPICIOUS, Audience::Public),
-                provenance: Provenance::UserInput,
-            }],
-            ..top_review()
-        };
-        assert_eq!(
-            run(&registry, &log, &call("wire", json!({})), &[with_review(dangling)]),
-            Err(PlanError::ReviewMismatch)
-        );
-        let ref_call = ResolvedCall::new(ToolName::new("wire"), json!({}), vec![ValueId::new(0)]);
-        assert_eq!(
-            run(&registry, &log, &ref_call, &[with_review(top_review())]),
-            Err(PlanError::ReviewMismatch)
-        );
     }
 
     #[test]
@@ -742,6 +716,7 @@ mod tests {
                 trust: None,
                 audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
             }),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 attention: vec![MarkName::new("signoff")],
@@ -773,7 +748,6 @@ mod tests {
             reviewed: AuthorityReview {
                 tool: ToolName::new("post"),
                 trajectory_label: known(TRUSTED, Audience::Public),
-                arg_refs: vec![],
             },
             covers: vec![Gap::Attention(MarkName::new("signoff"))],
         };
@@ -796,6 +770,7 @@ mod tests {
                 trust: None,
                 audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
             }),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires::default(),
         };

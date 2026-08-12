@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 
 use crate::contract::{DynamicAudienceBinding, PinnedDynamicResolution};
 use crate::label::Label;
+use crate::params::CanonicalArguments;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ToolName(String);
@@ -69,12 +70,14 @@ impl ValueId {
 pub struct CanonicalDigest([u8; 32]);
 
 impl CanonicalDigest {
-    fn of_call(tool: &ToolName, arguments: &serde_json::Value) -> Self {
+    /// Digest the canonical rendered call: domain-separated over the tool name and the
+    /// argument object's RFC 8785 canonical bytes, so equal argument objects
+    /// bind the same call regardless of source key order or whitespace.
+    pub(crate) fn of_call(tool: &ToolName, arguments: &CanonicalArguments) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(tool.0.as_bytes());
         hasher.update([0u8]);
-        let bytes = serde_json::to_vec(arguments).expect("a serde_json::Value re-serializes");
-        hasher.update(&bytes);
+        hasher.update(arguments.canonical_bytes());
         CanonicalDigest(hasher.finalize().into())
     }
 
@@ -189,26 +192,18 @@ impl LabeledValue {
     }
 }
 
-/// A proposed tool call the runtime has resolved: the tool, its concrete argument tree, and the prior
-/// values the arguments reference (coarse in v1 — see the plan's dependency-discovery note). The
-/// [`CanonicalDigest`] is **derived from the tool and arguments on demand**, never a stored field —
-/// so a value round-tripped through `serde` cannot carry a digest inconsistent with its arguments
-/// (which would let an approved call's digest ride on a different call's arguments).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedCall {
     tool: ToolName,
-    arguments: serde_json::Value,
-    arg_refs: Vec<ValueId>,
-    #[serde(skip, default)]
+    arguments: CanonicalArguments,
     dynamic_resolutions: Vec<PinnedDynamicResolution>,
 }
 
 impl ResolvedCall {
-    pub fn new(tool: ToolName, arguments: serde_json::Value, arg_refs: Vec<ValueId>) -> Self {
+    pub(crate) fn new(tool: ToolName, arguments: CanonicalArguments) -> Self {
         ResolvedCall {
             tool,
             arguments,
-            arg_refs,
             dynamic_resolutions: Vec::new(),
         }
     }
@@ -218,11 +213,11 @@ impl ResolvedCall {
     }
 
     pub fn arguments(&self) -> &serde_json::Value {
-        &self.arguments
+        self.arguments.value()
     }
 
-    pub fn arg_refs(&self) -> &[ValueId] {
-        &self.arg_refs
+    pub fn canonical_arguments(&self) -> &CanonicalArguments {
+        &self.arguments
     }
 
     pub fn with_dynamic_resolutions(mut self, resolutions: Vec<PinnedDynamicResolution>) -> Self {
@@ -259,24 +254,29 @@ impl ResolvedCall {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::params::ToolParameters;
     use serde_json::json;
+
+    fn args(value: serde_json::Value) -> CanonicalArguments {
+        CanonicalArguments::from_value(&value, &ToolParameters::open()).expect("test arguments are dialect-valid")
+    }
+
+    fn call(tool: &str, value: serde_json::Value) -> ResolvedCall {
+        ResolvedCall::new(ToolName::new(tool), args(value))
+    }
 
     #[test]
     fn digest_is_deterministic_and_key_order_independent() {
-        let a = ResolvedCall::new(ToolName::new("transfer"), json!({ "to": "alice", "amount": 1 }), vec![]);
-        let b = ResolvedCall::new(
-            ToolName::new("transfer"),
-            json!({ "amount": 1, "to": "alice" }),
-            vec![ValueId::new(7)],
-        );
+        let a = call("transfer", json!({ "to": "alice", "amount": 1 }));
+        let b = call("transfer", json!({ "amount": 1, "to": "alice" }));
         assert_eq!(a.digest(), b.digest());
     }
 
     #[test]
     fn digest_separates_distinct_calls() {
-        let base = ResolvedCall::new(ToolName::new("transfer"), json!({ "to": "a" }), vec![]);
-        let other_arg = ResolvedCall::new(ToolName::new("transfer"), json!({ "to": "b" }), vec![]);
-        let other_tool = ResolvedCall::new(ToolName::new("refund"), json!({ "to": "a" }), vec![]);
+        let base = call("transfer", json!({ "to": "a" }));
+        let other_arg = call("transfer", json!({ "to": "b" }));
+        let other_tool = call("refund", json!({ "to": "a" }));
         assert_ne!(base.digest(), other_arg.digest());
         assert_ne!(base.digest(), other_tool.digest());
     }
@@ -287,7 +287,7 @@ mod tests {
             resolver: crate::names::DynamicResolverName::new("directory"),
             argument: "recipient".into(),
         };
-        let base = ResolvedCall::new(ToolName::new("send"), json!({ "recipient": "room" }), vec![]);
+        let base = call("send", json!({ "recipient": "room" }));
         let resolved = base
             .clone()
             .with_dynamic_resolutions(vec![PinnedDynamicResolution::from_answer(
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn dispatch_id_distinguishes_occurrences() {
-        let call = ResolvedCall::new(ToolName::new("send"), json!({}), vec![]);
+        let call = call("send", json!({}));
         let traj = TrajectoryId::new("t1");
         let first = DispatchId::new(traj.clone(), call.digest(), 0);
         let second = DispatchId::new(traj, call.digest(), 1);

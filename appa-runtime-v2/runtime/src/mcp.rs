@@ -47,9 +47,9 @@ impl RemedyService {
                 call.tool,
             ))]),
             Ok(RemedyDecision::Returned { value }) => CallToolResult::success(vec![ContentBlock::text(value)]),
-            Ok(RemedyDecision::Staged { feedback })
-            | Ok(RemedyDecision::Declined { feedback })
-            | Ok(RemedyDecision::NoAnswer { feedback }) => CallToolResult::success(vec![ContentBlock::text(feedback)]),
+            Ok(RemedyDecision::Declined { feedback }) | Ok(RemedyDecision::NoAnswer { feedback }) => {
+                CallToolResult::success(vec![ContentBlock::text(feedback)])
+            }
             Err(error) => refusal(&error.to_string()),
         }
     }

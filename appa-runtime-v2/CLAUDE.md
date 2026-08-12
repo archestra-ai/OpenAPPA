@@ -23,47 +23,42 @@ Three crates, one binary, one process:
 The plugin (`plugin/`) and the marketplace manifest stay at this
 folder's top level, beside the crates.
 
-## Mock engine status
+## Engine boundary status
 
-The runtime crate targets the engine boundary that `docs/engine.md`
-sketches: `Engine::handle(&EngineView, EngineEvent) -> EngineDecision`.
-The real engine does not expose this API yet — the engine team is
-building it. `runtime/src/mock_engine.rs` holds a temporary copy of the
-boundary types and the `MockEngine` with three modes:
+`runtime/src/engine.rs` is the one module that speaks to `appa-engine`.
+It drives the real engine through today's composed operations — check,
+plan, open-dispatch, execute-remedy, observe-success, admit-result,
+seed-child, child-return — behind two functions the session calls:
+decode-and-validate the persisted log, then decide one event. The
+decode step runs `Engine::validate_replay` before any projection is
+built, so it is the store-reopen trust gate. `T31`'s
+published `handle` boundary replaces the composition when it lands;
+the swap stays inside `api` and `engine` (`IMP-1`; a structural
+source-scan test enforces that no other module names either).
 
-- **Test mode.** A test enqueues the exact decision for each event; the
-  queue is the behavior. The mock has no decision logic.
-- **Permissive mode.** The binary's default. The mock permits every
-  call and admits every result. `Runtime::open` warns loudly: a mock
-  engine is deciding, and no policy is enforced.
-- **Offer mode** (`--mock offer`). The mock first blocks every call
-  with a narrowing offer — exactly the proposed call — and authorizes
-  it when the model executes the offer through `execute_remedy_plan`.
-  It exercises the deny wire, the remedy round trip, and the fact-log
-  append path, with still no policy enforced. Its state is
-  its own fact batches; the runtime reads none of them.
+`Runtime::open` compiles `[policy]` through the runtime-v2-only
+`appa-policy` declaration compiler. Implementation bindings live in
+`[externals]`, never inline; the compiler rejects every inline site.
+Runtime open then refuses what this
+runtime cannot honor: pending-cast deltas, `[[cast]]` declarations,
+reserved control-tool names, and policy-named externals with no
+`[externals]` binding.
 
-## Integration plan
+Interims, each recorded in `docs/engine.md`: offers carry a durable
+id→trajectory routing row, but the offered payload is process state —
+a restart declines pending offers, and execution never trusts the
+cache (live re-plan, value match, `RMD-8`); the fork seed is the
+scalar interim (`T39`); no cast resolution is wired, so blocks on
+unestablished dimensions are terminal feedback.
 
-When the engine team publishes the boundary types: delete
-`runtime/src/mock_engine.rs`, import their types, and let the compiler
-drive the fixes. Differences from this copy are expected; the planned
-cost is one module plus compiler-led fixes. Only the `Session` event
-handlers in `runtime/src/api/` call the boundary — the dispatcher, the
-adapters, and the store never do (`IMP-1`; a test enforces this) — so
-the swap stays inside `api` and `mock_engine`.
-
-## Mock-era openness
-
-The boundary types — `ValidatedFactBatch` included — are plainly
-constructible. This is by design, not an oversight: in test mode the
-enqueued decision IS the engine's behavior, so tests must build
-decisions and batches freely. The sealed-batch property of `IMP-4`
-belongs to the real engine's published types and arrives with them at
-integration. Nothing outside the runtime crate consumes the boundary:
-the module is private, and the crate's public surface is
-`Runtime::open`/`open_offer_mode`, the `hooks` dispatcher, `config`,
-and the MCP service.
+The seam's test variant (`EngineSeam::Test`, cfg(test)-only) returns
+enqueued decisions so session-orchestration tests pin commit ordering,
+conflict replay, and evidence loops without engine policy; the
+real-engine behavioral tests beside the session pin policy behavior
+against compiled fixtures. `FactBatch` remains publicly constructible
+until `T31` seals it; nothing outside the runtime crate consumes the
+boundary, and the crate's public surface is `Runtime::open`, the
+`hooks` dispatcher, `config`, and the MCP service.
 
 ## Crate rules
 

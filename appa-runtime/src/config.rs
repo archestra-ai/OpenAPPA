@@ -30,6 +30,7 @@ use appa_engine::fact::ReturnPolicy;
 use appa_engine::fact::{EffectKind, EffectSet};
 use appa_engine::label::{Audience, Dim, DimValue, Label, ReaderId, Trust};
 use appa_engine::names::{AuthorityName, CastName, DynamicResolverName, MarkName, SanitizerName, TagName};
+use appa_engine::params::ToolParameters;
 use appa_engine::registry::{LoadError, PlannerCap, Registry, RegistryConfig, TrustChain};
 use appa_engine::value::ToolName;
 
@@ -74,8 +75,11 @@ pub enum ConfigError {
     TimeoutOutOfRange { found: u64, context: String },
     #[error("unknown {kind} builtin {name:?} (not a compiled-in implementation)")]
     UnknownBuiltin { kind: &'static str, name: String },
-    #[error("tool {tool}: `parameters` must be a JSON-Schema object (a TOML table)")]
-    ToolParametersNotAnObject { tool: String },
+    #[error("tool {tool}: {source}")]
+    ToolParameters {
+        tool: String,
+        source: appa_engine::params::ParamsError,
+    },
     #[error("tool {tool} declares effect {kind:?} twice — `effects` is a set")]
     DuplicateEffect { tool: String, kind: String },
     #[error("duplicate dynamic resolver {0}")]
@@ -137,7 +141,6 @@ pub struct Config {
     sanitizer_impls: BTreeMap<SanitizerName, SanitizerImpl>,
     cast_impls: BTreeMap<CastName, CastImpl>,
     tool_impls: BTreeMap<ToolName, ToolImpl>,
-    tool_parameters: BTreeMap<ToolName, serde_json::Value>,
     child_return: ReturnPolicy,
     dynamic_resolver_impls: BTreeMap<DynamicResolverName, DynamicResolverImpl>,
 }
@@ -182,14 +185,10 @@ impl Config {
         }
         let mut tools = Vec::new();
         let mut tool_impls = BTreeMap::new();
-        let mut tool_parameters = BTreeMap::new();
         for t in raw.tool {
-            let (tool, imp, parameters) = t.convert(&trust_chain)?;
+            let (tool, imp) = t.convert(&trust_chain)?;
             if let Some(imp) = imp {
                 tool_impls.insert(tool.name.clone(), imp);
-            }
-            if let Some(parameters) = parameters {
-                tool_parameters.insert(tool.name.clone(), parameters);
             }
             tools.push(tool);
         }
@@ -201,14 +200,7 @@ impl Config {
                         resolver: binding.resolver.as_str().into(),
                     });
                 }
-                let is_string = tool_parameters
-                    .get(&tool.name)
-                    .and_then(|p| p.get("properties"))
-                    .and_then(|p| p.get(&binding.argument))
-                    .and_then(|p| p.get("type"))
-                    .and_then(|t| t.as_str())
-                    == Some("string");
-                if !is_string {
+                if !tool.parameters.declares_string_property(&binding.argument) {
                     return Err(ConfigError::DynamicArgumentNotString {
                         tool: tool.name.as_str().into(),
                         argument: binding.argument.clone(),
@@ -299,7 +291,6 @@ impl Config {
             sanitizer_impls,
             cast_impls,
             tool_impls,
-            tool_parameters,
             child_return,
             dynamic_resolver_impls,
         })
@@ -343,12 +334,6 @@ impl Config {
 
     pub fn tool_impl(&self, name: &ToolName) -> Option<&ToolImpl> {
         self.tool_impls.get(name)
-    }
-
-    /// The tool's declared argument schema (`parameters`), advertised verbatim in its wire schema.
-    /// Advisory to the model only — the engine checks flows, never argument shapes.
-    pub fn tool_parameters(&self, name: &ToolName) -> Option<&serde_json::Value> {
-        self.tool_parameters.get(name)
     }
 }
 
@@ -435,10 +420,7 @@ struct RawTool {
 }
 
 impl RawTool {
-    fn convert(
-        self,
-        chain: &TrustChain,
-    ) -> Result<(ToolContract, Option<ToolImpl>, Option<serde_json::Value>), ConfigError> {
+    fn convert(self, chain: &TrustChain) -> Result<(ToolContract, Option<ToolImpl>), ConfigError> {
         let ctx = || format!("tool {}", self.name);
         // No `delta` key at all = unannotated (results admitted at Unknown/Unknown, fail-closed);
         // `delta = {}` = the deliberate neutral annotation. The distinction is the whole point —
@@ -449,11 +431,13 @@ impl RawTool {
             None => Requires::default(),
         };
         let imp = self.implementation.map(|i| i.convert(&self.name)).transpose()?;
-        if let Some(parameters) = &self.parameters
-            && !parameters.is_object()
-        {
-            return Err(ConfigError::ToolParametersNotAnObject { tool: self.name });
-        }
+        let parameters = match &self.parameters {
+            Some(authored) => ToolParameters::compile(authored).map_err(|source| ConfigError::ToolParameters {
+                tool: self.name.clone(),
+                source,
+            })?,
+            None => ToolParameters::open(),
+        };
         let emits = EffectSet::new(self.effects.into_iter().map(EffectKind::new)).map_err(|duplicate| {
             ConfigError::DuplicateEffect {
                 tool: self.name.clone(),
@@ -464,12 +448,12 @@ impl RawTool {
             ToolContract {
                 name: ToolName::new(self.name),
                 tags: self.tags.into_iter().map(TagName::new).collect(),
+                parameters,
                 delta,
                 emits,
                 requires,
             },
             imp,
-            self.parameters,
         ))
     }
 }
@@ -1824,6 +1808,7 @@ delta = { audience = { exactly = ["@team"] } }
             tools: vec![ToolContract {
                 name: ToolName::new("t"),
                 tags: vec![],
+                parameters: ToolParameters::open(),
                 delta: Some(Delta {
                     trust: None,
                     audience: Some(AudienceDelta::Static(Audience::restricted([ReaderId::new("@team")]))),

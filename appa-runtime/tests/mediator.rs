@@ -224,18 +224,17 @@ url = "http://tools.internal/alpha"
         names(mediator.advertised_tools(true, true)),
         ["alpha", "zeta", EXECUTE_REMEDY_PLAN, FORK, SUBMIT_RESULT]
     );
-    assert!(mediator.advertised_tools(false, false)[0].function.parameters.is_none());
 }
 
 #[test]
-fn declared_tool_parameters_are_advertised_verbatim() {
+fn tool_parameters_are_advertised_normalized() {
     let mediator = Mediator::new(
         config(
             r#"
 version = 1
 [[tool]]
 name = "read_hr"
-parameters = { type = "object", properties = { file = { type = "string" } }, required = ["file"], additionalProperties = false }
+parameters = { type = "object", properties = { file = { type = "string" } } }
 [tool.implementation.http]
 url = "http://tools.internal/read_hr"
 [[tool]]
@@ -254,15 +253,19 @@ url = "http://tools.internal/bare"
         &json!({
             "type": "object",
             "properties": { "file": { "type": "string" } },
-            "required": ["file"],
+            "required": [],
             "additionalProperties": false
         })
     );
-    let bare = tools
-        .iter()
-        .find(|tool| tool.function.name == "bare")
-        .expect("bare is advertised");
-    assert!(bare.function.parameters.is_none());
+    assert_eq!(
+        parameters(&tools, "bare"),
+        &json!({
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": true
+        })
+    );
 }
 
 #[test]
@@ -277,7 +280,7 @@ url = "http://tools.internal/broken"
 "#;
     assert!(matches!(
         Config::from_toml_str(source),
-        Err(ConfigError::ToolParametersNotAnObject { tool }) if tool == "broken"
+        Err(ConfigError::ToolParameters { tool, .. }) if tool == "broken"
     ));
 }
 

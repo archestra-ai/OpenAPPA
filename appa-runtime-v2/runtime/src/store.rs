@@ -22,6 +22,8 @@ pub struct BatchAppend {
     pub based_on: Revision,
 }
 
+const OFFER_ROWS_CAP: i64 = 1024;
+
 /// A runtime record written in the same transaction as the event's
 /// batch, so the log and the runtime's own state can never disagree.
 #[derive(Debug, Clone, PartialEq)]
@@ -39,6 +41,7 @@ pub enum RuntimeRecord {
     PromoteDispatch { id: DispatchId },
     CloseDispatch { id: DispatchId },
     SurfaceOffer { id: OfferId, trajectory: TrajectoryId },
+    RetireOffer { id: OfferId },
 }
 
 /// Where a dispatch stands. `Awaiting`: authorized, waiting for the
@@ -270,6 +273,16 @@ impl Store {
         Ok(row)
     }
 
+    #[cfg(test)]
+    pub fn surfaced_offers(&self, trajectory: &TrajectoryId) -> Result<Vec<OfferId>, StoreError> {
+        let conn = self.lock();
+        let mut statement = conn.prepare("SELECT id FROM offers WHERE trajectory = ?1 ORDER BY rowid")?;
+        let rows = statement
+            .query_map(params![trajectory.0], |row| Ok(OfferId(row.get(0)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Commit one event's writes in one transaction: the batch append
     /// (compare-and-swap on the revision) and every runtime record, or
     /// nothing. The caller answers the hook only after this returns.
@@ -364,6 +377,14 @@ impl Store {
                         "INSERT INTO offers (id, trajectory) VALUES (?1, ?2)",
                         params![id.0, trajectory.0],
                     )?;
+                    tx.execute(
+                        "DELETE FROM offers WHERE rowid NOT IN
+                         (SELECT rowid FROM offers ORDER BY rowid DESC LIMIT ?1)",
+                        params![OFFER_ROWS_CAP],
+                    )?;
+                }
+                RuntimeRecord::RetireOffer { id } => {
+                    tx.execute("DELETE FROM offers WHERE id = ?1", params![id.0])?;
                 }
             }
         }
@@ -542,6 +563,36 @@ mod tests {
 
     fn family() -> TrajectoryId {
         TrajectoryId("cc:root".to_string())
+    }
+
+    #[test]
+    fn surfaced_offer_rows_stay_capped_at_the_oldest_expense() {
+        let (_dir, store) = open_temp();
+        store.create_root(&family()).expect("the root opens");
+        for index in 0..1030u32 {
+            store
+                .commit_event(
+                    &family(),
+                    EventWrite {
+                        batch: None,
+                        records: vec![RuntimeRecord::SurfaceOffer {
+                            id: OfferId(format!("offer-{index}")),
+                            trajectory: family(),
+                        }],
+                    },
+                )
+                .expect("the offer surfaces");
+        }
+        let rows = store.surfaced_offers(&family()).expect("the offer query runs");
+        assert_eq!(rows.len(), 1024, "the routing table stays at its cap");
+        assert!(
+            !rows.contains(&OfferId("offer-0".to_string())),
+            "the oldest row was evicted",
+        );
+        assert!(
+            rows.contains(&OfferId("offer-1029".to_string())),
+            "the newest row survives",
+        );
     }
 
     #[test]

@@ -582,7 +582,7 @@ mod tests {
     }
 
     fn call(tool: &str, args: serde_json::Value) -> ResolvedCall {
-        ResolvedCall::new(ToolName::new(tool), args, vec![])
+        ResolvedCall::new(ToolName::new(tool), crate::params::test_arguments(&args))
     }
 
     #[test]
@@ -591,6 +591,7 @@ mod tests {
             name: ToolName::new("gate"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -657,6 +658,7 @@ mod tests {
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(delta),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires::default(),
         }
@@ -914,6 +916,7 @@ mod tests {
                 trust: Some(Dim::Known(SUSPICIOUS)),
                 audience: None,
             }),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
             requires: Requires::default(),
         };
@@ -921,6 +924,7 @@ mod tests {
             name: ToolName::new("wipe"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -975,6 +979,7 @@ mod tests {
             name: ToolName::new("backup"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("backup")]).unwrap(),
             requires: Requires::default(),
         };
@@ -982,6 +987,7 @@ mod tests {
             name: ToolName::new("wipe"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -1000,6 +1006,7 @@ mod tests {
                 trust: None,
                 audience: Some(Dim::Known(a.clone()).into()),
             }),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires::default(),
         };
@@ -1007,6 +1014,7 @@ mod tests {
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -1046,6 +1054,7 @@ mod tests {
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -1090,6 +1099,7 @@ mod tests {
                 trust: None,
                 audience: Some(Dim::Known(to).into()),
             }),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires::default(),
         };
@@ -1097,6 +1107,7 @@ mod tests {
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -1133,6 +1144,7 @@ mod tests {
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -1146,6 +1158,7 @@ mod tests {
             name: ToolName::new(name),
             tags: vec![],
             delta,
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires::default(),
         };
@@ -1190,6 +1203,7 @@ mod tests {
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -1210,6 +1224,7 @@ mod tests {
                 trust: None,
                 audience: Some(AudienceDelta::Static(a.clone())),
             }),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("backup.done"), EffectKind::new("receipt")]).unwrap(),
             requires: Requires::default(),
         };
@@ -1241,6 +1256,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -1281,6 +1297,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -1369,6 +1386,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -1407,6 +1425,7 @@ mod tests {
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -1455,6 +1474,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::NoPrior(EffectKind::new("spend"))],
@@ -1489,10 +1509,12 @@ mod tests {
     }
 
     fn open_reservation(tool: &str, kinds: &[&str]) -> Fact {
-        let seed = ResolvedCall::new(ToolName::new(tool), json!({}), vec![]);
+        let seed = ResolvedCall::new(ToolName::new(tool), crate::params::test_arguments(&json!({})));
         Fact::DispatchOpened {
             trajectory: traj(),
             dispatch: crate::value::DispatchId::new(traj(), seed.digest(), 0),
+            tool: seed.tool().clone(),
+            arguments: seed.canonical_arguments().clone(),
             proposed_label: known(TRUSTED, Audience::Public),
             proposed_effects: EffectSet::new(kinds.iter().copied().map(EffectKind::new))
                 .expect("distinct generated effect kinds"),
@@ -1506,6 +1528,7 @@ mod tests {
             name: ToolName::new("guard"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::NoPrior(EffectKind::new("email.sent"))],
@@ -1543,6 +1566,7 @@ mod tests {
             name: ToolName::new("delete_db"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
@@ -1553,6 +1577,7 @@ mod tests {
             name: ToolName::new("backup"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
             requires: Requires {
                 history: vec![HistoryRequirement::NoPrior(EffectKind::new("lock"))],
@@ -1589,6 +1614,7 @@ mod tests {
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -1639,6 +1665,7 @@ mod tests {
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -1692,6 +1719,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -1748,6 +1776,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -1836,6 +1865,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -1877,6 +1907,7 @@ mod tests {
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -1891,6 +1922,7 @@ mod tests {
             name: ToolName::new("emitter"),
             tags: vec![],
             delta: None,
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("receipt")]).unwrap(),
             requires: Requires::default(),
         };
@@ -1928,6 +1960,7 @@ mod tests {
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("receipt"))],
@@ -1938,6 +1971,7 @@ mod tests {
             name: ToolName::new("emitter"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("receipt")]).unwrap(),
             requires: Requires {
                 label: LabelRequirements {
@@ -1964,7 +1998,7 @@ mod tests {
             casts: vec![],
         });
         let send = call("send", json!({}));
-        let null_rendering = ResolvedCall::new(ToolName::new("emitter"), serde_json::Value::Null, Vec::new());
+        let null_rendering = ResolvedCall::new(ToolName::new("emitter"), crate::params::test_arguments(&json!({})));
         let log = vec![
             user_value(known(SUSPICIOUS, Audience::Public)),
             denial(&null_rendering, "gate"),
@@ -1982,6 +2016,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 attention: vec![MarkName::new("signoff"), MarkName::new("signoff")],
@@ -2022,6 +2057,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -2066,6 +2102,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -2098,6 +2135,7 @@ mod tests {
                 trust: None,
                 audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
             }),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires::default(),
         };
@@ -2126,6 +2164,7 @@ mod tests {
             name: ToolName::new("delete_db"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("db.deleted")]).unwrap(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
@@ -2136,6 +2175,7 @@ mod tests {
             name: ToolName::new("backup"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
             requires: Requires::default(),
         };
@@ -2161,6 +2201,7 @@ mod tests {
             name: ToolName::new("delete_db"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
@@ -2171,6 +2212,7 @@ mod tests {
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
             requires: Requires::default(),
         };
@@ -2204,6 +2246,7 @@ mod tests {
             name: ToolName::new("delete_db"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
@@ -2214,6 +2257,7 @@ mod tests {
             name: ToolName::new("backup"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("backup.done")]).unwrap(),
             requires: Requires {
                 label: LabelRequirements {
@@ -2249,6 +2293,7 @@ mod tests {
             name: ToolName::new("archive"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("email.sent"))],
@@ -2259,6 +2304,7 @@ mod tests {
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("email.sent")]).unwrap(),
             requires: Requires {
                 label: LabelRequirements {
@@ -2290,6 +2336,7 @@ mod tests {
             name: ToolName::new("delete_db"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("backup.done"))],
@@ -2314,6 +2361,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![TagName::new("payments")],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 attention: vec![MarkName::new("signoff")],
@@ -2352,6 +2400,7 @@ mod tests {
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Requires {
                 attention: vec![MarkName::new("signoff")],
@@ -2385,6 +2434,7 @@ mod tests {
             name: ToolName::new("a"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("ka")]).unwrap(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("kb"))],
@@ -2395,6 +2445,7 @@ mod tests {
             name: ToolName::new("b"),
             tags: vec![],
             delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("kb")]).unwrap(),
             requires: Requires {
                 history: vec![HistoryRequirement::Prior(EffectKind::new("ka"))],
@@ -2581,6 +2632,7 @@ mod tests {
                     name: name.clone(),
                     tags: vec![],
                     delta,
+                    parameters: crate::params::ToolParameters::open(),
                     emits: EffectSet::new(emits).expect("a btree_set draw is distinct"),
                     requires,
                 }
@@ -2622,7 +2674,7 @@ mod tests {
     }
 
     fn synthetic_call(tool: &ToolContract) -> ResolvedCall {
-        ResolvedCall::new(tool.name.clone(), serde_json::Value::Null, Vec::new())
+        ResolvedCall::new(tool.name.clone(), crate::params::test_arguments(&json!({})))
     }
 
     fn a_sanitizer(index: usize) -> impl Strategy<Value = Sanitizer> {
@@ -3046,7 +3098,11 @@ mod tests {
     fn committed_effect(kind: EffectKind) -> Fact {
         let dispatch = crate::value::DispatchId::new(
             traj(),
-            ResolvedCall::new(ToolName::new("seed"), json!({ "k": kind.as_str() }), vec![]).digest(),
+            ResolvedCall::new(
+                ToolName::new("seed"),
+                crate::params::test_arguments(&json!({ "k": kind.as_str() })),
+            )
+            .digest(),
             0,
         );
         Fact::DispatchClosed {

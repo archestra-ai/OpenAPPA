@@ -137,6 +137,59 @@ async fn spawn_dynamic_resolver(
     (format!("http://{addr}/resolve"), requests, server)
 }
 
+#[test]
+fn bind_tools_advertises_the_compiled_normalized_schema() {
+    let mut session = open(
+        r#"
+version = 1
+[[tool]]
+name = "typed"
+parameters = { type = "object", properties = { file = { type = "string" } } }
+[[tool]]
+name = "bare"
+"#,
+    );
+    let divergent = appa_runtime::WireTool {
+        kind: "function".into(),
+        function: appa_runtime::WireToolSchema {
+            name: "typed".into(),
+            description: Some("host description".into()),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": { "anything": { "type": "integer" } }
+            })),
+        },
+    };
+    let bound = session.bind_tools(vec![divergent, tool_schema("bare")]).unwrap();
+    let schema = |name: &str| {
+        &bound
+            .iter()
+            .find(|tool| tool.function.name == name)
+            .expect("the bound surface carries the tool")
+            .function
+    };
+    let typed = schema("typed");
+    assert_eq!(typed.description.as_deref(), Some("host description"));
+    assert_eq!(
+        typed.parameters,
+        Some(serde_json::json!({
+            "type": "object",
+            "properties": { "file": { "type": "string" } },
+            "required": [],
+            "additionalProperties": false
+        }))
+    );
+    assert_eq!(
+        schema("bare").parameters,
+        Some(serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": true
+        }))
+    );
+}
+
 #[tokio::test]
 async fn the_sdk_resolves_source_and_sink_audiences_and_pins_the_source_answer() {
     let (url, requests, server) = spawn_dynamic_resolver(vec![

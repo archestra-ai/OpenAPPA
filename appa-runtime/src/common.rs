@@ -7,11 +7,12 @@ use appa_engine::check::CheckOutcome;
 use appa_engine::contract::{
     AudienceDelta, AudienceRequirement, DynamicAudienceBinding, PinnedDynamicResolution, RecipientSpec, ToolContract,
 };
-use appa_engine::engine::Engine;
+use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::Ruling;
 use appa_engine::fact::{BoundaryKind, Fact, FactBatch, ReturnPolicy};
 use appa_engine::label::Label;
 use appa_engine::names::{AuthorityName, DynamicResolverName};
+use appa_engine::params::ArgumentError;
 use appa_engine::projection::Projection;
 use appa_engine::value::{
     CanonicalDigest, DispatchId, LabeledValue, Provenance, ResolvedCall, ToolName, TrajectoryId, ValueBody,
@@ -152,6 +153,14 @@ impl Core {
             }
         }
         let mut bound = surface;
+        for tool in &mut bound {
+            let contract = self
+                .engine
+                .registry()
+                .tool(&ToolName::new(tool.function.name.clone()))
+                .expect("the surface names only registered tools");
+            tool.function.parameters = Some(contract.parameters.normalized());
+        }
         bound.push(remedy_tool_schema());
         self.tools = Some(bound);
         Ok(self.tools.as_deref().expect("just bound"))
@@ -354,11 +363,7 @@ impl Core {
                     "an authority for this plan is not configured".to_string(),
                 ));
             };
-            let Ok(request) = AuthorityRequest::new(req.authority.clone(), &call, req.covers.clone(), &views) else {
-                return Ok(Remedied::Feedback(
-                    "the call's argument references no longer resolve".to_string(),
-                ));
-            };
+            let request = AuthorityRequest::new(req.authority.clone(), &call, req.covers.clone(), &views);
             // Awaited outside any store lock; a slow or unreachable authority fails closed.
             let answer = tokio::time::timeout(self.options.per_external_timeout, backend.rule(&request))
                 .await
@@ -603,6 +608,41 @@ fn validate_policy(config: &Config) -> Result<(), OpenError> {
     Ok(())
 }
 
+/// Render one host-parsed call against its schema. The SDK path: the host hands a
+/// parsed value, so this deprecated adapter first renders it back to bytes. The engine still owns
+/// the only call constructor and applies the registered contract.
+pub(crate) fn resolve_call(
+    engine: &Engine,
+    tool: ToolName,
+    arguments: &serde_json::Value,
+) -> Result<ResolvedCall, EngineError> {
+    let raw = serde_json::to_vec(arguments)
+        .map_err(|error| EngineError::InvalidCall(ArgumentError::Syntax(error.to_string())))?;
+    engine.resolve_call(tool, &raw)
+}
+
+/// Render one wire proposal from the provider's raw argument text: the strict scanner
+/// sees the bytes themselves, so duplicate keys and trailing data are refused rather than
+/// collapsed by a lossy parse.
+pub(crate) fn resolve_raw_call(engine: &Engine, tool: ToolName, raw: &[u8]) -> Result<ResolvedCall, EngineError> {
+    engine.resolve_call(tool, raw)
+}
+
+pub(crate) fn invalid_call_feedback(error: &EngineError) -> String {
+    error.to_string()
+}
+
+#[cfg(test)]
+pub(crate) fn test_call(tool: &str, arguments: serde_json::Value) -> ResolvedCall {
+    let policy = format!("version = 1\n[[tool]]\nname = {tool:?}\n");
+    let config = Config::from_toml_str(&policy).expect("the test tool policy loads");
+    let engine = Engine::new(config.registry().clone());
+    let raw = serde_json::to_vec(&arguments).expect("test arguments serialize");
+    engine
+        .resolve_call(ToolName::new(tool), &raw)
+        .expect("test arguments are dialect-valid")
+}
+
 /// Every distinct dynamic audience binding one proposed call consumes, in contract order. A
 /// source delta and sink requirement may deliberately share one binding; one proposal resolves it
 /// once and pins that answer for both uses.
@@ -711,7 +751,12 @@ implementation = {{ resolver = {{ url = "{url}", timeout_ms = 2000 }} }}
         let config = Config::from_toml_str(&policy).expect("policy parses");
         let mut core = Core::open(config, SdkOptions::default()).expect("policy is SDK-supported");
         core.admit_user_turn("send it".to_string()).unwrap();
-        let send = ResolvedCall::new(ToolName::new("send_email"), serde_json::json!({"to": "x"}), Vec::new());
+        let send = resolve_call(
+            &core.engine,
+            ToolName::new("send_email"),
+            &serde_json::json!({"to": "x"}),
+        )
+        .expect("arguments are dialect-valid");
         let Checked::Feedback(_) = core.check_ordinary(send.clone()).unwrap() else {
             panic!("the send blocks on its trust floor");
         };

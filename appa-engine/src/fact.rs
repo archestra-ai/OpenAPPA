@@ -160,6 +160,8 @@ pub enum Fact {
     DispatchOpened {
         trajectory: TrajectoryId,
         dispatch: DispatchId,
+        tool: ToolName,
+        arguments: crate::params::CanonicalArguments,
         proposed_label: Label,
         proposed_effects: EffectSet,
         #[serde(default)]
@@ -337,7 +339,10 @@ mod tests {
 
     #[test]
     fn a_denial_fact_round_trips_through_serde() {
-        let call = ResolvedCall::new(ToolName::new("wire"), json!({"to": "hr"}), vec![]);
+        let call = ResolvedCall::new(
+            ToolName::new("wire"),
+            crate::params::test_arguments(&json!({"to": "hr"})),
+        );
         let fact = Fact::Denial {
             trajectory: TrajectoryId::new("t"),
             digest: call.digest(),

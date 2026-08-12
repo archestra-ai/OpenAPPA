@@ -177,10 +177,16 @@ pub struct Requires {
     pub attention: Vec<MarkName>,
 }
 
+/// A tool contract: name, routing tags, the compiled input schema, and the three
+/// algebraic slots.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolContract {
     pub name: ToolName,
     pub tags: Vec<TagName>,
+    /// The compiled, normalized `APPA Tool Parameters v1` schema — part of policy identity.
+    /// Omitted `parameters` normalizes to the permissive open object.
+    #[serde(default = "crate::params::ToolParameters::open")]
+    pub parameters: crate::params::ToolParameters,
     /// The declared output contribution, or `None`: **unannotated** — results are admitted at
     /// `Unknown` in both dimensions (see [`Delta`]). `Some(Delta::NONE)` is the deliberate neutral
     /// annotation; the two are not interchangeable.

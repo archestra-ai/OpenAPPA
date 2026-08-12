@@ -174,10 +174,11 @@ constrains the mechanism vocabulary (no trait acrobatics, no `dyn`, no
 type-level programming); type-first design constrains the data vocabulary
 (invariants live in the shape of data). They compose: `Label::combine` only
 ever narrows, `CastResolution` is an enum, `ResolvedCall` derives its digest
-instead of storing it, and `AuthorityRequest` has private fields behind a
-validating constructor — so a permissive delta, a cast that is both constant
-and resolver-backed, a digest belonging to different arguments, and a
-request naming a dangling reference are each unrepresentable. Enums,
+instead of storing it, and `CanonicalArguments` derives its RFC 8785 bytes
+from the one validated value — so a permissive delta, a cast that is both
+constant and resolver-backed, a digest belonging to different arguments, and
+a payload disagreeing with its own canonical bytes are each unrepresentable.
+Enums,
 visibility and validated constructors do the enforcement; no typestate
 generics anywhere.
 

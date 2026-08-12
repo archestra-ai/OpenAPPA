@@ -18,6 +18,7 @@ COPY appa-agent-python appa-agent-python
 COPY appa-dojo-sidecar appa-dojo-sidecar
 COPY appa-engine appa-engine
 COPY appa-gateway appa-gateway
+COPY appa-policy appa-policy
 COPY appa-runtime appa-runtime
 COPY appa-runtime-v2 appa-runtime-v2
 COPY appa-sdk appa-sdk

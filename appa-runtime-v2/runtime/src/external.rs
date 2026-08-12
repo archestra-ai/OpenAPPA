@@ -11,8 +11,6 @@ use crate::config::{Endpoint, Externals};
 pub enum ConsultKind {
     Authority,
     Sanitizer,
-    Cast,
-    Membership,
 }
 
 impl ConsultKind {
@@ -20,8 +18,6 @@ impl ConsultKind {
         match self {
             ConsultKind::Authority => "authority",
             ConsultKind::Sanitizer => "sanitizer",
-            ConsultKind::Cast => "cast",
-            ConsultKind::Membership => "membership",
         }
     }
 }
@@ -177,8 +173,6 @@ impl ExternalServices {
         let map = match kind {
             ConsultKind::Authority => &self.config.authorities,
             ConsultKind::Sanitizer => &self.config.sanitizers,
-            ConsultKind::Cast => &self.config.casts,
-            ConsultKind::Membership => &self.config.memberships,
         };
         map.get(name)
     }
@@ -271,8 +265,6 @@ mod tests {
             max_body_bytes: cap,
             authorities: BTreeMap::new(),
             sanitizers: BTreeMap::new(),
-            casts: BTreeMap::new(),
-            memberships: BTreeMap::new(),
             dynamic: dynamic_url.map(|url| Endpoint { url, token: None }),
         })
     }
@@ -462,8 +454,6 @@ mod tests {
             max_body_bytes: 65536,
             authorities,
             sanitizers: BTreeMap::new(),
-            casts: BTreeMap::new(),
-            memberships: BTreeMap::new(),
             dynamic: None,
         });
         let outcome = services
@@ -481,45 +471,41 @@ mod tests {
         let services = services(None, 2000, 65536);
         assert_eq!(
             services
-                .consult(ConsultKind::Membership, "directory", &serde_json::json!({}))
+                .consult(ConsultKind::Authority, "directory", &serde_json::json!({}))
                 .await,
             ConsultOutcome::NoAnswer(NoAnswerReason::Unregistered),
         );
 
         let url = stub(Router::new().route("/", post(|| async { (axum::http::StatusCode::FORBIDDEN, "nope") }))).await;
-        let mut memberships = BTreeMap::new();
-        memberships.insert("directory".to_string(), Endpoint { url, token: None });
+        let mut authorities = BTreeMap::new();
+        authorities.insert("directory".to_string(), Endpoint { url, token: None });
         let services = ExternalServices::new(Externals {
             timeout: Duration::from_millis(2000),
             max_body_bytes: 65536,
-            authorities: BTreeMap::new(),
+            authorities,
             sanitizers: BTreeMap::new(),
-            casts: BTreeMap::new(),
-            memberships,
             dynamic: None,
         });
         assert_eq!(
             services
-                .consult(ConsultKind::Membership, "directory", &serde_json::json!({}))
+                .consult(ConsultKind::Authority, "directory", &serde_json::json!({}))
                 .await,
             ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess { status: 403 }),
         );
 
         let url = stub(Router::new().route("/", post(|| async { "not json" }))).await;
-        let mut casts = BTreeMap::new();
-        casts.insert("channel".to_string(), Endpoint { url, token: None });
+        let mut sanitizers = BTreeMap::new();
+        sanitizers.insert("channel".to_string(), Endpoint { url, token: None });
         let services = ExternalServices::new(Externals {
             timeout: Duration::from_millis(2000),
             max_body_bytes: 65536,
             authorities: BTreeMap::new(),
-            sanitizers: BTreeMap::new(),
-            casts,
-            memberships: BTreeMap::new(),
+            sanitizers,
             dynamic: None,
         });
         assert_eq!(
             services
-                .consult(ConsultKind::Cast, "channel", &serde_json::json!({}))
+                .consult(ConsultKind::Sanitizer, "channel", &serde_json::json!({}))
                 .await,
             ConsultOutcome::NoAnswer(NoAnswerReason::Malformed),
         );

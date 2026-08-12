@@ -179,7 +179,7 @@ mod tests {
     use super::*;
     use appa_engine::fact::ReturnPolicy;
     use appa_engine::label::{Audience, Dim, Label, Trust};
-    use appa_engine::value::{ChildReturnId, DispatchId, LabeledValue, ResolvedCall, ToolName, ValueBody};
+    use appa_engine::value::{ChildReturnId, DispatchId, LabeledValue, ToolName, ValueBody};
     use serde_json::json;
 
     fn traj() -> TrajectoryId {
@@ -222,7 +222,7 @@ mod tests {
     }
 
     fn tool_result(text: &str, tool: &str, args: serde_json::Value) -> Fact {
-        let call = ResolvedCall::new(ToolName::new(tool), args, vec![]);
+        let call = crate::common::test_call(tool, args);
         Fact::ValueAdmitted {
             trajectory: traj(),
             value: LabeledValue::new(ValueBody::new(text), public(0)),

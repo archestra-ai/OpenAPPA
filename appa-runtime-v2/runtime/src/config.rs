@@ -10,24 +10,21 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// The policy, opaque to the runtime. Handed to the engine at
-    /// open; the runtime never interprets it.
+    /// The policy value as authored, preserved verbatim; compiled
+    /// into the engine's registry at `Runtime::open`.
     pub policy: toml::Value,
     pub externals: Externals,
 }
 
 /// The external-service endpoints: authorities, sanitizers,
-/// cast resolvers, membership resolvers, and the dynamic resolver.
-/// Every call carries an explicit timeout and byte cap and fails
-/// closed.
+/// and the dynamic resolver. Every call carries an explicit timeout
+/// and byte cap and fails closed.
 #[derive(Debug, Clone)]
 pub struct Externals {
     pub timeout: Duration,
     pub max_body_bytes: usize,
     pub authorities: BTreeMap<String, Endpoint>,
     pub sanitizers: BTreeMap<String, Endpoint>,
-    pub casts: BTreeMap<String, Endpoint>,
-    pub memberships: BTreeMap<String, Endpoint>,
     pub dynamic: Option<Endpoint>,
 }
 
@@ -115,10 +112,6 @@ struct RawExternals {
     authorities: BTreeMap<String, RawEndpoint>,
     #[serde(default)]
     sanitizers: BTreeMap<String, RawEndpoint>,
-    #[serde(default)]
-    casts: BTreeMap<String, RawEndpoint>,
-    #[serde(default)]
-    memberships: BTreeMap<String, RawEndpoint>,
     dynamic: Option<RawEndpoint>,
 }
 
@@ -156,8 +149,6 @@ impl Config {
                 max_body_bytes: raw.externals.max_body_bytes,
                 authorities: resolve_endpoints("authorities", raw.externals.authorities, &lookup)?,
                 sanitizers: resolve_endpoints("sanitizers", raw.externals.sanitizers, &lookup)?,
-                casts: resolve_endpoints("casts", raw.externals.casts, &lookup)?,
-                memberships: resolve_endpoints("memberships", raw.externals.memberships, &lookup)?,
                 dynamic: raw
                     .externals
                     .dynamic

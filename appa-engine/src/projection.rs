@@ -444,7 +444,7 @@ mod tests {
     }
 
     fn dispatch(t: &str) -> DispatchId {
-        let call = ResolvedCall::new(ToolName::new("tool"), json!({ "t": t }), vec![]);
+        let call = ResolvedCall::new(ToolName::new("tool"), crate::params::test_arguments(&json!({ "t": t })));
         DispatchId::new(traj(t), call.digest(), 0)
     }
 
@@ -476,6 +476,8 @@ mod tests {
             Fact::DispatchOpened {
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
+                tool: ToolName::new("tool"),
+                arguments: crate::params::test_arguments(&json!({ "t": "a" })),
                 proposed_label: Label::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 dynamic_resolutions: Vec::new(),
@@ -500,6 +502,8 @@ mod tests {
             Fact::DispatchOpened {
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
+                tool: ToolName::new("tool"),
+                arguments: crate::params::test_arguments(&json!({ "t": "a" })),
                 proposed_label: Label::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 dynamic_resolutions: Vec::new(),
@@ -523,6 +527,8 @@ mod tests {
             Fact::DispatchOpened {
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
+                tool: ToolName::new("tool"),
+                arguments: crate::params::test_arguments(&json!({ "t": "a" })),
                 proposed_label: Label::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 dynamic_resolutions: Vec::new(),
@@ -543,8 +549,14 @@ mod tests {
     fn a_denial_scopes_to_its_trajectory_and_rendered_call() {
         use crate::names::AuthorityName;
 
-        let wire = ResolvedCall::new(ToolName::new("wire"), json!({"amount": 5}), vec![]);
-        let other = ResolvedCall::new(ToolName::new("wire"), json!({"amount": 6}), vec![]);
+        let wire = ResolvedCall::new(
+            ToolName::new("wire"),
+            crate::params::test_arguments(&json!({"amount": 5})),
+        );
+        let other = ResolvedCall::new(
+            ToolName::new("wire"),
+            crate::params::test_arguments(&json!({"amount": 6})),
+        );
         let log = vec![Fact::Denial {
             trajectory: traj("a"),
             digest: wire.digest(),
@@ -564,7 +576,7 @@ mod tests {
     fn a_child_inherits_denials_recorded_before_its_fork_and_not_after() {
         use crate::names::AuthorityName;
 
-        let wire = ResolvedCall::new(ToolName::new("wire"), json!({}), vec![]);
+        let wire = ResolvedCall::new(ToolName::new("wire"), crate::params::test_arguments(&json!({})));
         let denial = |t: &str, authority: &str| Fact::Denial {
             trajectory: traj(t),
             digest: wire.digest(),

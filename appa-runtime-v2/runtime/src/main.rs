@@ -32,9 +32,6 @@ struct Args {
     #[arg(long, value_enum, default_value_t = Adapter::ClaudeCode)]
     adapter: Adapter,
 
-    #[arg(long, value_enum, default_value_t = Mock::Permissive)]
-    mock: Mock,
-
     #[arg(short, action = clap::ArgAction::Count)]
     verbose: u8,
 }
@@ -60,12 +57,6 @@ impl Adapter {
             Adapter::ClaudeCode => appa_adapter_claude_code::codec(),
         }
     }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-enum Mock {
-    Permissive,
-    Offer,
 }
 
 fn log_level(verbose: u8) -> &'static str {
@@ -116,11 +107,7 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let opened = match args.mock {
-        Mock::Permissive => Runtime::open(config, args.db),
-        Mock::Offer => Runtime::open_offer_mode(config, args.db),
-    };
-    let runtime = match opened {
+    let runtime = match Runtime::open(config, args.db) {
         Ok(runtime) => Arc::new(runtime),
         Err(error) => {
             eprintln!("appa-runtime-v2: {error}");

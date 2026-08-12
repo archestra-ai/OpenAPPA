@@ -1403,11 +1403,13 @@ mod tests {
     fn abandoned_child_egress_is_visible_to_the_parent() {
         let mut log = forked(known(TRUSTED, Audience::Public));
         let egress = EffectKind::new("egress");
-        let call = ResolvedCall::new(ToolName::new("send"), json!({}), vec![]);
+        let call = ResolvedCall::new(ToolName::new("send"), crate::params::test_arguments(&json!({})));
         let dispatch = DispatchId::new(child(), call.digest(), 0);
         log.push(Fact::DispatchOpened {
             trajectory: child(),
             dispatch: dispatch.clone(),
+            tool: call.tool().clone(),
+            arguments: call.canonical_arguments().clone(),
             proposed_label: Label::top(),
             proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
             dynamic_resolutions: Vec::new(),
@@ -1427,11 +1429,13 @@ mod tests {
     fn an_in_flight_child_dispatch_reserves_against_the_parent() {
         let mut log = forked(known(TRUSTED, Audience::Public));
         let egress = EffectKind::new("egress");
-        let call = ResolvedCall::new(ToolName::new("send"), json!({}), vec![]);
+        let call = ResolvedCall::new(ToolName::new("send"), crate::params::test_arguments(&json!({})));
         let dispatch = DispatchId::new(child(), call.digest(), 0);
         log.push(Fact::DispatchOpened {
             trajectory: child(),
             dispatch: dispatch.clone(),
+            tool: call.tool().clone(),
+            arguments: call.canonical_arguments().clone(),
             proposed_label: Label::top(),
             proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
             dynamic_resolutions: Vec::new(),

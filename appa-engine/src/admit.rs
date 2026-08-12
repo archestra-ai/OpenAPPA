@@ -431,6 +431,7 @@ mod tests {
                 trust: Some(Dim::Known(SUSPICIOUS)),
                 audience: Some(Dim::Known(internal()).into()),
             }),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
             requires: Default::default(),
         };
@@ -482,6 +483,7 @@ mod tests {
                 trust: Some(Dim::Unknown),
                 audience: Some(Dim::Known(internal()).into()),
             }),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
             requires: Default::default(),
         };
@@ -492,6 +494,7 @@ mod tests {
                 trust: Some(Dim::Known(SUSPICIOUS)),
                 audience: Some(Dim::Unknown.into()),
             }),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
             requires: Default::default(),
         };
@@ -502,6 +505,7 @@ mod tests {
                 trust: Some(Dim::Unknown),
                 audience: Some(AudienceDelta::Dynamic(dynamic_binding())),
             }),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
             requires: Default::default(),
         };
@@ -516,11 +520,11 @@ mod tests {
     }
 
     fn scan_call() -> ResolvedCall {
-        ResolvedCall::new(ToolName::new("scan_inbox"), json!({}), vec![])
+        ResolvedCall::new(ToolName::new("scan_inbox"), crate::params::test_arguments(&json!({})))
     }
 
     fn get_call() -> ResolvedCall {
-        ResolvedCall::new(ToolName::new("get_ticket"), json!({}), vec![])
+        ResolvedCall::new(ToolName::new("get_ticket"), crate::params::test_arguments(&json!({})))
     }
 
     fn open_log(call: &ResolvedCall) -> (Vec<Fact>, DispatchId) {
@@ -528,6 +532,8 @@ mod tests {
         let log = vec![Fact::DispatchOpened {
             trajectory: traj(),
             dispatch: dispatch.clone(),
+            tool: call.tool().clone(),
+            arguments: call.canonical_arguments().clone(),
             proposed_label: Label::top(),
             proposed_effects: EffectSet::new([EffectKind::new("read")]).unwrap(),
             dynamic_resolutions: Vec::new(),
@@ -630,7 +636,10 @@ mod tests {
         let (log, dispatch) = open_log(&call);
         let p = views_of(&log);
         let t = traj();
-        let other = ResolvedCall::new(ToolName::new("get_ticket"), json!({ "x": 1 }), vec![]);
+        let other = ResolvedCall::new(
+            ToolName::new("get_ticket"),
+            crate::params::test_arguments(&json!({ "x": 1 })),
+        );
         assert_eq!(
             admit_result(&reg, &p.view(&t), &dispatch, &other, ResultAdmission::SuccessNoValue),
             Err(AdmitError::DigestMismatch)
@@ -778,7 +787,7 @@ mod tests {
     #[test]
     fn an_audience_resolution_is_bounded_at_the_engine_not_the_wire() {
         let reg = registry();
-        let call = ResolvedCall::new(ToolName::new("poll_room"), json!({}), vec![]);
+        let call = ResolvedCall::new(ToolName::new("poll_room"), crate::params::test_arguments(&json!({})));
         let (log, dispatch) = open_log(&call);
         let t = traj();
         let attempt = |resolved: DimValue| {
@@ -815,6 +824,7 @@ mod tests {
                 trust: None,
                 audience: Some(Dim::Unknown.into()),
             }),
+            parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
             requires: Default::default(),
         };
@@ -835,7 +845,7 @@ mod tests {
             casts: vec![librarian],
         })
         .unwrap();
-        let call = ResolvedCall::new(ToolName::new("fetch_page"), json!({}), vec![]);
+        let call = ResolvedCall::new(ToolName::new("fetch_page"), crate::params::test_arguments(&json!({})));
         let (log, dispatch) = open_log(&call);
         let t = traj();
         let attempt = |resolved: Audience| {
@@ -868,7 +878,7 @@ mod tests {
     #[test]
     fn an_audience_pending_cast_follows_the_same_acceptance_discipline() {
         let reg = registry();
-        let call = ResolvedCall::new(ToolName::new("poll_room"), json!({}), vec![]);
+        let call = ResolvedCall::new(ToolName::new("poll_room"), crate::params::test_arguments(&json!({})));
         let (log, dispatch) = open_log(&call);
         let t = traj();
         let p = views_of(&log);
@@ -916,15 +926,20 @@ mod tests {
     fn a_dynamic_audience_survives_trust_cast_acceptance_and_admission() {
         let reg = registry();
         let binding = dynamic_binding();
-        let call = ResolvedCall::new(ToolName::new("dynamic_scan"), json!({ "room": "internal" }), vec![])
-            .with_dynamic_resolutions(vec![PinnedDynamicResolution::from_answer(
-                binding.clone(),
-                Some(Audience::restricted([ReaderId::new("finance")])),
-            )]);
+        let call = ResolvedCall::new(
+            ToolName::new("dynamic_scan"),
+            crate::params::test_arguments(&json!({ "room": "internal" })),
+        )
+        .with_dynamic_resolutions(vec![PinnedDynamicResolution::from_answer(
+            binding.clone(),
+            Some(Audience::restricted([ReaderId::new("finance")])),
+        )]);
         let dispatch = DispatchId::new(traj(), call.digest(), 0);
         let log = vec![Fact::DispatchOpened {
             trajectory: traj(),
             dispatch: dispatch.clone(),
+            tool: call.tool().clone(),
+            arguments: call.canonical_arguments().clone(),
             proposed_label: Label::top(),
             proposed_effects: EffectSet::new([EffectKind::new("read")]).unwrap(),
             dynamic_resolutions: vec![PinnedDynamicResolution::from_answer(binding, Some(internal()))],

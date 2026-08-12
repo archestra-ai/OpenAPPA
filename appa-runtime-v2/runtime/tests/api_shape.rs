@@ -20,8 +20,7 @@ fn the_reexported_vocabulary(
 }
 
 fn the_declared_runtime(config: Config, db: PathBuf) {
-    let opened: Result<Runtime, OpenError> = Runtime::open(config.clone(), db.clone());
-    let _offer_mode: Result<Runtime, OpenError> = Runtime::open_offer_mode(config, db);
+    let opened: Result<Runtime, OpenError> = Runtime::open(config, db);
     drop(opened);
 }
 

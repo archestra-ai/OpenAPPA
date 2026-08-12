@@ -30,9 +30,7 @@ use crate::external::{
 };
 use crate::mediator::{ForkedSession, Mediator};
 use crate::store::{StoreError, StoreIdentity, TenantId};
-use crate::tool::{
-    BodyDisposition, DEFAULT_BODY_CAP_BYTES, EXECUTE_REMEDY_PLAN, FORK, RenderedCall, SUBMIT_RESULT, ToolOutcome,
-};
+use crate::tool::{BodyDisposition, DEFAULT_BODY_CAP_BYTES, EXECUTE_REMEDY_PLAN, FORK, SUBMIT_RESULT, ToolOutcome};
 use crate::transcript::model_transcript;
 use crate::wire::{WireMessage, WireTool, WireToolCall};
 
@@ -283,7 +281,15 @@ struct PendingCast {
 
 struct Proposal {
     call: ProposedCall,
-    malformed: bool,
+    raw: String,
+    disposition: ArgumentDisposition,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArgumentDisposition {
+    Parsed,
+    Malformed,
+    Oversized,
 }
 
 #[derive(Clone)]
@@ -515,14 +521,26 @@ impl Turn {
                 self.feedback(&proposal.call.id, POLICY_STOP_BUDGET)?;
                 continue;
             }
-            if proposal.malformed {
-                self.feedback(
-                    &proposal.call.id,
-                    "the tool call had malformed arguments and was not executed",
-                )?;
-                continue;
+            match proposal.disposition {
+                ArgumentDisposition::Malformed => {
+                    self.feedback(
+                        &proposal.call.id,
+                        "the tool call had malformed arguments and was not executed",
+                    )?;
+                    continue;
+                }
+                ArgumentDisposition::Oversized => {
+                    self.feedback(
+                        &proposal.call.id,
+                        &crate::common::invalid_call_feedback(&appa_engine::engine::EngineError::InvalidCall(
+                            appa_engine::params::ArgumentError::TooLarge,
+                        )),
+                    )?;
+                    continue;
+                }
+                ArgumentDisposition::Parsed => {}
             }
-            match self.handle_call(&proposal.call, budget).await? {
+            match self.handle_call(proposal, budget).await? {
                 CallProgress::Go => {}
                 CallProgress::Stop => budget_hit = true,
                 CallProgress::Cancelled => return self.finish_cancelled(),
@@ -567,7 +585,9 @@ impl Turn {
 
     fn mediate_fork_round(&mut self, proposals: Vec<Proposal>) -> Result<Step, TurnError> {
         let valid_task = match proposals.as_slice() {
-            [proposal] if !proposal.malformed && proposal.call.tool.as_str() == FORK => {
+            [proposal]
+                if proposal.disposition == ArgumentDisposition::Parsed && proposal.call.tool.as_str() == FORK =>
+            {
                 exact_nonempty_task(&proposal.call.arguments)
             }
             _ => None,
@@ -620,11 +640,8 @@ impl Turn {
         Ok(Step::Continue)
     }
 
-    async fn handle_call(
-        &mut self,
-        proposed: &ProposedCall,
-        budget: &mut RunBudget,
-    ) -> Result<CallProgress, TurnError> {
+    async fn handle_call(&mut self, proposal: &Proposal, budget: &mut RunBudget) -> Result<CallProgress, TurnError> {
+        let proposed = &proposal.call;
         match proposed.tool.as_str() {
             EXECUTE_REMEDY_PLAN => {
                 self.handle_execute_remedy(&proposed.id, &proposed.arguments, budget)
@@ -635,7 +652,17 @@ impl Turn {
                     .await
             }
             _ => {
-                let call = ResolvedCall::new(proposed.tool.clone(), proposed.arguments.clone(), Vec::new());
+                let call = match crate::common::resolve_raw_call(
+                    self.mediator.engine(),
+                    proposed.tool.clone(),
+                    proposal.raw.as_bytes(),
+                ) {
+                    Ok(call) => call,
+                    Err(error) => {
+                        self.feedback(&proposed.id, &crate::common::invalid_call_feedback(&error))?;
+                        return Ok(CallProgress::Go);
+                    }
+                };
                 let call = match self.resolve_dynamic_call(call, budget).await {
                     Some(call) => call,
                     None => return Ok(CallProgress::Cancelled),
@@ -868,13 +895,7 @@ impl Turn {
                 return Ok(CallProgress::Go);
             };
             let request =
-                match AuthorityRequest::new(requirement.authority.clone(), &call, requirement.covers.clone(), &views) {
-                    Ok(request) => request,
-                    Err(_) => {
-                        self.feedback(call_id, "the call's argument references no longer resolve")?;
-                        return Ok(CallProgress::Go);
-                    }
-                };
+                AuthorityRequest::new(requirement.authority.clone(), &call, requirement.covers.clone(), &views);
             let answer = match self.wait(budget, backend.rule(&request)).await {
                 Err(TurnCancelled) => return Ok(CallProgress::Cancelled),
                 Ok(answer) => answer.unwrap_or(AuthorityAnswer::Abstain),
@@ -1666,10 +1687,9 @@ impl Turn {
             call: call.clone(),
             close: CancelClose::Unobserved,
         });
-        let rendered = RenderedCall::from_call(call);
         let outcome = match self.mediator.tool_backend(call.tool()) {
             Some(backend) => {
-                let invoke = backend.invoke(&rendered, budget.limits.body_cap_bytes);
+                let invoke = backend.invoke(call, budget.limits.body_cap_bytes);
                 match self.wait(budget, invoke).await {
                     Err(TurnCancelled) => return Ok(CallProgress::Cancelled),
                     Ok(outcome) => outcome.unwrap_or(ToolOutcome::Indeterminate),
@@ -2056,21 +2076,27 @@ fn exact_nonempty_task(arguments: &serde_json::Value) -> Option<String> {
 
 fn proposal_of(call: &WireToolCall) -> Proposal {
     let trimmed = call.function.arguments.trim();
-    let (arguments, malformed) = if trimmed.is_empty() {
-        (serde_json::json!({}), false)
-    } else {
-        match serde_json::from_str(trimmed) {
-            Ok(value) => (value, false),
-            Err(_) => (serde_json::json!({}), true),
-        }
+    let proposed = |arguments| ProposedCall {
+        id: ToolCallId::new(call.id.clone()),
+        tool: ToolName::new(call.function.name.clone()),
+        arguments,
+    };
+    if trimmed.len() > appa_engine::params::MAX_ARGUMENT_BYTES {
+        return Proposal {
+            call: proposed(serde_json::json!({})),
+            raw: "{}".to_string(),
+            disposition: ArgumentDisposition::Oversized,
+        };
+    }
+    let raw = if trimmed.is_empty() { "{}" } else { trimmed };
+    let (arguments, disposition) = match serde_json::from_str(raw) {
+        Ok(value) => (value, ArgumentDisposition::Parsed),
+        Err(_) => (serde_json::json!({}), ArgumentDisposition::Malformed),
     };
     Proposal {
-        call: ProposedCall {
-            id: ToolCallId::new(call.id.clone()),
-            tool: ToolName::new(call.function.name.clone()),
-            arguments,
-        },
-        malformed,
+        call: proposed(arguments),
+        raw: raw.to_string(),
+        disposition,
     }
 }
 

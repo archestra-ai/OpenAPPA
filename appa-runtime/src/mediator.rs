@@ -266,13 +266,7 @@ impl Mediator {
             .engine
             .registry()
             .tools()
-            .map(|contract| {
-                policy_tool_schema(
-                    contract,
-                    self.engine.registry().trust_chain(),
-                    self.config.tool_parameters(&contract.name).cloned(),
-                )
-            })
+            .map(|contract| policy_tool_schema(contract, self.engine.registry().trust_chain()))
             .collect();
         tools.push(remedy_tool_schema(can_fork));
         if can_fork {
@@ -355,17 +349,13 @@ fn is_reserved(name: &str) -> bool {
     matches!(name, EXECUTE_REMEDY_PLAN | FORK | SUBMIT_RESULT)
 }
 
-fn policy_tool_schema(
-    contract: &ToolContract,
-    trust_chain: &TrustChain,
-    parameters: Option<serde_json::Value>,
-) -> WireTool {
+fn policy_tool_schema(contract: &ToolContract, trust_chain: &TrustChain) -> WireTool {
     WireTool {
         kind: "function".to_string(),
         function: WireToolSchema {
             name: contract.name.as_str().to_string(),
             description: Some(policy_description(contract, trust_chain)),
-            parameters,
+            parameters: Some(contract.parameters.normalized()),
         },
     }
 }
