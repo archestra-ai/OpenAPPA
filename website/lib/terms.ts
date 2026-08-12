@@ -45,7 +45,7 @@ const TERMS = {
   suspicious:
     "Data from an unvetted source, like external web content. Once ingested, the run stays suspicious.",
   public:
-    "The reserved audience state meaning everyone: the complete reader universe, not a reader ID. An agent with public reach can send data to any outbound destination. Never a group member.",
+    "The reserved unrestricted audience state, not a reader ID: no audience restriction applies. An agent with public reach can send data to any outbound destination. Never a group member.",
   "@name":
     "A group: a directory-held reader set. The membership resolver turns the name into literal reader IDs when the engine reads it; the algebra never stores the name.",
   "@auditors":
@@ -59,7 +59,7 @@ const TERMS = {
   internal:
     "An example reader for restricted internal data. Reading internal data closes off public destinations.",
   "{public, trusted}":
-    "The neutral starting label before reading any data: unrestricted outbound reach and trusted status.",
+    "The neutral starting label before reading any data: unrestricted outbound reach and the trust chain's top rank — trusted under the default chain.",
   egress:
     "A side effect where data leaves the system, recorded in the log on successful execution.",
   mutation:
