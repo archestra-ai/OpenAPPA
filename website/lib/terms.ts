@@ -129,5 +129,7 @@ const TERMS = {
 } as const satisfies Record<string, string>;
 
 export function termDefinition(chip: string): string | undefined {
-  return (TERMS as Record<string, string>)[chip];
+  const direct = (TERMS as Record<string, string>)[chip];
+  if (direct) return direct;
+  return (TERMS as Record<string, string>)[chip.toLowerCase()];
 }

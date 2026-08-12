@@ -9,7 +9,6 @@ OpenAPPA reads its policy from a single TOML file. In practice, most of the conf
 
 This document is a reference guide for writing and reviewing OpenAPPA policy TOML files. It covers global settings, set operators, contract declarations (`[[tool]]`, `[[authority]]`, `[[sanitizer]]`, `[[cast]]`), and policy review red flags.
 
-<!-- appa:example -->
 ```toml
 version = 1
 
@@ -51,7 +50,6 @@ Resolution is fresh per call, and pinned within one: the set resolved at a call'
 
 A dynamic resolver maps one top-level string argument to literal reader IDs. It does not resolve `@group` membership.
 
-<!-- appa:example-fragment -->
 ```toml
 [[dynamic_resolver]]
 name = "crm-acl"
@@ -104,7 +102,6 @@ A tool contract is typically four lines long. Use this checklist during policy r
 
 A `[[tool]]` entry defines what permissions its result restricts (`delta`), what global side effects it emits (`effects`), and what conditions must hold before it dispatches (`requires`).
 
-<!-- appa:example-fragment -->
 ```toml
 [[tool]]
 name  = "fetch_support_ticket"
@@ -137,7 +134,6 @@ attention = ["sre-signoff"]                            # Fresh per-call demand
 
 An `[[authority]]` provides dynamic judgment to clear specific requirement gaps for a single tool call. An authority approval clears the gap for that call, but **never raises the overall trajectory label**.
 
-<!-- appa:example-fragment -->
 ```toml
 [[authority]]
 name = "finance-officer"

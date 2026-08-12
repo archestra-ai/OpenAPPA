@@ -9,20 +9,32 @@ description: The whole model in one sitting — what OpenAPPA guarantees and wha
 
 OpenAPPA sits between an agent and its tools to answer one question before every action: *is this data allowed to go to this destination?*
 
-Powered by **APPA** (**Agentic Permissions Policy Algebra**), it provides a formal system to track data sensitivity and trust as an agent executes. When an action would violate policy, OpenAPPA does not simply throw a generic error. Instead, it calculates exact label flow and presents the agent with valid, actionable **remedy plans**—such as requesting human approval, scrubbing sensitive fields, or isolating reads in a sub-execution—so the agent can self-correct and finish its task safely.
+Powered by **APPA** (Agentic Permissions Policy Algebra), it provides a formal system to track data sensitivity and trust as an agent executes. When an action would violate policy, OpenAPPA does not simply throw a generic error. Instead, it calculates exact label flow and presents the agent with valid, actionable remedy plans—such as requesting human approval, scrubbing sensitive fields, or isolating reads in a sub-execution—so the agent can self-correct and finish its task safely.
 
 Because policy checks happen prospectively (before actions execute), sensitive data is never exposed to unauthorized tools, and the agent is never left stranded mid-workflow.
 
-| Runtime State | Engine Semantics |
-|---|---|
-| **Label** | Tracks audience (allowed reader set) and trust rank (`suspicious` vs `trusted`). Reading data intersects audiences and takes the lowest trust rank. |
-| **Log** | Append-only record of execution history, recording tool dispatches, narrowing acceptances, authority approvals, and denials. |
+### The core mental model
 
-Policy definitions remain strictly declarative: contracts, authorities, sanitizers, and casts are simple data configurations. Developers do not write static allow or block rules for every tool interaction. Instead, they declare tool contracts—specifying what permissions a tool requires (`requires`), how its output restricts security labels (`delta`), and what side effects it causes (`effects`). From these contracts and the trajectory's current label, OpenAPPA automatically derives whether an action is permitted, blocked, or remediable across any multi-step workflow.
+OpenAPPA operates on three runtime concepts:
 
-Imperative or model-based judgment—if necessary—lives outside the engine in registered components such as regex filters, classification models, or human approval queues. A component runs behind an HTTP endpoint (a `resolver`); an authority or sanitizer may instead run in-process (a `builtin` — a stock implementation or your own compiled module). Either way it follows the exact same policy rules: an authority mandate caps which policy gaps a human or service can approve, while a sanitizer mandate bounds the exact label transition a scrubber can claim.
+1. **Security Labels** (`label`)  
+   Attached to every running trajectory. A label tracks audience (which reader IDs are authorized to receive the trajectory's data) and trust rank (whether data comes from a vetted internal source or unvetted web content).
 
-Either kind may also carry a `hint`: a sentence, in the operator's own words, on what the component is for. The hint travels with every remedy plan naming that component, so an agent choosing among plans reads stated purpose rather than a bare name, and a reviewer reads intent beside the mandate. A hint grants nothing—the mandate remains the only bound on power.
+2. **Tool Contracts** (`delta` & `requires`)  
+   Declarative rules configured per tool. Reading data restricts the trajectory's label (`delta`), while invoking an outbound tool verifies that the destination is permitted by the trajectory's current label (`requires`).
+
+3. **Policy Remedies** (`remedy_plans`)  
+   When a proposed tool dispatch exceeds the trajectory's current permissions, OpenAPPA returns a structured refusal containing actionable remedy plans:
+   - Narrowing: accept restricted reach to continue internal tasks.
+   - Sanitizers: run a redactor or scrubber to clean data and preserve reach.
+   - Authorities: request targeted approval (e.g. human-in-the-loop) for an out-of-bounds call.
+   - Child Branches: spin off a sub-execution to isolate sensitive reads from the main workflow.
+
+### Declarative policy rules
+
+Policy definitions remain strictly declarative TOML configurations. Instead of writing static allow or block rules for every tool interaction, developers declare tool contracts—specifying what permissions a tool requires (`requires`), how its output restricts security labels (`delta`), and what side effects it causes (`effects`). From these contracts, OpenAPPA automatically derives whether an action is permitted, blocked, or remediable across multi-step agent workflows.
+
+Dynamic judgment—such as regex filters, ML classifiers, or human approval queues—lives in registered components (authorities, sanitizers, casts) running as HTTP endpoints (`resolver`) or in-process modules (`builtin`). Every component is bounded by a strict mandate and may carry an advisory `hint` explaining its purpose to the agent during remedy selection.
 
 ## Labels only move one way
 
@@ -42,11 +54,9 @@ label = admittedLabels.reduce(narrow, startingLabel)   // narrow only ever restr
 
 ## Reading data costs the agent reach
 
-OpenAPPA stops an agent *before* a fetch that restricts its label, informing it of lost reach before data enters its context. Reading internal data does not leak information by itself, but it restricts all future steps in the trajectory to an internal context. Destinations requiring public reach become permanently unavailable, and previously unconstrained dispatches require explicit approval.
+OpenAPPA evaluates tools *proactively before dispatch*, informing the agent of lost reach before data enters its context. Reading internal data restricts future steps to internal context, making public destinations unavailable unless explicitly approved or sanitized.
 
-By evaluating the step before dispatch, OpenAPPA prevents scenarios where an agent ingests data only to discover three steps later that outbound dispatches are blocked. The engine presents this pre-fetch choice as a **narrowing** stop. If the agent accepts the narrowing, the acceptance is recorded in the log and the call proceeds. Subsequent steps that cause no additional restriction pass without stopping, so narrowing prompts occur once per level of increased restriction during run.
-
-In deployments where the host can withhold a raw tool result, a registered sanitizer offers a third path. The call runs with the sanitizer bound, but this accepts no raw or guessed residual. The host withholds the raw result and the sanitizer derives a confined candidate. A candidate that no longer narrows enters context. Otherwise, the agent may choose another helpful sanitizer or accept the candidate's exact residual.
+This pre-fetch choice is presented as a **narrowing** stop. If the agent accepts the narrowing, the choice is logged and the call proceeds. Subsequent steps at the same restriction level proceed without repeating prompts. Alternatively, a registered **sanitizer** (such as a PII scrubber) can derive a clean output to preserve public reach.
 
 ## A child's narrowing dies with it
 
@@ -56,7 +66,6 @@ Child trajectories isolate label modifications within host-managed sub-execution
 
 To illustrate policy enforcement, consider an agent configured with three tools: `get_ticket_from_crm`, `send_email`, and `file_github_issue`. The CRM tool contract declares a `delta` that restricts the trajectory to internal reach, `send_email` requires the recipient to match the trajectory audience, and `file_github_issue` requires public reach.
 
-<!-- appa:example-fragment -->
 ```toml
 [[tool]]
 name  = "get_ticket_from_crm"
@@ -105,9 +114,9 @@ The trajectory begins at `{public, trusted}` unless pre-existing context or user
 
 :::fig-two-endings:::
 
-The second and third paths differ in what the model gets to read. Sanitizing the result never shows the model the raw ticket — the derivation is all that exists downstream in model context, though the host machine held the raw unless the deployment withholds it before the framework receives it. The child branch lets the child read the raw ticket and reason over it, and sanitizes only what crosses back. Choose the branch when the work itself needs the restricted content; choose the result sanitizer when the derivation is what you wanted anyway. Each sanitizer's `hint` states what its derivation drops, so that choice is informed.
+**Result Sanitization** keeps raw data out of model context by deriving a clean output before ingestion. **Child Branching** lets a sub-execution read and reason over raw content, sanitizing only what crosses back into the parent trajectory.
 
-If the goal is emailing raw CRM data to an external auditor, neither sanitized route applies and the agent accepts the narrowing in the parent trajectory. When `send_email(ticket, auditor@…)` subsequently runs, the engine checks whether `auditor@…` is in the `internal` audience. Because it is not, OpenAPPA blocks the call and generates an authority remedy plan for `user`. Once `user` approves the request, the email dispatches and the egress event enters the log. The trajectory label remains `internal`, ensuring that subsequent emails to unapproved recipients require separate authority rulings.
+If emailing raw CRM data to an external auditor is required, the agent accepts the narrowing to `internal`. When `send_email(ticket, auditor@…)` subsequently runs, OpenAPPA detects that `auditor@…` is not in the `internal` audience, blocks dispatch, and generates a human approval (`user`) remedy plan. Once approved, the email dispatches and the event is logged.
 
 ## Engine refusals enumerate every valid remedy
 
