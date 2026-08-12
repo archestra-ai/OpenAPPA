@@ -776,6 +776,8 @@ struct RawCast {
     name: String,
     constant: Option<RawConstantLabel>,
     resolver: Option<toml::Value>,
+    #[serde(default)]
+    scope: RawScope,
 }
 
 impl RawCast {
@@ -787,10 +789,14 @@ impl RawCast {
                 name: self.name,
             });
         }
+        let scope = Scope {
+            tags: self.scope.tags.into_iter().map(TagName::new).collect(),
+        };
         match (self.constant, self.resolver) {
             (Some(constant), None) => Ok(Cast {
                 name: CastName::new(self.name),
                 resolution: CastResolution::Constant(constant.convert(chain, &ctx)?),
+                scope,
             }),
             (Some(_), Some(_)) => Err(bad_impl("cast", &self.name, "declares both constant and resolver")),
             (None, None) => Err(bad_impl("cast", &self.name, "declares neither constant nor resolver")),

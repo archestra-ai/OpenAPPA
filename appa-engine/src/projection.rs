@@ -104,8 +104,8 @@ impl Projection {
                     dynamic_resolutions: resolutions,
                     ..
                 } => {
-                    dynamic_resolutions.insert(dispatch.clone(), resolutions.clone());
                     dispatch_tools.insert(dispatch.clone(), tool.clone());
+                    dynamic_resolutions.insert(dispatch.clone(), resolutions.clone());
                     open.insert(dispatch.clone());
                     reservations.insert(dispatch.clone(), proposed_effects.clone());
                     opened.push(OpenedDispatch {
@@ -283,8 +283,9 @@ impl Views<'_> {
             .map(|value| &value.provenance)
     }
 
-    /// The tool an opened dispatch called — what names the producer behind a
-    /// [`Provenance::ToolResult`]. Read-only audit context; the fold never consumes it.
+    /// The tool an opened dispatch called — the originating tool behind a
+    /// [`Provenance::ToolResult`], read by the cast scope gate and by readers naming a
+    /// value's producer. The fold never consumes it.
     pub fn dispatch_tool(&self, dispatch: &DispatchId) -> Option<&ToolName> {
         self.projection.dispatch_tools.get(dispatch)
     }

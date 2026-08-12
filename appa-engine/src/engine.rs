@@ -76,6 +76,12 @@ pub enum ReplayError {
     UnknownCast(String),
     #[error("cast record's resolution is not admissible for its source under the registered cast")]
     InadmissibleResolution,
+    #[error("cast record's scope does not cover the source's originating tool")]
+    OutOfScopeResolution,
+    #[error("admitted value names a dispatch not opened earlier in the log")]
+    UnknownDispatch,
+    #[error("admitted value names a dispatch of another trajectory")]
+    ForeignDispatch,
     #[error("fork record carries an unestablished seed")]
     UnestablishedForkSeed,
 }
@@ -373,9 +379,13 @@ impl Engine {
         struct ReplayValue<'a> {
             label: &'a crate::label::Label,
             trajectory: &'a TrajectoryId,
+            provenance: &'a crate::value::Provenance,
             resolved: bool,
         }
         let mut values: Vec<ReplayValue<'_>> = Vec::new();
+        // Opened dispatches, for resolving a result value's originating tool.
+        let mut dispatch_contracts: std::collections::BTreeMap<&DispatchId, &ToolContract> =
+            std::collections::BTreeMap::new();
         for fact in facts {
             match fact {
                 Fact::DispatchOpened {
@@ -396,11 +406,25 @@ impl Engine {
                     if dispatch.digest() != &recomputed {
                         return Err(ReplayError::DigestMismatch);
                     }
+                    dispatch_contracts.insert(dispatch, contract);
                 }
-                Fact::ValueAdmitted { trajectory, value, .. } => {
+                Fact::ValueAdmitted {
+                    trajectory,
+                    value,
+                    provenance,
+                } => {
+                    if let crate::value::Provenance::ToolResult { dispatch } = provenance {
+                        if !dispatch_contracts.contains_key(dispatch) {
+                            return Err(ReplayError::UnknownDispatch);
+                        }
+                        if dispatch.trajectory() != trajectory {
+                            return Err(ReplayError::ForeignDispatch);
+                        }
+                    }
                     values.push(ReplayValue {
                         label: &value.label,
                         trajectory,
+                        provenance,
                         resolved: false,
                     });
                 }
@@ -424,6 +448,17 @@ impl Engine {
                         .registry
                         .cast(cast)
                         .ok_or_else(|| ReplayError::UnknownCast(cast.as_str().to_string()))?;
+                    let applicable = match source.provenance {
+                        crate::value::Provenance::ToolResult { dispatch } => dispatch_contracts
+                            .get(dispatch)
+                            .is_some_and(|contract| registered.scope.covers(&contract.tags)),
+                        crate::value::Provenance::UserInput | crate::value::Provenance::ChildReturn { .. } => {
+                            registered.scope.is_unscoped()
+                        }
+                    };
+                    if !applicable {
+                        return Err(ReplayError::OutOfScopeResolution);
+                    }
                     if registered.resolution.validate(source.label, resolved).is_err() {
                         return Err(ReplayError::InadmissibleResolution);
                     }
@@ -1184,6 +1219,7 @@ mod tests {
                     audience: Audience::Public,
                 },
             },
+            scope: crate::authority::Scope::default(),
         };
         let cfg = RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
@@ -1251,6 +1287,95 @@ mod tests {
                 },
             }]),
             Err(ReplayError::UnestablishedForkSeed)
+        );
+    }
+
+    #[test]
+    fn replay_refuses_an_out_of_scope_resolution() {
+        let fetch = crate::contract::ToolContract {
+            name: ToolName::new("fetch"),
+            tags: vec![crate::names::TagName::new("web")],
+            delta: Some(crate::contract::Delta {
+                trust: Some(Dim::Unknown),
+                audience: Some(Dim::Known(Audience::Public).into()),
+            }),
+            parameters: crate::params::ToolParameters::open(),
+            emits: crate::fact::EffectSet::default(),
+            requires: Default::default(),
+        };
+        let webby = crate::authority::Cast {
+            name: crate::names::CastName::new("webby"),
+            resolution: crate::authority::CastResolution::Constant(established(SUSPICIOUS, Audience::Public)),
+            scope: crate::authority::Scope {
+                tags: vec![crate::names::TagName::new("web")],
+            },
+        };
+        let cfg = RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: vec![fetch],
+            authorities: vec![],
+            sanitizers: vec![],
+            casts: vec![webby],
+        };
+        let e = open_engine(cfg);
+        assert_eq!(
+            e.validate_replay(&[
+                user_value(Label::new(Dim::Unknown, Dim::Known(Audience::Public))),
+                Fact::CastApplied {
+                    trajectory: traj(),
+                    value: crate::value::ValueId::new(0),
+                    resolved: established(SUSPICIOUS, Audience::Public),
+                    cast: crate::names::CastName::new("webby"),
+                }
+            ]),
+            Err(ReplayError::OutOfScopeResolution)
+        );
+        let fetch_call = crate::value::ResolvedCall::new(
+            ToolName::new("fetch"),
+            crate::params::test_arguments(&serde_json::json!({})),
+        );
+        let dispatch = DispatchId::new(traj(), fetch_call.digest(), 0);
+        let sibling = TrajectoryId::new("sibling");
+        assert_eq!(
+            e.validate_replay(&[
+                Fact::DispatchOpened {
+                    trajectory: traj(),
+                    dispatch: dispatch.clone(),
+                    tool: fetch_call.tool().clone(),
+                    arguments: fetch_call.canonical_arguments().clone(),
+                    proposed_label: EstablishedLabel::top(),
+                    proposed_effects: crate::fact::EffectSet::default(),
+                    dynamic_resolutions: Vec::new(),
+                },
+                Fact::ValueAdmitted {
+                    trajectory: sibling.clone(),
+                    value: crate::value::LabeledValue::new(
+                        crate::value::ValueBody::new("page"),
+                        Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
+                    ),
+                    provenance: crate::value::Provenance::ToolResult { dispatch },
+                },
+                Fact::CastApplied {
+                    trajectory: sibling,
+                    value: crate::value::ValueId::new(0),
+                    resolved: established(SUSPICIOUS, Audience::Public),
+                    cast: crate::names::CastName::new("webby"),
+                }
+            ]),
+            Err(ReplayError::ForeignDispatch)
+        );
+        assert_eq!(
+            e.validate_replay(&[Fact::ValueAdmitted {
+                trajectory: traj(),
+                value: crate::value::LabeledValue::new(
+                    crate::value::ValueBody::new("page"),
+                    Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
+                ),
+                provenance: crate::value::Provenance::ToolResult {
+                    dispatch: DispatchId::new(traj(), fetch_call.digest(), 7),
+                },
+            }]),
+            Err(ReplayError::UnknownDispatch)
         );
     }
 

@@ -3481,6 +3481,256 @@ constant = { trust = "suspicious", audience = { exactly = ["public"] } }
 }
 
 #[tokio::test]
+async fn a_failed_earlier_candidate_permits_a_later_valid_answer() {
+    let (resolver_url, requests, server) = spawn_repeating_response("{}").await;
+    let policy = format!(
+        r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+
+[[tool]]
+name = "scan"
+effects = ["read"]
+
+[[tool]]
+name = "send"
+delta = {{}}
+[tool.requires]
+trust = "suspicious"
+
+[[cast]]
+name = "mum"
+resolver = {{ url = "{resolver_url}", may_cast = {{ trust = ["suspicious"], audience = {{ cap = ["public"] }} }} }}
+
+[[cast]]
+name = "right"
+constant = {{ trust = "suspicious", audience = {{ exactly = ["public"] }} }}
+"#
+    );
+    let mediated = mediator(
+        &policy,
+        &[
+            ("scan", BuiltinTool::Echo("mail body".to_string())),
+            ("send", BuiltinTool::Echo("sent".to_string())),
+        ],
+    );
+    let tenant = TenantId::new("tenant");
+    let session = mediated.create_session(tenant.clone());
+    let mut turn = begin(&mediated, &tenant, &session, "go").await;
+    let mut budget = RunBudget::default();
+    assert!(matches!(
+        turn.mediate(calls(vec![call("scan-call", "scan", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    assert!(matches!(
+        turn.mediate(calls(vec![call("send-call", "send", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    server.abort();
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+
+    let log = facts(&mediated, &tenant, &session);
+    let applied: Vec<&str> = log
+        .iter()
+        .filter_map(|fact| match fact {
+            Fact::CastApplied { cast, .. } => Some(cast.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(applied, vec!["right"]);
+    assert!(
+        tool_values(&log).iter().any(|(body, _)| *body == "sent"),
+        "send dispatched after the fallback answer landed"
+    );
+    turn.stop(StopReason::Cancelled).unwrap();
+}
+
+#[tokio::test]
+async fn a_valid_earlier_answer_stops_later_casts() {
+    let (resolver_url, requests, server) = spawn_repeating_response(r#"{"trust":"suspicious"}"#).await;
+    let policy = format!(
+        r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+
+[[tool]]
+name = "scan"
+effects = ["read"]
+
+[[tool]]
+name = "board"
+effects = ["read"]
+delta = {{ trust = "trusted", audience = "unknown" }}
+
+[[tool]]
+name = "send"
+delta = {{}}
+[tool.requires]
+trust = "suspicious"
+
+[[cast]]
+name = "first"
+constant = {{ trust = "suspicious", audience = {{ exactly = ["internal"] }} }}
+
+[[cast]]
+name = "later"
+resolver = {{ url = "{resolver_url}", may_cast = {{ trust = ["suspicious"], audience = {{ cap = ["public"] }} }} }}
+"#
+    );
+    let mediated = mediator(
+        &policy,
+        &[
+            ("scan", BuiltinTool::Echo("mail body".to_string())),
+            ("board", BuiltinTool::Echo("posts".to_string())),
+            ("send", BuiltinTool::Echo("sent".to_string())),
+        ],
+    );
+    let tenant = TenantId::new("tenant");
+    let session = mediated.create_session(tenant.clone());
+    let mut turn = begin(&mediated, &tenant, &session, "go").await;
+    let mut budget = RunBudget::default();
+    assert!(matches!(
+        turn.mediate(calls(vec![call("scan-call", "scan", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    assert!(matches!(
+        turn.mediate(calls(vec![call("send-call", "send", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    server.abort();
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        0,
+        "the later resolver was never consulted"
+    );
+
+    let log = facts(&mediated, &tenant, &session);
+    let applied: Vec<&str> = log
+        .iter()
+        .filter_map(|fact| match fact {
+            Fact::CastApplied { cast, .. } => Some(cast.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(applied, vec!["first"]);
+    assert!(
+        tool_values(&log).iter().any(|(body, _)| *body == "sent"),
+        "send dispatched on the first answer"
+    );
+    turn.stop(StopReason::Cancelled).unwrap();
+}
+
+#[tokio::test]
+async fn a_scoped_cast_is_never_attempted_outside_its_origin() {
+    let (resolver_url, requests, server) =
+        spawn_repeating_response(r#"{"trust":"suspicious","audience":["staff"]}"#).await;
+    let policy = format!(
+        r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+
+[[tool]]
+name = "inbox"
+tags = ["mail"]
+effects = ["read"]
+
+[[tool]]
+name = "scan"
+effects = ["read"]
+
+[[tool]]
+name = "send"
+delta = {{}}
+[tool.requires]
+trust = "suspicious"
+
+[[cast]]
+name = "mail-classifier"
+resolver = {{ url = "{resolver_url}", may_cast = {{ trust = ["suspicious"], audience = {{ cap = ["staff"] }} }} }}
+
+[cast.scope]
+tags = ["mail"]
+"#
+    );
+    let mediated = mediator(
+        &policy,
+        &[
+            ("inbox", BuiltinTool::Echo("mail body".to_string())),
+            ("scan", BuiltinTool::Echo("scan body".to_string())),
+            ("send", BuiltinTool::Echo("sent".to_string())),
+        ],
+    );
+    let tenant = TenantId::new("tenant");
+
+    let blocked = mediated.create_session(tenant.clone());
+    let mut turn = begin(&mediated, &tenant, &blocked, "go").await;
+    let mut budget = RunBudget::default();
+    assert!(matches!(
+        turn.mediate(calls(vec![call("scan-call", "scan", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    assert!(matches!(
+        turn.mediate(calls(vec![call("send-call", "send", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    assert_eq!(requests.load(Ordering::SeqCst), 0, "out-of-scope resolver saw nothing");
+    let log = facts(&mediated, &tenant, &blocked);
+    assert!(!log.iter().any(|fact| matches!(fact, Fact::CastApplied { .. })));
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(
+                fact,
+                Fact::BlockFeedback { call_id, .. } if call_id.as_str() == "send-call"
+            ))
+            .count(),
+        1
+    );
+    turn.stop(StopReason::Cancelled).unwrap();
+
+    let covered = mediated.create_session(tenant.clone());
+    let mut turn = begin(&mediated, &tenant, &covered, "go").await;
+    let mut budget = RunBudget::default();
+    assert!(matches!(
+        turn.mediate(calls(vec![call("inbox-call", "inbox", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    assert!(matches!(
+        turn.mediate(calls(vec![call("send2-call", "send", "{}")]), &mut budget)
+            .await
+            .unwrap(),
+        Step::Continue
+    ));
+    server.abort();
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    let log = facts(&mediated, &tenant, &covered);
+    assert_eq!(
+        log.iter()
+            .filter(|fact| matches!(fact, Fact::CastApplied { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        tool_values(&log).iter().any(|(body, _)| *body == "sent"),
+        "send dispatched after the covered cast landed"
+    );
+    turn.stop(StopReason::Cancelled).unwrap();
+}
+
+#[tokio::test]
 async fn every_unestablished_fact_is_attempted_and_the_residual_is_named() {
     let policy = r#"
 version = 1

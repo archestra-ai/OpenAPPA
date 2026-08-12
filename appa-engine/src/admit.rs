@@ -63,6 +63,8 @@ pub enum AdmitError {
     NonLiteralAnswer,
     #[error("cast answer changes a dimension the output label already establishes")]
     EstablishedMismatch,
+    #[error("the dispatched tool is outside the cast's scope")]
+    OutOfScopeCast,
     #[error("the cast resolution narrows the trajectory label: admission requires the agent's acceptance")]
     NarrowingUnaccepted,
     #[error("the accepted narrowing does not match the live trajectory state")]
@@ -138,6 +140,9 @@ fn validate_cast_resolution(
     let registered = registry
         .cast(cast)
         .ok_or_else(|| AdmitError::UnknownCast(cast.as_str().to_string()))?;
+    if !registered.scope.covers(&contract.tags) {
+        return Err(AdmitError::OutOfScopeCast);
+    }
     registered
         .resolution
         .validate(output_label, resolved)
@@ -167,6 +172,8 @@ pub enum CastError {
     UnknownValue,
     #[error("target value belongs to another trajectory")]
     ForeignValue,
+    #[error("target value's originating tool is outside the cast's scope")]
+    OutOfScope,
     #[error("target value's label is already fully established")]
     AlreadyEstablished,
 }
@@ -350,6 +357,22 @@ pub(crate) fn admit_cast(
     if !views.owns_value(value) {
         return Err(CastError::ForeignValue);
     }
+    let applicable = match views
+        .value_provenance(value)
+        .expect("owns_value proved the record exists")
+    {
+        crate::value::Provenance::ToolResult { dispatch } => {
+            let tool = views
+                .dispatch_tool(dispatch)
+                .expect("a result value's dispatch is opened in the log");
+            let contract = registry.tool(tool).expect("dispatches open only for registered tools");
+            cast.scope.covers(&contract.tags)
+        }
+        crate::value::Provenance::UserInput | crate::value::Provenance::ChildReturn { .. } => cast.scope.is_unscoped(),
+    };
+    if !applicable {
+        return Err(CastError::OutOfScope);
+    }
     if EstablishedLabel::from_label(prior).is_some() {
         return Err(CastError::AlreadyEstablished);
     }
@@ -374,7 +397,7 @@ pub(crate) fn admit_cast(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::{Cast, CastCeiling, CastResolution, Sanitizer, SanitizerPoints, Transition};
+    use crate::authority::{Cast, CastCeiling, CastResolution, Sanitizer, SanitizerPoints, Scope, Transition};
     use crate::contract::{AudienceDelta, Delta, DynamicAudienceBinding, PinnedDynamicResolution, ToolContract};
     use crate::fact::{EffectKind, Revision};
     use crate::label::{Audience, Dim, PartialLabel, ReaderId, Trust};
@@ -439,10 +462,7 @@ mod tests {
         let const_cast = Cast {
             name: CastName::new("paranoid"),
             resolution: CastResolution::Constant(EstablishedLabel::new(SUSPICIOUS, internal())),
-        };
-        let audience_cast = Cast {
-            name: CastName::new("roomer"),
-            resolution: CastResolution::Constant(EstablishedLabel::new(SUSPICIOUS, internal())),
+            scope: Scope::default(),
         };
         let resolver_cast = Cast {
             name: CastName::new("classifier"),
@@ -452,6 +472,7 @@ mod tests {
                     audience: Audience::restricted([ReaderId::new("finance"), ReaderId::new("audit")]),
                 },
             },
+            scope: Scope::default(),
         };
         let scan = ToolContract {
             name: ToolName::new("scan_inbox"),
@@ -491,7 +512,7 @@ mod tests {
             tools: vec![get, scan, poll, dynamic_scan],
             authorities: vec![],
             sanitizers: vec![out_san, finance_san],
-            casts: vec![const_cast, audience_cast, resolver_cast],
+            casts: vec![resolver_cast, const_cast],
         })
         .unwrap()
     }
@@ -646,6 +667,97 @@ mod tests {
             ),
             provenance: Provenance::UserInput,
         }]
+    }
+
+    #[test]
+    fn a_scoped_cast_applies_only_to_covered_tool_results() {
+        let fetch = ToolContract {
+            name: ToolName::new("fetch"),
+            tags: vec![crate::names::TagName::new("web")],
+            delta: Some(Delta {
+                trust: Some(Dim::Unknown),
+                audience: Some(Dim::Known(Audience::Public).into()),
+            }),
+            parameters: crate::params::ToolParameters::open(),
+            emits: EffectSet::default(),
+            requires: Default::default(),
+        };
+        let webby = Cast {
+            name: CastName::new("webby"),
+            resolution: CastResolution::Constant(EstablishedLabel::new(SUSPICIOUS, Audience::Public)),
+            scope: Scope {
+                tags: vec![crate::names::TagName::new("web")],
+            },
+        };
+        let fallback = Cast {
+            name: CastName::new("fallback"),
+            resolution: CastResolution::Constant(EstablishedLabel::new(SUSPICIOUS, Audience::Public)),
+            scope: Scope::default(),
+        };
+        let reg = Registry::build_covered(RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: vec![fetch],
+            authorities: vec![],
+            sanitizers: vec![],
+            casts: vec![webby, fallback],
+        })
+        .unwrap();
+        let call = ResolvedCall::new(ToolName::new("fetch"), crate::params::test_arguments(&json!({})));
+        let dispatch = DispatchId::new(traj(), call.digest(), 0);
+        let log = vec![
+            Fact::DispatchOpened {
+                trajectory: traj(),
+                dispatch: dispatch.clone(),
+                tool: call.tool().clone(),
+                arguments: call.canonical_arguments().clone(),
+                proposed_label: EstablishedLabel::top(),
+                proposed_effects: EffectSet::default(),
+                dynamic_resolutions: Vec::new(),
+            },
+            Fact::ValueAdmitted {
+                trajectory: traj(),
+                value: LabeledValue::new(
+                    ValueBody::new("page"),
+                    Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
+                ),
+                provenance: Provenance::ToolResult { dispatch },
+            },
+            Fact::ValueAdmitted {
+                trajectory: traj(),
+                value: LabeledValue::new(
+                    ValueBody::new("note"),
+                    Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
+                ),
+                provenance: Provenance::UserInput,
+            },
+            Fact::ValueAdmitted {
+                trajectory: traj(),
+                value: LabeledValue::new(
+                    ValueBody::new("digest"),
+                    Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
+                ),
+                provenance: Provenance::ChildReturn {
+                    child: TrajectoryId::new("child"),
+                    id: crate::value::ChildReturnId::new(TrajectoryId::new("child"), 0),
+                },
+            },
+        ];
+        let p = views_of(&log);
+        let answer = |cast: &str| CastAnswer {
+            cast: CastName::new(cast),
+            resolved: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
+        };
+        assert!(admit_cast(&reg, &p.view(&traj()), ValueId::new(0), answer("webby")).is_ok());
+        assert_eq!(
+            admit_cast(&reg, &p.view(&traj()), ValueId::new(1), answer("webby")),
+            Err(CastError::OutOfScope)
+        );
+        assert!(admit_cast(&reg, &p.view(&traj()), ValueId::new(1), answer("fallback")).is_ok());
+        assert_eq!(
+            admit_cast(&reg, &p.view(&traj()), ValueId::new(2), answer("webby")),
+            Err(CastError::OutOfScope)
+        );
+        assert!(admit_cast(&reg, &p.view(&traj()), ValueId::new(2), answer("fallback")).is_ok());
     }
 
     #[test]
@@ -834,6 +946,7 @@ mod tests {
                     audience: Audience::Public,
                 },
             },
+            scope: Scope::default(),
         };
         let reg = Registry::build_covered(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
@@ -888,7 +1001,7 @@ mod tests {
                 &call,
                 ResultAdmission::SuccessCast {
                     body: ValueBody::new("room roster"),
-                    cast: CastName::new("roomer"),
+                    cast: CastName::new("paranoid"),
                     resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
                 },
             ),
@@ -902,7 +1015,7 @@ mod tests {
             &call,
             ResultAdmission::SuccessCastAccepted {
                 body: ValueBody::new("room roster"),
-                cast: CastName::new("roomer"),
+                cast: CastName::new("paranoid"),
                 resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
                 accepted: Narrowing {
                     from: EstablishedLabel::top(),

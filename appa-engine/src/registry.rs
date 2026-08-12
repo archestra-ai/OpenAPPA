@@ -95,6 +95,10 @@ pub enum LoadError {
     EmptyMandate(String),
     #[error("trust rank {rank} out of the chain (length {len}) in {context}")]
     RankOutOfChain { rank: u8, len: usize, context: String },
+    #[error("cast {0} is unreachable: no registered origin in its scope can use it")]
+    UnreachableCast(String),
+    #[error("cast {cast} is shadowed by earlier constant {by} at every origin it can receive")]
+    ShadowedCast { cast: String, by: String },
     #[error("tool {0} declares both output dimensions pending-cast (a cast resolves exactly one)")]
     DualPendingCast(String),
     #[error("tool {tool} declares a pending-cast {dimension:?} output and a `requires` on that dimension")]
@@ -323,7 +327,7 @@ pub struct Registry {
     provider_run: BTreeMap<ToolName, ToolContract>,
     authorities: Vec<Authority>,
     sanitizers: BTreeMap<SanitizerName, Sanitizer>,
-    casts: BTreeMap<CastName, Cast>,
+    casts: Vec<Cast>,
     profile: crate::profile::DeploymentProfile,
 }
 
@@ -442,7 +446,7 @@ impl Registry {
             });
         }
 
-        let mut casts = BTreeMap::new();
+        let mut casts: Vec<Cast> = Vec::new();
         for cast in config.casts {
             match &cast.resolution {
                 CastResolution::Resolver { may_cast } => {
@@ -460,8 +464,49 @@ impl Registry {
                     check_readers(&constant.audience, || format!("cast {} constant", cast.name.as_str()))?;
                 }
             }
-            if casts.insert(cast.name.clone(), cast.clone()).is_some() {
+            if casts.iter().any(|earlier| earlier.name == cast.name) {
                 return Err(LoadError::DuplicateCast(cast.name.as_str().to_string()));
+            }
+            casts.push(cast);
+        }
+
+        for (i, cast) in casts.iter().enumerate() {
+            let castable: Vec<&ToolContract> = tools
+                .values()
+                .filter(|tool| cast.scope.covers(&tool.tags))
+                .filter(|tool| crate::label::EstablishedLabel::from_label(&tool.output_label()).is_none())
+                .collect();
+            if !cast.scope.is_unscoped() {
+                let usable = castable.iter().any(|tool| match &cast.resolution {
+                    CastResolution::Constant(constant) => {
+                        cast.resolution.validate(&tool.output_label(), constant).is_ok()
+                    }
+                    CastResolution::Resolver { may_cast } => {
+                        matches!(tool.output_label().trust, Dim::Known(_)) || !may_cast.trust.is_empty()
+                    }
+                });
+                if !usable {
+                    return Err(LoadError::UnreachableCast(cast.name.as_str().to_string()));
+                }
+            }
+            if castable.is_empty() {
+                continue;
+            }
+            let shadowing = casts[..i].iter().find(|earlier| {
+                let CastResolution::Constant(constant) = &earlier.resolution else {
+                    return false;
+                };
+                earlier.scope.covers_scope(&cast.scope)
+                    && castable.iter().all(|tool| {
+                        !pins_audience_beside_pending_trust(tool)
+                            && earlier.resolution.validate(&tool.output_label(), constant).is_ok()
+                    })
+            });
+            if let Some(earlier) = shadowing {
+                return Err(LoadError::ShadowedCast {
+                    cast: cast.name.as_str().to_string(),
+                    by: earlier.name.as_str().to_string(),
+                });
             }
         }
 
@@ -519,8 +564,18 @@ impl Registry {
     }
 
     pub fn cast(&self, name: &CastName) -> Option<&Cast> {
-        self.casts.get(name)
+        self.casts.iter().find(|cast| &cast.name == name)
     }
+
+    pub fn casts(&self) -> &[Cast] {
+        &self.casts
+    }
+}
+
+fn pins_audience_beside_pending_trust(tool: &ToolContract) -> bool {
+    tool.delta.as_ref().is_some_and(|delta| {
+        matches!(delta.trust, Some(Dim::Unknown)) && matches!(delta.audience, Some(AudienceDelta::Dynamic(_)))
+    })
 }
 
 #[cfg(test)]
@@ -722,6 +777,7 @@ mod tests {
         let cast = |name, resolution| Cast {
             name: CastName::new(name),
             resolution,
+            scope: Scope::default(),
         };
         let mut may_cast = base();
         may_cast.casts = vec![cast(
@@ -876,6 +932,228 @@ mod tests {
         ));
     }
 
+    fn internal() -> Audience {
+        Audience::restricted([ReaderId::new("internal")])
+    }
+
+    fn origin(name: &str, tags: &[&str], delta: Delta) -> ToolContract {
+        ToolContract {
+            name: ToolName::new(name),
+            tags: tags.iter().copied().map(crate::names::TagName::new).collect(),
+            delta: Some(delta),
+            parameters: crate::params::ToolParameters::open(),
+            emits: EffectSet::default(),
+            requires: Requires::default(),
+        }
+    }
+
+    fn pending_trust(audience: Audience) -> Delta {
+        Delta {
+            trust: Some(Dim::Unknown),
+            audience: Some(Dim::Known(audience).into()),
+        }
+    }
+
+    fn pending_audience(trust: Trust) -> Delta {
+        Delta {
+            trust: Some(Dim::Known(trust)),
+            audience: Some(Dim::Unknown.into()),
+        }
+    }
+
+    fn scoped(tags: &[&str]) -> Scope {
+        Scope {
+            tags: tags.iter().copied().map(crate::names::TagName::new).collect(),
+        }
+    }
+
+    fn constant_cast(name: &str, label: EstablishedLabel, scope: Scope) -> Cast {
+        Cast {
+            name: CastName::new(name),
+            resolution: CastResolution::Constant(label),
+            scope,
+        }
+    }
+
+    fn resolver_cast(name: &str, trust: Vec<Trust>, audience: Audience, scope: Scope) -> Cast {
+        Cast {
+            name: CastName::new(name),
+            resolution: CastResolution::Resolver {
+                may_cast: CastCeiling { trust, audience },
+            },
+            scope,
+        }
+    }
+
+    #[test]
+    fn casts_keep_registration_order() {
+        let mut cfg = base();
+        cfg.tools = vec![origin("inbox", &[], pending_trust(internal()))];
+        cfg.casts = vec![
+            resolver_cast("zeta", vec![Trust::new(0)], Audience::Public, Scope::default()),
+            constant_cast(
+                "alpha",
+                EstablishedLabel::new(Trust::new(0), internal()),
+                Scope::default(),
+            ),
+        ];
+        let reg = Registry::build_covered(cfg).unwrap();
+        let names: Vec<&str> = reg.casts().iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["zeta", "alpha"]);
+    }
+
+    #[test]
+    fn an_earlier_resolver_never_shadows_a_later_cast() {
+        let mut cfg = base();
+        cfg.tools = vec![origin("inbox", &[], pending_trust(internal()))];
+        cfg.casts = vec![
+            resolver_cast("classifier", vec![Trust::new(0)], Audience::Public, Scope::default()),
+            constant_cast(
+                "fallback",
+                EstablishedLabel::new(Trust::new(0), internal()),
+                Scope::default(),
+            ),
+        ];
+        assert!(Registry::build_covered(cfg).is_ok());
+    }
+
+    #[test]
+    fn an_earlier_constant_valid_at_every_origin_shadows_a_later_cast() {
+        let mut cfg = base();
+        cfg.tools = vec![origin("inbox", &[], pending_trust(internal()))];
+        cfg.casts = vec![
+            constant_cast(
+                "fallback",
+                EstablishedLabel::new(Trust::new(0), internal()),
+                Scope::default(),
+            ),
+            resolver_cast("classifier", vec![Trust::new(0)], Audience::Public, Scope::default()),
+        ];
+        assert!(matches!(
+            Registry::build_covered(cfg),
+            Err(LoadError::ShadowedCast { cast, by }) if cast == "classifier" && by == "fallback"
+        ));
+    }
+
+    #[test]
+    fn a_constant_failing_at_one_origin_shadows_nothing() {
+        let mut cfg = base();
+        cfg.tools = vec![
+            origin("inbox", &[], pending_trust(internal())),
+            origin("board", &[], pending_audience(Trust::new(1))),
+        ];
+        cfg.casts = vec![
+            constant_cast(
+                "fallback",
+                EstablishedLabel::new(Trust::new(0), internal()),
+                Scope::default(),
+            ),
+            resolver_cast("classifier", vec![Trust::new(0)], Audience::Public, Scope::default()),
+        ];
+        assert!(Registry::build_covered(cfg).is_ok());
+    }
+
+    #[test]
+    fn a_dynamically_pinned_audience_defeats_constant_shadowing() {
+        let mut cfg = base();
+        cfg.tools = vec![origin(
+            "feed",
+            &[],
+            Delta {
+                trust: Some(Dim::Unknown),
+                audience: Some(crate::contract::AudienceDelta::Dynamic(DynamicAudienceBinding {
+                    resolver: crate::names::DynamicResolverName::new("directory"),
+                    argument: "room".into(),
+                })),
+            },
+        )];
+        cfg.casts = vec![
+            constant_cast(
+                "fallback",
+                EstablishedLabel::new(Trust::new(0), internal()),
+                Scope::default(),
+            ),
+            resolver_cast("classifier", vec![Trust::new(0)], Audience::Public, Scope::default()),
+        ];
+        assert!(Registry::build_covered(cfg).is_ok());
+    }
+
+    #[test]
+    fn a_tag_superset_scope_covers_and_shadows_the_subset() {
+        let mut cfg = base();
+        cfg.tools = vec![origin("inbox", &["mail"], pending_trust(internal()))];
+        cfg.casts = vec![
+            constant_cast(
+                "fallback",
+                EstablishedLabel::new(Trust::new(0), internal()),
+                scoped(&["mail", "web"]),
+            ),
+            resolver_cast("classifier", vec![Trust::new(0)], Audience::Public, scoped(&["mail"])),
+        ];
+        assert!(matches!(
+            Registry::build_covered(cfg),
+            Err(LoadError::ShadowedCast { cast, by }) if cast == "classifier" && by == "fallback"
+        ));
+    }
+
+    #[test]
+    fn a_tag_subset_scope_does_not_cover_the_superset() {
+        let mut cfg = base();
+        cfg.tools = vec![origin("inbox", &["mail"], pending_trust(internal()))];
+        cfg.casts = vec![
+            constant_cast(
+                "fallback",
+                EstablishedLabel::new(Trust::new(0), internal()),
+                scoped(&["mail"]),
+            ),
+            resolver_cast(
+                "classifier",
+                vec![Trust::new(0)],
+                Audience::Public,
+                scoped(&["mail", "web"]),
+            ),
+        ];
+        assert!(Registry::build_covered(cfg).is_ok());
+    }
+
+    #[test]
+    fn a_scoped_cast_covering_no_registered_origin_is_unreachable() {
+        let mut cfg = base();
+        cfg.tools = vec![origin("inbox", &["mail"], pending_trust(internal()))];
+        cfg.casts = vec![resolver_cast(
+            "classifier",
+            vec![Trust::new(0)],
+            Audience::Public,
+            scoped(&["ghost"]),
+        )];
+        assert!(matches!(
+            Registry::build_covered(cfg),
+            Err(LoadError::UnreachableCast(name)) if name == "classifier"
+        ));
+    }
+
+    #[test]
+    fn a_scoped_resolver_no_covered_origin_can_use_is_unreachable() {
+        let mut cfg = base();
+        cfg.tools = vec![origin("inbox", &["mail"], pending_trust(internal()))];
+        cfg.casts = vec![resolver_cast("classifier", vec![], Audience::Public, scoped(&["mail"]))];
+        assert!(matches!(
+            Registry::build_covered(cfg),
+            Err(LoadError::UnreachableCast(name)) if name == "classifier"
+        ));
+    }
+
+    #[test]
+    fn an_audience_only_scoped_resolver_loads_for_an_established_trust_origin() {
+        let mut cfg = base();
+        cfg.tools = vec![
+            origin("inbox", &["mail"], pending_trust(internal())),
+            origin("board", &["mail"], pending_audience(Trust::new(1))),
+        ];
+        cfg.casts = vec![resolver_cast("classifier", vec![], Audience::Public, scoped(&["mail"]))];
+        assert!(Registry::build_covered(cfg).is_ok());
+    }
+
     #[test]
     fn an_audience_only_ceiling_loads() {
         let mut cfg = base();
@@ -887,6 +1165,7 @@ mod tests {
                     audience: Audience::Public,
                 },
             },
+            scope: Scope::default(),
         }];
         assert!(Registry::build_covered(cfg).is_ok());
     }
@@ -1051,6 +1330,7 @@ mod tests {
         cfg.casts = vec![Cast {
             name: CastName::new("paranoid"),
             resolution: CastResolution::Constant(EstablishedLabel::new(Trust::new(0), Audience::Public)),
+            scope: Scope::default(),
         }];
         assert!(Registry::build_covered(cfg).is_ok());
     }

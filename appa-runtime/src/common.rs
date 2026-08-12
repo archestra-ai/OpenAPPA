@@ -523,6 +523,7 @@ impl Core {
                     | AdmitError::CeilingExceeded
                     | AdmitError::NonLiteralAnswer
                     | AdmitError::EstablishedMismatch
+                    | AdmitError::OutOfScopeCast
                     | AdmitError::NarrowingUnaccepted
                     | AdmitError::AcceptanceMismatch
                     | AdmitError::AlreadySucceeded

@@ -13,9 +13,10 @@ use appa_engine::contract::PinnedDynamicResolution;
 use appa_engine::execute::Ruling;
 use appa_engine::fact::{BoundaryKind, Fact, FactBatch, ProposedCall, ReturnPolicy, Revision};
 use appa_engine::label::{EstablishedLabel, Label};
-use appa_engine::names::{CastName, SanitizerName};
+use appa_engine::names::{CastName, SanitizerName, TagName};
 use appa_engine::plan::{ExecutableRemedyPlan, RemedyPlan};
 use appa_engine::projection::Projection;
+use appa_engine::registry::Registry;
 use appa_engine::value::{
     CanonicalDigest, DispatchId, LabeledValue, Provenance, RawResultDigest, ResolvedCall, ToolCallId, ToolName,
     TrajectoryId, ValueBody, ValueId,
@@ -1367,16 +1368,23 @@ impl Turn {
         budget: &RunBudget,
     ) -> Result<Result<bool, TurnError>, TurnCancelled> {
         let mut landed = false;
+        let dispatches = dispatch_tools(log);
         for target in facts {
             if self.cancel.is_cancelled() {
                 return Err(TurnCancelled);
             }
-            let body = value_body(log, target.value).unwrap_or_default().to_string();
-            let Some(prior) = value_label(log, target.value).cloned() else {
+            let Some((admitted, provenance)) = admitted_value(log, target.value) else {
                 continue;
             };
+            let body = admitted.body.as_str().to_string();
+            let prior = admitted.label.clone();
+            let registry = self.mediator.engine().registry();
+            let call_tags = origin_tags(&dispatches, provenance, registry);
 
-            for cast in &self.mediator.config().registry_config().casts {
+            for cast in registry.casts() {
+                if !cast.scope.covers(call_tags) {
+                    continue;
+                }
                 let resolved: Option<EstablishedLabel> = match &cast.resolution {
                     CastResolution::Constant(declared) if cast.resolution.validate(&prior, declared).is_ok() => {
                         Some(declared.clone())
@@ -1459,9 +1467,13 @@ impl Turn {
         &self,
         body: &str,
         output_label: &Label,
+        call_tags: &[TagName],
         budget: &RunBudget,
     ) -> Result<Option<(CastName, EstablishedLabel)>, TurnCancelled> {
-        for cast in &self.mediator.config().registry_config().casts {
+        for cast in self.mediator.engine().registry().casts() {
+            if !cast.scope.covers(call_tags) {
+                continue;
+            }
             let resolved = match &cast.resolution {
                 CastResolution::Constant(declared) if cast.resolution.validate(output_label, declared).is_ok() => {
                     Some(declared.clone())
@@ -1752,11 +1764,12 @@ impl Turn {
                     body: ValueBody::new(body.clone()),
                 },
                 Some(_) => {
-                    let output_label = {
-                        let contract = contract.expect("pending_cast is Some only for a registered contract");
-                        contract.output_label_for_resolutions(call.dynamic_resolutions())
-                    };
-                    match self.resolve_output_cast(body, &output_label, budget).await {
+                    let contract = contract.expect("pending_cast is Some only for a registered contract");
+                    let output_label = contract.output_label_for_resolutions(call.dynamic_resolutions());
+                    match self
+                        .resolve_output_cast(body, &output_label, &contract.tags, budget)
+                        .await
+                    {
                         Err(TurnCancelled) => return Ok(CallProgress::Cancelled),
                         Ok(Some((cast, resolved))) => {
                             let narrowing = {
@@ -1912,6 +1925,7 @@ impl Turn {
                         | AdmitError::CeilingExceeded
                         | AdmitError::NonLiteralAnswer
                         | AdmitError::EstablishedMismatch
+                        | AdmitError::OutOfScopeCast
                         | AdmitError::NarrowingUnaccepted
                         | AdmitError::AcceptanceMismatch
                         | AdmitError::OutputSanitizerBound
@@ -2150,20 +2164,35 @@ fn describe_return_plan(plan: &ReturnPlan) -> String {
     }
 }
 
-fn value_body(log: &[Fact], id: ValueId) -> Option<&str> {
+fn admitted_value(log: &[Fact], id: ValueId) -> Option<(&LabeledValue, &Provenance)> {
     log.iter()
         .filter_map(|fact| match fact {
-            Fact::ValueAdmitted { value, .. } => Some(value.body.as_str()),
+            Fact::ValueAdmitted { value, provenance, .. } => Some((value, provenance)),
             _ => None,
         })
         .nth(id.index() as usize)
 }
 
-fn value_label(log: &[Fact], id: ValueId) -> Option<&Label> {
+fn dispatch_tools(log: &[Fact]) -> BTreeMap<&DispatchId, &ToolName> {
     log.iter()
         .filter_map(|fact| match fact {
-            Fact::ValueAdmitted { value, .. } => Some(&value.label),
+            Fact::DispatchOpened { dispatch, tool, .. } => Some((dispatch, tool)),
             _ => None,
         })
-        .nth(id.index() as usize)
+        .collect()
+}
+
+fn origin_tags<'a>(
+    dispatches: &BTreeMap<&DispatchId, &ToolName>,
+    provenance: &Provenance,
+    registry: &'a Registry,
+) -> &'a [TagName] {
+    match provenance {
+        Provenance::ToolResult { dispatch } => dispatches
+            .get(dispatch)
+            .and_then(|tool| registry.tool(tool))
+            .map(|contract| contract.tags.as_slice())
+            .unwrap_or(&[]),
+        Provenance::UserInput | Provenance::ChildReturn { .. } => &[],
+    }
 }

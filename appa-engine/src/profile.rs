@@ -1162,6 +1162,7 @@ mod tests {
                     Trust::new(0),
                     Audience::Public,
                 )),
+                scope: Scope::default(),
             },
             crate::authority::Cast {
                 name: crate::names::CastName::new("yolo"),
@@ -1169,6 +1170,7 @@ mod tests {
                     Trust::new(1),
                     Audience::Public,
                 )),
+                scope: Scope::default(),
             },
         ];
         let officer = |name: &str| Authority {

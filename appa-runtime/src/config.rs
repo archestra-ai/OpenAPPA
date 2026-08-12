@@ -859,16 +859,22 @@ struct RawCast {
     name: String,
     constant: Option<RawConstantLabel>,
     resolver: Option<RawCastResolver>,
+    #[serde(default)]
+    scope: RawScope,
 }
 
 impl RawCast {
     fn convert(self, chain: &TrustChain) -> Result<(Cast, Option<CastImpl>), ConfigError> {
         let ctx = format!("cast {}", self.name);
+        let scope = Scope {
+            tags: self.scope.tags.into_iter().map(TagName::new).collect(),
+        };
         match (self.constant, self.resolver) {
             (Some(constant), None) => Ok((
                 Cast {
                     name: CastName::new(self.name),
                     resolution: CastResolution::Constant(constant.convert(chain, &ctx)?),
+                    scope,
                 },
                 None,
             )),
@@ -882,6 +888,7 @@ impl RawCast {
                     Cast {
                         name: CastName::new(self.name),
                         resolution: CastResolution::Resolver { may_cast },
+                        scope,
                     },
                     Some(imp),
                 ))

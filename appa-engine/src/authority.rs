@@ -44,7 +44,8 @@ impl Mandate {
     }
 }
 
-/// An authority's jurisdiction: the tags it covers. Empty = every call (small configs stay small).
+/// A component's jurisdiction: the tags it covers. Empty = everything (small configs stay
+/// small). Authorities, casts, and sanitizers all route by this one shape.
 /// Attention gaps ignore scope — they route by their own currency (the attended mark).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Scope {
@@ -54,6 +55,17 @@ pub struct Scope {
 impl Scope {
     pub fn covers(&self, call_tags: &[TagName]) -> bool {
         self.tags.is_empty() || self.tags.iter().any(|t| call_tags.contains(t))
+    }
+
+    /// Does this scope cover every value `other` covers? Unscoped covers every
+    /// scope; otherwise coverage is tag-set superset — a scoped component never covers an
+    /// unscoped one.
+    pub fn covers_scope(&self, other: &Scope) -> bool {
+        self.tags.is_empty() || (!other.tags.is_empty() && other.tags.iter().all(|t| self.tags.contains(t)))
+    }
+
+    pub fn is_unscoped(&self) -> bool {
+        self.tags.is_empty()
     }
 }
 
@@ -208,12 +220,16 @@ impl CastResolution {
     }
 }
 
-/// A registered cast that establishes an Unknown value's complete label. Tag scope and
-/// registration-order request routing are `T05`.
+/// A registered cast that establishes an Unknown value's complete label. It applies to values
+/// whose originating tool contract carries a covered tag; a child return or user turn
+/// originates from no tool, so only unscoped casts apply there. Among applicable
+/// casts, registration order decides and the first complete valid answer stands.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cast {
     pub name: CastName,
     pub resolution: CastResolution,
+    #[serde(default)]
+    pub scope: Scope,
 }
 
 #[cfg(test)]
