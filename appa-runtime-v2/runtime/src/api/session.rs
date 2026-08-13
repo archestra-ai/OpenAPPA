@@ -8,11 +8,11 @@ use crate::engine::{
     Presentation,
 };
 use crate::external::{ConsultKind, ConsultOutcome, DynamicResolution};
-use crate::store::{BatchAppend, DispatchState, EventWrite, Revision, RuntimeRecord};
+use crate::store::{BatchAppend, DispatchRow, DispatchState, EventWrite, Revision, RuntimeRecord};
 
 use super::{
-    AuthorizedCall, ChildReturnDecision, EventError, Inner, OfferId, OutcomeBody, ProposedCall, RemedyDecision,
-    ToolCallDecision, ToolOutcome, ToolResultDecision, TrajectoryId,
+    AuthorizedCall, ChildReturnDecision, DispatchId, EventError, Inner, OfferId, OutcomeBody, ProposedCall,
+    RemedyDecision, ToolCallDecision, ToolOutcome, ToolResultDecision, TrajectoryId,
 };
 
 /// The runtime's own control tool, recognized by its exact
@@ -25,6 +25,61 @@ pub(crate) fn is_control_tool(tool: &str) -> bool {
     tool == "execute_remedy_plan"
         || tool == "mcp__appa__execute_remedy_plan"
         || tool == "mcp__plugin_appa-runtime_appa__execute_remedy_plan"
+}
+
+/// Why a reported outcome named no reportable dispatch. The threat model puts
+/// operator diagnostics for these reports on the runtime: an
+/// uncontrolled host makes integration mistakes the engine cannot
+/// diagnose for it. The model-facing refusal is unchanged — the case
+/// goes to the operator, not into feedback.
+///
+/// These are the three contexts the runtime can observe, which are not
+/// the threat model's three cases. An already-consumed report is
+/// indistinguishable from an unknown one here: closed dispatches leave
+/// the open view, and an outcome is attributable solely through its
+/// open dispatch, so a byte match against a closed row
+/// would name a call, never the occurrence that report belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnreportableOutcome {
+    NoOpenDispatch,
+    ByteMismatch,
+    UnreleasedDispatch,
+}
+
+impl UnreportableOutcome {
+    fn case(self) -> &'static str {
+        match self {
+            UnreportableOutcome::NoOpenDispatch => "no_open_dispatch",
+            UnreportableOutcome::ByteMismatch => "byte_mismatch",
+            UnreportableOutcome::UnreleasedDispatch => "unreleased_dispatch",
+        }
+    }
+
+    fn refusal(self) -> EventError {
+        match self {
+            UnreportableOutcome::NoOpenDispatch | UnreportableOutcome::UnreleasedDispatch => {
+                EventError::UnknownDispatch
+            }
+            UnreportableOutcome::ByteMismatch => EventError::OutcomeMismatch,
+        }
+    }
+}
+
+fn classify_report(
+    call: &ProposedCall,
+    canonical: impl FnOnce() -> Option<Vec<u8>>,
+    open: Option<&DispatchRow>,
+) -> Result<DispatchId, UnreportableOutcome> {
+    let Some(open) = open else {
+        return Err(UnreportableOutcome::NoOpenDispatch);
+    };
+    if call.tool != open.tool || canonical().as_deref() != Some(open.bytes.as_slice()) {
+        return Err(UnreportableOutcome::ByteMismatch);
+    }
+    match open.state {
+        DispatchState::Executing => Ok(open.id.clone()),
+        DispatchState::Awaiting => Err(UnreportableOutcome::UnreleasedDispatch),
+    }
 }
 
 const REPLAY_LIMIT: u32 = 8;
@@ -168,17 +223,10 @@ impl Session {
             .store
             .open_dispatch(&self.trajectory)
             .map_err(|error| EventError::Storage(error.to_string()))?;
-        let Some(open) = open else {
-            return Err(EventError::UnknownDispatch);
+        let dispatch = match classify_report(&call, || self.inner.engine.canonical_bytes(&call), open.as_ref()) {
+            Ok(dispatch) => dispatch,
+            Err(case) => return Err(self.refuse_report(case, &call, open.as_ref())),
         };
-        let reported = self.inner.engine.canonical_bytes(&call);
-        if call.tool != open.tool || reported.as_deref() != Some(open.bytes.as_slice()) {
-            return Err(EventError::OutcomeMismatch);
-        }
-        if open.state != DispatchState::Executing {
-            return Err(EventError::UnknownDispatch);
-        }
-        let dispatch = open.id;
         let o = self.cap_outcome(o);
 
         if matches!(o, ToolOutcome::Success { .. }) {
@@ -366,6 +414,17 @@ impl Session {
             },
             other => other,
         }
+    }
+
+    fn refuse_report(&self, case: UnreportableOutcome, call: &ProposedCall, open: Option<&DispatchRow>) -> EventError {
+        tracing::warn!(
+            trajectory = %self.trajectory.0,
+            tool = %call.tool,
+            dispatch = open.map(|row| row.id.0.as_str()).unwrap_or("-"),
+            case = case.case(),
+            "an outcome report named no reportable dispatch",
+        );
+        case.refusal()
     }
 
     fn refuse_if_ended(&self) -> Result<(), EventError> {
@@ -869,6 +928,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_permanently_contended_log_refuses_the_event() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_test_runtime(&dir);
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        for _ in 0..REPLAY_LIMIT {
+            runtime.inner.engine.enqueue(decision(
+                Some(batch(BoundaryKind::TurnEnd, 1)),
+                Next::ModelResponse {
+                    invocations: vec![released("d-contended", &call())],
+                    feedback: Vec::new(),
+                },
+            ));
+        }
+        assert!(matches!(
+            session.on_tool_call(call()).await,
+            Err(EventError::Contended { attempts: REPLAY_LIMIT }),
+        ));
+        assert_eq!(runtime.inner.engine.seen().len(), REPLAY_LIMIT as usize);
+        let (log, _) = runtime.inner.store.load_log(&root()).expect("the log loads");
+        assert!(log.is_empty(), "no losing decision may leave a batch behind");
+        assert!(
+            runtime
+                .inner
+                .store
+                .open_dispatch(&root())
+                .expect("the dispatch query runs")
+                .is_none(),
+            "the refused event released nothing",
+        );
+    }
+
+    #[tokio::test]
     async fn a_second_call_while_one_executes_is_refused_without_an_engine_call() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_test_runtime(&dir);
@@ -1134,6 +1225,107 @@ mod tests {
         assert_eq!(open.id, DispatchId("d1".to_string()));
         assert_eq!(open.state, DispatchState::Executing);
         assert_eq!(runtime.inner.engine.seen().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_outcome_for_an_unreleased_dispatch_is_refused_and_it_stays_awaiting() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_test_runtime(&dir);
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        runtime.inner.engine.enqueue(deny_decision(
+            "blocked; execute_remedy_plan(offer-1) authorizes it",
+            &["offer-1"],
+        ));
+        session.on_tool_call(call()).await.expect("the deny is delivered");
+        runtime
+            .inner
+            .engine
+            .enqueue(decision(None, Next::InvokeTool(released("d-authorized", &call()))));
+        session
+            .on_remedy(OfferId("offer-1".to_string()))
+            .await
+            .expect("the remedy authorizes");
+
+        let before = runtime.inner.engine.seen().len();
+        assert!(matches!(
+            session
+                .on_tool_result(
+                    call(),
+                    ToolOutcome::Success {
+                        body: OutcomeBody::Available("ran anyway".to_string()),
+                    },
+                )
+                .await,
+            Err(EventError::UnknownDispatch),
+        ));
+        assert_eq!(runtime.inner.engine.seen().len(), before);
+        let open = runtime
+            .inner
+            .store
+            .open_dispatch(&root())
+            .expect("the dispatch query runs")
+            .expect("the dispatch stays open");
+        assert_eq!(open.state, DispatchState::Awaiting);
+    }
+
+    #[test]
+    fn an_outcome_report_is_classified_against_the_open_dispatch() {
+        let row = |state| DispatchRow {
+            id: DispatchId("d1".to_string()),
+            tool: "Bash".to_string(),
+            bytes: serde_json::to_vec(&call()).expect("the test call serializes"),
+            state,
+        };
+        let canonical = |call: &ProposedCall| {
+            let bytes = serde_json::to_vec(call).expect("the reported call serializes");
+            move || Some(bytes)
+        };
+
+        assert_eq!(
+            classify_report(&call(), canonical(&call()), Some(&row(DispatchState::Executing))),
+            Ok(DispatchId("d1".to_string())),
+            "the executing dispatch takes its own call's outcome",
+        );
+        assert_eq!(
+            classify_report(&call(), canonical(&call()), None),
+            Err(UnreportableOutcome::NoOpenDispatch),
+            "an already-consumed outcome arrives here too: closed dispatches leave the open view",
+        );
+        assert_eq!(
+            classify_report(&call(), canonical(&call()), Some(&row(DispatchState::Awaiting))),
+            Err(UnreportableOutcome::UnreleasedDispatch),
+            "an approved dispatch is not a released one",
+        );
+        let other = ProposedCall {
+            tool: "Bash".to_string(),
+            arguments: serde_json::json!({"command": "rm"}),
+        };
+        assert_eq!(
+            classify_report(&other, canonical(&other), Some(&row(DispatchState::Executing))),
+            Err(UnreportableOutcome::ByteMismatch),
+        );
+        assert_eq!(
+            classify_report(
+                &ProposedCall {
+                    tool: "Write".to_string(),
+                    arguments: call().arguments,
+                },
+                canonical(&call()),
+                Some(&row(DispatchState::Executing)),
+            ),
+            Err(UnreportableOutcome::ByteMismatch),
+            "a different tool over identical bytes is still not that dispatch",
+        );
+        assert_eq!(
+            classify_report(&call(), || None, Some(&row(DispatchState::Executing))),
+            Err(UnreportableOutcome::ByteMismatch),
+            "a call the engine cannot canonicalize matches nothing",
+        );
+
+        assert_eq!(
+            classify_report(&call(), || panic!("no open dispatch canonicalizes nothing"), None),
+            Err(UnreportableOutcome::NoOpenDispatch),
+        );
     }
 
     #[tokio::test]
@@ -1571,6 +1763,14 @@ delta = {}
 context_control = true
 "#;
 
+    const EMITTING_FETCH: &str = r#"
+version = 1
+
+[[policy.tool]]
+name = "fetch"
+effects = ["fetch"]
+"#;
+
     fn root() -> TrajectoryId {
         TrajectoryId("cc:root".to_string())
     }
@@ -1580,6 +1780,10 @@ context_control = true
             tool: "fetch".to_string(),
             arguments: spelling,
         }
+    }
+
+    fn facts(row: &[u8]) -> Vec<appa_engine::fact::Fact> {
+        serde_json::from_slice(row).expect("the persisted batch decodes as engine facts")
     }
 
     async fn stub(answer: serde_json::Value) -> String {
@@ -1771,6 +1975,69 @@ name = "execute_remedy_plan"
                 .expect("the dispatch query runs")
                 .is_none(),
             "the admitted result closed the dispatch",
+        );
+    }
+
+    #[tokio::test]
+    async fn the_success_checkpoint_commits_once_across_a_lost_admission() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(EMITTING_FETCH, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let outcome = || ToolOutcome::Success {
+            body: OutcomeBody::Available("data".to_string()),
+        };
+        session
+            .on_tool_call(fetch(serde_json::json!({"a": 1})))
+            .await
+            .expect("the call is released");
+
+        runtime.inner.store.fail_commit_after(1);
+        assert!(matches!(
+            session
+                .on_tool_result(fetch(serde_json::json!({"a": 1})), outcome())
+                .await,
+            Err(EventError::Storage(_)),
+        ));
+        let (log, revision) = runtime.inner.store.load_log(&root()).expect("the log loads");
+        assert_eq!(revision, Revision(2), "the checkpoint committed, the admission did not");
+        let effects = match facts(&log[1]).as_slice() {
+            [appa_engine::fact::Fact::DispatchSucceeded { effects, .. }] => effects.clone(),
+            other => panic!("expected the success checkpoint alone, got {other:?}"),
+        };
+        assert_eq!(effects.len(), 1, "the checkpoint committed the declared effect");
+        let open = runtime
+            .inner
+            .store
+            .open_dispatch(&root())
+            .expect("the dispatch query runs")
+            .expect("the lost admission left the dispatch open");
+        assert_eq!(open.state, DispatchState::Executing);
+
+        let kept = session
+            .on_tool_result(fetch(serde_json::json!({"a": 1})), outcome())
+            .await
+            .expect("the re-reported outcome admits");
+        assert_eq!(kept, ToolResultDecision::Keep);
+        let (log, revision) = runtime.inner.store.load_log(&root()).expect("the log loads");
+        assert_eq!(
+            revision,
+            Revision(3),
+            "the retry appended the admission alone — the checkpoint did not repeat",
+        );
+        let closed = facts(&log[2])
+            .into_iter()
+            .find_map(|fact| match fact {
+                appa_engine::fact::Fact::DispatchClosed {
+                    outcome: appa_engine::fact::CloseOutcome::Success { effects },
+                    ..
+                } => Some(effects),
+                _ => None,
+            })
+            .expect("the admission closed the dispatch successfully");
+        assert!(
+            closed.is_empty(),
+            "the close carries no effects: the checkpoint committed them once",
         );
     }
 
@@ -1987,6 +2254,97 @@ name = "execute_remedy_plan"
                 .expect("the dispatch query runs")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn a_subject_a_concurrent_event_moved_reads_as_lifecycle_not_a_fault() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let refuse = |trajectory: &TrajectoryId, event: crate::engine::EngineEvent| {
+            let (log, _) = runtime.inner.store.load_log(&root()).expect("the log loads");
+            let view = runtime
+                .inner
+                .engine
+                .rebuild_view(&log, trajectory)
+                .expect("the log rebuilds");
+            let refusal = runtime
+                .inner
+                .engine
+                .handle(&view, event)
+                .expect_err("the moved subject refuses the event");
+            EventError::from(refusal)
+        };
+
+        let child = TrajectoryId("cc:root:child".to_string());
+        session.on_child_start(child.clone()).expect("the child opens");
+        let error = refuse(&root(), crate::engine::EngineEvent::ChildStart { child: child.clone() });
+        assert!(
+            matches!(error, EventError::TrajectoryExists),
+            "a lost opening race answers as the store-level race does; got {error:?}",
+        );
+        assert!(!error.is_operational());
+
+        session
+            .on_tool_call(fetch(serde_json::json!({"a": 1})))
+            .await
+            .expect("the call is released");
+        session
+            .on_tool_result(
+                fetch(serde_json::json!({"a": 1})),
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("data".to_string()),
+                },
+            )
+            .await
+            .expect("the result is admitted");
+        let error = refuse(
+            &root(),
+            crate::engine::EngineEvent::SuccessObserved {
+                call: fetch(serde_json::json!({"a": 1})),
+            },
+        );
+        assert!(
+            matches!(error, EventError::UnknownDispatch),
+            "a duplicate report answers as a later one would; got {error:?}",
+        );
+        assert!(!error.is_operational());
+
+        let mut child_session = runtime.session(&child).expect("the child reopens");
+        child_session
+            .on_child_end(Some("done".to_string()))
+            .await
+            .expect("the child returns");
+        let error = refuse(
+            &child,
+            crate::engine::EngineEvent::ChildStart {
+                child: TrajectoryId("cc:root:child:grandchild".to_string()),
+            },
+        );
+        assert!(
+            matches!(error, EventError::TrajectoryEnded),
+            "an ended parent is a lifecycle condition; got {error:?}",
+        );
+        assert!(!error.is_operational());
+
+        for value in [Some("again".to_string()), None] {
+            let error = refuse(
+                &root(),
+                crate::engine::EngineEvent::ChildReturn {
+                    parent: root(),
+                    child: child.clone(),
+                    value: value.clone(),
+                    evidence: Vec::new(),
+                    entropy: fresh_entropy(),
+                },
+            );
+            assert!(
+                matches!(error, EventError::TrajectoryEnded),
+                "a duplicate return answers as a later one would; got {error:?} for {value:?}",
+            );
+            assert!(!error.is_operational());
+        }
     }
 
     #[tokio::test]
@@ -2326,6 +2684,48 @@ confined_child_return = true
                 value: "scrubbed".to_string()
             },
         );
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_sanitized_return_reads_as_an_ended_child() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let url = stub(serde_json::json!({"body": "scrubbed"})).await;
+        let runtime = Runtime::open(sanitized_config(Some(&url)), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let child_id = TrajectoryId("cc:child".to_string());
+        let mut child = session.on_child_start(child_id.clone()).expect("the child opens");
+        child
+            .on_child_end(Some("raw with pii".to_string()))
+            .await
+            .expect("the sanitized return crosses");
+
+        let (log, _) = runtime.inner.store.load_log(&root()).expect("the log loads");
+        let view = runtime
+            .inner
+            .engine
+            .rebuild_view(&log, &root())
+            .expect("the log rebuilds");
+        let refusal = runtime
+            .inner
+            .engine
+            .handle(
+                &view,
+                crate::engine::EngineEvent::ChildReturn {
+                    parent: root(),
+                    child: child_id,
+                    value: Some("raw with pii".to_string()),
+                    evidence: vec![crate::engine::ExternalEvidence::Sanitizer {
+                        sanitizer: "scrub".to_string(),
+                        derived: Some("scrubbed".to_string()),
+                    }],
+                    entropy: fresh_entropy(),
+                },
+            )
+            .expect_err("the duplicate return is refused");
+        let error = EventError::from(refusal);
+        assert!(matches!(error, EventError::TrajectoryEnded), "got {error:?}",);
+        assert!(!error.is_operational());
     }
 
     #[tokio::test]

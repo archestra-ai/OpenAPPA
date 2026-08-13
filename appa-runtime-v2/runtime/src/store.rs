@@ -127,7 +127,7 @@ pub enum CommitError {
 pub struct Store {
     conn: Mutex<Connection>,
     #[cfg(test)]
-    fail_before_commit: std::sync::atomic::AtomicBool,
+    commits_until_failure: std::sync::atomic::AtomicU64,
 }
 
 impl Store {
@@ -183,7 +183,7 @@ impl Store {
         Ok(Store {
             conn: Mutex::new(conn),
             #[cfg(test)]
-            fail_before_commit: std::sync::atomic::AtomicBool::new(false),
+            commits_until_failure: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -390,8 +390,17 @@ impl Store {
         }
 
         #[cfg(test)]
-        if self.fail_before_commit.swap(false, std::sync::atomic::Ordering::SeqCst) {
-            return Err(CommitError::Injected);
+        {
+            use std::sync::atomic::Ordering::SeqCst;
+            let armed = self
+                .commits_until_failure
+                .fetch_update(SeqCst, SeqCst, |remaining| match remaining {
+                    0 => None,
+                    remaining => Some(remaining - 1),
+                });
+            if armed == Ok(1) {
+                return Err(CommitError::Injected);
+            }
         }
 
         tx.commit()?;
@@ -441,7 +450,17 @@ impl Store {
     /// of committing, as a process kill inside the transaction would.
     #[cfg(test)]
     pub fn fail_next_commit(&self) {
-        self.fail_before_commit.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.fail_commit_after(0);
+    }
+
+    /// Arm the fail point further out: `skip` commits land normally
+    /// and the one after them rolls back. An event that takes two
+    /// engine interactions — the success checkpoint, then the
+    /// admission — can only lose the second this way.
+    #[cfg(test)]
+    pub fn fail_commit_after(&self, skip: u64) {
+        self.commits_until_failure
+            .store(skip + 1, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {

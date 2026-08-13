@@ -86,22 +86,13 @@ fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
             })),
             None => Err(malformed("PreToolUse without a tool call")),
         },
-        "PostToolUse" | "PostToolUseFailure" => {
-            let Some(call) = event.call() else {
-                return Err(malformed("a tool outcome without its tool call"));
-            };
-            let outcome = match event.hook_event_name.as_str() {
-                "PostToolUseFailure" => ToolOutcome::Failure {
-                    message: "the tool run failed".to_string(),
-                },
-                _ => map_outcome(event.tool_response.as_ref()),
-            };
-            Ok(Some(HookEvent::ToolResult {
-                actor: event.actor(),
-                call,
-                outcome,
-            }))
-        }
+        "PostToolUse" => tool_result(&event, map_outcome(event.tool_response.as_ref())),
+        "PostToolUseFailure" => tool_result(
+            &event,
+            ToolOutcome::Failure {
+                message: "the tool run failed".to_string(),
+            },
+        ),
         "SubagentStart" => match event.agent_id.clone() {
             Some(agent) => Ok(Some(HookEvent::ChildStart {
                 parent: event.root(),
@@ -121,15 +112,23 @@ fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
     }
 }
 
+fn tool_result(event: &WireEvent, outcome: ToolOutcome) -> Result<Option<HookEvent>, ParseRefusal> {
+    match event.call() {
+        Some(call) => Ok(Some(HookEvent::ToolResult {
+            actor: event.actor(),
+            call,
+            outcome,
+        })),
+        None => Err(malformed("a tool outcome without its tool call")),
+    }
+}
+
 fn map_outcome(response: Option<&serde_json::Value>) -> ToolOutcome {
-    let Some(response) = response else {
-        return ToolOutcome::Indeterminate;
-    };
-    let Ok(body) = serde_json::to_string(response) else {
-        return ToolOutcome::Indeterminate;
-    };
-    ToolOutcome::Success {
-        body: OutcomeBody::Available(body),
+    match response {
+        None => ToolOutcome::Indeterminate,
+        Some(response) => ToolOutcome::Success {
+            body: OutcomeBody::Available(response.to_string()),
+        },
     }
 }
 
@@ -320,22 +319,48 @@ mod tests {
     }
 
     #[test]
-    fn the_outcome_mapping_carries_what_it_saw() {
-        let available = map_outcome(Some(&serde_json::json!({"ok": true})));
+    fn a_post_tool_use_maps_its_response_shape_onto_one_outcome() {
+        let post = |response: Option<serde_json::Value>| {
+            let mut event = serde_json::json!({
+                "hook_event_name": "PostToolUse",
+                "session_id": "s1",
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls"},
+            });
+            if let Some(response) = response {
+                event["tool_response"] = response;
+            }
+            match parse_value(&event) {
+                Ok(Some(HookEvent::ToolResult { outcome, .. })) => outcome,
+                other => panic!("expected a ToolResult event, got {other:?}"),
+            }
+        };
+        assert_eq!(post(None), ToolOutcome::Indeterminate, "no response key at all");
         assert_eq!(
-            available,
+            post(Some(serde_json::Value::Null)),
+            ToolOutcome::Indeterminate,
+            "an explicit null response carries no result either",
+        );
+        assert_eq!(
+            post(Some(serde_json::json!({"stdout": "readme.txt"}))),
             ToolOutcome::Success {
-                body: OutcomeBody::Available("{\"ok\":true}".to_string()),
+                body: OutcomeBody::Available("{\"stdout\":\"readme.txt\"}".to_string()),
             },
+        );
+        assert_eq!(
+            post(Some(serde_json::json!("plain text"))),
+            ToolOutcome::Success {
+                body: OutcomeBody::Available("\"plain text\"".to_string()),
+            },
+            "a scalar response is carried as its JSON rendering, like every other shape",
         );
         let big = serde_json::json!("x".repeat(5000));
         assert_eq!(
-            map_outcome(Some(&big)),
+            post(Some(big.clone())),
             ToolOutcome::Success {
-                body: OutcomeBody::Available(serde_json::to_string(&big).expect("the big body serializes")),
+                body: OutcomeBody::Available(big.to_string()),
             },
         );
-        assert_eq!(map_outcome(None), ToolOutcome::Indeterminate);
     }
 
     #[test]

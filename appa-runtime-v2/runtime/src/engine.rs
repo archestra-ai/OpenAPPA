@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use appa_engine::admit::{AdmitError, ResultAdmission};
-use appa_engine::branch::{ReturnBlock, ReturnCheck, ReturnPlan, ReturnSubmission};
+use appa_engine::branch::{BranchError, ReturnBlock, ReturnCheck, ReturnPlan, ReturnSubmission};
 use appa_engine::check::{CheckOutcome, UnestablishedFact};
 use appa_engine::contract::{
     AudienceRequirement, DynamicAudienceBinding, PinnedDynamicResolution, RecipientSpec, ToolContract,
@@ -220,13 +220,19 @@ impl EngineDecision {
 
 /// Why the seam refused an event outright. Model-visible outcomes (a deny, a
 /// declined offer) are decisions, not refusals; a refusal means the event
-/// cannot be processed at all and the harness fails closed.
+/// cannot be processed as it stands.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineRefusal {
     #[error("the persisted log is refused: {detail}")]
     UntrustedLog { detail: String },
     #[error("engine invariant breach: {detail}")]
     Invariant { detail: String },
+    #[error("the child is already forked")]
+    ChildAlreadyForked,
+    #[error("the trajectory has ended")]
+    Ended,
+    #[error("the dispatch is no longer open")]
+    DispatchClosed,
 }
 
 /// The engine's derived working picture of one family log, scoped to the
@@ -490,12 +496,13 @@ impl RuntimeEngine {
             EngineEvent::ChildStart { child } => {
                 let views = projection.view(&own);
                 let child_id = engine_id(&child);
-                let batch = self
-                    .engine
-                    .seed_child(&views, &child_id)
-                    .map_err(|error| EngineRefusal::Invariant {
+                let batch = self.engine.seed_child(&views, &child_id).map_err(|error| match error {
+                    BranchError::AlreadyForked => EngineRefusal::ChildAlreadyForked,
+                    BranchError::ParentEnded => EngineRefusal::Ended,
+                    error => EngineRefusal::Invariant {
                         detail: format!("seeding child {}: {error}", child.0),
-                    })?;
+                    },
+                })?;
                 Ok(EngineDecision::append(batch, Next::Done))
             }
             EngineEvent::ChildReturn {
@@ -867,12 +874,20 @@ impl RuntimeEngine {
         chosen: &ReturnPlan,
         evidence: &[ExternalEvidence],
     ) -> Result<EngineDecision, EngineRefusal> {
-        let check = self
-            .engine
-            .check_child_return(parent_views, &engine_id(child))
-            .map_err(|error| EngineRefusal::Invariant {
-                detail: format!("re-checking a child return: {error}"),
-            })?;
+        let check = match self.engine.check_child_return(parent_views, &engine_id(child)) {
+            Ok(check) => check,
+            Err(BranchError::AlreadyEnded) => {
+                return Ok(retire_declined(
+                    offer,
+                    "[appa] the child has already ended; this return offer no longer stands".to_string(),
+                ));
+            }
+            Err(error) => {
+                return Err(EngineRefusal::Invariant {
+                    detail: format!("re-checking a child return: {error}"),
+                });
+            }
+        };
         let plans = match &check {
             ReturnCheck::Block(ReturnBlock::Narrowing { plans, .. }) => plans.clone(),
             ReturnCheck::Allow | ReturnCheck::Block(ReturnBlock::Unestablished(_)) => Vec::new(),
@@ -950,8 +965,11 @@ impl RuntimeEngine {
             let batch = self
                 .engine
                 .submit_void_return(parent_views, &child_engine)
-                .map_err(|error| EngineRefusal::Invariant {
-                    detail: format!("void return: {error}"),
+                .map_err(|error| match error {
+                    BranchError::AlreadyEnded => EngineRefusal::Ended,
+                    error => EngineRefusal::Invariant {
+                        detail: format!("void return: {error}"),
+                    },
                 })?;
             return Ok(EngineDecision::append(
                 batch,
@@ -990,6 +1008,7 @@ impl RuntimeEngine {
                             batch,
                             Next::PresentToModel(Presentation::Value { value: derived }),
                         )),
+                        Err(BranchError::AlreadyEnded) => Err(EngineRefusal::Ended),
                         Err(error) => Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
                             feedback: format!("[appa] the sanitized return may not cross: {error}"),
                             offers: Vec::new(),
@@ -1001,8 +1020,11 @@ impl RuntimeEngine {
         let check = self
             .engine
             .check_child_return(parent_views, &child_engine)
-            .map_err(|error| EngineRefusal::Invariant {
-                detail: format!("checking a child return: {error}"),
+            .map_err(|error| match error {
+                BranchError::AlreadyEnded => EngineRefusal::Ended,
+                error => EngineRefusal::Invariant {
+                    detail: format!("checking a child return: {error}"),
+                },
             })?;
         match check {
             ReturnCheck::Allow => {
@@ -1122,9 +1144,7 @@ impl RuntimeEngine {
         let dispatch = (0..views.dispatch_count(&digest))
             .map(|occurrence| EngineDispatchId::new(views.trajectory().clone(), digest, occurrence))
             .find(|dispatch| views.is_open(dispatch))
-            .ok_or_else(|| EngineRefusal::Invariant {
-                detail: "a matched outcome names no open engine dispatch".to_string(),
-            })?;
+            .ok_or(EngineRefusal::DispatchClosed)?;
         Ok((resolved, dispatch))
     }
 

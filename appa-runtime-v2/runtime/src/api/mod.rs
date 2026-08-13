@@ -142,11 +142,51 @@ pub(crate) enum EventError {
     Storage(String),
 }
 
+impl EventError {
+    /// Whether this failure is the deployment's problem rather than
+    /// something the model or the harness can act on. An operational
+    /// failure refuses wherever it happens, so the harness fails closed
+    /// and an integration fault never reaches the model
+    /// dressed as policy feedback. The match is exhaustive on purpose:
+    /// a new variant has to pick a side.
+    pub(crate) fn is_operational(&self) -> bool {
+        match self {
+            EventError::Storage(_)
+            | EventError::UntrustedLog(_)
+            | EventError::EngineInvariant(_)
+            | EventError::Contended { .. }
+            | EventError::UnexpectedDecision => true,
+            EventError::CallOutstanding
+            | EventError::TrajectoryEnded
+            | EventError::UnknownTrajectory
+            | EventError::TrajectoryExists
+            | EventError::UnknownDispatch
+            | EventError::OutcomeMismatch
+            | EventError::UnknownOffer
+            | EventError::NotAChild => false,
+        }
+    }
+}
+
+impl From<SessionError> for EventError {
+    fn from(error: SessionError) -> EventError {
+        match error {
+            SessionError::AlreadyExists => EventError::TrajectoryExists,
+            SessionError::Unknown => EventError::UnknownTrajectory,
+            SessionError::Ended => EventError::TrajectoryEnded,
+            SessionError::Storage(detail) => EventError::Storage(detail),
+        }
+    }
+}
+
 impl From<EngineRefusal> for EventError {
     fn from(refusal: EngineRefusal) -> EventError {
         match refusal {
             EngineRefusal::UntrustedLog { detail } => EventError::UntrustedLog(detail),
             EngineRefusal::Invariant { detail } => EventError::EngineInvariant(detail),
+            EngineRefusal::ChildAlreadyForked => EventError::TrajectoryExists,
+            EngineRefusal::Ended => EventError::TrajectoryEnded,
+            EngineRefusal::DispatchClosed => EventError::UnknownDispatch,
         }
     }
 }
@@ -384,6 +424,10 @@ pub(crate) mod testing {
 
     pub(crate) fn runtime(config: Config, db: std::path::PathBuf) -> Runtime {
         Runtime::open_with_engine(config, db, EngineSeam::Test(TestSeam::new())).expect("a fresh test runtime opens")
+    }
+
+    pub(crate) fn fail_next_commit(runtime: &Runtime) {
+        runtime.inner.store.fail_next_commit();
     }
 
     fn enqueue(runtime: &Runtime, then: Next) {

@@ -39,11 +39,11 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
         HookEvent::Prompt { actor, text } => {
             let mut session = match event_session(runtime, &actor) {
                 Ok(session) => session,
-                Err(error) => return block(error.to_string()),
+                Err(error) => return fold(error, block),
             };
             match session.on_prompt(text) {
                 Ok(()) => HookDecision::Ack,
-                Err(error) => block(error.to_string()),
+                Err(error) => fold(error, block),
             }
         }
         HookEvent::ToolCall { actor, call } => {
@@ -53,14 +53,13 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             }
             let mut session = match event_session(runtime, &actor) {
                 Ok(session) => session,
-                Err(error) => return deny(error.to_string()),
+                Err(error) => return fold(error, deny),
             };
             match session.on_tool_call(call).await {
                 Ok(ToolCallDecision::Allow) => HookDecision::AllowCall,
                 Ok(ToolCallDecision::Control) => HookDecision::PassControl,
                 Ok(ToolCallDecision::Deny { feedback }) => HookDecision::DenyCall { feedback },
-                Err(EventError::Storage(detail)) => refuse(detail),
-                Err(error) => deny(error.to_string()),
+                Err(error) => fold(error, deny),
             }
         }
         HookEvent::ToolResult { actor, call, outcome } => {
@@ -70,13 +69,12 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             }
             let mut session = match event_session(runtime, &actor) {
                 Ok(session) => session,
-                Err(error) => return block(error.to_string()),
+                Err(error) => return fold(error, block),
             };
             match session.on_tool_result(call, outcome).await {
                 Ok(ToolResultDecision::Keep) => HookDecision::Ack,
                 Ok(ToolResultDecision::Replace { placeholder }) => block(placeholder),
-                Err(EventError::Storage(detail)) => refuse(detail),
-                Err(error) => block(error.to_string()),
+                Err(error) => fold(error, block),
             }
         }
         HookEvent::ChildStart { parent, child } => {
@@ -96,13 +94,12 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
         HookEvent::ChildEnd { parent, child, value } => {
             let mut child = match child_session(runtime, &parent, &child) {
                 Ok(session) => session,
-                Err(error) => return block(error.to_string()),
+                Err(error) => return fold(error, block),
             };
             match child.on_child_end(value).await {
                 Ok(ChildReturnDecision::Returned { .. }) | Ok(ChildReturnDecision::NoValue) => HookDecision::Ack,
                 Ok(ChildReturnDecision::Blocked { feedback }) => block(feedback),
-                Err(EventError::Storage(detail)) => refuse(detail),
-                Err(error) => block(error.to_string()),
+                Err(error) => fold(error, block),
             }
         }
     }
@@ -128,30 +125,30 @@ fn child_session(
     match runtime.session(child) {
         Ok(session) => Ok(session),
         Err(SessionError::Unknown) => {
-            let mut parent = open_or_reopen(runtime, parent).map_err(|error| EventError::Storage(error.to_string()))?;
+            let mut parent = open_or_reopen(runtime, parent).map_err(EventError::from)?;
             match parent.on_child_start(child.clone()) {
                 Ok(session) => Ok(session),
                 // A concurrent event won the opening race.
-                Err(EventError::TrajectoryExists) => runtime.session(child).map_err(|error| match error {
-                    SessionError::Ended => EventError::TrajectoryEnded,
-                    error => EventError::Storage(error.to_string()),
-                }),
+                Err(EventError::TrajectoryExists) => runtime.session(child).map_err(EventError::from),
                 Err(error) => Err(error),
             }
         }
-        Err(SessionError::Ended) => Err(EventError::TrajectoryEnded),
-        Err(error) => Err(EventError::Storage(error.to_string())),
+        Err(error) => Err(EventError::from(error)),
     }
 }
 
 fn event_session(runtime: &Runtime, actor: &Actor) -> Result<Session, EventError> {
     match &actor.child {
         Some(child) => child_session(runtime, &actor.root, child),
-        None => match open_or_reopen(runtime, &actor.root) {
-            Ok(session) => Ok(session),
-            Err(SessionError::Ended) => Err(EventError::TrajectoryEnded),
-            Err(error) => Err(EventError::Storage(error.to_string())),
-        },
+        None => open_or_reopen(runtime, &actor.root).map_err(EventError::from),
+    }
+}
+
+fn fold(error: EventError, family: fn(String) -> HookDecision) -> HookDecision {
+    if error.is_operational() {
+        refuse(error.to_string())
+    } else {
+        family(error.to_string())
     }
 }
 
@@ -464,6 +461,83 @@ mod tests {
             serde_json::json!({}),
             "the control outcome is absorbed on an ended trajectory"
         );
+    }
+
+    #[tokio::test]
+    async fn an_ended_parent_blocks_its_unknown_childs_return() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_test_runtime(&dir);
+        let root = appa_runtime_api::TrajectoryId("cc:s1".to_string());
+        let ended = appa_runtime_api::TrajectoryId("cc:s1:a1".to_string());
+
+        testing::enqueue_done(&runtime);
+        assert_eq!(
+            handle(
+                &runtime,
+                HookEvent::ChildStart {
+                    parent: root.clone(),
+                    child: ended.clone(),
+                },
+            )
+            .await,
+            HookDecision::Ack,
+        );
+        testing::enqueue_value(&runtime, "done");
+        assert_eq!(
+            handle(
+                &runtime,
+                HookEvent::ChildEnd {
+                    parent: root.clone(),
+                    child: ended.clone(),
+                    value: Some("done".to_string()),
+                },
+            )
+            .await,
+            HookDecision::Ack,
+        );
+
+        let decision = handle(
+            &runtime,
+            HookEvent::ChildEnd {
+                parent: ended,
+                child: appa_runtime_api::TrajectoryId("cc:s1:a1:b1".to_string()),
+                value: Some("late".to_string()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(decision, HookDecision::Block { .. }),
+            "an ended trajectory blocks; only an operational failure refuses. Got {decision:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn an_operational_failure_refuses_instead_of_answering_the_model() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_test_runtime(&dir);
+        testing::fail_next_commit(&runtime);
+        let prompt = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "s1",
+            "prompt": "read the report",
+        });
+        let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&prompt).expect("serializes")).await;
+        assert_eq!(status, 409, "the harness must fail closed on a storage failure");
+        assert!(
+            answer.get("error").is_some(),
+            "an operational failure renders as a refusal, never as model-facing feedback: {answer}",
+        );
+
+        testing::enqueue_done(&runtime);
+        let call = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "s1",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+        });
+        let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&call).expect("serializes")).await;
+        assert_eq!(status, 409, "an undeliverable decision refuses rather than denying");
+        assert!(answer.get("error").is_some(), "got {answer}");
     }
 
     #[tokio::test]
