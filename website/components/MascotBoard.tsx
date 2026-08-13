@@ -12,6 +12,11 @@ const ROWS = [
   { size: 56, count: 6, curve: 26, gap: 50 },
 ];
 
+/* A row is one arc, and an arc only reads as an arc unbroken: at a fixed seat
+   size the widest row is ~600px, so on a phone it either overflows the page or
+   wraps into a column of stragglers. Instead every length in a row — seat,
+   gap, and the curve's drop — is a multiple of `--seat`, which shrinks to
+   whatever the column allows. The arc keeps its shape at any width. */
 export function MascotBoard() {
   return (
     <div
@@ -19,28 +24,44 @@ export function MascotBoard() {
       role="img"
       aria-label="The Advisory Board: rows of OpenAPPA mascots seated like a theater audience facing a stage"
     >
-      {ROWS.map((row, r) => (
-        <div key={r} className="mascot-theater-row" style={{ gap: row.gap }}>
-          {Array.from({ length: row.count }, (_, i) => {
-            const t = row.count === 1 ? 0 : (i - (row.count - 1) / 2) / ((row.count - 1) / 2);
-            const drop = row.curve * t * t;
-            const seat = r * 7 + i;
-            return (
-              <span key={i} style={{ display: "inline-block", transform: `translateY(${drop.toFixed(1)}px)` }}>
-                <PixelMark
-                  size={row.size}
-                  style={
-                    {
-                      "--appa-float-delay": `${(-0.9 * seat).toFixed(1)}s`,
-                      "--appa-blink-delay": `${(-1.7 * seat).toFixed(1)}s`,
-                    } as React.CSSProperties
-                  }
-                />
-              </span>
-            );
-          })}
-        </div>
-      ))}
+      {ROWS.map((row, r) => {
+        const gapRatio = row.gap / row.size;
+        // Seats plus gaps span the row, so this divisor converts row width
+        // into the seat width that exactly fills it.
+        const span = row.count + (row.count - 1) * gapRatio;
+        return (
+          <div
+            key={r}
+            className="mascot-theater-row"
+            style={
+              {
+                "--seat": `min(${row.size}px, calc(100% / ${span.toFixed(4)}))`,
+                "--seat-gap": gapRatio.toFixed(4),
+              } as React.CSSProperties
+            }
+          >
+            {Array.from({ length: row.count }, (_, i) => {
+              const t = row.count === 1 ? 0 : (i - (row.count - 1) / 2) / ((row.count - 1) / 2);
+              const drop = ((row.curve * t * t) / row.size).toFixed(4);
+              const seat = r * 7 + i;
+              return (
+                <span key={i} className="mascot-seat" style={{ transform: `translateY(calc(var(--seat) * ${drop}))` }}>
+                  <PixelMark
+                    className="mascot-mark"
+                    size={row.size}
+                    style={
+                      {
+                        "--appa-float-delay": `${(-0.9 * seat).toFixed(1)}s`,
+                        "--appa-blink-delay": `${(-1.7 * seat).toFixed(1)}s`,
+                      } as React.CSSProperties
+                    }
+                  />
+                </span>
+              );
+            })}
+          </div>
+        );
+      })}
     </div>
   );
 }

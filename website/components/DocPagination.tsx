@@ -10,7 +10,7 @@ export interface PaginationDoc {
 
 export function DocPagination({ docs }: { docs: PaginationDoc[] }) {
   const pathname = usePathname();
-  const currentSlug = pathname === "/" ? "index" : pathname.replace("/docs/", "");
+  const currentSlug = pathname === "/" ? "index" : pathname.replace(/^\//, "");
   const currentIndex = docs.findIndex((d) => d.slug === currentSlug);
 
   if (currentIndex === -1) return null;
@@ -24,7 +24,7 @@ export function DocPagination({ docs }: { docs: PaginationDoc[] }) {
     <nav className="doc-pagination" aria-label="Pagination">
       {prevDoc ? (
         <Link
-          href={prevDoc.slug === "index" ? "/" : `/docs/${prevDoc.slug}`}
+          href={prevDoc.slug === "index" ? "/" : `/${prevDoc.slug}`}
           className="pagination-card prev"
         >
           <span className="pagination-label">← Previous</span>
@@ -36,7 +36,7 @@ export function DocPagination({ docs }: { docs: PaginationDoc[] }) {
 
       {nextDoc && (
         <Link
-          href={nextDoc.slug === "index" ? "/" : `/docs/${nextDoc.slug}`}
+          href={nextDoc.slug === "index" ? "/" : `/${nextDoc.slug}`}
           className="pagination-card next"
         >
           <span className="pagination-label">Next →</span>

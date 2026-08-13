@@ -6,6 +6,8 @@ import rehypeHighlight from "rehype-highlight";
 import rehypeSlug from "rehype-slug";
 import remarkGfm from "remark-gfm";
 
+import { AdvisorySignup } from "@/components/AdvisorySignup";
+import { BenchmarkHighlight } from "@/components/BenchmarkHighlight";
 import { CodeBlock } from "@/components/CodeBlock";
 import { ConnectedAgentFigure } from "@/components/figures/ConnectedAgentFigure";
 import { ExfiltrationFigure } from "@/components/figures/ExfiltrationFigure";
@@ -22,6 +24,8 @@ import { termDefinition } from "@/lib/terms";
 /* Block directives: a line of the form :::name::: in the markdown renders
    the mapped component in place. */
 const DIRECTIVES: Record<string, () => ReactNode> = {
+  "advisory-signup": () => <AdvisorySignup />,
+  "benchmark-highlight": () => <BenchmarkHighlight />,
   "fig-connected-agent": () => <ConnectedAgentFigure />,
   "fig-exfiltration": () => <ExfiltrationFigure />,
   "fig-guardrail": () => <GuardrailFigure />,
@@ -112,6 +116,13 @@ function Markdown({ content }: { content: string }) {
         pre: (props) => <CodeBlock {...props} />,
         code: MarkdownCode,
         a: MarkdownLink,
+        // A table's min-content width can exceed a phone viewport; without a
+        // scroll container of its own it widens the whole page instead.
+        table: (props) => (
+          <div className="table-scroll">
+            <table {...props} />
+          </div>
+        ),
         h2: (props) => <AnchoredHeading level={2} {...props} />,
         h3: (props) => <AnchoredHeading level={3} {...props} />,
         h4: (props) => <AnchoredHeading level={4} {...props} />,

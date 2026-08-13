@@ -20,7 +20,7 @@ const ROWS = 9;
 const CAP_ROWS = 7;
 
 /* Pixel-grid mascot on the same grid as the wordmark, ported from the
-   landing page's <appa-mark> custom element (app/landing/pixel-marks.ts).
+   <appa-mark> custom element (components/pixel-marks.ts).
    1 body · 3 dim (muzzle, paws) · 2 nose · 4 eyes */
 
 const MARK_COLS = 24;
@@ -64,7 +64,15 @@ const MARK_FILL: Record<string, string> = {
   "4": "var(--bg)",
 };
 
-export function PixelMark({ size = 26, style }: { size?: number; style?: CSSProperties }) {
+export function PixelMark({
+  size = 26,
+  style,
+  className,
+}: {
+  size?: number;
+  style?: CSSProperties;
+  className?: string;
+}) {
   const height = Math.round((size * MARK_ROWS) / MARK_COLS);
   const body: ReactNode[] = [];
   const eyes: ReactNode[] = [];
@@ -86,6 +94,7 @@ export function PixelMark({ size = 26, style }: { size?: number; style?: CSSProp
       viewBox={`0 0 ${MARK_COLS} ${MARK_ROWS}`}
       width={size}
       height={height}
+      className={className}
       shapeRendering="crispEdges"
       role="img"
       aria-label="OpenAPPA mascot"
@@ -132,6 +141,7 @@ export function PixelWordmark({
   word,
   capHeight,
   style,
+  className,
   gap = 0,
   shape = "square",
   dimLowercase = true,
@@ -140,6 +150,7 @@ export function PixelWordmark({
   /** Fixed cap height in px; omit for fluid sizing via `style`. */
   capHeight?: number;
   style?: CSSProperties;
+  className?: string;
 } & WordmarkOptions) {
   const { pixels, width } = layoutWord(word);
   const height = ROWS * CELL;
@@ -150,6 +161,7 @@ export function PixelWordmark({
       viewBox={`0 0 ${width} ${height}`}
       height={boxHeight}
       width={boxHeight ? (boxHeight * width) / height : undefined}
+      className={className}
       style={style}
       preserveAspectRatio="xMinYMid meet"
       role="img"
@@ -179,28 +191,24 @@ export function PixelWordmark({
   );
 }
 
-/** `height` is the cap height in px; the descender extends below it. */
-export function Logo({ height = 15 }: { height?: number }) {
-  const labelSize = Math.round(height * 0.55);
+/* The lockup is sized entirely from one length, `--logo-h` (the wordmark's cap
+   height): every gap, the mark, and the tagline are proportions of it in CSS.
+   That lets a caller scale the whole thing fluidly — the hero clamps it
+   against the viewport — instead of wrapping the mark onto its own line when
+   a fixed pixel width stops fitting.
+
+   `height` seeds that variable. A number is pixels; a string is any CSS
+   length, so a caller can hand it a clamp() and get a fluid lockup. It has to
+   arrive as a prop rather than a stylesheet override — the variable is set
+   inline here, and inline styles win. */
+export function Logo({ height = 15 }: { height?: number | string }) {
+  const logoHeight = typeof height === "number" ? `${height}px` : height;
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: height * 0.7 }}>
-      <PixelMark size={Math.round((height * 26) / 15)} />
-      <span style={{ display: "inline-flex", alignItems: "flex-start", gap: height * 0.45 }}>
-        <PixelWordmark word="OpenAPPA" capHeight={height} />
-        <span
-          className="logo-tagline"
-          style={{
-            fontSize: labelSize,
-            lineHeight: 1,
-            marginTop: height - labelSize,
-            letterSpacing: "0.08em",
-            textTransform: "uppercase",
-            color: "var(--text-weak)",
-            fontFamily: "var(--font-mono)",
-          }}
-        >
-          Preview &amp; RFC
-        </span>
+    <span className="logo-lockup" style={{ "--logo-h": logoHeight } as CSSProperties}>
+      <PixelMark className="logo-mark" />
+      <span className="logo-word-group">
+        <PixelWordmark word="OpenAPPA" className="logo-word" />
+        <span className="logo-tagline">Preview &amp; RFC</span>
       </span>
     </span>
   );

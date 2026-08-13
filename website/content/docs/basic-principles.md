@@ -9,7 +9,7 @@ One of OpenAPPA's core goals is to work in practice, not only in theory. That me
 
 ## A cross-platform language for agent security
 
-OpenAPPA is cross-platform. A single configuration ([the policy reference](/docs/contracts) describes the format) can be applied at different levels, on different stacks, and by different roles.
+OpenAPPA is cross-platform. A single configuration ([the policy reference](/contracts) describes the format) can be applied at different levels, on different stacks, and by different roles.
 
 :::fig-policy-stack:::
 

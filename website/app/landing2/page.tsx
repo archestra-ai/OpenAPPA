@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 
 import { Landing } from "./Landing";
 
-import "../landing/landing.css";
+import "./landing.css";
 
 export const metadata: Metadata = {
   title: "Landing 2",

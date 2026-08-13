@@ -7,6 +7,14 @@ const nextConfig: NextConfig = {
     "/mcp": ["./content/**/*"],
     "/llms.txt": ["./content/**/*"],
   },
+  // Doc pages live at the root (/contracts, not /docs/contracts). Links
+  // already shared under the old prefix keep working.
+  async redirects() {
+    return [
+      { source: "/docs", destination: "/", permanent: true },
+      { source: "/docs/:slug", destination: "/:slug", permanent: true },
+    ];
+  },
 };
 
 export default nextConfig;

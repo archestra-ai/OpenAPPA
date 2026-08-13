@@ -16,7 +16,9 @@ export default function HomePage() {
       <div className="landing">
         <div className="hero">
           <h1>
-            <Logo height={36} />
+            {/* Fluid: the lockup shrinks to fit a phone instead of wrapping
+                the mascot onto a line of its own. 36px is the design size. */}
+            <Logo height="clamp(15px, calc((100vw - 64px) / 15), 36px)" />
           </h1>
           <p className="tagline">{doc.description}</p>
         </div>

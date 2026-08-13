@@ -15,7 +15,7 @@ export function UnderConstruction() {
       <div className="uc-label">Under construction</div>
       <p className="uc-text">
         There is nothing here yet — this page is being written, and the mascot is on it. In the meantime,{" "}
-        <Link href="/docs/how-it-works">How it works</Link> is the best place to start.
+        <Link href="/how-it-works">How it works</Link> is the best place to start.
       </p>
       <div className="uc-stripes" aria-hidden />
     </div>

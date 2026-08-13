@@ -1,31 +1,38 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef } from "react";
 import Link from "next/link";
 
+import { GitHubSoon } from "@/components/GitHubSoon";
 import { Logo } from "@/components/Logo";
-import { SearchModal } from "@/components/SearchModal";
+import { MobileNavToggle } from "@/components/MobileNav";
+import { SearchIcon, useSearch } from "@/components/SearchProvider";
+import { ThemeToggle } from "@/components/ThemeToggle";
 
 export function Header() {
-  const [searchOpen, setSearchOpen] = useState(false);
+  const search = useSearch();
+  const headerRef = useRef<HTMLElement>(null);
 
+  /* Everything that has to clear the sticky header — anchor landings, the
+     sticky rails, the drawer — reads --header-h. Publishing the measured
+     height keeps them exact when the header reflows (font swap, narrow
+     breakpoints) instead of drifting from a hardcoded guess. */
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
-        e.preventDefault();
-        setSearchOpen((open) => !open);
-      } else if (e.key === "/" && document.activeElement?.tagName !== "INPUT" && document.activeElement?.tagName !== "TEXTAREA") {
-        e.preventDefault();
-        setSearchOpen(true);
-      }
+    const el = headerRef.current;
+    if (!el) return;
+    const publish = () => {
+      document.documentElement.style.setProperty("--header-h", `${Math.round(el.getBoundingClientRect().height)}px`);
     };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    publish();
+    const observer = new ResizeObserver(publish);
+    observer.observe(el);
+    return () => observer.disconnect();
   }, []);
 
   return (
     <>
-      <header className="site-header">
+      <header className="site-header" ref={headerRef}>
+        <MobileNavToggle />
         <Link href="/" className="wordmark">
           <Logo height={15} />
         </Link>
@@ -33,26 +40,23 @@ export function Header() {
           <button
             type="button"
             className="search-trigger-btn"
-            onClick={() => setSearchOpen(true)}
+            onClick={() => search?.open()}
             aria-label="Search documentation"
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="11" cy="11" r="8" />
-              <line x1="21" y1="21" x2="16.65" y2="16.65" />
-            </svg>
+            <SearchIcon />
             <span>Search...</span>
             <kbd className="header-kbd">⌘K</kbd>
           </button>
-          <Link href="/">Docs</Link>
+          <Link href="/" className="nav-docs">
+            Docs
+          </Link>
           <a href="https://arxiv.org/abs/2607.24625" target="_blank" rel="noreferrer">
             Paper
           </a>
-          <a href="https://github.com/archestra-ai/OpenAPPA" target="_blank" rel="noreferrer">
-            GitHub
-          </a>
+          <GitHubSoon />
+          <ThemeToggle />
         </nav>
       </header>
-      <SearchModal isOpen={searchOpen} onClose={() => setSearchOpen(false)} />
     </>
   );
 }

@@ -42,7 +42,7 @@ import {
   describeSystem,
 } from "./playground-data";
 import { PolicyEditor, findBlock } from "./PolicyEditor";
-import { registerPixelMarks } from "@/app/landing/pixel-marks";
+import { registerPixelMarks } from "@/components/pixel-marks";
 import { termDefinition } from "@/lib/terms";
 
 declare module "react" {

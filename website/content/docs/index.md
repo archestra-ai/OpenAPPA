@@ -20,6 +20,8 @@ And yet a gap remains between these ideas on paper and the ability to apply them
 
 OpenAPPA answers all four.
 
+:::benchmark-highlight:::
+
 ## OpenAPPA tracks data flows deterministically instead of classifying data
 
 Plenty of PII detectors and prompt-injection classifiers exist today — OpenAI's [moderation models](https://platform.openai.com/docs/guides/moderation), Meta's [Llama Prompt Guard](https://www.llama.com/docs/model-cards-and-prompt-formats/prompt-guard/), Microsoft's [Prompt Shields](https://learn.microsoft.com/en-us/azure/ai-services/content-safety/concepts/jailbreak-detection), and [Lakera Guard](https://www.lakera.ai/lakera-guard) among them. We believe real agent security is deterministic: it holds on every run, not on 99% of them. Only then can you genuinely trust agents in real applications — say, around medical or financial data.
@@ -30,6 +32,6 @@ And where it is genuinely unavoidable, OpenAPPA also lets you plug in non-determ
 
 ## Where next
 
-- [How OpenAPPA works](/docs/how-it-works) — the whole model in one sitting.
-- [Reading a policy](/docs/contracts) — what each declaration means, and what a wrong one looks like.
-- [Benchmarks](/docs/evaluation) — empirical paper results and running bench-corp.
+- [How OpenAPPA works](/how-it-works) — the whole model in one sitting.
+- [Reading a policy](/contracts) — what each declaration means, and what a wrong one looks like.
+- [Benchmarks](/evaluation) — empirical paper results and running bench-corp.

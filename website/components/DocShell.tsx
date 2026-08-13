@@ -12,7 +12,7 @@ export function DocShell({ toc, children }: { toc: TocItem[]; children: React.Re
 
   return (
     <div className="shell">
-      <DocsSidebar categories={categories} />
+      <DocsSidebar categories={categories} toc={toc} />
       <main className="doc-main">
         {children}
         <DocPagination docs={allDocs} />

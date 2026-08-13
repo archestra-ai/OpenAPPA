@@ -1,13 +1,14 @@
 "use client";
 
-// /landing2: a copy of /landing whose one divergence is the "In action"
-// section — the scripted terminal is replaced by the live chat playground.
-// Styles, data, and pixel marks are imported from the original, not duplicated.
+// /landing2: the surviving landing experiment. Its "In action" section uses
+// the live chat playground rather than the scripted terminal of the original
+// /landing, which has been removed; the styles, data, and pixel marks it left
+// behind live here and in components/pixel-marks.ts.
 
 import React, { useEffect, useRef, useState } from "react";
 
-import { INSTALLERS, LAYERS, lines, SOURCES, SYNTAXES } from "../landing/landing-data";
-import { registerPixelMarks } from "../landing/pixel-marks";
+import { INSTALLERS, LAYERS, lines, SOURCES, SYNTAXES } from "./landing-data";
+import { registerPixelMarks } from "@/components/pixel-marks";
 
 declare module "react" {
   namespace JSX {

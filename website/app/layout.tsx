@@ -1,6 +1,10 @@
 import type { Metadata } from "next";
 import { IBM_Plex_Mono, IBM_Plex_Sans } from "next/font/google";
 
+import { MobileNavProvider } from "@/components/MobileNav";
+import { SearchProvider } from "@/components/SearchProvider";
+import { THEME_INIT_SCRIPT } from "@/components/ThemeToggle";
+
 import "./globals.css";
 
 const plexMono = IBM_Plex_Mono({
@@ -25,9 +29,14 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${plexMono.variable} ${plexSans.variable}`}>
+    <html lang="en" className={`${plexMono.variable} ${plexSans.variable}`} suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
+      </head>
       <body style={{ fontFamily: "var(--font-plex-sans), system-ui, sans-serif" }}>
-        {children}
+        <MobileNavProvider>
+          <SearchProvider>{children}</SearchProvider>
+        </MobileNavProvider>
       </body>
     </html>
   );

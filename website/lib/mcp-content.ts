@@ -52,7 +52,7 @@ export interface McpDoc {
 }
 
 function docUrl(slug: string): string {
-  return slug === "index" ? "/" : `/docs/${slug}`;
+  return slug === "index" ? "/" : `/${slug}`;
 }
 
 function splitSections(markdown: string): { intro: string; sections: DocSection[] } {
