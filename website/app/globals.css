@@ -1054,22 +1054,6 @@ samp {
   color: var(--accent);
 }
 
-.bench-panel-title {
-  margin: 6px 0 0;
-  font-family: var(--font-mono);
-  font-size: 17px;
-  font-weight: 600;
-  line-height: 1.35;
-  color: var(--text-strong);
-}
-
-.bench-panel-lede {
-  margin: 6px 0 0;
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--text-weak);
-}
-
 .bench-charts {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
@@ -1324,11 +1308,11 @@ samp {
 .chat-shell {
   height: calc(100vh - var(--header-h));
   min-height: 0;
-  /* An app screen, not a reading page: the playground owns the whole
-     viewport (its panes keep their own width floors and caps), so the
-     site's centered reading column does not apply — matching its
-     full-bleed header. */
-  max-width: none;
+  /* Centred on the same column as the rest of the site, so the chat does
+     not sprawl to the window edges while every other page is contained. */
+  max-width: var(--site-max);
+  margin-inline: auto;
+  width: 100%;
 }
 
 @media (min-width: 1280px) {
@@ -1342,6 +1326,25 @@ samp {
   min-width: 0;
   min-height: 0;
   flex-direction: column;
+}
+
+/* ————————————————————————————————————————————————
+   Policy editor — a transparent textarea over a highlighted <pre>
+   ———————————————————————————————————————————————— */
+
+/* The visible text lives in the layer *behind* the caret layer, so an opaque
+   selection paints over it and the selected words vanish. Keep the selection
+   translucent so the highlighted text reads through it. */
+.policy-editor textarea::selection {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: transparent;
+}
+
+/* The site's focus ring is meant for controls with edges. Around a full-pane
+   editor it reads as the panel itself lighting up. */
+.policy-editor textarea:focus,
+.policy-editor textarea:focus-visible {
+  outline: none;
 }
 
 /* ————————————————————————————————————————————————

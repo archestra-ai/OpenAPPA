@@ -374,7 +374,7 @@ export function Landing() {
         <div id="demo" style={S.section}>
           <p style={S.kicker}>In action</p>
           <a
-            href="/chat"
+            href="/playground"
             style={{
               display: "block",
               marginTop: "1.75rem",

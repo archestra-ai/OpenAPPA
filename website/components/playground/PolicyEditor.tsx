@@ -61,10 +61,16 @@ export function findBlock(policy: string, name: string): Highlight | null {
   const lines = policy.split("\n");
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const declares = new RegExp(`^\\s*name\\s*=\\s*"${escaped}"`);
-  const at = lines.findIndex((line) => declares.test(line));
+  let at = lines.findIndex((line) => declares.test(line));
+  // Not every block is named: `[boundary]` and friends are their own heading,
+  // and the stream points at them too.
+  if (at === -1) {
+    const heading = new RegExp(`^\\s*\\[\\[?${escaped}\\]?\\]`);
+    at = lines.findIndex((line) => heading.test(line));
+  }
   if (at === -1) return null;
   let start = at;
-  while (start > 0 && !lines[start].trimStart().startsWith("[[")) start -= 1;
+  while (start > 0 && !lines[start].trimStart().startsWith("[")) start -= 1;
   let end = at;
   while (end + 1 < lines.length && !lines[end + 1].startsWith("[")) end += 1;
   // Trailing blanks and comments belong to the next block, not this one.
@@ -78,11 +84,14 @@ export function PolicyEditor({
   autoFocus,
   className,
   highlight,
+  readOnly,
 }: {
   value: string;
   onChange: (next: string) => void;
   autoFocus?: boolean;
   className?: string;
+  /** A view of a policy rather than the one being edited: no caret, no edits. */
+  readOnly?: boolean;
   /** Lines the engine is currently acting on, marker-penned in the layer. */
   highlight?: Highlight | null;
 }) {
@@ -102,59 +111,68 @@ export function PolicyEditor({
   }, [highlight]);
 
   return (
-    <div
-      className={`relative overflow-hidden rounded-md border border-[var(--border-weak)] bg-[var(--bg-weak)] focus-within:border-[var(--accent)] ${className ?? ""}`}
-    >
-      {/* The zero-width space keeps the pre's first child from being a bare
+    <div className={`policy-editor bg-[var(--bg-weak)] ${className ?? ""}`}>
+      {/* The two layers share this box, and nothing may come between them.
+          An absolute `inset-0` resolves against the *padding* box, so any
+          padding the caller puts on the root would widen the pre past the
+          textarea: the layers would then wrap at different columns and the
+          selection would drift from the glyphs under the pointer. Keeping
+          the positioning context padding-free makes the boxes identical. */}
+      <div className="relative h-full w-full overflow-hidden">
+        {/* The zero-width space keeps the pre's first child from being a bare
           newline: HTML parsing eats a newline right after <pre>, which would
           make the server snapshot differ from the client render. */}
-      <pre
-        aria-hidden
-        className={`${METRICS} pointer-events-none absolute inset-0 overflow-hidden text-[var(--text)]`}
-        ref={preRef}
-      >
-        {"​"}
-        {lines.map((line, index) => {
-          const lit = highlight && index >= highlight.start && index <= highlight.end;
-          const tokens = tokenizeLine(line).map((token, at) =>
-            token.color ? (
-              <span key={at} style={{ color: token.color }}>
-                {token.text}
-              </span>
-            ) : (
-              token.text
-            ),
-          );
-          return (
-            <React.Fragment key={index}>
-              {index > 0 && "\n"}
-              {lit ? (
-                <span style={{ background: "var(--warn-bg)", borderRadius: 2, boxShadow: "0 0 0 3px var(--warn-bg)" }}>
-                  {tokens}
+        <pre
+          aria-hidden
+          className={`${METRICS} pointer-events-none absolute inset-0 overflow-hidden text-[var(--text)]`}
+          ref={preRef}
+        >
+          {"​"}
+          {lines.map((line, index) => {
+            const lit = highlight && index >= highlight.start && index <= highlight.end;
+            const tokens = tokenizeLine(line).map((token, at) =>
+              token.color ? (
+                <span key={at} style={{ color: token.color }}>
+                  {token.text}
                 </span>
               ) : (
-                tokens
-              )}
-            </React.Fragment>
-          );
-        })}
-        {"\n"}
-      </pre>
-      <textarea
-        autoFocus={autoFocus}
-        className={`${METRICS} relative block h-full w-full resize-none bg-transparent text-transparent caret-[var(--text)] outline-none`}
-        onChange={(event) => onChange(event.currentTarget.value)}
-        onScroll={(event) => {
-          const pre = preRef.current;
-          if (pre) {
-            pre.scrollTop = event.currentTarget.scrollTop;
-            pre.scrollLeft = event.currentTarget.scrollLeft;
-          }
-        }}
-        ref={textareaRef}
-        spellCheck={false}
-        value={value}
-      />
+                token.text
+              ),
+            );
+            return (
+              <React.Fragment key={index}>
+                {index > 0 && "\n"}
+                {lit ? (
+                  <span style={{ background: "var(--warn-bg)", borderRadius: 2, boxShadow: "0 0 0 3px var(--warn-bg)" }}>
+                    {tokens}
+                  </span>
+                ) : (
+                  tokens
+                )}
+              </React.Fragment>
+            );
+          })}
+          {"\n"}
+        </pre>
+        <textarea
+          autoFocus={autoFocus}
+          className={`${METRICS} relative block h-full w-full resize-none bg-transparent text-transparent outline-none ${
+            readOnly ? "caret-transparent" : "caret-[var(--text)]"
+          }`}
+          onChange={(event) => onChange(event.currentTarget.value)}
+          onScroll={(event) => {
+            const pre = preRef.current;
+            if (pre) {
+              pre.scrollTop = event.currentTarget.scrollTop;
+              pre.scrollLeft = event.currentTarget.scrollLeft;
+            }
+          }}
+          readOnly={readOnly}
+          ref={textareaRef}
+          spellCheck={false}
+          value={value}
+        />
+      </div>
     </div>
   );
 }

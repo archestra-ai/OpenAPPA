@@ -16,14 +16,13 @@ import {
   ConversationEmptyState,
   ConversationScrollButton,
 } from "@/components/ai-elements/conversation";
-import { Message, MessageContent, MessageResponse } from "@/components/ai-elements/message";
+import { Message, MessageContent } from "@/components/ai-elements/message";
 import {
   PromptInput,
   type PromptInputMessage,
   PromptInputSubmit,
   PromptInputTextarea,
 } from "@/components/ai-elements/prompt-input";
-import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput } from "@/components/ai-elements/tool";
 
 import {
   DEMO_URL,
@@ -35,12 +34,8 @@ import {
   respondApproval,
   streamTurn,
 } from "./demo-client";
-import {
-  type LabelState,
-  PLAYGROUND_MODEL,
-  type PlaygroundSystem,
-  describeSystem,
-} from "./playground-data";
+import { type LabelState, PLAYGROUND_MODEL, type PlaygroundSystem, describeSystem } from "./playground-data";
+import { NEW_CHAT_EVENT } from "@/components/DocsSidebar";
 import { PolicyEditor, findBlock } from "./PolicyEditor";
 import { registerPixelMarks } from "@/components/pixel-marks";
 import { termDefinition } from "@/lib/terms";
@@ -72,6 +67,8 @@ type ThreadItem = { lab?: LabelState } & (
       /** The result body the model read, verbatim. */
       result?: string;
       blocked?: string;
+      /** Set when the engine refused this protocol call outright. */
+      refused?: boolean;
       /** Set when the raw result was withheld and a sanitizer's derivation admitted. */
       sanitizedBy?: string;
       /** Set when the call ran under an authority's ruling. */
@@ -96,9 +93,9 @@ type ThreadItem = { lab?: LabelState } & (
       state: "pending" | "approved" | "denied" | "expired";
     }
   /** APPA's turn on a held call: the ruling text, rendered as a speaker. */
-  | { id: number; t: "verdict"; text: string; traj?: string }
+  | { id: number; t: "verdict"; text: string; traj?: string; tool?: string }
   /** The root label moved: a marker row that recolors the rail below it. */
-  | { id: number; t: "shift"; from: LabelState; to: LabelState }
+  | { id: number; t: "shift"; from: LabelState; to: LabelState; cause?: string }
   /** Where the session entered: the label's opening row in the stream. */
   | { id: number; t: "entry"; label: LabelState }
   /** The closing recap of a demo case: what the path just showed and why. */
@@ -117,22 +114,21 @@ type Mode = "probing" | "live" | "down";
  */
 const STARTER_PROMPTS = [
   {
-    tag: "recordings → github",
+    outcome: "Confidential meeting notes are never published to a GitHub issue.",
     text: "Check the recent meeting recordings for bugs customers mentioned, and file any that are not on GitHub yet.",
-    recap:
-      "What this path shows: meeting recordings are untrusted input, so reading them would have dropped the whole chat to the suspicious rank — and a suspicious chat may not file public GitHub issues. APPA held that one tool call, priced the drop, and offered remedy plans; choosing the strip-customer-data sanitizer meant the assistant never saw the raw transcripts, only the cleaned derivation, so the session kept its label and the issues could still be filed. Every hold and remedy you watched was scoped to a single tool call — nothing was blanket-allowed or blanket-denied.",
+    expectation: "In this example, OpenAPPA makes sure that confidential meeting notes never end up in a GitHub issue.",
   },
   {
-    tag: "invoices → transfer",
+    outcome: "A wire transfer happens only after a human approves it.",
     text: "Check the open invoices and pay the overdue one by transfer.",
-    recap:
-      "What this path shows: invoices are confidential, so the one call that read them carried a price — the chat's audience narrowed to the finance readers — and the agent accepted it knowingly. Moving money additionally demands a human ruling: make_transfer paused until the treasurer (that was you) approved that exact call, and no answer would have failed it closed. Each decision landed on a single tool call; the policy never had to trust the agent's intentions, only rule on its flows.",
+    expectation:
+      "In this example, OpenAPPA makes sure that the invoice data is not leaked, and that the wire transfer happens only after a human approves it.",
   },
   {
-    tag: "invoices → email",
-    text: "Review the unpaid invoices and email a summary first to ap-review@corp.example. After that succeeds, send the same summary to finance-all@corp.example.",
-    recap:
-      "What this path shows: once the invoices were read, their summary belonged to the finance audience. An email is a flow to whoever is currently behind the recipient list, so APPA resolved each address to its live readers and compared them with the label — the same summary passed for one list and was refused for the other, decided per tool call at the moment of sending. That is the point of value-granular flow control: verdicts follow the data and its readers, not tool names or good intentions.",
+    outcome: "Financial data reaches only the people allowed to read it.",
+    text: "Review the unpaid invoices and email a summary first to ap-review@corp.example. After that succeeds, send the same summary to all@acme.com.",
+    expectation:
+      "In this example, OpenAPPA makes sure that the invoice summary reaches only the people allowed to read it — ap-review@corp.example, but not all@acme.com. Yes, that means it refuses a malicious user prompt too.",
   },
 ];
 
@@ -142,6 +138,12 @@ const STARTER_PROMPTS = [
  * notice — never a policy ruling on a flow; rulings land on the blocked
  * tool's own card. So their cards close calmly instead of styling as errors.
  */
+/* Every reference into the policy wears the same clothes: mono, a dotted
+   underline that lifts to the accent on hover. Pills boxed each mention and
+   broke the line's rhythm wherever a sentence carried two of them. */
+const REFERENCE_CLASS =
+  "cursor-pointer font-mono text-[12.5px] text-[var(--text-strong)] underline decoration-dotted decoration-[var(--border)] underline-offset-4 hover:text-[var(--accent)] hover:decoration-[var(--accent)]";
+
 const PROTOCOL_TOOLS = new Set(["execute_remedy_plan", "fork", "submit_result"]);
 
 /** Resizing floors: the policy pane and the chat pane each keep a readable
@@ -200,7 +202,12 @@ function parsePlans(plans: unknown): ParsedPlan[] {
     if (typeof entry.plan_id !== "string") return [];
     const rulings = (Array.isArray(entry.rulings) ? entry.rulings : []).flatMap((ruling) =>
       typeof ruling.authority === "string"
-        ? [{ authority: ruling.authority, hint: typeof ruling.hint === "string" ? ruling.hint : undefined }]
+        ? [
+            {
+              authority: ruling.authority,
+              hint: typeof ruling.hint === "string" ? ruling.hint : undefined,
+            },
+          ]
         : [],
     );
     const sanitize =
@@ -210,8 +217,125 @@ function parsePlans(plans: unknown): ParsedPlan[] {
             hint: typeof entry.sanitizes.hint === "string" ? entry.sanitizes.hint : undefined,
           }
         : undefined;
-    return [{ id: entry.plan_id, rulings, sanitize, accepts: Boolean(entry.accepts_narrowing) }];
+    return [
+      {
+        id: entry.plan_id,
+        rulings,
+        sanitize,
+        accepts: Boolean(entry.accepts_narrowing),
+      },
+    ];
   });
+}
+
+/** Drop the protocol instruction the runtime appends for the model. */
+function readable(summary: string): string {
+  return summary
+    .replace(/[;,]?\s*execute (?:one offered plan|plan [^\s]+) with execute_remedy_plan\.?/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * The tools the playground's own stories touch. The CRM pair is registered and
+ * never called by a scenario, so the short view leaves it out; everything else
+ * appears in a ruling, a remedy plan or a pill you can click.
+ */
+const STORY_TOOLS = new Set(["list_recordings", "list_issues", "create_issue", "list_invoices", "make_transfer", "send_email"]);
+
+/**
+ * Sections the short view leaves out. The session's opening label, the resolver
+ * behind an address, and how an authority or sanitizer is actually implemented
+ * are all real policy — and none of them is what a reader is pointed at from
+ * the stream. They stay one tab away, in the full text.
+ */
+const SHORT_DROP = new Set([
+  "[boundary]",
+  "[[dynamic_resolver]]",
+  "[authority.mandate]",
+  "[authority.implementation]",
+  "[sanitizer.implementation]",
+]);
+
+/**
+ * The policy reduced to what the playground's stories point at: the six tools
+ * the scenarios call, the authority that signs a transfer, and the two
+ * sanitizers with the transitions they are allowed to make. The section
+ * headings stay so the rules keep their shape; the explanatory prose does not.
+ *
+ * Derived from the live text rather than kept as a second copy, so it follows
+ * an edit in the full view instead of drifting from it.
+ */
+function shortPolicy(full: string): string {
+  // A comment belongs to the section it introduces, so it travels with the
+  // block below it — a dropped section takes its own heading with it.
+  const groups: { head: string; lead: string[]; body: string[] }[] = [];
+  let lead: string[] = [];
+  for (const line of full.split("\n")) {
+    if (line.startsWith("[")) {
+      groups.push({ head: line.trim(), lead, body: [line] });
+      lead = [];
+      continue;
+    }
+    if (line.trimStart().startsWith("#")) lead.push(line);
+    else if (line.trim() !== "") groups[groups.length - 1]?.body.push(line);
+    else if (lead.length > 0) lead.push(line);
+  }
+  const kept = groups.filter((group) => {
+    if (SHORT_DROP.has(group.head)) return false;
+    if (group.head !== "[[tool]]") return true;
+    const name = group.body.find((line) => /^\s*name\s*=/.test(line));
+    return STORY_TOOLS.has(name?.split('"')[1] ?? "");
+  });
+  return kept
+    .flatMap((group) => [
+      "",
+      // Only the section rules survive: `# --- GitHub … ---` says where you
+      // are, where a paragraph of explanation would undo the shortening.
+      ...group.lead.filter((line) => line.startsWith("# ---")).flatMap((line) => [line, ""]),
+      ...group.body,
+    ])
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
+ * The runtime's refusal for an unoffered `plan_id` is written for the model:
+ * it leads with the fork case, because that is the one a model reads its way
+ * into, and closes by telling it how to re-propose. A reader watching the
+ * stream needs neither — in this playground the agent simply answered one
+ * ruling twice, and the second answer arrived after the first had settled it.
+ */
+function refusal(output: string | undefined, offerKnown: boolean): string {
+  const text = readable(output ?? "");
+  if (/no pending blocked call offers that plan_id/i.test(text)) {
+    return offerKnown
+      ? "That ruling was already settled, so its plans are no longer on offer."
+      : "No ruling in this chat is offering that plan.";
+  }
+  return text || "The engine refused this plan.";
+}
+
+/**
+ * The model answers in markdown out of habit. Its bold labels, code chips and
+ * heading rules turn a two-line answer into a formatted document, which reads
+ * as noise beside a stream that has no formatting of its own. Strip the
+ * syntax, keep the words and the line breaks.
+ */
+function asProse(text: string): string {
+  return text
+    .replace(/```[a-z]*\n?/gi, "")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^\s*>\s?/gm, "")
+    .replace(/^(\s*)[-*+]\s+/gm, "$1· ")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/(\*\*|__)(.+?)\1/g, "$2")
+    .replace(/(^|[\s(])[*_]([^*_\n]+)[*_](?=[\s).,;:!?]|$)/g, "$1$2")
+    .replace(/`([^`\n]+)`/g, "$1")
+    .replace(/^\s*([-*_]\s*){3,}$/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function splitRuling(text: string): Ruling {
@@ -221,7 +345,10 @@ function splitRuling(text: string): Ruling {
   const detail = text.slice(start + 1);
   try {
     const parsed = JSON.parse(detail) as {
-      narrowing?: { from?: Record<string, unknown>; to?: Record<string, unknown> };
+      narrowing?: {
+        from?: Record<string, unknown>;
+        to?: Record<string, unknown>;
+      };
       requirement_gaps?: unknown[];
       remedy_plans?: unknown;
     };
@@ -231,13 +358,26 @@ function splitRuling(text: string): Ruling {
     if (!narrowing || parsed.requirement_gaps?.length) return { kind: "refusal", summary, detail: pretty, plans };
     const moved = (dim: string) => JSON.stringify(narrowing.from?.[dim]) !== JSON.stringify(narrowing.to?.[dim]);
     const dimension = moved("trust") && moved("audience") ? "both" : moved("audience") ? "audience" : "trust";
-    // `{"Known": {"Restricted": ["crm"]}}` — the engine's wire shape for a
-    // concrete reader set; `{"Known": 0}` for a trust rank (a chain index).
-    const known = (narrowing.to?.audience as { Known?: { Restricted?: unknown } } | undefined)?.Known;
-    const readers = Array.isArray(known?.Restricted) ? known.Restricted.map(String) : undefined;
-    const knownTrust = (narrowing.to?.trust as { Known?: unknown } | undefined)?.Known;
-    const toTrustRank = typeof knownTrust === "number" ? knownTrust : undefined;
-    return { kind: "narrowing", dimension, readers, toTrustRank, summary, detail: pretty, plans };
+    // A concrete reader set arrives either wrapped — `{"Known": {"Restricted":
+    // [...]}}` — or bare, `{"Restricted": [...]}`, which is what the service
+    // sends today; a trust rank likewise as `{"Known": 0}` or a plain `0`.
+    // Read both: missing either shape is what made these sentences fall back
+    // to "fewer readers" and "less trusted" instead of naming the real thing.
+    const audience = narrowing.to?.audience as { Known?: { Restricted?: unknown }; Restricted?: unknown } | undefined;
+    const restricted = audience?.Known?.Restricted ?? audience?.Restricted;
+    const readers = Array.isArray(restricted) ? restricted.map(String) : undefined;
+    const trustValue = narrowing.to?.trust as { Known?: unknown } | number | undefined;
+    const rank = typeof trustValue === "number" ? trustValue : trustValue?.Known;
+    const toTrustRank = typeof rank === "number" ? rank : undefined;
+    return {
+      kind: "narrowing",
+      dimension,
+      readers,
+      toTrustRank,
+      summary,
+      detail: pretty,
+      plans,
+    };
   } catch {
     return { kind: "refusal", summary, detail, plans: [] };
   }
@@ -253,18 +393,6 @@ function parseTrustChain(policy: string): string[] {
   const match = policy.match(/trust_chain\s*=\s*\[([^\]]*)\]/);
   const names = match?.[1].match(/"([^"]*)"/g)?.map((quoted) => quoted.slice(1, -1));
   return names?.length ? names : ["suspicious", "trusted"];
-}
-
-function rulingBadge(ruling: Ruling): string {
-  if (ruling.kind === "refusal") return "blocked by policy";
-  switch (ruling.dimension) {
-    case "trust":
-      return "lowers the trust";
-    case "audience":
-      return "narrows the audience";
-    case "both":
-      return "lowers the trust · narrows the audience";
-  }
 }
 
 /**
@@ -306,30 +434,6 @@ const chrome = {
   } as React.CSSProperties,
 };
 
-const pill = (bg: string, fg: string): React.CSSProperties => ({
-  fontSize: 10.5,
-  letterSpacing: "0.07em",
-  textTransform: "uppercase",
-  padding: "0.12rem 0.55rem",
-  borderRadius: 999,
-  whiteSpace: "nowrap",
-  background: bg,
-  color: fg,
-});
-
-function LabelPills({ label, boundary }: { label: LabelState; boundary: LabelState | null }) {
-  // Green while trust still sits where the turn entered; amber once it has
-  // dropped. The boundary comes from the loader's reading of the policy in the
-  // editor, so this stays true when a visitor renames the ranks.
-  const clean = label.trust === boundary?.trust;
-  return (
-    <span style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}>
-      <span style={pill(clean ? "#1f6b46" : "#8c5f1f", clean ? "#eafff2" : "#fff4e0")}>trust: {label.trust}</span>
-      <span style={pill("#3f3168", "#efe9ff")}>audience: {label.audience}</span>
-    </span>
-  );
-}
-
 /**
  * The live playground: fills its container — the /chat route — with the chat
  * as the main surface and the policy pane as a full-height right sidebar.
@@ -343,17 +447,23 @@ export function ChatPlayground() {
   // Null until the loader reports where a turn enters under the current
   // policy; there is nothing honest to show before that.
   const [boundary, setBoundary] = useState<LabelState | null>(null);
-  const [label, setLabel] = useState<LabelState | null>(null);
   const [busy, setBusy] = useState(false);
   const [input, setInput] = useState("");
   const [turns, setTurns] = useState(0);
 
   // Two independent inputs: which systems exist (so which tools the agent has)
   // and what the policy allows those tools to do. Both arrive with the preset.
-  const [pane, setPane] = useState<"tools" | "policy">("policy");
+  const [pane, setPane] = useState<"tools" | "short" | "full">("short");
   const [editorMax, setEditorMax] = useState(false);
   // Mobile only: the pane lives in a right-side drawer, closed by default.
   const [panelOpen, setPanelOpen] = useState(false);
+  /* Which call rows have their arguments open. A whole email body inline
+     drowns the line it belongs to, but the arguments are still the thing a
+     flow decision turns on — so they collapse rather than disappear. */
+  const [openArgs, setOpenArgs] = useState<ReadonlySet<number>>(new Set());
+  /* The first screen is a choice, not a prompt: the composer only appears
+     once there is a conversation, or when a visitor asks for one. */
+  const [composerAsked, setComposerAsked] = useState(false);
   // Desktop only: the policy pane's width once the visitor has dragged its
   // edge; null leaves the breakpoint defaults in charge. Remembered locally.
   const [sidebarPx, setSidebarPx] = useState<number | null>(null);
@@ -361,12 +471,19 @@ export function ChatPlayground() {
   // The contract or authority the engine is acting on right now, lit in the
   // editor. A focus holds until the next acting block replaces it; when the
   // turn settles (`settled`), it lingers briefly and fades.
-  const [focus, setFocus] = useState<{ name: string; at: number; settled?: boolean } | null>(null);
+  const [focus, setFocus] = useState<{
+    name: string;
+    at: number;
+    settled?: boolean;
+  } | null>(null);
   const [catalog, setCatalog] = useState<PlaygroundSystem[]>([]);
   const [presetPolicy, setPresetPolicy] = useState("");
   const [systems, setSystems] = useState<string[]>([]);
   const [policyText, setPolicyText] = useState("");
-  const [policyStatus, setPolicyStatus] = useState<{ ok: boolean; text: string } | null>(null);
+  const [policyStatus, setPolicyStatus] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
 
   const sessionRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -412,17 +529,18 @@ export function ChatPlayground() {
           if (result.boundary) {
             setBoundary(result.boundary);
             // With no session running the label simply *is* the boundary, so
-            // editing `[boundary]` moves the pills. Once a session exists its
-            // live label owns them until New chat.
+            // editing `[boundary]` moves it. Once a session exists its live
+            // label owns it until New chat.
             if (!sessionRef.current) {
-              setLabel(result.boundary);
               labelRef.current = result.boundary;
             }
           }
-          const notes = [`${result.tools} tools`];
+          // Silence on success: a policy that loads has nothing to announce.
+          // Warnings and failures still speak.
+          const notes: string[] = [];
           if (result.unconstrained?.length) notes.push(`${result.unconstrained.length} unconstrained`);
           if (result.ignored?.length) notes.push(`ignoring ${result.ignored.join(", ")} — system off`);
-          setPolicyStatus({ ok: true, text: `loads clean · ${notes.join(" · ")}` });
+          setPolicyStatus(notes.length ? { ok: true, text: notes.join(" · ") } : null);
         })
         .catch(() => {});
     }, 500);
@@ -499,14 +617,40 @@ export function ChatPlayground() {
    * agent turns — carries what the remedy produced. Created on the first
    * outcome event of the batch, patched by the rest.
    */
-  const resolveHeld = (prev: ThreadItem[], patch: Partial<Extract<ThreadItem, { t: "tool" }>>): ThreadItem[] => {
-    const heldAt = prev.findLastIndex(
-      (item) => item.t === "tool" && item.state === "blocked" && !PROTOCOL_TOOLS.has(item.name),
-    );
+  const resolveHeld = (
+    prev: ThreadItem[],
+    patch: Partial<Extract<ThreadItem, { t: "tool" }>>,
+    sanitizer?: string,
+  ): ThreadItem[] => {
+    /* Which held call this outcome belongs to. The wire carries no call id on
+       a result, and the agent can have several calls held at once — taking
+       "the last held card" then routed every outcome to the same call, so one
+       resolution card was overwritten and the other never appeared.
+
+       A sanitizer names itself, and only one held ruling offered it, so that
+       is the reliable match. Failing that, outcomes arrive in the order the
+       remedies were taken, so the oldest still-unresolved call is next. */
+    const resolved = (item: Extract<ThreadItem, { t: "tool" }>) =>
+      prev.some((entry) => entry.t === "tool" && entry.echo && entry.callId === `${item.callId}+resolved`);
+    const isHeld = (item: ThreadItem): item is Extract<ThreadItem, { t: "tool" }> =>
+      item.t === "tool" && item.state === "blocked" && !PROTOCOL_TOOLS.has(item.name);
+    const offers = (item: Extract<ThreadItem, { t: "tool" }>) =>
+      Boolean(
+        sanitizer &&
+        item.blocked &&
+        splitRuling(item.blocked).plans.some((plan) => plan.sanitize?.sanitizer === sanitizer),
+      );
+
+    // The sanitizer match ignores whether the call already has a resolution
+    // card: the outcome batch opens that card, and this event patches it.
+    let heldAt = sanitizer ? prev.findIndex((item) => isHeld(item) && offers(item)) : -1;
+    if (heldAt === -1) heldAt = prev.findIndex((item) => isHeld(item) && !resolved(item));
+    if (heldAt === -1) heldAt = prev.findLastIndex(isHeld);
     if (heldAt === -1) return prev;
     const held = prev[heldAt] as Extract<ThreadItem, { t: "tool" }>;
-    const echoAt = prev.findLastIndex(
-      (item, at) => at > heldAt && item.t === "tool" && Boolean(item.echo) && item.name === held.name,
+    // The echo belongs to this call, not merely to a call of the same name.
+    const echoAt = prev.findIndex(
+      (item) => item.t === "tool" && Boolean(item.echo) && item.callId === `${held.callId}+resolved`,
     );
     if (echoAt !== -1)
       return prev.map((item, at) => (at === echoAt && item.t === "tool" ? { ...item, ...patch } : item));
@@ -536,24 +680,37 @@ export function ChatPlayground() {
     setThread([]);
     childIdsRef.current = new Set();
     setChildIds(new Set());
-    setLabel(boundary);
     labelRef.current = boundary;
     setBusy(false);
     setTurns(0);
     setInput("");
+    setComposerAsked(false);
   }, [boundary]);
+
+  /* The nav's Playground link cannot navigate when you are already here, so it
+     asks for a fresh session instead. An event keeps the reset where it lives
+     — in this component — rather than threading it up through the layout. */
+  useEffect(() => {
+    const onNewChat = () => resetChat();
+    window.addEventListener(NEW_CHAT_EVENT, onNewChat);
+    return () => window.removeEventListener(NEW_CHAT_EVENT, onNewChat);
+  }, [resetChat]);
 
   // ---- live path ----------------------------------------------------------
 
   const applyEvent = useCallback((event: DemoEvent) => {
     switch (event.type) {
       case "says":
-        push({ id: nextId(), t: "text", text: event.text, traj: event.trajectory });
+        push({
+          id: nextId(),
+          t: "text",
+          text: event.text,
+          traj: event.trajectory,
+        });
         break;
       case "tool_proposed": {
         // Light the contract the engine is about to check. The harness's own
         // tools have no contract in the editor.
-        if (!PROTOCOL_TOOLS.has(event.tool)) setFocus({ name: event.tool, at: Date.now() });
         const item: ThreadItem = {
           id: nextId(),
           t: "tool",
@@ -565,6 +722,28 @@ export function ChatPlayground() {
           lab: labelRef.current ?? undefined,
         };
         setThread((prev) => {
+          /* A remedy answers one ruling, so it belongs under that ruling. Plan
+             ids are unique across a batch, so the offer identifies its block
+             exactly — appending instead filed every remedy under whichever
+             ruling happened to be last. */
+          const planId = event.tool === "execute_remedy_plan" ? event.arguments.plan_id : undefined;
+          if (typeof planId === "string") {
+            const verdictAt = prev.findIndex(
+              (entry) => entry.t === "verdict" && splitRuling(entry.text).plans.some((plan) => plan.id === planId),
+            );
+            if (verdictAt !== -1) {
+              // Past any remedy already filed under the same ruling.
+              let after = verdictAt + 1;
+              while (after < prev.length) {
+                const entry = prev[after];
+                if (entry.t !== "tool" || !PROTOCOL_TOOLS.has(entry.name)) break;
+                after++;
+              }
+              const next = [...prev];
+              next.splice(after, 0, item);
+              return next;
+            }
+          }
           // The agent's remedy choice precedes the approval it triggers, but
           // the elicitation can hit the wire first: slot a protocol call in
           // front of any still-pending approval so the screen keeps the
@@ -593,18 +772,35 @@ export function ChatPlayground() {
           );
           if (index === -1) return prev;
           const item = prev[index] as Extract<ThreadItem, { t: "tool" }>;
+          // A block on a protocol call is the engine refusing the agent's own
+          // move — the card has to say so, or a rejected remedy reads exactly
+          // like one that worked.
           if (PROTOCOL_TOOLS.has(item.name))
             return prev.map((entry, at) =>
-              at === index ? { ...item, state: "done" as const, output: event.text } : entry,
+              at === index
+                ? {
+                    ...item,
+                    state: "done" as const,
+                    output: event.text,
+                    refused: true,
+                  }
+                : entry,
             );
           // The card records the hold; the ruling itself is APPA's own turn.
           const next = prev.map((entry, at) =>
             at === index ? { ...item, state: "blocked" as const, blocked: event.text } : entry,
           );
-          next.push({
+          /* File the ruling directly under the call it answers, not at the
+             end of the stream. The agent proposes calls in batches, so the
+             engine's rulings arrive together after them — appending left a
+             run of calls followed by a run of rulings, with nothing saying
+             which answered which. The ruling names its own tool for the same
+             reason: it is matched by `call_id`, never by proximity. */
+          next.splice(index + 1, 0, {
             id: ++idRef.current,
             t: "verdict",
             text: event.text,
+            tool: item.name,
             traj: item.traj,
             lab: labelRef.current ?? undefined,
           });
@@ -676,20 +872,45 @@ export function ChatPlayground() {
           });
           break;
         }
-        // The rail recolors below the separator naming the move, and the
-        // session-label pills update in place.
         const from = labelRef.current;
         if (from && (from.trust !== next.trust || from.audience !== next.audience)) {
-          push({ id: nextId(), t: "shift", from, to: next, lab: next });
+          const shift: ThreadItem = {
+            id: nextId(),
+            t: "shift",
+            from,
+            to: next,
+            lab: next,
+          };
+          /* The service reports the new label after the call's result, but on
+             an accepted narrowing the label moved *before* dispatch — the
+             acceptance is what paid for the call. Rendering the
+             wire order puts the move after the call it authorised, which
+             reads as the wrong causal story. So the move is filed ahead of
+             the resolution cards it paid for.
+
+             Scoped to those cards on purpose: when a narrowing is not
+             accepted but simply admitted with the result, the label really
+             does move after the call, and that order is left alone. */
+          setThread((prev) => {
+            let at = prev.length;
+            while (at > 0) {
+              const above = prev[at - 1];
+              if (above.t !== "tool" || !above.echo) break;
+              at--;
+            }
+            const paid = prev[at];
+            const caused = paid && paid.t === "tool" ? paid.name : undefined;
+            return [...prev.slice(0, at), { ...shift, cause: caused }, ...prev.slice(at)];
+          });
         }
         labelRef.current = next;
-        setLabel(next);
         break;
       }
       case "approval_requested": {
-        // The authority consulted is named in the request; light its block.
+        // The policy pane stays where the reader put it: jumping it mid-run
+        // moved the ground under anyone reading, and the stream already names
+        // every rule as a reference they can follow when they choose to.
         const authority = (event.detail as { authority?: string }).authority;
-        if (authority) setFocus({ name: authority, at: Date.now() });
         push({
           id: nextId(),
           t: "approval",
@@ -717,7 +938,10 @@ export function ChatPlayground() {
             : -1;
           return prev.map((item, at) => {
             if (item.t === "approval" && item.approvalId === event.id)
-              return { ...item, state: event.expired ? "expired" : event.approved ? "approved" : "denied" };
+              return {
+                ...item,
+                state: event.expired ? "expired" : event.approved ? "approved" : "denied",
+              };
             if (at === running && item.t === "tool" && authority) return { ...item, approvedBy: authority };
             return item;
           });
@@ -742,7 +966,12 @@ export function ChatPlayground() {
           break;
         }
         if (event.text.startsWith("narrowing accepted:")) break;
-        push({ id: nextId(), t: "note", text: event.text, traj: event.trajectory });
+        push({
+          id: nextId(),
+          t: "note",
+          text: event.text,
+          traj: event.trajectory,
+        });
         break;
       }
       case "sanitized":
@@ -756,7 +985,7 @@ export function ChatPlayground() {
             return prev.map((item, at) =>
               at === running && item.t === "tool" ? { ...item, sanitizedBy: event.sanitizer } : item,
             );
-          return resolveHeld(prev, { sanitizedBy: event.sanitizer });
+          return resolveHeld(prev, { sanitizedBy: event.sanitizer }, event.sanitizer);
         });
         break;
       case "merge":
@@ -764,7 +993,11 @@ export function ChatPlayground() {
         // child *kept*, not what it hands back. If the returned value is
         // restricted, the label event right after shows the parent paying for
         // it — so say what crossed, not that it was free.
-        push({ id: nextId(), t: "note", text: "child returned a value — checked at the merge" });
+        push({
+          id: nextId(),
+          t: "note",
+          text: "child returned a value — checked at the merge",
+        });
         break;
       case "fork":
         // No note: the branch block's own header marks the fork.
@@ -804,17 +1037,17 @@ export function ChatPlayground() {
       // then the row is inserted once the session reports where it entered.
       const entryLabel = labelRef.current ?? boundary;
       const opening = turns === 0;
+      const starter = STARTER_PROMPTS.find((prompt) => prompt.text === text);
+      if (opening && starter) push({ id: nextId(), t: "authors", text: starter.expectation });
       if (opening && entryLabel) push({ id: nextId(), t: "entry", label: entryLabel });
       push({ id: nextId(), t: "user", text });
       setTurns((count) => count + 1);
-      const starter = STARTER_PROMPTS.find((prompt) => prompt.text === text);
 
       try {
         if (!sessionRef.current) {
           const info = await createSession(policyText, systems, PLAYGROUND_MODEL.id);
           if (runRef.current !== run) return;
           sessionRef.current = info.session;
-          setLabel({ trust: info.trust, audience: info.audience });
           labelRef.current = { trust: info.trust, audience: info.audience };
           if (opening && !entryLabel) {
             // The visitor beat the policy check's debounce: open the stream
@@ -822,7 +1055,12 @@ export function ChatPlayground() {
             const label = { trust: info.trust, audience: info.audience };
             setThread((prev) => {
               const at = prev.findIndex((item) => item.t === "user");
-              const item: ThreadItem = { id: ++idRef.current, t: "entry", label, lab: label };
+              const item: ThreadItem = {
+                id: ++idRef.current,
+                t: "entry",
+                label,
+                lab: label,
+              };
               return at === -1 ? [item, ...prev] : [...prev.slice(0, at), item, ...prev.slice(at)];
             });
           }
@@ -839,7 +1077,6 @@ export function ChatPlayground() {
         );
         // A demo case closes the way the docs' examples do: a recap of what
         // the path just showed and why it matters.
-        if (runRef.current === run && starter) push({ id: nextId(), t: "authors", text: starter.recap });
       } catch (error) {
         if (runRef.current === run && (error as Error).name !== "AbortError") {
           push({ id: nextId(), t: "note", text: (error as Error).message });
@@ -872,7 +1109,13 @@ export function ChatPlayground() {
 
   // The line range the engine is acting on, located in the visitor's own
   // policy text — absent when the focused name has no block there.
-  const highlight = useMemo(() => (focus ? findBlock(policyText, focus.name) : null), [focus, policyText]);
+  const shortText = useMemo(() => shortPolicy(policyText), [policyText]);
+  // The lit block belongs to whichever view is on screen: the two texts differ,
+  // so a line number from one would light the wrong lines in the other.
+  const highlight = useMemo(
+    () => (focus ? findBlock(pane === "short" ? shortText : policyText, focus.name) : null),
+    [focus, pane, policyText, shortText],
+  );
 
   // Names a narrowing's target trust rank in the visitor's own vocabulary.
   const trustChain = useMemo(() => parseTrustChain(policyText), [policyText]);
@@ -892,46 +1135,100 @@ export function ChatPlayground() {
   // A registered entity named in chat is a door into the policy: clicking it
   // opens the policy pane scrolled to that block, lit.
   const focusEntity = (name: string) => {
-    setPane("policy");
+    // Land on the shortest view that actually declares the thing: the short one
+    // omits contracts, and sending a reader to a tab without the block would
+    // show them a policy with no answer in it.
+    const inShort = Boolean(findBlock(shortText, name));
+    setPane((prev) => (!inShort ? "full" : prev === "tools" ? "short" : prev));
     setFocus({ name, at: Date.now() });
   };
 
-  const entityPill = (name: string, hint?: string) => (
-    <button
-      className="inline-block cursor-pointer rounded-full border border-[var(--accent-border)] bg-[var(--accent-bg)] px-2 font-mono text-[10.5px] leading-[1.6] text-[var(--accent)] hover:bg-[var(--bg-weak-hover)]"
-      onClick={() => focusEntity(name)}
-      title={hint ? `“${hint}” — click to see it in the policy` : "Click to see it in the policy"}
-      type="button"
+  const entityPill = (name: string, hint?: string) =>
+    reference(
+      name,
+      name,
+      REFERENCE_CLASS,
+      hint ? `“${hint}” — click to see it in the policy` : "Click to see it in the policy",
+    );
+
+  /* References are words inside a sentence, so they must wrap like words. A
+     <button> cannot: browsers treat form controls as atomic inline-level
+     boxes and force `inline-block`, which is why a long reader set leapt to
+     the next line whole. A span with the button role wraps naturally and
+     keeps click and keyboard activation. */
+  const reference = (text: string, target: string, className: string, title: string) => (
+    <span
+      className={className}
+      onClick={() => focusEntity(target)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          focusEntity(target);
+        }
+      }}
+      role="button"
+      tabIndex={0}
+      title={title}
     >
-      {name}
-    </button>
+      {text}
+    </span>
   );
+
+  /** Inline reference at the host line's own size — for label rows. */
+  const policyRef = (text: string, target: string) =>
+    reference(
+      text,
+      target,
+      "cursor-pointer underline decoration-dotted decoration-[var(--border)] underline-offset-4 hover:text-[var(--accent)] hover:decoration-[var(--accent)]",
+      `Click to see ${target} in the policy`,
+    );
+
+  /** A value whose *cause* lives in the policy: reads as prose, opens the rule. */
+  const policyPill = (text: string, target: string) =>
+    reference(text, target, REFERENCE_CLASS, `Click to see the ${target} rule that set this in the policy`);
 
   // A label value wears the glossary: the same definition the docs popovers
   // use, as a plain tooltip.
   const termPill = (text: string) => (
     <span
-      className="inline-block rounded-full border border-[var(--border-weak)] bg-[var(--bg-weak)] px-2 font-mono text-[10.5px] leading-[1.6] text-[var(--text-strong)]"
-      style={termDefinition(text) ? { cursor: "help", borderBottomStyle: "dotted" } : undefined}
+      className="font-mono text-[12.5px] text-[var(--text-strong)] underline decoration-dotted decoration-[var(--border)] underline-offset-4"
+      style={termDefinition(text) ? { cursor: "help" } : undefined}
       title={termDefinition(text)}
     >
       {text}
     </span>
   );
 
-  /** The narrowing's cost in plain words: what changes for this chat if we accept. */
+  /** What the narrowing costs, named once so nothing has to repeat it. */
+  const narrowedTrust = (ruling: Extract<Ruling, { kind: "narrowing" }>) =>
+    ruling.toTrustRank !== undefined ? (trustChain[ruling.toTrustRank] ?? `rank ${ruling.toTrustRank}`) : null;
+
+  /** The readers left, when the engine resolved them to a concrete set. */
+  const narrowedReaders = (ruling: Extract<Ruling, { kind: "narrowing" }>) =>
+    ruling.readers ? ruling.readers.join(", ") || "nobody" : null;
+
+  /** The dimension a narrowing lands on, for sentences that name it. */
+  const narrowedDimension = (ruling: Extract<Ruling, { kind: "narrowing" }>) =>
+    ruling.dimension === "trust" ? "trust" : ruling.dimension === "audience" ? "audience" : "label";
+
+  /** "the audience narrowing" / "the trust narrowing" / "the narrowing". */
+  const narrowingNoun = (ruling: Extract<Ruling, { kind: "narrowing" }>) =>
+    ruling.dimension === "both" ? "the narrowing" : `the ${ruling.dimension} narrowing`;
+
+  /**
+   * What accepting does to this chat, as one clause. Says what changes and
+   * for how long — a reader who has never met an information-flow label
+   * should still understand the price.
+   */
   const acceptMove = (ruling: Extract<Ruling, { kind: "narrowing" }>) => {
     const moves: React.ReactNode[] = [];
     if (ruling.dimension !== "audience") {
-      const to =
-        ruling.toTrustRank !== undefined
-          ? (trustChain[ruling.toTrustRank] ?? `rank ${ruling.toTrustRank}`)
-          : "less trusted";
-      moves.push(<span key="trust">the chat becomes {termPill(to)}</span>);
+      const to = narrowedTrust(ruling);
+      moves.push(<span key="trust">lowers this chat&apos;s trust{to ? <> to {termPill(to)}</> : null}</span>);
     }
     if (ruling.dimension !== "trust") {
-      const to = ruling.readers ? ruling.readers.join(", ") || "nobody" : "fewer readers";
-      moves.push(<span key="audience">only {termPill(to)} sees the results</span>);
+      const to = narrowedReaders(ruling);
+      moves.push(<span key="audience">narrows this chat&apos;s audience{to ? <> to {termPill(to)}</> : null}</span>);
     }
     return moves.map((move, index) => (
       <span key={index}>
@@ -941,19 +1238,29 @@ export function ChatPlayground() {
     ));
   };
 
-  /** One plan as one option line: what "we" do, in the order the plan does it. */
+  /**
+   * One plan as one option. The price is already stated in the sentence
+   * above, so an option says what it *does* rather than restating the cost —
+   * the repetition was most of what made these cards hard to read.
+   */
   const planOption = (plan: ParsedPlan, ruling: Ruling) => {
     const clauses: React.ReactNode[] = [];
     for (const ruled of plan.rulings)
-      clauses.push(<>we ask {entityPill(ruled.authority, ruled.hint)} for approval</>);
-    if (plan.sanitize) clauses.push(<>we clean it with {entityPill(plan.sanitize.sanitizer, plan.sanitize.hint)}</>);
+      clauses.push(<>ask {entityPill(ruled.authority, ruled.hint)} to approve this one call</>);
+    if (plan.sanitize)
+      clauses.push(
+        <>
+          clean it first with {entityPill(plan.sanitize.sanitizer, plan.sanitize.hint)}
+          {ruling.kind === "narrowing" ? <>, and this chat&apos;s {narrowedDimension(ruling)} stays as it is</> : null}
+        </>,
+      );
     if (plan.accepts || clauses.length === 0)
-      clauses.push(ruling.kind === "narrowing" ? <>we accept — {acceptMove(ruling)}</> : <>we accept the cost</>);
+      clauses.push(ruling.kind === "narrowing" ? <>accept {narrowingNoun(ruling)}</> : <>accept</>);
     return (
       <li className="my-1" key={plan.id}>
         {clauses.map((clause, index) => (
           <span key={index}>
-            {index > 0 && " and "}
+            {index > 0 && ", then "}
             {clause}
           </span>
         ))}
@@ -961,24 +1268,20 @@ export function ChatPlayground() {
     );
   };
 
-  const appaWho = (badge?: React.ReactNode) => (
-    <div className="mb-1.5 flex items-center gap-2 font-mono text-[11px] tracking-[0.12em] text-[var(--text-weak)] uppercase">
-      <span className="flex size-7 shrink-0 items-center justify-center rounded-full border border-[var(--accent-border)] bg-[var(--accent-bg)]">
-        <appa-mark size={17} />
-      </span>
-      appa
-      {badge && <span className="ml-auto">{badge}</span>}
-    </div>
+  /* Who is speaking: a name and a colon. The label shares a baseline with the
+     line it opens, which is correct and still reads low — at 11px its ink sits
+     0.9px below the optical centre of the 13.5px sentence beside it (measured,
+     not guessed). Lifting it by that much centres the two. Only the agent's
+     rows showed it: APPA's neighbour is the same mono face, so the identical
+     offset goes unseen there. */
+  const speaker = (who: "appa" | "agent", badge?: React.ReactNode) => (
+    <span className="relative top-[-0.9px] mr-2 font-mono text-[11px] font-semibold text-[var(--text-strong)]">
+      {who === "appa" ? "OpenAPPA:" : "Agent:"}
+      {badge ? <span className="ml-2">{badge}</span> : null}
+    </span>
   );
 
-  const agentWho = (
-    <div className="mb-1.5 flex items-center gap-2 font-mono text-[11px] tracking-[0.12em] text-[var(--text-weak)] uppercase">
-      <span className="flex size-7 shrink-0 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--bg)] text-[15px]">
-        🤖
-      </span>
-      agent
-    </div>
-  );
+  const appaWho = (badge?: React.ReactNode) => speaker("appa", badge);
 
   /**
    * One grey container for the APPA ↔ agent exchange. Consecutive exchange
@@ -986,36 +1289,13 @@ export function ChatPlayground() {
    * edges, and the rows between them close their gap. The box opens by naming
    * the one tool call under negotiation — the exchange never widens beyond it.
    */
-  const exchangeShell = (
-    group: { first: boolean; last: boolean } | undefined,
-    children: React.ReactNode,
-    tool?: string,
-  ) => {
+  const exchangeShell = (group: { first: boolean; last: boolean } | undefined, children: React.ReactNode) => {
     const edges = group ?? { first: true, last: true };
-    return (
-      <div
-        className={`w-full min-w-0 bg-[var(--bg-weak)] px-4 pb-4 ${
-          edges.first ? "rounded-t-md pt-4" : "pt-0"
-        } ${edges.last ? "rounded-b-md" : ""}`}
-      >
-        {edges.first && tool && (
-          <div className="mb-2.5 border-b border-[var(--border-weak)] pb-1.5 font-mono text-[10px] tracking-widest text-[var(--icon)] uppercase">
-            negotiating one tool call · {tool}
-          </div>
-        )}
-        {children}
-      </div>
-    );
-  };
-
-  /** The world call this exchange negotiates: the nearest held card above. */
-  const heldToolBefore = (id: number) => {
-    const at = thread.findIndex((entry) => entry.id === id);
-    for (let index = (at === -1 ? thread.length : at) - 1; index >= 0; index--) {
-      const prev = thread[index];
-      if (prev.t === "tool" && prev.state === "blocked" && !PROTOCOL_TOOLS.has(prev.name)) return prev.name;
-    }
-    return undefined;
+    /* The negotiation hangs off the call that caused it as a short sub-spine
+       — no panel, no background, and no header: the call line above already
+       names the tool and says it is paused, and repeating that was the
+       loudest redundancy in the old stream. */
+    return <div className={`border-l-2 border-[var(--warn-bg)] py-2 pl-4 ${edges.last ? "pb-3" : ""}`}>{children}</div>;
   };
 
   /**
@@ -1045,67 +1325,49 @@ export function ChatPlayground() {
       const tone = warnKind
         ? { bg: "var(--warn-bg)", fg: "var(--warn)" }
         : { bg: "var(--danger-bg)", fg: "var(--danger)" };
+      // The story in one sentence: what this call returns, what reading it
+      // would cost, and how long the cost lasts. The tool is named so the
+      // sentence stands on its own when read out of the stream.
+      const tool = item.tool;
+      const subject = tool ? entityPill(tool) : <>This call</>;
+      const readers = ruling.kind === "narrowing" ? narrowedReaders(ruling) : null;
+      const rank = ruling.kind === "narrowing" ? narrowedTrust(ruling) : null;
       const caption =
         ruling.kind === "refusal" ? (
-          <>{ruling.summary}</>
+          <>
+            {subject} — {readable(ruling.summary)}
+          </>
         ) : ruling.dimension === "trust" ? (
           <>
-            This source is not trusted — if we read it, the chat becomes{" "}
-            {termPill(
-              ruling.toTrustRank !== undefined
-                ? (trustChain[ruling.toTrustRank] ?? `rank ${ruling.toTrustRank}`)
-                : "less trusted",
-            )}
-            .
+            {subject} returns content the policy does not trust. Reading it lowers this chat&apos;s trust
+            {rank ? <> to {tool ? policyPill(rank, tool) : termPill(rank)}</> : null}.
           </>
         ) : ruling.dimension === "audience" ? (
           <>
-            This data is confidential — if we read it, only{" "}
-            {termPill(ruling.readers ? ruling.readers.join(", ") || "nobody" : "fewer readers")} sees the results.
+            {subject} returns confidential data. Reading it narrows this chat&apos;s audience
+            {readers ? <> to {tool ? policyPill(readers, tool) : termPill(readers)}</> : null}.
           </>
         ) : (
-          <>Not trusted and confidential — if we read it, {acceptMove(ruling)}.</>
+          <>
+            {subject} returns confidential data the policy does not trust. Reading it {acceptMove(ruling)}.
+          </>
         );
       return exchangeShell(
         group,
-        (
-            <>
+        <>
+          <div className="text-[13.5px] leading-relaxed">
+            <p className="m-0">
               {appaWho()}
-              <div className="text-[13.5px] leading-relaxed">
-                <p className="m-0">
-                  {caption}
-                  {ruling.plans.length > 0 && (
-                    <>
-                      {" "}
-                      <b>I have a plan for you:</b>
-                    </>
-                  )}
-                </p>
-                {ruling.plans.length > 0 && (
-                  <ol className="m-0 mt-1 list-decimal pl-6">
-                    {ruling.plans.map((plan) => planOption(plan, ruling))}
-                  </ol>
-                )}
-                <details className="mt-2">
-                  <summary className="cursor-pointer font-mono text-[10.5px] text-[var(--icon)]">
-                    what the model was told
-                  </summary>
-                  <div
-                    className="mt-1 overflow-x-auto rounded-md text-xs"
-                    style={{ background: tone.bg, color: tone.fg }}
-                  >
-                    <div className="whitespace-pre-wrap break-words p-2">{ruling.summary}</div>
-                    {ruling.detail && (
-                      <pre className="m-0 max-h-40 overflow-auto p-2 font-mono text-[11px] leading-relaxed">
-                        {ruling.detail}
-                      </pre>
-                    )}
-                  </div>
-                </details>
-              </div>
-            </>
-        ),
-        heldToolBefore(item.id),
+              {caption}
+            </p>
+            {ruling.plans.length > 0 && (
+              <>
+                <p className="m-0 mt-2 text-[var(--text)]">Remedy plan options:</p>
+                <ol className="m-0 mt-0.5 list-decimal pl-5">{ruling.plans.map((plan) => planOption(plan, ruling))}</ol>
+              </>
+            )}
+          </div>
+        </>,
       );
     }
     if (item.t === "user")
@@ -1116,11 +1378,9 @@ export function ChatPlayground() {
       );
     if (item.t === "text")
       return (
-        <Message className="max-w-full" from="assistant" key={item.id}>
-          <MessageContent>
-            <MessageResponse>{item.text}</MessageResponse>
-          </MessageContent>
-        </Message>
+        <div className="text-[13.5px] leading-relaxed whitespace-pre-wrap text-[var(--text)]" key={item.id}>
+          {asProse(item.text)}
+        </div>
       );
     if (item.t === "note")
       return (
@@ -1132,217 +1392,205 @@ export function ChatPlayground() {
     if (item.t === "rule") return <div className="border-t border-dashed border-[var(--border-weak)]" key={item.id} />;
     if (item.t === "entry")
       return (
-        <div className="my-1 flex w-full items-center gap-3" key={item.id}>
-          <span className="h-px flex-1 bg-[var(--border-weak)]" />
-          <span className="flex flex-wrap items-center gap-1.5 font-mono text-[10.5px] tracking-widest text-[var(--icon)] uppercase">
-            session starts
-            <span style={pill("var(--bg-weak)", "var(--text-weak)")}>trust: {item.label.trust}</span>
-            <span style={pill("var(--bg-weak)", "var(--text-weak)")}>audience: {item.label.audience}</span>
-          </span>
-          <span className="h-px flex-1 bg-[var(--border-weak)]" />
+        <div key={item.id}>
+          <div className="font-mono text-[11px] text-[var(--icon)]">
+            Session label · Trust: {policyRef(item.label.trust, "boundary")} · Audience:{" "}
+            {policyRef(item.label.audience, "boundary")}
+          </div>
         </div>
       );
     if (item.t === "authors")
       return (
-        <div
-          className="w-full rounded-md border border-[var(--accent-border)] bg-[var(--accent-bg)] p-4"
-          key={item.id}
-        >
-          <div className="mb-1.5 flex items-center gap-2 font-mono text-[11px] tracking-[0.12em] text-[var(--accent)] uppercase">
-            <appa-mark size={17} />
-            author note
-          </div>
-          <p className="m-0 text-[13.5px] leading-relaxed text-[var(--text)]">{item.text}</p>
+        <div className="mx-auto max-w-[34rem] px-4 py-6 text-center" key={item.id}>
+          <span className="mx-auto mb-3 block h-px w-8 bg-[var(--accent-border)]" />
+          <p className="m-0 text-[14.5px] leading-[1.75] text-balance text-[var(--text-weak)]">{item.text}</p>
         </div>
       );
     if (item.t === "shift")
       return (
         <div
-          className="my-1 flex w-full items-center gap-3"
+          className="font-mono text-[11px]"
           key={item.id}
+          style={{
+            color: item.to.trust !== item.from.trust ? "var(--danger)" : "var(--warn)",
+          }}
           title={`was trust: ${item.from.trust} · audience: ${item.from.audience}`}
         >
-          <span className="h-px flex-1 bg-[var(--warn)] opacity-40" />
-          <span className="flex flex-wrap items-center gap-1.5 font-mono text-[10.5px] tracking-widest text-[var(--warn)] uppercase">
-            new label
-            <span style={pill("var(--warn-bg)", "var(--warn)")}>trust: {item.to.trust}</span>
-            <span style={pill("var(--warn-bg)", "var(--warn)")}>audience: {item.to.audience}</span>
-          </span>
-          <span className="h-px flex-1 bg-[var(--warn)] opacity-40" />
+          Label narrows · Trust: {policyRef(item.to.trust, item.cause ?? "boundary")} · Audience:{" "}
+          {policyRef(item.to.audience, item.cause ?? "boundary")}
         </div>
       );
     if (item.t === "approval") {
+      /* An APPA turn like any other: a speaker, a sentence, and — while it is
+         open — the two rulings you can give. The bordered warn panel was the
+         only box left in the stream, and its saturated fills shouted louder
+         than anything the engine actually says. */
       const verdict =
         item.state === "approved"
-          ? { text: "approved", bg: "var(--accent-bg)", fg: "var(--accent)" }
+          ? { text: "approved", tone: "var(--accent)" }
           : item.state === "denied"
-            ? { text: "denied", bg: "var(--danger-bg)", fg: "var(--danger)" }
+            ? { text: "denied", tone: "var(--danger)" }
             : item.state === "expired"
-              ? { text: "expired — abstained", bg: "var(--bg-weak-hover)", fg: "var(--icon)" }
-              : null;
+              ? { text: "expired — nobody answered", tone: "var(--icon)" }
+              : { text: "waiting on you", tone: "var(--warn)" };
+      const ruleBtn = (label: string, tone: string, border: string, approve: boolean) => (
+        <button
+          /* The one control a run demands mid-stream. A 28px target is fine
+             for a pointer and too small for a thumb, so it grows to the 44px
+             touch minimum below `lg` and keeps its desktop size above. */
+          className="min-h-11 cursor-pointer rounded border px-4 py-2 font-mono text-[11px] transition-colors lg:min-h-0 lg:px-2.5 lg:py-1"
+          onClick={() => void answerApproval(item.approvalId, approve)}
+          style={{ color: tone, borderColor: border }}
+          type="button"
+        >
+          {label}
+        </button>
+      );
       return exchangeShell(
         group,
-        (
-          <>
-          {appaWho(
-            <span style={pill(verdict ? verdict.bg : "var(--warn)", verdict ? verdict.fg : "var(--warn-bg)")}>
-              {verdict ? verdict.text : "waiting on you"}
-            </span>,
-          )}
-          <div className="rounded-md border border-[var(--warn)] bg-[var(--warn-bg)] p-4">
-          <p className="m-0 text-[13.5px] leading-relaxed text-[var(--text)]">
-            We ask {item.authority ? entityPill(item.authority) : "a human"} to approve{" "}
-            <span className="font-mono text-xs text-[var(--text-strong)]">{item.tool}</span>.
+        <div className="text-[13.5px] leading-relaxed">
+          <p className="m-0">
+            {speaker(
+              "appa",
+              <span className="font-mono text-[11px] font-normal" style={{ color: verdict.tone }}>
+                {verdict.text}
+              </span>,
+            )}
+            We ask {item.authority ? entityPill(item.authority) : "a human"} to approve {entityPill(item.tool)}.
           </p>
           {item.state === "pending" && (
             <div className="mt-2 flex gap-2">
-              <button
-                className="rounded-md bg-[var(--accent)] px-3 py-1 font-mono text-[11px] text-[var(--accent-bg)]"
-                onClick={() => void answerApproval(item.approvalId, true)}
-                type="button"
-              >
-                Approve
-              </button>
-              <button
-                className="rounded-md bg-[var(--danger)] px-3 py-1 font-mono text-[11px] text-[var(--danger-bg)]"
-                onClick={() => void answerApproval(item.approvalId, false)}
-                type="button"
-              >
-                Deny
-              </button>
+              {ruleBtn("Approve", "var(--accent)", "var(--accent-border)", true)}
+              {ruleBtn("Deny", "var(--danger)", "var(--danger)", false)}
             </div>
           )}
-          <details className="mt-2">
-            <summary className="cursor-pointer font-mono text-[10.5px] text-[var(--warn)]">
-              what the authority sees
-            </summary>
-            <pre className="m-0 mt-1 max-h-40 overflow-auto rounded-md bg-[var(--bg)] p-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-words">
-              {item.detail}
-            </pre>
-          </details>
-          </div>
-          </>
-        ),
-        item.tool,
+        </div>,
       );
     }
     // The agent's remedy choice, in its own voice: "I choose to use X" says
     // more than a protocol payload. The wire call stays available underneath.
     if (item.name === "execute_remedy_plan") {
       const chosen = chosenPlan(item);
+      // The agent's answer, short: APPA has just stated the price, so the
+      // reply names the choice and stops.
       const sentence = chosen ? (
         <>
           {chosen.plan.rulings.map((ruled, index) => (
             <span key={ruled.authority}>
-              {index > 0 && " and "}I ask {entityPill(ruled.authority, ruled.hint)} for approval
+              {index > 0 && " and "}Asking {entityPill(ruled.authority, ruled.hint)} to approve this call
             </span>
           ))}
           {chosen.plan.sanitize && (
             <>
-              {chosen.plan.rulings.length > 0 && " and "}I choose to use{" "}
+              {chosen.plan.rulings.length > 0 && ", then "}
+              {chosen.plan.rulings.length > 0 ? "cleaning" : "Cleaning"} it first with{" "}
               {entityPill(chosen.plan.sanitize.sanitizer, chosen.plan.sanitize.hint)}
             </>
           )}
           {chosen.plan.accepts &&
             (chosen.plan.rulings.length > 0 || chosen.plan.sanitize ? (
-              <> and accept what remains</>
+              <> and accepting what remains</>
             ) : (
-              <>
-                I accept{chosen.ruling.kind === "narrowing" ? <> — {acceptMove(chosen.ruling)}</> : <> the cost</>}
-              </>
+              <>Accepting {chosen.ruling.kind === "narrowing" ? narrowingNoun(chosen.ruling) : "the ruling"}</>
             ))}
           .
         </>
       ) : (
-        <>I execute remedy plan {typeof item.args.plan_id === "string" ? item.args.plan_id : "…"}.</>
+        <>Taking remedy plan {typeof item.args.plan_id === "string" ? item.args.plan_id : "…"}.</>
       );
       return exchangeShell(
         group,
-        (
-          <>
-            {agentWho}
-            <div className={`text-[14px] leading-relaxed ${item.state === "running" ? "animate-pulse" : ""}`}>
-              {sentence}
+        <div className={`text-[13.5px] leading-relaxed ${item.state === "running" ? "animate-pulse" : ""}`}>
+          <div>
+            {speaker("agent")}
+            {sentence}
+          </div>
+          {/* The engine can refuse the move itself — an offer belongs to the
+                block that made it, and that block may already be settled.
+                Without this the card reads as though the plan was taken. */}
+          {item.refused && (
+            <div className="mt-1 text-[12.5px] text-[var(--warn)]">
+              {speaker("appa")}
+              {refusal(item.output, Boolean(chosen))}
             </div>
-          </>
-        ),
-        heldToolBefore(item.id),
+          )}
+        </div>,
       );
     }
-    const state =
-      item.state === "running"
-        ? ("input-available" as const)
-        : item.state === "blocked"
-          ? ("output-error" as const)
-          : ("output-available" as const);
     const ruling = item.state === "blocked" && item.blocked ? splitRuling(item.blocked) : null;
-    // A ruling is the engine mediating — the thing the demo exists to show —
-    // so the card wears verdict styling, never the error slot. The ruling's
-    // own words are APPA's turn, a separate item in the thread.
-    const verdict = ruling
-      ? ruling.kind === "narrowing"
-        ? { badge: rulingBadge(ruling), bg: "var(--warn-bg)", fg: "var(--warn)" }
-        : { badge: rulingBadge(ruling), bg: "var(--danger-bg)", fg: "var(--danger)" }
-      : null;
+    /* A tool call is a line on the spine, not a card. The arrow carries the
+       direction — out to the world, or a result coming back — which is what
+       the wrench never said; the name is mono because it is an identifier;
+       and the one status that matters sits at the end of the line. What was
+       sent and what came back live behind a single disclosure: this demo is
+       about the decision, not the payload. */
+    const outbound = item.state !== "done";
+    /* The arguments are the call: which recipient, which invoice. Hiding them
+       behind a disclosure hid the very thing a flow decision turns on. */
+    const args = Object.entries(item.args ?? {}).filter(([, value]) => value !== undefined && value !== "");
+    const argsOpen = openArgs.has(item.id);
+    /* The sanitizer and the authority named here are registered in the policy
+       like any other entity, so they open it too — `policyRef` keeps the
+       status line's own size and colour and adds only the affordance. */
+    const status = item.sanitizedBy ? (
+      <span className="inline-flex items-center gap-1.5 text-[var(--accent)]">
+        <appa-mark size={14} variant="clean" /> cleaned by {policyRef(item.sanitizedBy, item.sanitizedBy)}
+      </span>
+    ) : item.approvedBy ? (
+      <span className="text-[var(--accent)]">approved by {policyRef(item.approvedBy, item.approvedBy)}</span>
+    ) : item.state === "running" ? (
+      <span className="animate-pulse text-[var(--icon)]">running…</span>
+    ) : null;
     return (
       <div className="w-full min-w-0" key={item.id}>
-        {/* mb-0: the thread's rhythm is the row's own padding, not the card's. */}
-        <Tool className="mb-0 w-full">
-          <ToolHeader
-            badge={
-              // The held card keeps its block; the resolution card — the same
-              // call, run again after its remedy — wears the outcome: the
-              // mascot sweeps for a cleaned result, carries a check for an
-              // accepted narrowing.
-              item.sanitizedBy ? (
-                <span className="inline-flex items-center gap-1.5" style={pill("var(--accent-bg)", "var(--accent)")}>
-                  <appa-mark size={16} variant="clean" /> cleaned
+        <div className="flex items-baseline gap-x-3">
+          {/* Arrow, name and arguments are one unit: the arrow used to be its
+              own flex item, so a long signature wrapped away and left it
+              stranded on the line above. */}
+          <span className="min-w-0 flex-1 break-all">
+            <span className="mr-2 font-mono text-[12px] text-[var(--icon)]">{outbound ? "\u2192" : "\u2190"}</span>
+            {PROTOCOL_TOOLS.has(item.name) ? (
+              <span className="font-mono text-[13px] text-[var(--text-strong)]">{item.name}</span>
+            ) : (
+              reference(
+                item.name,
+                item.name,
+                "cursor-pointer font-mono text-[13px] text-[var(--text-strong)] underline decoration-dotted decoration-[var(--border)] underline-offset-4 hover:decoration-[var(--accent)] hover:text-[var(--accent)]",
+                "Click to see this tool's contract in the policy",
+              )
+            )}
+            {args.length > 0 && (
+              <button
+                className="ml-1.5 cursor-pointer font-mono text-[12px] text-[var(--icon)] hover:text-[var(--text-strong)]"
+                onClick={() =>
+                  setOpenArgs((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(item.id)) next.delete(item.id);
+                    else next.add(item.id);
+                    return next;
+                  })
+                }
+                type="button"
+              >
+                ({argsOpen ? "hide arguments" : "arguments"})
+              </button>
+            )}
+            {item.output && <span className="font-mono text-[11.5px] text-[var(--text-weak)]"> · {item.output}</span>}
+          </span>
+          {status && <span className="shrink-0 font-mono text-[11px]">{status}</span>}
+        </div>
+        {argsOpen && (
+          <div className="mt-1 max-h-56 overflow-auto font-mono text-[11.5px] leading-relaxed">
+            {args.map(([key, value]) => (
+              <div className="flex gap-2 break-all" key={key}>
+                <span className="shrink-0 text-[var(--icon)]">{key}:</span>
+                <span className="whitespace-pre-wrap text-[var(--text)]">
+                  {typeof value === "string" ? value : JSON.stringify(value, null, 2)}
                 </span>
-              ) : item.approvedBy ? (
-                <span style={pill("var(--accent-bg)", "var(--accent)")}>approved by {item.approvedBy}</span>
-              ) : item.echo ? (
-                <span className="inline-flex items-center gap-1.5" style={pill("var(--warn-bg)", "var(--warn)")}>
-                  <appa-mark size={16} variant="accept" /> accepted
-                </span>
-              ) : verdict ? (
-                <span style={pill(verdict.bg, verdict.fg)}>
-                  {ruling?.kind === "narrowing" ? `held · ${verdict.badge}` : verdict.badge}
-                </span>
-              ) : undefined
-            }
-            state={state}
-            type={`tool-${item.name}` as `tool-${string}`}
-          />
-          <ToolContent>
-            <ToolInput input={item.args} />
-            <ToolOutput
-              errorText={undefined}
-              output={
-                (item.state === "done" && item.output) || item.result || item.sanitizedBy || item.approvedBy ? (
-                  <div className="p-2 font-mono text-xs">
-                    {item.state === "done" && item.output && <div>⎿ {item.output}</div>}
-                    {item.sanitizedBy && (
-                      <div className="mt-1 flex flex-wrap items-center gap-1.5 font-sans text-[11px] text-[var(--text-weak)]">
-                        cleaned with {entityPill(item.sanitizedBy)} — the assistant never saw the raw result, only
-                        this:
-                      </div>
-                    )}
-                    {item.approvedBy && (
-                      <div className="mt-1 flex flex-wrap items-center gap-1.5 font-sans text-[11px] text-[var(--text-weak)]">
-                        approved by {entityPill(item.approvedBy)}
-                      </div>
-                    )}
-                    {item.result && (
-                      <pre className="m-0 mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md bg-[var(--bg-weak)] p-2 text-[11px] leading-relaxed">
-                        {item.result}
-                      </pre>
-                    )}
-                  </div>
-                ) : undefined
-              }
-            />
-          </ToolContent>
-        </Tool>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     );
   };
@@ -1360,116 +1608,146 @@ export function ChatPlayground() {
     return "var(--accent-border)";
   };
 
-  // One thread row: the rail segment carrying the label at that moment, then
-  // the turn. A shift row is stamped with the label it moved to, so the rail
-  // simply changes color through the separator — the separator itself is the
-  // marker.
-  const railRow = (key: number, content: React.ReactNode, lab?: LabelState, tight = false) => (
-    <div className="grid grid-cols-[12px_minmax(0,1fr)] gap-x-2" key={key}>
-      <span
-        className="w-[5px] justify-self-start rounded-[1px]"
-        style={{ background: railTone(lab) }}
-        title={lab ? `trust: ${lab.trust} · audience: ${lab.audience}` : undefined}
-      />
-      <div className={`min-w-0 ${tight ? "pb-0" : "pb-4"}`}>{content}</div>
-    </div>
-  );
+  /**
+   * The spine: one unbroken line down the whole conversation, carrying the
+   * session label at every moment. It starts hairline and pale, and thickens
+   * into the warn tone the instant the audience narrows or the danger tone
+   * when trust drops — and never thins again, because the label never widens
+   * again. The invariant the engine enforces is the shape of the page.
+   *
+   * Events sit on it as nodes: hollow for a call going out, filled for a
+   * result coming back. Everything else is content hanging beside the line,
+   * which is why the stream needs no boxes.
+   */
+  const spineWeight = (lab?: LabelState) => (railTone(lab) === "var(--accent-border)" ? 2 : 3);
+
+  const spineRow = (
+    key: number,
+    content: React.ReactNode,
+    lab?: LabelState,
+    opts: { tight?: boolean; node?: "call" | "result" | "hold" | "label" } = {},
+  ) => {
+    const tone = railTone(lab);
+    return (
+      <div className="grid grid-cols-[14px_minmax(0,1fr)] gap-x-3" key={key}>
+        <div
+          className="relative flex justify-center"
+          title={lab ? `trust: ${lab.trust} · audience: ${lab.audience}` : undefined}
+        >
+          <span className="absolute inset-y-0 rounded-[1px]" style={{ background: tone, width: spineWeight(lab) }} />
+          {/* A label change is a tick drawn across the spine, not a glyph in
+              the text column — the annotation has to touch the line it is
+              about, or it reads as unrelated prose sitting nearby. */}
+          {opts.node === "label" ? (
+            <span className="relative mt-[7px] h-[3px] w-full rounded-[1px]" style={{ background: tone }} />
+          ) : opts.node ? (
+            <span
+              className="relative mt-[6px] size-[9px] rotate-45 rounded-[1px]"
+              style={{
+                background: opts.node === "result" ? tone : "var(--bg)",
+                border: `${opts.node === "hold" ? 2 : 1.5}px solid ${opts.node === "hold" ? "var(--warn)" : tone}`,
+              }}
+            />
+          ) : null}
+        </div>
+        <div className={`min-w-0 ${opts.tight ? "pb-0" : "pb-4"}`}>{content}</div>
+      </div>
+    );
+  };
 
   // The whole right-hand pane, rendered into the desktop sidebar or the
   // mobile drawer — one JSX value so the two never drift.
   const policyPane = (
     <>
-          <div className="flex items-center gap-1 px-3 pt-3 pb-2">
-            {(["tools", "policy"] as const).map((tab) => (
+      {/* Three tabs do not fit one line in the mobile sheet, so the row wraps
+          rather than clipping a label or growing a scrollbar. */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-[var(--border-weak)] px-3 pt-3" role="tablist">
+        {(["tools", "short", "full"] as const).map((tab) => (
+          <button
+            aria-selected={pane === tab}
+            className={
+              pane === tab
+                ? "-mb-px cursor-pointer border-b-2 border-[var(--accent)] px-0.5 pb-1.5 font-mono text-[11px] text-[var(--text-strong)]"
+                : "-mb-px cursor-pointer border-b-2 border-transparent px-0.5 pb-1.5 font-mono text-[11px] text-[var(--text-weak)] hover:text-[var(--text-strong)]"
+            }
+            key={tab}
+            onClick={() => setPane(tab)}
+            role="tab"
+            type="button"
+          >
+            {tab === "tools"
+              ? `Tools · ${systems.length}/${catalog.length}`
+              : tab === "short"
+                ? "OpenAPPA Policy (Short)"
+                : "OpenAPPA Policy (Full)"}
+          </button>
+        ))}
+        {pane === "full" && (
+          <span className="ml-auto flex items-center gap-2.5 pb-1.5">
+            {presetPolicy && policyText !== presetPolicy && (
               <button
-                className={
-                  pane === tab
-                    ? "rounded-md bg-[var(--bg-weak)] px-2.5 py-1 font-mono text-[11px] text-[var(--text-strong)]"
-                    : "rounded-md px-2.5 py-1 font-mono text-[11px] text-[var(--text-weak)] hover:text-[var(--text-strong)]"
-                }
-                key={tab}
-                onClick={() => setPane(tab)}
+                className="font-mono text-[11px] text-[var(--text-weak)] underline underline-offset-2 hover:text-[var(--text-strong)]"
+                onClick={() => setPolicyText(presetPolicy)}
                 type="button"
               >
-                {tab === "tools" ? `Tools · ${systems.length}/${catalog.length}` : "Policy"}
+                reset
               </button>
-            ))}
-            {pane === "policy" && (
-              <span className="ml-auto flex items-center gap-2.5">
-                {presetPolicy && policyText !== presetPolicy && (
-                  <button
-                    className="font-mono text-[11px] text-[var(--text-weak)] underline underline-offset-2 hover:text-[var(--text-strong)]"
-                    onClick={() => setPolicyText(presetPolicy)}
-                    type="button"
-                  >
-                    reset
-                  </button>
-                )}
-                <button
-                  className="font-mono text-[11px] text-[var(--text-weak)] hover:text-[var(--text-strong)]"
-                  onClick={() => setEditorMax(true)}
-                  title="Edit full screen"
-                  type="button"
-                >
-                  ⤢ full screen
-                </button>
-              </span>
             )}
-          </div>
+          </span>
+        )}
+      </div>
 
-          {pane === "tools" ? (
-            <div className="mx-3 flex-1 overflow-y-auto rounded-md border border-[var(--border-weak)] bg-[var(--bg-weak)] p-2">
-              <p className="m-0 px-1 pb-2 text-[11px] leading-relaxed text-[var(--icon)]">
-                Which systems the assistant has. Turning one on is what makes its tools exist — the policy decides what
-                they may do.
-              </p>
-              {catalog.map((system) => {
-                const on = systems.includes(system.id);
-                return (
-                  <label
-                    className="flex cursor-pointer items-start gap-2 rounded-md px-1 py-1.5 hover:bg-[var(--bg-weak-hover)]"
-                    key={system.id}
-                  >
-                    <input
-                      checked={on}
-                      className="mt-0.5 accent-[var(--accent)]"
-                      onChange={() =>
-                        setSystems((prev) =>
-                          prev.includes(system.id) ? prev.filter((id) => id !== system.id) : [...prev, system.id],
-                        )
-                      }
-                      type="checkbox"
-                    />
-                    <span className="min-w-0">
-                      <span className="block text-[12px] text-[var(--text-strong)]">{system.label}</span>
-                      <span className="block text-[11px] leading-snug text-[var(--text-weak)]">{system.blurb}</span>
-                      <span className="mt-0.5 block truncate font-mono text-[10px] text-[var(--icon)]">
-                        {system.tools.join(" · ")}
-                      </span>
-                    </span>
-                  </label>
-                );
-              })}
-            </div>
-          ) : (
-            <PolicyEditor className="mx-3 min-h-[12rem] flex-1" highlight={highlight} onChange={setPolicyText} value={policyText} />
-          )}
-          <div className="flex flex-col gap-2 p-3">
-            <p
-              className="m-0 text-[11.5px] leading-relaxed"
-              style={{ color: policyStatus && !policyStatus.ok ? "var(--danger)" : "var(--icon)" }}
-            >
-              {policyStatus
-                ? policyStatus.text
-                : "Changes apply to the next chat — a session keeps the tools and policy it started with."}
-            </p>
-            <div className="flex items-center gap-2 rounded-md border border-[var(--border)] px-2.5 py-1.5">
-              <span className="text-[11px] whitespace-nowrap text-[var(--icon)]">Model</span>
-              <span className="min-w-0 flex-1 text-right font-mono text-xs text-[var(--text-weak)]">
-                {PLAYGROUND_MODEL.label}
-              </span>
-            </div>
-          </div>
+      {pane === "tools" ? (
+        <div className="flex-1 overflow-y-auto bg-[var(--bg-weak)] px-3 py-2">
+          {catalog.map((system) => {
+            const on = systems.includes(system.id);
+            return (
+              <label
+                className="flex cursor-pointer items-start gap-2 rounded-md px-1 py-1.5 hover:bg-[var(--bg-weak-hover)]"
+                key={system.id}
+              >
+                <input
+                  checked={on}
+                  className="mt-0.5 accent-[var(--accent)]"
+                  onChange={() =>
+                    setSystems((prev) =>
+                      prev.includes(system.id) ? prev.filter((id) => id !== system.id) : [...prev, system.id],
+                    )
+                  }
+                  type="checkbox"
+                />
+                <span className="min-w-0">
+                  <span className="block text-[12px] text-[var(--text-strong)]">{system.label}</span>
+                  <span className="block text-[11px] leading-snug text-[var(--text-weak)]">{system.blurb}</span>
+                  <span className="mt-0.5 block truncate font-mono text-[10px] text-[var(--icon)]">
+                    {system.tools.join(" · ")}
+                  </span>
+                </span>
+              </label>
+            );
+          })}
+        </div>
+      ) : (
+        /* No padding here: the editor's own layers carry it, and padding
+               on this box would only push the caret layer off the text. The
+               short view is a reading of the same policy, never a second one
+               that could run — so it shows the text and refuses the caret. */
+        <PolicyEditor
+          className="min-h-[12rem] flex-1"
+          highlight={highlight}
+          onChange={setPolicyText}
+          readOnly={pane === "short"}
+          value={pane === "short" ? shortText : policyText}
+        />
+      )}
+      {policyStatus && (
+        <p
+          className="m-0 px-3 py-2 text-[11.5px] leading-relaxed"
+          style={{ color: policyStatus.ok ? "var(--warn)" : "var(--danger)" }}
+        >
+          {policyStatus.text}
+        </p>
+      )}
     </>
   );
 
@@ -1486,25 +1764,10 @@ export function ChatPlayground() {
       >
         {/* ---- chat pane ---- */}
         <div className="flex min-h-0 min-w-0 flex-col border-b border-[var(--border-weak)] bg-[var(--bg)] lg:border-r lg:border-b-0">
-          {/* One strip of chrome: the session label heads the chat it governs
-              (the flight from a card lands here), with the few controls the
-              playground needs on the right. */}
-          <div className="flex flex-wrap items-center gap-2 border-b border-[var(--border-weak)] px-4 py-1.5">
-            <span className="font-mono text-[10px] tracking-widest text-[var(--icon)] uppercase">session label</span>
-            <span style={{ display: "flex", gap: "0.4rem" }}>
-              {label && <LabelPills boundary={boundary} label={label} />}
-            </span>
-            <span className="ml-auto flex flex-wrap items-center gap-2">
-              {mode === "probing" && <span style={pill("var(--bg-weak-hover)", "var(--icon)")}>connecting…</span>}
-              {mode === "down" && <span style={pill("var(--danger-bg)", "var(--danger)")}>service unavailable</span>}
-              <button type="button" onClick={resetChat} className="lp-replay" style={chrome.barBtn}>
-                New chat
-              </button>
-              <button className="lg:hidden" onClick={() => setPanelOpen(true)} style={chrome.barBtn} type="button">
-                Tools · policy
-              </button>
-            </span>
-          </div>
+          {/* No chrome strip above the chat: the stream is the interface. The
+              service's state is carried by the composer's placeholder and the
+              empty state, and New chat waits at the foot of the stream until
+              the exchange has actually settled. */}
           <Conversation className="min-h-0">
             <ConversationContent className="gap-0">
               {thread.length === 0 ? (
@@ -1516,27 +1779,85 @@ export function ChatPlayground() {
                   // the breakpoint suggests. Safe centering: when the cards
                   // outgrow the pane, align to the scrollable top instead of
                   // clipping both ends.
-                  <div className="@container flex h-full flex-col items-center gap-4 px-4 py-12 [justify-content:safe_center]">
-                    <span className="font-mono text-[11px] tracking-widest text-[var(--icon)] uppercase">
-                      start with
-                    </span>
-                    <div className="@xl:grid-cols-2 @4xl:grid-cols-3 grid w-full max-w-[64rem] grid-cols-1 gap-3">
-                      {STARTER_PROMPTS.map((starter) => (
-                        <button
-                          className="group flex cursor-pointer flex-col gap-2.5 rounded-xl border border-[var(--border-weak)] bg-[var(--bg-weak)] p-5 text-left transition-colors hover:border-[var(--accent-border)] hover:bg-[var(--accent-bg)]"
-                          key={starter.tag}
-                          onClick={() => send(starter.text)}
-                          type="button"
-                        >
-                          <span className="flex items-center justify-between font-mono text-[10.5px] tracking-widest text-[var(--icon)] uppercase group-hover:text-[var(--accent)]">
-                            {starter.tag}
-                            <span aria-hidden className="transition-transform group-hover:translate-x-0.5">→</span>
-                          </span>
-                          <span className="text-[14.5px] leading-normal text-[var(--text-strong)]">
-                            {starter.text}
-                          </span>
-                        </button>
+                  /* Four choices and nothing else. A filled tile reads as a
+                     control on sight — no index, no arrow, no outline needed
+                     — so the sentence stays the only thing to read and the
+                     fill does the work of saying "press me". */
+                  <div className="flex h-full flex-col justify-center px-4 py-10">
+                    {/* One line of welcome, then the choices. The run itself
+                        is the explanation. */}
+                    <h1 className="mx-auto mb-4 w-full max-w-[36rem] text-[17px] font-semibold text-[var(--text-strong)]">
+                      Pick a scenario and watch it run.
+                    </h1>
+                    <ul className="m-0 mx-auto flex w-full max-w-[36rem] list-none flex-col gap-2 p-0">
+                      {[
+                        ...STARTER_PROMPTS.map((starter) => ({
+                          label: starter.outcome,
+                          run: () => send(starter.text),
+                        })),
+                        {
+                          label: "Free form chat.",
+                          run: () => {
+                            setComposerAsked(true);
+                            /* A blank prompt is the hardest place to start, and
+                               the interesting flows are the ones that cross
+                               systems — so say what is reachable and point at
+                               the shape of a request worth trying. */
+                            push({
+                              id: nextId(),
+                              t: "authors",
+                              text: `The agent can reach ${systems.length} system${
+                                systems.length === 1 ? "" : "s"
+                              }: ${systems.join(", ")}. Ask it to take something out of one and publish it into another — that is where the policy starts ruling.`,
+                            });
+                            // The input mounts this tick; focus it on the next.
+                            requestAnimationFrame(() => document.getElementById("chat-composer")?.focus());
+                          },
+                        },
+                      ].map((choice) => (
+                        <li className="m-0 p-0" key={choice.label}>
+                          <button
+                            className="w-full cursor-pointer rounded-xl bg-[var(--bg-weak)] px-5 py-4 text-left text-[15.5px] leading-snug text-balance text-[var(--text-strong)] transition-colors hover:bg-[var(--accent-bg)] hover:text-[var(--accent)]"
+                            onClick={choice.run}
+                            type="button"
+                          >
+                            {choice.label}
+                          </button>
+                        </li>
                       ))}
+                    </ul>
+                    {/* The policy sits beside the chat and reads as scenery
+                        until something points at it. The arrow follows the
+                        layout: the pane is to the right on wide screens and
+                        below the chat once the grid stacks. */}
+                    <div className="mx-auto mt-8 w-full max-w-[36rem] border-t border-[var(--border-weak)] pt-5">
+                      {/* Below `lg` the pane is a sheet and the only button that
+                          opens it sits in the composer, which this screen has
+                          not shown yet — so the line that points at the policy
+                          is also the way in. On desktop the pane is already
+                          open beside the chat, and this selects its tab. */}
+                      <button
+                        className="m-0 flex cursor-pointer items-center gap-2 text-left text-[15px] font-semibold text-[var(--text-strong)] hover:text-[var(--accent)]"
+                        onClick={() => {
+                          setPane("short");
+                          setPanelOpen(true);
+                        }}
+                        type="button"
+                      >
+                        Take a look at the policy
+                        <span aria-hidden className="text-[var(--accent)]">
+                          →
+                        </span>
+                      </button>
+                      {/* Site prose size (.prose is 15px): this is body copy,
+                          not a caption, so it reads like the docs do. */}
+                      <p className="mt-2.5 mb-0 text-[15px] leading-relaxed text-[var(--text)]">
+                        We don't block or allow specific tool calls, and we don't have any agent-specific rules.
+                      </p>
+                      <p className="mt-3 mb-0 text-[15px] leading-relaxed text-[var(--text)]">
+                        We describe "audiences", "authorities" and "sanitizers". OpenAPPA works out what to block, what to let
+                        through, and how to help the agent reach the goal.
+                      </p>
                     </div>
                   </div>
                 ) : (
@@ -1551,43 +1872,89 @@ export function ChatPlayground() {
                 )
               ) : (
                 <>
-                {segmentThread(thread, childIds).map((segment) =>
-                  segment.child
-                    ? railRow(
-                        segment.items[0].id,
-                        <details className="w-full min-w-0 rounded-md border border-dashed border-[var(--border-weak)]">
-                          <summary className="cursor-pointer px-3 py-2 font-mono text-[11px] text-[var(--text-weak)] hover:text-[var(--text-strong)]">
-                            ⑂ child {segment.child} — what it reads narrows this branch only ·{" "}
-                            {segment.items.length} steps
-                          </summary>
-                          <div className="mb-2 ml-3 flex flex-col gap-3 border-l-2 border-[var(--warn)] py-1 pr-2 pl-3">
-                            {segment.items.map((entry) => renderItem(entry))}
-                          </div>
-                        </details>,
-                        segment.items[0].lab,
-                      )
-                    : segment.items.map((item, index) => {
-                        // Consecutive exchange turns share one grey box.
-                        const group = isExchange(item)
-                          ? {
-                              first: index === 0 || !isExchange(segment.items[index - 1]),
-                              last:
-                                index === segment.items.length - 1 || !isExchange(segment.items[index + 1]),
-                            }
-                          : undefined;
-                        return railRow(item.id, renderItem(item, group), item.lab, Boolean(group && !group.last));
-                      }),
-                )}
-                {/* Between the model's moves nothing on screen is alive —
+                  {segmentThread(thread, childIds).map((segment) =>
+                    segment.child
+                      ? spineRow(
+                          segment.items[0].id,
+                          <details className="w-full min-w-0 rounded-md border border-dashed border-[var(--border-weak)]">
+                            <summary className="cursor-pointer px-3 py-2 font-mono text-[11px] text-[var(--text-weak)] hover:text-[var(--text-strong)]">
+                              ⑂ child {segment.child} — what it reads narrows this branch only · {segment.items.length}{" "}
+                              steps
+                            </summary>
+                            <div className="mb-2 ml-3 flex flex-col gap-3 border-l-2 border-[var(--warn)] py-1 pr-2 pl-3">
+                              {segment.items.map((entry) => renderItem(entry))}
+                            </div>
+                          </details>,
+                          segment.items[0].lab,
+                        )
+                      : segment.items.map((item, index) => {
+                          // Consecutive exchange turns share one grey box.
+                          const group = isExchange(item)
+                            ? {
+                                first: index === 0 || !isExchange(segment.items[index - 1]),
+                                last: index === segment.items.length - 1 || !isExchange(segment.items[index + 1]),
+                              }
+                            : undefined;
+                          // A paused call and the exchange it opened are one
+                          // thought: drop the gap between them so the nested
+                          // block hangs off the card instead of floating free.
+                          const opensExchange =
+                            item.t === "tool" &&
+                            item.state === "blocked" &&
+                            index < segment.items.length - 1 &&
+                            isExchange(segment.items[index + 1]);
+                          // Nodes mark the moments a call crosses the boundary:
+                          // hollow going out, filled coming back, ringed when
+                          // the engine held it.
+                          const node =
+                            item.t === "shift" || item.t === "entry"
+                              ? ("label" as const)
+                              : item.t !== "tool"
+                                ? undefined
+                                : item.state === "blocked"
+                                  ? ("hold" as const)
+                                  : item.state === "done"
+                                    ? ("result" as const)
+                                    : ("call" as const);
+                          // The closing note belongs to the whole run, so it
+                          // spans the column instead of hanging off the spine.
+                          if (item.t === "authors")
+                            return (
+                              <div className="w-full py-2" key={item.id}>
+                                {renderItem(item)}
+                              </div>
+                            );
+                          return spineRow(item.id, renderItem(item, group), item.lab, {
+                            tight: Boolean(group && !group.last) || opensExchange,
+                            node,
+                          });
+                        }),
+                  )}
+                  {/* Between the model's moves nothing on screen is alive —
                     running cards pulse, pending approvals wear a badge, and
                     this row covers the remaining silence. */}
-                {busy &&
-                  !thread.some((item) => item.t === "tool" && item.state === "running") &&
-                  !thread.some((item) => item.t === "approval" && item.state === "pending") &&
-                  railRow(
-                    -1,
-                    <div className="animate-pulse font-mono text-[11px] text-[var(--icon)]">⎿ thinking…</div>,
-                    labelRef.current ?? undefined,
+                  {busy &&
+                    !thread.some((item) => item.t === "tool" && item.state === "running") &&
+                    !thread.some((item) => item.t === "approval" && item.state === "pending") &&
+                    spineRow(
+                      -1,
+                      <div className="animate-pulse font-mono text-[11px] text-[var(--icon)]">⎿ thinking…</div>,
+                      labelRef.current ?? undefined,
+                    )}
+                  {/* The run has played out and nothing is pending: offer a
+                    fresh start where the eye already is, at the foot of the
+                    stream rather than in chrome the reader must go find. */}
+                  {!busy && thread.length > 0 && (
+                    <div className="flex justify-center px-4 pt-6 pb-2">
+                      <button
+                        className="lp-replay min-h-11 px-4 lg:min-h-0 lg:px-0"
+                        onClick={resetChat}
+                        style={chrome.barBtn}
+                        type="button"
+                      >
+                        New chat
+                      </button>
+                    </div>
                   )}
                 </>
               )}
@@ -1595,29 +1962,43 @@ export function ChatPlayground() {
             <ConversationScrollButton />
           </Conversation>
 
-          <div className="flex flex-col gap-2 border-t border-[var(--border-weak)] px-4 py-3">
-            <PromptInput className="relative" onSubmit={onSubmit}>
-              <PromptInputTextarea
-                className="pr-12"
-                disabled={!live}
-                onChange={(event) => setInput(event.currentTarget.value)}
-                placeholder={
-                  mode === "probing"
-                    ? "Connecting…"
-                    : mode === "down"
-                      ? "The demo service is offline."
-                      : "Message the assistant…"
-                }
-                value={input}
-              />
-              <PromptInputSubmit
-                className="absolute right-1 bottom-1"
-                disabled={!busy && (!live || !input.trim())}
-                onStop={stop}
-                status={busy ? "streaming" : "ready"}
-              />
-            </PromptInput>
-          </div>
+          {(thread.length > 0 || composerAsked || mode !== "live") && (
+            <div className="flex flex-col gap-2 border-t border-[var(--border-weak)] px-4 py-3">
+              <PromptInput className="relative" onSubmit={onSubmit}>
+                <PromptInputTextarea
+                  className="pr-12"
+                  id="chat-composer"
+                  disabled={!live}
+                  onChange={(event) => setInput(event.currentTarget.value)}
+                  placeholder={
+                    mode === "probing"
+                      ? "Connecting…"
+                      : mode === "down"
+                        ? "The demo service is offline."
+                        : "Message the assistant…"
+                  }
+                  value={input}
+                />
+                <PromptInputSubmit
+                  className="absolute right-1 bottom-1"
+                  disabled={!busy && (!live || !input.trim())}
+                  onStop={stop}
+                  status={busy ? "streaming" : "ready"}
+                />
+              </PromptInput>
+              {/* Below `lg` the policy pane is a sheet, and this is the only way
+                into it — it lived in the strip that used to sit above the
+                chat, so it moves here rather than disappearing. */}
+              <button
+                className="min-h-11 self-start px-3 lg:hidden"
+                onClick={() => setPanelOpen(true)}
+                style={chrome.barBtn}
+                type="button"
+              >
+                Tools · policy
+              </button>
+            </div>
+          )}
         </div>
 
         {/* ---- policy pane: resizable sidebar on desktop ---- */}
@@ -1644,8 +2025,10 @@ export function ChatPlayground() {
           <div className="absolute top-0 right-0 flex h-full w-[88vw] max-w-[26rem] flex-col border-l border-[var(--border-weak)] bg-[var(--bg)] shadow-xl">
             <div className="flex items-center justify-between px-3 pt-3">
               <span className="font-mono text-[11px] text-[var(--icon)]">tools & policy</span>
+              {/* Touch-sized: this sheet is mobile-only, so there is no
+                  pointer case to keep small. */}
               <button
-                className="rounded-md border border-[var(--border-weak)] px-2 py-0.5 font-mono text-[11px] text-[var(--text-weak)]"
+                className="min-h-11 rounded-md border border-[var(--border-weak)] px-4 font-mono text-[11px] text-[var(--text-weak)]"
                 onClick={() => setPanelOpen(false)}
                 type="button"
               >
@@ -1663,7 +2046,9 @@ export function ChatPlayground() {
             <span className="font-mono text-sm text-[var(--text-strong)]">default.toml</span>
             <p
               className="m-0 min-w-0 flex-1 truncate text-right text-[11.5px] leading-relaxed"
-              style={{ color: policyStatus && !policyStatus.ok ? "var(--danger)" : "var(--icon)" }}
+              style={{
+                color: policyStatus && !policyStatus.ok ? "var(--danger)" : "var(--icon)",
+              }}
             >
               {policyStatus?.text ?? ""}
             </p>
@@ -1684,7 +2069,13 @@ export function ChatPlayground() {
               close · esc
             </button>
           </div>
-          <PolicyEditor autoFocus className="min-h-0 flex-1" highlight={highlight} onChange={setPolicyText} value={policyText} />
+          <PolicyEditor
+            autoFocus
+            className="min-h-0 flex-1"
+            highlight={highlight}
+            onChange={setPolicyText}
+            value={policyText}
+          />
         </div>
       )}
     </div>

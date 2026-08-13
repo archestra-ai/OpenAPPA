@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect } from "react";
+import { Fragment, useCallback, useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -14,6 +14,11 @@ export interface SidebarCategory {
   name: string;
   docs: { slug: string; title: string }[];
 }
+
+export const PLAYGROUND_HREF = "/playground";
+
+/** Clicking the playground link while already in it starts a fresh session. */
+export const NEW_CHAT_EVENT = "appa:new-chat";
 
 function docHref(slug: string): string {
   return slug === "index" ? "/" : `/${slug}`;
@@ -67,16 +72,6 @@ export function DocsSidebar({
             <ThemeToggle />
           </div>
         </div>
-        <div>
-          <div className="sidebar-category">Playground</div>
-          <ul>
-            <li>
-              <Link href="/chat" aria-current={pathname === "/chat" ? "page" : undefined}>
-                Chat with OpenAPPA
-              </Link>
-            </li>
-          </ul>
-        </div>
         {categories.map((category) => (
           <div key={category.name}>
             <div className="sidebar-category">{category.name}</div>
@@ -84,11 +79,34 @@ export function DocsSidebar({
               {category.docs.map((doc) => {
                 const href = docHref(doc.slug);
                 return (
-                  <li key={doc.slug}>
-                    <Link href={href} aria-current={pathname === href ? "page" : undefined}>
-                      {doc.title}
-                    </Link>
-                  </li>
+                  <Fragment key={doc.slug}>
+                    <li>
+                      <Link href={href} aria-current={pathname === href ? "page" : undefined}>
+                        {doc.title}
+                      </Link>
+                    </li>
+                    {/* The playground sits with the pages that introduce the
+                        model, directly under the one that opens it. */}
+                    {doc.slug === "index" && (
+                      <li>
+                        <Link
+                          aria-current={pathname === PLAYGROUND_HREF ? "page" : undefined}
+                          href={PLAYGROUND_HREF}
+                          onClick={(event) => {
+                            // Already here: the link cannot navigate, so make it
+                            // do the thing it looks like it does — start over.
+                            if (pathname === PLAYGROUND_HREF) {
+                              event.preventDefault();
+                              window.dispatchEvent(new CustomEvent(NEW_CHAT_EVENT));
+                            }
+                            close();
+                          }}
+                        >
+                          Playground
+                        </Link>
+                      </li>
+                    )}
+                  </Fragment>
                 );
               })}
             </ul>

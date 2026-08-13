@@ -5,7 +5,7 @@ import { ChatPlayground } from "@/components/playground/ChatPlayground";
 import { getDocsByCategory } from "@/lib/docs";
 
 export const metadata: Metadata = {
-  title: "Chat with OpenAPPA",
+  title: "Playground",
   description:
     "A live agent on the full OpenAPPA loop: bring an OpenRouter key, edit the policy, watch every tool call get mediated.",
 };

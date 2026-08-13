@@ -54,15 +54,8 @@ const CHARTS = [
 
 export function BenchmarkHighlight() {
   return (
-    <section className="bench-panel" aria-labelledby="bench-panel-title">
+    <section className="bench-panel" aria-label="Benchmark results">
       <span className="bench-panel-eyebrow">Benchmarks</span>
-      <h3 className="bench-panel-title" id="bench-panel-title">
-        Every attack blocked, and the work still gets done
-      </h3>
-      <p className="bench-panel-lede">
-        Bench-Corp enterprise workflows, 35 episodes per arm on GPT-5.6 Luna, against an
-        unprotected agent and Microsoft Research&apos;s FIDES.
-      </p>
 
       <div className="bench-charts">
         {CHARTS.map((chart) => (

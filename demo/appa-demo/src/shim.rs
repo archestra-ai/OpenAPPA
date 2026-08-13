@@ -120,7 +120,7 @@ async fn dynamic_resolver(
 
     let readers = match request.value.as_str() {
         "ap-review@corp.example" => vec!["cfo@corp.example", "ap-lead@corp.example"],
-        "finance-all@corp.example" => vec!["cfo@corp.example", "ap-lead@corp.example", "controller@corp.example"],
+        "all@acme.com" => vec!["ceo@acme.com", "staff@acme.com"],
         recipient => vec![recipient],
     };
     (
@@ -398,12 +398,9 @@ mod tests {
             serde_json::json!(["cfo@corp.example", "ap-lead@corp.example"])
         );
 
-        let (status, axum::Json(answer)) = dynamic_resolver(axum::Json(resolve("finance-all@corp.example"))).await;
+        let (status, axum::Json(answer)) = dynamic_resolver(axum::Json(resolve("all@acme.com"))).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            answer["readers"],
-            serde_json::json!(["cfo@corp.example", "ap-lead@corp.example", "controller@corp.example"])
-        );
+        assert_eq!(answer["readers"], serde_json::json!(["ceo@acme.com", "staff@acme.com"]));
 
         let (status, axum::Json(answer)) = dynamic_resolver(axum::Json(resolve("person@corp.example"))).await;
         assert_eq!(status, StatusCode::OK);

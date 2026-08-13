@@ -165,12 +165,17 @@ mod tests {
                 if binding.resolver.as_str() == "email-recipient-readers" && binding.argument == "to"
         ));
         let sanitizers = &checked.config.registry_config().sanitizers;
-        assert_eq!(sanitizers.len(), 1);
+        assert_eq!(sanitizers.len(), 2);
         assert!(sanitizers.iter().all(|sanitizer| sanitizer.hint.is_some()));
         assert!(
             sanitizers
                 .iter()
-                .all(|sanitizer| matches!(sanitizer.transition, Transition::Audience { .. }))
+                .any(|sanitizer| matches!(sanitizer.transition, Transition::Audience { .. }))
+        );
+        assert!(
+            sanitizers
+                .iter()
+                .any(|sanitizer| matches!(sanitizer.transition, Transition::Trust { .. }))
         );
     }
 
