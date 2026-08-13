@@ -22,6 +22,13 @@ pub struct Config {
 #[derive(Debug, Clone)]
 pub struct Externals {
     pub timeout: Duration,
+    /// How long a human review may stay open before the runtime treats
+    /// it as no answer. Deliberately separate from
+    /// `timeout`, which bounds a machine consult: a person reads the
+    /// arguments and thinks. It also bounds the MCP session's
+    /// keep-alive, because a review outliving its session cannot be
+    /// answered.
+    pub review_timeout: Duration,
     pub max_body_bytes: usize,
     pub authorities: BTreeMap<String, Implementation>,
     pub sanitizers: BTreeMap<String, Implementation>,
@@ -102,6 +109,8 @@ pub enum ConfigError {
     },
     #[error("externals.timeout_ms must be greater than zero")]
     ZeroTimeout,
+    #[error("externals.review_timeout_ms must be greater than zero")]
+    ZeroReviewTimeout,
     #[error("externals.max_body_bytes must be greater than zero")]
     ZeroByteCap,
     #[error("the {section} entry {name:?} must name exactly one of url or builtin, and only url takes token_env")]
@@ -127,6 +136,8 @@ struct RawConfig {
 #[serde(deny_unknown_fields)]
 struct RawExternals {
     timeout_ms: u64,
+    #[serde(default = "default_review_timeout_ms")]
+    review_timeout_ms: u64,
     max_body_bytes: usize,
     #[serde(default)]
     authorities: BTreeMap<String, RawImplementation>,
@@ -141,6 +152,10 @@ struct RawImplementation {
     url: Option<String>,
     token_env: Option<String>,
     builtin: Option<String>,
+}
+
+fn default_review_timeout_ms() -> u64 {
+    600_000
 }
 
 impl Config {
@@ -160,6 +175,9 @@ impl Config {
         if raw.externals.timeout_ms == 0 {
             return Err(ConfigError::ZeroTimeout);
         }
+        if raw.externals.review_timeout_ms == 0 {
+            return Err(ConfigError::ZeroReviewTimeout);
+        }
         if raw.externals.max_body_bytes == 0 {
             return Err(ConfigError::ZeroByteCap);
         }
@@ -167,6 +185,7 @@ impl Config {
             policy: raw.policy,
             externals: Externals {
                 timeout: Duration::from_millis(raw.externals.timeout_ms),
+                review_timeout: Duration::from_millis(raw.externals.review_timeout_ms),
                 max_body_bytes: raw.externals.max_body_bytes,
                 authorities: resolve_implementations("authorities", raw.externals.authorities, &lookup)?,
                 sanitizers: resolve_implementations("sanitizers", raw.externals.sanitizers, &lookup)?,

@@ -798,7 +798,13 @@ impl RuntimeEngine {
             match answer {
                 None => requests.push(ExternalRequest::Authority {
                     authority: name,
-                    payload: authority_payload(requirement.authority.as_str(), &resolved, &requirement.covers, views),
+                    payload: authority_payload(
+                        &requirement.authority,
+                        self.engine.registry(),
+                        &resolved,
+                        &requirement.covers,
+                        views,
+                    ),
                     review: AuthorityReview {
                         tool: resolved.tool().clone(),
                         trajectory_label: views.current_label(),
@@ -1248,16 +1254,22 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn authority_payload(
-    authority: &str,
+    authority: &appa_engine::names::AuthorityName,
+    registry: &appa_engine::registry::Registry,
     resolved: &ResolvedCall,
     gaps: &[appa_engine::check::Gap],
     views: &Views,
 ) -> serde_json::Value {
+    let hint = registry
+        .authority(authority)
+        .and_then(|registered| registered.hint.as_ref())
+        .map(|hint| hint.as_str());
     serde_json::json!({
-        "authority": authority,
+        "authority": authority.as_str(),
+        "hint": hint,
         "tool": resolved.tool().as_str(),
         "digest": hex(resolved.digest().bytes()),
-        "trajectory_label": label_wire(&views.current_label()),
+        "trajectory_label": label_wire(&views.current_label(), registry.trust_chain()),
         "arguments": resolved.arguments(),
         "gaps": gaps.iter().map(gap_text).collect::<Vec<_>>(),
     })
@@ -1311,8 +1323,28 @@ const fn is_format(c: char) -> bool {
     )
 }
 
-fn label_wire(label: &appa_engine::label::PartialLabel) -> serde_json::Value {
-    serde_json::json!(format!("{label:?}"))
+fn label_wire(
+    label: &appa_engine::label::PartialLabel,
+    chain: &appa_engine::registry::TrustChain,
+) -> serde_json::Value {
+    use appa_engine::label::{Audience, Dimension};
+
+    let bound = label.bound();
+    let unresolved = |dim| label.unresolved(dim).map(|value| value.index()).collect::<Vec<_>>();
+    let trust = match chain.name_of(bound.trust) {
+        Some(rank) => rank.to_string(),
+        None => format!("rank {}, which this deployment does not name", bound.trust.rank()),
+    };
+    serde_json::json!({
+        "trust": trust,
+        "trust_rank": bound.trust.rank(),
+        "audience": match &bound.audience {
+            Audience::Public => serde_json::Value::String("public".to_string()),
+            Audience::Restricted(readers) => readers.iter().map(|reader| reader.as_str()).collect(),
+        },
+        "unresolved_trust": unresolved(Dimension::Trust),
+        "unresolved_audience": unresolved(Dimension::Audience),
+    })
 }
 
 /// The dynamic recipient bindings a contract declares, at
@@ -1541,6 +1573,69 @@ mod tests {
             "trusted",
             "the full Cf range replaces"
         );
+    }
+
+    #[test]
+    fn the_label_wire_names_every_state_it_can_be_in() {
+        use appa_engine::label::{Audience, EstablishedLabel, PartialLabel, ReaderId, Trust};
+        use appa_engine::registry::TrustChain;
+        use appa_engine::value::ValueId;
+
+        let chain = TrustChain::new(vec!["suspicious".to_string(), "trusted".to_string()]);
+        let wire = |label: &PartialLabel| super::label_wire(label, &chain);
+
+        let open = PartialLabel::established(EstablishedLabel::new(Trust::new(1), Audience::Public));
+        assert_eq!(
+            wire(&open),
+            serde_json::json!({
+                "trust": "trusted",
+                "trust_rank": 1,
+                "audience": "public",
+                "unresolved_trust": [],
+                "unresolved_audience": [],
+            }),
+        );
+
+        let restricted = PartialLabel::established(EstablishedLabel::new(
+            Trust::new(0),
+            Audience::restricted([ReaderId::new("private")]),
+        ));
+        assert_eq!(
+            wire(&restricted)["audience"],
+            serde_json::json!(["private"]),
+            "the bound readers cross by name",
+        );
+        assert_eq!(wire(&restricted)["trust"], serde_json::json!("suspicious"));
+
+        let nobody = PartialLabel::established(EstablishedLabel::new(Trust::new(0), Audience::restricted([])));
+        assert_eq!(
+            wire(&nobody)["audience"],
+            serde_json::json!([]),
+            "an empty reader set is not public",
+        );
+
+        let neutral = PartialLabel::established(EstablishedLabel::top());
+        let rendered = wire(&neutral);
+        assert_eq!(rendered["trust_rank"], serde_json::json!(255));
+        assert!(
+            !rendered["trust"].is_null(),
+            "an unnamed rank still reports itself: {rendered}",
+        );
+        assert!(
+            rendered["trust"].as_str().expect("trust is a string").contains("255"),
+            "the rank travels when the chain cannot name it: {rendered}",
+        );
+
+        use appa_engine::label::{Dim, Label};
+        let mut partial = PartialLabel::established(EstablishedLabel::new(Trust::new(1), Audience::Public));
+        partial.fold_value(ValueId::new(7), &Label::new(Dim::Unknown, Dim::Unknown));
+        let rendered = wire(&partial);
+        assert_eq!(
+            rendered["unresolved_trust"],
+            serde_json::json!([7]),
+            "the unresolved source crosses by its own id: {rendered}",
+        );
+        assert_eq!(rendered["unresolved_audience"], serde_json::json!([7]));
     }
 
     #[test]

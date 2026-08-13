@@ -6,6 +6,7 @@ pub mod hooks;
 pub mod mcp;
 
 mod builtins;
+mod elicit;
 mod engine;
 mod external;
 mod store;

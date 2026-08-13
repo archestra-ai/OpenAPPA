@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use crate::elicit::Elicitation;
 use crate::engine::{
     AuthorityVerdict, EngineDecision, EngineEvent, ExternalEvidence, ExternalRequest, Feedback, Next, OfferNonce,
     Presentation,
@@ -180,6 +181,7 @@ impl Session {
                         _ => Vec::new(),
                     }
                 },
+                None,
             )
             .await?;
 
@@ -256,6 +258,7 @@ impl Session {
                         _ => Vec::new(),
                     }
                 },
+                None,
             )
             .await?;
 
@@ -279,7 +282,11 @@ impl Session {
     /// one offer by its id; the id is unguessable,
     /// so naming it proves the model read the offer. An id
     /// this runtime never surfaced for this trajectory is refused.
-    pub async fn on_remedy(&mut self, offer: OfferId) -> Result<RemedyDecision, EventError> {
+    pub async fn on_remedy(
+        &mut self,
+        offer: OfferId,
+        elicitation: Option<&Elicitation>,
+    ) -> Result<RemedyDecision, EventError> {
         self.refuse_if_ended()?;
         let owner = self
             .inner
@@ -313,6 +320,7 @@ impl Session {
                     }
                     records
                 },
+                elicitation,
             )
             .await?;
 
@@ -392,6 +400,7 @@ impl Session {
                         _ => Vec::new(),
                     }
                 },
+                None,
             )
             .await?;
 
@@ -459,6 +468,7 @@ impl Session {
         &self,
         mut event: impl FnMut(Vec<ExternalEvidence>) -> EngineEvent,
         records: impl Fn(&EngineDecision) -> Vec<RuntimeRecord>,
+        elicitation: Option<&Elicitation>,
     ) -> Result<EngineDecision, EventError> {
         let mut evidence: Vec<ExternalEvidence> = Vec::new();
         for _ in 0..EVIDENCE_LIMIT {
@@ -467,7 +477,7 @@ impl Session {
             match decision.then {
                 Next::ResolveExternal(requests) => {
                     for request in requests {
-                        evidence.push(self.consult(request).await);
+                        evidence.push(self.consult(request, elicitation).await);
                     }
                 }
                 _ => return Ok(decision),
@@ -566,7 +576,7 @@ impl Session {
         Err(EventError::Contended { attempts: REPLAY_LIMIT })
     }
 
-    async fn consult(&self, request: ExternalRequest) -> ExternalEvidence {
+    async fn consult(&self, request: ExternalRequest, elicitation: Option<&Elicitation>) -> ExternalEvidence {
         match &request {
             ExternalRequest::Authority {
                 authority,
@@ -577,7 +587,7 @@ impl Session {
                 let outcome = self
                     .inner
                     .externals
-                    .consult(ConsultKind::Authority, authority, payload)
+                    .consult(ConsultKind::Authority, authority, payload, elicitation)
                     .await;
                 let verdict = match outcome {
                     ConsultOutcome::Answer(body) => AuthorityVerdict::from_wire(&body),
@@ -594,7 +604,7 @@ impl Session {
                 let outcome = self
                     .inner
                     .externals
-                    .consult(ConsultKind::Sanitizer, sanitizer, payload)
+                    .consult(ConsultKind::Sanitizer, sanitizer, payload, None)
                     .await;
                 let derived = match outcome {
                     ConsultOutcome::Answer(body) => body.get("body").and_then(|b| b.as_str()).map(String::from),
@@ -1242,7 +1252,7 @@ mod tests {
             .engine
             .enqueue(decision(None, Next::InvokeTool(released("d-authorized", &call()))));
         session
-            .on_remedy(OfferId("offer-1".to_string()))
+            .on_remedy(OfferId("offer-1".to_string()), None)
             .await
             .expect("the remedy authorizes");
 
@@ -1367,7 +1377,7 @@ mod tests {
         let runtime = open_test_runtime(&dir);
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         assert!(matches!(
-            session.on_remedy(OfferId("never-surfaced".to_string())).await,
+            session.on_remedy(OfferId("never-surfaced".to_string()), None).await,
             Err(EventError::UnknownOffer),
         ));
         assert!(runtime.inner.engine.seen().is_empty());
@@ -1390,7 +1400,7 @@ mod tests {
             .engine
             .enqueue(decision(None, Next::InvokeTool(released("d-authorized", &call()))));
         let outcome = session
-            .on_remedy(OfferId("offer-3".to_string()))
+            .on_remedy(OfferId("offer-3".to_string()), None)
             .await
             .expect("the remedy authorizes");
         let expected_bytes = serde_json::to_vec(&call()).expect("the test call serializes");
@@ -1449,7 +1459,7 @@ mod tests {
         }));
         assert_eq!(
             session
-                .on_remedy(OfferId("offer-4".to_string()))
+                .on_remedy(OfferId("offer-4".to_string()), None)
                 .await
                 .expect("no answer"),
             RemedyDecision::NoAnswer {
@@ -1461,7 +1471,7 @@ mod tests {
         }));
         assert_eq!(
             session
-                .on_remedy(OfferId("offer-4".to_string()))
+                .on_remedy(OfferId("offer-4".to_string()), None)
                 .await
                 .expect("returned"),
             RemedyDecision::Returned {
@@ -1473,7 +1483,7 @@ mod tests {
         }));
         assert_eq!(
             session
-                .on_remedy(OfferId("offer-4".to_string()))
+                .on_remedy(OfferId("offer-4".to_string()), None)
                 .await
                 .expect("declined"),
             RemedyDecision::Declined {
@@ -1659,7 +1669,7 @@ mod tests {
         });
         assert_eq!(
             session
-                .on_remedy(OfferId("offer-7".to_string()))
+                .on_remedy(OfferId("offer-7".to_string()), None)
                 .await
                 .expect("the remedy runs"),
             RemedyDecision::Returned {
@@ -2469,7 +2479,10 @@ attends = ["irreversible"]
         assert!(matches!(denied, ToolCallDecision::Deny { .. }));
         let offer = surfaced_offer(&runtime);
 
-        let authorized = session.on_remedy(offer.clone()).await.expect("the remedy executes");
+        let authorized = session
+            .on_remedy(offer.clone(), None)
+            .await
+            .expect("the remedy executes");
         let RemedyDecision::Authorized { call } = authorized else {
             panic!("an approval must authorize the call");
         };
@@ -2489,7 +2502,10 @@ attends = ["irreversible"]
             .expect("the result is admitted");
         assert_eq!(kept, ToolResultDecision::Keep);
 
-        assert!(matches!(session.on_remedy(offer).await, Err(EventError::UnknownOffer),));
+        assert!(matches!(
+            session.on_remedy(offer, None).await,
+            Err(EventError::UnknownOffer),
+        ));
     }
 
     #[tokio::test]
@@ -2503,7 +2519,7 @@ attends = ["irreversible"]
         session.on_tool_call(wire(500)).await.expect("the block is delivered");
         let offer = surfaced_offer(&runtime);
         assert!(matches!(
-            session.on_remedy(offer).await.expect("the denial is delivered"),
+            session.on_remedy(offer, None).await.expect("the denial is delivered"),
             RemedyDecision::Declined { .. },
         ));
         let before = runtime
@@ -2554,7 +2570,7 @@ attends = ["irreversible"]
 
         assert!(matches!(
             first
-                .on_remedy(first_offer)
+                .on_remedy(first_offer, None)
                 .await
                 .expect("the first denial is delivered"),
             RemedyDecision::Declined { .. },
@@ -2582,13 +2598,13 @@ attends = ["irreversible"]
         let offer = surfaced_offer(&runtime);
         assert!(matches!(
             session
-                .on_remedy(offer.clone())
+                .on_remedy(offer.clone(), None)
                 .await
                 .expect("the no-answer is delivered"),
             RemedyDecision::NoAnswer { .. },
         ));
         assert!(matches!(
-            session.on_remedy(offer).await.expect("the offer is still live"),
+            session.on_remedy(offer, None).await.expect("the offer is still live"),
             RemedyDecision::NoAnswer { .. },
         ));
     }
@@ -2605,11 +2621,11 @@ attends = ["irreversible"]
         let offer = surfaced_offer(&runtime);
         runtime.inner.store.fail_next_commit();
         assert!(matches!(
-            session.on_remedy(offer.clone()).await,
+            session.on_remedy(offer.clone(), None).await,
             Err(EventError::Storage(_)),
         ));
         assert!(matches!(
-            session.on_remedy(offer).await.expect("the retry executes"),
+            session.on_remedy(offer, None).await.expect("the retry executes"),
             RemedyDecision::Authorized { .. },
         ));
     }
@@ -2629,7 +2645,7 @@ attends = ["irreversible"]
         let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), db, None).expect("the deployment reopens");
         let mut session = runtime.session(&root()).expect("the trajectory reopens");
         assert!(matches!(
-            session.on_remedy(offer).await.expect("the decline is delivered"),
+            session.on_remedy(offer, None).await.expect("the decline is delivered"),
             RemedyDecision::Declined { .. },
         ));
     }
@@ -2793,7 +2809,7 @@ confined_results = ["leak"]
             .surfaced_offers(&root())
             .expect("the offer query runs");
         let offer = offers.last().expect("the block surfaced offers").clone();
-        let authorized = session.on_remedy(offer).await.expect("the offer executes");
+        let authorized = session.on_remedy(offer, None).await.expect("the offer executes");
         assert!(matches!(authorized, RemedyDecision::Authorized { .. }));
         assert_eq!(
             session.on_tool_call(leak()).await.expect("the re-proposal resumes"),
@@ -2907,7 +2923,7 @@ context_control = true
                 .expect("the narrowing block surfaced its acceptance")
                 .clone();
             assert!(matches!(
-                session.on_remedy(offer).await.expect("the acceptance executes"),
+                session.on_remedy(offer, None).await.expect("the acceptance executes"),
                 RemedyDecision::Authorized { .. },
             ));
             assert_eq!(

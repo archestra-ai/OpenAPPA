@@ -5,11 +5,13 @@ use std::sync::Arc;
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
+use rmcp::service::{RequestContext, RoleServer};
 use rmcp::transport::streamable_http_server::StreamableHttpService;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 
 use crate::api::{OfferId, RemedyDecision, Runtime};
+use crate::elicit::Elicitation;
 
 #[derive(Clone)]
 pub struct RemedyService {
@@ -29,8 +31,19 @@ impl RemedyService {
 
     #[tool(description = "Execute one remedy plan by the offer id that blocking \
                        feedback surfaced. The id must be quoted exactly.")]
-    pub async fn execute_remedy_plan(&self, Parameters(args): Parameters<ExecuteRemedyPlanArgs>) -> CallToolResult {
-        let offer = OfferId(args.offer_id);
+    pub async fn execute_remedy_plan(
+        &self,
+        Parameters(args): Parameters<ExecuteRemedyPlanArgs>,
+        request: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let elicitation = Elicitation::new(request, self.runtime.review_timeout());
+        self.execute(OfferId(args.offer_id), Some(&elicitation)).await
+    }
+
+    async fn execute(&self, offer: OfferId, elicitation: Option<&Elicitation>) -> CallToolResult {
+        let Some(_claim) = self.runtime.claim_offer(&offer) else {
+            return refusal("this offer is already being executed");
+        };
         let trajectory = match self.runtime.offer_trajectory(&offer) {
             Ok(Some(trajectory)) => trajectory,
             Ok(None) => return refusal("no live offer with this id exists"),
@@ -40,7 +53,7 @@ impl RemedyService {
             Ok(session) => session,
             Err(error) => return refusal(&error.to_string()),
         };
-        match session.on_remedy(offer).await {
+        match session.on_remedy(offer, elicitation).await {
             Ok(RemedyDecision::Authorized { call }) => CallToolResult::success(vec![ContentBlock::text(format!(
                 "Authorized. Propose the {} call again, byte-for-byte identical; \
                      it will run without a new check.",
@@ -75,12 +88,16 @@ impl ServerHandler for RemedyService {
     }
 }
 
+const SESSION_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The tower service `main` nests at `/mcp`, serving from process
 /// start.
 pub fn service(runtime: Arc<Runtime>) -> StreamableHttpService<RemedyService, LocalSessionManager> {
+    let mut sessions = LocalSessionManager::default();
+    sessions.session_config.keep_alive = Some(runtime.review_timeout() + SESSION_GRACE);
     StreamableHttpService::new(
         move || Ok(RemedyService::new(Arc::clone(&runtime))),
-        Arc::new(LocalSessionManager::default()),
+        Arc::new(sessions),
         Default::default(),
     )
 }
@@ -90,7 +107,6 @@ mod tests {
     use super::*;
     use crate::api::{ProposedCall, ToolCallDecision, testing};
     use crate::config::Config;
-    use rmcp::handler::server::wrapper::Parameters;
 
     fn config() -> Config {
         let text = r#"
@@ -110,12 +126,31 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Arc::new(testing::runtime(config(), dir.path().join("appa.db")));
         let service = RemedyService::new(runtime);
-        let result = service
-            .execute_remedy_plan(Parameters(ExecuteRemedyPlanArgs {
-                offer_id: "never-surfaced".to_string(),
-            }))
-            .await;
+        let result = service.execute(OfferId("never-surfaced".to_string()), None).await;
         assert_eq!(result.is_error, Some(true));
+    }
+
+    #[tokio::test]
+    async fn one_offer_executes_once_at_a_time() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Arc::new(testing::runtime(config(), dir.path().join("appa.db")));
+        let offer = OfferId("offer-live".to_string());
+
+        let claim = runtime.claim_offer(&offer).expect("a free offer is claimable");
+        assert!(
+            runtime.claim_offer(&offer).is_none(),
+            "a second execution of one offer is refused"
+        );
+        let refused = RemedyService::new(Arc::clone(&runtime))
+            .execute(offer.clone(), None)
+            .await;
+        assert_eq!(refused.is_error, Some(true));
+
+        drop(claim);
+        assert!(
+            runtime.claim_offer(&offer).is_some(),
+            "the offer is claimable again once its execution ended"
+        );
     }
 
     #[tokio::test]
@@ -137,11 +172,7 @@ mod tests {
 
         testing::enqueue_value(&runtime, "the cleaned result");
         let service = RemedyService::new(Arc::clone(&runtime));
-        let result = service
-            .execute_remedy_plan(Parameters(ExecuteRemedyPlanArgs {
-                offer_id: "offer-mcp".to_string(),
-            }))
-            .await;
+        let result = service.execute(OfferId("offer-mcp".to_string()), None).await;
         assert_ne!(result.is_error, Some(true));
         let text = format!("{:?}", result.content);
         assert!(

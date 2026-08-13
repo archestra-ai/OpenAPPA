@@ -200,6 +200,7 @@ struct Inner {
     engine: EngineSeam,
     externals: ExternalServices,
     config: Config,
+    executing: std::sync::Mutex<std::collections::BTreeSet<String>>,
 }
 
 impl Runtime {
@@ -249,6 +250,7 @@ impl Runtime {
                 engine,
                 externals,
                 config,
+                executing: std::sync::Mutex::new(std::collections::BTreeSet::new()),
             }),
         })
     }
@@ -321,6 +323,48 @@ impl Runtime {
             .store
             .offer_trajectory(offer)
             .map_err(|error| SessionError::Storage(error.to_string()))
+    }
+
+    /// Claim one offer for the length of its execution, so two calls
+    /// naming the same offer cannot both reach its authorities. A human
+    /// review holds its call open for minutes, and without this the
+    /// second call raises a second dialog for one decision.
+    pub(crate) fn claim_offer(&self, offer: &OfferId) -> Option<OfferClaim> {
+        let claimed = self
+            .inner
+            .executing
+            .lock()
+            .expect("the executing-offer mutex is never poisoned")
+            .insert(offer.0.clone());
+        claimed.then(|| OfferClaim {
+            inner: Arc::clone(&self.inner),
+            offer: offer.0.clone(),
+        })
+    }
+
+    /// How long a human review may stay open before the runtime treats
+    /// it as no answer. Deliberately unrelated to
+    /// `[externals] timeout_ms`, which bounds a machine consult: a
+    /// person reads the arguments and thinks.
+    pub(crate) fn review_timeout(&self) -> std::time::Duration {
+        self.inner.config.externals.review_timeout
+    }
+}
+
+/// One offer's execution, released when the call that took it ends —
+/// including by panic or by a client that walked away.
+pub(crate) struct OfferClaim {
+    inner: Arc<Inner>,
+    offer: String,
+}
+
+impl Drop for OfferClaim {
+    fn drop(&mut self) {
+        self.inner
+            .executing
+            .lock()
+            .expect("the executing-offer mutex is never poisoned")
+            .remove(&self.offer);
     }
 }
 

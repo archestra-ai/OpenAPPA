@@ -10,6 +10,9 @@ use crate::builtins::{
     BuiltinAuthority, BuiltinSanitizer, LoadedModule, MODULE_OUTPUT_CEILING, ModuleRegistry, ModulesError,
 };
 use crate::config::{Endpoint, Externals, Implementation};
+use crate::elicit::Elicitation;
+
+const HITL: &str = "hitl";
 
 /// Which registered external a consult addresses. Closed: the wire
 /// format is per kind, not per deployment.
@@ -33,6 +36,8 @@ impl ConsultKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NoAnswerReason {
     Unregistered,
+    Unreachable,
+    Dismissed,
     NonSuccess {
         status: u16,
     },
@@ -94,6 +99,7 @@ enum AuthorityBackend {
     Resolver(Endpoint),
     Stock(BuiltinAuthority),
     Module(Arc<LoadedModule>),
+    Hitl,
 }
 
 enum SanitizerBackend {
@@ -129,6 +135,7 @@ impl ExternalServices {
         for (name, implementation) in config.authorities {
             let backend = match implementation {
                 Implementation::Resolver(endpoint) => AuthorityBackend::Resolver(endpoint),
+                Implementation::Builtin(builtin) if builtin == HITL => AuthorityBackend::Hitl,
                 Implementation::Builtin(builtin) => match BuiltinAuthority::from_name(&builtin) {
                     Some(stock) => AuthorityBackend::Stock(stock),
                     None => match registry.authority(&builtin) {
@@ -175,14 +182,34 @@ impl ExternalServices {
     }
 
     /// One consult of a registered authority or sanitizer, dispatched
-    /// on the component's configured implementation.
-    pub async fn consult(&self, kind: ConsultKind, name: &str, payload: &serde_json::Value) -> ConsultOutcome {
+    /// on the component's configured implementation. `elicitation` is
+    /// the open request that asked for the ruling; it is present only
+    /// for an authority consult raised inside the remedy tool, and only
+    /// the `hitl` backend reads it.
+    pub async fn consult(
+        &self,
+        kind: ConsultKind,
+        name: &str,
+        payload: &serde_json::Value,
+        elicitation: Option<&Elicitation>,
+    ) -> ConsultOutcome {
         match kind {
             ConsultKind::Authority => match self.authorities.get(name) {
                 None => unregistered(kind, name),
                 Some(AuthorityBackend::Resolver(endpoint)) => self.post_consult(endpoint, kind, name, payload).await,
                 Some(AuthorityBackend::Stock(stock)) => ConsultOutcome::Answer(stock.answer()),
                 Some(AuthorityBackend::Module(module)) => self.call_module(module, kind, name, payload).await,
+                Some(AuthorityBackend::Hitl) => match elicitation {
+                    Some(elicitation) => elicitation.ask(payload).await,
+                    // No live request to ask through — a `hitl`
+                    // authority reachable from anywhere but the remedy
+                    // tool would be a configuration this runtime cannot
+                    // serve. It abstains rather than invent an answer.
+                    None => {
+                        tracing::warn!(name, "a hitl consult raised with no open request abstains");
+                        ConsultOutcome::NoAnswer(NoAnswerReason::Unreachable)
+                    }
+                },
             },
             ConsultKind::Sanitizer => match self.sanitizers.get(name) {
                 None => unregistered(kind, name),
@@ -412,6 +439,7 @@ mod tests {
     fn externals(dynamic_url: Option<String>, timeout_ms: u64, cap: usize) -> Externals {
         Externals {
             timeout: Duration::from_millis(timeout_ms),
+            review_timeout: Duration::from_millis(timeout_ms),
             max_body_bytes: cap,
             authorities: BTreeMap::new(),
             sanitizers: BTreeMap::new(),
@@ -613,6 +641,7 @@ mod tests {
                 ConsultKind::Authority,
                 "security",
                 &serde_json::json!({"call": "send_message"}),
+                None,
             )
             .await;
         assert_eq!(outcome, ConsultOutcome::Answer(serde_json::json!({"authorized": true})),);
@@ -623,7 +652,7 @@ mod tests {
         let services = services(None, 2000, 65536);
         assert_eq!(
             services
-                .consult(ConsultKind::Authority, "directory", &serde_json::json!({}))
+                .consult(ConsultKind::Authority, "directory", &serde_json::json!({}), None)
                 .await,
             ConsultOutcome::NoAnswer(NoAnswerReason::Unregistered),
         );
@@ -637,7 +666,7 @@ mod tests {
         let services = services_over(config);
         assert_eq!(
             services
-                .consult(ConsultKind::Authority, "directory", &serde_json::json!({}))
+                .consult(ConsultKind::Authority, "directory", &serde_json::json!({}), None)
                 .await,
             ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess { status: 403 }),
         );
@@ -651,7 +680,7 @@ mod tests {
         let services = services_over(config);
         assert_eq!(
             services
-                .consult(ConsultKind::Sanitizer, "channel", &serde_json::json!({}))
+                .consult(ConsultKind::Sanitizer, "channel", &serde_json::json!({}), None)
                 .await,
             ConsultOutcome::NoAnswer(NoAnswerReason::Malformed),
         );
@@ -669,7 +698,7 @@ mod tests {
         let services = services_over(config);
         assert_eq!(
             services
-                .consult(ConsultKind::Authority, "auto", &serde_json::json!({"call": "x"}))
+                .consult(ConsultKind::Authority, "auto", &serde_json::json!({"call": "x"}), None)
                 .await,
             ConsultOutcome::Answer(serde_json::json!({"ruling": "approve"})),
         );
@@ -680,6 +709,7 @@ mod tests {
                     ConsultKind::Sanitizer,
                     "pii",
                     &serde_json::json!({"body": "mail bob@corp.example now"}),
+                    None,
                 )
                 .await,
             ConsultOutcome::Answer(serde_json::json!({"body": "mail [redacted-email] now"})),
@@ -687,7 +717,7 @@ mod tests {
 
         assert_eq!(
             services
-                .consult(ConsultKind::Sanitizer, "pii", &serde_json::json!({"content": 7}))
+                .consult(ConsultKind::Sanitizer, "pii", &serde_json::json!({"content": 7}), None)
                 .await,
             ConsultOutcome::NoAnswer(NoAnswerReason::Malformed),
         );
@@ -792,7 +822,7 @@ mod tests {
     async fn a_loaded_module_answers_the_consult_with_its_component() {
         let (services, _dir) = module_services("appa-module-fixture", None, "fixture-auth", 65536);
         let outcome = services
-            .consult(ConsultKind::Authority, "auto", &serde_json::json!({"call": "x"}))
+            .consult(ConsultKind::Authority, "auto", &serde_json::json!({"call": "x"}), None)
             .await;
         assert_eq!(
             outcome,
@@ -806,14 +836,24 @@ mod tests {
 
         assert_eq!(
             services
-                .consult(ConsultKind::Authority, "auto", &serde_json::json!({"mode": "error"}))
+                .consult(
+                    ConsultKind::Authority,
+                    "auto",
+                    &serde_json::json!({"mode": "error"}),
+                    None
+                )
                 .await,
             ConsultOutcome::NoAnswer(NoAnswerReason::ModuleError),
         );
 
         assert_eq!(
             services
-                .consult(ConsultKind::Authority, "auto", &serde_json::json!({"mode": "panic"}))
+                .consult(
+                    ConsultKind::Authority,
+                    "auto",
+                    &serde_json::json!({"mode": "panic"}),
+                    None
+                )
                 .await,
             ConsultOutcome::NoAnswer(NoAnswerReason::ModulePanicked),
         );
@@ -821,7 +861,12 @@ mod tests {
         let (small, _dir) = module_services("appa-module-fixture", None, "fixture-auth", 64);
         assert_eq!(
             small
-                .consult(ConsultKind::Authority, "auto", &serde_json::json!({"mode": "big"}))
+                .consult(
+                    ConsultKind::Authority,
+                    "auto",
+                    &serde_json::json!({"mode": "big"}),
+                    None
+                )
                 .await,
             ConsultOutcome::NoAnswer(NoAnswerReason::Oversized),
         );
@@ -832,7 +877,7 @@ mod tests {
         let (services, _dir) = module_services("appa-module-fixture-bad", Some("dishonest-length"), "liar", 65536);
         assert_eq!(
             services
-                .consult(ConsultKind::Authority, "auto", &serde_json::json!({}))
+                .consult(ConsultKind::Authority, "auto", &serde_json::json!({}), None)
                 .await,
             ConsultOutcome::NoAnswer(NoAnswerReason::Malformed),
         );
@@ -843,8 +888,8 @@ mod tests {
         let (services, _dir) = module_services("appa-module-fixture", None, "fixture-auth", 65536);
         let payload = serde_json::json!({"mode": "gate"});
         let (first, second) = tokio::join!(
-            services.consult(ConsultKind::Authority, "auto", &payload),
-            services.consult(ConsultKind::Authority, "auto", &payload),
+            services.consult(ConsultKind::Authority, "auto", &payload, None),
+            services.consult(ConsultKind::Authority, "auto", &payload, None),
         );
         for outcome in [first, second] {
             match outcome {

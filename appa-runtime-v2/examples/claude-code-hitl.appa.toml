@@ -1,0 +1,289 @@
+# Example deployment for gating a Claude Code session, with a human
+# authority on one tool. Read `claude-code.appa.toml` first: this file
+# is that policy plus the `hitl` wiring.
+#
+# Creating a GitHub issue — `mcp__github__issue_write` — carries an
+# attention mark. An attention mark is a requirement no label can
+# satisfy: only an authority that attends it clears it, so
+# every issue write stops and asks the `operator` authority to rule.
+# The mark is on the write, not on the reads: this session can search
+# and read GitHub freely and stops only where it would publish.
+#
+# The `operator` authority is implemented `builtin = "hitl"`, which
+# this runtime serves over MCP elicitation: the reviewer is you, in
+# the same Claude Code session, and the dialog shows the exact tool
+# and canonical arguments the engine would dispatch (`RUL-7`,
+# `RUL-8`).
+#
+# To try it: connect the GitHub MCP server, then ask the session to
+# file an issue. The call is blocked, the model calls
+# `execute_remedy_plan` with the offer id from the feedback, and a
+# dialog appears carrying the issue title and body it would post.
+# Accepting rules; declining ends every offer naming `operator` for
+# that exact call; cancelling leaves the offer standing
+#.
+#
+# Coverage this deployment does not claim: `gh issue create`
+# through `Bash` reaches the same sink without the mark, because the
+# mark is on a tool contract and `Bash` is one tool covering every
+# command. A deployment that wants the sink covered either forbids the
+# `gh` path or names it as an open vector, as this one does.
+#
+# GitHub tools this file does not name are blocked, which is the
+# fail-closed default: name the ones your session needs.
+
+[policy]
+version = 1
+
+# --- tools whose results stay inside the session's trust boundary ---
+
+[[policy.tool]]
+name = "Agent"
+delta = {}
+
+[[policy.tool]]
+name = "AskUserQuestion"
+delta = {}
+
+[[policy.tool]]
+name = "Artifact"
+delta = {}
+
+[[policy.tool]]
+name = "Bash"
+delta = {}
+
+[[policy.tool]]
+name = "BashOutput"
+delta = {}
+
+[[policy.tool]]
+name = "CronCreate"
+delta = {}
+
+[[policy.tool]]
+name = "CronDelete"
+delta = {}
+
+[[policy.tool]]
+name = "CronList"
+delta = {}
+
+[[policy.tool]]
+name = "Edit"
+delta = {}
+
+[[policy.tool]]
+name = "EnterPlanMode"
+delta = {}
+
+[[policy.tool]]
+name = "EnterWorktree"
+delta = {}
+
+[[policy.tool]]
+name = "ExitPlanMode"
+delta = {}
+
+[[policy.tool]]
+name = "ExitWorktree"
+delta = {}
+
+[[policy.tool]]
+name = "Glob"
+delta = {}
+
+[[policy.tool]]
+name = "Grep"
+delta = {}
+
+[[policy.tool]]
+name = "KillShell"
+delta = {}
+
+[[policy.tool]]
+name = "LSP"
+delta = {}
+
+[[policy.tool]]
+name = "ListAgents"
+delta = {}
+
+[[policy.tool]]
+name = "ListMcpResourcesTool"
+delta = {}
+
+[[policy.tool]]
+name = "Monitor"
+delta = {}
+
+[[policy.tool]]
+name = "NotebookEdit"
+delta = {}
+
+[[policy.tool]]
+name = "PushNotification"
+delta = {}
+
+[[policy.tool]]
+name = "Read"
+delta = {}
+
+[[policy.tool]]
+name = "ReadMcpResourceDirTool"
+delta = {}
+
+[[policy.tool]]
+name = "ReadMcpResourceTool"
+delta = {}
+
+[[policy.tool]]
+name = "ReportFindings"
+delta = {}
+
+[[policy.tool]]
+name = "ScheduleWakeup"
+delta = {}
+
+[[policy.tool]]
+name = "SendMessage"
+delta = {}
+
+[[policy.tool]]
+name = "SendUserFile"
+delta = {}
+
+[[policy.tool]]
+name = "Skill"
+delta = {}
+
+[[policy.tool]]
+name = "SlashCommand"
+delta = {}
+
+[[policy.tool]]
+name = "Task"
+delta = {}
+
+[[policy.tool]]
+name = "TaskCreate"
+delta = {}
+
+[[policy.tool]]
+name = "TaskGet"
+delta = {}
+
+[[policy.tool]]
+name = "TaskList"
+delta = {}
+
+[[policy.tool]]
+name = "TaskOutput"
+delta = {}
+
+[[policy.tool]]
+name = "TaskStop"
+delta = {}
+
+[[policy.tool]]
+name = "TaskUpdate"
+delta = {}
+
+[[policy.tool]]
+name = "TodoWrite"
+delta = {}
+
+[[policy.tool]]
+name = "ToolSearch"
+delta = {}
+
+[[policy.tool]]
+name = "Workflow"
+delta = {}
+
+[[policy.tool]]
+name = "Write"
+delta = {}
+
+# --- tools that bring outside content into the session ---
+
+# Web pages and search results are authored outside the session.
+[[policy.tool]]
+name = "WebFetch"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "WebSearch"
+delta = { trust = "suspicious" }
+
+# --- GitHub, through the GitHub MCP server ---
+#
+# Issue and pull-request text is written by whoever opened it, so it
+# enters at the low rank of the trust chain, exactly as a fetched web
+# page does. A GitHub tool this file does not name is blocked.
+
+[[policy.tool]]
+name = "mcp__github__get_me"
+delta = {}
+
+[[policy.tool]]
+name = "mcp__github__search_issues"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__list_issues"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__issue_read"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__list_issue_types"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__search_code"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__get_file_contents"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__list_pull_requests"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp__github__pull_request_read"
+delta = { trust = "suspicious" }
+
+# The sink. Publishing an issue is what the human rules on: the review
+# carries the exact title and body this call would post.
+[[policy.tool]]
+name = "mcp__github__issue_write"
+delta = { trust = "suspicious" }
+requires = { attention = ["operator-signoff"] }
+
+# --- the human authority ---
+
+[[policy.authority]]
+name = "operator"
+hint = "The person running this session. Consult them before publishing an issue."
+
+[policy.authority.mandate]
+attends = ["operator-signoff"]
+
+[externals]
+timeout_ms = 5000
+# How long a review may stay open. Separate from `timeout_ms`, which
+# bounds a machine consult: a person reads the arguments and thinks.
+# Omitted, it is ten minutes.
+review_timeout_ms = 600000
+max_body_bytes = 65536
+
+# `hitl` is the reserved human authority. This runtime
+# serves it over MCP elicitation, inside the still-open
+# `execute_remedy_plan` call that asked for the ruling.
+[externals.authorities.operator]
+builtin = "hitl"
