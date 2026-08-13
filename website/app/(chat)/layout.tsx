@@ -5,7 +5,7 @@ import { Header } from "@/components/Header";
 export default function ChatLayout({ children }: { children: React.ReactNode }) {
   return (
     <>
-      <Header />
+      <Header fullBleed />
       {children}
     </>
   );

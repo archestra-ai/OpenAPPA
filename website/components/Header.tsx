@@ -9,7 +9,7 @@ import { MobileNavToggle } from "@/components/MobileNav";
 import { SearchIcon, useSearch } from "@/components/SearchProvider";
 import { ThemeToggle } from "@/components/ThemeToggle";
 
-export function Header() {
+export function Header({ fullBleed = false }: { fullBleed?: boolean }) {
   const search = useSearch();
   const headerRef = useRef<HTMLElement>(null);
 
@@ -31,7 +31,10 @@ export function Header() {
 
   return (
     <>
-      <header className="site-header" ref={headerRef}>
+      {/* Site pages align the header's contents to the centered reading
+          column; an app screen (the chat) spans the viewport, so its header
+          keeps edge padding to match. */}
+      <header className={fullBleed ? "site-header site-header-full" : "site-header"} ref={headerRef}>
         <MobileNavToggle />
         <Link href="/" className="wordmark">
           <Logo height={15} />

@@ -16,6 +16,13 @@
      estimate. */
   --header-h: 73px;
 
+  /* The site's one reading column: sidebar + main + toc at their designed
+     widths (16rem + 52rem + 15rem) with a hair of slack. The shell, the
+     header's contents, and the footer all align to it, so on a wide monitor
+     the whole page centers as one block instead of hugging the left edge.
+     The chat playground is an app screen and deliberately ignores it. */
+  --site-max: 84rem;
+
   /* neutrals — warm-tinted, never pure gray */
   --bg: hsl(40, 25%, 99%);
   --bg-weak: hsl(42, 18%, 96%);
@@ -220,9 +227,17 @@ samp {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 20px 24px;
+  /* Full-bleed bar, contents aligned to the centered reading column: the
+     inline padding grows into the same gutters the shell leaves. */
+  padding: 20px max(24px, calc((100% - var(--site-max)) / 2));
   background: var(--bg);
   border-bottom: 1px solid var(--border-weak);
+}
+
+/* An app screen (the chat) spans the viewport; its header contents keep edge
+   padding to match instead of indenting to the reading column. */
+.site-header-full {
+  padding-inline: 24px;
 }
 
 .wordmark {
@@ -411,6 +426,10 @@ samp {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   min-height: calc(100vh - var(--header-h));
+  /* One centered block on monitors wider than the reading column — the gap
+     splits into two gutters instead of pooling on the right. */
+  max-width: var(--site-max);
+  margin-inline: auto;
 }
 
 @media (min-width: 1024px) {
@@ -597,6 +616,9 @@ samp {
   padding: 2.5rem 3rem 5rem;
   max-width: 46rem;
   width: 100%;
+  /* Between the cap and the breakpoints the column has slack; the prose sits
+     centered in it rather than against the sidebar. */
+  margin-inline: auto;
 }
 
 @media (max-width: 768px) {
@@ -1302,6 +1324,11 @@ samp {
 .chat-shell {
   height: calc(100vh - var(--header-h));
   min-height: 0;
+  /* An app screen, not a reading page: the playground owns the whole
+     viewport (its panes keep their own width floors and caps), so the
+     site's centered reading column does not apply — matching its
+     full-bleed header. */
+  max-width: none;
 }
 
 @media (min-width: 1280px) {
@@ -1323,7 +1350,8 @@ samp {
 .site-footer {
   display: flex;
   justify-content: space-between;
-  padding: 20px 24px;
+  /* Aligned to the centered reading column, like the header. */
+  padding: 20px max(24px, calc((100% - var(--site-max)) / 2));
   border-top: 1px solid var(--border-weak);
   color: var(--text-weak);
   font-size: 13px;
