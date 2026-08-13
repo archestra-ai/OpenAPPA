@@ -14,7 +14,11 @@ use crate::plan::{self, PlannedBlock};
 use crate::profile::{self, DeploymentPolicy, DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentityV1};
 use crate::projection::Views;
 use crate::registry::{LoadError, Registry};
-use crate::value::{DispatchId, ResolvedCall, ToolName, TrajectoryId};
+use crate::transition::{
+    Blocked, EngineDecision, EngineEvent, EngineView, FollowUp, ProposalBatch, Released, TransitionError,
+    ValidatedFactBatch,
+};
+use crate::value::{CanonicalDigest, DispatchId, ResolvedCall, ToolName, TrajectoryId};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum EngineError {
@@ -88,6 +92,10 @@ pub enum ReplayError {
     OutOfOrderFork,
     #[error("fork record names a child trajectory the log already used")]
     ChildActiveBeforeFork,
+    #[error("one proposal batch identity is bound to two different decisions")]
+    BatchIdentityConflict,
+    #[error("a decision record claims a release its log never opened")]
+    UnbackedDecision,
     #[error("fork record's return policy is not the deployment's child-return binding")]
     ForkReturnPolicyMismatch,
 }
@@ -149,6 +157,112 @@ impl Engine {
             .map(|tool| &tool.name)
             .chain(self.registry.provider_run_contracts().map(|tool| &tool.name));
         profile::derive_open_vectors(self.profile(), tools)
+    }
+
+    /// Build the working view over a persisted family log: the records are validated
+    /// before anything reads them, so no caller decides against an untrusted stream.
+    /// On cache loss the runtime rebuilds through this same call.
+    pub fn view(&self, records: Vec<Fact>, revision: Revision) -> Result<EngineView, ReplayError> {
+        self.validate_replay(&records)?;
+        Ok(EngineView::over(records, revision))
+    }
+
+    /// The engine's one mutation boundary: decide one event against the view and return
+    /// a sealed batch plus the typed follow-up. The engine owns semantic validation and constructs
+    /// every fact; it owns no mutable state.
+    pub fn handle(&self, view: &EngineView, event: EngineEvent) -> Result<EngineDecision, TransitionError> {
+        match event {
+            EngineEvent::Proposals(batch) => self.decide_proposals(view, &batch),
+        }
+    }
+
+    fn decide_proposals(&self, view: &EngineView, batch: &ProposalBatch) -> Result<EngineDecision, TransitionError> {
+        match batch.proposals.len() {
+            0 => return Err(TransitionError::EmptyBatch),
+            1 => {}
+            _ => return Err(TransitionError::UncomposedBatch),
+        }
+        let views = view.projection().view(&batch.trajectory);
+        let payload = CanonicalDigest::of_batch(&batch.proposals);
+        if let Some(decided) = views.decided_batch(&batch.id) {
+            if decided.trajectory != batch.trajectory || decided.payload != payload {
+                return Err(TransitionError::BatchIdentityConflict);
+            }
+            let recorded = decided.released.clone();
+            return Ok(EngineDecision {
+                append: None,
+                follow_up: self.decided_follow_up(&views, batch, &recorded)?,
+            });
+        }
+
+        let mut opened = Vec::new();
+        let mut released = Vec::new();
+        let mut blocked = Vec::new();
+        for call in &batch.proposals {
+            let contract = self.validated_contract(call)?;
+            match check::evaluate(contract, &views, call) {
+                CheckOutcome::Allow => {
+                    let (dispatch, fact) = opened_dispatch(contract, &views, call);
+                    opened.push(fact);
+                    released.push(Released {
+                        dispatch,
+                        call: call.clone(),
+                    });
+                }
+                CheckOutcome::Block(raw) => blocked.push(Blocked {
+                    call: call.clone(),
+                    block: plan::plan(&self.registry, &views, call, &raw),
+                }),
+            }
+        }
+        let mut facts = vec![Fact::ProposalBatchDecided {
+            trajectory: batch.trajectory.clone(),
+            batch: batch.id.clone(),
+            payload,
+            released: released.iter().map(|release| release.dispatch.clone()).collect(),
+        }];
+        facts.extend(opened);
+        Ok(EngineDecision {
+            append: Some(ValidatedFactBatch::seal(FactBatch::new(views.revision(), facts))),
+            follow_up: FollowUp::Proposals {
+                released,
+                blocked,
+                spent: Vec::new(),
+            },
+        })
+    }
+
+    fn decided_follow_up(
+        &self,
+        views: &Views,
+        batch: &ProposalBatch,
+        recorded: &[DispatchId],
+    ) -> Result<FollowUp, TransitionError> {
+        let mut released = Vec::new();
+        let mut blocked = Vec::new();
+        let mut spent = Vec::new();
+        for call in &batch.proposals {
+            let contract = self.validated_contract(call)?;
+            match recorded.iter().find(|dispatch| dispatch.digest() == &call.digest()) {
+                Some(dispatch) if views.is_open(dispatch) && !views.is_succeeded(dispatch) => released.push(Released {
+                    dispatch: dispatch.clone(),
+                    call: call.clone(),
+                }),
+                Some(_) => {}
+                None => match check::evaluate(contract, views, call) {
+                    CheckOutcome::Block(raw) => blocked.push(Blocked {
+                        call: call.clone(),
+                        block: plan::plan(&self.registry, views, call, &raw),
+                    }),
+                    CheckOutcome::Allow => spent.push(call.clone()),
+                },
+            }
+        }
+        Ok(FollowUp::Proposals {
+            released,
+            blocked,
+            spent,
+        })
     }
 
     /// The opening batch of a fresh root trajectory family: one `TrajectoryOpened`
@@ -447,15 +561,57 @@ impl Engine {
             })
             .collect();
         let mut active: std::collections::BTreeSet<&TrajectoryId> = std::collections::BTreeSet::new();
+        // Each decided batch identity and what it is bound to.
+        let mut decided: std::collections::BTreeSet<&crate::transition::ProposalBatchId> =
+            std::collections::BTreeSet::new();
+        let mut pending_release: std::collections::BTreeSet<&DispatchId> = std::collections::BTreeSet::new();
+        // Each decision's claimed releases and the payload digest they must reproduce.
+        let mut claimed_payloads: Vec<(Vec<DispatchId>, CanonicalDigest)> = Vec::new();
+        // Dispatch identities already opened: one opening per identity.
+        let mut seen_openings: std::collections::BTreeSet<&DispatchId> = std::collections::BTreeSet::new();
+        // The rendered call each opening recorded, for re-deriving a decision's payload.
+        let mut opened_calls: std::collections::BTreeMap<&DispatchId, ResolvedCall> = std::collections::BTreeMap::new();
         for fact in facts {
             let opens_trajectory = active.insert(fact.trajectory());
             match fact {
+                Fact::ProposalBatchDecided {
+                    trajectory,
+                    batch,
+                    payload,
+                    released,
+                } => {
+                    if !decided.insert(batch) {
+                        return Err(ReplayError::BatchIdentityConflict);
+                    }
+                    for dispatch in released {
+                        if dispatch.trajectory() != trajectory || !pending_release.insert(dispatch) {
+                            return Err(ReplayError::UnbackedDecision);
+                        }
+                    }
+                    claimed_payloads.push((released.clone(), *payload));
+                }
                 Fact::DispatchOpened {
                     dispatch,
                     tool,
                     arguments,
+                    dynamic_resolutions,
                     ..
                 } => {
+                    if dispatch.trajectory() != fact.trajectory() {
+                        return Err(ReplayError::ForeignDispatch);
+                    }
+                    if !seen_openings.insert(dispatch) {
+                        return Err(ReplayError::UnbackedDecision);
+                    }
+                    pending_release.remove(dispatch);
+                    opened_calls.insert(
+                        dispatch,
+                        ResolvedCall::new(tool.clone(), arguments.clone())
+                            .with_dynamic_resolutions(dynamic_resolutions.clone()),
+                    );
+                    if dispatch.trajectory() != fact.trajectory() {
+                        return Err(ReplayError::ForeignDispatch);
+                    }
                     let contract = self
                         .registry
                         .tool(tool)
@@ -569,6 +725,18 @@ impl Engine {
                     snapshots.insert(trajectory, snapshot);
                 }
                 _ => {}
+            }
+        }
+        if !pending_release.is_empty() {
+            return Err(ReplayError::UnbackedDecision);
+        }
+        for (released, payload) in claimed_payloads {
+            let calls: Option<Vec<&ResolvedCall>> = released.iter().map(|id| opened_calls.get(id)).collect();
+            if let Some(calls) = calls
+                && !calls.is_empty()
+                && CanonicalDigest::of_batch(calls) != payload
+            {
+                return Err(ReplayError::UnbackedDecision);
             }
         }
         Ok(())
@@ -760,6 +928,187 @@ mod tests {
                 assert!(b.requirement_gaps.is_empty());
             }
             other => panic!("expected narrowing block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_boundary_releases_an_allowed_proposal_with_its_dispatch() {
+        let e = engine(vec![crm_tool()]);
+        let internal = Audience::restricted([ReaderId::new("internal")]);
+        let records = vec![user_value(known(TRUSTED, internal))];
+        let view = e.view(records, Revision::new(1)).unwrap();
+        let call = call("get_ticket", json!({}));
+
+        let decision = e
+            .handle(
+                &view,
+                EngineEvent::Proposals(ProposalBatch {
+                    id: crate::transition::ProposalBatchId::new("b1"),
+                    trajectory: traj(),
+                    proposals: vec![call.clone()],
+                }),
+            )
+            .unwrap();
+
+        let released = match &decision.follow_up {
+            FollowUp::Proposals { released, blocked, .. } if blocked.is_empty() => released.clone(),
+            other => panic!("expected a release, got {other:?}"),
+        };
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].call, call);
+        let composed = e.open_dispatch(&view.projection().view(&traj()), &call).unwrap();
+        let appended = decision.append.expect("an allowed call opens a dispatch");
+        assert!(matches!(
+            &appended.facts()[0],
+            Fact::ProposalBatchDecided { batch, .. } if batch.as_str() == "b1"
+        ));
+        assert_eq!(&appended.facts()[1..], composed.facts.as_slice());
+        assert!(matches!(
+            &appended.facts()[1],
+            Fact::DispatchOpened { dispatch, .. } if dispatch == &released[0].dispatch
+        ));
+    }
+
+    #[test]
+    fn a_repeated_batch_identity_returns_its_recorded_decision_and_a_reused_one_is_refused() {
+        let e = engine(vec![crm_tool()]);
+        let internal = Audience::restricted([ReaderId::new("internal")]);
+        let records = vec![user_value(known(TRUSTED, internal))];
+        let view = e.view(records.clone(), Revision::new(1)).unwrap();
+        let batch = |proposals: Vec<ResolvedCall>| {
+            EngineEvent::Proposals(ProposalBatch {
+                id: crate::transition::ProposalBatchId::new("b1"),
+                trajectory: traj(),
+                proposals,
+            })
+        };
+        let proposal = call("get_ticket", json!({}));
+        let other = call("get_ticket", json!({ "id": "2" }));
+        let call = proposal;
+
+        let first = e.handle(&view, batch(vec![call.clone()])).unwrap();
+        let appended_facts = first
+            .append
+            .clone()
+            .expect("the first decision records itself")
+            .into_unsealed()
+            .facts;
+        let decided = [records, appended_facts.clone()].concat();
+        let after = e.view(decided, Revision::new(2)).unwrap();
+
+        let repeat = e.handle(&after, batch(vec![call.clone()])).unwrap();
+        assert_eq!(repeat.append, None);
+        assert_eq!(repeat.follow_up, first.follow_up);
+
+        assert_eq!(
+            e.handle(&after, batch(vec![other.clone()])),
+            Err(crate::transition::TransitionError::BatchIdentityConflict)
+        );
+
+        let decision = |released: Vec<DispatchId>| Fact::ProposalBatchDecided {
+            trajectory: traj(),
+            batch: crate::transition::ProposalBatchId::new("b1"),
+            payload: CanonicalDigest::of_batch([&call]),
+            released,
+        };
+        assert_eq!(
+            e.validate_replay(&[decision(vec![]), decision(vec![])]),
+            Err(ReplayError::BatchIdentityConflict)
+        );
+        let FollowUp::Proposals { released, .. } = &first.follow_up;
+        let dispatch = released[0].dispatch.clone();
+        assert_eq!(
+            e.validate_replay(&[decision(vec![dispatch.clone()])]),
+            Err(ReplayError::UnbackedDecision)
+        );
+        let other_id = |released: Vec<DispatchId>| Fact::ProposalBatchDecided {
+            trajectory: traj(),
+            batch: crate::transition::ProposalBatchId::new("b2"),
+            payload: CanonicalDigest::of_batch([&call]),
+            released,
+        };
+        let opening = appended_facts[1].clone();
+        assert_eq!(
+            e.validate_replay(&[
+                decision(vec![dispatch.clone()]),
+                other_id(vec![dispatch.clone()]),
+                opening.clone()
+            ]),
+            Err(ReplayError::UnbackedDecision)
+        );
+        assert_eq!(
+            e.validate_replay(&[decision(vec![dispatch.clone(), dispatch.clone()]), opening.clone()]),
+            Err(ReplayError::UnbackedDecision)
+        );
+        assert_eq!(
+            e.validate_replay(&[
+                Fact::ProposalBatchDecided {
+                    trajectory: traj(),
+                    batch: crate::transition::ProposalBatchId::new("b3"),
+                    payload: CanonicalDigest::of_batch([&other]),
+                    released: vec![dispatch],
+                },
+                opening
+            ]),
+            Err(ReplayError::UnbackedDecision)
+        );
+    }
+
+    #[test]
+    fn a_repeat_of_a_block_that_has_lifted_reports_a_spent_identity() {
+        let e = engine(vec![crm_tool()]);
+        let public = vec![user_value(known(TRUSTED, Audience::Public))];
+        let call = call("get_ticket", json!({}));
+        let event = EngineEvent::Proposals(ProposalBatch {
+            id: crate::transition::ProposalBatchId::new("b1"),
+            trajectory: traj(),
+            proposals: vec![call.clone()],
+        });
+
+        let view = e.view(public.clone(), Revision::new(1)).unwrap();
+        let decision = e.handle(&view, event.clone()).unwrap();
+        let decided = decision.append.expect("the block records its decision").into_unsealed();
+
+        let internal = Audience::restricted([ReaderId::new("internal")]);
+        let later = [public, decided.facts, vec![user_value(known(TRUSTED, internal))]].concat();
+        let after = e.view(later, Revision::new(3)).unwrap();
+
+        let FollowUp::Proposals {
+            released,
+            blocked,
+            spent,
+        } = e.handle(&after, event).unwrap().follow_up;
+        assert!(released.is_empty() && blocked.is_empty());
+        assert_eq!(spent, vec![call]);
+    }
+
+    #[test]
+    fn the_boundary_plans_a_blocked_proposal_and_opens_nothing() {
+        let e = engine(vec![crm_tool(), plain_tool("send")]);
+        let records = vec![user_value(known(TRUSTED, Audience::Public))];
+        let view = e.view(records, Revision::new(1)).unwrap();
+        let call = call("get_ticket", json!({}));
+
+        let decision = e
+            .handle(
+                &view,
+                EngineEvent::Proposals(ProposalBatch {
+                    id: crate::transition::ProposalBatchId::new("b1"),
+                    trajectory: traj(),
+                    proposals: vec![call.clone()],
+                }),
+            )
+            .unwrap();
+
+        let appended = decision.append.clone().expect("the decision boundary is recorded");
+        assert!(matches!(appended.facts(), [Fact::ProposalBatchDecided { .. }],));
+        match &decision.follow_up {
+            FollowUp::Proposals { released, blocked, .. } if released.is_empty() => {
+                assert_eq!(blocked.len(), 1);
+                assert_eq!(blocked[0].call, call);
+                assert!(blocked[0].block.raw.narrowing.is_some());
+            }
+            other => panic!("expected a planned block, got {other:?}"),
         }
     }
 

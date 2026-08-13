@@ -81,6 +81,30 @@ impl CanonicalDigest {
         CanonicalDigest(hasher.finalize().into())
     }
 
+    /// Digest one proposal batch's policy-content payload: domain-separated over each call's
+    /// ordered rendered digest and the dynamic resolutions pinned to it, so a repeat carrying the
+    /// same content binds the same payload and anything else is an identity conflict.
+    pub(crate) fn of_batch<'a>(calls: impl IntoIterator<Item = &'a ResolvedCall>) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(b"appa.proposal-batch.v1");
+        for call in calls {
+            hasher.update([0u8]);
+            hasher.update(call.digest().0);
+            let mut pinned: Vec<Vec<u8>> = call
+                .dynamic_resolutions
+                .iter()
+                .map(|resolution| {
+                    serde_json_canonicalizer::to_vec(resolution).expect("a pinned resolution canonicalizes")
+                })
+                .collect();
+            pinned.sort();
+            for resolution in pinned {
+                hasher.update(resolution);
+            }
+        }
+        CanonicalDigest(hasher.finalize().into())
+    }
+
     pub fn bytes(&self) -> &[u8; 32] {
         &self.0
     }

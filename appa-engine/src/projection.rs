@@ -36,6 +36,13 @@ static MISSING_SOURCE: Label = Label::unknown();
 static NO_INHERITED: BTreeSet<ValueId> = BTreeSet::new();
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DecidedBatch {
+    pub(crate) trajectory: TrajectoryId,
+    pub(crate) payload: CanonicalDigest,
+    pub(crate) released: Vec<DispatchId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ReturnedChild {
     id: ChildReturnId,
     value: LabeledValue,
@@ -68,6 +75,7 @@ pub struct Projection {
     /// at a time, so the flat copy stays the boring choice over an ancestry-cutoff walk.
     denials: BTreeMap<TrajectoryId, BTreeMap<CanonicalDigest, BTreeSet<AuthorityName>>>,
     active: BTreeSet<TrajectoryId>,
+    decided: BTreeMap<crate::transition::ProposalBatchId, DecidedBatch>,
 }
 
 impl Projection {
@@ -89,11 +97,27 @@ impl Projection {
         let mut dynamic_resolutions = BTreeMap::new();
         let mut denials: BTreeMap<TrajectoryId, BTreeMap<CanonicalDigest, BTreeSet<AuthorityName>>> = BTreeMap::new();
         let mut active = BTreeSet::new();
+        let mut decided = BTreeMap::new();
 
         for fact in log {
             active.insert(fact.trajectory().clone());
             match fact {
                 Fact::TrajectoryOpened { .. } => {}
+                Fact::ProposalBatchDecided {
+                    trajectory,
+                    batch,
+                    payload,
+                    released,
+                } => {
+                    decided.insert(
+                        batch.clone(),
+                        DecidedBatch {
+                            trajectory: trajectory.clone(),
+                            payload: *payload,
+                            released: released.clone(),
+                        },
+                    );
+                }
                 Fact::ValueAdmitted {
                     trajectory,
                     value,
@@ -220,6 +244,7 @@ impl Projection {
             dynamic_resolutions,
             denials,
             active,
+            decided,
         }
     }
 
@@ -334,6 +359,12 @@ impl Views<'_> {
                 .projection
                 .snapshot_of(self.trajectory)
                 .is_some_and(|snapshot| snapshot.inherited().contains(&id))
+    }
+
+    /// What this batch identity is already bound to, family-wide: the trajectory that decided it
+    /// and the payload digest. `None` means the identity is fresh.
+    pub(crate) fn decided_batch(&self, batch: &crate::transition::ProposalBatchId) -> Option<&DecidedBatch> {
+        self.projection.decided.get(batch)
     }
 
     /// Does the family log name `trajectory` at all? A fork takes an unused child id:

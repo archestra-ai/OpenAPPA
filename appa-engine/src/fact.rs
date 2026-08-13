@@ -293,6 +293,12 @@ pub enum Fact {
         value: LabeledValue,
         derivation: ReturnDerivation,
     },
+    ProposalBatchDecided {
+        trajectory: TrajectoryId,
+        batch: crate::transition::ProposalBatchId,
+        payload: CanonicalDigest,
+        released: Vec<DispatchId>,
+    },
     Boundary {
         trajectory: TrajectoryId,
         kind: BoundaryKind,
@@ -303,6 +309,7 @@ impl Fact {
     pub fn trajectory(&self) -> &TrajectoryId {
         match self {
             Fact::TrajectoryOpened { trajectory, .. }
+            | Fact::ProposalBatchDecided { trajectory, .. }
             | Fact::ValueAdmitted { trajectory, .. }
             | Fact::AssistantMessage { trajectory, .. }
             | Fact::BlockFeedback { trajectory, .. }

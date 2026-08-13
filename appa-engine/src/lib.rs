@@ -31,4 +31,5 @@ pub mod plan;
 pub mod profile;
 pub mod projection;
 pub mod registry;
+pub mod transition;
 pub mod value;
