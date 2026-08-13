@@ -11,10 +11,11 @@ use appa_engine::contract::{
 };
 use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityReview, PlanError, Ruling};
-use appa_engine::fact::{Fact, FactBatch, ReturnPolicy, Revision};
+use appa_engine::fact::{Fact, FactBatch, ObservedResult, ReturnPolicy, Revision};
 use appa_engine::label::{Audience, Dimension, ReaderId, Trust};
 use appa_engine::plan::{ExecutableRemedyPlan, PlannedBlock, RemedyPlan};
-use appa_engine::projection::{Projection, Views};
+use appa_engine::projection::Views;
+use appa_engine::transition::EngineView as ValidatedView;
 use appa_engine::value::{
     CanonicalDigest, DispatchId as EngineDispatchId, Provenance, RawResultDigest, ResolvedCall, ToolName, ValueBody,
     ValueId,
@@ -116,7 +117,10 @@ pub enum EngineEvent {
         evidence: Vec<ExternalEvidence>,
         entropy: OfferNonce,
     },
-    SuccessObserved { call: ProposedCall },
+    SuccessObserved {
+        call: ProposedCall,
+        observed: ObservedResult,
+    },
     ToolOutcome {
         call: ProposedCall,
         outcome: ToolOutcome,
@@ -239,11 +243,11 @@ pub enum EngineRefusal {
 
 /// The engine's derived working picture of one family log, scoped to the
 /// trajectory the event belongs to. Opaque and disposable: rebuilt
-/// per event, never stored.
+/// per event, never stored. The engine's own view is boxed because it carries
+/// the whole validated projection.
 #[derive(Debug)]
 pub struct EngineView {
-    facts: Vec<Fact>,
-    revision: Revision,
+    view: Box<ValidatedView>,
     trajectory: TrajectoryId,
 }
 
@@ -521,18 +525,18 @@ impl RuntimeEngine {
             facts.extend(batch);
         }
         self.engine
-            .validate_replay(&facts)
-            .map_err(|error| EngineRefusal::UntrustedLog {
-                detail: error.to_string(),
-            })?;
-        self.engine
             .verify_opening(&facts, &engine_id(family))
             .map_err(|error| EngineRefusal::OpeningMismatch {
                 detail: error.to_string(),
             })?;
+        let view = self
+            .engine
+            .view(&engine_id(family), facts, Revision::new(log.len() as u64))
+            .map_err(|error| EngineRefusal::UntrustedLog {
+                detail: error.to_string(),
+            })?;
         Ok(EngineView {
-            facts,
-            revision: Revision::new(log.len() as u64),
+            view: Box::new(view),
             trajectory: trajectory.clone(),
         })
     }
@@ -544,13 +548,8 @@ impl RuntimeEngine {
     }
 
     fn trajectory_status(&self, view: &EngineView) -> Option<TrajectoryStatus> {
-        let EngineView {
-            facts,
-            revision,
-            trajectory,
-        } = view;
-        let projection = Projection::build(facts, *revision);
-        let label = projection.view(&engine_id(trajectory)).current_label();
+        let EngineView { view, trajectory } = view;
+        let label = view.views(&engine_id(trajectory)).current_label();
         let chain = self.engine.registry().trust_chain();
         let trust = if label.is_established(Dimension::Trust) {
             let bound = label.bound().trust;
@@ -592,12 +591,7 @@ impl RuntimeEngine {
         event: EngineEvent,
         offers: &Mutex<OfferCache>,
     ) -> Result<EngineDecision, EngineRefusal> {
-        let EngineView {
-            facts,
-            revision,
-            trajectory,
-        } = view;
-        let projection = Projection::build(facts, *revision);
+        let EngineView { view, trajectory } = view;
         let own = engine_id(trajectory);
         match event {
             EngineEvent::ModelResponse {
@@ -605,24 +599,24 @@ impl RuntimeEngine {
                 evidence,
                 entropy,
             } => {
-                let views = projection.view(&own);
+                let views = view.views(&own);
                 self.model_response(&views, trajectory, &call, &evidence, entropy)
             }
-            EngineEvent::SuccessObserved { call } => {
-                let views = projection.view(&own);
-                self.success_observed(&views, &call)
+            EngineEvent::SuccessObserved { call, observed } => {
+                let views = view.views(&own);
+                self.success_observed(&views, &call, observed)
             }
             EngineEvent::ToolOutcome {
                 call,
                 outcome,
                 evidence,
             } => {
-                let views = projection.view(&own);
+                let views = view.views(&own);
                 self.tool_outcome(&views, &call, &outcome, &evidence)
             }
-            EngineEvent::ExecuteOffer { offer, evidence } => self.execute_offer(&projection, &offer, &evidence, offers),
+            EngineEvent::ExecuteOffer { offer, evidence } => self.execute_offer(view, &offer, &evidence, offers),
             EngineEvent::ChildStart { child } => {
-                let views = projection.view(&own);
+                let views = view.views(&own);
                 let child_id = engine_id(&child);
                 let batch = self.engine.seed_child(&views, &child_id).map_err(|error| match error {
                     BranchError::AlreadyForked => EngineRefusal::ChildAlreadyForked,
@@ -641,7 +635,7 @@ impl RuntimeEngine {
                 entropy,
             } => {
                 let parent_id = engine_id(&parent);
-                let views = projection.view(&parent_id);
+                let views = view.views(&parent_id);
                 self.child_return(&views, &parent, &child, value, &evidence, entropy)
             }
         }
@@ -668,8 +662,11 @@ impl RuntimeEngine {
                 let batch = self
                     .engine
                     .open_dispatch(views, &resolved)
-                    .map_err(|error| EngineRefusal::Invariant {
-                        detail: format!("open after allow: {error}"),
+                    .map_err(|error| match error {
+                        EngineError::BranchEnded => EngineRefusal::Ended,
+                        error => EngineRefusal::Invariant {
+                            detail: format!("open after allow: {error}"),
+                        },
                     })?;
                 Ok(EngineDecision::append(
                     batch,
@@ -718,20 +715,25 @@ impl RuntimeEngine {
                 "[appa] tool {tool} is provider-run: it executes inside the inference call and cannot be proposed as a tool call"
             ))),
             Err(EngineError::InvalidCall(error)) => Ok(deny(format!("[appa] invalid call: {error}"))),
-            Err(EngineError::NotAllowed) => Err(EngineRefusal::Invariant {
-                detail: "check returned the dispatch-path refusal".to_string(),
+            Err(EngineError::NotAllowed | EngineError::BranchEnded) => Err(EngineRefusal::Invariant {
+                detail: "check returned a dispatch-path refusal".to_string(),
             }),
         }
     }
 
-    fn success_observed(&self, views: &Views, call: &ProposedCall) -> Result<EngineDecision, EngineRefusal> {
+    fn success_observed(
+        &self,
+        views: &Views,
+        call: &ProposedCall,
+        observed: ObservedResult,
+    ) -> Result<EngineDecision, EngineRefusal> {
         let (resolved, dispatch) = self.open_dispatch_for(views, call)?;
         if views.is_succeeded(&dispatch) {
             return Ok(EngineDecision::deliver(Next::Done));
         }
         let batch = self
             .engine
-            .observe_success(views, &dispatch, &resolved)
+            .observe_success(views, &dispatch, &resolved, observed)
             .map_err(|error| EngineRefusal::Invariant {
                 detail: format!("success checkpoint: {error}"),
             })?;
@@ -810,7 +812,9 @@ impl RuntimeEngine {
                 error @ (AdmitError::UnknownTool(_)
                 | AdmitError::DigestMismatch
                 | AdmitError::ForeignDispatch
-                | AdmitError::NotOpen),
+                | AdmitError::NotOpen
+                | AdmitError::ObservationMismatch
+                | AdmitError::SuccessContradicted),
             ) => Err(EngineRefusal::Invariant {
                 detail: format!("result admission identity: {error}"),
             }),
@@ -822,7 +826,7 @@ impl RuntimeEngine {
 
     fn execute_offer(
         &self,
-        projection: &Projection,
+        view: &ValidatedView,
         offer: &OfferId,
         evidence: &[ExternalEvidence],
         offers: &Mutex<OfferCache>,
@@ -840,7 +844,7 @@ impl RuntimeEngine {
         match cached {
             CachedOffer::Call { trajectory, call, plan } => {
                 let owner = engine_id(&trajectory);
-                let views = projection.view(&owner);
+                let views = view.views(&owner);
                 self.execute_call_offer(&views, &trajectory, offer, &call, &plan, evidence, offers)
             }
             CachedOffer::ChildReturn {
@@ -851,7 +855,7 @@ impl RuntimeEngine {
                 ..
             } => {
                 let owner = engine_id(&trajectory);
-                let views = projection.view(&owner);
+                let views = view.views(&owner);
                 self.execute_return_offer(&views, offer, &child, &raw, &plan, evidence)
             }
         }

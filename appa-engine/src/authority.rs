@@ -232,6 +232,17 @@ pub struct Cast {
     pub scope: Scope,
 }
 
+impl Sanitizer {
+    /// The label this sanitizer's derivation of `raw` would carry at an output point, or `None`
+    /// where it does not apply there: it must be registered for output, and the source
+    /// must satisfy its declared `from`. The one predicate live admission, the child crossing and
+    /// the transition validator share, so none of them can drift from the others.
+    pub(crate) fn derive_output(&self, raw: &crate::label::Label) -> Option<crate::label::Label> {
+        (self.on.output && self.transition.admits(raw) == crate::label::Adequacy::Holds)
+            .then(|| self.transition.derive(raw))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

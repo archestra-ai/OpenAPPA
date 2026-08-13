@@ -11,7 +11,7 @@ use appa_engine::branch::{ReturnBlock, ReturnCheck, ReturnPlan, ReturnSubmission
 use appa_engine::check::{CheckOutcome, Narrowing, UnestablishedFact};
 use appa_engine::contract::PinnedDynamicResolution;
 use appa_engine::execute::Ruling;
-use appa_engine::fact::{BoundaryKind, Fact, FactBatch, ProposedCall, ReturnPolicy, Revision};
+use appa_engine::fact::{BoundaryKind, Fact, FactBatch, ObservedResult, ProposedCall, ReturnPolicy, Revision};
 use appa_engine::label::{EstablishedLabel, Label};
 use appa_engine::names::{CastName, SanitizerName, TagName};
 use appa_engine::plan::{ExecutableRemedyPlan, RemedyPlan};
@@ -1741,7 +1741,11 @@ impl Turn {
             .as_mut()
             .expect("this invocation opened a dispatch")
             .close = close;
-        if matches!(outcome, ToolOutcome::Success { .. }) {
+        if let ToolOutcome::Success { body } = &outcome {
+            let observed = match body {
+                BodyDisposition::Available(raw) => ObservedResult::Available(RawResultDigest::of(raw.as_bytes())),
+                BodyDisposition::RejectedTooLarge | BodyDisposition::Unavailable => ObservedResult::Unavailable,
+            };
             self.mediator
                 .store()
                 .finalize(&self.tenant, &self.session, |facts, revision| {
@@ -1750,7 +1754,7 @@ impl Turn {
                     Some(
                         self.mediator
                             .engine()
-                            .observe_success(&views, &dispatch, call)
+                            .observe_success(&views, &dispatch, call, observed.clone())
                             .expect("the runtime holds this dispatch open and checkpoints it once"),
                     )
                 })?;
@@ -1936,7 +1940,8 @@ impl Turn {
                         | AdmitError::DigestMismatch
                         | AdmitError::ForeignDispatch
                         | AdmitError::AlreadySucceeded
-                        | AdmitError::SuccessContradicted,
+                        | AdmitError::SuccessContradicted
+                        | AdmitError::ObservationMismatch,
                     ) => {
                         result = Admission::InvariantBreach;
                         None

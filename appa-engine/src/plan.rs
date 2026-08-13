@@ -407,12 +407,23 @@ fn enumerate_assignments(registry: &Registry, gaps: &[Gap], tags: &[TagName]) ->
     }
 }
 
-struct NarrowingSettlement {
-    accept: Option<Narrowing>,
-    sanitize: Option<SanitizerName>,
+/// One way a block's narrowing settles: by acceptance alone, through an output sanitizer with
+/// acceptance of exactly the residual its relabel cannot shed, or by a full-clear sanitizer owing
+/// no acceptance — the shape `BRN-12` already fixes for child returns, applied at tool output.
+/// The settlement carries *what* is settled; [`enumerate_plans`] composes it into the
+/// canonical step order.
+pub(crate) struct NarrowingSettlement {
+    pub(crate) accept: Option<Narrowing>,
+    pub(crate) sanitize: Option<SanitizerName>,
 }
 
-fn narrowing_remedies(
+/// The ways this block's narrowing can be settled: acceptance always, then one
+/// settlement per applicable output sanitizer, in registry name order. The transition validator
+/// holds a persisted remedy release to this same list, so a log cannot record a settlement the
+/// planner would not have offered. A block with no narrowing
+/// yields one empty settlement, so the caller's cross product still produces the plain authority
+/// plans.
+pub(crate) fn narrowing_remedies(
     registry: &Registry,
     current: &PartialLabel,
     contract: &ToolContract,

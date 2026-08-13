@@ -10,6 +10,8 @@ use crate::engine::{
 };
 use crate::external::{ConsultKind, ConsultOutcome, DynamicResolution};
 use crate::store::{BatchAppend, DispatchRow, DispatchState, EventWrite, Revision, RuntimeRecord};
+use appa_engine::fact::ObservedResult;
+use appa_engine::value::RawResultDigest;
 
 use super::{
     AuthorizedCall, ChildReturnDecision, DispatchId, EventError, Inner, OfferId, OutcomeBody, ProposedCall,
@@ -238,10 +240,17 @@ impl Session {
         };
         let o = self.cap_outcome(o);
 
-        if matches!(o, ToolOutcome::Success { .. }) {
+        if let ToolOutcome::Success { body } = &o {
+            let observed = match body {
+                OutcomeBody::Available(raw) => ObservedResult::Available(RawResultDigest::of(raw.as_bytes())),
+                OutcomeBody::Unavailable => ObservedResult::Unavailable,
+            };
             let checkpoint = self.drive(
                 &policy,
-                || EngineEvent::SuccessObserved { call: call.clone() },
+                || EngineEvent::SuccessObserved {
+                    call: call.clone(),
+                    observed: observed.clone(),
+                },
                 |_| Vec::new(),
             )?;
             match checkpoint.then {
@@ -730,18 +739,30 @@ mod tests {
         }
     }
 
-    fn batch(kind: BoundaryKind, based_on: u64) -> FactBatch {
+    #[derive(Clone, Copy)]
+    enum Marker {
+        One,
+        Two,
+    }
+
+    fn batch(marker: Marker, based_on: u64) -> FactBatch {
+        let punctuation = match marker {
+            Marker::One => 1,
+            Marker::Two => 2,
+        };
         FactBatch::new(
             EngineRevision::new(based_on),
-            vec![Fact::Boundary {
-                trajectory: appa_engine::value::TrajectoryId::new("cc:root"),
-                kind,
-            }],
+            (0..punctuation)
+                .map(|_| Fact::Boundary {
+                    trajectory: appa_engine::value::TrajectoryId::new("cc:root"),
+                    kind: BoundaryKind::TurnEnd,
+                })
+                .collect(),
         )
     }
 
-    fn batch_bytes(kind: BoundaryKind) -> Vec<u8> {
-        serde_json::to_vec(&batch(kind, 0).facts).expect("the test facts serialize")
+    fn batch_bytes(marker: Marker) -> Vec<u8> {
+        serde_json::to_vec(&batch(marker, 0).facts).expect("the test facts serialize")
     }
 
     fn assert_only_the_opening(log: &[Vec<u8>]) {
@@ -899,7 +920,7 @@ mod tests {
         let runtime = open_test_runtime(&dir);
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         runtime.inner.engine.enqueue(decision(
-            Some(batch(BoundaryKind::TurnEnd, 1)),
+            Some(batch(Marker::One, 1)),
             Next::ModelResponse {
                 invocations: vec![released("d1", &call())],
                 feedback: Vec::new(),
@@ -928,14 +949,14 @@ mod tests {
         let runtime = open_test_runtime(&dir);
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         runtime.inner.engine.enqueue(decision(
-            Some(batch(BoundaryKind::TurnEnd, 2)),
+            Some(batch(Marker::One, 2)),
             Next::ModelResponse {
                 invocations: vec![released("d-stale", &call())],
                 feedback: Vec::new(),
             },
         ));
         runtime.inner.engine.enqueue(decision(
-            Some(batch(BoundaryKind::VoidReturn, 1)),
+            Some(batch(Marker::Two, 1)),
             Next::ModelResponse {
                 invocations: vec![released("d-fresh", &call())],
                 feedback: Vec::new(),
@@ -945,7 +966,7 @@ mod tests {
         assert_eq!(outcome, ToolCallDecision::Allow);
         let (log, _) = runtime.inner.store.load_log(&root()).expect("the log loads");
         assert_eq!(log.len(), 2);
-        assert_eq!(log[1], batch_bytes(BoundaryKind::VoidReturn));
+        assert_eq!(log[1], batch_bytes(Marker::Two));
         let open = runtime
             .inner
             .store
@@ -974,7 +995,7 @@ mod tests {
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         for _ in 0..REPLAY_LIMIT {
             runtime.inner.engine.enqueue(decision(
-                Some(batch(BoundaryKind::TurnEnd, 2)),
+                Some(batch(Marker::One, 2)),
                 Next::ModelResponse {
                     invocations: vec![released("d-contended", &call())],
                     feedback: Vec::new(),
@@ -1579,13 +1600,13 @@ mod tests {
         runtime
             .inner
             .engine
-            .enqueue(decision(Some(batch(BoundaryKind::VoidReturn, 1)), Next::Done));
+            .enqueue(decision(Some(batch(Marker::Two, 1)), Next::Done));
         let mut child = session
             .on_child_start(TrajectoryId("cc:child".to_string()))
             .expect("the child opens");
         let (log, _) = runtime.inner.store.load_log(&root()).expect("the family log loads");
         assert_eq!(log.len(), 2, "the seed follows the opening in the one family log");
-        assert_eq!(log[1], batch_bytes(BoundaryKind::VoidReturn));
+        assert_eq!(log[1], batch_bytes(Marker::Two));
 
         assert!(matches!(
             session.on_child_start(TrajectoryId("cc:child".to_string())),
@@ -2609,6 +2630,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             &root(),
             crate::engine::EngineEvent::SuccessObserved {
                 call: fetch(serde_json::json!({"a": 1})),
+                observed: ObservedResult::Unavailable,
             },
         );
         assert!(
@@ -2631,6 +2653,20 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         assert!(
             matches!(error, EventError::TrajectoryEnded),
             "an ended parent is a lifecycle condition; got {error:?}",
+        );
+        assert!(!error.is_operational());
+
+        let error = refuse(
+            &child,
+            crate::engine::EngineEvent::ModelResponse {
+                call: fetch(serde_json::json!({"a": 2})),
+                evidence: Vec::new(),
+                entropy: fresh_entropy(),
+            },
+        );
+        assert!(
+            matches!(error, EventError::TrajectoryEnded),
+            "a call on an ended branch is a lifecycle condition; got {error:?}",
         );
         assert!(!error.is_operational());
 

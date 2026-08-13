@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::check::{Narrowing, UnestablishedFact};
 use crate::fact::{BoundaryKind, Fact, FactBatch, ReturnDerivation, ReturnPolicy};
-use crate::label::{Adequacy, Dimension, EstablishedLabel, PartialLabel};
+use crate::label::{Dimension, EstablishedLabel, PartialLabel};
 use crate::names::SanitizerName;
 use crate::projection::Views;
 use crate::registry::Registry;
@@ -279,14 +279,11 @@ pub(crate) fn check_child_return(
         return Ok(ReturnCheck::Block(ReturnBlock::Narrowing { narrowing, plans }));
     }
     for sanitizer in registry.sanitizers() {
-        if !sanitizer.on.output {
+        let Some(derived) = sanitizer.derive_output(&fold_label) else {
             continue;
-        }
-        if sanitizer.transition.admits(&fold_label) != Adequacy::Holds {
-            continue;
-        }
-        let sanitized = EstablishedLabel::from_label(&sanitizer.transition.derive(&fold_label))
-            .expect("a derivation of an established fold is established");
+        };
+        let sanitized =
+            EstablishedLabel::from_label(&derived).expect("a derivation of an established fold is established");
         let merged = current.bound().combine(&sanitized);
         if &merged == current.bound() {
             plans.push(ReturnPlan::Sanitize {
@@ -391,10 +388,10 @@ fn sanitized_crossing(
         return Err(BranchError::SanitizerNotOutput(sanitizer.as_str().to_string()));
     }
     let fold_label = fold.bound().clone().into_label();
-    if registered.transition.admits(&fold_label) != Adequacy::Holds {
-        return Err(BranchError::TransitionSourceUnmet);
-    }
-    let value = LabeledValue::new(body, registered.transition.derive(&fold_label));
+    let derived = registered
+        .derive_output(&fold_label)
+        .ok_or(BranchError::TransitionSourceUnmet)?;
+    let value = LabeledValue::new(body, derived);
     let derivation = ReturnDerivation::Sanitized {
         sanitizer: sanitizer.clone(),
         raw_digest,
@@ -411,6 +408,7 @@ mod tests {
     use crate::admit::{CastAnswer, CastError, admit_cast};
     use crate::authority::{Cast, CastResolution, Sanitizer, SanitizerPoints, Scope, Transition};
     use crate::fact::{CloseOutcome, EffectKind, EffectSet, ForkSnapshot, Revision};
+    use crate::label::Adequacy;
     use crate::label::{Audience, Dim, Label, ReaderId, Trust};
     use crate::names::CastName;
     use crate::projection::Projection;

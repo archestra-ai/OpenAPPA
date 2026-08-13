@@ -167,6 +167,16 @@ pub enum BoundaryKind {
     VoidReturn,
 }
 
+/// What the runtime observed when a dispatch succeeded: a usable body, bound by its
+/// digest, or none. Recorded on the success checkpoint before any external step runs, so the
+/// derivation that comes back is bound to the bytes the tool actually returned and a repeat
+/// carrying other bytes is a different observation, not a retry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ObservedResult {
+    Available(RawResultDigest),
+    Unavailable,
+}
+
 /// How a dispatch closed. Effects commit **only** on success — a call that dispatched but failed
 /// appends nothing. A success that admits no value (e.g. an oversized body) still commits effects.
 /// `Indeterminate` records a dispatch whose south outcome was never observed (a timeout or a
@@ -219,6 +229,7 @@ pub enum Fact {
         trajectory: TrajectoryId,
         dispatch: DispatchId,
         effects: EffectSet,
+        observed: ObservedResult,
     },
     DispatchClosed {
         trajectory: TrajectoryId,
@@ -293,11 +304,32 @@ pub enum Fact {
         value: LabeledValue,
         derivation: ReturnDerivation,
     },
+    /// One proposal batch was decided: the identity the runtime supplied and the
+    /// policy content it was bound to. This is the decision boundary itself, so replay reads it
+    /// rather than inferring atomic acts from flattened facts. A repeat of the identity with this
+    /// payload returns the recorded decision instead of deciding again; a repeat carrying other
+    /// content is an identity conflict and is refused.
+    ///
+    /// The proposals are the payload, so the digest the identity binds is derived from them and
+    /// never stored. A refused proposal persists nowhere else — without it the decision would be
+    /// the one record replay cannot check, and a rewritten log could turn a refusal into a
+    /// release with the payload still agreeing.
     ProposalBatchDecided {
         trajectory: TrajectoryId,
         batch: crate::transition::ProposalBatchId,
-        payload: CanonicalDigest,
+        proposals: Vec<crate::value::ResolvedCall>,
+        spawn: Option<crate::transition::SpawnMark>,
         released: Vec<DispatchId>,
+    },
+    ForkPrepared {
+        trajectory: TrajectoryId,
+        fork: crate::value::ForkId,
+        snapshot: ForkSnapshot,
+        return_policy: ReturnPolicy,
+    },
+    ForkOpened {
+        trajectory: TrajectoryId,
+        fork: crate::value::ForkId,
     },
     Boundary {
         trajectory: TrajectoryId,
@@ -327,6 +359,8 @@ impl Fact {
             | Fact::OutputSanitizerBound { trajectory, .. }
             | Fact::OutputSanitizerApplied { trajectory, .. }
             | Fact::ChildReturn { trajectory, .. }
+            | Fact::ForkPrepared { trajectory, .. }
+            | Fact::ForkOpened { trajectory, .. }
             | Fact::Boundary { trajectory, .. } => trajectory,
         }
     }

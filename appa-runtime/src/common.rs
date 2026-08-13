@@ -528,6 +528,8 @@ impl Core {
                     | AdmitError::AcceptanceMismatch
                     | AdmitError::AlreadySucceeded
                     | AdmitError::SuccessContradicted
+                    // And this one: with no checkpoint there is no observation to contradict.
+                    | AdmitError::ObservationMismatch
                     | AdmitError::OutputSanitizerBound
                     | AdmitError::SanitizerBindingMismatch
                     | AdmitError::SanitizerTransitionUnmet,

@@ -84,9 +84,20 @@ impl CanonicalDigest {
     /// Digest one proposal batch's policy-content payload: domain-separated over each call's
     /// ordered rendered digest and the dynamic resolutions pinned to it, so a repeat carrying the
     /// same content binds the same payload and anything else is an identity conflict.
-    pub(crate) fn of_batch<'a>(calls: impl IntoIterator<Item = &'a ResolvedCall>) -> Self {
+    pub(crate) fn of_batch<'a>(
+        calls: impl IntoIterator<Item = &'a ResolvedCall>,
+        spawn: Option<crate::transition::SpawnMark>,
+    ) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(b"appa.proposal-batch.v1");
+        // The mark is content: the same calls with and without a spawn are two different acts.
+        match spawn {
+            Some(mark) => {
+                hasher.update([1u8]);
+                hasher.update(mark.index().to_be_bytes());
+            }
+            None => hasher.update([0u8]),
+        }
         for call in calls {
             hasher.update([0u8]);
             hasher.update(call.digest().0);
@@ -158,6 +169,23 @@ impl DispatchId {
     }
 }
 
+/// Identifies one prepared fork. Derived from the dispatch whose release prepared it,
+/// never minted by a runtime: one release prepares one fork, and a repeat of the same spawn call
+/// is a new dispatch and so a new fork. The child's own identity is not part of it — the host does
+/// not know that yet when the spawn is released.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ForkId(DispatchId);
+
+impl ForkId {
+    pub fn of(dispatch: &DispatchId) -> Self {
+        ForkId(dispatch.clone())
+    }
+
+    pub fn dispatch(&self) -> &DispatchId {
+        &self.0
+    }
+}
+
 /// Identifies one value a child branch returned through `submit_result`. The occurrence
 /// distinguishes repeated returns from the same child; a merge consumes exactly one, once.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -191,16 +219,28 @@ pub enum Provenance {
 
 /// A value's body — opaque to the engine, which checks labels, never content. Content robustness
 /// is the registered sanitizer's/authority's concern, not the engine's.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ValueBody(String);
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValueBody(std::sync::Arc<str>);
 
 impl ValueBody {
     pub fn new(body: impl Into<String>) -> Self {
-        ValueBody(body.into())
+        ValueBody(body.into().into())
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl Serialize for ValueBody {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for ValueBody {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(ValueBody::new(String::deserialize(deserializer)?))
     }
 }
 
@@ -216,7 +256,7 @@ impl LabeledValue {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedCall {
     tool: ToolName,
     arguments: CanonicalArguments,

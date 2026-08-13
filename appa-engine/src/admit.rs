@@ -4,8 +4,8 @@ use thiserror::Error;
 
 use crate::authority::CastRefusal;
 use crate::check::Narrowing;
-use crate::fact::{CloseOutcome, EffectSet, Fact, FactBatch};
-use crate::label::{Adequacy, EstablishedLabel, Label};
+use crate::fact::{CloseOutcome, EffectSet, Fact, FactBatch, ObservedResult};
+use crate::label::{EstablishedLabel, Label};
 use crate::names::CastName;
 use crate::projection::Views;
 use crate::registry::Registry;
@@ -73,6 +73,8 @@ pub enum AdmitError {
     AlreadySucceeded,
     #[error("the dispatch recorded success: a failure or indeterminate close contradicts it")]
     SuccessContradicted,
+    #[error("this admission carries other bytes than the dispatch's success checkpoint observed")]
+    ObservationMismatch,
     #[error("an executed plan bound this dispatch to a sanitizer: only its derivation may be admitted")]
     OutputSanitizerBound,
     #[error("the derivation names a sanitizer this dispatch is not bound to")]
@@ -86,6 +88,7 @@ pub(crate) fn observe_success(
     views: &Views,
     dispatch: &DispatchId,
     call: &ResolvedCall,
+    observed: ObservedResult,
 ) -> Result<FactBatch, AdmitError> {
     let contract = registry
         .tool(call.tool())
@@ -108,6 +111,7 @@ pub(crate) fn observe_success(
             trajectory: views.trajectory().clone(),
             dispatch: dispatch.clone(),
             effects: contract.emits.clone(),
+            observed,
         }],
     ))
 }
@@ -127,7 +131,12 @@ fn refusal_error(refusal: CastRefusal) -> AdmitError {
     }
 }
 
-fn validate_cast_resolution(
+/// Validate a pending-cast resolution against the contract and the registered cast: the contract
+/// must declare a pending-cast output, and the answer must be the complete whole-source
+/// resolution of that output label — established dimensions preserved exactly, the pending one
+/// inside the registered declaration — so a misbehaving resolver (or runtime) cannot widen a
+/// label past the ceiling or move a dimension the contract settled.
+pub(crate) fn validate_pending_cast(
     registry: &Registry,
     contract: &crate::contract::ToolContract,
     output_label: &Label,
@@ -201,6 +210,19 @@ pub(crate) fn admit_result(
     if checkpointed && matches!(admission, ResultAdmission::Failure | ResultAdmission::Indeterminate) {
         return Err(AdmitError::SuccessContradicted);
     }
+    let reported = match &admission {
+        ResultAdmission::SuccessRaw { body }
+        | ResultAdmission::SuccessCast { body, .. }
+        | ResultAdmission::SuccessCastAccepted { body, .. }
+        | ResultAdmission::SuccessCastLapsed { body, .. } => Some(RawResultDigest::of(body.as_str().as_bytes())),
+        ResultAdmission::SuccessSanitized { raw_digest, .. } => Some(*raw_digest),
+        ResultAdmission::SuccessNoValue | ResultAdmission::Failure | ResultAdmission::Indeterminate => None,
+    };
+    if let (Some(reported), Some(observed)) = (reported, views.observed_result(dispatch))
+        && observed != &ObservedResult::Available(reported)
+    {
+        return Err(AdmitError::ObservationMismatch);
+    }
 
     let trajectory = views.trajectory().clone();
     let output_label =
@@ -248,7 +270,7 @@ pub(crate) fn admit_result(
             vec![close_success(), admit_value(output_label(), body)]
         }
         ResultAdmission::SuccessCast { body, cast, resolved } => {
-            validate_cast_resolution(registry, contract, &output_label(), &cast, &resolved)?;
+            validate_pending_cast(registry, contract, &output_label(), &cast, &resolved)?;
             if pending_cast_narrowing(views, &resolved).is_some() {
                 return Err(AdmitError::NarrowingUnaccepted);
             }
@@ -271,7 +293,7 @@ pub(crate) fn admit_result(
             resolved,
             accepted,
         } => {
-            validate_cast_resolution(registry, contract, &output_label(), &cast, &resolved)?;
+            validate_pending_cast(registry, contract, &output_label(), &cast, &resolved)?;
             if pending_cast_narrowing(views, &resolved) != Some(accepted.clone()) {
                 return Err(AdmitError::AcceptanceMismatch);
             }
@@ -307,9 +329,9 @@ pub(crate) fn admit_result(
                 .sanitizer(&sanitizer)
                 .ok_or_else(|| AdmitError::UnknownTool(sanitizer.as_str().to_string()))?;
             let raw_label = output_label();
-            if !registered.on.output || registered.transition.admits(&raw_label) != Adequacy::Holds {
-                return Err(AdmitError::SanitizerTransitionUnmet);
-            }
+            let derived = registered
+                .derive_output(&raw_label)
+                .ok_or(AdmitError::SanitizerTransitionUnmet)?;
             vec![
                 close_success(),
                 Fact::OutputSanitizerApplied {
@@ -319,11 +341,11 @@ pub(crate) fn admit_result(
                     transition: registered.transition.clone(),
                     raw_digest,
                 },
-                admit_value(registered.transition.derive(&raw_label), body),
+                admit_value(derived, body),
             ]
         }
         ResultAdmission::SuccessCastLapsed { body, cast, resolved } => {
-            validate_cast_resolution(registry, contract, &output_label(), &cast, &resolved)?;
+            validate_pending_cast(registry, contract, &output_label(), &cast, &resolved)?;
             let raw_digest = RawResultDigest::of(body.as_str().as_bytes());
             vec![
                 close_success(),
@@ -395,6 +417,8 @@ pub(crate) fn admit_cast(
 
 #[cfg(test)]
 mod tests {
+    const BODY: &str = "the result";
+
     use super::*;
     use crate::authority::{Cast, CastCeiling, CastResolution, Sanitizer, SanitizerPoints, Scope, Transition};
     use crate::contract::{AudienceDelta, Delta, DynamicAudienceBinding, PinnedDynamicResolution, ToolContract};
@@ -1427,14 +1451,15 @@ mod tests {
         let t = traj();
 
         let p = views_of(&log);
-        let batch = observe_success(&reg, &p.view(&t), &dispatch, &call).unwrap();
+        let observed = ObservedResult::Available(RawResultDigest::of(BODY.as_bytes()));
+        let batch = observe_success(&reg, &p.view(&t), &dispatch, &call, observed.clone()).unwrap();
         log.extend(batch.facts);
         let p = views_of(&log);
         assert!(p.view(&t).has_effect(&EffectKind::new("read")));
         assert!(p.view(&t).is_open(&dispatch));
 
         assert_eq!(
-            observe_success(&reg, &p.view(&t), &dispatch, &call),
+            observe_success(&reg, &p.view(&t), &dispatch, &call, observed.clone()),
             Err(AdmitError::AlreadySucceeded)
         );
 
@@ -1453,7 +1478,7 @@ mod tests {
             &dispatch,
             &call,
             ResultAdmission::SuccessCastLapsed {
-                body: ValueBody::new("mail"),
+                body: ValueBody::new(BODY),
                 cast: CastName::new("paranoid"),
                 resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
             },
@@ -1480,14 +1505,15 @@ mod tests {
         let t = traj();
 
         let p = views_of(&log);
-        let batch = observe_success(&reg, &p.view(&t), &dispatch, &call).unwrap();
+        let observed = ObservedResult::Available(RawResultDigest::of(BODY.as_bytes()));
+        let batch = observe_success(&reg, &p.view(&t), &dispatch, &call, observed.clone()).unwrap();
         log.extend(batch.facts);
         let p = views_of(&log);
         assert!(p.view(&t).has_effect(&EffectKind::new("read")));
         assert!(p.view(&t).is_open(&dispatch));
 
         assert_eq!(
-            observe_success(&reg, &p.view(&t), &dispatch, &call),
+            observe_success(&reg, &p.view(&t), &dispatch, &call, observed.clone()),
             Err(AdmitError::AlreadySucceeded)
         );
         assert_eq!(
@@ -1501,7 +1527,7 @@ mod tests {
             &dispatch,
             &call,
             ResultAdmission::SuccessRaw {
-                body: ValueBody::new("ticket"),
+                body: ValueBody::new(BODY),
             },
         )
         .unwrap();

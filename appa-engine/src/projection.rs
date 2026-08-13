@@ -3,11 +3,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::contract::PinnedDynamicResolution;
-use crate::fact::{BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ForkSnapshot, ReturnPolicy, Revision};
+use crate::fact::{
+    BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ForkSnapshot, ObservedResult, ReturnPolicy, Revision,
+};
 use crate::label::{EstablishedLabel, Label, PartialLabel};
 use crate::names::{AuthorityName, SanitizerName};
 use crate::value::{
-    CanonicalDigest, ChildReturnId, DispatchId, LabeledValue, Provenance, ToolName, TrajectoryId, ValueId,
+    CanonicalDigest, ChildReturnId, DispatchId, ForkId, LabeledValue, Provenance, ResolvedCall, ToolName, TrajectoryId,
+    ValueId,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -15,12 +18,7 @@ struct AdmittedValue {
     trajectory: TrajectoryId,
     label: Label,
     provenance: Provenance,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct OpenedDispatch {
-    trajectory: TrajectoryId,
-    digest: CanonicalDigest,
+    body: Option<crate::value::ValueBody>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,7 +29,22 @@ struct Fork {
     return_policy: ReturnPolicy,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PreparedFork {
+    pub(crate) parent: TrajectoryId,
+    pub(crate) snapshot: ForkSnapshot,
+    pub(crate) return_policy: ReturnPolicy,
+    denials: BTreeMap<CanonicalDigest, BTreeSet<AuthorityName>>,
+}
+
 static MISSING_SOURCE: Label = Label::unknown();
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseKind {
+    Success,
+    Failure,
+    Indeterminate,
+}
 
 static NO_INHERITED: BTreeSet<ValueId> = BTreeSet::new();
 
@@ -52,18 +65,22 @@ struct ReturnedChild {
 pub struct Projection {
     revision: Revision,
     values: Vec<AdmittedValue>,
+    local: BTreeMap<TrajectoryId, Vec<ValueId>>,
     effects: Vec<EffectKind>,
     open: BTreeSet<DispatchId>,
     reservations: BTreeMap<DispatchId, EffectSet>,
-    succeeded: BTreeSet<DispatchId>,
-    opened: Vec<OpenedDispatch>,
-    dispatch_tools: BTreeMap<DispatchId, ToolName>,
+    lapsed: BTreeSet<DispatchId>,
+    closed: BTreeMap<DispatchId, CloseKind>,
+    occurrences: BTreeMap<(TrajectoryId, CanonicalDigest), u32>,
+    dispatch_calls: BTreeMap<DispatchId, ResolvedCall>,
+    observations: BTreeMap<DispatchId, ObservedResult>,
     boundaries: Vec<TrajectoryId>,
     forks: Vec<Fork>,
+    prepared: BTreeMap<ForkId, PreparedFork>,
+    bound: BTreeMap<ForkId, TrajectoryId>,
     child_returns: Vec<ReturnedChild>,
     voided: BTreeSet<TrajectoryId>,
     bound_sanitizers: BTreeMap<DispatchId, SanitizerName>,
-    dynamic_resolutions: BTreeMap<DispatchId, Vec<PinnedDynamicResolution>>,
     /// Denied authorities per trajectory scope, keyed by rendered call (the
     /// denial-exclusion consultation). The engine scopes the exclusion "in the trajectory" and is
     /// silent on forks; the settled reading implemented here — a child snapshots its parent's
@@ -79,41 +96,87 @@ pub struct Projection {
 }
 
 impl Projection {
-    /// Build every view from the family log. `revision` is the log's current version (the runtime's
-    /// batch count); the projection is a pure function of `(log, revision)`.
-    pub fn build(log: &[Fact], revision: Revision) -> Self {
-        let mut values = Vec::new();
-        let mut effects = Vec::new();
-        let mut open = BTreeSet::new();
-        let mut reservations = BTreeMap::new();
-        let mut succeeded = BTreeSet::new();
-        let mut opened = Vec::new();
-        let mut dispatch_tools = BTreeMap::new();
-        let mut boundaries = Vec::new();
-        let mut forks = Vec::new();
-        let mut child_returns = Vec::new();
-        let mut voided = BTreeSet::new();
-        let mut bound_sanitizers = BTreeMap::new();
-        let mut dynamic_resolutions = BTreeMap::new();
-        let mut denials: BTreeMap<TrajectoryId, BTreeMap<CanonicalDigest, BTreeSet<AuthorityName>>> = BTreeMap::new();
-        let mut active = BTreeSet::new();
-        let mut decided = BTreeMap::new();
+    pub(crate) fn empty(revision: Revision) -> Self {
+        Projection {
+            revision,
+            values: Vec::new(),
+            local: BTreeMap::new(),
+            effects: Vec::new(),
+            open: BTreeSet::new(),
+            reservations: BTreeMap::new(),
+            lapsed: BTreeSet::new(),
+            closed: BTreeMap::new(),
+            occurrences: BTreeMap::new(),
+            dispatch_calls: BTreeMap::new(),
+            observations: BTreeMap::new(),
+            boundaries: Vec::new(),
+            forks: Vec::new(),
+            prepared: BTreeMap::new(),
+            bound: BTreeMap::new(),
+            child_returns: Vec::new(),
+            voided: BTreeSet::new(),
+            bound_sanitizers: BTreeMap::new(),
+            denials: BTreeMap::new(),
+            active: BTreeSet::new(),
+            decided: BTreeMap::new(),
+        }
+    }
 
+    /// Fold every view from the family log **without** the transition rules.
+    pub fn build(log: &[Fact], revision: Revision) -> Self {
+        let mut projection = Projection::empty(revision);
         for fact in log {
+            projection.fold(fact);
+        }
+        projection
+    }
+
+    pub(crate) fn set_revision(&mut self, revision: Revision) {
+        self.revision = revision;
+    }
+
+    /// Fold one record into every view. The one fold: replay, cache rebuild, and the advance of a
+    /// held view all reach the log through this function, so no second fold can drift from it.
+    pub(crate) fn fold(&mut self, fact: &Fact) {
+        let Projection {
+            revision: _,
+            values,
+            local,
+            effects,
+            open,
+            reservations,
+            lapsed,
+            closed,
+            occurrences,
+            dispatch_calls,
+            observations,
+            boundaries,
+            forks,
+            prepared,
+            bound,
+            child_returns,
+            voided,
+            bound_sanitizers,
+            denials,
+            active,
+            decided,
+        } = self;
+        {
             active.insert(fact.trajectory().clone());
             match fact {
                 Fact::TrajectoryOpened { .. } => {}
                 Fact::ProposalBatchDecided {
                     trajectory,
                     batch,
-                    payload,
+                    proposals,
+                    spawn,
                     released,
                 } => {
                     decided.insert(
                         batch.clone(),
                         DecidedBatch {
                             trajectory: trajectory.clone(),
-                            payload: *payload,
+                            payload: CanonicalDigest::of_batch(proposals, *spawn),
                             released: released.clone(),
                         },
                     );
@@ -122,40 +185,59 @@ impl Projection {
                     trajectory,
                     value,
                     provenance,
-                } => values.push(AdmittedValue {
-                    trajectory: trajectory.clone(),
-                    label: value.label.clone(),
-                    provenance: provenance.clone(),
-                }),
+                } => {
+                    local
+                        .entry(trajectory.clone())
+                        .or_default()
+                        .push(ValueId::new(values.len() as u64));
+                    values.push(AdmittedValue {
+                        trajectory: trajectory.clone(),
+                        label: value.label.clone(),
+                        provenance: provenance.clone(),
+                        body: match provenance {
+                            Provenance::ToolResult { .. } => Some(value.body.clone()),
+                            Provenance::UserInput | Provenance::ChildReturn { .. } => None,
+                        },
+                    });
+                }
                 Fact::DispatchOpened {
                     trajectory,
                     dispatch,
                     tool,
+                    arguments,
                     proposed_effects,
                     dynamic_resolutions: resolutions,
                     ..
                 } => {
-                    dispatch_tools.insert(dispatch.clone(), tool.clone());
-                    dynamic_resolutions.insert(dispatch.clone(), resolutions.clone());
+                    dispatch_calls.insert(
+                        dispatch.clone(),
+                        ResolvedCall::new(tool.clone(), arguments.clone())
+                            .with_dynamic_resolutions(resolutions.clone()),
+                    );
                     open.insert(dispatch.clone());
                     reservations.insert(dispatch.clone(), proposed_effects.clone());
-                    opened.push(OpenedDispatch {
-                        trajectory: trajectory.clone(),
-                        digest: *dispatch.digest(),
-                    });
+                    *occurrences.entry((trajectory.clone(), *dispatch.digest())).or_insert(0) += 1;
                 }
                 Fact::DispatchSucceeded {
                     dispatch,
                     effects: committed,
+                    observed,
                     ..
                 } => {
-                    succeeded.insert(dispatch.clone());
+                    observations.insert(dispatch.clone(), observed.clone());
                     reservations.remove(dispatch);
                     effects.extend(committed.iter().cloned());
                 }
                 Fact::DispatchClosed { dispatch, outcome, .. } => {
                     open.remove(dispatch);
-                    succeeded.remove(dispatch);
+                    closed.insert(
+                        dispatch.clone(),
+                        match outcome {
+                            CloseOutcome::Success { .. } => CloseKind::Success,
+                            CloseOutcome::Failure => CloseKind::Failure,
+                            CloseOutcome::Indeterminate => CloseKind::Indeterminate,
+                        },
+                    );
                     match outcome {
                         CloseOutcome::Success { effects: committed } => {
                             reservations.remove(dispatch);
@@ -188,12 +270,45 @@ impl Projection {
                 Fact::AssistantMessage { .. } | Fact::BlockFeedback { .. } => {}
                 Fact::OutputCastApplied { .. }
                 | Fact::OutputCastAccepted { .. }
-                | Fact::OutputCastLapsed { .. }
                 | Fact::OutputSanitizerApplied { .. } => {}
+                Fact::OutputCastLapsed { dispatch, .. } => {
+                    lapsed.insert(dispatch.clone());
+                }
                 Fact::OutputSanitizerBound {
                     dispatch, sanitizer, ..
                 } => {
                     bound_sanitizers.insert(dispatch.clone(), sanitizer.clone());
+                }
+                // The spawn's release prepared this fork; the child that binds it comes later.
+                Fact::ForkPrepared {
+                    trajectory,
+                    fork,
+                    snapshot,
+                    return_policy,
+                } => {
+                    prepared.insert(
+                        fork.clone(),
+                        PreparedFork {
+                            parent: trajectory.clone(),
+                            snapshot: snapshot.clone(),
+                            return_policy: return_policy.clone(),
+                            denials: denials.get(trajectory).cloned().unwrap_or_default(),
+                        },
+                    );
+                }
+                Fact::ForkOpened { trajectory, fork } => {
+                    if let Some(preparation) = prepared.get(fork) {
+                        bound.insert(fork.clone(), trajectory.clone());
+                        if !preparation.denials.is_empty() {
+                            denials.insert(trajectory.clone(), preparation.denials.clone());
+                        }
+                        forks.push(Fork {
+                            child: trajectory.clone(),
+                            parent: preparation.parent.clone(),
+                            snapshot: preparation.snapshot.clone(),
+                            return_policy: preparation.return_policy.clone(),
+                        });
+                    }
                 }
                 Fact::ChildReturn { id, value, .. } => child_returns.push(ReturnedChild {
                     id: id.clone(),
@@ -226,26 +341,6 @@ impl Projection {
                 }
             }
         }
-
-        Projection {
-            revision,
-            values,
-            effects,
-            open,
-            reservations,
-            succeeded,
-            opened,
-            dispatch_tools,
-            boundaries,
-            forks,
-            child_returns,
-            voided,
-            bound_sanitizers,
-            dynamic_resolutions,
-            denials,
-            active,
-            decided,
-        }
     }
 
     pub fn revision(&self) -> Revision {
@@ -270,16 +365,11 @@ impl Projection {
         let inherited = self
             .snapshot_of(trajectory)
             .map_or(&NO_INHERITED, ForkSnapshot::inherited);
+        static NO_VALUES: Vec<ValueId> = Vec::new();
         inherited
             .iter()
+            .chain(self.local.get(trajectory).unwrap_or(&NO_VALUES))
             .map(|id| (*id, self.value_label(*id).unwrap_or(&MISSING_SOURCE)))
-            .chain(
-                self.values
-                    .iter()
-                    .enumerate()
-                    .filter(move |(_, value)| &value.trajectory == trajectory)
-                    .map(|(i, value)| (ValueId::new(i as u64), &value.label)),
-            )
     }
 
     fn base_of(&self, trajectory: &TrajectoryId) -> EstablishedLabel {
@@ -293,6 +383,32 @@ impl Projection {
 
     fn freeze_basis(&self, trajectory: &TrajectoryId) -> ForkSnapshot {
         ForkSnapshot::freeze(self.base_of(trajectory), self.basis_sources(trajectory))
+    }
+
+    /// Every trajectory the log names — the family membership the transition validator carries
+    /// forward when it resumes from a validated view.
+    pub(crate) fn trajectories(&self) -> impl Iterator<Item = &TrajectoryId> {
+        self.active.iter()
+    }
+
+    pub(crate) fn admitted_dispatches(&self) -> BTreeSet<DispatchId> {
+        self.values
+            .iter()
+            .filter_map(|value| match &value.provenance {
+                Provenance::ToolResult { dispatch } => Some(dispatch.clone()),
+                Provenance::UserInput | Provenance::ChildReturn { .. } => None,
+            })
+            .collect()
+    }
+
+    /// The fork a release prepared, if this identity names one. Family-global: a fork
+    /// belongs to the log, and the child it will open is not a trajectory of it yet.
+    pub(crate) fn prepared_fork(&self, fork: &ForkId) -> Option<&PreparedFork> {
+        self.prepared.get(fork)
+    }
+
+    pub(crate) fn bound_child(&self, fork: &ForkId) -> Option<&TrajectoryId> {
+        self.bound.get(fork)
     }
 
     pub fn view<'a>(&'a self, trajectory: &'a TrajectoryId) -> Views<'a> {
@@ -309,8 +425,13 @@ pub struct Views<'a> {
 }
 
 impl Views<'_> {
+    /// The dynamic answers a dispatch pinned, read off the canonical call the opening
+    /// recorded — the one representation the validator held that record to.
     pub fn dynamic_resolutions(&self, dispatch: &DispatchId) -> Option<&[PinnedDynamicResolution]> {
-        self.projection.dynamic_resolutions.get(dispatch).map(Vec::as_slice)
+        self.projection
+            .dispatch_calls
+            .get(dispatch)
+            .map(ResolvedCall::dynamic_resolutions)
     }
     pub fn revision(&self) -> Revision {
         self.projection.revision
@@ -337,7 +458,28 @@ impl Views<'_> {
     /// [`Provenance::ToolResult`], read by the cast scope gate and by readers naming a
     /// value's producer. The fold never consumes it.
     pub fn dispatch_tool(&self, dispatch: &DispatchId) -> Option<&ToolName> {
-        self.projection.dispatch_tools.get(dispatch)
+        self.projection.dispatch_calls.get(dispatch).map(ResolvedCall::tool)
+    }
+
+    /// The canonical call a dispatch released. An outcome names its dispatch, and this
+    /// is what the engine reports on — never a call the caller re-supplies.
+    pub(crate) fn dispatch_call(&self, dispatch: &DispatchId) -> Option<&ResolvedCall> {
+        self.projection.dispatch_calls.get(dispatch)
+    }
+
+    /// What the runtime observed at this dispatch's success checkpoint, if it recorded
+    /// one. A later report of the same dispatch is bound to it.
+    pub(crate) fn observed_result(&self, dispatch: &DispatchId) -> Option<&ObservedResult> {
+        self.projection.observations.get(dispatch)
+    }
+
+    /// The body a dispatch's result admitted into the trajectory, if one crossed — the recorded
+    /// terminal outcome a repeated report hears.
+    pub(crate) fn admitted_body(&self, dispatch: &DispatchId) -> Option<&crate::value::ValueBody> {
+        self.projection.values.iter().find_map(|value| match &value.provenance {
+            Provenance::ToolResult { dispatch: opened } if opened == dispatch => value.body.as_ref(),
+            _ => None,
+        })
     }
 
     /// Does this value belong to the scoped trajectory? Read by the block feedback that names a
@@ -347,6 +489,16 @@ impl Views<'_> {
             .ok()
             .and_then(|i| self.projection.values.get(i))
             .is_some_and(|value| &value.trajectory == self.trajectory)
+    }
+
+    pub(crate) fn bound_child_of(&self, fork: &ForkId) -> Option<&TrajectoryId> {
+        self.projection.bound_child(fork)
+    }
+
+    /// Was this fork prepared by a release in this family? Family-global, like the fork
+    /// itself; the scoping trajectory plays no part.
+    pub(crate) fn is_prepared(&self, fork: &ForkId) -> bool {
+        self.projection.prepared_fork(fork).is_some()
     }
 
     /// May this branch resolve `id`? A locally admitted value, or an ancestor value in
@@ -441,10 +593,10 @@ impl Views<'_> {
     /// next one (a repeat identical call is a new dispatch, not a re-issue).
     pub fn dispatch_count(&self, digest: &CanonicalDigest) -> u32 {
         self.projection
-            .opened
-            .iter()
-            .filter(|d| &d.trajectory == self.trajectory && &d.digest == digest)
-            .count() as u32
+            .occurrences
+            .get(&(self.trajectory.clone(), *digest))
+            .copied()
+            .unwrap_or(0)
     }
 
     pub fn has_effect(&self, kind: &EffectKind) -> bool {
@@ -465,10 +617,23 @@ impl Views<'_> {
         self.projection.open.contains(dispatch)
     }
 
+    pub(crate) fn has_lapsed(&self, dispatch: &DispatchId) -> bool {
+        self.projection.lapsed.contains(dispatch)
+    }
+
+    pub(crate) fn closed_successfully(&self, dispatch: &DispatchId) -> bool {
+        matches!(self.projection.closed.get(dispatch), Some(CloseKind::Success))
+    }
+
+    pub(crate) fn dispatch_failed(&self, dispatch: &DispatchId) -> bool {
+        matches!(self.projection.closed.get(dispatch), Some(CloseKind::Failure))
+    }
+
     /// Has this still-open dispatch's success checkpoint already committed its effects? Gates the
     /// close (success-family only, no duplicate effects) and the runtime's once-only checkpoint.
+    /// Derived: a checkpoint is exactly a recorded observation on a dispatch that is still open.
     pub fn is_succeeded(&self, dispatch: &DispatchId) -> bool {
-        self.projection.succeeded.contains(dispatch)
+        self.is_open(dispatch) && self.projection.observations.contains_key(dispatch)
     }
 
     /// The output sanitizer an executed sanitize plan bound to this dispatch, if any.

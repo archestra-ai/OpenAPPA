@@ -41,6 +41,8 @@ pub enum PlanError {
     InvalidCall(crate::params::ArgumentError),
     #[error("the call is not blocked — dispatch it directly")]
     NotBlocked,
+    #[error("the branch already ended its errand")]
+    BranchEnded,
     #[error("the call has an unestablished dimension — a fact clears it, never a plan")]
     Unestablished(Vec<UnestablishedFact>),
     #[error("no plan {0} is offered for this block")]
@@ -59,6 +61,39 @@ pub enum PlanError {
     RulingAssignmentMismatch,
     #[error("a ruling's recorded review does not match the live state it would admit")]
     ReviewMismatch,
+}
+
+/// The mandate envelope of a released block: no ruling claims a gap the block
+/// does not carry or its authority's mandate does not reach, and every requirement gap is claimed
+/// by one that does. Shared by live execution and by the transition validator, so the envelope a
+/// persisted release is held to is the one the live path enforced.
+pub(crate) fn rulings_cover<'a>(
+    registry: &Registry,
+    contract: &crate::contract::ToolContract,
+    block: &crate::check::RawBlock,
+    rulings: impl Iterator<Item = (&'a AuthorityName, &'a [Gap])> + Clone,
+) -> Result<(), PlanError> {
+    for (authority, covers) in rulings.clone() {
+        let registered = registry
+            .authority(authority)
+            .ok_or_else(|| PlanError::UnknownAuthority(authority.as_str().to_string()))?;
+        for gap in covers {
+            if !block.requirement_gaps.contains(gap) {
+                return Err(PlanError::RulingClaimsAbsentGap(gap.clone()));
+            }
+            if !covers_gap(registered, gap, &contract.tags) {
+                return Err(PlanError::RulingExceedsMandate {
+                    authority: authority.as_str().to_string(),
+                });
+            }
+        }
+    }
+    for gap in &block.requirement_gaps {
+        if !rulings.clone().any(|(_, covers)| covers.contains(gap)) {
+            return Err(PlanError::GapUncovered(gap.clone()));
+        }
+    }
+    Ok(())
 }
 
 /// Execute a remedy plan: verify coverage, then emit the atomic
@@ -119,37 +154,20 @@ pub(crate) fn execute_remedy_plan(
 
     let (dispatch, dispatch_opened) = opened_dispatch(contract, views, call);
 
+    // Each ruling must be scoped to this exact dispatch.
     for ruling in rulings {
         if ruling.dispatch != dispatch {
             return Err(PlanError::RulingCallMismatch);
         }
-        let authority = registry
-            .authority(&ruling.authority)
-            .ok_or_else(|| PlanError::UnknownAuthority(ruling.authority.as_str().to_string()))?;
-        for gap in &ruling.covers {
-            if !block.requirement_gaps.contains(gap) {
-                return Err(PlanError::RulingClaimsAbsentGap(gap.clone()));
-            }
-            if !covers_gap(authority, gap, &contract.tags) {
-                return Err(PlanError::RulingExceedsMandate {
-                    authority: ruling.authority.as_str().to_string(),
-                });
-            }
-        }
     }
-
-    // Every requirement gap must be covered by some in-mandate ruling that claims it.
-    for gap in &block.requirement_gaps {
-        let covered = rulings.iter().any(|ruling| {
-            ruling.covers.contains(gap)
-                && registry
-                    .authority(&ruling.authority)
-                    .is_some_and(|authority| covers_gap(authority, gap, &contract.tags))
-        });
-        if !covered {
-            return Err(PlanError::GapUncovered(gap.clone()));
-        }
-    }
+    rulings_cover(
+        registry,
+        contract,
+        &block,
+        rulings
+            .iter()
+            .map(|ruling| (&ruling.authority, ruling.covers.as_slice())),
+    )?;
 
     let trajectory = views.trajectory().clone();
 
