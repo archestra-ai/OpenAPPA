@@ -1043,13 +1043,37 @@ impl Turn {
                 if facts.is_empty() {
                     break;
                 }
-                let residual = crate::feedback::unestablished_return_feedback(&facts, &projection.view(&self.session));
                 drop(projection);
                 match self.resolve_unknown(&log, &facts, budget).await {
                     Err(TurnCancelled) => return Ok(CallProgress::Cancelled),
                     Ok(progressed) => {
                         if !progressed? {
-                            self.feedback(call_id, &residual)?;
+                            let mut reported = false;
+                            self.mediator
+                                .store()
+                                .finalize(&self.tenant, &self.session, |log, revision| {
+                                    let projection = Projection::build(log, revision);
+                                    let facts = self
+                                        .mediator
+                                        .engine()
+                                        .child_fold_unestablished(&projection.view(&parent), &self.session);
+                                    if facts.is_empty() {
+                                        return None;
+                                    }
+                                    reported = true;
+                                    let residual = crate::feedback::unestablished_return_feedback(
+                                        &facts,
+                                        &projection.view(&self.session),
+                                    );
+                                    Some(FactBatch::new(
+                                        revision,
+                                        vec![feedback_fact(&self.session, call_id, &residual)],
+                                    ))
+                                })?;
+                            if !reported {
+                                break;
+                            }
+                            self.mark_answered(call_id);
                             return Ok(CallProgress::Go);
                         }
                     }

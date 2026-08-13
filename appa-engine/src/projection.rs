@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::contract::PinnedDynamicResolution;
-use crate::fact::{BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ReturnPolicy, Revision};
+use crate::fact::{BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ForkSnapshot, ReturnPolicy, Revision};
 use crate::label::{EstablishedLabel, Label, PartialLabel};
 use crate::names::{AuthorityName, SanitizerName};
 use crate::value::{
@@ -27,9 +27,13 @@ struct OpenedDispatch {
 struct Fork {
     child: TrajectoryId,
     parent: TrajectoryId,
-    seed: Label,
+    snapshot: ForkSnapshot,
     return_policy: ReturnPolicy,
 }
+
+static MISSING_SOURCE: Label = Label::unknown();
+
+static NO_INHERITED: BTreeSet<ValueId> = BTreeSet::new();
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ReturnedChild {
@@ -63,6 +67,7 @@ pub struct Projection {
     /// `D×F` entries. Denials are rare governance events and the planner consults one trajectory
     /// at a time, so the flat copy stays the boring choice over an ancestry-cutoff walk.
     denials: BTreeMap<TrajectoryId, BTreeMap<CanonicalDigest, BTreeSet<AuthorityName>>>,
+    active: BTreeSet<TrajectoryId>,
 }
 
 impl Projection {
@@ -83,8 +88,10 @@ impl Projection {
         let mut bound_sanitizers = BTreeMap::new();
         let mut dynamic_resolutions = BTreeMap::new();
         let mut denials: BTreeMap<TrajectoryId, BTreeMap<CanonicalDigest, BTreeSet<AuthorityName>>> = BTreeMap::new();
+        let mut active = BTreeSet::new();
 
         for fact in log {
+            active.insert(fact.trajectory().clone());
             match fact {
                 Fact::TrajectoryOpened { .. } => {}
                 Fact::ValueAdmitted {
@@ -174,7 +181,7 @@ impl Projection {
                         BoundaryKind::TurnEnd => {}
                         BoundaryKind::Fork {
                             parent,
-                            seed,
+                            snapshot,
                             return_policy,
                         } => {
                             if let Some(inherited) = denials.get(parent).cloned() {
@@ -183,7 +190,7 @@ impl Projection {
                             forks.push(Fork {
                                 child: trajectory.clone(),
                                 parent: parent.clone(),
-                                seed: seed.clone(),
+                                snapshot: snapshot.clone(),
                                 return_policy: return_policy.clone(),
                             });
                         }
@@ -212,6 +219,7 @@ impl Projection {
             bound_sanitizers,
             dynamic_resolutions,
             denials,
+            active,
         }
     }
 
@@ -226,23 +234,40 @@ impl Projection {
             .map(|v| &v.label)
     }
 
-    fn fold_for(&self, trajectory: &TrajectoryId) -> PartialLabel {
-        let seed = self
-            .forks
+    fn snapshot_of(&self, trajectory: &TrajectoryId) -> Option<&ForkSnapshot> {
+        self.forks
             .iter()
             .find(|fork| &fork.child == trajectory)
-            .map(|fork| {
-                EstablishedLabel::from_label(&fork.seed)
-                    .expect("fork seeds are fully established (seed_child refuses unresolved parents)")
-            })
-            .unwrap_or_else(EstablishedLabel::top);
-        let mut fold = PartialLabel::established(seed);
-        for (i, value) in self.values.iter().enumerate() {
-            if &value.trajectory == trajectory {
-                fold.fold_value(ValueId::new(i as u64), &value.label);
-            }
-        }
-        fold
+            .map(|fork| &fork.snapshot)
+    }
+
+    fn basis_sources<'a>(&'a self, trajectory: &'a TrajectoryId) -> impl Iterator<Item = (ValueId, &'a Label)> + 'a {
+        let inherited = self
+            .snapshot_of(trajectory)
+            .map_or(&NO_INHERITED, ForkSnapshot::inherited);
+        inherited
+            .iter()
+            .map(|id| (*id, self.value_label(*id).unwrap_or(&MISSING_SOURCE)))
+            .chain(
+                self.values
+                    .iter()
+                    .enumerate()
+                    .filter(move |(_, value)| &value.trajectory == trajectory)
+                    .map(|(i, value)| (ValueId::new(i as u64), &value.label)),
+            )
+    }
+
+    fn base_of(&self, trajectory: &TrajectoryId) -> EstablishedLabel {
+        self.snapshot_of(trajectory)
+            .map_or_else(EstablishedLabel::top, |snapshot| snapshot.base().clone())
+    }
+
+    fn fold_for(&self, trajectory: &TrajectoryId) -> PartialLabel {
+        PartialLabel::from_basis(self.base_of(trajectory), self.basis_sources(trajectory))
+    }
+
+    fn freeze_basis(&self, trajectory: &TrajectoryId) -> ForkSnapshot {
+        ForkSnapshot::freeze(self.base_of(trajectory), self.basis_sources(trajectory))
     }
 
     pub fn view<'a>(&'a self, trajectory: &'a TrajectoryId) -> Views<'a> {
@@ -290,13 +315,36 @@ impl Views<'_> {
         self.projection.dispatch_tools.get(dispatch)
     }
 
-    /// Does this value belong to the scoped trajectory? A cast may only resolve its own branch's
-    /// values, never a sibling's.
+    /// Does this value belong to the scoped trajectory? Read by the block feedback that names a
+    /// value's producing tool: a value this branch did not admit itself stays id-only.
     pub fn owns_value(&self, id: ValueId) -> bool {
         usize::try_from(id.index())
             .ok()
             .and_then(|i| self.projection.values.get(i))
             .is_some_and(|value| &value.trajectory == self.trajectory)
+    }
+
+    /// May this branch resolve `id`? A locally admitted value, or an ancestor value in
+    /// its frozen inherited set — the resolution belongs to the immutable source, not the actor,
+    /// so whoever holds the source may establish it. A sibling-only or post-fork value is in no
+    /// snapshot of this branch and stays out of reach.
+    pub(crate) fn may_resolve(&self, id: ValueId) -> bool {
+        self.owns_value(id)
+            || self
+                .projection
+                .snapshot_of(self.trajectory)
+                .is_some_and(|snapshot| snapshot.inherited().contains(&id))
+    }
+
+    /// Does the family log name `trajectory` at all? A fork takes an unused child id:
+    /// activity recorded before the fork was decided under no parent restriction at all, and the
+    /// fork cannot retract it afterwards.
+    pub(crate) fn is_active(&self, trajectory: &TrajectoryId) -> bool {
+        self.projection.active.contains(trajectory)
+    }
+
+    pub(crate) fn freeze_basis(&self) -> ForkSnapshot {
+        self.projection.freeze_basis(self.trajectory)
     }
 
     /// The branch's current partial label: the fold of every value admitted to this
@@ -626,7 +674,7 @@ mod tests {
             trajectory: traj(child),
             kind: BoundaryKind::Fork {
                 parent: traj(parent),
-                seed: Label::top(),
+                snapshot: ForkSnapshot::freeze(EstablishedLabel::top(), std::iter::empty()),
                 return_policy: ReturnPolicy::Raw,
             },
         };

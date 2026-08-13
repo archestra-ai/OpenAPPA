@@ -147,8 +147,9 @@ fn fork_advice<'a>(
     offers: &[(String, ExecutableRemedyPlan)],
     surface: FeedbackSurface,
 ) -> Option<&'a str> {
-    // No fork advice while a fact is missing: fork seeding refuses an Unknown parent, so the
-    // advice would name a move the engine then refuses.
+    // No fork advice while a fact is missing: a fork cures no gap. The child inherits the
+    // unresolved source and meets the same block, so the advice would name a move that cannot
+    // clear this one.
     if !raw.unestablished.is_empty() {
         return None;
     }

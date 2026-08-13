@@ -177,8 +177,8 @@ fn render_call(call: &ProposedCall) -> WireToolCall {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use appa_engine::fact::ReturnPolicy;
-    use appa_engine::label::{Audience, Dim, Label, Trust};
+    use appa_engine::fact::{ForkSnapshot, ReturnPolicy};
+    use appa_engine::label::{Audience, Dim, EstablishedLabel, Label, Trust};
     use appa_engine::value::{ChildReturnId, DispatchId, LabeledValue, ToolName, ValueBody};
     use serde_json::json;
 
@@ -207,7 +207,7 @@ mod tests {
             trajectory: child.clone(),
             kind: BoundaryKind::Fork {
                 parent: parent.clone(),
-                seed: public(3),
+                snapshot: ForkSnapshot::freeze(EstablishedLabel::top(), std::iter::empty()),
                 return_policy: ReturnPolicy::Raw,
             },
         }

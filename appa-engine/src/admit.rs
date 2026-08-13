@@ -170,7 +170,7 @@ pub enum CastError {
     EstablishedMismatch,
     #[error("target value is unknown or out of range")]
     UnknownValue,
-    #[error("target value belongs to another trajectory")]
+    #[error("target value is neither admitted by nor inherited into this branch")]
     ForeignValue,
     #[error("target value's originating tool is outside the cast's scope")]
     OutOfScope,
@@ -353,13 +353,12 @@ pub(crate) fn admit_cast(
         .cast(&answer.cast)
         .ok_or_else(|| CastError::UnknownCast(answer.cast.as_str().to_string()))?;
     let prior = views.value_label(value).ok_or(CastError::UnknownValue)?;
-    // A cast establishes an Unknown of the caller's own branch-local value, never a sibling's.
-    if !views.owns_value(value) {
+    if !views.may_resolve(value) {
         return Err(CastError::ForeignValue);
     }
     let applicable = match views
         .value_provenance(value)
-        .expect("owns_value proved the record exists")
+        .expect("the value_label lookup proved the record exists")
     {
         crate::value::Provenance::ToolResult { dispatch } => {
             let tool = views

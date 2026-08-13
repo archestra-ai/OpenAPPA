@@ -20,8 +20,8 @@ pub enum BranchError {
     SelfFork,
     #[error("the child is already forked from a parent (reparenting refused)")]
     AlreadyForked,
-    #[error("the parent's current label has an unresolved dimension — resolve it before forking")]
-    ParentUnresolved,
+    #[error("the family log already names this child trajectory — a fork takes an unused id")]
+    ChildAlreadyActive,
     #[error("the fork parent already ended its errand — an ended branch cannot fork")]
     ParentEnded,
     #[error("the branch already ended its errand — by one value crossing or one void, at most once")]
@@ -50,11 +50,10 @@ pub enum BranchError {
     ReturnNarrowsParent,
 }
 
-/// Seed a child branch at the parent's current label with an immutable, unique `Fork` binding
-/// carrying the child's [`ReturnPolicy`]. Refuses a self-fork, a re-fork of an already-bound
-/// child, a fork at an unresolved parent label (a child cannot inherit an Unknown it has no value
-/// to cast), and a policy naming an unregistered transformer. The batch is on the family's
-/// revision.
+/// Seed a child branch at the parent's frozen basis snapshot with an immutable, unique `Fork`
+/// binding carrying the child's [`ReturnPolicy`]. Refuses a self-fork, a re-fork of an
+/// already-bound child, a fork from an ended branch, and a policy naming an unregistered
+/// transformer. The batch is on the family's revision.
 pub(crate) fn seed_child(
     registry: &Registry,
     parent: &Views,
@@ -70,6 +69,9 @@ pub(crate) fn seed_child(
     if parent.parent_of(child).is_some() {
         return Err(BranchError::AlreadyForked);
     }
+    if parent.is_active(child) {
+        return Err(BranchError::ChildAlreadyActive);
+    }
     if parent.has_ended(parent.trajectory()) {
         return Err(BranchError::ParentEnded);
     }
@@ -84,15 +86,11 @@ pub(crate) fn seed_child(
             }
         }
     }
-    let seed = parent.current_label();
-    if !seed.is_fully_established() {
-        return Err(BranchError::ParentUnresolved);
-    }
     let fact = Fact::Boundary {
         trajectory: child.clone(),
         kind: BoundaryKind::Fork {
             parent: parent.trajectory().clone(),
-            seed: seed.bound().clone().into_label(),
+            snapshot: parent.freeze_basis(),
             return_policy,
         },
     };
@@ -410,9 +408,11 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::authority::{Sanitizer, SanitizerPoints, Transition};
-    use crate::fact::{CloseOutcome, EffectKind, EffectSet, Revision};
+    use crate::admit::{CastAnswer, CastError, admit_cast};
+    use crate::authority::{Cast, CastResolution, Sanitizer, SanitizerPoints, Scope, Transition};
+    use crate::fact::{CloseOutcome, EffectKind, EffectSet, ForkSnapshot, Revision};
     use crate::label::{Audience, Dim, Label, ReaderId, Trust};
+    use crate::names::CastName;
     use crate::projection::Projection;
     use crate::registry::{RegistryConfig, TrustChain};
     use crate::value::{
@@ -519,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn fork_refuses_self_reparent_and_unresolved_parent() {
+    fn fork_refuses_a_self_fork_and_reparenting() {
         let log = vec![admit(parent(), known(TRUSTED, Audience::Public))];
         let projection = build(&log);
         assert_eq!(
@@ -533,11 +533,14 @@ mod tests {
             seed_child(&registry(), &projection.view(&other), &child(), ReturnPolicy::Raw),
             Err(BranchError::AlreadyForked)
         );
-        let log = vec![admit(parent(), Label::new(Dim::Unknown, Dim::Known(Audience::Public)))];
+        let log = vec![
+            admit(parent(), known(TRUSTED, Audience::Public)),
+            admit(child(), known(TRUSTED, Audience::Public)),
+        ];
         let projection = build(&log);
         assert_eq!(
             seed_child(&registry(), &projection.view(&parent()), &child(), ReturnPolicy::Raw),
-            Err(BranchError::ParentUnresolved)
+            Err(BranchError::ChildAlreadyActive)
         );
     }
 
@@ -1429,6 +1432,169 @@ mod tests {
         });
         let projection = build(&log);
         assert!(projection.view(&parent()).has_effect(&egress));
+    }
+
+    fn cast_registry() -> Registry {
+        Registry::build_covered(RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: vec![],
+            authorities: vec![],
+            sanitizers: vec![],
+            casts: vec![Cast {
+                name: CastName::new("classify"),
+                resolution: CastResolution::Constant(established(SUSPICIOUS, Audience::Public)),
+                scope: Scope::default(),
+            }],
+        })
+        .unwrap()
+    }
+
+    fn unknown_source(trajectory: TrajectoryId) -> Fact {
+        admit(trajectory, Label::new(Dim::Unknown, Dim::Known(Audience::Public)))
+    }
+
+    fn fork_under(log: &mut Vec<Fact>, parent: &TrajectoryId, child: &TrajectoryId) {
+        let projection = build(log);
+        let batch = seed_child(&cast_registry(), &projection.view(parent), child, ReturnPolicy::Raw)
+            .expect("the fork is admitted");
+        log.extend(batch.facts);
+    }
+
+    fn snapshot_of(log: &[Fact], child: &TrajectoryId) -> ForkSnapshot {
+        log.iter()
+            .find_map(|fact| match fact {
+                Fact::Boundary {
+                    trajectory,
+                    kind: BoundaryKind::Fork { snapshot, .. },
+                } if trajectory == child => Some(snapshot.clone()),
+                _ => None,
+            })
+            .expect("the child has a fork boundary")
+    }
+
+    fn resolve(log: &[Fact], actor: &TrajectoryId, value: u64) -> Result<FactBatch, CastError> {
+        let projection = build(log);
+        admit_cast(
+            &cast_registry(),
+            &projection.view(actor),
+            ValueId::new(value),
+            CastAnswer {
+                cast: CastName::new("classify"),
+                resolved: established(SUSPICIOUS, Audience::Public),
+            },
+        )
+    }
+
+    fn unresolved_trust(log: &[Fact], trajectory: &TrajectoryId) -> Vec<ValueId> {
+        build(log)
+            .view(trajectory)
+            .current_label()
+            .unresolved(Dimension::Trust)
+            .collect()
+    }
+
+    #[test]
+    fn a_fork_at_an_unresolved_parent_carries_the_source_and_shares_its_resolution() {
+        let mut log = vec![unknown_source(parent())];
+        fork_under(&mut log, &parent(), &child());
+
+        let projection = build(&log);
+        let at_fork = projection.view(&parent()).current_label();
+        assert_eq!(projection.view(&child()).current_label(), at_fork);
+        assert_eq!(
+            projection.view(&child()).current_label().meets_floor(SUSPICIOUS),
+            Adequacy::Unresolved
+        );
+        let snapshot = snapshot_of(&log, &child());
+        assert_eq!(snapshot.inherited(), &BTreeSet::from([ValueId::new(0)]));
+        assert_eq!(snapshot.seed(), &at_fork);
+
+        let batch = resolve(&log, &parent(), 0).expect("a branch resolves its own source");
+        log.extend(batch.facts);
+        let projection = build(&log);
+        assert_eq!(
+            projection.view(&child()).current_label(),
+            partial(SUSPICIOUS, Audience::Public)
+        );
+        assert_eq!(
+            projection.view(&child()).current_label().meets_floor(SUSPICIOUS),
+            Adequacy::Holds
+        );
+        assert_eq!(snapshot_of(&log, &child()).seed(), &at_fork);
+    }
+
+    #[test]
+    fn a_childs_resolution_of_an_inherited_source_reaches_the_parent_and_its_siblings() {
+        let sibling = TrajectoryId::new("sibling");
+        let mut log = vec![unknown_source(parent())];
+        fork_under(&mut log, &parent(), &child());
+        fork_under(&mut log, &parent(), &sibling);
+
+        let batch = resolve(&log, &child(), 0).expect("an inherited source is in reach");
+        log.extend(batch.facts);
+        let projection = build(&log);
+        for branch in [parent(), child(), sibling] {
+            assert_eq!(
+                projection.view(&branch).current_label(),
+                partial(SUSPICIOUS, Audience::Public),
+                "the resolution is shared with every branch holding the source"
+            );
+        }
+        assert_eq!(resolve(&log, &parent(), 0), Err(CastError::AlreadyEstablished));
+    }
+
+    #[test]
+    fn a_branch_may_not_resolve_a_sibling_or_post_fork_value() {
+        let sibling = TrajectoryId::new("sibling");
+        let mut log = vec![unknown_source(parent())];
+        fork_under(&mut log, &parent(), &child());
+        fork_under(&mut log, &parent(), &sibling);
+        log.push(unknown_source(parent()));
+        log.push(unknown_source(child()));
+
+        assert_eq!(resolve(&log, &child(), 1), Err(CastError::ForeignValue));
+        assert_eq!(resolve(&log, &sibling, 2), Err(CastError::ForeignValue));
+        assert_eq!(resolve(&log, &parent(), 2), Err(CastError::ForeignValue));
+
+        assert_eq!(
+            unresolved_trust(&log, &parent()),
+            vec![ValueId::new(0), ValueId::new(1)]
+        );
+        assert_eq!(unresolved_trust(&log, &child()), vec![ValueId::new(0), ValueId::new(2)]);
+        assert_eq!(unresolved_trust(&log, &sibling), vec![ValueId::new(0)]);
+    }
+
+    #[test]
+    fn a_nested_fork_flattens_its_inherited_set() {
+        let grandchild = TrajectoryId::new("grandchild");
+        let mut log = vec![unknown_source(parent())];
+        fork_under(&mut log, &parent(), &child());
+        log.push(unknown_source(child()));
+        fork_under(&mut log, &child(), &grandchild);
+
+        let snapshot = snapshot_of(&log, &grandchild);
+        assert_eq!(
+            snapshot.inherited(),
+            &BTreeSet::from([ValueId::new(0), ValueId::new(1)])
+        );
+
+        let batch = resolve(&log, &grandchild, 0).expect("an inherited ancestor source is in reach");
+        log.extend(batch.facts);
+        assert_eq!(unresolved_trust(&log, &parent()), vec![]);
+        assert_eq!(unresolved_trust(&log, &child()), vec![ValueId::new(1)]);
+        assert_eq!(unresolved_trust(&log, &grandchild), vec![ValueId::new(1)]);
+    }
+
+    #[test]
+    fn competing_first_answers_admit_exactly_one() {
+        let mut log = vec![unknown_source(parent())];
+        fork_under(&mut log, &parent(), &child());
+        let by_child = resolve(&log, &child(), 0).unwrap();
+        let by_parent = resolve(&log, &parent(), 0).unwrap();
+        assert_eq!(by_child.basis, by_parent.basis);
+
+        log.extend(by_child.facts);
+        assert_eq!(resolve(&log, &parent(), 0), Err(CastError::AlreadyEstablished));
     }
 
     #[test]

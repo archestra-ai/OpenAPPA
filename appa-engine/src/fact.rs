@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::authority::Transition;
 use crate::check::{Gap, Narrowing};
 use crate::execute::AuthorityReview;
-use crate::label::{EstablishedLabel, Label};
+use crate::label::{EstablishedLabel, Label, PartialLabel};
 use crate::names::{AuthorityName, CastName, SanitizerName};
 use crate::plan::PlanId;
 use crate::profile::{DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentityV1};
@@ -108,17 +108,57 @@ impl<'de> Deserialize<'de> for EffectSet {
     }
 }
 
+/// The content snapshot a fork freezes: the parent's established base, the source
+/// values that contributed to its label at that moment, and the partial label they derive.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkSnapshot {
+    base: EstablishedLabel,
+    inherited: std::collections::BTreeSet<ValueId>,
+    seed: PartialLabel,
+}
+
+impl ForkSnapshot {
+    /// Freeze a basis: the established base plus every contributing source with its label at this
+    /// moment. Nested preparations pass their own flattened basis, so a snapshot never has to walk
+    /// ancestry to be understood.
+    pub fn freeze<'a>(base: EstablishedLabel, sources: impl IntoIterator<Item = (ValueId, &'a Label)>) -> ForkSnapshot {
+        let sources: std::collections::BTreeMap<ValueId, &Label> = sources.into_iter().collect();
+        let seed = PartialLabel::from_basis(base.clone(), sources.iter().map(|(id, label)| (*id, *label)));
+        ForkSnapshot {
+            base,
+            inherited: sources.into_keys().collect(),
+            seed,
+        }
+    }
+
+    /// The fully established label the child's fold starts from — the deployment's starting label
+    /// carried down every fork, since no established contribution outside the frozen set exists.
+    pub(crate) fn base(&self) -> &EstablishedLabel {
+        &self.base
+    }
+
+    /// The frozen inherited source set: the values whose contributions the child inherits, and the
+    /// ancestor values it MAY resolve.
+    pub(crate) fn inherited(&self) -> &std::collections::BTreeSet<ValueId> {
+        &self.inherited
+    }
+
+    pub fn seed(&self) -> &PartialLabel {
+        &self.seed
+    }
+}
+
 /// A boundary is punctuation, not a decision: it marks the log, never gates it (pending offers
 /// die with their turn, and execution is always re-validated against the live state). The engine
 /// appends one at the end of each assistant turn, at fork, and at merge. `Fork` and `Merge` carry
-/// the branch structure — the fork's parent binding and seed label, the merge's consumed child
-/// return.
+/// the branch structure — the fork's parent binding and frozen snapshot, the merge's consumed
+/// child return.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BoundaryKind {
     TurnEnd,
     Fork {
         parent: TrajectoryId,
-        seed: Label,
+        snapshot: ForkSnapshot,
         return_policy: ReturnPolicy,
     },
     Merge {

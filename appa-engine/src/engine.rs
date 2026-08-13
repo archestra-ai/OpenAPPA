@@ -68,7 +68,7 @@ pub enum ReplayError {
     DigestMismatch,
     #[error("cast record names a value not admitted earlier in the log")]
     CastBeforeSource,
-    #[error("cast record's trajectory did not admit the value it resolves")]
+    #[error("cast record's trajectory neither admitted nor inherited the value it resolves")]
     ForeignResolution,
     #[error("cast record resolves a source that is already fully established")]
     RepeatResolution,
@@ -82,8 +82,14 @@ pub enum ReplayError {
     UnknownDispatch,
     #[error("admitted value names a dispatch of another trajectory")]
     ForeignDispatch,
-    #[error("fork record carries an unestablished seed")]
-    UnestablishedForkSeed,
+    #[error("fork record's snapshot is not the parent's frozen basis at that point in the log")]
+    ForkBasisMismatch,
+    #[error("fork record precedes the fork that opened its parent")]
+    OutOfOrderFork,
+    #[error("fork record names a child trajectory the log already used")]
+    ChildActiveBeforeFork,
+    #[error("fork record's return policy is not the deployment's child-return binding")]
+    ForkReturnPolicyMismatch,
 }
 
 /// The pure decision core, owning its static capability: the immutable registry (which carries
@@ -375,18 +381,74 @@ impl Engine {
 
     /// Validate persisted facts against this registry before the log is trusted as replay
     /// input: sequentially, failing at the first impossible record.
+    ///
+    /// Dispatched calls: the named tool must be registered, the persisted payload must satisfy
+    /// that tool's compiled schema, and the recomputed digest must match the `DispatchId`.
+    /// A `CanonicalArguments` cannot prove which schema it was validated against, so
+    /// replay re-establishes the binding here.
+    ///
+    /// Cast records: a `CastApplied` must name a value admitted earlier in the log, must be
+    /// recorded by a trajectory that admitted that value or inherited it at its fork (`BRN-14`
+    /// — the same local-or-inherited gate live admission applies), must be that source's first
+    /// resolution (`UNK-8` — a repeat or conflicting resolution is refused, and a value
+    /// admitted fully established takes none), and its complete label must be admissible for
+    /// the source under the registered cast, and the cast's scope must cover
+    /// the source's originating tool (`SAN-9` — a child return or user value takes unscoped
+    /// casts only).
+    ///
+    /// Fork records: the recorded snapshot must be the parent's own basis frozen at that point
+    /// — its base, its frozen inherited set plus every value it had admitted, and the seed they
+    /// derive. This one basis re-derivation is a deliberate, scoped
+    /// exception to the boundary below, because the frozen inherited set is what later cast
+    /// records are authorized against: taking it verbatim would leave `BRN-14`'s sibling and
+    /// post-fork exclusion unenforced on every persisted log. `T31` absorbs it.
+    ///
+    /// `OutputCastApplied`/`OutputCastLapsed` are audit-only — the projection folds nothing
+    /// from them, so a crafted record cannot alter a trusted view; their cross-record
+    /// consistency belongs to `T31`'s complete transition validator. So does re-deriving
+    /// persisted label state: admitted labels are taken verbatim here, checked only against the
+    /// rules above — a store that can rewrite rows can forge one until `T31` replays every
+    /// transition.
     pub fn validate_replay(&self, facts: &[Fact]) -> Result<(), ReplayError> {
         struct ReplayValue<'a> {
-            label: &'a crate::label::Label,
+            admitted: &'a crate::label::Label,
             trajectory: &'a TrajectoryId,
             provenance: &'a crate::value::Provenance,
-            resolved: bool,
+            resolved: Option<crate::label::Label>,
+        }
+        impl ReplayValue<'_> {
+            fn label(&self) -> &crate::label::Label {
+                self.resolved.as_ref().unwrap_or(self.admitted)
+            }
+        }
+        static MISSING_SOURCE: crate::label::Label = crate::label::Label::unknown();
+        static NO_INHERITED: std::collections::BTreeSet<crate::value::ValueId> = std::collections::BTreeSet::new();
+        fn label_at<'v>(values: &'v [ReplayValue<'_>], id: crate::value::ValueId) -> &'v crate::label::Label {
+            usize::try_from(id.index())
+                .ok()
+                .and_then(|i| values.get(i))
+                .map_or(&MISSING_SOURCE, |value| value.label())
         }
         let mut values: Vec<ReplayValue<'_>> = Vec::new();
         // Opened dispatches, for resolving a result value's originating tool.
         let mut dispatch_contracts: std::collections::BTreeMap<&DispatchId, &ToolContract> =
             std::collections::BTreeMap::new();
+        let mut snapshots: std::collections::BTreeMap<&TrajectoryId, &crate::fact::ForkSnapshot> =
+            std::collections::BTreeMap::new();
+        let mut local: std::collections::BTreeMap<&TrajectoryId, Vec<usize>> = std::collections::BTreeMap::new();
+        let forked_children: std::collections::BTreeSet<&TrajectoryId> = facts
+            .iter()
+            .filter_map(|fact| match fact {
+                Fact::Boundary {
+                    trajectory,
+                    kind: crate::fact::BoundaryKind::Fork { .. },
+                } => Some(trajectory),
+                _ => None,
+            })
+            .collect();
+        let mut active: std::collections::BTreeSet<&TrajectoryId> = std::collections::BTreeSet::new();
         for fact in facts {
+            let opens_trajectory = active.insert(fact.trajectory());
             match fact {
                 Fact::DispatchOpened {
                     dispatch,
@@ -421,11 +483,12 @@ impl Engine {
                             return Err(ReplayError::ForeignDispatch);
                         }
                     }
+                    local.entry(trajectory).or_default().push(values.len());
                     values.push(ReplayValue {
-                        label: &value.label,
+                        admitted: &value.label,
                         trajectory,
                         provenance,
-                        resolved: false,
+                        resolved: None,
                     });
                 }
                 Fact::CastApplied {
@@ -434,14 +497,18 @@ impl Engine {
                     resolved,
                     cast,
                 } => {
+                    let inherited = snapshots
+                        .get(trajectory)
+                        .map_or(&NO_INHERITED, |snapshot| snapshot.inherited());
+                    let acting_may_resolve = inherited.contains(value);
                     let source = usize::try_from(value.index())
                         .ok()
                         .and_then(|i| values.get_mut(i))
                         .ok_or(ReplayError::CastBeforeSource)?;
-                    if trajectory != source.trajectory {
+                    if trajectory != source.trajectory && !acting_may_resolve {
                         return Err(ReplayError::ForeignResolution);
                     }
-                    if source.resolved || EstablishedLabel::from_label(source.label).is_some() {
+                    if source.resolved.is_some() || EstablishedLabel::from_label(source.admitted).is_some() {
                         return Err(ReplayError::RepeatResolution);
                     }
                     let registered = self
@@ -459,16 +526,47 @@ impl Engine {
                     if !applicable {
                         return Err(ReplayError::OutOfScopeResolution);
                     }
-                    if registered.resolution.validate(source.label, resolved).is_err() {
+                    if registered.resolution.validate(source.admitted, resolved).is_err() {
                         return Err(ReplayError::InadmissibleResolution);
                     }
-                    source.resolved = true;
+                    source.resolved = Some(resolved.clone().into_label());
                 }
                 Fact::Boundary {
-                    kind: crate::fact::BoundaryKind::Fork { seed, .. },
-                    ..
-                } if EstablishedLabel::from_label(seed).is_none() => {
-                    return Err(ReplayError::UnestablishedForkSeed);
+                    trajectory,
+                    kind:
+                        crate::fact::BoundaryKind::Fork {
+                            parent,
+                            snapshot,
+                            return_policy,
+                        },
+                } => {
+                    if !opens_trajectory {
+                        return Err(ReplayError::ChildActiveBeforeFork);
+                    }
+                    if return_policy != &self.child_return {
+                        return Err(ReplayError::ForkReturnPolicyMismatch);
+                    }
+                    if !snapshots.contains_key(parent) && forked_children.contains(parent) {
+                        return Err(ReplayError::OutOfOrderFork);
+                    }
+                    // The recorded snapshot must be the parent's own basis frozen at this point:
+                    // its base, its frozen inherited set, every value it had admitted, and the
+                    // seed they derive. Re-deriving it here is deliberately
+                    // narrower than `T31`'s transition validator — the fork basis is what later
+                    // cast records are authorized against, so it cannot be taken verbatim.
+                    let parent_fork = snapshots.get(parent);
+                    let inherited = parent_fork.map_or(&NO_INHERITED, |snapshot| snapshot.inherited());
+                    let own = local.get(parent).map_or(&[][..], Vec::as_slice);
+                    let sources = inherited
+                        .iter()
+                        .copied()
+                        .chain(own.iter().map(|i| crate::value::ValueId::new(*i as u64)))
+                        .map(|id| (id, label_at(&values, id)));
+                    let base = parent_fork.map_or_else(EstablishedLabel::top, |snapshot| snapshot.base().clone());
+                    if crate::fact::ForkSnapshot::freeze(base, sources) != *snapshot {
+                        return Err(ReplayError::ForkBasisMismatch);
+                    }
+                    snapshots.insert(trajectory, snapshot);
                 }
                 _ => {}
             }
@@ -1277,16 +1375,130 @@ mod tests {
             ]),
             Err(ReplayError::InadmissibleResolution)
         );
-        assert_eq!(
-            e.validate_replay(&[Fact::Boundary {
-                trajectory: TrajectoryId::new("child"),
-                kind: crate::fact::BoundaryKind::Fork {
-                    parent: traj(),
-                    seed: Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
-                    return_policy: crate::fact::ReturnPolicy::Raw,
+    }
+
+    #[test]
+    fn replay_holds_a_fork_to_its_parents_frozen_basis() {
+        let classifier = crate::authority::Cast {
+            name: crate::names::CastName::new("classifier"),
+            resolution: crate::authority::CastResolution::Resolver {
+                may_cast: crate::authority::CastCeiling {
+                    trust: vec![SUSPICIOUS],
+                    audience: Audience::Public,
                 },
-            }]),
-            Err(ReplayError::UnestablishedForkSeed)
+            },
+            scope: crate::authority::Scope::default(),
+        };
+        let e = open_engine(RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: vec![],
+            authorities: vec![],
+            sanitizers: vec![],
+            casts: vec![classifier],
+        });
+        let child = TrajectoryId::new("child");
+        let unknown_source = user_value(Label::new(Dim::Unknown, Dim::Known(Audience::Public)));
+        let fork = |snapshot: crate::fact::ForkSnapshot| Fact::Boundary {
+            trajectory: child.clone(),
+            kind: crate::fact::BoundaryKind::Fork {
+                parent: traj(),
+                snapshot,
+                return_policy: crate::fact::ReturnPolicy::Raw,
+            },
+        };
+        let basis_after = |log: &[Fact]| {
+            Projection::build(log, crate::fact::Revision::new(log.len() as u64))
+                .view(&traj())
+                .freeze_basis()
+        };
+        let resolve = |trajectory: TrajectoryId, value: u64| Fact::CastApplied {
+            trajectory,
+            value: crate::value::ValueId::new(value),
+            resolved: established(SUSPICIOUS, Audience::Public),
+            cast: crate::names::CastName::new("classifier"),
+        };
+
+        let opened = vec![unknown_source.clone()];
+        let snapshot = basis_after(&opened);
+        assert_eq!(
+            e.validate_replay(&[unknown_source.clone(), fork(snapshot.clone())]),
+            Ok(())
+        );
+        assert_eq!(
+            e.validate_replay(&[
+                unknown_source.clone(),
+                fork(snapshot.clone()),
+                resolve(child.clone(), 0)
+            ]),
+            Ok(())
+        );
+
+        assert_eq!(
+            e.validate_replay(&[unknown_source.clone(), fork(basis_after(&[]))]),
+            Err(ReplayError::ForkBasisMismatch)
+        );
+        let late = vec![unknown_source.clone(), unknown_source.clone()];
+        assert_eq!(
+            e.validate_replay(&[unknown_source.clone(), fork(basis_after(&late))]),
+            Err(ReplayError::ForkBasisMismatch)
+        );
+        assert_eq!(
+            e.validate_replay(&[
+                unknown_source.clone(),
+                fork(snapshot.clone()),
+                unknown_source.clone(),
+                resolve(child.clone(), 1)
+            ]),
+            Err(ReplayError::ForeignResolution)
+        );
+        assert_eq!(
+            e.validate_replay(&[
+                unknown_source.clone(),
+                Fact::ValueAdmitted {
+                    trajectory: child.clone(),
+                    value: LabeledValue::new(ValueBody::new("early"), known(SUSPICIOUS, Audience::Public)),
+                    provenance: Provenance::UserInput,
+                },
+                fork(snapshot.clone())
+            ]),
+            Err(ReplayError::ChildActiveBeforeFork)
+        );
+        let refork = vec![unknown_source.clone(), fork(snapshot.clone()), unknown_source.clone()];
+        let widened = basis_after(&refork[..3]);
+        assert_eq!(
+            e.validate_replay(&[refork.clone(), vec![fork(widened)]].concat()),
+            Err(ReplayError::ChildActiveBeforeFork)
+        );
+        assert_eq!(
+            e.validate_replay(&[
+                unknown_source.clone(),
+                Fact::Boundary {
+                    trajectory: child.clone(),
+                    kind: crate::fact::BoundaryKind::Fork {
+                        parent: traj(),
+                        snapshot: snapshot.clone(),
+                        return_policy: crate::fact::ReturnPolicy::Sanitized(crate::names::SanitizerName::new("redact")),
+                    },
+                }
+            ]),
+            Err(ReplayError::ForkReturnPolicyMismatch)
+        );
+
+        let grandchild = Fact::Boundary {
+            trajectory: TrajectoryId::new("grandchild"),
+            kind: crate::fact::BoundaryKind::Fork {
+                parent: child.clone(),
+                snapshot: crate::fact::ForkSnapshot::freeze(EstablishedLabel::top(), std::iter::empty()),
+                return_policy: crate::fact::ReturnPolicy::Raw,
+            },
+        };
+        assert_eq!(
+            e.validate_replay(&[unknown_source.clone(), grandchild.clone(), fork(snapshot.clone())]),
+            Err(ReplayError::OutOfOrderFork)
+        );
+        assert_eq!(
+            e.validate_replay(&[unknown_source, fork(snapshot), grandchild]),
+            Err(ReplayError::ForkBasisMismatch)
         );
     }
 

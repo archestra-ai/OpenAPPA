@@ -335,11 +335,11 @@ return_sanitizer = "redact"
 
     let (facts, revision) = mediator.snapshot(&tenant, &parent).expect("family snapshot");
     let projection = Projection::build(&facts, revision);
+    let parent_established =
+        appa_engine::label::EstablishedLabel::from_label(&parent_label).expect("fixture label is established");
     assert_eq!(
         projection.view(&child).current_label(),
-        appa_engine::label::PartialLabel::established(
-            appa_engine::label::EstablishedLabel::from_label(&parent_label).expect("fixture label is established")
-        )
+        appa_engine::label::PartialLabel::established(parent_established.clone())
     );
     let fork = facts
         .iter()
@@ -349,15 +349,20 @@ return_sanitizer = "redact"
                 kind:
                     BoundaryKind::Fork {
                         parent,
-                        seed,
+                        snapshot,
                         return_policy,
                     },
-            } if trajectory == &child => Some((parent, seed, return_policy)),
+            } if trajectory == &child => Some((parent, snapshot, return_policy)),
             _ => None,
         })
         .expect("child has a fork boundary");
     assert_eq!(fork.0, &parent);
-    assert_eq!(fork.1, &parent_label);
+    assert_eq!(
+        fork.1.seed(),
+        &projection.view(&parent).current_label(),
+        "the seed pins the parent's label at the fork"
+    );
+    assert_eq!(fork.1.seed().bound(), &parent_established);
     assert_eq!(fork.2, &ReturnPolicy::Sanitized(SanitizerName::new("redact")));
 }
 

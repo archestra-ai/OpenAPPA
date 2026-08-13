@@ -179,6 +179,16 @@ impl Label {
         EstablishedLabel::top().into_label()
     }
 
+    /// The wholly unestablished contribution: neither dimension established. Folding it moves no
+    /// bound and records its source in both unresolved sets — the fail-closed reading of
+    /// a basis source whose record the log does not hold.
+    pub(crate) const fn unknown() -> Label {
+        Label {
+            trust: Dim::Unknown,
+            audience: Dim::Unknown,
+        }
+    }
+
     /// This contribution as a meet operand on established bounds: a known dimension carries its
     /// value, an unknown one the meet identity (unknown is identity for the bound; its
     /// source identity is tracked separately by the fold).
@@ -254,6 +264,20 @@ impl PartialLabel {
             unresolved_trust: BTreeSet::new(),
             unresolved_audience: BTreeSet::new(),
         }
+    }
+
+    /// Fold a whole basis: the established base plus one contribution per source. The
+    /// one derivation a trajectory's label and a fork snapshot's seed both go through, so a
+    /// branch fold and the snapshot frozen from it cannot disagree.
+    pub(crate) fn from_basis<'a>(
+        base: EstablishedLabel,
+        sources: impl IntoIterator<Item = (ValueId, &'a Label)>,
+    ) -> Self {
+        let mut fold = PartialLabel::established(base);
+        for (source, label) in sources {
+            fold.fold_value(source, label);
+        }
+        fold
     }
 
     /// Fold one admitted value's contribution: a known dimension meets into the

@@ -318,7 +318,6 @@ fn require_owned<'a>(
 mod tests {
     use super::*;
     use appa_engine::fact::{BoundaryKind, Fact};
-    use appa_engine::label::Label;
     use appa_engine::projection::Projection;
 
     fn boundary(trajectory: &TrajectoryId) -> Fact {
@@ -340,7 +339,10 @@ mod tests {
                     trajectory: child.clone(),
                     kind: BoundaryKind::Fork {
                         parent,
-                        seed: Label::top(),
+                        snapshot: appa_engine::fact::ForkSnapshot::freeze(
+                            appa_engine::label::EstablishedLabel::top(),
+                            std::iter::empty(),
+                        ),
                         return_policy: appa_engine::fact::ReturnPolicy::Raw,
                     },
                 }],
@@ -497,10 +499,8 @@ mod tests {
         let tenant = TenantId::new("host-a");
         let parent = store.create_session(tenant.clone());
 
-        let result = store.fork(&tenant, &parent, |_child, _facts, _rev| {
-            Err(BranchError::ParentUnresolved)
-        });
-        assert!(matches!(result, Err(StoreError::Seed(BranchError::ParentUnresolved))));
+        let result = store.fork(&tenant, &parent, |_child, _facts, _rev| Err(BranchError::SelfFork));
+        assert!(matches!(result, Err(StoreError::Seed(BranchError::SelfFork))));
         assert_eq!(store.snapshot(&tenant, &parent).unwrap(), (vec![], Revision::ZERO));
     }
 
