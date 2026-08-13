@@ -12,8 +12,7 @@
 # The `operator` authority is implemented `builtin = "hitl"`, which
 # this runtime serves over MCP elicitation: the reviewer is you, in
 # the same Claude Code session, and the dialog shows the exact tool
-# and canonical arguments the engine would dispatch (`RUL-7`,
-# `RUL-8`).
+# and canonical arguments the engine would dispatch.
 #
 # To try it: connect the GitHub MCP server, then ask the session to
 # file an issue. The call is blocked, the model calls

@@ -6,7 +6,8 @@ use axum::Router;
 use axum::routing::post;
 
 fn shipped_command() -> String {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../plugin/hooks/hooks.json");
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../integrations/claude-code/plugin/hooks/hooks.json");
     let hooks: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(path).expect("the shipped hooks.json is readable"))
             .expect("the shipped hooks.json parses");

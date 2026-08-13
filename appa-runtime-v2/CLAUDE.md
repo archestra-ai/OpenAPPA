@@ -26,5 +26,7 @@ Three crates, one binary, one process:
   `appa-builtin` ABI crate at the repo root), and the engine boundary
   (`runtime/src/engine.rs`, the one module that names `appa-engine`).
 
-The plugin (`plugin/`) and the marketplace manifest stay at this
-folder's top level, beside the crates.
+The Claude Code plugin, the marketplace manifest, and the example
+policies are not code and live in `integrations/claude-code/` at the
+repository root. The tests here still run those shipped files
+(`runtime/tests/plugin_hooks.rs`, `runtime/tests/examples_load.rs`).

@@ -40,10 +40,10 @@ max_body_bytes = 65536
 Implementation bindings (authority and sanitizer endpoints) live in
 `[externals]`, never inline in the policy.
 
-`examples/claude-code.appa.toml` is a complete starting point: it
-releases every built-in Claude Code tool with the neutral annotation
-and marks the web tools' results suspicious. Pass it directly with
-`--config examples/claude-code.appa.toml`.
+`integrations/claude-code/examples/claude-code.appa.toml` is a
+complete starting point: it releases every built-in Claude Code tool
+with the neutral annotation and marks the web tools' results
+suspicious. Pass its path directly to `--config`.
 
 ### 3. Start the process
 
@@ -62,82 +62,21 @@ Start the process before the session. While it is down, every action
 in a gated session is blocked, and that cannot be automated from
 inside the session — the session's own commands are blocked too.
 
-### 4. Install the plugin
+### 4. Gate a session
 
-For one session, no installation:
-
-```sh
-claude --plugin-dir /path/to/OpenAPPA/appa-runtime-v2/plugin
-```
-
-Permanently, through the marketplace manifest in this directory:
-
-```sh
-claude plugin marketplace add /path/to/OpenAPPA/appa-runtime-v2
-claude plugin install appa-runtime@appa
-```
-
-The plugin brings all the hooks and the `execute_remedy_plan` MCP
-server; it adds roughly zero tokens to a session. Note that a
-permanent install gates **every** Claude Code session on the machine —
-each one then needs the process running. For trying things out, prefer
-`--plugin-dir`.
-
-If the process listens on a port other than 8787, set
-`APPA_RUNTIME_URL=http://127.0.0.1:<port>` in the session's
-environment; the hooks and the MCP server both follow it.
+The Claude Code integration — the plugin, the statusline, the example
+policies, and the install and uninstall instructions — lives in
+[`integrations/claude-code/`](../integrations/claude-code/README.md).
 
 ### 5. See it work
 
-Run `claude` and use it normally. With `-v` on the process you see
-every hook arrive and every decision go out. The database shows what
-was recorded:
+Run a gated session and use it normally. With `-v` on the process you
+see every hook arrive and every decision go out. The database shows
+what was recorded:
 
 ```sh
 sqlite3 appa.db 'SELECT id, parent, ended FROM trajectories;'
 sqlite3 appa.db 'SELECT trajectory, tool, state FROM dispatches;'
-```
-
-### 6. Statusline (optional)
-
-The plugin directory ships a statusline script: the APPA pixel mascot
-plus the session's current Trust and Audience, read from the process's
-`GET /status` — a projection of the fact log rendered to strings. Each
-dimension shows its established bound (`trusted`, `suspicious`,
-`public`, reader ids), or `unknown` while a value with an
-unestablished dimension sits in the fold. Claude Code has one
-statusline, so this replaces any statusline you already configured. A
-plugin cannot set the statusline itself — Claude Code reads
-`statusLine` only from your own settings — so merge this into your
-`settings.json`, pointing at your OpenAPPA checkout:
-
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "/path/to/OpenAPPA/appa-runtime-v2/plugin/statusline.sh"
-  }
-}
-```
-
-Point at the checkout even with a marketplace install: installed
-plugins are copied into a versioned cache, and the script is plain
-shell that works from the repository regardless. It needs `jq` and
-`curl` and fails open — runtime down, session not gated, or tools
-missing all print the mascot alone, never a blocked action.
-
-To keep an existing statusline (for example claude-powerline) and add
-the APPA rows beneath it, run both and tee stdin. Pin the exact
-version you vetted — `@latest` would fetch and run new third-party
-code on every statusline refresh:
-
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "input=$(cat); printf '%s' \"$input\" | npx -y @owloops/claude-powerline@1.4.0; printf '%s' \"$input\" | /path/to/OpenAPPA/appa-runtime-v2/plugin/statusline.sh"
-  }
-}
 ```
 
 ## Things to know
@@ -145,8 +84,7 @@ code on every statusline refresh:
 - **A changed policy is a new deployment.** Edit `[policy]` and the
   old database refuses to open; use a fresh `--db` path.
 - **Stopping the process blocks gated sessions.** That is the design,
-  not a fault. Uninstall the plugin (`claude plugin uninstall
-  appa-runtime@appa`) if you want ungated sessions back.
+  not a fault. Uninstall the plugin if you want ungated sessions back.
 - **`docs/runtime.md`** is the contract the crates in this directory
   implement — the process (`runtime/`), the shared vocabulary
   (`api/`), and the Claude Code adapter (`adapters/claude-code/`) —

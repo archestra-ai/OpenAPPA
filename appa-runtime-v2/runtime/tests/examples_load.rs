@@ -4,10 +4,7 @@ use appa_runtime_v2::config::Config;
 
 #[test]
 fn every_shipped_example_opens() {
-    let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("the runtime crate sits inside appa-runtime-v2")
-        .join("examples");
+    let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../integrations/claude-code/examples");
     let mut opened = 0;
     for entry in std::fs::read_dir(&examples).expect("the examples directory is readable") {
         let path = entry.expect("the directory entry is readable").path();
