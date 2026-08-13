@@ -10,10 +10,56 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// The policy value as authored, preserved verbatim; compiled
-    /// into the engine's registry at `Runtime::open`.
-    pub policy: toml::Value,
+    policy: PolicyFile,
     pub externals: Externals,
+}
+
+/// The policy file as supplied at startup: the exact bytes read from
+/// disk, the policy value parsed from those bytes, and the key derived
+/// from them. The only constructor parses the bytes it is
+/// given, so the three can never disagree.
+#[derive(Debug, Clone)]
+pub struct PolicyFile {
+    bytes: Vec<u8>,
+    value: toml::Value,
+    key: PolicyFileKey,
+}
+
+impl PolicyFile {
+    fn new(bytes: Vec<u8>, value: toml::Value) -> PolicyFile {
+        let key = PolicyFileKey::of(&bytes);
+        PolicyFile { bytes, value, key }
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn value(&self) -> &toml::Value {
+        &self.value
+    }
+
+    pub fn key(&self) -> &PolicyFileKey {
+        &self.key
+    }
+}
+
+/// The key of a stored policy file: the SHA-256 of its exact bytes,
+/// lowercase hex. Distinct from the policy identity digest,
+/// which excludes source syntax, runtime bindings, `[limits]`, and
+/// hints — two files can share one identity and still get two keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyFileKey(String);
+
+impl PolicyFileKey {
+    pub fn of(bytes: &[u8]) -> PolicyFileKey {
+        use sha2::Digest as _;
+        PolicyFileKey(format!("{:x}", sha2::Sha256::digest(bytes)))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// The registered externals: authorities, sanitizers, and
@@ -168,10 +214,14 @@ impl Config {
             path: path.display().to_string(),
             source,
         })?;
-        Config::validate(raw, |var| std::env::var(var).ok())
+        Config::validate(text, raw, |var| std::env::var(var).ok())
     }
 
-    fn validate(raw: RawConfig, lookup: impl Fn(&str) -> Option<String>) -> Result<Config, ConfigError> {
+    pub fn policy_file(&self) -> &PolicyFile {
+        &self.policy
+    }
+
+    fn validate(text: String, raw: RawConfig, lookup: impl Fn(&str) -> Option<String>) -> Result<Config, ConfigError> {
         if raw.externals.timeout_ms == 0 {
             return Err(ConfigError::ZeroTimeout);
         }
@@ -182,7 +232,7 @@ impl Config {
             return Err(ConfigError::ZeroByteCap);
         }
         Ok(Config {
-            policy: raw.policy,
+            policy: PolicyFile::new(text.into_bytes(), raw.policy),
             externals: Externals {
                 timeout: Duration::from_millis(raw.externals.timeout_ms),
                 review_timeout: Duration::from_millis(raw.externals.review_timeout_ms),
@@ -347,7 +397,7 @@ mod tests {
 
     fn parse_with(text: &str, lookup: impl Fn(&str) -> Option<String>) -> Result<Config, ConfigError> {
         let raw: RawConfig = toml::from_str(text).expect("test fixture parses as TOML");
-        Config::validate(raw, lookup)
+        Config::validate(text.to_string(), raw, lookup)
     }
 
     #[test]
@@ -357,9 +407,11 @@ mod tests {
         assert_eq!(config.externals.max_body_bytes, 65536);
         assert!(config.externals.dynamic.is_none());
         assert_eq!(
-            config.policy.get("anything").and_then(|v| v.as_str()),
+            config.policy_file().value().get("anything").and_then(|v| v.as_str()),
             Some("the runtime does not interpret this"),
         );
+        assert_eq!(config.policy_file().bytes(), MINIMAL.as_bytes());
+        assert_eq!(config.policy_file().key(), &PolicyFileKey::of(MINIMAL.as_bytes()),);
     }
 
     #[test]

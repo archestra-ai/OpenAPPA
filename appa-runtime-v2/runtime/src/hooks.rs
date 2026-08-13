@@ -177,6 +177,7 @@ mod tests {
     fn config() -> Config {
         let text = r#"
             [policy]
+            version = 1
             [externals]
             timeout_ms = 1000
             max_body_bytes = 4096

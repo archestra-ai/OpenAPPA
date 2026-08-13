@@ -291,6 +291,12 @@ impl PolicyIdentityV1 {
         hasher.update(&canonical);
         PolicyIdentityV1(hasher.finalize().into())
     }
+
+    /// The digest bytes, for hosts that persist the identity beside a
+    /// trajectory's durable opening record.
+    pub fn bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
 }
 
 fn canonical_value(value: &impl Serialize) -> serde_json::Value {

@@ -189,17 +189,69 @@ fn committed_state_survives_a_hard_kill_and_the_dispatch_stays_open() {
 }
 
 #[test]
-fn a_changed_policy_refuses_the_old_database() {
+fn a_changed_policy_keeps_old_roots_on_their_opening_policy() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let config = write_config(dir.path(), CONFIG);
     let db = dir.path().join("appa.db");
     let port = free_port();
     let mut server = start(&config, &db, port);
     wait_for_health(&mut server);
+    post_hook(
+        &server,
+        r#"{"hook_event_name":"SessionStart","session_id":"old-1","source":"startup"}"#,
+    )
+    .expect("SessionStart answers");
+    let allow = post_hook(
+        &server,
+        r#"{"hook_event_name":"PreToolUse","session_id":"old-1","tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"t1"}"#,
+    )
+    .expect("PreToolUse answers");
+    assert!(allow.contains("\"permissionDecision\":\"allow\""));
+    post_hook(
+        &server,
+        r#"{"hook_event_name":"PostToolUse","session_id":"old-1","tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"t1","tool_response":{"stdout":"readme.txt"}}"#,
+    )
+    .expect("PostToolUse answers");
     drop(server);
 
     let changed = write_config(dir.path(), &CONFIG.replace("name = \"Bash\"", "name = \"Read\""));
-    expect_startup_refusal(&changed, &db, "policy digest");
+    let port = free_port();
+    let mut server = start(&changed, &db, port);
+    wait_for_health(&mut server);
+
+    let old_allows = post_hook(
+        &server,
+        r#"{"hook_event_name":"PreToolUse","session_id":"old-1","tool_name":"Bash","tool_input":{"command":"pwd"},"tool_use_id":"t2"}"#,
+    )
+    .expect("the old root answers");
+    assert!(
+        old_allows.contains("\"permissionDecision\":\"allow\""),
+        "the old root keeps its opening policy: {old_allows}",
+    );
+
+    post_hook(
+        &server,
+        r#"{"hook_event_name":"SessionStart","session_id":"new-1","source":"startup"}"#,
+    )
+    .expect("the new SessionStart answers");
+    let new_denies = post_hook(
+        &server,
+        r#"{"hook_event_name":"PreToolUse","session_id":"new-1","tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"t3"}"#,
+    )
+    .expect("the new root answers");
+    assert!(
+        new_denies.contains("\"permissionDecision\":\"deny\""),
+        "the new root follows the edited policy: {new_denies}",
+    );
+    let new_allows = post_hook(
+        &server,
+        r#"{"hook_event_name":"PreToolUse","session_id":"new-1","tool_name":"Read","tool_input":{"command":"x"},"tool_use_id":"t4"}"#,
+    )
+    .expect("the new root answers");
+    assert!(
+        new_allows.contains("\"permissionDecision\":\"allow\""),
+        "the edited policy's tool releases on the new root: {new_allows}",
+    );
 }
 
 #[test]

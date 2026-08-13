@@ -76,6 +76,28 @@ pub struct EventWrite {
     pub records: Vec<RuntimeRecord>,
 }
 
+/// A root's opening at the store's encoding boundary: the
+/// api layer's validated opening renders to these columns plus the
+/// log's first batch. The store keeps the batch opaque, like every
+/// other batch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpeningWrite {
+    pub policy_key: String,
+    pub policy_identity: String,
+    pub batch: Vec<u8>,
+}
+
+/// A family's opening record joined with its stored policy file, in
+/// one read. The two absences refuse differently upstream: a root
+/// with no opening row is a pre-binding database, and an opening
+/// whose stored file is gone is a damaged store.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpeningRow {
+    pub policy_key: String,
+    pub policy_identity: String,
+    pub policy_bytes: Option<Vec<u8>>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrajectoryRow {
     pub id: TrajectoryId,
@@ -90,8 +112,8 @@ pub enum StoreError {
     Damaged { path: String, detail: String },
     #[error("no trajectory family {family} exists")]
     UnknownFamily { family: String },
-    #[error("the database belongs to policy digest {stored}, not {supplied}")]
-    PolicyMismatch { stored: String, supplied: String },
+    #[error("the stored policy file under key {key} does not match the supplied bytes")]
+    PolicyRewrite { key: String },
     #[error("storage failure: {0}")]
     Storage(#[from] rusqlite::Error),
 }
@@ -102,6 +124,9 @@ pub enum CreateError {
     AlreadyExists,
     #[error("storage failure: {0}")]
     Storage(#[from] rusqlite::Error),
+    #[cfg(test)]
+    #[error("injected failure before commit")]
+    Injected,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -136,6 +161,7 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let check: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
         if check != "ok" {
             return Err(StoreError::Damaged {
@@ -175,9 +201,14 @@ impl Store {
              );
              CREATE UNIQUE INDEX IF NOT EXISTS one_open_dispatch
                  ON dispatches (trajectory) WHERE state != 'closed';
-             CREATE TABLE IF NOT EXISTS deployment (
+             CREATE TABLE IF NOT EXISTS policies (
                  key   TEXT PRIMARY KEY,
-                 value TEXT NOT NULL
+                 bytes BLOB NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS openings (
+                 family          TEXT PRIMARY KEY,
+                 policy_key      TEXT NOT NULL,
+                 policy_identity TEXT NOT NULL
              );",
         )?;
         Ok(Store {
@@ -187,9 +218,59 @@ impl Store {
         })
     }
 
-    pub fn create_root(&self, id: &TrajectoryId) -> Result<(), CreateError> {
+    /// Open a root trajectory: its family is itself. One transaction
+    /// writes the trajectory row, the opening record, and the log's
+    /// first batch: the opening is durable before any other
+    /// family event, or nothing is.
+    pub fn create_root(&self, id: &TrajectoryId, opening: OpeningWrite) -> Result<(), CreateError> {
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        match insert_trajectory_tx(&tx, id, id, None) {
+            Ok(()) => {}
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.extended_code == SQLITE_CONSTRAINT_PRIMARYKEY || e.extended_code == SQLITE_CONSTRAINT_UNIQUE =>
+            {
+                return Err(CreateError::AlreadyExists);
+            }
+            Err(e) => return Err(CreateError::Storage(e)),
+        }
+        tx.execute(
+            "INSERT INTO openings (family, policy_key, policy_identity) VALUES (?1, ?2, ?3)",
+            params![id.0, opening.policy_key, opening.policy_identity],
+        )?;
+        tx.execute(
+            "INSERT INTO batches (family, seq, bytes) VALUES (?1, 0, ?2)",
+            params![id.0, opening.batch],
+        )?;
+        #[cfg(test)]
+        if self.failure_fires() {
+            return Err(CreateError::Injected);
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// A family's opening record and its stored policy file, in one
+    /// read. `None`: the family has no opening record — a database
+    /// from before per-root binding.
+    pub fn opening(&self, family: &TrajectoryId) -> Result<Option<OpeningRow>, StoreError> {
         let conn = self.lock();
-        insert_trajectory(&conn, id, id, None)
+        let row = conn
+            .query_row(
+                "SELECT o.policy_key, o.policy_identity, p.bytes
+                 FROM openings o LEFT JOIN policies p ON p.key = o.policy_key
+                 WHERE o.family = ?1",
+                params![family.0],
+                |row| {
+                    Ok(OpeningRow {
+                        policy_key: row.get(0)?,
+                        policy_identity: row.get(1)?,
+                        policy_bytes: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
     }
 
     /// The whole family log in append order, with its revision. The
@@ -390,48 +471,31 @@ impl Store {
         }
 
         #[cfg(test)]
-        {
-            use std::sync::atomic::Ordering::SeqCst;
-            let armed = self
-                .commits_until_failure
-                .fetch_update(SeqCst, SeqCst, |remaining| match remaining {
-                    0 => None,
-                    remaining => Some(remaining - 1),
-                });
-            if armed == Ok(1) {
-                return Err(CommitError::Injected);
-            }
+        if self.failure_fires() {
+            return Err(CommitError::Injected);
         }
 
         tx.commit()?;
         Ok(revision)
     }
 
-    /// Record the deployment's policy digest on first open; on every
-    /// later open, refuse a database that was opened under a different
-    /// policy. A policy change opens a new deployment, never continues
-    /// an old database.
-    pub fn bind_policy_digest(&self, digest: &str) -> Result<(), StoreError> {
-        let conn = self.lock();
-        let stored: Option<String> = conn
-            .query_row("SELECT value FROM deployment WHERE key = 'policy_digest'", [], |row| {
-                row.get(0)
-            })
-            .optional()?;
-        match stored {
-            None => {
-                conn.execute(
-                    "INSERT INTO deployment (key, value) VALUES ('policy_digest', ?1)",
-                    params![digest],
-                )?;
-                Ok(())
-            }
-            Some(stored) if stored == digest => Ok(()),
-            Some(stored) => Err(StoreError::PolicyMismatch {
-                stored,
-                supplied: digest.to_string(),
-            }),
+    pub fn put_policy(&self, bytes: &[u8]) -> Result<(), StoreError> {
+        let key = crate::config::PolicyFileKey::of(bytes);
+        let key = key.as_str();
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO policies (key, bytes) VALUES (?1, ?2) ON CONFLICT (key) DO NOTHING",
+            params![key, bytes],
+        )?;
+        let stored: Vec<u8> = tx.query_row("SELECT bytes FROM policies WHERE key = ?1", params![key], |row| {
+            row.get(0)
+        })?;
+        if stored != bytes {
+            return Err(StoreError::PolicyRewrite { key: key.to_string() });
         }
+        tx.commit()?;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -461,6 +525,18 @@ impl Store {
     pub fn fail_commit_after(&self, skip: u64) {
         self.commits_until_failure
             .store(skip + 1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    fn failure_fires(&self) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        let armed = self
+            .commits_until_failure
+            .fetch_update(SeqCst, SeqCst, |remaining| match remaining {
+                0 => None,
+                remaining => Some(remaining - 1),
+            });
+        armed == Ok(1)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -537,26 +613,6 @@ fn require_one_row(changed: usize, record: &str, id: &str) -> Result<(), CommitE
 const SQLITE_CONSTRAINT_PRIMARYKEY: i32 = 1555;
 const SQLITE_CONSTRAINT_UNIQUE: i32 = 2067;
 
-fn insert_trajectory(
-    conn: &Connection,
-    id: &TrajectoryId,
-    family: &TrajectoryId,
-    parent: Option<&TrajectoryId>,
-) -> Result<(), CreateError> {
-    match conn.execute(
-        "INSERT INTO trajectories (id, family, parent) VALUES (?1, ?2, ?3)",
-        params![id.0, family.0, parent.map(|p| p.0.clone())],
-    ) {
-        Ok(_) => Ok(()),
-        Err(rusqlite::Error::SqliteFailure(e, _))
-            if e.extended_code == SQLITE_CONSTRAINT_PRIMARYKEY || e.extended_code == SQLITE_CONSTRAINT_UNIQUE =>
-        {
-            Err(CreateError::AlreadyExists)
-        }
-        Err(e) => Err(CreateError::Storage(e)),
-    }
-}
-
 fn insert_trajectory_tx(
     tx: &rusqlite::Transaction<'_>,
     id: &TrajectoryId,
@@ -584,10 +640,24 @@ mod tests {
         TrajectoryId("cc:root".to_string())
     }
 
+    const POLICY_FILE: &[u8] = b"the policy file";
+
+    fn opening() -> OpeningWrite {
+        OpeningWrite {
+            policy_key: crate::config::PolicyFileKey::of(POLICY_FILE).as_str().to_string(),
+            policy_identity: "policy-identity".to_string(),
+            batch: b"opening".to_vec(),
+        }
+    }
+
+    fn open_root(store: &Store, id: &TrajectoryId) {
+        store.create_root(id, opening()).expect("a fresh root opens");
+    }
+
     #[test]
     fn surfaced_offer_rows_stay_capped_at_the_oldest_expense() {
         let (_dir, store) = open_temp();
-        store.create_root(&family()).expect("the root opens");
+        open_root(&store, &family());
         for index in 0..1030u32 {
             store
                 .commit_event(
@@ -618,7 +688,7 @@ mod tests {
     fn appends_advance_the_revision_and_reload_in_order() {
         let (_dir, store) = open_temp();
         let f = family();
-        store.create_root(&f).expect("a fresh root is creatable");
+        open_root(&store, &f);
 
         let r1 = store
             .commit_event(
@@ -626,13 +696,13 @@ mod tests {
                 EventWrite {
                     batch: Some(BatchAppend {
                         bytes: b"b0".to_vec(),
-                        based_on: Revision(0),
+                        based_on: Revision(1),
                     }),
                     records: vec![],
                 },
             )
             .expect("an append at the current revision commits");
-        assert_eq!(r1, Revision(1));
+        assert_eq!(r1, Revision(2));
 
         let r2 = store
             .commit_event(
@@ -640,31 +710,31 @@ mod tests {
                 EventWrite {
                     batch: Some(BatchAppend {
                         bytes: b"b1".to_vec(),
-                        based_on: Revision(1),
+                        based_on: Revision(2),
                     }),
                     records: vec![],
                 },
             )
             .expect("a second append at the advanced revision commits");
-        assert_eq!(r2, Revision(2));
+        assert_eq!(r2, Revision(3));
 
         let (log, revision) = store.load_log(&f).expect("the log loads");
-        assert_eq!(log, vec![b"b0".to_vec(), b"b1".to_vec()]);
-        assert_eq!(revision, Revision(2));
+        assert_eq!(log, vec![b"opening".to_vec(), b"b0".to_vec(), b"b1".to_vec()]);
+        assert_eq!(revision, Revision(3));
     }
 
     #[test]
     fn a_stale_basis_conflicts_and_writes_nothing() {
         let (_dir, store) = open_temp();
         let f = family();
-        store.create_root(&f).expect("a fresh root is creatable");
+        open_root(&store, &f);
         store
             .commit_event(
                 &f,
                 EventWrite {
                     batch: Some(BatchAppend {
                         bytes: b"b0".to_vec(),
-                        based_on: Revision(0),
+                        based_on: Revision(1),
                     }),
                     records: vec![],
                 },
@@ -676,7 +746,7 @@ mod tests {
             EventWrite {
                 batch: Some(BatchAppend {
                     bytes: b"stale".to_vec(),
-                    based_on: Revision(0),
+                    based_on: Revision(1),
                 }),
                 records: vec![RuntimeRecord::Request {
                     trajectory: f.clone(),
@@ -685,13 +755,13 @@ mod tests {
             },
         );
         match stale {
-            Err(CommitError::Conflict { current }) => assert_eq!(current, Revision(1)),
+            Err(CommitError::Conflict { current }) => assert_eq!(current, Revision(2)),
             other => panic!("expected a stale-revision conflict, got {other:?}"),
         }
 
         let (log, revision) = store.load_log(&f).expect("the log loads");
-        assert_eq!(log.len(), 1);
-        assert_eq!(revision, Revision(1));
+        assert_eq!(log.len(), 2);
+        assert_eq!(revision, Revision(2));
         assert!(store.request_texts(&f).is_empty());
     }
 
@@ -699,8 +769,8 @@ mod tests {
     fn a_reused_trajectory_id_is_refused() {
         let (_dir, store) = open_temp();
         let f = family();
-        store.create_root(&f).expect("a fresh root is creatable");
-        match store.create_root(&f) {
+        open_root(&store, &f);
+        match store.create_root(&f, opening()) {
             Err(CreateError::AlreadyExists) => {}
             other => panic!("expected AlreadyExists, got {other:?}"),
         }
@@ -711,7 +781,7 @@ mod tests {
         let (_dir, store) = open_temp();
         let f = family();
         let child = TrajectoryId("cc:child".to_string());
-        store.create_root(&f).expect("a fresh root is creatable");
+        open_root(&store, &f);
 
         store
             .commit_event(
@@ -739,7 +809,7 @@ mod tests {
                 EventWrite {
                     batch: Some(BatchAppend {
                         bytes: b"return".to_vec(),
-                        based_on: Revision(0),
+                        based_on: Revision(1),
                     }),
                     records: vec![RuntimeRecord::End { id: child.clone() }],
                 },
@@ -759,14 +829,14 @@ mod tests {
         let f = family();
         {
             let store = Store::open(&path).expect("a fresh store opens");
-            store.create_root(&f).expect("a fresh root is creatable");
+            open_root(&store, &f);
             store.fail_next_commit();
             let killed = store.commit_event(
                 &f,
                 EventWrite {
                     batch: Some(BatchAppend {
                         bytes: b"lost".to_vec(),
-                        based_on: Revision(0),
+                        based_on: Revision(1),
                     }),
                     records: vec![RuntimeRecord::Request {
                         trajectory: f.clone(),
@@ -779,8 +849,8 @@ mod tests {
 
         let store = Store::open(&path).expect("the store reopens");
         let (log, revision) = store.load_log(&f).expect("the log loads");
-        assert!(log.is_empty());
-        assert_eq!(revision, Revision(0));
+        assert_eq!(log, vec![b"opening".to_vec()]);
+        assert_eq!(revision, Revision(1));
         assert!(store.request_texts(&f).is_empty());
         store
             .commit_event(
@@ -788,12 +858,12 @@ mod tests {
                 EventWrite {
                     batch: Some(BatchAppend {
                         bytes: b"b0".to_vec(),
-                        based_on: Revision(0),
+                        based_on: Revision(1),
                     }),
                     records: vec![],
                 },
             )
-            .expect("the replayed event commits from revision 0");
+            .expect("the replayed event commits from revision 1");
     }
 
     #[test]
@@ -803,14 +873,14 @@ mod tests {
         let f = family();
         {
             let store = Store::open(&path).expect("a fresh store opens");
-            store.create_root(&f).expect("a fresh root is creatable");
+            open_root(&store, &f);
             store
                 .commit_event(
                     &f,
                     EventWrite {
                         batch: Some(BatchAppend {
                             bytes: b"b0".to_vec(),
-                            based_on: Revision(0),
+                            based_on: Revision(1),
                         }),
                         records: vec![],
                     },
@@ -819,8 +889,8 @@ mod tests {
         }
         let store = Store::open(&path).expect("the store reopens");
         let (log, revision) = store.load_log(&f).expect("the log loads");
-        assert_eq!(log, vec![b"b0".to_vec()]);
-        assert_eq!(revision, Revision(1));
+        assert_eq!(log, vec![b"opening".to_vec(), b"b0".to_vec()]);
+        assert_eq!(revision, Revision(2));
         assert!(
             store
                 .trajectory(&f)
@@ -834,22 +904,22 @@ mod tests {
         let (_dir, store) = open_temp();
         let a = TrajectoryId("cc:family-a".to_string());
         let b = TrajectoryId("cc:family-b".to_string());
-        store.create_root(&a).expect("family a opens");
-        store.create_root(&b).expect("family b opens");
+        open_root(&store, &a);
+        open_root(&store, &b);
 
         let crossed = store.commit_event(
             &a,
             EventWrite {
                 batch: Some(BatchAppend {
                     bytes: b"facts".to_vec(),
-                    based_on: Revision(0),
+                    based_on: Revision(1),
                 }),
                 records: vec![RuntimeRecord::End { id: b.clone() }],
             },
         );
         assert!(matches!(crossed, Err(CommitError::InvalidRecord { .. })));
         let (log, _) = store.load_log(&a).expect("the log loads");
-        assert!(log.is_empty(), "the batch must roll back with the refused record");
+        assert_eq!(log.len(), 1, "the batch must roll back with the refused record");
         assert!(
             store
                 .trajectory(&b)
@@ -885,7 +955,7 @@ mod tests {
         let path = dir.path().join("appa.db");
         let f = family();
         let first = Store::open(&path).expect("the first connection opens");
-        first.create_root(&f).expect("a fresh root is creatable");
+        open_root(&first, &f);
         let second = Store::open(&path).expect("the second connection opens");
 
         first
@@ -894,7 +964,7 @@ mod tests {
                 EventWrite {
                     batch: Some(BatchAppend {
                         bytes: b"first".to_vec(),
-                        based_on: Revision(0),
+                        based_on: Revision(1),
                     }),
                     records: vec![],
                 },
@@ -905,13 +975,13 @@ mod tests {
             EventWrite {
                 batch: Some(BatchAppend {
                     bytes: b"second".to_vec(),
-                    based_on: Revision(0),
+                    based_on: Revision(1),
                 }),
                 records: vec![],
             },
         );
         match stale {
-            Err(CommitError::Conflict { current }) => assert_eq!(current, Revision(1)),
+            Err(CommitError::Conflict { current }) => assert_eq!(current, Revision(2)),
             other => panic!("expected a stale-revision conflict, got {other:?}"),
         }
         second
@@ -920,21 +990,21 @@ mod tests {
                 EventWrite {
                     batch: Some(BatchAppend {
                         bytes: b"second".to_vec(),
-                        based_on: Revision(1),
+                        based_on: Revision(2),
                     }),
                     records: vec![],
                 },
             )
             .expect("the replayed append commits");
         let (log, _) = first.load_log(&f).expect("the log loads");
-        assert_eq!(log, vec![b"first".to_vec(), b"second".to_vec()]);
+        assert_eq!(log, vec![b"opening".to_vec(), b"first".to_vec(), b"second".to_vec()]);
     }
 
     #[test]
     fn a_second_open_dispatch_for_one_trajectory_is_refused() {
         let (_dir, store) = open_temp();
         let f = family();
-        store.create_root(&f).expect("a fresh root is creatable");
+        open_root(&store, &f);
         let open_record = |id: &str| RuntimeRecord::OpenDispatch {
             id: DispatchId(id.to_string()),
             trajectory: f.clone(),
@@ -968,8 +1038,8 @@ mod tests {
         let (_dir, store) = open_temp();
         let a = TrajectoryId("cc:family-a".to_string());
         let b = TrajectoryId("cc:family-b".to_string());
-        store.create_root(&a).expect("family a opens");
-        store.create_root(&b).expect("family b opens");
+        open_root(&store, &a);
+        open_root(&store, &b);
         store
             .commit_event(
                 &b,
@@ -1012,14 +1082,107 @@ mod tests {
     }
 
     #[test]
-    fn a_changed_policy_digest_is_refused() {
+    fn a_stored_policy_file_is_write_once() {
         let (_dir, store) = open_temp();
-        store.bind_policy_digest("digest-one").expect("the first open binds");
-        store.bind_policy_digest("digest-one").expect("the same policy reopens");
+        store.put_policy(POLICY_FILE).expect("the first store lands");
+        store
+            .put_policy(POLICY_FILE)
+            .expect("the same bytes store nothing and pass");
+        store
+            .lock()
+            .execute("UPDATE policies SET bytes = X'00'", [])
+            .expect("the tamper lands");
         assert!(matches!(
-            store.bind_policy_digest("digest-two"),
-            Err(StoreError::PolicyMismatch { .. }),
+            store.put_policy(POLICY_FILE),
+            Err(StoreError::PolicyRewrite { .. }),
         ));
+    }
+
+    #[test]
+    fn concurrent_stores_of_the_same_policy_file_both_pass() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.db");
+        drop(Store::open(&path).expect("the schema creates"));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let racers: Vec<_> = (0..2)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let store = Store::open(&path).expect("a connection opens");
+                    barrier.wait();
+                    store.put_policy(POLICY_FILE)
+                })
+            })
+            .collect();
+        for racer in racers {
+            racer
+                .join()
+                .expect("the racer thread joins")
+                .expect("both concurrent stores pass");
+        }
+    }
+
+    #[test]
+    fn a_killed_opening_leaves_nothing() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.db");
+        {
+            let store = Store::open(&path).expect("a fresh store opens");
+            store.fail_next_commit();
+            assert!(matches!(
+                store.create_root(&family(), opening()),
+                Err(CreateError::Injected),
+            ));
+        }
+        let store = Store::open(&path).expect("the store reopens");
+        assert!(
+            store.trajectory(&family()).expect("the row query runs").is_none(),
+            "no trajectory row survives the kill",
+        );
+        assert!(matches!(
+            store.load_log(&family()),
+            Err(StoreError::UnknownFamily { .. }),
+        ));
+        assert!(
+            store.opening(&family()).expect("the opening query runs").is_none(),
+            "no opening record survives the kill",
+        );
+        open_root(&store, &family());
+    }
+
+    #[test]
+    fn an_opened_root_carries_its_opening_and_stored_file() {
+        let (_dir, store) = open_temp();
+        store.put_policy(POLICY_FILE).expect("the file stores");
+        open_root(&store, &family());
+        let (log, revision) = store.load_log(&family()).expect("the log loads");
+        assert_eq!(log, vec![b"opening".to_vec()]);
+        assert_eq!(revision, Revision(1));
+        let row = store
+            .opening(&family())
+            .expect("the opening query runs")
+            .expect("the opening row exists");
+        assert_eq!(row.policy_key, crate::config::PolicyFileKey::of(POLICY_FILE).as_str());
+        assert_eq!(row.policy_identity, "policy-identity");
+        assert_eq!(row.policy_bytes.as_deref(), Some(POLICY_FILE));
+    }
+
+    #[test]
+    fn a_missing_stored_file_joins_as_none() {
+        let (_dir, store) = open_temp();
+        open_root(&store, &family());
+        let row = store
+            .opening(&family())
+            .expect("the opening query runs")
+            .expect("the opening row exists");
+        assert!(row.policy_bytes.is_none());
+        assert!(
+            store
+                .opening(&TrajectoryId("cc:ghost".to_string()))
+                .expect("the opening query runs")
+                .is_none()
+        );
     }
 
     #[test]

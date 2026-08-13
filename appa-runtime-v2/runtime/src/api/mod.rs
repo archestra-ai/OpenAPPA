@@ -10,8 +10,8 @@ pub use crate::engine::TrajectoryStatus;
 pub use appa_runtime_api::{OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
 pub(crate) use session::{Session, is_control_tool};
 
-use crate::config::Config;
-use crate::engine::{EngineRefusal, EngineSeam, RuntimeEngine};
+use crate::config::{Config, PolicyFileKey};
+use crate::engine::{EngineRefusal, EngineSeam, PolicyEngine, RuntimeEngine};
 use crate::external::ExternalServices;
 use crate::store::{Store, StoreError};
 
@@ -92,8 +92,6 @@ pub enum OpenError {
     UnboundExternal { kind: &'static str, name: String },
     #[error("the database is damaged: {0}")]
     Damaged(String),
-    #[error("the database belongs to policy digest {stored}, not {supplied}")]
-    PolicyMismatch { stored: String, supplied: String },
     #[error("storage failure: {0}")]
     Storage(String),
 }
@@ -136,6 +134,8 @@ pub(crate) enum EventError {
     UnexpectedDecision,
     #[error("the persisted log is refused: {0}")]
     UntrustedLog(String),
+    #[error("the opening policy is unavailable: {0}")]
+    PolicyUnavailable(String),
     #[error("engine invariant breach: {0}")]
     EngineInvariant(String),
     #[error("storage failure: {0}")]
@@ -153,6 +153,7 @@ impl EventError {
         match self {
             EventError::Storage(_)
             | EventError::UntrustedLog(_)
+            | EventError::PolicyUnavailable(_)
             | EventError::EngineInvariant(_)
             | EventError::Contended { .. }
             | EventError::UnexpectedDecision => true,
@@ -183,6 +184,7 @@ impl From<EngineRefusal> for EventError {
     fn from(refusal: EngineRefusal) -> EventError {
         match refusal {
             EngineRefusal::UntrustedLog { detail } => EventError::UntrustedLog(detail),
+            EngineRefusal::OpeningMismatch { detail } => EventError::PolicyUnavailable(detail),
             EngineRefusal::Invariant { detail } => EventError::EngineInvariant(detail),
             EngineRefusal::ChildAlreadyForked => EventError::TrajectoryExists,
             EngineRefusal::Ended => EventError::TrajectoryEnded,
@@ -203,6 +205,42 @@ struct Inner {
     executing: std::sync::Mutex<std::collections::BTreeSet<String>>,
 }
 
+impl Inner {
+    pub(super) fn resolve_policy(&self, family: &TrajectoryId) -> Result<PolicyEngine<'_>, EventError> {
+        let opening = self
+            .store
+            .opening(family)
+            .map_err(|error| EventError::Storage(error.to_string()))?
+            .ok_or_else(|| EventError::PolicyUnavailable(format!("family {} has no opening record", family.0)))?;
+        let Some(bytes) = opening.policy_bytes else {
+            return Err(EventError::PolicyUnavailable(format!(
+                "the stored policy file {} is missing",
+                opening.policy_key
+            )));
+        };
+        let key = PolicyFileKey::of(&bytes);
+        if key.as_str() != opening.policy_key {
+            return Err(EventError::PolicyUnavailable(format!(
+                "the stored policy file does not hash to its key {}",
+                opening.policy_key
+            )));
+        }
+        let policy = if self.config.policy_file().key() == &key {
+            self.engine.resident()
+        } else {
+            let compiled = compile_stored_policy(&bytes).map_err(EventError::PolicyUnavailable)?;
+            PolicyEngine::Stored(RuntimeEngine::new(compiled.engine().clone()))
+        };
+        if policy.identity_hex() != opening.policy_identity {
+            return Err(EventError::PolicyUnavailable(format!(
+                "the stored policy file compiles to a different identity than the opening record of family {}",
+                family.0
+            )));
+        }
+        Ok(policy)
+    }
+}
+
 impl Runtime {
     /// Opens the modules, the engine, and the store. The `[policy]`
     /// table compiles through the documented dialect into the engine's
@@ -210,19 +248,26 @@ impl Runtime {
     /// a policy this deployment cannot honor is refused before
     /// anything opens.
     pub fn open(config: Config, db: PathBuf, modules: Option<PathBuf>) -> Result<Runtime, OpenError> {
-        let text = toml::to_string(&config.policy)
-            .map_err(|error| OpenError::UnsupportedPolicy(format!("the policy table does not serialize: {error}")))?;
-        let policy = appa_policy::Config::from_toml_str(&text).map_err(OpenError::Policy)?;
+        let policy = compile_policy(&config)?;
         validate_deployment(&policy, &config)?;
-        let seam = EngineSeam::Real(RuntimeEngine::new(policy.engine().clone()));
+        let seam = EngineSeam::real(RuntimeEngine::new(policy.engine().clone()));
         Runtime::with_engine(config, db, modules, seam)
     }
 
-    /// The tests' entry: the same runtime over an engine seam whose
-    /// queue the test controls, with no modules directory.
+    /// The tests' entry: the same runtime with decisions from the
+    /// enqueued queue and no modules directory. The policy still
+    /// compiles for real — opening records and the replay gates run on
+    /// the compiled engine even here — but the deployment lints are
+    /// skipped, so a fixture needs no `[externals]` bindings.
     #[cfg(test)]
-    pub(crate) fn open_with_engine(config: Config, db: PathBuf, engine: EngineSeam) -> Result<Runtime, OpenError> {
-        Runtime::with_engine(config, db, None, engine)
+    pub(crate) fn open_with_engine(
+        config: Config,
+        db: PathBuf,
+        seam: crate::engine::TestSeam,
+    ) -> Result<Runtime, OpenError> {
+        let policy = compile_policy(&config)?;
+        let seam = EngineSeam::test(RuntimeEngine::new(policy.engine().clone()), seam);
+        Runtime::with_engine(config, db, None, seam)
     }
 
     fn with_engine(
@@ -239,11 +284,12 @@ impl Runtime {
             StoreError::Damaged { path, detail } => OpenError::Damaged(format!("{path}: {detail}")),
             error => OpenError::Storage(error.to_string()),
         })?;
-        let digest = policy_digest(&config.policy);
-        store.bind_policy_digest(&digest).map_err(|error| match error {
-            StoreError::PolicyMismatch { stored, supplied } => OpenError::PolicyMismatch { stored, supplied },
-            error => OpenError::Storage(error.to_string()),
-        })?;
+        store
+            .put_policy(config.policy_file().bytes())
+            .map_err(|error| match error {
+                error @ StoreError::PolicyRewrite { .. } => OpenError::Damaged(error.to_string()),
+                error => OpenError::Storage(error.to_string()),
+            })?;
         Ok(Runtime {
             inner: Arc::new(Inner {
                 store,
@@ -257,12 +303,23 @@ impl Runtime {
 
     /// Opens a fresh trajectory. Refuses an id that already exists: a
     /// reused harness id MUST NOT continue another trajectory's
-    /// history (`POS-8`, harness binding).
+    /// history One transaction writes the
+    /// trajectory row, the opening record, and the opening batch — the
+    /// root is bound to the current policy file durably, or not opened
+    /// at all.
     pub(crate) fn create_session(&self, id: TrajectoryId) -> Result<Session, SessionError> {
-        self.inner.store.create_root(&id).map_err(|error| match error {
-            crate::store::CreateError::AlreadyExists => SessionError::AlreadyExists,
-            crate::store::CreateError::Storage(error) => SessionError::Storage(error.to_string()),
-        })?;
+        let opening = self
+            .inner
+            .engine
+            .root_opening(&id, self.inner.config.policy_file().key());
+        let id = opening.trajectory().clone();
+        self.inner
+            .store
+            .create_root(&id, opening.into_write())
+            .map_err(|error| match error {
+                crate::store::CreateError::AlreadyExists => SessionError::AlreadyExists,
+                error => SessionError::Storage(error.to_string()),
+            })?;
         Ok(Session::attach(Arc::clone(&self.inner), id.clone(), id))
     }
 
@@ -298,6 +355,13 @@ impl Runtime {
             tracing::debug!(trajectory = %id.0, "status read refused: not a root trajectory");
             return None;
         }
+        let policy = match self.inner.resolve_policy(&row.family) {
+            Ok(policy) => policy,
+            Err(error) => {
+                tracing::warn!(trajectory = %id.0, %error, "status read refused: the opening policy is unavailable");
+                return None;
+            }
+        };
         let (log, _revision) = match self.inner.store.load_log(&row.family) {
             Ok(log) => log,
             Err(error) => {
@@ -305,14 +369,14 @@ impl Runtime {
                 return None;
             }
         };
-        let view = match self.inner.engine.rebuild_view(&log, id) {
+        let view = match self.inner.engine.rebuild_view(&policy, &log, &row.family, id) {
             Ok(view) => view,
             Err(refusal) => {
                 tracing::warn!(trajectory = %id.0, %refusal, "status read refused the persisted log");
                 return None;
             }
         };
-        self.inner.engine.trajectory_status(&view)
+        self.inner.engine.trajectory_status(&policy, &view)
     }
 
     /// Which trajectory a surfaced offer routes to. The MCP endpoint
@@ -446,12 +510,22 @@ fn validate_deployment(policy: &appa_policy::Config, config: &Config) -> Result<
     Ok(())
 }
 
-fn policy_digest(policy: &toml::Value) -> String {
-    use sha2::{Digest, Sha256};
-    let canonical = toml::to_string(policy).unwrap_or_default();
-    let mut hasher = Sha256::new();
-    hasher.update(canonical.as_bytes());
-    format!("{:x}", hasher.finalize())
+fn compile_policy(config: &Config) -> Result<appa_policy::Config, OpenError> {
+    let text = toml::to_string(config.policy_file().value())
+        .map_err(|error| OpenError::UnsupportedPolicy(format!("the policy table does not serialize: {error}")))?;
+    appa_policy::Config::from_toml_str(&text).map_err(OpenError::Policy)
+}
+
+fn compile_stored_policy(bytes: &[u8]) -> Result<appa_policy::Config, String> {
+    let text = std::str::from_utf8(bytes).map_err(|error| format!("the stored policy file is not UTF-8: {error}"))?;
+    let value: toml::Value =
+        toml::from_str(text).map_err(|error| format!("the stored policy file does not parse: {error}"))?;
+    let policy = value
+        .get("policy")
+        .ok_or("the stored policy file has no [policy] table")?;
+    let text =
+        toml::to_string(policy).map_err(|error| format!("the stored policy table does not serialize: {error}"))?;
+    appa_policy::Config::from_toml_str(&text).map_err(|error| format!("the stored policy does not load: {error}"))
 }
 
 /// Plain-data helpers for tests outside this module — the adapter and
@@ -460,14 +534,12 @@ fn policy_digest(policy: &toml::Value) -> String {
 /// code too).
 #[cfg(test)]
 pub(crate) mod testing {
-    use crate::engine::{
-        EngineDecision, EngineSeam, Feedback, Next, OfferMutations, Presentation, ReleasedCall, TestSeam,
-    };
+    use crate::engine::{EngineDecision, Feedback, Next, OfferMutations, Presentation, ReleasedCall, TestSeam};
 
     use super::{Config, DispatchId, OfferId, ProposedCall, Runtime};
 
     pub(crate) fn runtime(config: Config, db: std::path::PathBuf) -> Runtime {
-        Runtime::open_with_engine(config, db, EngineSeam::Test(TestSeam::new())).expect("a fresh test runtime opens")
+        Runtime::open_with_engine(config, db, TestSeam::new()).expect("a fresh test runtime opens")
     }
 
     pub(crate) fn fail_next_commit(runtime: &Runtime) {
@@ -475,10 +547,7 @@ pub(crate) mod testing {
     }
 
     fn enqueue(runtime: &Runtime, then: Next) {
-        let EngineSeam::Test(seam) = &runtime.inner.engine else {
-            panic!("testing helpers drive the test seam only");
-        };
-        seam.enqueue(EngineDecision {
+        runtime.inner.engine.enqueue(EngineDecision {
             append: None,
             then,
             offers: OfferMutations::default(),

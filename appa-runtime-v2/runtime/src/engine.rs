@@ -225,6 +225,8 @@ impl EngineDecision {
 pub enum EngineRefusal {
     #[error("the persisted log is refused: {detail}")]
     UntrustedLog { detail: String },
+    #[error("the opening does not match the deciding policy: {detail}")]
+    OpeningMismatch { detail: String },
     #[error("engine invariant breach: {detail}")]
     Invariant { detail: String },
     #[error("the child is already forked")]
@@ -239,14 +241,10 @@ pub enum EngineRefusal {
 /// trajectory the event belongs to. Opaque and disposable: rebuilt
 /// per event, never stored.
 #[derive(Debug)]
-pub enum EngineView {
-    Real {
-        facts: Vec<Fact>,
-        revision: Revision,
-        trajectory: TrajectoryId,
-    },
-    #[cfg(test)]
-    Test,
+pub struct EngineView {
+    facts: Vec<Fact>,
+    revision: Revision,
+    trajectory: TrajectoryId,
 }
 
 /// One trajectory's current label rendered for a display surface — the
@@ -260,30 +258,154 @@ pub struct TrajectoryStatus {
     pub audience: String,
 }
 
-/// The one engine boundary the session drives: the real engine, or
-/// the tests' enqueued-decision seam.
-// One seam exists per process, so the size gap against the cfg(test) variant buys no box.
-#[cfg_attr(test, expect(clippy::large_enum_variant))]
-pub enum EngineSeam {
-    Real(RuntimeEngine),
+/// A root's validated opening: the engine's opening batch plus
+/// the exact-bytes key of the policy file the root opens under. The only
+/// constructor derives the trajectory and the identity from the batch's one
+/// `TrajectoryOpened` fact, so the durable opening record can never
+/// disagree with the fact it stores beside.
+#[derive(Debug, Clone)]
+pub struct RootOpening {
+    trajectory: TrajectoryId,
+    policy_key: crate::config::PolicyFileKey,
+    policy_identity: String,
+    batch: Vec<u8>,
+}
+
+impl RootOpening {
+    fn new(batch: &FactBatch, policy_key: crate::config::PolicyFileKey) -> Result<RootOpening, String> {
+        if batch.basis.value() != 0 {
+            return Err("the opening batch is not at revision zero".to_string());
+        }
+        let [fact] = batch.facts.as_slice() else {
+            return Err("the opening batch does not hold exactly one fact".to_string());
+        };
+        let Fact::TrajectoryOpened {
+            trajectory,
+            policy_digest,
+            ..
+        } = fact
+        else {
+            return Err("the opening batch's fact is not a TrajectoryOpened".to_string());
+        };
+        Ok(RootOpening {
+            trajectory: TrajectoryId(trajectory.as_str().to_string()),
+            policy_key,
+            policy_identity: hex(policy_digest.bytes()),
+            batch: serde_json::to_vec(&batch.facts).expect("engine facts serialize"),
+        })
+    }
+
+    pub fn trajectory(&self) -> &TrajectoryId {
+        &self.trajectory
+    }
+
+    /// The store's row for this opening, rendered at the SQLite
+    /// encoding boundary. The one way the validated opening reaches
+    /// the store: no caller decomposes it into free strings first.
+    pub fn into_write(self) -> crate::store::OpeningWrite {
+        crate::store::OpeningWrite {
+            policy_key: self.policy_key.as_str().to_string(),
+            policy_identity: self.policy_identity,
+            batch: self.batch,
+        }
+    }
+}
+
+/// The engine deciding one family's events: the resident engine when the
+/// root's stored policy file is the current one, or an engine compiled
+/// from the root's stored bytes. Per-event and disposable —
+/// never a registry of resident engines.
+#[expect(clippy::large_enum_variant)]
+pub enum PolicyEngine<'a> {
+    Resident(&'a RuntimeEngine),
+    Stored(RuntimeEngine),
+}
+
+impl PolicyEngine<'_> {
+    fn engine(&self) -> &RuntimeEngine {
+        match self {
+            PolicyEngine::Resident(engine) => engine,
+            PolicyEngine::Stored(engine) => engine,
+        }
+    }
+
+    /// The policy identity of the deciding engine, lowercase hex — what
+    /// a root's opening record must name.
+    pub fn identity_hex(&self) -> String {
+        hex(self.engine().engine.identity().bytes())
+    }
+}
+
+enum Decider {
+    Real,
     #[cfg(test)]
     Test(TestSeam),
 }
 
+/// The one engine boundary the session drives: the resident
+/// engine compiled at open, the process-wide offer cache shared by every
+/// resolved engine, and the decider.
+pub struct EngineSeam {
+    resident: RuntimeEngine,
+    offers: Mutex<OfferCache>,
+    decider: Decider,
+}
+
 impl EngineSeam {
-    pub fn rebuild_view(&self, log: &[Vec<u8>], trajectory: &TrajectoryId) -> Result<EngineView, EngineRefusal> {
-        match self {
-            EngineSeam::Real(engine) => engine.rebuild_view(log, trajectory),
-            #[cfg(test)]
-            EngineSeam::Test(_) => Ok(EngineView::Test),
+    pub fn real(resident: RuntimeEngine) -> EngineSeam {
+        EngineSeam {
+            resident,
+            offers: Mutex::new(OfferCache::new()),
+            decider: Decider::Real,
         }
     }
 
-    pub fn handle(&self, view: &EngineView, event: EngineEvent) -> Result<EngineDecision, EngineRefusal> {
-        match self {
-            EngineSeam::Real(engine) => engine.handle(view, event),
+    /// The tests' seam: decisions come from the enqueued queue; the real
+    /// compiled engine still opens trajectories and gates replays.
+    #[cfg(test)]
+    pub fn test(resident: RuntimeEngine, seam: TestSeam) -> EngineSeam {
+        EngineSeam {
+            resident,
+            offers: Mutex::new(OfferCache::new()),
+            decider: Decider::Test(seam),
+        }
+    }
+
+    pub fn resident(&self) -> PolicyEngine<'_> {
+        PolicyEngine::Resident(&self.resident)
+    }
+
+    /// The opening of a fresh root under the resident policy: the engine's
+    /// opening batch bound to the current policy file's key.
+    pub fn root_opening(&self, trajectory: &TrajectoryId, policy_key: &crate::config::PolicyFileKey) -> RootOpening {
+        let batch = self.resident.engine.open_trajectory(&engine_id(trajectory));
+        RootOpening::new(&batch, policy_key.clone())
+            .expect("the engine's opening batch is one TrajectoryOpened at revision zero")
+    }
+
+    /// Decode one family log and refuse it before it is trusted,
+    /// including the opening gate: the log's first record must be this
+    /// family's opening under exactly the deciding engine's policy.
+    pub fn rebuild_view(
+        &self,
+        policy: &PolicyEngine<'_>,
+        log: &[Vec<u8>],
+        family: &TrajectoryId,
+        trajectory: &TrajectoryId,
+    ) -> Result<EngineView, EngineRefusal> {
+        policy.engine().rebuild_view(log, family, trajectory)
+    }
+
+    pub fn handle(
+        &self,
+        policy: &PolicyEngine<'_>,
+        view: &EngineView,
+        event: EngineEvent,
+    ) -> Result<EngineDecision, EngineRefusal> {
+        match &self.decider {
+            Decider::Real => policy.engine().handle(view, event, &self.offers),
             #[cfg(test)]
-            EngineSeam::Test(seam) => Ok(seam.next(event)),
+            Decider::Test(seam) => Ok(seam.next(event)),
         }
     }
 
@@ -291,46 +413,43 @@ impl EngineSeam {
     /// matching of provider-run tools. `None` when the call cannot canonicalize — an
     /// unknown tool or schema-invalid arguments never match a dispatched
     /// call, whose bytes the engine validated.
-    pub fn canonical_bytes(&self, call: &ProposedCall) -> Option<Vec<u8>> {
-        match self {
-            EngineSeam::Real(engine) => engine.canonical_bytes(call),
+    pub fn canonical_bytes(&self, policy: &PolicyEngine<'_>, call: &ProposedCall) -> Option<Vec<u8>> {
+        match &self.decider {
+            Decider::Real => policy.engine().canonical_bytes(call),
             #[cfg(test)]
-            EngineSeam::Test(_) => serde_json::to_vec(call).ok(),
+            Decider::Test(_) => serde_json::to_vec(call).ok(),
         }
     }
 
     #[cfg(test)]
     pub fn enqueue(&self, decision: EngineDecision) {
-        match self {
-            EngineSeam::Test(seam) => seam.enqueue(decision),
-            EngineSeam::Real(_) => panic!("only the test seam takes enqueued decisions"),
+        match &self.decider {
+            Decider::Test(seam) => seam.enqueue(decision),
+            Decider::Real => panic!("only the test seam takes enqueued decisions"),
         }
     }
 
     #[cfg(test)]
     pub fn seen(&self) -> Vec<EngineEvent> {
-        match self {
-            EngineSeam::Test(seam) => seam.seen(),
-            EngineSeam::Real(_) => panic!("only the test seam records seen events"),
+        match &self.decider {
+            Decider::Test(seam) => seam.seen(),
+            Decider::Real => panic!("only the test seam records seen events"),
         }
     }
 
     pub fn apply_offers(&self, mutations: OfferMutations) {
-        match self {
-            EngineSeam::Real(engine) => engine.apply_offers(mutations),
-            #[cfg(test)]
-            EngineSeam::Test(_) => {}
-        }
+        let mut cache = self.offers.lock().expect("the offer cache mutex is never poisoned");
+        cache.apply(mutations);
     }
 
     /// Render one trajectory's current label from the rebuilt view, for the
     /// statusline. A projection read: no engine event, no fact, nothing
     /// gated.
-    pub fn trajectory_status(&self, view: &EngineView) -> Option<TrajectoryStatus> {
-        match self {
-            EngineSeam::Real(engine) => engine.trajectory_status(view),
+    pub fn trajectory_status(&self, policy: &PolicyEngine<'_>, view: &EngineView) -> Option<TrajectoryStatus> {
+        match &self.decider {
+            Decider::Real => policy.engine().trajectory_status(view),
             #[cfg(test)]
-            EngineSeam::Test(_) => Some(TrajectoryStatus {
+            Decider::Test(_) => Some(TrajectoryStatus {
                 trajectory: String::new(),
                 trust: String::new(),
                 audience: String::new(),
@@ -340,11 +459,11 @@ impl EngineSeam {
 }
 
 /// The real engine behind the seam: the immutable registry-backed decision
-/// core plus this process's offer cache. The deployment's child-return
-/// binding is the engine's own validated state.
+/// core. The deployment's child-return binding is the engine's own
+/// validated state. Offer payloads live in the seam, shared by
+/// every resolved engine.
 pub struct RuntimeEngine {
     engine: Engine,
-    offers: Mutex<OfferCache>,
 }
 
 struct OfferCache {
@@ -354,39 +473,46 @@ struct OfferCache {
 
 const OFFER_CACHE_CAP: usize = 1024;
 
-impl RuntimeEngine {
-    pub fn new(engine: Engine) -> RuntimeEngine {
-        RuntimeEngine {
-            engine,
-            offers: Mutex::new(OfferCache {
-                entries: HashMap::new(),
-                staged: 0,
-            }),
+impl OfferCache {
+    fn new() -> OfferCache {
+        OfferCache {
+            entries: HashMap::new(),
+            staged: 0,
         }
     }
 
-    fn apply_offers(&self, mutations: OfferMutations) {
-        let mut cache = self.offers.lock().expect("the offer cache mutex is never poisoned");
+    fn apply(&mut self, mutations: OfferMutations) {
         for id in &mutations.retire {
-            cache.entries.remove(&id.0);
+            self.entries.remove(&id.0);
         }
         for (id, offer) in mutations.stage {
-            let seq = cache.staged;
-            cache.staged += 1;
-            cache.entries.insert(id.0, (seq, offer));
+            let seq = self.staged;
+            self.staged += 1;
+            self.entries.insert(id.0, (seq, offer));
         }
-        while cache.entries.len() > OFFER_CACHE_CAP {
-            let oldest = cache
+        while self.entries.len() > OFFER_CACHE_CAP {
+            let oldest = self
                 .entries
                 .iter()
                 .min_by_key(|(_, (seq, _))| *seq)
                 .map(|(id, _)| id.clone())
                 .expect("a non-empty cache has an oldest entry");
-            cache.entries.remove(&oldest);
+            self.entries.remove(&oldest);
         }
     }
+}
 
-    fn rebuild_view(&self, log: &[Vec<u8>], trajectory: &TrajectoryId) -> Result<EngineView, EngineRefusal> {
+impl RuntimeEngine {
+    pub fn new(engine: Engine) -> RuntimeEngine {
+        RuntimeEngine { engine }
+    }
+
+    fn rebuild_view(
+        &self,
+        log: &[Vec<u8>],
+        family: &TrajectoryId,
+        trajectory: &TrajectoryId,
+    ) -> Result<EngineView, EngineRefusal> {
         let mut facts = Vec::new();
         for (seq, row) in log.iter().enumerate() {
             let batch: Vec<Fact> = serde_json::from_slice(row).map_err(|error| EngineRefusal::UntrustedLog {
@@ -399,7 +525,12 @@ impl RuntimeEngine {
             .map_err(|error| EngineRefusal::UntrustedLog {
                 detail: error.to_string(),
             })?;
-        Ok(EngineView::Real {
+        self.engine
+            .verify_opening(&facts, &engine_id(family))
+            .map_err(|error| EngineRefusal::OpeningMismatch {
+                detail: error.to_string(),
+            })?;
+        Ok(EngineView {
             facts,
             revision: Revision::new(log.len() as u64),
             trajectory: trajectory.clone(),
@@ -413,15 +544,11 @@ impl RuntimeEngine {
     }
 
     fn trajectory_status(&self, view: &EngineView) -> Option<TrajectoryStatus> {
-        let (facts, revision, trajectory) = match view {
-            EngineView::Real {
-                facts,
-                revision,
-                trajectory,
-            } => (facts, revision, trajectory),
-            #[cfg(test)]
-            EngineView::Test => unreachable!("a test view never reaches the real engine"),
-        };
+        let EngineView {
+            facts,
+            revision,
+            trajectory,
+        } = view;
         let projection = Projection::build(facts, *revision);
         let label = projection.view(&engine_id(trajectory)).current_label();
         let chain = self.engine.registry().trust_chain();
@@ -459,16 +586,17 @@ impl RuntimeEngine {
         })
     }
 
-    fn handle(&self, view: &EngineView, event: EngineEvent) -> Result<EngineDecision, EngineRefusal> {
-        let (facts, revision, trajectory) = match view {
-            EngineView::Real {
-                facts,
-                revision,
-                trajectory,
-            } => (facts, revision, trajectory),
-            #[cfg(test)]
-            EngineView::Test => unreachable!("a test view never reaches the real engine"),
-        };
+    fn handle(
+        &self,
+        view: &EngineView,
+        event: EngineEvent,
+        offers: &Mutex<OfferCache>,
+    ) -> Result<EngineDecision, EngineRefusal> {
+        let EngineView {
+            facts,
+            revision,
+            trajectory,
+        } = view;
         let projection = Projection::build(facts, *revision);
         let own = engine_id(trajectory);
         match event {
@@ -492,7 +620,7 @@ impl RuntimeEngine {
                 let views = projection.view(&own);
                 self.tool_outcome(&views, &call, &outcome, &evidence)
             }
-            EngineEvent::ExecuteOffer { offer, evidence } => self.execute_offer(&projection, &offer, &evidence),
+            EngineEvent::ExecuteOffer { offer, evidence } => self.execute_offer(&projection, &offer, &evidence, offers),
             EngineEvent::ChildStart { child } => {
                 let views = projection.view(&own);
                 let child_id = engine_id(&child);
@@ -697,9 +825,10 @@ impl RuntimeEngine {
         projection: &Projection,
         offer: &OfferId,
         evidence: &[ExternalEvidence],
+        offers: &Mutex<OfferCache>,
     ) -> Result<EngineDecision, EngineRefusal> {
         let cached = {
-            let cache = self.offers.lock().expect("the offer cache mutex is never poisoned");
+            let cache = offers.lock().expect("the offer cache mutex is never poisoned");
             cache.entries.get(&offer.0).map(|(_, cached)| cached.clone())
         };
         let Some(cached) = cached else {
@@ -712,7 +841,7 @@ impl RuntimeEngine {
             CachedOffer::Call { trajectory, call, plan } => {
                 let owner = engine_id(&trajectory);
                 let views = projection.view(&owner);
-                self.execute_call_offer(&views, &trajectory, offer, &call, &plan, evidence)
+                self.execute_call_offer(&views, &trajectory, offer, &call, &plan, evidence, offers)
             }
             CachedOffer::ChildReturn {
                 trajectory,
@@ -728,6 +857,7 @@ impl RuntimeEngine {
         }
     }
 
+    #[expect(clippy::too_many_arguments)]
     fn execute_call_offer(
         &self,
         views: &Views,
@@ -736,6 +866,7 @@ impl RuntimeEngine {
         call: &ProposedCall,
         chosen: &ExecutableRemedyPlan,
         evidence: &[ExternalEvidence],
+        offers: &Mutex<OfferCache>,
     ) -> Result<EngineDecision, EngineRefusal> {
         let resolved = match self.resolve(call, evidence) {
             Ok(resolved) => resolved,
@@ -828,7 +959,7 @@ impl RuntimeEngine {
                             authority: denier.clone(),
                         }],
                     );
-                    let retire = self.offers_naming(trajectory, &denier, &digest);
+                    let retire = self.offers_naming(trajectory, &denier, &digest, offers);
                     let mut decision = EngineDecision::append(
                         batch,
                         Next::PresentToModel(Presentation::Declined {
@@ -1159,8 +1290,9 @@ impl RuntimeEngine {
         trajectory: &TrajectoryId,
         denier: &appa_engine::names::AuthorityName,
         digest: &CanonicalDigest,
+        offers: &Mutex<OfferCache>,
     ) -> Vec<OfferId> {
-        let cache = self.offers.lock().expect("the offer cache mutex is never poisoned");
+        let cache = offers.lock().expect("the offer cache mutex is never poisoned");
         cache
             .entries
             .iter()
