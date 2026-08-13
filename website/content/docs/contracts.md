@@ -36,7 +36,6 @@ A reader list may name a **group**, written `@name`. The registered membership r
 
 ```toml
 [membership]                    # one per deployment; every @group resolves here
-resolver = { url = "https://directory.corp/members", timeout_ms = 5000 }
 
 [[tool]]
 name     = "post_audit_note"
@@ -51,13 +50,11 @@ Resolution is fresh per call, and pinned within one: the set resolved at a call'
 A dynamic resolver maps one top-level string argument to literal reader IDs. It does not resolve `@group` membership.
 
 ```toml
-[[dynamic_resolver]]
+[[dynamic_resolver]]            # registration only; the deployment binds the endpoint
 name = "crm-acl"
-resolver = { url = "https://acl.corp/readers", timeout_ms = 5000 }
 
 [[dynamic_resolver]]
 name = "channel-members"
-resolver = { url = "https://chat.corp/readers", timeout_ms = 5000 }
 
 [[tool]]
 name = "lookup_customer"
@@ -147,9 +144,14 @@ attends            = ["finance-signoff"]       # Satisfy fresh attention demands
 
 [authority.scope]
 tags = ["finance"]                             # Omitted scope matches all tools
+```
 
-[authority.implementation]
-resolver = { url = "https://approver.corp/rule", timeout_ms = 30000 }
+The policy stops there. Who actually rules is a deployment question, bound in
+`[externals]`:
+
+```toml
+[externals.authorities.finance-officer]
+url = "https://approver.corp/rule"
 # Builtin options:
 # builtin = "hitl"                             # Human-in-the-loop elicitation
 # builtin = "approve"                          # In-process auto-approval
@@ -162,7 +164,7 @@ resolver = { url = "https://approver.corp/rule", timeout_ms = 30000 }
 | **`builtin = "hitl"`** | Prompts a human reviewer in the loop. | Highest audit fidelity; presents exact arguments and label context to a human. |
 | **`builtin = "approve"`** | Auto-approves matching gaps in-process. | Intentionally opens an automated policy bypass within declared mandate limits. |
 | **`builtin = "<module name>"`** | A deployer builtin module: your own compiled code, loaded by the runtime at startup and called in-process. | Same mandate ceiling as any implementation; the module is deployer trusted code with the runtime's own privileges. |
-| **`resolver = { url = ... }`** | Queries a privileged external service. | Receives call digest, rendered payload, and review context; decision is logged verbatim. |
+| **`url = ...`** | Queries a privileged external service. | Receives call digest, rendered payload, and review context; decision is logged verbatim. |
 
 ## Sanitizers
 
@@ -181,8 +183,10 @@ audience = { from = { includes = ["finance"] }, to = { exactly = ["public"] } }
 
 [sanitizer.scope]
 tags = ["support"]                             # Applies only to values from tools with these tags
+```
 
-[sanitizer.implementation]
+```toml
+[externals.sanitizers.pii-redactor]            # the deployment binds the scrubber
 builtin = "redact-email"
 ```
 
@@ -193,7 +197,7 @@ builtin = "redact-email"
 | **`builtin = "redact-email"`** | The stock in-process redactor: replaces email-like tokens with a fixed placeholder. | Deterministic and offline; registering it vouches for exactly that transform. |
 | **`builtin = "attest-schema"`** | The reserved quarantine-exit sanitizer; engine-held, no service behind it. | Derives the return unchanged; claims instruction-cleanliness only. |
 | **`builtin = "<module name>"`** | A deployer builtin module: your own compiled scrubber, loaded at startup and called in-process. | Same mandate ceiling as any implementation; deployer trusted code. |
-| **`resolver = { url = ... }`** | A scrubbing service behind an endpoint. | The derivation is re-validated against the declared transition before admission. |
+| **`url = ...`** | A scrubbing service behind an endpoint. | The derivation is re-validated against the declared transition before admission. |
 
 A mandate binds exactly one dimension. Trust is declared on the same terms, as a floor the source must meet and the rank the derivation carries — this is how a scrubber vouches untrusted fetched text back up:
 
@@ -225,8 +229,10 @@ hint = "Vouches a fork-bound structured return; shape only, no content claims."
 
 [sanitizer.mandate]
 trust = { from = "suspicious", to = "trusted" }
+```
 
-[sanitizer.implementation]
+```toml
+[externals.sanitizers.quarantine-exit]
 builtin = "attest-schema"
 ```
 
@@ -237,9 +243,9 @@ Unannotated tools return data in an `Unknown` label state. A `[[cast]]` resolves
 ```toml
 [[cast]]
 name     = "content-classifier"
-resolver = { url = "https://classifier.corp/resolve", timeout_ms = 10000,
-             may_cast = { trust = ["suspicious"],
-                          audience = { cap = ["public"] } } } # Complete product ceiling
+resolver = { may_cast = { trust = ["suspicious"],
+                          audience = { cap = ["public"] } } } # Complete product ceiling;
+                                              # the ceiling is policy, the endpoint deployment
 
 [cast.scope]
 tags = ["support"]                            # Applies only to values from tools with these tags

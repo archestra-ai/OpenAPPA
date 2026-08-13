@@ -91,17 +91,23 @@ hint = "Removes customer identities from a CRM record."   # advisory; grants not
 [sanitizer.mandate]
 audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
 
-[sanitizer.implementation]
-resolver = { url = "https://pii.corp/redact", timeout_ms = 10000 }
-
 [[authority]]                              # who can approve the auditor mail
 name    = "user"
 
 [authority.mandate]
 can_cover_readers = { may_add = ["public"] } # may cover any recipient
+```
 
-[authority.implementation]
-builtin = "hitl"
+The policy names the components. The deployment says who performs them, in a
+separate `[externals]` table — so swapping a redactor or moving approval to a
+person changes no policy:
+
+```toml
+[externals.sanitizers.remove_pii]
+url = "https://pii.corp/redact"
+
+[externals.authorities.user]
+builtin = "hitl"                           # ask a person
 ```
 
 The trajectory begins at `{public, trusted}` unless pre-existing context or user input introduces restricted labels. When the agent calls `get_ticket_from_crm()`, OpenAPPA intercepts the dispatch before execution. The engine offers three operational paths, and the block names all of them:
