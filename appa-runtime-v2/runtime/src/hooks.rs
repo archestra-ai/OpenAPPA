@@ -349,6 +349,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_mid_run_input_rewrite_still_matches_its_dispatch() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_test_runtime(&dir);
+        let questions = serde_json::json!({"questions": [{"question": "Declare the tool?"}]});
+        testing::enqueue_release(&runtime, "d1", "AskUserQuestion", &questions);
+        let pre = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "s1",
+            "tool_name": "AskUserQuestion",
+            "tool_input": questions,
+        });
+        let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&pre).expect("serializes")).await;
+        assert_eq!(status, 200, "the release refused: {answer}");
+
+        testing::enqueue_done(&runtime);
+        testing::enqueue_keep_output(&runtime);
+        let post = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "s1",
+            "tool_name": "AskUserQuestion",
+            "tool_input": {
+                "questions": [{"question": "Declare the tool?"}],
+                "answers": {"Declare the tool?": "No, skip it"},
+            },
+            "tool_response": {"answers": {"Declare the tool?": "No, skip it"}},
+        });
+        let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&post).expect("serializes")).await;
+        assert_eq!(status, 200, "the rewritten report refused: {answer}");
+        assert_eq!(answer, serde_json::json!({}), "the rewritten report lands");
+
+        testing::enqueue_release(&runtime, "d2", "Bash", &serde_json::json!({"command": "ls"}));
+        let next = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "s1",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+        });
+        let (_, answer) = call_hook(&runtime, &serde_json::to_vec(&next).expect("serializes")).await;
+        assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "allow");
+    }
+
+    #[tokio::test]
     async fn the_control_tool_opens_no_dispatch() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_test_runtime(&dir);

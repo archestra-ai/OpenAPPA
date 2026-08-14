@@ -53,10 +53,28 @@ impl WireEvent {
 
     fn call(&self) -> Option<ProposedCall> {
         match (self.tool_name.clone(), self.tool_input.clone()) {
-            (Some(tool), Some(arguments)) => Some(ProposedCall { tool, arguments }),
+            (Some(tool), Some(arguments)) => {
+                let arguments = match tool.as_str() {
+                    "AskUserQuestion" => strip_collected_answers(arguments),
+                    _ => arguments,
+                };
+                Some(ProposedCall { tool, arguments })
+            }
             _ => None,
         }
     }
+}
+
+fn strip_collected_answers(arguments: Box<serde_json::value::RawValue>) -> Box<serde_json::value::RawValue> {
+    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(arguments.get()) else {
+        return arguments;
+    };
+    let Some(object) = parsed.as_object_mut() else {
+        return arguments;
+    };
+    object.remove("answers");
+    object.remove("annotations");
+    serde_json::value::to_raw_value(&parsed).expect("a parsed value re-serializes")
 }
 
 fn malformed(detail: &str) -> ParseRefusal {
@@ -314,6 +332,43 @@ mod tests {
                 value: Some("the summary".to_string()),
             })),
         );
+    }
+
+    #[test]
+    fn ask_user_question_input_is_normalized_of_injected_answers() {
+        let questions = serde_json::json!({"questions": [{"question": "Proceed?"}]});
+        let post = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "s1",
+            "tool_name": "AskUserQuestion",
+            "tool_input": {
+                "questions": [{"question": "Proceed?"}],
+                "answers": {"Proceed?": "Yes"},
+                "annotations": {"Proceed?": {"notes": "ok"}},
+            },
+            "tool_response": {"answers": {"Proceed?": "Yes"}},
+        });
+        match parse_value(&post) {
+            Ok(Some(HookEvent::ToolResult { call, .. })) => {
+                let stripped: serde_json::Value =
+                    serde_json::from_str(call.arguments.get()).expect("the stripped input parses");
+                assert_eq!(stripped, questions, "the injected fields are stripped");
+            }
+            other => panic!("expected a ToolResult event, got {other:?}"),
+        }
+        let other = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "s1",
+            "tool_name": "SurveyTool",
+            "tool_input": {"answers": {"q": "kept"}},
+            "tool_response": "done",
+        });
+        match parse_value(&other) {
+            Ok(Some(HookEvent::ToolResult { call, .. })) => {
+                assert_eq!(call.arguments.get(), r#"{"answers":{"q":"kept"}}"#);
+            }
+            other => panic!("expected a ToolResult event, got {other:?}"),
+        }
     }
 
     #[test]
