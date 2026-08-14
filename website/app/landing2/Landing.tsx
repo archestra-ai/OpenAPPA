@@ -496,7 +496,7 @@ export function Landing() {
           <p style={S.benchFoot}>
             Both benches score what the tools actually did — files written, emails sent — never the
             conversation text.{" "}
-            <a href="#" style={S.benchFootLink}>
+            <a href="/evaluation" style={S.benchFootLink}>
               Method and pinned results →
             </a>
           </p>

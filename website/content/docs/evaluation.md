@@ -121,7 +121,7 @@ Under adversarial prompts, unprotected models leaked sensitive data in 30% to 40
 
 Rather than relying on prompt-injection classifiers, OpenAPPA attaches reader-set permissions to customer data when `lookup_customer` runs. When a messaging tool is invoked, OpenAPPA checks whether the recipient belongs to that reader set before allowing dispatch.
 
-*Harness coverage note: AgentThreatBench currently includes OpenAPPA policy arms. Harness integration for a FIDES 4-arm comparison (26 samples per prompt profile) is in progress.*
+> **Artifact coverage note:** The current repository does not include the harness, pinned run configuration, or raw artifacts for this 10-sample AgentThreatBench slice, so these reported results cannot yet be independently rerun from a checkout. A durable OpenAPPA harness and a FIDES 4-arm comparison remain follow-up work.
 
 ## Summary of empirical findings
 
@@ -143,7 +143,6 @@ Across all three benchmark suites:
 - [AgentThreatBench](https://github.com/UKGovernmentBEIS/inspect_evals/tree/main/src/inspect_evals/agent_threat_bench) — upstream task definitions and benchmark suite.
 - [OpenAPPA Paper on arXiv](https://arxiv.org/abs/2607.24625) — formal information-flow model and evaluation methodology.
 - [FIDES (Microsoft Research)](https://www.microsoft.com/en-us/research/publication/securing-ai-agents-with-information-flow-control/) — information flow control framework for AI agents.
-
 
 
 
