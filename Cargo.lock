@@ -71,6 +71,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.104"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+
+[[package]]
 name = "appa-adapter-claude-code"
 version = "0.0.0"
 dependencies = [
@@ -84,26 +90,33 @@ dependencies = [
 name = "appa-agent"
 version = "0.0.0"
 dependencies = [
- "appa-engine",
- "appa-runtime",
+ "appa-runtime-api",
+ "appa-runtime-v2",
+ "axum",
+ "reqwest 0.12.28",
+ "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
 name = "appa-agent-python"
 version = "0.1.0"
 dependencies = [
- "appa-engine",
- "appa-runtime",
- "appa-sdk",
+ "appa-runtime-api",
+ "appa-runtime-v2",
  "pyo3",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "toml",
 ]
 
 [[package]]
@@ -116,14 +129,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "appa-dojo-sidecar"
-version = "0.0.0"
+name = "appa-demo"
+version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "appa-agent",
  "appa-engine",
- "appa-sdk",
+ "appa-policy",
+ "appa-runtime-v2",
+ "axum",
+ "clap",
+ "getrandom 0.3.4",
+ "http-body-util",
  "serde",
  "serde_json",
+ "tempfile",
+ "thiserror",
  "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "toml",
+ "tower",
 ]
 
 [[package]]
@@ -137,20 +163,6 @@ dependencies = [
  "sha2",
  "thiserror",
  "tracing",
-]
-
-[[package]]
-name = "appa-gateway"
-version = "0.0.0"
-dependencies = [
- "appa-agent",
- "appa-runtime",
- "axum",
- "reqwest 0.12.28",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
 ]
 
 [[package]]
@@ -177,21 +189,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "appa-runtime"
-version = "0.0.0"
-dependencies = [
- "appa-engine",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
-]
-
-[[package]]
 name = "appa-runtime-api"
 version = "0.0.0"
 dependencies = [
@@ -213,7 +210,7 @@ dependencies = [
  "libloading",
  "rand 0.10.2",
  "reqwest 0.12.28",
- "rmcp",
+ "rmcp 3.1.2",
  "rusqlite",
  "schemars",
  "serde",
@@ -226,13 +223,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
-]
-
-[[package]]
-name = "appa-sdk"
-version = "0.0.0"
-dependencies = [
- "appa-runtime",
 ]
 
 [[package]]
@@ -460,6 +450,43 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
+name = "corp-systems"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "rmcp 1.8.0",
+ "schemars",
+ "serde",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "corporate-agent-demo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "appa-agent",
+ "appa-engine",
+ "appa-policy",
+ "appa-runtime-v2",
+ "axum",
+ "clap",
+ "corp-systems",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -489,12 +516,35 @@ dependencies = [
 
 [[package]]
 name = "darling"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25ae13da2f202d56bd7f91c25fba009e7717a1e4a1cc98a76d844b65ae912e9d"
+dependencies = [
+ "darling_core 0.23.0",
+ "darling_macro 0.23.0",
+]
+
+[[package]]
+name = "darling"
 version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88490bf1b990d87eaaa7ac8aa887f629a08e7359765b4911faf63c3763347d23"
 dependencies = [
- "darling_core",
- "darling_macro",
+ "darling_core 0.24.0",
+ "darling_macro 0.24.0",
+]
+
+[[package]]
+name = "darling_core"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9865a50f7c335f53564bb694ef660825eb8610e0a53d3e11bf1b0d3df31e03b0"
+dependencies = [
+ "ident_case",
+ "proc-macro2",
+ "quote",
+ "strsim",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -512,11 +562,22 @@ dependencies = [
 
 [[package]]
 name = "darling_macro"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac3984ec7bd6cfa798e62b4a642426a5be0e68f9401cfc2a01e3fa9ea2fcdb8d"
+dependencies = [
+ "darling_core 0.23.0",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "darling_macro"
 version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68f5792fa0d41cd2325ce0ffa64f0a340eaebd4971a3a0c5e1ffd2cc488a355e"
 dependencies = [
- "darling_core",
+ "darling_core 0.24.0",
  "quote",
  "syn 3.0.3",
 ]
@@ -1559,6 +1620,28 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
+version = "1.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d1f571c72940a19d9532fe52dbea8bc9912bf1d766c2970bb824056b86f3f59"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "futures",
+ "pastey",
+ "pin-project-lite",
+ "rmcp-macros 1.8.0",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "rmcp"
 version = "3.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8dddc5b1924b9a59fba420166160ca2c4663a4e01803e52eda33070f56d63c8"
@@ -1575,7 +1658,7 @@ dependencies = [
  "pin-project-lite",
  "rand 0.10.2",
  "reqwest 0.13.4",
- "rmcp-macros",
+ "rmcp-macros 3.1.2",
  "schemars",
  "serde",
  "serde_json",
@@ -1592,11 +1675,24 @@ dependencies = [
 
 [[package]]
 name = "rmcp-macros"
+version = "1.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aad0035b69380782d78ea95b508327e6deaa2235909053e596eea8f27b5e1d5"
+dependencies = [
+ "darling 0.23.0",
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "rmcp-macros"
 version = "3.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6898e24cd16342b59bfa8a53c2c04b9cf62fc8a2cfea57b9c038b09984bfc521"
 dependencies = [
- "darling",
+ "darling 0.24.0",
  "proc-macro2",
  "quote",
  "serde_json",

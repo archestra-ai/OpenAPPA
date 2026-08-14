@@ -39,14 +39,16 @@ jobs:
       - name: Rust tests
         run: cargo test --workspace --locked
 
-      - name: Standalone demo formatting
-        run: cargo fmt --manifest-path demo/corporate-agent/Cargo.toml --all --check
+      # `demo/corp-systems` is the one crate outside the workspace: no APPA
+      # dependency at all, and an older `rmcp` than the runtime pins.
+      - name: Mock systems formatting
+        run: cargo fmt --manifest-path demo/corp-systems/Cargo.toml --all --check
 
-      - name: Standalone demo lint
-        run: cargo clippy --manifest-path demo/corporate-agent/Cargo.toml --all-targets --locked -- -D warnings
+      - name: Mock systems lint
+        run: cargo clippy --manifest-path demo/corp-systems/Cargo.toml --all-targets --locked -- -D warnings
 
-      - name: Standalone demo tests
-        run: cargo test --manifest-path demo/corporate-agent/Cargo.toml --locked
+      - name: Mock systems tests
+        run: cargo test --manifest-path demo/corp-systems/Cargo.toml --locked
 
   python-checks:
     name: Python Checks
@@ -62,11 +64,9 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Setup Python
-        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
-        with:
-          python-version: "3.11"
-
+      # No `setup-python`: the interpreter is `harness-agentdojo/.python-version`,
+      # and uv provisions it. One source of truth, and a local run uses the same
+      # version this job does.
       - name: Setup uv
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:

@@ -4,18 +4,20 @@ members = [
     "appa-agent",
     "appa-agent-python",
     "appa-builtin",
-    "appa-dojo-sidecar",
     "appa-engine",
-    "appa-gateway",
     "appa-policy",
-    "appa-runtime",
     "appa-runtime-v2/adapters/claude-code",
     "appa-runtime-v2/api",
     "appa-runtime-v2/runtime",
     "appa-runtime-v2/runtime/tests/fixtures/module-bad",
     "appa-runtime-v2/runtime/tests/fixtures/module-good",
-    "appa-sdk",
+    "demo/appa-demo",
+    "demo/corporate-agent",
 ]
+# Its own workspace, and no APPA dependency at all: the mock internal systems
+# the corporate demo talks to over MCP. It pins an older `rmcp` than the
+# runtime does, and keeps its own lockfile and its own per-manifest gate.
+exclude = ["demo/corp-systems"]
 
 [workspace.package]
 edition = "2024"
@@ -38,5 +40,5 @@ axum = { version = "0.8", default-features = false, features = ["json", "tokio",
 tokio-util = { version = "0.7", default-features = false }
 appa-engine = { path = "appa-engine" }
 appa-policy = { path = "appa-policy" }
-appa-runtime = { path = "appa-runtime" }
-appa-sdk = { path = "appa-sdk" }
+appa-runtime-api = { path = "appa-runtime-v2/api" }
+appa-runtime-v2 = { path = "appa-runtime-v2/runtime" }

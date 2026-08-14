@@ -9,10 +9,26 @@ pub struct TrajectoryId(pub String);
 
 /// A tool call as the model proposed it. The engine canonicalizes;
 /// the runtime and the adapter pass it through unchanged.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ProposedCall {
     pub tool: String,
-    pub arguments: serde_json::Value,
+    pub arguments: Box<serde_json::value::RawValue>,
+}
+
+/// Equality is over the bytes as spelled, because that is the only
+/// equality this type can answer: deciding that two spellings are the
+/// same call needs the registered contract and the engine's
+/// canonicalization, neither of which this crate has. Parsing here to
+/// compare would reintroduce exactly what `arguments` exists to
+/// prevent — `serde_json` would make `{"a":1,"a":2}` equal to the
+/// admissible `{"a":2}`, though the engine refuses the first.
+/// Callers that need same-call identity compare the
+/// engine's canonical bytes; the runtime does
+/// (`api::session::classify_report`).
+impl PartialEq for ProposedCall {
+    fn eq(&self, other: &Self) -> bool {
+        self.tool == other.tool && self.arguments.get() == other.arguments.get()
+    }
 }
 
 /// What a dispatched tool produced, in the runtime's typing. The
@@ -72,6 +88,14 @@ pub enum HookDecision {
     PassControl,
     DenyCall { feedback: String },
     Block { reason: String },
+    ReplaceOutput { output: String },
+    /// The child's return crosses as `value` and not as the child
+    /// spelled it — a `return_sanitizer` produced it. A
+    /// return that crosses unchanged answers `Ack`, so this variant
+    /// names a substitution and never merely a crossing. A harness with
+    /// no way to substitute a finished child's return cannot enforce
+    /// it.
+    ChildReturn { value: String },
     Refuse { detail: String },
 }
 

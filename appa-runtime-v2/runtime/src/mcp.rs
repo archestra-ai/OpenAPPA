@@ -10,7 +10,7 @@ use rmcp::transport::streamable_http_server::StreamableHttpService;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 
-use crate::api::{OfferId, RemedyDecision, Runtime};
+use crate::api::{OfferId, RemedyOutcome, Runtime};
 use crate::elicit::Elicitation;
 
 #[derive(Clone)]
@@ -37,39 +37,22 @@ impl RemedyService {
         request: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let elicitation = Elicitation::new(request, self.runtime.review_timeout());
-        self.execute(OfferId(args.offer_id), Some(&elicitation)).await
-    }
-
-    async fn execute(&self, offer: OfferId, elicitation: Option<&Elicitation>) -> CallToolResult {
-        let Some(_claim) = self.runtime.claim_offer(&offer) else {
-            return refusal("this offer is already being executed");
-        };
-        let trajectory = match self.runtime.offer_trajectory(&offer) {
-            Ok(Some(trajectory)) => trajectory,
-            Ok(None) => return refusal("no live offer with this id exists"),
-            Err(error) => return refusal(&error.to_string()),
-        };
-        let mut session = match self.runtime.session(&trajectory) {
-            Ok(session) => session,
-            Err(error) => return refusal(&error.to_string()),
-        };
-        match session.on_remedy(offer, elicitation).await {
-            Ok(RemedyDecision::Authorized { call }) => CallToolResult::success(vec![ContentBlock::text(format!(
-                "Authorized. Propose the {} call again, byte-for-byte identical; \
-                     it will run without a new check.",
-                call.tool,
-            ))]),
-            Ok(RemedyDecision::Returned { value }) => CallToolResult::success(vec![ContentBlock::text(value)]),
-            Ok(RemedyDecision::Declined { feedback }) | Ok(RemedyDecision::NoAnswer { feedback }) => {
-                CallToolResult::success(vec![ContentBlock::text(feedback)])
-            }
-            Err(error) => refusal(&error.to_string()),
-        }
+        render(self.runtime.remedy(OfferId(args.offer_id), Some(&elicitation)).await)
     }
 }
 
-fn refusal(detail: &str) -> CallToolResult {
-    CallToolResult::error(vec![ContentBlock::text(detail.to_string())])
+fn render(outcome: RemedyOutcome) -> CallToolResult {
+    match outcome {
+        RemedyOutcome::Authorized { tool } => CallToolResult::success(vec![ContentBlock::text(format!(
+            "Authorized. Propose the {tool} call again, byte-for-byte identical; \
+             it will run without a new check.",
+        ))]),
+        RemedyOutcome::Returned { value } => CallToolResult::success(vec![ContentBlock::text(value)]),
+        RemedyOutcome::Declined { feedback } | RemedyOutcome::NoAnswer { feedback } => {
+            CallToolResult::success(vec![ContentBlock::text(feedback)])
+        }
+        RemedyOutcome::Refused { detail } => CallToolResult::error(vec![ContentBlock::text(detail)]),
+    }
 }
 
 #[tool_handler]
@@ -105,6 +88,7 @@ pub fn service(runtime: Arc<Runtime>) -> StreamableHttpService<RemedyService, Lo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::raw;
     use crate::api::{ProposedCall, ToolCallDecision, testing};
     use crate::config::Config;
 
@@ -125,16 +109,21 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_offer_gets_one_typed_refusal() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = Arc::new(testing::runtime(config(), dir.path().join("appa.db")));
-        let service = RemedyService::new(runtime);
-        let result = service.execute(OfferId("never-surfaced".to_string()), None).await;
-        assert_eq!(result.is_error, Some(true));
+        let runtime = testing::runtime(config(), dir.path().join("appa.db"));
+        let outcome = runtime.execute_remedy(OfferId("never-surfaced".to_string())).await;
+        assert_eq!(
+            outcome,
+            RemedyOutcome::Refused {
+                detail: "no live offer with this id exists".to_string(),
+            },
+        );
+        assert_eq!(render(outcome).is_error, Some(true));
     }
 
     #[tokio::test]
     async fn one_offer_executes_once_at_a_time() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = Arc::new(testing::runtime(config(), dir.path().join("appa.db")));
+        let runtime = testing::runtime(config(), dir.path().join("appa.db"));
         let offer = OfferId("offer-live".to_string());
 
         let claim = runtime.claim_offer(&offer).expect("a free offer is claimable");
@@ -142,10 +131,12 @@ mod tests {
             runtime.claim_offer(&offer).is_none(),
             "a second execution of one offer is refused"
         );
-        let refused = RemedyService::new(Arc::clone(&runtime))
-            .execute(offer.clone(), None)
-            .await;
-        assert_eq!(refused.is_error, Some(true));
+        assert_eq!(
+            runtime.execute_remedy(offer.clone()).await,
+            RemedyOutcome::Refused {
+                detail: "this offer is already being executed".to_string(),
+            },
+        );
 
         drop(claim);
         assert!(
@@ -157,7 +148,7 @@ mod tests {
     #[tokio::test]
     async fn a_surfaced_offer_executes_and_returns_the_value() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = Arc::new(testing::runtime(config(), dir.path().join("appa.db")));
+        let runtime = testing::runtime(config(), dir.path().join("appa.db"));
         let mut session = runtime
             .create_session(crate::api::TrajectoryId("cc:mcp-test".to_string()))
             .expect("a fresh id opens");
@@ -165,20 +156,18 @@ mod tests {
         let denied = session
             .on_tool_call(ProposedCall {
                 tool: "Bash".to_string(),
-                arguments: serde_json::json!({"command": "ls"}),
+                arguments: raw(serde_json::json!({"command": "ls"})),
             })
             .await
             .expect("the deny is delivered");
         assert!(matches!(denied, ToolCallDecision::Deny { .. }));
 
         testing::enqueue_value(&runtime, "the cleaned result");
-        let service = RemedyService::new(Arc::clone(&runtime));
-        let result = service.execute(OfferId("offer-mcp".to_string()), None).await;
-        assert_ne!(result.is_error, Some(true));
-        let text = format!("{:?}", result.content);
-        assert!(
-            text.contains("the cleaned result"),
-            "the value must be the tool response"
+        assert_eq!(
+            runtime.execute_remedy(OfferId("offer-mcp".to_string())).await,
+            RemedyOutcome::Returned {
+                value: "the cleaned result".to_string(),
+            },
         );
     }
 }

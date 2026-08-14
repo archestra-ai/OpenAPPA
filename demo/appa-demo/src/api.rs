@@ -4,8 +4,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use appa_agent::{Agent, OpenAiCompatible, Outcome};
-use appa_runtime::Limits;
+use appa_agent::{Agent, Limits, Outcome, Recorded, ToolShim};
 use axum::Json;
 use axum::Router;
 use axum::extract::{Path, Request, State};
@@ -19,13 +18,18 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
-use crate::events::{WireEvent, current_label, fact_event};
+use crate::events::{AuditReader, WireEvent, record_event};
 use crate::lint::check_policy;
 use crate::session::{CreateError, DemoSession, Sessions};
 use crate::systems::System;
 
 const MAX_POLICY_BYTES: usize = 32 * 1024;
 const MAX_MESSAGE_BYTES: usize = 2 * 1024;
+
+/// How long one inference round may take. The turn's wall clock is unbounded
+/// on purpose, but a single provider call that never answers is a hang, not a
+/// visitor thinking.
+const INFERENCE_TIMEOUT: Duration = Duration::from_secs(120);
 
 const PUMP_INTERVAL: Duration = Duration::from_millis(150);
 
@@ -35,16 +39,15 @@ const EFFECTIVELY_UNBOUNDED: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 /// approval waits for the visitor's click, not a timer: a runaway loop costs
 /// a visitor 16 rounds, a session the turn cap, and an abandoned tab is
 /// reclaimed by the pump cancelling the turn when the stream drops. A zero
-/// fork budget keeps the playground single-trajectory: the fork tool is never
-/// advertised, so the story stays one visible thread.
+/// fork budget keeps the playground single-trajectory: no spawn tool is
+/// installed, so the story stays one visible thread.
 fn demo_limits() -> Limits {
     Limits {
         max_inference_rounds: 16,
-        per_external_timeout: EFFECTIVELY_UNBOUNDED,
+        max_tool_calls: 32,
         run_deadline: EFFECTIVELY_UNBOUNDED,
         max_forks: 0,
-        max_fork_depth: 1,
-        ..Limits::default()
+        max_fork_depth: 0,
     }
 }
 
@@ -89,8 +92,6 @@ enum ApiError {
     UnknownSystem(String),
     #[error(transparent)]
     Create(#[from] CreateError),
-    #[error("reading the session log: {0}")]
-    Store(String),
 }
 
 impl IntoResponse for ApiError {
@@ -104,11 +105,10 @@ impl IntoResponse for ApiError {
             ApiError::TurnLimit(_) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::UnknownSystem(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::Create(CreateError::AtCapacity) => StatusCode::SERVICE_UNAVAILABLE,
-            ApiError::Create(CreateError::World(_)) | ApiError::Create(CreateError::Mediator(_)) => {
+            ApiError::Create(CreateError::World(_)) | ApiError::Create(CreateError::Deployment(_)) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
             ApiError::Create(_) => StatusCode::UNPROCESSABLE_ENTITY,
-            ApiError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(serde_json::json!({ "error": self.to_string() }))).into_response()
     }
@@ -181,16 +181,18 @@ async fn policy_check(Json(request): Json<CheckRequest>) -> Result<Json<CheckRes
     let enabled = parse_systems(&request.systems)?;
     Ok(Json(match check_policy(&request.policy, &enabled) {
         Ok(checked) => {
-            let label = checked.config.boundary_label();
-            let chain = &checked.config.registry_config().trust_chain;
+            let boundary = crate::events::LabelText::of(
+                checked.config.boundary_label(),
+                &checked.config.registry_config().trust_chain,
+            );
             CheckResponse {
                 ok: true,
                 tools: Some(checked.tool_count),
                 unconstrained: checked.defaulted,
                 ignored: checked.dropped,
                 boundary: Some(Boundary {
-                    trust: crate::events::trust_text(label, chain),
-                    audience: crate::events::audience_text(label),
+                    trust: boundary.trust,
+                    audience: boundary.audience,
                 }),
                 error: None,
             }
@@ -240,12 +242,11 @@ async fn session_create(
     }
     let enabled = parse_systems(&request.systems)?;
     let session = state.sessions.create(&request.policy, &enabled, &request.model).await?;
-    let boundary = session.mediator.config().boundary_label().clone();
     Ok(Json(CreateResponse {
         session: session.id.clone(),
         tools: session.tool_count,
-        trust: crate::events::trust_text(&boundary, &session.chain),
-        audience: crate::events::audience_text(&boundary),
+        trust: session.boundary.trust.clone(),
+        audience: session.boundary.audience.clone(),
     }))
 }
 
@@ -297,8 +298,7 @@ async fn session_message(
         .get(&id)
         .ok_or_else(|| ApiError::UnknownSession(id.clone()))?;
 
-    // One open turn per session: refuse instead of queueing behind the lease.
-    let turn_guard = Arc::clone(&session.turn_gate)
+    let mut transcript = Arc::clone(&session.turn_gate)
         .try_lock_owned()
         .map_err(|_| ApiError::TurnInFlight)?;
 
@@ -307,38 +307,40 @@ async fn session_message(
     }
     session.spend_turn();
 
-    let (baseline, _) = session
-        .mediator
-        .snapshot(&session.tenant, &session.trajectory)
-        .map_err(|error| ApiError::Store(error.to_string()))?;
-
     let (tx, rx) = tokio::sync::mpsc::channel::<WireEvent>(64);
+    let (records_tx, records) = tokio::sync::mpsc::channel::<Recorded>(64);
     let cancel = CancellationToken::new();
     session.derivations.arm(key.clone());
     let agent = Agent::new(
-        session.mediator.clone(),
-        OpenAiCompatible::openrouter(session.model.clone(), key),
-        demo_limits(),
-    );
+        Arc::clone(&session.runtime),
+        crate::session::provider(&session.inference, &session.model, key.clone(), INFERENCE_TIMEOUT),
+        ToolShim::new(session.tools_url.clone()),
+        session.catalogue.clone(),
+    )
+    .with_head(crate::session::head())
+    .with_limits(demo_limits())
+    .with_observer(records_tx);
 
     let mut turn = tokio::spawn({
         let session = session.clone();
         let cancel = cancel.clone();
         let text = request.text;
         async move {
-            agent
-                .run_existing(session.tenant.clone(), session.trajectory.clone(), text, cancel)
-                .await
+            let outcome = agent
+                .turn(session.trajectory.clone(), &mut transcript, text, cancel)
+                .await;
+            drop(transcript);
+            outcome
         }
     });
 
     tokio::spawn(async move {
-        let _guard = turn_guard; // held until the stream ends
-
         let mut pump = Pump {
             session: &session,
             tx: &tx,
-            seen: baseline.len(),
+            records,
+            audit_seen: 0,
+            audit: AuditReader::default(),
             last_label: None,
         };
         let mut ticker = tokio::time::interval(PUMP_INTERVAL);
@@ -349,6 +351,8 @@ async fn session_message(
                 _ = ticker.tick() => {
                     session.touch();
                     if pump.drain().await.is_err() {
+                        pump.records.close();
+                        session.approvals.abandon();
                         cancel.cancel();
                         break None;
                     }
@@ -356,19 +360,17 @@ async fn session_message(
             }
         };
 
-        let result = match finished {
-            Some(result) => result,
+        let outcome = match finished {
+            Some(outcome) => outcome,
             None => turn.await,
         };
+        // The turn is over, so everything it recorded is already buffered.
+        pump.records.close();
         let _ = pump.drain().await;
-        let final_event = match result {
-            Ok(Ok(Outcome::Final(text))) => WireEvent::Answer { text },
-            Ok(Ok(Outcome::PolicyStop(text))) => WireEvent::Stopped { text },
-            Ok(Ok(Outcome::ChildFinished)) => WireEvent::Stopped {
-                text: "the run ended inside a child session".to_string(),
-            },
-            Ok(Err(error)) => WireEvent::Error {
-                message: error.to_string(),
+        let final_event = match outcome {
+            Ok(Outcome::Answer(text)) => WireEvent::Answer { text },
+            Ok(Outcome::Stopped(reason)) => WireEvent::Stopped {
+                text: reason.to_string(),
             },
             Err(join) => WireEvent::Error {
                 message: format!("the turn task failed: {join}"),
@@ -386,7 +388,9 @@ async fn session_message(
 struct Pump<'a> {
     session: &'a DemoSession,
     tx: &'a tokio::sync::mpsc::Sender<WireEvent>,
-    seen: usize,
+    records: tokio::sync::mpsc::Receiver<Recorded>,
+    audit_seen: usize,
+    audit: AuditReader,
     last_label: Option<(String, String)>,
 }
 
@@ -394,30 +398,34 @@ struct ClientGone;
 
 impl Pump<'_> {
     async fn drain(&mut self) -> Result<(), ClientGone> {
-        let Ok((facts, revision)) = self
-            .session
-            .mediator
-            .snapshot(&self.session.tenant, &self.session.trajectory)
-        else {
-            return Ok(()); // transient store refusal; retry next tick
-        };
-        let mut events = self.session.approvals.drain_events();
-        for fact in &facts[self.seen.min(facts.len())..] {
-            events.extend(fact_event(fact, &self.session.chain));
+        // A hangup is noticed on its own, not only when the next event fails
+        // to send. A turn parked on a human ruling produces nothing for as
+        // long as the visitor takes, and its wall clock is deliberately
+        // unbounded — so without this a closed tab would hold the gate, and
+        // the pump's own `touch` would keep the session out of the reaper
+        // indefinitely.
+        if self.tx.is_closed() {
+            return Err(ClientGone);
         }
-        self.seen = facts.len();
-
-        let label = current_label(&facts, revision, &self.session.trajectory, &self.session.chain);
-        if label.0 != "?" && self.last_label.as_ref() != Some(&label) {
-            events.push(WireEvent::Label {
-                trajectory: self.session.trajectory.as_str().to_string(),
-                trust: label.0.clone(),
-                audience: label.1.clone(),
-            });
-            self.last_label = Some(label);
+        let mut events = self.session.approvals.drain_events();
+        while let Ok(recorded) = self.records.try_recv() {
+            events.extend(record_event(&recorded));
+        }
+        if let Some(entries) = self.session.runtime.audit(&self.session.trajectory) {
+            for entry in entries.iter().skip(self.audit_seen) {
+                events.extend(self.audit.event(entry));
+            }
+            self.audit_seen = entries.len();
         }
 
         for event in events {
+            if let WireEvent::Label { trust, audience, .. } = &event {
+                let label = (trust.clone(), audience.clone());
+                if self.last_label.as_ref() == Some(&label) {
+                    continue;
+                }
+                self.last_label = Some(label);
+            }
             if self.tx.send(event).await.is_err() {
                 return Err(ClientGone);
             }

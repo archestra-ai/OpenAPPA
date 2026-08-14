@@ -8,6 +8,10 @@ use rmcp::model::{ElicitRequestParams, ElicitResult, ElicitationAction};
 use rmcp::service::{RequestContext, RoleClient};
 use rmcp::{ClientHandler, ServiceExt};
 
+fn raw(value: serde_json::Value) -> Box<serde_json::value::RawValue> {
+    serde_json::value::to_raw_value(&value).expect("the fixture serializes")
+}
+
 fn policy(review_timeout_ms: u64) -> String {
     POLICY.replace("REVIEW_TIMEOUT_MS", &review_timeout_ms.to_string())
 }
@@ -140,7 +144,7 @@ async fn deployment_with(review_timeout_ms: u64) -> Deployment {
             },
             call: ProposedCall {
                 tool: "publish".to_string(),
-                arguments: serde_json::json!({"body": "the quarterly figures"}),
+                arguments: raw(serde_json::json!({"body": "the quarterly figures"})),
             },
         },
     )

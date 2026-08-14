@@ -15,15 +15,15 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use appa_runtime::tool::RenderedCall;
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::post;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::approvals::Approvals;
 use crate::derive::Derivations;
+use crate::world::{AUTHORITY_PATH, DYNAMIC_RESOLVER_PATH, SANITIZER_PATH, TOOLS_PATH};
 
 use crate::systems::{
     CreateCustomerArgs, CreateError, CreateIssueArgs, SendEmailArgs, System, TransferArgs, Verb, create, list,
@@ -46,10 +46,10 @@ pub async fn serve(world: World) -> std::io::Result<SocketAddr> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let app = Router::new()
-        .route("/", post(handle))
-        .route("/authority", post(authority))
-        .route("/sanitizer/{name}", post(sanitize))
-        .route("/dynamic-resolver", post(dynamic_resolver))
+        .route(TOOLS_PATH, post(handle))
+        .route(&format!("{AUTHORITY_PATH}/{{name}}"), post(authority))
+        .route(&format!("{SANITIZER_PATH}/{{name}}"), post(sanitize))
+        .route(DYNAMIC_RESOLVER_PATH, post(dynamic_resolver))
         .with_state(Arc::new(world));
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
@@ -57,42 +57,87 @@ pub async fn serve(world: World) -> std::io::Result<SocketAddr> {
     Ok(address)
 }
 
-async fn handle(State(world): State<Arc<World>>, axum::Json(call): axum::Json<RenderedCall>) -> (StatusCode, String) {
-    dispatch(&world, &call)
+/// One released call as the agent posts it: the tool, and the arguments
+/// exactly as the model spelled them.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Dispatch {
+    pub tool: String,
+    pub arguments: serde_json::Value,
+}
+
+async fn handle(State(world): State<Arc<World>>, body: String) -> (StatusCode, String) {
+    match serde_json::from_str::<Dispatch>(&body) {
+        Ok(call) => dispatch(&world, &call),
+        Err(error) => (StatusCode::BAD_REQUEST, format!("bad dispatch: {error}")),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct Consult<T> {
+    version: u32,
+    name: String,
+    payload: T,
+}
+
+#[derive(Debug, Serialize)]
+struct ConsultAnswer<T> {
+    version: u32,
+    answer: T,
+}
+
+#[derive(Debug, Serialize)]
+struct Ruling {
+    ruling: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct Derivation {
+    body: String,
 }
 
 async fn authority(
     State(world): State<Arc<World>>,
-    axum::Json(request): axum::Json<serde_json::Value>,
-) -> axum::Json<serde_json::Value> {
-    let tool = request
+    Path(name): Path<String>,
+    axum::Json(consult): axum::Json<Consult<serde_json::Value>>,
+) -> Result<axum::Json<ConsultAnswer<Ruling>>, StatusCode> {
+    if consult.version != 1 || consult.name != name {
+        return Err(StatusCode::NOT_ACCEPTABLE);
+    }
+    let tool = consult
+        .payload
         .get("tool")
         .and_then(|tool| tool.as_str())
         .unwrap_or("(unknown tool)")
         .to_string();
-    let ruling = match world.approvals.request(&tool, request).await {
+    let ruling = match world.approvals.request(&tool, consult.payload).await {
         Some(true) => "approve",
         Some(false) => "deny",
         None => "abstain",
     };
-    axum::Json(serde_json::json!({ "ruling": ruling }))
+    Ok(axum::Json(ConsultAnswer {
+        version: 1,
+        answer: Ruling { ruling },
+    }))
 }
 
 async fn sanitize(
     State(world): State<Arc<World>>,
     Path(name): Path<String>,
-    axum::Json(input): axum::Json<SanitizerInput>,
-) -> (StatusCode, axum::Json<serde_json::Value>) {
-    match world.derivations.derive(&name, &input.body).await {
-        Some(body) => (StatusCode::OK, axum::Json(serde_json::json!({ "body": body }))),
-        None => (
-            StatusCode::BAD_GATEWAY,
-            axum::Json(serde_json::json!({ "error": "the derivation could not be produced" })),
-        ),
+    axum::Json(consult): axum::Json<Consult<SanitizerInput>>,
+) -> Result<axum::Json<ConsultAnswer<Derivation>>, StatusCode> {
+    if consult.version != 1 || consult.name != name {
+        return Err(StatusCode::NOT_ACCEPTABLE);
+    }
+    match world.derivations.derive(&name, &consult.payload.body).await {
+        Some(body) => Ok(axum::Json(ConsultAnswer {
+            version: 1,
+            answer: Derivation { body },
+        })),
+        None => Err(StatusCode::BAD_GATEWAY),
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct SanitizerInput {
     pub body: String,
 }
@@ -129,7 +174,7 @@ async fn dynamic_resolver(
     )
 }
 
-pub fn dispatch(world: &World, call: &RenderedCall) -> (StatusCode, String) {
+pub fn dispatch(world: &World, call: &Dispatch) -> (StatusCode, String) {
     let tool = call.tool.as_str();
     let Some((system, verb)) = route(tool) else {
         return unknown(tool);
@@ -273,7 +318,6 @@ fn unknown(tool: &str) -> (StatusCode, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use appa_engine::value::ToolName;
 
     fn world(name: &str, enabled: &[System]) -> World {
         let dir = std::env::temp_dir().join(format!("appa-demo-shim-{name}-{}", std::process::id()));
@@ -281,16 +325,20 @@ mod tests {
         std::fs::create_dir_all(dir.join("crm")).unwrap();
         std::fs::create_dir_all(dir.join("github")).unwrap();
         World {
-            derivations: Arc::new(Derivations::new(String::new(), Default::default())),
+            derivations: Arc::new(Derivations::new(
+                appa_agent::Endpoint::new("http://127.0.0.1:1/v1"),
+                String::new(),
+                Default::default(),
+            )),
             data_root: dir,
             enabled: enabled.iter().copied().collect(),
             approvals: Arc::new(Approvals::default()),
         }
     }
 
-    fn call(tool: &str, arguments: serde_json::Value) -> RenderedCall {
-        RenderedCall {
-            tool: ToolName::new(tool),
+    fn call(tool: &str, arguments: serde_json::Value) -> Dispatch {
+        Dispatch {
+            tool: tool.to_string(),
             arguments,
         }
     }
@@ -434,22 +482,58 @@ mod tests {
         assert!(body.contains("invalid name"), "got: {body}");
     }
 
+    fn consult<T>(name: &str, version: u32, payload: T) -> axum::Json<Consult<T>> {
+        axum::Json(Consult {
+            version,
+            name: name.to_string(),
+            payload,
+        })
+    }
+
     #[tokio::test]
     async fn an_underivable_sanitizer_fails_closed_rather_than_passing_the_raw_through() {
         let world = Arc::new(world("derive", &[System::Crm]));
-        let (status, body) = sanitize(
+        let name = "nobody-registered-this";
+        let answer = sanitize(
             State(world),
-            Path("nobody-registered-this".to_string()),
-            axum::Json(SanitizerInput {
-                body: "ask eve@corp.com".to_string(),
-            }),
+            Path(name.to_string()),
+            consult(
+                name,
+                1,
+                SanitizerInput {
+                    body: "ask eve@corp.com".to_string(),
+                },
+            ),
         )
         .await;
-        assert_eq!(status, StatusCode::BAD_GATEWAY);
-        assert!(body.0.get("body").is_none(), "no derivation is offered: {:?}", body.0);
-        assert!(
-            !serde_json::to_string(&body.0).unwrap().contains("eve@corp.com"),
-            "the raw never rides out on the failure path"
+        assert_eq!(answer.err(), Some(StatusCode::BAD_GATEWAY));
+    }
+
+    #[tokio::test]
+    async fn a_consult_for_another_component_is_not_answered() {
+        let world = Arc::new(world("mismatch", &[System::Crm]));
+        let input = || SanitizerInput {
+            body: "records".to_string(),
+        };
+        assert_eq!(
+            sanitize(
+                State(world.clone()),
+                Path("strip-customer-data".to_string()),
+                consult("something-else", 1, input()),
+            )
+            .await
+            .err(),
+            Some(StatusCode::NOT_ACCEPTABLE),
+        );
+        assert_eq!(
+            sanitize(
+                State(world),
+                Path("strip-customer-data".to_string()),
+                consult("strip-customer-data", 2, input()),
+            )
+            .await
+            .err(),
+            Some(StatusCode::NOT_ACCEPTABLE),
         );
     }
 }

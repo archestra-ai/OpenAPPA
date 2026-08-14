@@ -1,9 +1,13 @@
+//! One OpenAI-compatible `/chat/completions` provider. It runs
+//! inference and nothing else — it holds no trajectory, no transcript
+//! and no policy, so it is a transport leaf.
+
 use std::time::Duration;
 
-use appa_runtime::Completion;
-use appa_runtime::tool::{HttpClient, read_body_capped};
-use appa_runtime::wire::{ChatCompletionRequest, ChatCompletionResponse, WireMessage};
 use thiserror::Error;
+
+use crate::http::{HttpClient, read_body_capped};
+use crate::wire::{ChatCompletionRequest, ChatCompletionResponse, WireMessage};
 
 pub const DEFAULT_COMPLETION_BODY_CAP_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -64,7 +68,7 @@ struct ApiKey(String);
 
 /// Configuration for one OpenAI-compatible chat-completions endpoint.
 ///
-/// This type deliberately has no `Debug` implementation because it owns the API key.
+/// Deliberately without a `Debug` implementation: it owns the API key.
 #[derive(Clone)]
 pub struct OpenAiConfig {
     endpoint: Endpoint,
@@ -108,6 +112,8 @@ impl OpenAiConfig {
     }
 }
 
+/// Why an upstream inference round failed. Every variant is
+/// fail-closed: the agent stops rather than proceeding on a guess.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum ProviderError {
     #[error("inference transport fault or timeout")]
@@ -120,10 +126,11 @@ pub enum ProviderError {
     NoChoice,
 }
 
-/// A non-streaming OpenAI/OpenRouter-compatible `/chat/completions` provider.
+/// A non-streaming OpenAI/OpenRouter-compatible provider.
 ///
-/// This type deliberately has no `Debug` implementation because its configuration owns the API
-/// key. Its HTTP client never follows redirects and no request is retried.
+/// Deliberately without a `Debug` implementation: its configuration
+/// owns the API key. The client never follows redirects and no request
+/// is retried.
 #[derive(Clone)]
 pub struct OpenAiCompatible {
     config: OpenAiConfig,
@@ -132,7 +139,7 @@ pub struct OpenAiCompatible {
 
 impl OpenAiCompatible {
     pub fn new(config: OpenAiConfig) -> Self {
-        Self::with_http_client(config, HttpClient::new())
+        OpenAiCompatible::with_http_client(config, HttpClient::new())
     }
 
     pub fn with_http_client(config: OpenAiConfig, client: HttpClient) -> Self {
@@ -147,9 +154,10 @@ impl OpenAiCompatible {
         &self.config
     }
 
-    pub async fn complete(&self, mut request: ChatCompletionRequest) -> Result<Completion, ProviderError> {
+    /// Run one provider call. The configured model replaces any model
+    /// in `request`.
+    pub async fn complete(&self, mut request: ChatCompletionRequest) -> Result<WireMessage, ProviderError> {
         request.model = self.config.model.0.clone();
-        request.stream = None;
         let url = format!("{}/chat/completions", self.config.endpoint.0.trim_end_matches('/'));
         let response = self
             .client
@@ -174,13 +182,6 @@ impl OpenAiCompatible {
         }
         let parsed: ChatCompletionResponse = serde_json::from_slice(&body).map_err(|_| ProviderError::Malformed)?;
         let choice = parsed.choices.into_iter().next().ok_or(ProviderError::NoChoice)?;
-        Ok(completion_of(choice.message))
-    }
-}
-
-fn completion_of(message: WireMessage) -> Completion {
-    Completion {
-        content: message.content,
-        tool_calls: message.tool_calls.unwrap_or_default(),
+        Ok(choice.message)
     }
 }

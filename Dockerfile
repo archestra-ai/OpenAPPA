@@ -1,8 +1,8 @@
 # appa-demo: the chat-playground service behind openappa.com.
 #
-# Built from the repository root because `demo/appa-demo` path-depends on the
-# sibling crates (`appa-runtime`, `appa-engine`, `appa-agent`). The crate is
-# deliberately outside the root workspace and carries its own Cargo.lock.
+# Built from the repository root: `demo/appa-demo` is a workspace member and
+# path-depends on the sibling crates (`appa-runtime-v2`, `appa-policy`,
+# `appa-engine`, `appa-agent`).
 #
 #   docker build -t appa-demo .
 #   docker run -p 8787:8787 -e APPA_DEMO_OPENROUTER_API_KEY=sk-or-… appa-demo
@@ -15,15 +15,14 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY appa-agent appa-agent
 COPY appa-agent-python appa-agent-python
-COPY appa-dojo-sidecar appa-dojo-sidecar
 COPY appa-engine appa-engine
-COPY appa-gateway appa-gateway
 COPY appa-policy appa-policy
-COPY appa-runtime appa-runtime
 COPY appa-runtime-v2 appa-runtime-v2
-COPY appa-sdk appa-sdk
+COPY appa-builtin appa-builtin
 COPY demo/appa-demo demo/appa-demo
-RUN cargo build --release --locked --manifest-path demo/appa-demo/Cargo.toml
+COPY demo/corporate-agent demo/corporate-agent
+COPY demo/corp-systems demo/corp-systems
+RUN cargo build --release --locked --package appa-demo
 
 FROM debian:bookworm-slim
 # TLS roots are compiled in (webpki-roots); the runtime needs only the binary,
@@ -31,7 +30,7 @@ FROM debian:bookworm-slim
 RUN useradd --system --create-home appa
 USER appa
 WORKDIR /home/appa
-COPY --from=builder /build/demo/appa-demo/target/release/appa-demo /usr/local/bin/appa-demo
+COPY --from=builder /build/target/release/appa-demo /usr/local/bin/appa-demo
 COPY --chown=appa demo/appa-demo/world world
 ENV APPA_DEMO_WORLD=/home/appa/world
 EXPOSE 8787

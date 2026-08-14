@@ -699,6 +699,16 @@ fn offer_records(trajectory: &TrajectoryId, offers: &[OfferId]) -> Vec<RuntimeRe
         .collect()
 }
 
+/// Fixture arguments, from a `json!` value to the bytes a harness would
+/// have sent. Production never takes this direction — the adapter holds
+/// the harness's bytes already — so this is a test helper and not a
+/// constructor on `ProposedCall`, which would invite the parse this
+/// change exists to remove.
+#[cfg(test)]
+pub(crate) fn raw(value: serde_json::Value) -> Box<serde_json::value::RawValue> {
+    serde_json::value::to_raw_value(&value).expect("the fixture serializes")
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{DispatchId, OpenError, OutcomeBody, Runtime, SessionError};
@@ -774,7 +784,7 @@ mod tests {
     fn call() -> ProposedCall {
         ProposedCall {
             tool: "Bash".to_string(),
-            arguments: serde_json::json!({"command": "ls"}),
+            arguments: raw(serde_json::json!({"command": "ls"})),
         }
     }
 
@@ -1040,7 +1050,7 @@ mod tests {
     fn control_call(name: &str) -> ProposedCall {
         ProposedCall {
             tool: name.to_string(),
-            arguments: serde_json::json!({"offer_id": "x"}),
+            arguments: raw(serde_json::json!({"offer_id": "x"})),
         }
     }
 
@@ -1264,7 +1274,7 @@ mod tests {
             .on_tool_result(
                 ProposedCall {
                     tool: "Bash".to_string(),
-                    arguments: serde_json::json!({"command": "rm"}),
+                    arguments: raw(serde_json::json!({"command": "rm"})),
                 },
                 ToolOutcome::Success {
                     body: OutcomeBody::Available("output".to_string()),
@@ -1359,7 +1369,7 @@ mod tests {
         );
         let other = ProposedCall {
             tool: "Bash".to_string(),
-            arguments: serde_json::json!({"command": "rm"}),
+            arguments: raw(serde_json::json!({"command": "rm"})),
         };
         assert_eq!(
             classify_report(&other, canonical(&other), Some(&row(DispatchState::Executing))),
@@ -1490,7 +1500,7 @@ mod tests {
             session
                 .on_tool_call(ProposedCall {
                     tool: "Bash".to_string(),
-                    arguments: serde_json::json!({"command": "rm -rf /"}),
+                    arguments: raw(serde_json::json!({"command": "rm -rf /"})),
                 })
                 .await,
             Err(EventError::CallOutstanding),
@@ -1840,7 +1850,7 @@ effects = ["fetch"]
     fn fetch(spelling: serde_json::Value) -> ProposedCall {
         ProposedCall {
             tool: "fetch".to_string(),
-            arguments: spelling,
+            arguments: raw(spelling),
         }
     }
 
@@ -2007,6 +2017,33 @@ name = "execute_remedy_plan"
             facts.as_slice(),
             [appa_engine::fact::Fact::DispatchOpened { .. }]
         ));
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_argument_key_is_refused_and_opens_no_dispatch() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let duplicated = ProposedCall {
+            tool: "fetch".to_string(),
+            arguments: serde_json::value::RawValue::from_string(r#"{"a":1,"a":2}"#.to_string())
+                .expect("the fixture is well-formed JSON"),
+        };
+        let decision = session.on_tool_call(duplicated).await.expect("the call is decided");
+        assert!(
+            matches!(decision, ToolCallDecision::Deny { .. }),
+            "a duplicate key must be refused, not resolved by last-wins: {decision:?}"
+        );
+        assert!(
+            runtime
+                .inner
+                .store
+                .open_dispatch(&root())
+                .expect("the dispatch query runs")
+                .is_none(),
+            "a refused call opens no dispatch"
+        );
     }
 
     #[tokio::test]
@@ -2179,7 +2216,7 @@ name = "execute_remedy_plan"
         let decision = session
             .on_tool_call(ProposedCall {
                 tool: "wrench".to_string(),
-                arguments: serde_json::json!({}),
+                arguments: raw(serde_json::json!({})),
             })
             .await
             .expect("the refusal is delivered as feedback");
@@ -2254,7 +2291,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let allowed = new
             .on_tool_call(ProposedCall {
                 tool: "read".to_string(),
-                arguments: serde_json::json!({"path": "a.txt"}),
+                arguments: raw(serde_json::json!({"path": "a.txt"})),
             })
             .await
             .expect("the new root decides");
@@ -2561,7 +2598,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let decision = session
             .on_tool_call(ProposedCall {
                 tool: "send".to_string(),
-                arguments: serde_json::json!({}),
+                arguments: raw(serde_json::json!({})),
             })
             .await
             .expect("the block is delivered");
@@ -2780,7 +2817,7 @@ attends = ["irreversible"]
     fn wire(amount: u64) -> ProposedCall {
         ProposedCall {
             tool: "wire".to_string(),
-            arguments: serde_json::json!({"amount": amount}),
+            arguments: raw(serde_json::json!({"amount": amount})),
         }
     }
 
@@ -3132,7 +3169,7 @@ confined_results = ["leak"]
     fn leak() -> ProposedCall {
         ProposedCall {
             tool: "leak".to_string(),
-            arguments: serde_json::json!({"q": "all"}),
+            arguments: raw(serde_json::json!({"q": "all"})),
         }
     }
 
@@ -3240,7 +3277,7 @@ context_control = true
     fn mark() -> ProposedCall {
         ProposedCall {
             tool: "mark".to_string(),
-            arguments: serde_json::json!({"a": 1}),
+            arguments: raw(serde_json::json!({"a": 1})),
         }
     }
 
@@ -3305,7 +3342,7 @@ context_control = true
             &mut session,
             ProposedCall {
                 tool: "bare".to_string(),
-                arguments: serde_json::json!({"a": 2}),
+                arguments: raw(serde_json::json!({"a": 2})),
             },
         )
         .await;

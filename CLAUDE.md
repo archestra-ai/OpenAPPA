@@ -229,7 +229,6 @@ Mechanics:
   included, because a trajectory's turns are serialized by construction.
 - Observability is `tracing` only (decision path at `debug!`, algebra at
   `trace!`), borrow-only and never behavior-changing; exporter wiring stays
-  out of core (`appa-gateway -- -v`/`-vv` in `demo/gateway` selects the
-  level).
+  out of core (`appa-runtime-v2 -v`/`-vv` selects the level).
 - Public domain structs own their data; cloning small IDs/config is fine,
   cloning hot-path buffers is not.

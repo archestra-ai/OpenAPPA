@@ -1,17 +1,20 @@
-//! The turn stream's vocabulary: facts from the family log rendered as wire
-//! events for the chat client.
+//! The turn stream's vocabulary, and where each event comes from.
 //!
-//! Everything the client shows is derived from the log — the same discipline
-//! as `appa-corp-agent`'s replay — so what the visitor watches is the audit
-//! record, not a parallel narration. The mapping is lossy on purpose: audit
-//! detail the chat does not render (cast records, per-value provenance) stays
-//! in the log.
+//! Two records feed it, and neither could feed it alone. The agent's own
+//! record holds the conversation — what the model said, what it proposed,
+//! and what the runtime told it — including the blocks, which the runtime's
+//! audit cannot carry: a refused call appends no fact, so nothing moved and
+//! nothing was written. The audit holds the flows — what actually crossed,
+//! what it was labelled, what committed. The chat shows both, and neither is
+//! a narration the service invented.
+//!
+//! The mapping is lossy on purpose: audit detail the chat does not render
+//! (cast records, per-value provenance) stays in the log.
 
-use appa_engine::fact::{BoundaryKind, CloseOutcome, Fact, ReturnDerivation};
+use appa_agent::{Record, Recorded};
 use appa_engine::label::{Audience, Dim, Label};
-use appa_engine::projection::Projection;
 use appa_engine::registry::TrustChain;
-use appa_engine::value::{Provenance, TrajectoryId};
+use appa_runtime_v2::api::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome};
 use serde::Serialize;
 
 #[derive(Clone, Debug, Serialize)]
@@ -55,154 +58,167 @@ pub enum WireEvent {
     Error { message: String },
 }
 
-pub fn trust_text(label: &Label, chain: &TrustChain) -> String {
-    match &label.trust {
-        Dim::Known(trust) => chain.name_of(*trust).unwrap_or("?").to_string(),
-        Dim::Unknown => "unknown".to_string(),
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LabelText {
+    pub trust: String,
+    pub audience: String,
+}
+
+impl LabelText {
+    /// Render an engine label. Used once per session, for the boundary the
+    /// policy declares; everything the runtime renders arrives as strings
+    /// already.
+    pub fn of(label: &Label, chain: &TrustChain) -> LabelText {
+        LabelText {
+            trust: match &label.trust {
+                Dim::Known(trust) => chain.name_of(*trust).unwrap_or("?").to_string(),
+                Dim::Unknown => "unknown".to_string(),
+            },
+            audience: match &label.audience {
+                Dim::Known(Audience::Public) => "public".to_string(),
+                Dim::Known(Audience::Restricted(readers)) if readers.is_empty() => "nobody".to_string(),
+                Dim::Known(Audience::Restricted(readers)) => readers
+                    .iter()
+                    .map(|reader| reader.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                Dim::Unknown => "unknown".to_string(),
+            },
+        }
     }
 }
 
-pub fn audience_text(label: &Label) -> String {
-    match &label.audience {
-        Dim::Known(Audience::Public) => "public".to_string(),
-        Dim::Known(Audience::Restricted(readers)) if readers.is_empty() => "nobody".to_string(),
-        Dim::Known(Audience::Restricted(readers)) => {
-            let names: Vec<&str> = readers.iter().map(|reader| reader.as_str()).collect();
-            names.join(", ")
+impl From<AuditLabel> for LabelText {
+    fn from(label: AuditLabel) -> LabelText {
+        LabelText {
+            trust: label.trust,
+            audience: label.audience,
         }
-        Dim::Unknown => "unknown".to_string(),
     }
 }
 
-pub fn fact_event(fact: &Fact, chain: &TrustChain) -> Vec<WireEvent> {
-    match fact {
-        Fact::ValueAdmitted {
+pub fn record_event(recorded: &Recorded) -> Vec<WireEvent> {
+    let trajectory = recorded.trajectory.0.clone();
+    match &recorded.record {
+        Record::Says { text } => vec![WireEvent::Says {
             trajectory,
-            value,
-            provenance: Provenance::ToolResult { .. },
-        } => vec![WireEvent::ToolResult {
-            trajectory: trajectory.as_str().to_string(),
-            body: value.body.as_str().to_string(),
+            text: text.clone(),
         }],
-        Fact::AssistantMessage {
+        Record::Proposes { call, tool, arguments } => vec![WireEvent::ToolProposed {
             trajectory,
-            content,
-            calls,
-        } => {
-            let mut events = Vec::new();
-            if let Some(text) = content
-                && !text.trim().is_empty()
-            {
-                events.push(WireEvent::Says {
-                    trajectory: trajectory.as_str().to_string(),
-                    text: text.clone(),
-                });
-            }
-            for call in calls {
-                events.push(WireEvent::ToolProposed {
-                    trajectory: trajectory.as_str().to_string(),
-                    call_id: call.id.as_str().to_string(),
-                    tool: call.tool.as_str().to_string(),
-                    arguments: call.arguments.clone(),
-                });
-            }
-            events
-        }
-        Fact::BlockFeedback {
-            trajectory,
-            call_id,
-            content,
-        } => vec![WireEvent::Blocked {
-            trajectory: trajectory.as_str().to_string(),
-            call_id: call_id.as_str().to_string(),
-            text: content.clone(),
+            call_id: call.0.clone(),
+            tool: tool.clone(),
+            arguments: serde_json::from_str(arguments).unwrap_or_else(|_| serde_json::Value::String(arguments.clone())),
         }],
-        Fact::DispatchClosed {
-            trajectory, outcome, ..
-        } => {
-            let (outcome, effects) = match outcome {
-                CloseOutcome::Success { effects } => {
-                    ("ran", effects.iter().map(|kind| kind.as_str().to_string()).collect())
-                }
-                CloseOutcome::Failure => ("failed", Vec::new()),
-                CloseOutcome::Indeterminate => ("indeterminate", Vec::new()),
-            };
-            vec![WireEvent::ToolClosed {
-                trajectory: trajectory.as_str().to_string(),
-                outcome: outcome.to_string(),
-                effects,
+        Record::Blocked { call, feedback, .. } => vec![WireEvent::Blocked {
+            trajectory,
+            call_id: call.0.clone(),
+            text: feedback.clone(),
+        }],
+        Record::OutputBlocked { call, reason } => vec![WireEvent::Blocked {
+            trajectory,
+            call_id: call.0.clone(),
+            text: reason.clone(),
+        }],
+        Record::Admitted { body, .. } | Record::Substituted { body, .. } => {
+            vec![WireEvent::ToolResult {
+                trajectory,
+                body: body.clone(),
             }]
         }
-        Fact::Ruling {
-            trajectory, authority, ..
-        } => vec![WireEvent::Remedy {
-            trajectory: trajectory.as_str().to_string(),
-            text: format!("approved by {}", authority.as_str()),
+        Record::OfferRefused { feedback } => vec![WireEvent::Remedy {
+            trajectory,
+            text: feedback.clone(),
         }],
-        Fact::Acceptance {
-            trajectory, narrowing, ..
-        } => vec![WireEvent::Remedy {
-            trajectory: trajectory.as_str().to_string(),
-            text: format!(
-                "narrowing accepted: {} → {}",
-                label_text(&narrowing.from, chain),
-                label_text(&narrowing.to, chain)
-            ),
-        }],
-        Fact::ChildReturn {
-            trajectory, derivation, ..
-        } => match derivation {
-            ReturnDerivation::Raw => Vec::new(),
-            ReturnDerivation::Sanitized { sanitizer, .. } => vec![WireEvent::Remedy {
-                trajectory: trajectory.as_str().to_string(),
-                text: format!("child return crossed as the {} derivation", sanitizer.as_str()),
-            }],
-        },
-        Fact::OutputSanitizerApplied {
-            trajectory, sanitizer, ..
-        } => vec![WireEvent::Sanitized {
-            trajectory: trajectory.as_str().to_string(),
-            sanitizer: sanitizer.as_str().to_string(),
-        }],
-        Fact::Boundary { trajectory, kind } => match kind {
-            BoundaryKind::Fork { parent, .. } => vec![WireEvent::Fork {
-                parent: parent.as_str().to_string(),
-                child: trajectory.as_str().to_string(),
-            }],
-            BoundaryKind::Merge { .. } => vec![WireEvent::Merge {
-                trajectory: trajectory.as_str().to_string(),
-            }],
-            BoundaryKind::TurnEnd | BoundaryKind::VoidReturn => Vec::new(),
-        },
-        // Algebraically detailed records the chat does not render.
-        _ => Vec::new(),
+        Record::OfferTaken { .. } | Record::Forked { .. } | Record::ReturnBlocked { .. } | Record::Answers { .. } => {
+            Vec::new()
+        }
     }
 }
 
-fn label_text(label: &appa_engine::label::EstablishedLabel, chain: &TrustChain) -> String {
-    let as_label = label.clone().into_label();
-    format!("trust={} audience={}", trust_text(&as_label, chain), audience_text(&as_label))
+/// The audit reader's own state: one dispatch writes its committed effects
+/// and its close as two entries, and the chat resolves one card.
+#[derive(Default)]
+pub struct AuditReader {
+    committed: Vec<String>,
 }
 
-pub fn current_label(
-    facts: &[Fact],
-    revision: appa_engine::fact::Revision,
-    root: &TrajectoryId,
-    chain: &TrustChain,
-) -> (String, String) {
-    let projection = Projection::build(facts, revision);
-    let fold = projection.view(root).current_label();
-    let label = Label::new(
-        if fold.is_established(appa_engine::label::Dimension::Trust) {
-            Dim::Known(fold.bound().trust)
-        } else {
-            Dim::Unknown
-        },
-        if fold.is_established(appa_engine::label::Dimension::Audience) {
-            Dim::Known(fold.bound().audience.clone())
-        } else {
-            Dim::Unknown
-        },
-    );
-    (trust_text(&label, chain), audience_text(&label))
+impl AuditReader {
+    pub fn event(&mut self, entry: &AuditEntry) -> Vec<WireEvent> {
+        let trajectory = entry.trajectory.clone();
+        match &entry.event {
+            AuditEvent::EffectsCommitted { effects } => {
+                self.committed = effects.clone();
+                Vec::new()
+            }
+            AuditEvent::Closed { outcome } => {
+                let (outcome, effects) = match outcome {
+                    DispatchOutcome::Ran { effects } => {
+                        ("ran", [std::mem::take(&mut self.committed), effects.clone()].concat())
+                    }
+                    DispatchOutcome::Failed => ("failed", Vec::new()),
+                    DispatchOutcome::Unknown => ("indeterminate", Vec::new()),
+                };
+                vec![WireEvent::ToolClosed {
+                    trajectory,
+                    outcome: outcome.to_string(),
+                    effects,
+                }]
+            }
+            AuditEvent::Released { label, .. } | AuditEvent::Admitted { label } => {
+                vec![label_event(trajectory, label.clone())]
+            }
+            AuditEvent::Ruled { authority } => vec![WireEvent::Remedy {
+                trajectory,
+                text: format!("approved by {authority}"),
+            }],
+            AuditEvent::Denied { authority } => vec![WireEvent::Remedy {
+                trajectory,
+                text: format!("{authority} denied this call"),
+            }],
+            AuditEvent::Narrowed { from, to } => vec![
+                WireEvent::Remedy {
+                    trajectory: trajectory.clone(),
+                    text: format!(
+                        "narrowing accepted: trust={} audience={} → trust={} audience={}",
+                        from.trust, from.audience, to.trust, to.audience
+                    ),
+                },
+                label_event(trajectory, to.clone()),
+            ],
+            AuditEvent::Sanitized { sanitizer } => vec![WireEvent::Sanitized {
+                trajectory,
+                sanitizer: sanitizer.clone(),
+            }],
+            AuditEvent::Forked { parent, .. } => vec![WireEvent::Fork {
+                parent: parent.clone(),
+                child: trajectory,
+            }],
+            AuditEvent::Merged => vec![WireEvent::Merge { trajectory }],
+            AuditEvent::ChildReturn { sanitizer, label } => {
+                let mut events = match sanitizer {
+                    None => Vec::new(),
+                    Some(sanitizer) => vec![WireEvent::Remedy {
+                        trajectory: trajectory.clone(),
+                        text: format!("child return crossed as the {sanitizer} derivation"),
+                    }],
+                };
+                events.push(label_event(trajectory, label.clone()));
+                events
+            }
+            // Algebraically detailed records the chat does not render.
+            AuditEvent::Cast { .. }
+            | AuditEvent::CastLapsed { .. }
+            | AuditEvent::SanitizerBound { .. }
+            | AuditEvent::VoidReturn => Vec::new(),
+        }
+    }
+}
+
+fn label_event(trajectory: String, label: AuditLabel) -> WireEvent {
+    WireEvent::Label {
+        trajectory,
+        trust: label.trust,
+        audience: label.audience,
+    }
 }

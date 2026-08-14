@@ -1,14 +1,13 @@
 //! Which tools exist, decided by the enabled systems — not by the policy.
 
 use std::collections::BTreeSet;
+use std::time::Duration;
+
+use appa_runtime_v2::config::{Endpoint, Externals, Implementation};
 
 use crate::systems::System;
 
 use crate::params::{InjectError, tool_parameters};
-
-/// The only dynamic-resolver URL a visitor policy may name. Session creation
-/// replaces it with the session's loopback endpoint after the SSRF lint.
-pub const DYNAMIC_RESOLVER_PLACEHOLDER: &str = "http://demo.invalid/dynamic-resolver";
 
 pub fn system_tools(system: System) -> Vec<String> {
     system.tools().iter().map(|tool| tool.to_string()).collect()
@@ -89,6 +88,14 @@ pub fn merge_policy(policy: &str, enabled: &BTreeSet<System>) -> Result<MergedPo
         }
     }
 
+    let mut deployment = toml::value::Table::new();
+    deployment.insert("dispatch".to_string(), toml::Value::String("enforced".to_string()));
+    deployment.insert(
+        "confined_results".to_string(),
+        toml::Value::Array(tools.iter().filter_map(|tool| tool.get("name").cloned()).collect()),
+    );
+    table.insert("deployment".to_string(), toml::Value::Table(deployment));
+
     if !tools.is_empty() {
         table.insert("tool".to_string(), toml::Value::Array(tools));
     }
@@ -100,98 +107,60 @@ pub fn merge_policy(policy: &str, enabled: &BTreeSet<System>) -> Result<MergedPo
     })
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct Rebound {
-    pub authorities: usize,
-    pub sanitizers: usize,
-    pub dynamic_resolvers: usize,
-}
+pub const TOOLS_PATH: &str = "/tools";
+pub const AUTHORITY_PATH: &str = "/authority";
+pub const SANITIZER_PATH: &str = "/sanitizer";
+pub const DYNAMIC_RESOLVER_PATH: &str = "/dynamic-resolver";
 
-/// Replace the implementations the harness hosts with this session's own endpoints: `hitl`
-/// authorities with the approval desk, `hosted` sanitizers with the derivation endpoint, and the
-/// reserved dynamic-resolver placeholder with the directory endpoint.
-pub fn bind_hosted(
-    merged_toml: &str,
-    authority_url: &str,
-    sanitizer_base: &str,
-    dynamic_resolver_url: &str,
-) -> Result<(String, Rebound), toml::de::Error> {
-    let mut value: toml::Value = toml::from_str(merged_toml)?;
-    let mut rebound = Rebound::default();
+const CONSULT_TIMEOUT: Duration = Duration::from_secs(300);
+const REVIEW_WINDOW: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+const MAX_CONSULT_BYTES: usize = 256 * 1024;
 
-    let resolver = |url: String, timeout_ms: i64| {
-        let mut resolver = toml::value::Table::new();
-        resolver.insert("url".to_string(), toml::Value::String(url));
-        resolver.insert("timeout_ms".to_string(), toml::Value::Integer(timeout_ms));
-        let mut implementation = toml::value::Table::new();
-        implementation.insert("resolver".to_string(), toml::Value::Table(resolver));
-        toml::Value::Table(implementation)
-    };
-    const UNBOUNDED_MS: i64 = 365 * 24 * 60 * 60 * 1000;
-    const DERIVATION_MS: i64 = 300_000;
-    let builtin_is = |entry: &toml::Value, name: &str| {
-        entry
-            .get("implementation")
-            .and_then(|imp| imp.get("builtin"))
-            .and_then(|found| found.as_str())
-            == Some(name)
-    };
-
-    if let Some(authorities) = value.get_mut("authority").and_then(|list| list.as_array_mut()) {
-        for authority in authorities {
-            if !builtin_is(authority, "hitl") {
-                continue;
-            }
-            let Some(table) = authority.as_table_mut() else {
-                continue;
-            };
-            table.insert(
-                "implementation".to_string(),
-                resolver(authority_url.to_string(), UNBOUNDED_MS),
-            );
-            rebound.authorities += 1;
-        }
+/// Bind every component the visitor's policy registered to this session's
+/// own endpoint.
+///
+/// The policy says what a component may do; the deployment says who
+/// performs it, and on this box the deployment is never the
+/// visitor's to write. That split is what makes the playground safe to
+/// expose: a submitted policy has nowhere to put a URL, so it cannot make
+/// this process call one. Every authority is the visitor at the approval
+/// desk, every sanitizer is their own model, and the one directory is the
+/// service's.
+///
+/// Enumerating is the whole job: a component the policy registers and this
+/// misses would be refused by `Runtime::open` as unbound, which
+/// is a contained failure but a failure — a visitor's own policy would not
+/// start.
+pub fn externals_for(policy: &appa_policy::Config, base: &str) -> Externals {
+    let registry = policy.registry_config();
+    let endpoint = |path: String| Implementation::Resolver(Endpoint { url: path, token: None });
+    Externals {
+        timeout: CONSULT_TIMEOUT,
+        review_timeout: REVIEW_WINDOW,
+        max_body_bytes: MAX_CONSULT_BYTES,
+        authorities: registry
+            .authorities
+            .iter()
+            .map(|authority| {
+                let name = authority.name.as_str().to_string();
+                let url = format!("{base}{AUTHORITY_PATH}/{name}");
+                (name, endpoint(url))
+            })
+            .collect(),
+        sanitizers: registry
+            .sanitizers
+            .iter()
+            .map(|sanitizer| {
+                let name = sanitizer.name.as_str().to_string();
+                let url = format!("{base}{SANITIZER_PATH}/{name}");
+                (name, endpoint(url))
+            })
+            .collect(),
+        dynamic: Some(Endpoint {
+            url: format!("{base}{DYNAMIC_RESOLVER_PATH}"),
+            token: None,
+        }),
     }
-
-    if let Some(sanitizers) = value.get_mut("sanitizer").and_then(|list| list.as_array_mut()) {
-        for sanitizer in sanitizers {
-            if !builtin_is(sanitizer, "hosted") {
-                continue;
-            }
-            let Some(name) = sanitizer.get("name").and_then(|name| name.as_str()).map(str::to_string) else {
-                continue;
-            };
-            let Some(table) = sanitizer.as_table_mut() else {
-                continue;
-            };
-            table.insert(
-                "implementation".to_string(),
-                resolver(format!("{sanitizer_base}/{name}"), DERIVATION_MS),
-            );
-            rebound.sanitizers += 1;
-        }
-    }
-
-    if let Some(resolvers) = value.get_mut("dynamic_resolver").and_then(|list| list.as_array_mut()) {
-        for dynamic_resolver in resolvers {
-            let Some(url) = dynamic_resolver
-                .get_mut("resolver")
-                .and_then(|resolver| resolver.get_mut("url"))
-            else {
-                continue;
-            };
-            if url.as_str() != Some(DYNAMIC_RESOLVER_PLACEHOLDER) {
-                continue;
-            }
-            *url = toml::Value::String(dynamic_resolver_url.to_string());
-            rebound.dynamic_resolvers += 1;
-        }
-    }
-
-    Ok((
-        toml::to_string(&value).expect("a just-parsed policy re-serializes"),
-        rebound,
-    ))
 }
 
 #[cfg(test)]
@@ -272,78 +241,6 @@ delta = {}
             .map(|tool| tool["name"].as_str().unwrap())
             .collect();
         assert!(!names.contains(&"list_issues"));
-    }
-
-    #[test]
-    fn only_the_harness_hosted_builtins_are_rebound() {
-        let policy = r#"
-version = 1
-[[dynamic_resolver]]
-name = "directory"
-resolver = { url = "http://demo.invalid/dynamic-resolver", timeout_ms = 5000 }
-
-[[authority]]
-name = "treasurer"
-mandate.attends = ["human-approval"]
-implementation.builtin = "hitl"
-
-[[authority]]
-name = "auto"
-mandate.can_waive = ["egress"]
-implementation.builtin = "approve"
-
-[[sanitizer]]
-name = "digest"
-on = ["tool_output"]
-mandate.trust = { from = "suspicious", to = "trusted" }
-implementation.builtin = "hosted"
-
-[[sanitizer]]
-name = "scrub"
-on = ["tool_output"]
-mandate.audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
-implementation.builtin = "redact-numbers"
-"#;
-        let (bound, rebound) = bind_hosted(
-            policy,
-            "http://127.0.0.1:5555/authority",
-            "http://127.0.0.1:5555/sanitizer",
-            "http://127.0.0.1:5555/dynamic-resolver",
-        )
-        .unwrap();
-        assert_eq!(
-            rebound,
-            Rebound {
-                authorities: 1,
-                sanitizers: 1,
-                dynamic_resolvers: 1,
-            }
-        );
-        let value: toml::Value = toml::from_str(&bound).unwrap();
-
-        let dynamic_resolvers = value["dynamic_resolver"].as_array().unwrap();
-        assert_eq!(
-            dynamic_resolvers[0]["resolver"]["url"].as_str(),
-            Some("http://127.0.0.1:5555/dynamic-resolver")
-        );
-
-        let authorities = value["authority"].as_array().unwrap();
-        assert_eq!(
-            authorities[0]["implementation"]["resolver"]["url"].as_str(),
-            Some("http://127.0.0.1:5555/authority")
-        );
-        assert!(authorities[0]["implementation"].get("builtin").is_none());
-        assert_eq!(authorities[1]["implementation"]["builtin"].as_str(), Some("approve"));
-
-        let sanitizers = value["sanitizer"].as_array().unwrap();
-        assert_eq!(
-            sanitizers[0]["implementation"]["resolver"]["url"].as_str(),
-            Some("http://127.0.0.1:5555/sanitizer/digest")
-        );
-        assert_eq!(
-            sanitizers[1]["implementation"]["builtin"].as_str(),
-            Some("redact-numbers")
-        );
     }
 
     #[test]

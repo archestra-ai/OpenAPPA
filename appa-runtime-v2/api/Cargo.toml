@@ -6,7 +6,11 @@ publish = false
 
 [dependencies]
 serde = { workspace = true }
-serde_json = { workspace = true }
+# `raw_value` keeps a proposed call's arguments as the bytes the harness
+# sent, so the engine — the only party that may construct
+# `CanonicalArguments` — sees duplicate keys and other refusable forms
+# instead of a parser's interpretation of them.
+serde_json = { workspace = true, features = ["raw_value"] }
 
 [lints]
 workspace = true

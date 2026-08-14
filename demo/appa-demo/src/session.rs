@@ -6,19 +6,18 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use appa_agent::wire::{WireMessage, WireTool};
+use appa_agent::{Endpoint, HttpClient, OpenAiCompatible, OpenAiConfig, ToolCatalogue, Transcript, TranscriptHead};
+use appa_runtime_v2::api::{OpenError, Runtime, TrajectoryId};
+use appa_runtime_v2::config::{Config, ConfigError};
+
 use crate::approvals::Approvals;
 use crate::derive::Derivations;
+use crate::events::LabelText;
+use crate::lint::{PolicyError, check_policy};
 use crate::shim::{self, World};
 use crate::systems::System;
-use crate::world::{Rebound, bind_hosted};
-use appa_engine::registry::TrustChain;
-use appa_runtime::config::SanitizerImpl;
-use appa_runtime::external::BuiltinSanitizer;
-use appa_runtime::store::TenantId;
-use appa_runtime::tool::{HttpClient, HttpTool, ToolBackend};
-use appa_runtime::{Config, InitError, Mediator, TrajectoryId, TranscriptHead, WireMessage};
-
-use crate::lint::{PolicyError, check_policy};
+use crate::world::{TOOLS_PATH, externals_for};
 
 const SYSTEM_PROMPT: &str = "You are the company assistant at a vendor of an AI agent platform. Depending on \
 configuration you may have access to the CRM, the public GitHub issue tracker, outbound email, finance, and meeting \
@@ -29,27 +28,36 @@ after you execute the plan. When you are done, briefly summarise what you did.";
 
 const MAX_LIVE_SESSIONS: usize = 64;
 
-/// One live chat: the frozen policy behind a mediator, the trajectory the
-/// turns append to, and the session's private world on disk.
+/// One live chat: the runtime holding the frozen policy, the trajectory the
+/// turns continue, and the session's private world on disk.
 pub struct DemoSession {
     pub id: String,
-    pub tenant: TenantId,
     pub trajectory: TrajectoryId,
-    pub mediator: Arc<Mediator>,
-    pub chain: TrustChain,
+    pub runtime: Arc<Runtime>,
+    /// Where this session's turns and derivations run inference, and which
+    /// model they ask for. Both are fixed when the chat opens.
+    pub inference: Endpoint,
     pub model: String,
     pub tool_count: usize,
-    /// The session's human-ruling desk: the rebound `hitl` authority parks
-    /// here, the SSE pump drains its events, the approval endpoint resolves.
+    pub boundary: LabelText,
+    /// What the model is offered, built from the policy it was checked
+    /// against — a harness owns its catalogue, so this host holds it.
+    pub catalogue: ToolCatalogue,
+    pub tools_url: String,
+    /// The session's human-ruling desk: every authority consult parks here,
+    /// the SSE pump drains its events, the approval endpoint resolves.
     pub approvals: Arc<Approvals>,
-    /// The session's hosted-derivation desk: a rebound `hosted` sanitizer
-    /// resolves here, and each turn lends it the service's key.
+    /// The session's derivation desk: every sanitizer consult resolves here,
+    /// and each turn lends it the service's key.
     pub derivations: Arc<Derivations>,
-    /// Serializes turns: `try_lock_owned` fails while a turn is streaming, so
-    /// a second message answers 409 instead of queuing behind the lease.
-    pub turn_gate: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes turns, and holds what they accumulate: the runtime keeps
+    /// no conversation, so the transcript is this host's, and the turn that
+    /// holds the gate is the one entitled to it. `try_lock_owned` fails while
+    /// a turn is streaming, so a second message answers 409 instead of
+    /// queuing behind the lease.
+    pub turn_gate: Arc<tokio::sync::Mutex<Transcript>>,
     turns: Mutex<u32>,
-    world_dir: PathBuf,
+    session_dir: PathBuf,
     last_used: Mutex<Instant>,
 }
 
@@ -73,8 +81,7 @@ impl DemoSession {
 
 impl Drop for DemoSession {
     fn drop(&mut self) {
-        // Best effort: a leftover world directory is disk, not state.
-        let _ = std::fs::remove_dir_all(&self.world_dir);
+        let _ = std::fs::remove_dir_all(&self.session_dir);
     }
 }
 
@@ -98,8 +105,10 @@ pub enum CreateError {
     AtCapacity,
     #[error("preparing the session world: {0}")]
     World(#[from] std::io::Error),
-    #[error("assembling the mediator: {0}")]
-    Mediator(#[from] InitError),
+    #[error("this deployment cannot run that policy: {0}")]
+    Open(#[from] Box<OpenError>),
+    #[error("composing the deployment: {0}")]
+    Deployment(#[from] Box<ConfigError>),
 }
 
 /// The models the playground may spend the service's key on — the four the
@@ -115,15 +124,17 @@ pub struct Sessions {
     seed_data_root: PathBuf,
     worlds_root: PathBuf,
     ttl: Duration,
+    inference: Endpoint,
     live: Mutex<HashMap<String, Arc<DemoSession>>>,
 }
 
 impl Sessions {
-    pub fn new(seed_data_root: PathBuf, worlds_root: PathBuf, ttl: Duration) -> Sessions {
+    pub fn new(seed_data_root: PathBuf, worlds_root: PathBuf, ttl: Duration, inference: Endpoint) -> Sessions {
         Sessions {
             seed_data_root,
             worlds_root,
             ttl,
+            inference,
             live: Mutex::new(HashMap::new()),
         }
     }
@@ -144,34 +155,24 @@ impl Sessions {
         }
 
         let checked = check_policy(policy, enabled)?;
-        let chain = checked.config.registry_config().trust_chain.clone();
-        let tool_names: Vec<String> = checked
-            .config
-            .registry_config()
-            .tools
-            .iter()
-            .map(|tool| tool.name.as_str().to_string())
-            .collect();
+        let chain = &checked.config.registry_config().trust_chain;
+        let boundary = LabelText::of(checked.config.boundary_label(), chain);
+        let advertised: Vec<WireTool> = crate::catalogue::advertised(&checked.config);
 
         let id = session_id();
-        let world_dir = self.worlds_root.join(&id);
-        let data_root = world_dir.join("data");
+        let session_dir = self.worlds_root.join(&id);
+        let data_root = session_dir.join("data");
         copy_dir(&self.seed_data_root, &data_root)?;
 
         let approvals = Arc::new(Approvals::default());
         let derivations = Arc::new(Derivations::new(
+            self.inference.clone(),
             model.to_string(),
             checked
                 .config
                 .registry_config()
                 .sanitizers
                 .iter()
-                .filter(|sanitizer| {
-                    matches!(
-                        checked.config.sanitizer_impl(&sanitizer.name),
-                        Some(SanitizerImpl::Builtin(BuiltinSanitizer::Hosted))
-                    )
-                })
                 .filter_map(|sanitizer| {
                     Some((
                         sanitizer.name.as_str().to_string(),
@@ -188,53 +189,27 @@ impl Sessions {
             derivations: derivations.clone(),
         })
         .await?;
-        let shim_url = format!("http://{address}/");
+        let base = format!("http://{address}");
 
-        let config = {
-            let (bound, rebound) = bind_hosted(
-                &checked.merged_toml,
-                &format!("{shim_url}authority"),
-                &format!("{shim_url}sanitizer"),
-                &format!("{shim_url}dynamic-resolver"),
-            )
-            .map_err(|error| CreateError::Policy(PolicyError::Load(error.into())))?;
-            if rebound == Rebound::default() {
-                checked.config
-            } else {
-                Config::from_toml_str(&bound).map_err(|error| CreateError::Policy(PolicyError::Load(error)))?
-            }
-        };
-
-        let client = HttpClient::loopback();
-        let backends = tool_names
-            .iter()
-            .map(|name| {
-                let backend =
-                    ToolBackend::Http(HttpTool::new(shim_url.clone(), Duration::from_secs(15), client.clone()));
-                (appa_runtime::ToolName::new(name.clone()), backend)
-            })
-            .collect();
-
-        let head = TranscriptHead::new(vec![WireMessage::system(SYSTEM_PROMPT)])
-            .expect("a one-message system head is a valid transcript head");
-        let mediator = Arc::new(Mediator::with_tool_backends(config, backends)?.with_transcript_head(head));
-
-        let tenant = TenantId::new(format!("playground-{id}"));
-        let trajectory = mediator.create_session(tenant.clone());
+        let config =
+            Config::embedded(checked.merged_toml.clone(), externals_for(&checked.config, &base)).map_err(Box::new)?;
+        let runtime = Runtime::open(config, session_dir.join("appa.db"), None).map_err(Box::new)?;
 
         let session = Arc::new(DemoSession {
             id: id.clone(),
-            tenant,
-            trajectory,
-            mediator,
-            chain,
+            trajectory: TrajectoryId(format!("playground-{id}")),
+            runtime: Arc::new(runtime),
+            inference: self.inference.clone(),
             model: model.to_string(),
             tool_count: checked.tool_count,
+            boundary,
+            catalogue: ToolCatalogue::new(advertised),
+            tools_url: format!("{base}{TOOLS_PATH}"),
             approvals,
             derivations,
-            turn_gate: Arc::new(tokio::sync::Mutex::new(())),
+            turn_gate: Arc::new(tokio::sync::Mutex::new(Transcript::default())),
             turns: Mutex::new(0),
-            world_dir,
+            session_dir,
             last_used: Mutex::new(Instant::now()),
         });
         self.live.expect_lock().insert(id, session.clone());
@@ -253,7 +228,7 @@ impl Sessions {
         self.live.expect_lock().remove(id)
     }
 
-    /// Drop every session idle past the TTL. The world directory goes with
+    /// Drop every session idle past the TTL. The session directory goes with
     /// the last `Arc` — after any in-flight turn's stream ends.
     pub fn expire_idle(&self) -> usize {
         let mut live = self.live.expect_lock();
@@ -281,6 +256,38 @@ impl Sessions {
             }
         });
     }
+}
+
+/// The provider one turn (or one derivation) runs on.
+pub fn provider(inference: &Endpoint, model: &str, key: String, request_timeout: Duration) -> OpenAiCompatible {
+    let config = OpenAiConfig::new(inference.clone(), model.to_string(), key).with_request_timeout(request_timeout);
+    match is_loopback(inference) {
+        true => OpenAiCompatible::with_http_client(config, HttpClient::loopback()),
+        false => OpenAiCompatible::new(config),
+    }
+}
+
+fn is_loopback(endpoint: &Endpoint) -> bool {
+    let authority = endpoint
+        .as_str()
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(endpoint.as_str())
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    let host = match authority.rsplit_once(':') {
+        Some((host, _)) => host,
+        None => authority,
+    };
+    matches!(
+        host.trim_start_matches('[').trim_end_matches(']'),
+        "127.0.0.1" | "::1" | "localhost"
+    )
+}
+
+pub fn head() -> TranscriptHead {
+    TranscriptHead::new(vec![WireMessage::system(SYSTEM_PROMPT)])
 }
 
 fn session_id() -> String {

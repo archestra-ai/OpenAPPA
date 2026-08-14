@@ -3,14 +3,20 @@
 
 mod session;
 
+/// The fixture-only `Value` → raw-bytes helper, shared with the other
+/// modules' test suites.
+#[cfg(test)]
+pub(crate) use session::raw;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub use crate::engine::TrajectoryStatus;
+pub use crate::engine::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, TrajectoryStatus};
 pub use appa_runtime_api::{OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
 pub(crate) use session::{Session, is_control_tool};
 
 use crate::config::{Config, PolicyFileKey};
+use crate::elicit::Elicitation;
 use crate::engine::{EngineRefusal, EngineSeam, PolicyEngine, RuntimeEngine};
 use crate::external::ExternalServices;
 use crate::store::{Store, StoreError};
@@ -23,9 +29,11 @@ use crate::store::{Store, StoreError};
 pub(crate) struct DispatchId(pub String);
 
 /// Identity of one remedy offer. Engine-derived and unguessable:
-/// naming it proves the model read the offer.
+/// naming it proves the model read the offer. The model
+/// quotes it back verbatim, so a host carries the string it surfaced
+/// and never builds one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct OfferId(pub String);
+pub struct OfferId(pub String);
 
 /// An authorized call: the exact canonical bytes the harness must now
 /// execute, never re-rendered and never edited.
@@ -63,6 +71,20 @@ pub(crate) enum RemedyDecision {
     Returned { value: String },
     Declined { feedback: String },
     NoAnswer { feedback: String },
+}
+
+/// What one whole `execute_remedy_plan` act produced: the engine's
+/// answer, or the control channel's own refusal. `Refused` covers an
+/// id no live offer answers, an offer already executing, and a storage
+/// failure — never an engine decision, and it never says which,
+/// because the id is the proof.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RemedyOutcome {
+    Authorized { tool: String },
+    Returned { value: String },
+    Declined { feedback: String },
+    NoAnswer { feedback: String },
+    Refused { detail: String },
 }
 
 /// What happens to the child's final message: delivered to the parent,
@@ -340,36 +362,8 @@ impl Runtime {
     }
 
     pub fn status(&self, id: &TrajectoryId) -> Option<TrajectoryStatus> {
-        let row = match self.inner.store.trajectory(id) {
-            Ok(Some(row)) => row,
-            Ok(None) => {
-                tracing::debug!(trajectory = %id.0, "status read refused: unknown trajectory");
-                return None;
-            }
-            Err(error) => {
-                tracing::debug!(trajectory = %id.0, %error, "status read refused at the store");
-                return None;
-            }
-        };
-        if row.family != row.id {
-            tracing::debug!(trajectory = %id.0, "status read refused: not a root trajectory");
-            return None;
-        }
-        let policy = match self.inner.resolve_policy(&row.family) {
-            Ok(policy) => policy,
-            Err(error) => {
-                tracing::warn!(trajectory = %id.0, %error, "status read refused: the opening policy is unavailable");
-                return None;
-            }
-        };
-        let (log, _revision) = match self.inner.store.load_log(&row.family) {
-            Ok(log) => log,
-            Err(error) => {
-                tracing::debug!(trajectory = %id.0, %error, "status read refused at the store");
-                return None;
-            }
-        };
-        let view = match self.inner.engine.rebuild_view(&policy, &log, &row.family, id) {
+        let (policy, log, family) = self.root_log(id, "status")?;
+        let view = match self.inner.engine.rebuild_view(&policy, &log, &family, id) {
             Ok(view) => view,
             Err(refusal) => {
                 tracing::warn!(trajectory = %id.0, %refusal, "status read refused the persisted log");
@@ -377,6 +371,102 @@ impl Runtime {
             }
         };
         self.inner.engine.trajectory_status(&policy, &view)
+    }
+
+    /// Every decision this family's log recorded, in log order.
+    /// A projection like
+    /// [`Runtime::status`]: it gates nothing, appends nothing, and
+    /// expires no offer, and it answers for an ended
+    /// trajectory because an audit is read after the run.
+    pub fn audit(&self, id: &TrajectoryId) -> Option<Vec<AuditEntry>> {
+        let (policy, log, family) = self.root_log(id, "audit")?;
+        match self.inner.engine.audit(&policy, &log, &family) {
+            Ok(entries) => entries,
+            Err(refusal) => {
+                tracing::warn!(trajectory = %id.0, %refusal, "audit read refused the persisted log");
+                None
+            }
+        }
+    }
+
+    fn root_log(&self, id: &TrajectoryId, read: &str) -> Option<(PolicyEngine<'_>, Vec<Vec<u8>>, TrajectoryId)> {
+        let row = match self.inner.store.trajectory(id) {
+            Ok(Some(row)) => row,
+            Ok(None) => {
+                tracing::debug!(trajectory = %id.0, read, "read refused: unknown trajectory");
+                return None;
+            }
+            Err(error) => {
+                tracing::debug!(trajectory = %id.0, read, %error, "read refused at the store");
+                return None;
+            }
+        };
+        if row.family != row.id {
+            tracing::debug!(trajectory = %id.0, read, "read refused: not a root trajectory");
+            return None;
+        }
+        let policy = match self.inner.resolve_policy(&row.family) {
+            Ok(policy) => policy,
+            Err(error) => {
+                tracing::warn!(trajectory = %id.0, read, %error, "read refused: the opening policy is unavailable");
+                return None;
+            }
+        };
+        let (log, _revision) = match self.inner.store.load_log(&row.family) {
+            Ok(log) => log,
+            Err(error) => {
+                tracing::debug!(trajectory = %id.0, read, %error, "read refused at the store");
+                return None;
+            }
+        };
+        Some((policy, log, row.family))
+    }
+
+    /// Execute one surfaced remedy offer by its id (`RMD-2`,
+    /// `RMD-12`). Naming the id proves the model read the offer.
+    pub async fn execute_remedy(&self, offer: OfferId) -> RemedyOutcome {
+        self.remedy(offer, None).await
+    }
+
+    /// The whole act: claim the offer, route it to its session, and
+    /// answer. `elicitation` is supplied rather than extracted, so the
+    /// body is reachable without a live peer.
+    pub(crate) async fn remedy(&self, offer: OfferId, elicitation: Option<&Elicitation>) -> RemedyOutcome {
+        let Some(_claim) = self.claim_offer(&offer) else {
+            return RemedyOutcome::Refused {
+                detail: "this offer is already being executed".to_string(),
+            };
+        };
+        let trajectory = match self.offer_trajectory(&offer) {
+            Ok(Some(trajectory)) => trajectory,
+            Ok(None) => {
+                return RemedyOutcome::Refused {
+                    detail: "no live offer with this id exists".to_string(),
+                };
+            }
+            Err(error) => {
+                return RemedyOutcome::Refused {
+                    detail: error.to_string(),
+                };
+            }
+        };
+        let mut session = match self.session(&trajectory) {
+            Ok(session) => session,
+            Err(error) => {
+                return RemedyOutcome::Refused {
+                    detail: error.to_string(),
+                };
+            }
+        };
+        match session.on_remedy(offer, elicitation).await {
+            Ok(RemedyDecision::Authorized { call }) => RemedyOutcome::Authorized { tool: call.tool },
+            Ok(RemedyDecision::Returned { value }) => RemedyOutcome::Returned { value },
+            Ok(RemedyDecision::Declined { feedback }) => RemedyOutcome::Declined { feedback },
+            Ok(RemedyDecision::NoAnswer { feedback }) => RemedyOutcome::NoAnswer { feedback },
+            Err(error) => RemedyOutcome::Refused {
+                detail: error.to_string(),
+            },
+        }
     }
 
     /// Which trajectory a surfaced offer routes to. The MCP endpoint
@@ -562,7 +652,7 @@ pub(crate) mod testing {
     pub(crate) fn enqueue_release(runtime: &Runtime, dispatch: &str, tool: &str, arguments: &serde_json::Value) {
         let call = ProposedCall {
             tool: tool.to_string(),
-            arguments: arguments.clone(),
+            arguments: super::raw(arguments.clone()),
         };
         enqueue(
             runtime,

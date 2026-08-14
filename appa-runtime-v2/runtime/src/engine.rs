@@ -11,8 +11,10 @@ use appa_engine::contract::{
 };
 use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityReview, PlanError, Ruling};
-use appa_engine::fact::{Fact, FactBatch, ObservedResult, ReturnPolicy, Revision};
-use appa_engine::label::{Audience, Dimension, ReaderId, Trust};
+use appa_engine::fact::{
+    BoundaryKind, CloseOutcome, EffectSet, Fact, FactBatch, ObservedResult, ReturnDerivation, ReturnPolicy, Revision,
+};
+use appa_engine::label::{Audience, Dim, Dimension, Label, PartialLabel, ReaderId, Trust};
 use appa_engine::plan::{ExecutableRemedyPlan, PlannedBlock, RemedyPlan};
 use appa_engine::projection::Views;
 use appa_engine::transition::EngineView as ValidatedView;
@@ -262,6 +264,63 @@ pub struct TrajectoryStatus {
     pub audience: String,
 }
 
+/// One label rendered for a display surface: chain names and reader ids as
+/// plain strings, per dimension, with `unknown` where a source is still
+/// unresolved.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AuditLabel {
+    pub trust: String,
+    pub audience: String,
+}
+
+/// One decision the family log recorded, in log order (`docs/runtime.md`, the
+/// audit read). Like [`TrajectoryStatus`] it is a projection: it gates
+/// nothing, appends nothing, and expires no offer. Primitives only,
+/// so no engine type leaves the boundary.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AuditEntry {
+    pub trajectory: String,
+    pub event: AuditEvent,
+}
+
+/// What one entry records. The facts the harness owns rather than the engine
+/// — the model's own rounds, turn punctuation, batch identity — have no entry:
+/// this is the decision log, not the transcript.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub enum AuditEvent {
+    Forked { parent: String, seed: AuditLabel },
+    Released {
+        tool: String,
+        label: AuditLabel,
+        effects: Vec<String>,
+    },
+    EffectsCommitted { effects: Vec<String> },
+    Closed { outcome: DispatchOutcome },
+    Admitted { label: AuditLabel },
+    Ruled { authority: String },
+    Denied { authority: String },
+    Narrowed { from: AuditLabel, to: AuditLabel },
+    Cast { cast: String, resolved: AuditLabel },
+    CastLapsed { cast: String, resolved: AuditLabel },
+    SanitizerBound { sanitizer: String },
+    Sanitized { sanitizer: String },
+    ChildReturn {
+        sanitizer: Option<String>,
+        label: AuditLabel,
+    },
+    Merged,
+    VoidReturn,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub enum DispatchOutcome {
+    Ran {
+        effects: Vec<String>,
+    },
+    Failed,
+    Unknown,
+}
+
 /// A root's validated opening: the engine's opening batch plus
 /// the exact-bytes key of the policy file the root opens under. The only
 /// constructor derives the trajectory and the identity from the batch's one
@@ -460,6 +519,19 @@ impl EngineSeam {
             }),
         }
     }
+
+    /// Render the family's recorded decisions from its persisted log. Like
+    /// [`EngineSeam::trajectory_status`], a projection read — and
+    /// like the replay gates, it runs on the real compiled engine in both
+    /// modes, because what it renders is the log itself.
+    pub fn audit(
+        &self,
+        policy: &PolicyEngine<'_>,
+        log: &[Vec<u8>],
+        family: &TrajectoryId,
+    ) -> Result<Option<Vec<AuditEntry>>, EngineRefusal> {
+        policy.engine().audit(log, family)
+    }
 }
 
 /// The real engine behind the seam: the immutable registry-backed decision
@@ -517,72 +589,185 @@ impl RuntimeEngine {
         family: &TrajectoryId,
         trajectory: &TrajectoryId,
     ) -> Result<EngineView, EngineRefusal> {
-        let mut facts = Vec::new();
-        for (seq, row) in log.iter().enumerate() {
-            let batch: Vec<Fact> = serde_json::from_slice(row).map_err(|error| EngineRefusal::UntrustedLog {
-                detail: format!("batch {seq} does not decode: {error}"),
-            })?;
-            facts.extend(batch);
-        }
-        self.engine
-            .verify_opening(&facts, &engine_id(family))
-            .map_err(|error| EngineRefusal::OpeningMismatch {
-                detail: error.to_string(),
-            })?;
-        let view = self
-            .engine
-            .view(&engine_id(family), facts, Revision::new(log.len() as u64))
-            .map_err(|error| EngineRefusal::UntrustedLog {
-                detail: error.to_string(),
-            })?;
+        let facts = decode_log(log)?;
+        let view = self.validated(facts, family, Revision::new(log.len() as u64))?;
         Ok(EngineView {
             view: Box::new(view),
             trajectory: trajectory.clone(),
         })
     }
 
+    fn validated(
+        &self,
+        facts: Vec<Fact>,
+        family: &TrajectoryId,
+        revision: Revision,
+    ) -> Result<ValidatedView, EngineRefusal> {
+        self.engine
+            .verify_opening(&facts, &engine_id(family))
+            .map_err(|error| EngineRefusal::OpeningMismatch {
+                detail: error.to_string(),
+            })?;
+        self.engine
+            .view(&engine_id(family), facts, revision)
+            .map_err(|error| EngineRefusal::UntrustedLog {
+                detail: error.to_string(),
+            })
+    }
+
     fn canonical_bytes(&self, call: &ProposedCall) -> Option<Vec<u8>> {
-        let raw = serde_json::to_vec(&call.arguments).ok()?;
-        let resolved = self.engine.resolve_call(ToolName::new(call.tool.clone()), &raw).ok()?;
+        let resolved = self
+            .engine
+            .resolve_call(ToolName::new(call.tool.clone()), call.arguments.get().as_bytes())
+            .ok()?;
         Some(resolved.canonical_arguments().canonical_bytes().to_vec())
     }
 
     fn trajectory_status(&self, view: &EngineView) -> Option<TrajectoryStatus> {
         let EngineView { view, trajectory } = view;
-        let label = view.views(&engine_id(trajectory)).current_label();
-        let chain = self.engine.registry().trust_chain();
-        let trust = if label.is_established(Dimension::Trust) {
-            let bound = label.bound().trust;
-            if bound == Trust::new(u8::MAX) {
-                chain
-                    .name_of(Trust::new((chain.len() - 1) as u8))
-                    .expect("a validated chain names its top rank")
-                    .to_string()
-            } else {
-                match chain.name_of(bound) {
-                    Some(name) => name.to_string(),
-                    None => {
-                        tracing::warn!(
-                            rank = bound.rank(),
-                            "status render refused: the trust bound has no chain name"
-                        );
-                        return None;
-                    }
-                }
-            }
-        } else {
-            "unknown".to_string()
-        };
-        let audience = if label.is_established(Dimension::Audience) {
-            audience_wire(&label.bound().audience)
-        } else {
-            "unknown".to_string()
-        };
+        let current = view.views(&engine_id(trajectory)).current_label();
+        let label = self.render_label(&as_label(&current))?;
         Some(TrajectoryStatus {
             trajectory: terminal_safe(&trajectory.0),
+            trust: label.trust,
+            audience: label.audience,
+        })
+    }
+
+    fn render_label(&self, label: &Label) -> Option<AuditLabel> {
+        let chain = self.engine.registry().trust_chain();
+        let trust = match label.trust {
+            Dim::Known(bound) if bound == Trust::new(u8::MAX) => chain
+                .name_of(Trust::new((chain.len() - 1) as u8))
+                .expect("a validated chain names its top rank")
+                .to_string(),
+            Dim::Known(bound) => match chain.name_of(bound) {
+                Some(name) => name.to_string(),
+                None => {
+                    tracing::warn!(rank = bound.rank(), "render refused: the trust bound has no chain name");
+                    return None;
+                }
+            },
+            Dim::Unknown => "unknown".to_string(),
+        };
+        let audience = match &label.audience {
+            Dim::Known(audience) => audience_wire(audience),
+            Dim::Unknown => "unknown".to_string(),
+        };
+        Some(AuditLabel {
             trust: terminal_safe(&trust),
             audience: terminal_safe(&audience),
         })
+    }
+
+    fn audit(&self, log: &[Vec<u8>], family: &TrajectoryId) -> Result<Option<Vec<AuditEntry>>, EngineRefusal> {
+        let facts = decode_log(log)?;
+        // The validator takes the records; this read keeps its own copy of
+        // them, which is why the audit — and only the audit — clones a log.
+        self.validated(facts.clone(), family, Revision::new(log.len() as u64))?;
+        let mut entries = Vec::new();
+        for fact in &facts {
+            let event = match self.audit_event(fact) {
+                Some(Some(event)) => event,
+                // A record the audit does not show.
+                Some(None) => continue,
+                // A bound this deployment cannot name.
+                None => return Ok(None),
+            };
+            entries.push(AuditEntry {
+                trajectory: terminal_safe(fact.trajectory().as_str()),
+                event,
+            });
+        }
+        Ok(Some(entries))
+    }
+
+    fn audit_event(&self, fact: &Fact) -> Option<Option<AuditEvent>> {
+        let event = match fact {
+            Fact::DispatchOpened {
+                tool,
+                proposed_label,
+                proposed_effects,
+                ..
+            } => AuditEvent::Released {
+                tool: terminal_safe(tool.as_str()),
+                label: self.render_label(&proposed_label.clone().into_label())?,
+                effects: effect_names(proposed_effects),
+            },
+            Fact::DispatchSucceeded { effects, .. } => AuditEvent::EffectsCommitted {
+                effects: effect_names(effects),
+            },
+            Fact::DispatchClosed { outcome, .. } => AuditEvent::Closed {
+                outcome: match outcome {
+                    CloseOutcome::Success { effects } => DispatchOutcome::Ran {
+                        effects: effect_names(effects),
+                    },
+                    CloseOutcome::Failure => DispatchOutcome::Failed,
+                    CloseOutcome::Indeterminate => DispatchOutcome::Unknown,
+                },
+            },
+            Fact::ValueAdmitted { value, .. } => AuditEvent::Admitted {
+                label: self.render_label(&value.label)?,
+            },
+            Fact::Ruling { authority, .. } => AuditEvent::Ruled {
+                authority: terminal_safe(authority.as_str()),
+            },
+            Fact::Denial { authority, .. } => AuditEvent::Denied {
+                authority: terminal_safe(authority.as_str()),
+            },
+            Fact::Acceptance { narrowing, .. }
+            | Fact::ChildReturnAcceptance { narrowing, .. }
+            | Fact::OutputCastAccepted { narrowing, .. } => AuditEvent::Narrowed {
+                from: self.render_label(&narrowing.from.clone().into_label())?,
+                to: self.render_label(&narrowing.to.clone().into_label())?,
+            },
+            Fact::CastApplied { cast, resolved, .. } | Fact::OutputCastApplied { cast, resolved, .. } => {
+                AuditEvent::Cast {
+                    cast: terminal_safe(cast.as_str()),
+                    resolved: self.render_label(&resolved.clone().into_label())?,
+                }
+            }
+            Fact::OutputCastLapsed { cast, resolved, .. } => AuditEvent::CastLapsed {
+                cast: terminal_safe(cast.as_str()),
+                resolved: self.render_label(&resolved.clone().into_label())?,
+            },
+            Fact::OutputSanitizerBound { sanitizer, .. } => AuditEvent::SanitizerBound {
+                sanitizer: terminal_safe(sanitizer.as_str()),
+            },
+            Fact::OutputSanitizerApplied { sanitizer, .. } => AuditEvent::Sanitized {
+                sanitizer: terminal_safe(sanitizer.as_str()),
+            },
+            Fact::ChildReturn { value, derivation, .. } => AuditEvent::ChildReturn {
+                sanitizer: match derivation {
+                    ReturnDerivation::Raw => None,
+                    ReturnDerivation::Sanitized { sanitizer, .. } => Some(terminal_safe(sanitizer.as_str())),
+                },
+                label: self.render_label(&value.label)?,
+            },
+            Fact::Boundary { kind, .. } => match kind {
+                BoundaryKind::Fork { parent, snapshot, .. } => AuditEvent::Forked {
+                    parent: terminal_safe(parent.as_str()),
+                    seed: self.render_label(&as_label(snapshot.seed()))?,
+                },
+                BoundaryKind::Merge { .. } => AuditEvent::Merged,
+                BoundaryKind::VoidReturn => AuditEvent::VoidReturn,
+                // A turn's end is the harness's punctuation, not a decision.
+                BoundaryKind::TurnEnd => return Some(None),
+            },
+            Fact::TrajectoryOpened { .. }
+            | Fact::ProposalBatchDecided { .. }
+            | Fact::AssistantMessage { .. }
+            | Fact::BlockFeedback { .. } => return Some(None),
+            Fact::OfferOpened { .. }
+            | Fact::OfferAccepted { .. }
+            | Fact::OfferDenied { .. }
+            | Fact::OfferInvalidated { .. }
+            | Fact::CallApproved { .. }
+            | Fact::CallApprovalConsumed { .. }
+            | Fact::BasisAdvanced { .. } => return Some(None),
+            Fact::ForkPrepared { .. } | Fact::ForkOpened { .. } => return Some(None),
+        };
+        Some(Some(event))
     }
 
     fn handle(
@@ -1229,16 +1414,14 @@ impl RuntimeEngine {
                 call.tool
             )));
         };
-        let raw = serde_json::to_vec(&call.arguments)
-            .map_err(|error| Resolution::Feedback(format!("[appa] invalid call: {error}")))?;
         let resolved = self
             .engine
-            .resolve_call(tool, &raw)
+            .resolve_call(tool, call.arguments.get().as_bytes())
             .map_err(|error| Resolution::Feedback(format!("[appa] {error}")))?;
         let mut pins = Vec::new();
         let mut requests = Vec::new();
         for binding in dynamic_bindings(contract) {
-            let Some(argument_value) = call.arguments.get(&binding.argument).and_then(|v| v.as_str()) else {
+            let Some(argument_value) = resolved.arguments().get(&binding.argument).and_then(|v| v.as_str()) else {
                 continue;
             };
             let answer = evidence.iter().find_map(|entry| match entry {
@@ -1274,12 +1457,9 @@ impl RuntimeEngine {
         call: &ProposedCall,
     ) -> Result<(ResolvedCall, EngineDispatchId), EngineRefusal> {
         let tool = ToolName::new(call.tool.clone());
-        let raw = serde_json::to_vec(&call.arguments).map_err(|_| EngineRefusal::Invariant {
-            detail: "a matched outcome's call no longer serializes".to_string(),
-        })?;
         let resolved = self
             .engine
-            .resolve_call(tool, &raw)
+            .resolve_call(tool, call.arguments.get().as_bytes())
             .map_err(|_| EngineRefusal::Invariant {
                 detail: "a matched outcome's call no longer canonicalizes".to_string(),
             })?;
@@ -1319,9 +1499,8 @@ impl RuntimeEngine {
     }
 
     fn digest_of(&self, call: &ProposedCall) -> Option<CanonicalDigest> {
-        let raw = serde_json::to_vec(&call.arguments).ok()?;
         self.engine
-            .resolve_call(ToolName::new(call.tool.clone()), &raw)
+            .resolve_call(ToolName::new(call.tool.clone()), call.arguments.get().as_bytes())
             .ok()
             .map(|call| call.digest())
     }
@@ -1359,6 +1538,17 @@ fn retire_declined(offer: &OfferId, feedback: String) -> EngineDecision {
 
 fn engine_id(id: &TrajectoryId) -> appa_engine::value::TrajectoryId {
     appa_engine::value::TrajectoryId::new(id.0.clone())
+}
+
+fn decode_log(log: &[Vec<u8>]) -> Result<Vec<Fact>, EngineRefusal> {
+    let mut facts = Vec::new();
+    for (seq, row) in log.iter().enumerate() {
+        let batch: Vec<Fact> = serde_json::from_slice(row).map_err(|error| EngineRefusal::UntrustedLog {
+            detail: format!("batch {seq} does not decode: {error}"),
+        })?;
+        facts.extend(batch);
+    }
+    Ok(facts)
 }
 
 fn predicted_dispatch(views: &Views, resolved: &ResolvedCall) -> EngineDispatchId {
@@ -1411,6 +1601,24 @@ fn authority_payload(
         "arguments": resolved.arguments(),
         "gaps": gaps.iter().map(gap_text).collect::<Vec<_>>(),
     })
+}
+
+fn as_label(fold: &PartialLabel) -> Label {
+    let bound = fold.bound();
+    Label::new(
+        match fold.is_established(Dimension::Trust) {
+            true => Dim::Known(bound.trust),
+            false => Dim::Unknown,
+        },
+        match fold.is_established(Dimension::Audience) {
+            true => Dim::Known(bound.audience.clone()),
+            false => Dim::Unknown,
+        },
+    )
+}
+
+fn effect_names(effects: &EffectSet) -> Vec<String> {
+    effects.iter().map(|effect| terminal_safe(effect.as_str())).collect()
 }
 
 fn audience_wire(audience: &Audience) -> String {

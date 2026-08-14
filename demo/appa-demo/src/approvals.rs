@@ -8,6 +8,12 @@ use tokio::sync::oneshot;
 
 use crate::events::WireEvent;
 
+/// How long a parked ruling waits for the visitor before abstaining:
+/// effectively forever. The demo's runtime limits and the review window bound
+/// on the session's externals both sit above it, so the answer is always ours
+/// and never a transport fault. The real bound on an abandoned card is
+/// [`Approvals::abandon`], which the SSE pump calls when the visitor's stream
+/// drops; this window is the backstop behind it.
 pub const DECISION_WINDOW: Duration = Duration::from_secs(364 * 24 * 60 * 60);
 
 #[derive(Default)]
@@ -55,6 +61,11 @@ impl Approvals {
             .ok_or_else(|| UnknownApproval(id.to_string()))?;
         let _ = sender.send(approve);
         Ok(())
+    }
+
+    /// The visitor is gone: no parked ruling will ever be answered.
+    pub fn abandon(&self) {
+        self.pending.expect_lock().clear();
     }
 
     pub fn drain_events(&self) -> Vec<WireEvent> {

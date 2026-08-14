@@ -60,6 +60,31 @@ impl Adapter {
             Adapter::ClaudeCode => appa_adapter_claude_code::codec(),
         }
     }
+
+    fn substitutes_child_returns(self) -> bool {
+        match self {
+            Adapter::ClaudeCode => false,
+        }
+    }
+}
+
+fn refuse_unenforceable(adapter: Adapter, policy: &toml::Value) -> Result<(), String> {
+    if binds_return_sanitizer(policy) && !adapter.substitutes_child_returns() {
+        return Err(
+            "this policy binds a child return_sanitizer, and the selected harness cannot substitute \
+             a finished child's return — it would cross as the child spelled it. Serve a harness \
+             that can, or drop the binding."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn binds_return_sanitizer(policy: &toml::Value) -> bool {
+    policy
+        .get("child")
+        .and_then(|child| child.get("return_sanitizer"))
+        .is_some()
 }
 
 fn log_level(verbose: u8) -> &'static str {
@@ -127,6 +152,10 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if let Err(refusal) = refuse_unenforceable(args.adapter, config.policy_file().value()) {
+        eprintln!("appa-runtime-v2: {refusal}");
+        return ExitCode::FAILURE;
+    }
     let runtime = match Runtime::open(config, args.db, args.modules_dir) {
         Ok(runtime) => Arc::new(runtime),
         Err(error) => {
@@ -180,5 +209,36 @@ mod tests {
         assert_eq!(log_level(0), "info");
         assert_eq!(log_level(1), "debug");
         assert_eq!(log_level(2), "trace");
+    }
+
+    #[test]
+    fn a_bound_return_sanitizer_refuses_a_harness_that_cannot_substitute() {
+        let bound = r#"
+version = 1
+
+[[tool]]
+name = "read_hr"
+delta = { audience = { exactly = ["hr"] } }
+
+[[sanitizer]]
+name = "redact-email"
+on = ["tool_output"]
+mandate = { audience = { from = { includes = ["hr"] }, to = { exactly = ["public"] } } }
+
+[child]
+return_sanitizer = "redact-email"
+
+[deployment]
+context_control = true
+confined_child_return = true
+"#;
+        appa_policy::Config::from_toml_str(bound).expect("the fixture is a policy the dialect accepts");
+        let bound: toml::Value = toml::from_str(bound).expect("the fixture parses");
+        assert!(binds_return_sanitizer(&bound));
+        assert!(refuse_unenforceable(Adapter::ClaudeCode, &bound).is_err());
+
+        let unbound: toml::Value = toml::from_str("version = 1\n").expect("the fixture parses");
+        assert!(!binds_return_sanitizer(&unbound));
+        assert!(refuse_unenforceable(Adapter::ClaudeCode, &unbound).is_ok());
     }
 }

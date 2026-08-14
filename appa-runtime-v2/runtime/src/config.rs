@@ -127,6 +127,10 @@ pub enum ConfigError {
     Unreadable { path: String, source: std::io::Error },
     #[error("cannot parse {path}: {source}")]
     Unparsable { path: String, source: toml::de::Error },
+    #[error("cannot parse the composed policy: {source}")]
+    UnparsablePolicy { source: toml::de::Error },
+    #[error("the composed policy does not render as a policy file: {source}")]
+    UnrenderablePolicy { source: toml::ser::Error },
     #[error("the {section} endpoint {name:?} has an invalid url: {url}")]
     InvalidEndpoint {
         section: &'static str,
@@ -215,6 +219,21 @@ impl Config {
             source,
         })?;
         Config::validate(text, raw, |var| std::env::var(var).ok())
+    }
+
+    /// The configuration of a host that composes its policy in memory
+    /// rather than reading `appa.toml`: the policy text it composed, and
+    /// the bindings it binds itself.
+    pub fn embedded(policy: String, externals: Externals) -> Result<Config, ConfigError> {
+        let value: toml::Value = toml::from_str(&policy).map_err(|source| ConfigError::UnparsablePolicy { source })?;
+        let mut file = toml::value::Table::new();
+        file.insert("policy".to_string(), value.clone());
+        let text =
+            toml::to_string(&toml::Value::Table(file)).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
+        Ok(Config {
+            policy: PolicyFile::new(text.into_bytes(), value),
+            externals,
+        })
     }
 
     pub fn policy_file(&self) -> &PolicyFile {

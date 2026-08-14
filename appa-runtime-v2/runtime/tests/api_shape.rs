@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use appa_runtime_api::{
     Actor, Codec, HookDecision, HookEvent, OutcomeBody, ParseRefusal, ProposedCall, ToolOutcome, TrajectoryId,
 };
-use appa_runtime_v2::api::{OpenError, Runtime, TrajectoryStatus};
+use appa_runtime_v2::api::{
+    AuditEvent, AuditLabel, DispatchOutcome, OfferId, OpenError, RemedyOutcome, Runtime, TrajectoryStatus,
+};
 use appa_runtime_v2::config::Config;
 use appa_runtime_v2::hooks;
 
@@ -43,7 +45,7 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
         HookEvent::ToolCall { actor: _, call } => {
             let ProposedCall { tool, arguments } = call;
             let _: String = tool;
-            let _: serde_json::Value = arguments;
+            let _: Box<serde_json::value::RawValue> = arguments;
         }
         HookEvent::ToolResult {
             actor: _,
@@ -71,6 +73,12 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
         }
         HookDecision::Block { reason } => {
             let _: String = reason;
+        }
+        HookDecision::ReplaceOutput { output } => {
+            let _: String = output;
+        }
+        HookDecision::ChildReturn { value } => {
+            let _: String = value;
         }
         HookDecision::Refuse { detail } => {
             let _: String = detail;
@@ -101,6 +109,68 @@ fn the_declared_status(runtime: &Runtime, id: &TrajectoryId) {
     let status: Option<TrajectoryStatus> = runtime.status(id);
     if let Some(status) = status {
         let _: (String, String, String) = (status.trajectory, status.trust, status.audience);
+    }
+}
+
+fn the_declared_audit(runtime: &Runtime, id: &TrajectoryId) {
+    let Some(entries) = runtime.audit(id) else {
+        return;
+    };
+    for entry in entries {
+        let _: String = entry.trajectory;
+        match entry.event {
+            AuditEvent::Forked { parent, seed } => {
+                let _: (String, AuditLabel) = (parent, seed);
+            }
+            AuditEvent::Released { tool, label, effects } => {
+                let _: (String, AuditLabel, Vec<String>) = (tool, label, effects);
+            }
+            AuditEvent::EffectsCommitted { effects } => {
+                let _: Vec<String> = effects;
+            }
+            AuditEvent::Closed { outcome } => match outcome {
+                DispatchOutcome::Ran { effects } => {
+                    let _: Vec<String> = effects;
+                }
+                DispatchOutcome::Failed | DispatchOutcome::Unknown => {}
+            },
+            AuditEvent::Admitted { label } => {
+                let _: (String, String) = (label.trust, label.audience);
+            }
+            AuditEvent::Ruled { authority } | AuditEvent::Denied { authority } => {
+                let _: String = authority;
+            }
+            AuditEvent::Narrowed { from, to } => {
+                let _: (AuditLabel, AuditLabel) = (from, to);
+            }
+            AuditEvent::Cast { cast, resolved } | AuditEvent::CastLapsed { cast, resolved } => {
+                let _: (String, AuditLabel) = (cast, resolved);
+            }
+            AuditEvent::SanitizerBound { sanitizer } | AuditEvent::Sanitized { sanitizer } => {
+                let _: String = sanitizer;
+            }
+            AuditEvent::ChildReturn { sanitizer, label } => {
+                let _: (Option<String>, AuditLabel) = (sanitizer, label);
+            }
+            AuditEvent::Merged | AuditEvent::VoidReturn => {}
+        }
+    }
+}
+
+async fn the_declared_remedy_entry(runtime: &Runtime, offer: OfferId) {
+    match runtime.execute_remedy(offer).await {
+        RemedyOutcome::Authorized { tool } => {
+            let _: String = tool;
+        }
+        RemedyOutcome::Returned { value } => {
+            let _: String = value;
+        }
+        RemedyOutcome::Declined { feedback } | RemedyOutcome::NoAnswer { feedback } => {
+            let _: String = feedback;
+        }
+        RemedyOutcome::Refused { detail } => {
+            let _: String = detail;
+        }
     }
 }
 

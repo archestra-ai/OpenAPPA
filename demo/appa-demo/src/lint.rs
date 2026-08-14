@@ -1,15 +1,12 @@
-//! The demo box's own gate on submitted policies: service-hosted implementations only.
+//! The demo box's own gate on submitted policies.
 
 use std::collections::BTreeSet;
 
-use crate::systems::System;
-use appa_runtime::Config;
-use appa_runtime::config::{AuthorityImpl, CastImpl, ConfigError, SanitizerImpl};
-
-use appa_runtime::external::BuiltinSanitizer;
+use appa_policy::{Config, ConfigError};
 
 use crate::params::InjectError;
-use crate::world::{DYNAMIC_RESOLVER_PLACEHOLDER, merge_policy};
+use crate::systems::System;
+use crate::world::merge_policy;
 
 /// Why a submitted policy was refused. `Load` carries the real loader's own
 /// message — it goes to the editor verbatim.
@@ -20,16 +17,11 @@ pub enum PolicyError {
     #[error("{0}")]
     Load(#[from] ConfigError),
     #[error(
-        "the demo runs service-hosted implementations only: {kind} {name:?} names an HTTP endpoint, \
-         which this box will not call on a visitor's behalf"
+        "sanitizer {name:?} declares no `hint`: in this playground every derivation is produced by \
+         running your model, and the hint is the instruction it runs under — without one this \
+         sanitizer could never derive anything"
     )]
-    NonBuiltinImplementation { kind: &'static str, name: String },
-    #[error(
-        "sanitizer {name:?} is `builtin = \"hosted\"` but declares no `hint`: in this playground the \
-         hint is the instruction the derivation runs under, so a hosted sanitizer without one could \
-         never derive anything"
-    )]
-    HostedWithoutHint { name: String },
+    SanitizerWithoutHint { name: String },
 }
 
 #[derive(Debug)]
@@ -38,66 +30,21 @@ pub struct CheckedPolicy {
     pub tool_count: usize,
     pub defaulted: Vec<String>,
     pub dropped: Vec<String>,
-    /// The composed TOML the config was loaded from, kept so session creation
-    /// can rebind `hitl` authorities to the session's approval desk.
+    /// The composed TOML the config was loaded from, kept so session
+    /// creation can hand the runtime the same policy it validated.
     pub merged_toml: String,
 }
 
 /// Compose the editor's policy with the enabled systems, then run the result
-/// through the real loader and the builtin-only lint.
+/// through the real loader and this host's own rule.
 pub fn check_policy(policy: &str, enabled: &BTreeSet<System>) -> Result<CheckedPolicy, PolicyError> {
     let merged = merge_policy(policy, enabled)?;
     let config = Config::from_toml_str(&merged.toml)?;
 
-    for tool in &config.registry_config().tools {
-        if config.tool_impl(&tool.name).is_some() {
-            return Err(PolicyError::NonBuiltinImplementation {
-                kind: "tool",
-                name: tool.name.as_str().to_string(),
-            });
-        }
-    }
-    for (name, implementation) in config.dynamic_resolvers() {
-        if implementation.url != DYNAMIC_RESOLVER_PLACEHOLDER {
-            return Err(PolicyError::NonBuiltinImplementation {
-                kind: "dynamic resolver",
-                name: name.as_str().to_string(),
-            });
-        }
-    }
-    for authority in &config.registry_config().authorities {
-        if let Some(AuthorityImpl::HttpResolver { .. }) = config.authority_impl(&authority.name) {
-            return Err(PolicyError::NonBuiltinImplementation {
-                kind: "authority",
-                name: authority.name.as_str().to_string(),
-            });
-        }
-    }
     for sanitizer in &config.registry_config().sanitizers {
-        match config.sanitizer_impl(&sanitizer.name) {
-            Some(SanitizerImpl::HttpResolver { .. }) => {
-                return Err(PolicyError::NonBuiltinImplementation {
-                    kind: "sanitizer",
-                    name: sanitizer.name.as_str().to_string(),
-                });
-            }
-            // A hosted derivation runs under its hint. Without one there is no
-            // instruction to run, so every plan the sanitizer appears in would be
-            // offered and then fail — refuse it here instead, where the message
-            // reaches the editor.
-            Some(SanitizerImpl::Builtin(BuiltinSanitizer::Hosted)) if sanitizer.hint.is_none() => {
-                return Err(PolicyError::HostedWithoutHint {
-                    name: sanitizer.name.as_str().to_string(),
-                });
-            }
-            _ => {}
-        }
-    }
-    for cast in &config.registry_config().casts {
-        if let Some(CastImpl::HttpResolver { .. }) = config.cast_impl(&cast.name) {
-            return Err(PolicyError::NonBuiltinImplementation {
-                kind: "cast",
-                name: cast.name.as_str().to_string(),
+        if sanitizer.hint.is_none() {
+            return Err(PolicyError::SanitizerWithoutHint {
+                name: sanitizer.name.as_str().to_string(),
             });
         }
     }
@@ -134,13 +81,6 @@ mod tests {
         assert_eq!(checked.tool_count, 8);
         assert!(checked.dropped.is_empty(), "the preset only names available tools");
         assert!(checked.defaulted.is_empty(), "the preset contracts every tool");
-        let dynamic_resolvers = checked.config.dynamic_resolvers();
-        assert_eq!(dynamic_resolvers.len(), 1);
-        assert!(
-            dynamic_resolvers
-                .values()
-                .all(|implementation| implementation.url == DYNAMIC_RESOLVER_PLACEHOLDER)
-        );
         let invoices = checked
             .config
             .registry()
@@ -180,7 +120,7 @@ mod tests {
     }
 
     #[test]
-    fn a_hosted_sanitizer_without_a_hint_is_refused() {
+    fn a_sanitizer_without_a_hint_is_refused() {
         let policy = r#"
 version = 1
 
@@ -188,11 +128,10 @@ version = 1
 name = "digest"
 on = ["tool_output"]
 mandate.trust = { from = "suspicious", to = "trusted" }
-implementation.builtin = "hosted"
 "#;
         assert!(matches!(
             check_policy(policy, &systems("crm")),
-            Err(PolicyError::HostedWithoutHint { .. })
+            Err(PolicyError::SanitizerWithoutHint { .. })
         ));
     }
 
@@ -208,9 +147,11 @@ implementation.builtin = "hosted"
     }
 
     #[test]
-    fn tool_http_implementation_is_refused() {
-        let error = check_policy(
-            r#"
+    fn a_visitor_can_bind_nothing_to_an_endpoint_of_their_own() {
+        let bindings = [
+            (
+                "tool",
+                r#"
 version = 1
 
 [[tool]]
@@ -218,19 +159,11 @@ name = "list_customers"
 delta = {}
 implementation = { http = { url = "http://169.254.169.254/latest/meta-data" } }
 "#,
-            &systems("crm"),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            PolicyError::NonBuiltinImplementation { kind: "tool", .. }
-        ));
-    }
-
-    #[test]
-    fn http_authority_resolver_is_refused() {
-        let error = check_policy(
-            r#"
+                systems("crm"),
+            ),
+            (
+                "authority",
+                r#"
 version = 1
 
 [[tool]]
@@ -243,19 +176,11 @@ name = "release-desk"
 mandate = { can_cover_trust_to = "trusted" }
 implementation = { resolver = { url = "http://10.0.0.1/exfil" } }
 "#,
-            &systems("github"),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(error, PolicyError::NonBuiltinImplementation { kind: "authority", .. }),
-            "got: {error}"
-        );
-    }
-
-    #[test]
-    fn visitor_dynamic_resolver_is_refused() {
-        let error = check_policy(
-            r#"
+                systems("github"),
+            ),
+            (
+                "dynamic resolver",
+                r#"
 version = 1
 
 [[dynamic_resolver]]
@@ -267,25 +192,11 @@ name = "send_email"
 requires = { audience = { includes = { resolver = "directory", argument = "to" } } }
 delta = {}
 "#,
-            &systems("email"),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(
-                error,
-                PolicyError::NonBuiltinImplementation {
-                    kind: "dynamic resolver",
-                    ..
-                }
+                systems("email"),
             ),
-            "got: {error}"
-        );
-    }
-
-    #[test]
-    fn http_sanitizer_resolver_is_refused() {
-        let error = check_policy(
-            r#"
+            (
+                "sanitizer",
+                r#"
 version = 1
 
 [[tool]]
@@ -295,37 +206,19 @@ delta = { audience = { exactly = ["crm"] } }
 [[sanitizer]]
 name = "leaky"
 on = ["tool_output"]
+hint = "clean it"
 implementation = { resolver = { url = "http://internal.cluster.local/" } }
 mandate = { audience = { from = { includes = ["crm"] }, to = { exactly = ["public"] } } }
 "#,
-            &systems("crm"),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(error, PolicyError::NonBuiltinImplementation { kind: "sanitizer", .. }),
-            "got: {error}"
-        );
-    }
-
-    #[test]
-    fn builtin_sanitizer_passes() {
-        check_policy(
-            r#"
-version = 1
-
-[[tool]]
-name = "list_customers"
-delta = { audience = { exactly = ["crm"] } }
-
-[[sanitizer]]
-name = "pii-redactor"
-on = ["tool_output"]
-implementation = { builtin = "redact-numbers" }
-mandate = { audience = { from = { includes = ["crm"] }, to = { exactly = ["public"] } } }
-"#,
-            &systems("crm"),
-        )
-        .expect("builtin implementations are allowed");
+                systems("crm"),
+            ),
+        ];
+        for (kind, policy, enabled) in bindings {
+            assert!(
+                matches!(check_policy(policy, &enabled), Err(PolicyError::Load(_))),
+                "a visitor-named {kind} endpoint must be refused by the loader",
+            );
+        }
     }
 
     #[test]

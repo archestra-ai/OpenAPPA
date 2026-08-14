@@ -1,27 +1,29 @@
-//! The hosted-sanitizer desk: what `builtin = "hosted"` means in this playground.
+//! The derivation desk: who performs every sanitizer this playground registers.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use appa_agent::{OpenAiCompatible, OpenAiConfig};
-use appa_runtime::wire::{ChatCompletionRequest, WireMessage};
+use appa_agent::Endpoint;
+use appa_agent::wire::{ChatCompletionRequest, WireMessage};
 
 const DERIVE_TIMEOUT: Duration = Duration::from_secs(30);
 
 const MAX_BODY_BYTES: usize = 32_768;
 
-/// The session's hosted-derivation desk: which model to ask, what each hosted
+/// The session's derivation desk: which model to ask, what each registered
 /// sanitizer was registered to do, and the key for the turn in flight.
 pub struct Derivations {
+    inference: Endpoint,
     model: String,
     hints: BTreeMap<String, String>,
     key: Mutex<Option<String>>,
 }
 
 impl Derivations {
-    pub fn new(model: String, hints: BTreeMap<String, String>) -> Derivations {
+    pub fn new(inference: Endpoint, model: String, hints: BTreeMap<String, String>) -> Derivations {
         Derivations {
+            inference,
             model,
             hints,
             key: Mutex::new(None),
@@ -52,9 +54,7 @@ impl Derivations {
         if body.len() > MAX_BODY_BYTES {
             return None;
         }
-        let provider = OpenAiCompatible::new(
-            OpenAiConfig::openrouter(self.model.clone(), key).with_request_timeout(DERIVE_TIMEOUT),
-        );
+        let provider = crate::session::provider(&self.inference, &self.model, key, DERIVE_TIMEOUT);
         let request = ChatCompletionRequest {
             model: self.model.clone(),
             messages: vec![
@@ -67,7 +67,6 @@ impl Derivations {
                 WireMessage::user(body),
             ],
             tools: None,
-            stream: None,
         };
         let completion = provider.complete(request).await.ok()?;
         let derived = completion.content?;
@@ -88,6 +87,7 @@ mod tests {
 
     fn desk() -> Derivations {
         Derivations::new(
+            Endpoint::new("http://127.0.0.1:1/v1"),
             "openai/gpt-4o".to_string(),
             BTreeMap::from([("digest".to_string(), "drop names".to_string())]),
         )

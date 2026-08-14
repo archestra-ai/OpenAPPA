@@ -1,7 +1,8 @@
-//! `appa-demo`: the chat-playground service behind openappa.com/landing2.
+//! `appa-demo`: the chat-playground service behind openappa.com.
 
 pub mod api;
 pub mod approvals;
+pub mod catalogue;
 pub mod derive;
 pub mod events;
 pub mod lint;

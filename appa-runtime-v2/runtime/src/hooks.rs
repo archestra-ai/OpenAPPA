@@ -73,7 +73,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             };
             match session.on_tool_result(call, outcome).await {
                 Ok(ToolResultDecision::Keep) => HookDecision::Ack,
-                Ok(ToolResultDecision::Replace { placeholder }) => block(placeholder),
+                Ok(ToolResultDecision::Replace { placeholder }) => HookDecision::ReplaceOutput { output: placeholder },
                 Err(error) => fold(error, block),
             }
         }
@@ -96,7 +96,11 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
                 Ok(session) => session,
                 Err(error) => return fold(error, block),
             };
+            let said = value.clone();
             match child.on_child_end(value).await {
+                Ok(ChildReturnDecision::Returned { value }) if said.as_deref() != Some(value.as_str()) => {
+                    HookDecision::ChildReturn { value }
+                }
                 Ok(ChildReturnDecision::Returned { .. }) | Ok(ChildReturnDecision::NoValue) => HookDecision::Ack,
                 Ok(ChildReturnDecision::Blocked { feedback }) => block(feedback),
                 Err(error) => fold(error, block),
@@ -461,6 +465,35 @@ mod tests {
             answer,
             serde_json::json!({}),
             "the control outcome is absorbed on an ended trajectory"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_a_substituted_child_return_answers_with_the_admitted_value() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_test_runtime(&dir);
+        let root = appa_runtime_api::TrajectoryId("cc:s1".to_string());
+
+        let end = |child: &str, said: &str| HookEvent::ChildEnd {
+            parent: root.clone(),
+            child: appa_runtime_api::TrajectoryId(format!("cc:s1:{child}")),
+            value: Some(said.to_string()),
+        };
+
+        testing::enqueue_done(&runtime);
+        testing::enqueue_value(&runtime, "the report, with the account numbers removed");
+        assert_eq!(
+            handle(&runtime, end("a1", "the report, account 4821-9930")).await,
+            HookDecision::ChildReturn {
+                value: "the report, with the account numbers removed".to_string(),
+            },
+        );
+
+        testing::enqueue_done(&runtime);
+        testing::enqueue_value(&runtime, "the report, nothing sensitive");
+        assert_eq!(
+            handle(&runtime, end("a2", "the report, nothing sensitive")).await,
+            HookDecision::Ack,
         );
     }
 

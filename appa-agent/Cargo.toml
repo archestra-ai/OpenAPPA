@@ -3,16 +3,25 @@ name = "appa-agent"
 version = "0.0.0"
 edition.workspace = true
 publish = false
+description = "A protoagent on runtime-v2: it owns the loop, the transcript and the tool catalogue, and gates every flow through the hook dispatcher"
 
 [dependencies]
-appa-runtime = { workspace = true }
+appa-runtime-api = { workspace = true }
+appa-runtime-v2 = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
-appa-engine = { workspace = true }
+axum = { workspace = true }
+tempfile = "3"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+# To read back the decision record a host subscribes to.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true

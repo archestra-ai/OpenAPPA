@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use appa_agent::Endpoint;
 use appa_demo::api::{AppState, router};
 use appa_demo::session::Sessions;
 use clap::Parser;
@@ -31,6 +32,13 @@ struct Args {
     #[arg(long, env = "APPA_DEMO_OPENROUTER_API_KEY", hide_env_values = true)]
     openrouter_key: Option<String>,
 
+    #[arg(
+        long,
+        env = "APPA_DEMO_INFERENCE_BASE_URL",
+        default_value = "https://openrouter.ai/api/v1"
+    )]
+    inference_base_url: String,
+
     #[arg(long, default_value_t = 30)]
     max_turns: u32,
 }
@@ -55,6 +63,7 @@ async fn main() -> anyhow::Result<()> {
         seed.clone(),
         worlds.clone(),
         Duration::from_secs(args.session_ttl_secs),
+        Endpoint::new(args.inference_base_url),
     ));
     sessions.spawn_expiry();
 

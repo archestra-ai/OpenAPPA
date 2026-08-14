@@ -22,7 +22,7 @@ struct WireEvent {
     #[serde(default)]
     tool_name: Option<String>,
     #[serde(default)]
-    tool_input: Option<serde_json::Value>,
+    tool_input: Option<Box<serde_json::value::RawValue>>,
     #[serde(default)]
     tool_response: Option<serde_json::Value>,
     #[serde(default)]
@@ -138,12 +138,18 @@ fn render(decision: &HookDecision) -> serde_json::Value {
         HookDecision::AllowCall => allow("appa: the call is released"),
         HookDecision::PassControl => allow("appa: the runtime's own control tool"),
         HookDecision::DenyCall { feedback } => deny(feedback),
-        HookDecision::Block { reason } => serde_json::json!({
-            "decision": "block",
-            "reason": reason,
-        }),
+        HookDecision::Block { reason } => block(reason),
+        HookDecision::ReplaceOutput { output } => block(output),
+        HookDecision::ChildReturn { .. } => serde_json::json!({}),
         HookDecision::Refuse { detail } => serde_json::json!({ "error": detail }),
     }
+}
+
+fn block(reason: &str) -> serde_json::Value {
+    serde_json::json!({
+        "decision": "block",
+        "reason": reason,
+    })
 }
 
 fn allow(reason: &str) -> serde_json::Value {
@@ -243,10 +249,21 @@ mod tests {
                 },
                 call: ProposedCall {
                     tool: "Bash".to_string(),
-                    arguments: serde_json::json!({"command": "ls"}),
+                    arguments: serde_json::value::to_raw_value(&serde_json::json!({"command": "ls"}))
+                        .expect("the fixture serializes"),
                 },
             })),
         );
+    }
+
+    #[test]
+    fn duplicate_argument_members_reach_the_runtime_unresolved() {
+        let body =
+            br#"{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Bash","tool_input":{"a":1,"a":2}}"#;
+        let Ok(Some(HookEvent::ToolCall { call, .. })) = parse(body) else {
+            panic!("the hook parses to a tool call");
+        };
+        assert_eq!(call.arguments.get(), r#"{"a":1,"a":2}"#);
     }
 
     #[test]
@@ -403,6 +420,20 @@ mod tests {
                 reason: "the output is confined".to_string(),
             }),
             serde_json::json!({"decision": "block", "reason": "the output is confined"}),
+        );
+        assert_eq!(
+            render(&HookDecision::ReplaceOutput {
+                output: "the output is confined".to_string(),
+            }),
+            serde_json::json!({"decision": "block", "reason": "the output is confined"}),
+            "this harness cannot rewrite a delivered output, so the admitted text blocks instead",
+        );
+        assert_eq!(
+            render(&HookDecision::ChildReturn {
+                value: "the redacted summary".to_string(),
+            }),
+            serde_json::json!({}),
+            "SubagentStop cannot substitute a finished child's return, and the branch has already ended",
         );
         assert_eq!(
             render(&HookDecision::Refuse {

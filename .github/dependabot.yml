@@ -15,7 +15,7 @@ updates:
           - patch
 
   - package-ecosystem: cargo
-    directory: /demo/gateway
+    directory: /demo/corp-systems
     schedule:
       interval: weekly
     cooldown:
