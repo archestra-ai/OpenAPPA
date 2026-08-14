@@ -98,6 +98,7 @@ fn wire_unestablished(facts: &[UnestablishedFact], views: &Views) -> Vec<WireUne
                 Provenance::UserInput => "user_input",
                 Provenance::ToolResult { .. } => "tool_result",
                 Provenance::ChildReturn { .. } => "child_return",
+                Provenance::ProviderRun { .. } => "provider_run",
             },
         })
         .collect()

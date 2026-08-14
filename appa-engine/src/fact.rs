@@ -42,7 +42,7 @@ pub enum ReturnDerivation {
 /// — the runtime resolves the call into a [`ResolvedCall`](crate::value::ResolvedCall) for the check
 /// separately, and pairs it to its model-visible response by `id`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProposedCall {
+pub struct TranscriptCall {
     pub id: ToolCallId,
     pub tool: ToolName,
     pub arguments: serde_json::Value,
@@ -208,7 +208,7 @@ pub enum Fact {
     AssistantMessage {
         trajectory: TrajectoryId,
         content: Option<String>,
-        calls: Vec<ProposedCall>,
+        calls: Vec<TranscriptCall>,
     },
     BlockFeedback {
         trajectory: TrajectoryId,

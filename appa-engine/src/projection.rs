@@ -134,6 +134,7 @@ pub struct Projection {
     denials: BTreeMap<TrajectoryId, BTreeMap<CanonicalDigest, BTreeSet<AuthorityName>>>,
     active: BTreeSet<TrajectoryId>,
     decided: BTreeMap<crate::transition::ProposalBatchId, DecidedBatch>,
+    admissions: BTreeMap<crate::transition::ProposalBatchId, Vec<ValueId>>,
     offers: BTreeMap<crate::value::OfferId, RecordedOffer>,
     approvals: BTreeMap<crate::value::OfferId, PreparedApproval>,
     versions: crate::basis::Versions,
@@ -163,6 +164,7 @@ impl Projection {
             denials: BTreeMap::new(),
             active: BTreeSet::new(),
             decided: BTreeMap::new(),
+            admissions: BTreeMap::new(),
             offers: BTreeMap::new(),
             approvals: BTreeMap::new(),
             versions: crate::basis::Versions::default(),
@@ -207,6 +209,7 @@ impl Projection {
             denials,
             active,
             decided,
+            admissions,
             offers,
             approvals,
             versions,
@@ -300,16 +303,23 @@ impl Projection {
                     value,
                     provenance,
                 } => {
-                    local
-                        .entry(trajectory.clone())
-                        .or_default()
-                        .push(ValueId::new(values.len() as u64));
+                    let id = ValueId::new(values.len() as u64);
+                    local.entry(trajectory.clone()).or_default().push(id);
+                    if let Provenance::ProviderRun {
+                        batch,
+                        effects: observed,
+                        ..
+                    } = provenance
+                    {
+                        admissions.entry(batch.clone()).or_default().push(id);
+                        effects.extend(observed.iter().cloned());
+                    }
                     values.push(AdmittedValue {
                         trajectory: trajectory.clone(),
                         label: value.label.clone(),
                         provenance: provenance.clone(),
                         body: match provenance {
-                            Provenance::ToolResult { .. } => Some(value.body.clone()),
+                            Provenance::ToolResult { .. } | Provenance::ProviderRun { .. } => Some(value.body.clone()),
                             Provenance::UserInput | Provenance::ChildReturn { .. } => None,
                         },
                     });
@@ -505,12 +515,35 @@ impl Projection {
         self.active.iter()
     }
 
+    /// The exposed provider-run results one batch identity admitted, in order: the
+    /// trajectory, tool and body of each. See [`Views::provider_admissions`].
+    pub(crate) fn provider_admissions(
+        &self,
+        batch: &crate::transition::ProposalBatchId,
+    ) -> impl ExactSizeIterator<Item = (&TrajectoryId, &crate::value::ToolName, &crate::value::ValueBody)> {
+        self.admissions
+            .get(batch)
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .map(|id| {
+                let value = &self.values[id.index() as usize];
+                let Provenance::ProviderRun { tool, .. } = &value.provenance else {
+                    unreachable!("the admissions index holds only provider-run admissions")
+                };
+                let body = value
+                    .body
+                    .as_ref()
+                    .expect("a provider-run admission retains the body a repeat is compared against");
+                (&value.trajectory, tool, body)
+            })
+    }
+
     pub(crate) fn admitted_dispatches(&self) -> BTreeSet<DispatchId> {
         self.values
             .iter()
             .filter_map(|value| match &value.provenance {
                 Provenance::ToolResult { dispatch } => Some(dispatch.clone()),
-                Provenance::UserInput | Provenance::ChildReturn { .. } => None,
+                Provenance::UserInput | Provenance::ChildReturn { .. } | Provenance::ProviderRun { .. } => None,
             })
             .collect()
     }
@@ -631,6 +664,18 @@ impl Views<'_> {
     /// and the payload digest. `None` means the identity is fresh.
     pub(crate) fn decided_batch(&self, batch: &crate::transition::ProposalBatchId) -> Option<&DecidedBatch> {
         self.projection.decided.get(batch)
+    }
+
+    /// The exposed provider-run results this batch identity has already admitted, in order:
+    /// the trajectory that admitted each, its originating tool and its body,
+    /// which together are the whole of what a repeat is compared against. The trajectory is part of
+    /// it because an identity names one trajectory's payload, and a batch whose siblings were
+    /// malformed records it nowhere else. Empty for an identity that admitted none.
+    pub(crate) fn provider_admissions(
+        &self,
+        batch: &crate::transition::ProposalBatchId,
+    ) -> impl ExactSizeIterator<Item = (&TrajectoryId, &crate::value::ToolName, &crate::value::ValueBody)> {
+        self.projection.provider_admissions(batch)
     }
 
     /// The offers of one subject that are still **pending**: opened, and recording the basis that
@@ -1128,7 +1173,7 @@ mod tests {
 
     #[test]
     fn transcript_facts_are_inert_in_the_fold_and_effects() {
-        use crate::fact::ProposedCall;
+        use crate::fact::TranscriptCall;
         use crate::value::{ToolCallId, ToolName};
 
         let egress = EffectKind::new("egress");
@@ -1137,7 +1182,7 @@ mod tests {
             Fact::AssistantMessage {
                 trajectory: traj("a"),
                 content: None,
-                calls: vec![ProposedCall {
+                calls: vec![TranscriptCall {
                     id: ToolCallId::new("call_1"),
                     tool: ToolName::new("send_email"),
                     arguments: json!({ "to": "auditor" }),

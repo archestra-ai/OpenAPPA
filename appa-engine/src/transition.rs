@@ -37,15 +37,18 @@ impl ProposalBatchId {
     }
 }
 
-/// One model response's policy content: the ordered proposals it made for one
-/// trajectory, under the identity that makes the act repeatable. Structurally plural from the
-/// start — a deployment's hook gates one call at a time today, and the atomic
-/// multi-proposal composition is `T01`'s.
+/// One model response's complete policy content: every exposed provider-run
+/// result, the ordered calls it proposed for one trajectory, and at most one spawn mark — under
+/// the identity that makes the act repeatable. Nothing else in a response is policy content, and
+/// a response carrying none of these is no engine event at all.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProposalBatch {
     pub id: ProposalBatchId,
     pub trajectory: TrajectoryId,
-    pub proposals: Vec<ResolvedCall>,
+    /// The provider-run results this response exposed, in the order it exposed them.
+    /// They are admitted before any sibling is checked, because the model has already read them.
+    pub provider_results: Vec<ProviderResult>,
+    pub proposals: Vec<ProposedCall>,
     /// Which proposal, if any, the runtime marks as the deployment's context-controlled spawn
     /// (`Q27`). Runtime names it — no configuration surface does — and the marked call is checked
     /// and released like any other. The engine refuses the mark where the deployment declares no
@@ -55,6 +58,28 @@ pub struct ProposalBatch {
     /// and offer identity it derives here and keeps none of it: entropy is input data, never engine
     /// state. Runtime supplies it per act and allocates no offer identity of its own.
     pub offer_nonce: crate::value::OfferNonce,
+}
+
+/// One call the model proposed, as it wrote it: a tool name and untrusted argument bytes.
+/// Only the engine turns this into a [`ResolvedCall`], so no caller can present a
+/// payload under a schema the registry does not hold.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProposedCall {
+    pub tool: crate::value::ToolName,
+    pub arguments: Vec<u8>,
+    /// The answers the runtime resolved for this call's dynamic audience bindings, if any.
+    /// They are payload, not decoration: the same tool and arguments under
+    /// different resolved recipients is a different act.
+    pub dynamic_resolutions: Vec<crate::contract::PinnedDynamicResolution>,
+}
+
+/// One provider-run result the response exposed: the tool the provider ran inside the
+/// inference call, and the body the model has already read. There is no dispatch to name — the
+/// engine never released it and cannot have.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderResult {
+    pub tool: crate::value::ToolName,
+    pub body: ValueBody,
 }
 
 /// The one proposal of a batch that spawns a child: its position among the
@@ -264,6 +289,10 @@ pub enum FollowUp {
         spent: Vec<ResolvedCall>,
         settled: Vec<Settled>,
     },
+    Malformed {
+        position: usize,
+        error: crate::engine::EngineError,
+    },
 }
 
 /// Why the boundary refused an event outright. A policy block is a decision, not an error: this
@@ -298,10 +327,8 @@ pub enum TransitionError {
     /// unreadable, so neither is decided.
     #[error("this proposal batch id is already bound to different policy content")]
     BatchIdentityConflict,
-    #[error("a proposal batch carries at least one proposal")]
+    #[error("a proposal batch carries at least one proposal or exposed provider-run result")]
     EmptyBatch,
-    #[error("more than one proposal in a batch awaits ordered in-batch composition (T01)")]
-    UncomposedBatch,
     #[error("no dispatch of this family was opened under that identity")]
     UnknownDispatch,
     #[error("the report contradicts the observation this dispatch already checkpointed")]
@@ -492,6 +519,18 @@ pub enum TransitionRefusal {
     ContradictedSuccess,
     #[error("a record commits effects its contract does not declare")]
     EffectsMismatch,
+    #[error("value admitted as a provider-run result of {0}, which this deployment does not run in the provider")]
+    NotProviderRun(String),
+    #[error("a provider-run admission follows the decision of its own batch")]
+    AdmissionAfterDecision,
+    #[error("a provider-run admission names a slot other than the next one of its batch")]
+    WrongAdmissionPosition,
+    #[error("a proposal batch identity admits or decides on two trajectories")]
+    ForeignAdmission,
+    #[error("a provider-run admission stands outside the declaration of the act that read it")]
+    UndeclaredAdmission,
+    #[error("one batch identity's exposed results are admitted across two decisions")]
+    SplitAdmission,
     #[error("an admitted value does not carry the label its source derives")]
     ForgedLabel,
     #[error("a second value is admitted for one dispatch or child return")]
@@ -534,8 +573,6 @@ pub enum TransitionRefusal {
     UnbackedDecision,
     #[error("a decision released a call the check refuses, or refused one it allows")]
     MisdecidedBatch,
-    #[error("a decision record carries other than the one proposal this engine composes (T01)")]
-    UncomposedDecision,
     #[error("fork record's return policy is not the deployment's child-return binding")]
     ForkReturnPolicyMismatch,
     #[error("a return or fork record names a branch that has already ended")]
@@ -654,6 +691,8 @@ pub(crate) struct Sequence<'a> {
         Vec<crate::plan::ExecutableRemedyPlan>,
     )>,
     declared: Option<Declaration>,
+    admitting: Option<ProposalBatchId>,
+    deciding: Option<ProposalBatchId>,
 }
 
 struct Declaration {
@@ -694,6 +733,8 @@ impl<'a> Sequence<'a> {
             crossed: BTreeMap::new(),
             accepted: BTreeMap::new(),
             declared: None,
+            admitting: None,
+            deciding: None,
             menu: None,
         }
     }
@@ -720,6 +761,8 @@ impl<'a> Sequence<'a> {
             crossed: BTreeMap::new(),
             accepted: BTreeMap::new(),
             declared: None,
+            admitting: None,
+            deciding: None,
             menu: None,
         }
     }
@@ -1063,7 +1106,7 @@ impl<'a> Sequence<'a> {
             // Transcript memory: algebraically inert, and outside this validator by `IMP-4`.
             Fact::AssistantMessage { .. } | Fact::BlockFeedback { .. } => {}
         }
-        self.settle_advance(fact, &implied)?;
+        self.settle_advance(fact, &implied, released)?;
         self.projection.fold(fact);
         Ok(())
     }
@@ -1265,13 +1308,21 @@ impl<'a> Sequence<'a> {
             declared: advance.clone(),
             owed: advance.clone(),
         });
+        // A new decision has read no response yet, whatever the last one admitted.
+        self.admitting = None;
         Ok(())
     }
 
-    fn settle_advance(&mut self, fact: &Fact, implied: &crate::basis::BasisAdvance) -> Result<(), TransitionRefusal> {
+    fn settle_advance(
+        &mut self,
+        fact: &Fact,
+        implied: &crate::basis::BasisAdvance,
+        obligation: Obligation,
+    ) -> Result<(), TransitionRefusal> {
         if implied.is_empty() {
             return Ok(());
         }
+        let own_act = self.settles_its_own_declaration(fact, obligation);
         if !self.declared.as_ref().is_some_and(|open| belongs_to(&open.act, fact)) {
             return Ok(());
         }
@@ -1279,13 +1330,13 @@ impl<'a> Sequence<'a> {
             return Ok(());
         };
         if implied.family {
-            if !declaration.owed.family {
+            if !declaration.owed.family && !(own_act && declaration.declared.family) {
                 return Err(TransitionRefusal::UndeclaredAdvance);
             }
             declaration.owed.family = false;
         }
         for flow in &implied.flows {
-            if !declaration.owed.flows.remove(flow) {
+            if !declaration.owed.flows.remove(flow) && !(own_act && declaration.declared.flows.contains(flow)) {
                 return Err(TransitionRefusal::UndeclaredAdvance);
             }
         }
@@ -1301,6 +1352,20 @@ impl<'a> Sequence<'a> {
         Ok(())
     }
 
+    fn settles_its_own_declaration(&self, fact: &Fact, obligation: Obligation) -> bool {
+        let Some(open) = &self.declared else {
+            return false;
+        };
+        match (&open.act, fact) {
+            (
+                crate::basis::DecidedAct::Proposals(act),
+                Fact::DispatchOpened { .. } | Fact::ForkPrepared { .. } | Fact::CallApprovalConsumed { .. },
+            ) => obligation != Obligation::Free && self.deciding.as_ref() == Some(act),
+            // Everything else `belongs_to` admits names the act it belongs to.
+            _ => true,
+        }
+    }
+
     fn may_spend(
         &self,
         trajectory: &TrajectoryId,
@@ -1313,8 +1378,7 @@ impl<'a> Sequence<'a> {
         if !open.declared.subjects.contains(subject) {
             return Err(TransitionRefusal::UndeclaredAdvance);
         }
-        if recorded.advanced_by(&open.declared, trajectory, subject)
-            != self.projection.view(trajectory).basis_for(subject)
+        if recorded.advanced_by(&open.owed, trajectory, subject) != self.projection.view(trajectory).basis_for(subject)
         {
             return Err(TransitionRefusal::StaleSpend);
         }
@@ -1337,6 +1401,9 @@ impl<'a> Sequence<'a> {
         view: &EngineView,
         facts: &[Fact],
     ) -> crate::basis::BasisAdvance {
+        if facts.is_empty() {
+            return crate::basis::BasisAdvance::default();
+        }
         let mut sequence = Sequence::resuming(registry, child_return, view);
         let mut total = crate::basis::BasisAdvance::default();
         for fact in facts {
@@ -1386,8 +1453,15 @@ impl<'a> Sequence<'a> {
                 );
                 advance
             }
-            // The trajectory's label and unresolved sources move with every value it admits.
-            Fact::ValueAdmitted { trajectory, .. } => BasisAdvance::flow(trajectory),
+            Fact::ValueAdmitted {
+                trajectory, provenance, ..
+            } => {
+                let mut advance = BasisAdvance::flow(trajectory);
+                if let Provenance::ProviderRun { effects, .. } = provenance {
+                    advance.absorb(&self.effect_advance(!effects.is_empty()));
+                }
+                advance
+            }
             // A denial changes what may be offered for that rendered call.
             Fact::Denial { trajectory, .. } => BasisAdvance::flow(trajectory),
             Fact::CallApprovalConsumed { offer, .. } => BasisAdvance {
@@ -1561,44 +1635,59 @@ impl<'a> Sequence<'a> {
         if self.projection.view(trajectory).has_ended(trajectory) {
             return Err(TransitionRefusal::BranchEnded);
         }
-        let [call] = proposals else {
-            return Err(TransitionRefusal::UncomposedDecision);
-        };
-        let views = self.projection.view(trajectory);
-        let contract = self
-            .registry
-            .tool(call.tool())
-            .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
-        contract
-            .parameters
-            .validate(call.arguments())
-            .map_err(TransitionRefusal::InvalidPayload)?;
-        let dispatch = DispatchId::new(trajectory.clone(), call.digest(), views.dispatch_count(&call.digest()));
-        let consumes = views
-            .approvals_for(call)
-            .map(|(offer, approval)| (offer, approval.basis))
-            .find(|(offer, basis)| {
-                self.may_spend(trajectory, &crate::basis::SubjectKey::Approval(*offer), basis)
-                    .is_ok()
-            })
-            .map(|(offer, _)| offer);
-        let expected: Vec<DispatchId> = match crate::check::evaluate(contract, &views, call) {
-            CheckOutcome::Allow => vec![dispatch],
-            CheckOutcome::Block(_) if consumes.is_some() => vec![dispatch],
-            CheckOutcome::Block(_) => Vec::new(),
-        };
-        if expected != released {
+        // The identity's provider half, where it has one, fixed the trajectory before this record:
+        // a decision elsewhere would be a second act under one identity.
+        if self
+            .projection
+            .provider_admissions(batch)
+            .next()
+            .is_some_and(|(admitted, ..)| admitted != trajectory)
+        {
+            return Err(TransitionRefusal::ForeignAdmission);
+        }
+        let mut working = std::borrow::Cow::Borrowed(&self.projection);
+        let composed = crate::engine::compose_batch(
+            self.registry,
+            self.child_return,
+            &mut working,
+            trajectory,
+            proposals,
+            spawn,
+            &|views, call| {
+                views
+                    .approvals_for(call)
+                    .map(|(offer, approval)| (offer, approval.basis))
+                    .find(|(offer, basis)| {
+                        self.may_spend(trajectory, &crate::basis::SubjectKey::Approval(*offer), basis)
+                            .is_ok()
+                    })
+                    .map(|(offer, _)| offer)
+            },
+        )
+        .map_err(|(_, error)| match error {
+            crate::engine::EngineError::InvalidCall(error) => TransitionRefusal::InvalidPayload(error),
+            crate::engine::EngineError::UnknownTool(tool) | crate::engine::EngineError::ProviderRunTool(tool) => {
+                TransitionRefusal::UnknownTool(tool)
+            }
+            other => unreachable!("composing a batch refuses only on the call it cannot build, not {other}"),
+        })?;
+        let expected: Vec<&DispatchId> = composed.iter().flatten().map(|release| &release.dispatch).collect();
+        if expected.into_iter().ne(released) {
             return Err(TransitionRefusal::MisdecidedBatch);
         }
-        self.pending.extend(expected.into_iter().map(|dispatch| PendingRelease {
-            dispatch,
-            call: call.clone(),
-            prepares_fork: matches!(spawn, Some(mark) if mark.index() == 0),
-            next: match consumes {
-                Some(offer) => ReleasePart::Consumption(offer),
-                None => ReleasePart::Opening,
-            },
-        }));
+        self.deciding = Some(batch.clone());
+        self.pending
+            .extend(composed.into_iter().zip(proposals).filter_map(|(release, call)| {
+                release.map(|release| PendingRelease {
+                    dispatch: release.dispatch,
+                    call: call.clone(),
+                    prepares_fork: release.prepares_fork.is_some(),
+                    next: match release.consumes {
+                        Some(offer) => ReleasePart::Consumption(offer),
+                        None => ReleasePart::Opening,
+                    },
+                })
+            }));
         Ok(())
     }
 
@@ -1695,6 +1784,49 @@ impl<'a> Sequence<'a> {
     ) -> Result<(), TransitionRefusal> {
         match provenance {
             Provenance::UserInput => Ok(()),
+            Provenance::ProviderRun {
+                tool,
+                batch,
+                position,
+                effects,
+            } => {
+                let contract = self
+                    .registry
+                    .provider_run_contract(tool)
+                    .ok_or_else(|| TransitionRefusal::NotProviderRun(tool.as_str().to_string()))?;
+                let views = self.projection.view(trajectory);
+                if !self
+                    .declared
+                    .as_ref()
+                    .is_some_and(|open| open.act == crate::basis::DecidedAct::Proposals(batch.clone()))
+                {
+                    return Err(TransitionRefusal::UndeclaredAdmission);
+                }
+                if views.has_ended(trajectory) {
+                    return Err(TransitionRefusal::BranchEnded);
+                }
+                if views.decided_batch(batch).is_some() {
+                    return Err(TransitionRefusal::AdmissionAfterDecision);
+                }
+                let mut admitted = views.provider_admissions(batch);
+                if *position as usize != admitted.len() {
+                    return Err(TransitionRefusal::WrongAdmissionPosition);
+                }
+                if *position > 0 && self.admitting.as_ref() != Some(batch) {
+                    return Err(TransitionRefusal::SplitAdmission);
+                }
+                if admitted.next().is_some_and(|(first, ..)| first != trajectory) {
+                    return Err(TransitionRefusal::ForeignAdmission);
+                }
+                if effects != &contract.emits {
+                    return Err(TransitionRefusal::EffectsMismatch);
+                }
+                if value.label != contract.output_label() {
+                    return Err(TransitionRefusal::ForgedLabel);
+                }
+                self.admitting = Some(batch.clone());
+                Ok(())
+            }
             Provenance::ToolResult { dispatch } => {
                 let contract = self.dispatch_contract(trajectory, dispatch)?;
                 let views = self.projection.view(trajectory);
@@ -1793,6 +1925,10 @@ impl<'a> Sequence<'a> {
             Provenance::ToolResult { dispatch } => views
                 .dispatch_tool(dispatch)
                 .and_then(|tool| self.registry.tool(tool))
+                .is_some_and(|contract| registered.scope.covers(&contract.tags)),
+            Provenance::ProviderRun { tool, .. } => self
+                .registry
+                .provider_run_contract(tool)
                 .is_some_and(|contract| registered.scope.covers(&contract.tags)),
             Provenance::UserInput | Provenance::ChildReturn { .. } => registered.scope.is_unscoped(),
         };
@@ -2042,6 +2178,13 @@ fn belongs_to(act: &crate::basis::DecidedAct, fact: &Fact) -> bool {
         (DecidedAct::Proposals(act), Fact::ProposalBatchDecided { batch, .. } | Fact::OfferOpened { batch, .. }) => {
             batch == act
         }
+        (
+            DecidedAct::Proposals(act),
+            Fact::ValueAdmitted {
+                provenance: crate::value::Provenance::ProviderRun { batch, .. },
+                ..
+            },
+        ) => batch == act,
         (
             DecidedAct::Proposals(_),
             Fact::DispatchOpened { .. } | Fact::ForkPrepared { .. } | Fact::CallApprovalConsumed { .. },

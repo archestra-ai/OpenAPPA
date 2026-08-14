@@ -11,7 +11,7 @@ use appa_engine::branch::{ReturnBlock, ReturnCheck, ReturnPlan, ReturnSubmission
 use appa_engine::check::{CheckOutcome, Narrowing, UnestablishedFact};
 use appa_engine::contract::PinnedDynamicResolution;
 use appa_engine::execute::Ruling;
-use appa_engine::fact::{BoundaryKind, Fact, FactBatch, ObservedResult, ProposedCall, ReturnPolicy, Revision};
+use appa_engine::fact::{BoundaryKind, Fact, FactBatch, ObservedResult, ReturnPolicy, Revision, TranscriptCall};
 use appa_engine::label::{EstablishedLabel, Label};
 use appa_engine::names::{CastName, SanitizerName, TagName};
 use appa_engine::plan::{ExecutableRemedyPlan, RemedyPlan};
@@ -281,7 +281,7 @@ struct PendingCast {
 }
 
 struct Proposal {
-    call: ProposedCall,
+    call: TranscriptCall,
     raw: String,
     disposition: ArgumentDisposition,
 }
@@ -2126,7 +2126,7 @@ fn exact_nonempty_task(arguments: &serde_json::Value) -> Option<String> {
 
 fn proposal_of(call: &WireToolCall) -> Proposal {
     let trimmed = call.function.arguments.trim();
-    let proposed = |arguments| ProposedCall {
+    let proposed = |arguments| TranscriptCall {
         id: ToolCallId::new(call.id.clone()),
         tool: ToolName::new(call.function.name.clone()),
         arguments,
@@ -2220,6 +2220,10 @@ fn origin_tags<'a>(
         Provenance::ToolResult { dispatch } => dispatches
             .get(dispatch)
             .and_then(|tool| registry.tool(tool))
+            .map(|contract| contract.tags.as_slice())
+            .unwrap_or(&[]),
+        Provenance::ProviderRun { tool, .. } => registry
+            .provider_run_contract(tool)
             .map(|contract| contract.tags.as_slice())
             .unwrap_or(&[]),
         Provenance::UserInput | Provenance::ChildReturn { .. } => &[],

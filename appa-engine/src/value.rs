@@ -101,16 +101,8 @@ impl CanonicalDigest {
         for call in calls {
             hasher.update([0u8]);
             hasher.update(call.digest().0);
-            let mut pinned: Vec<Vec<u8>> = call
-                .dynamic_resolutions
-                .iter()
-                .map(|resolution| {
-                    serde_json_canonicalizer::to_vec(resolution).expect("a pinned resolution canonicalizes")
-                })
-                .collect();
-            pinned.sort();
-            for resolution in pinned {
-                hasher.update(resolution);
+            for resolution in &call.dynamic_resolutions {
+                hasher.update(canonical_resolution(resolution));
             }
         }
         CanonicalDigest(hasher.finalize().into())
@@ -119,6 +111,10 @@ impl CanonicalDigest {
     pub fn bytes(&self) -> &[u8; 32] {
         &self.0
     }
+}
+
+fn canonical_resolution(resolution: &PinnedDynamicResolution) -> Vec<u8> {
+    serde_json_canonicalizer::to_vec(resolution).expect("a pinned resolution canonicalizes")
 }
 
 /// A digest of a raw tool result. Binds a cast resolution or a child-return derivation to the bytes it
@@ -310,6 +306,12 @@ pub enum Provenance {
     UserInput,
     ToolResult { dispatch: DispatchId },
     ChildReturn { child: TrajectoryId, id: ChildReturnId },
+    ProviderRun {
+        tool: ToolName,
+        batch: crate::transition::ProposalBatchId,
+        position: u32,
+        effects: crate::fact::EffectSet,
+    },
 }
 
 /// A value's body — opaque to the engine, which checks labels, never content. Content robustness
@@ -351,11 +353,32 @@ impl LabeledValue {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ResolvedCall {
     tool: ToolName,
     arguments: CanonicalArguments,
     dynamic_resolutions: Vec<PinnedDynamicResolution>,
+}
+
+impl<'de> Deserialize<'de> for ResolvedCall {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct WireCall {
+            tool: ToolName,
+            arguments: CanonicalArguments,
+            dynamic_resolutions: Vec<PinnedDynamicResolution>,
+        }
+
+        let wire = WireCall::deserialize(deserializer)?;
+        let pinned = wire.dynamic_resolutions.clone();
+        let canonical = ResolvedCall::new(wire.tool, wire.arguments).with_dynamic_resolutions(wire.dynamic_resolutions);
+        if canonical.dynamic_resolutions != pinned {
+            return Err(serde::de::Error::custom(
+                "pinned dynamic answers are not in their canonical order",
+            ));
+        }
+        Ok(canonical)
+    }
 }
 
 impl ResolvedCall {
@@ -391,6 +414,7 @@ impl ResolvedCall {
                 None => self.dynamic_resolutions.push(resolution),
             }
         }
+        self.dynamic_resolutions.sort_by_cached_key(canonical_resolution);
         self
     }
 
@@ -456,6 +480,62 @@ mod tests {
                 )])),
             )]);
         assert_eq!(base.digest(), resolved.digest());
+    }
+
+    #[test]
+    fn pinned_answers_are_a_set_whatever_order_they_arrive_in() {
+        let answer = |resolver: &str, reader: &str| {
+            PinnedDynamicResolution::from_answer(
+                DynamicAudienceBinding {
+                    resolver: crate::names::DynamicResolverName::new(resolver),
+                    argument: "recipient".into(),
+                },
+                Some(crate::label::Audience::restricted([crate::label::ReaderId::new(
+                    reader,
+                )])),
+            )
+        };
+        let base = call("send", json!({ "recipient": "room" }));
+        let one = base
+            .clone()
+            .with_dynamic_resolutions(vec![answer("directory", "alice"), answer("acl", "bob")]);
+        let other = base.with_dynamic_resolutions(vec![answer("acl", "bob"), answer("directory", "alice")]);
+        assert_eq!(one, other);
+        assert_eq!(
+            CanonicalDigest::of_batch([&one], None),
+            CanonicalDigest::of_batch([&other], None)
+        );
+    }
+
+    #[test]
+    fn persisted_pinned_answers_refuse_a_non_canonical_spelling() {
+        let answer = |resolver: &str| {
+            PinnedDynamicResolution::from_answer(
+                DynamicAudienceBinding {
+                    resolver: crate::names::DynamicResolverName::new(resolver),
+                    argument: "recipient".into(),
+                },
+                Some(crate::label::Audience::restricted([crate::label::ReaderId::new(
+                    "alice",
+                )])),
+            )
+        };
+        let canonical = call("send", json!({ "recipient": "room" }))
+            .with_dynamic_resolutions(vec![answer("acl"), answer("directory")]);
+        let wire = serde_json::to_value(&canonical).expect("a call serializes");
+        assert_eq!(
+            serde_json::from_value::<ResolvedCall>(wire.clone()).expect("the canonical form round-trips"),
+            canonical
+        );
+
+        for spelling in [
+            vec![answer("directory"), answer("acl")],
+            vec![answer("acl"), answer("acl"), answer("directory")],
+        ] {
+            let mut tampered = wire.clone();
+            tampered["dynamic_resolutions"] = serde_json::to_value(&spelling).expect("answers serialize");
+            assert!(serde_json::from_value::<ResolvedCall>(tampered).is_err());
+        }
     }
 
     #[test]

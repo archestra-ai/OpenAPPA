@@ -389,6 +389,12 @@ pub(crate) fn admit_cast(
             let contract = registry.tool(tool).expect("dispatches open only for registered tools");
             cast.scope.covers(&contract.tags)
         }
+        crate::value::Provenance::ProviderRun { tool, .. } => {
+            let contract = registry
+                .provider_run_contract(tool)
+                .expect("a provider value is admitted only under a registered provider-run contract");
+            cast.scope.covers(&contract.tags)
+        }
         crate::value::Provenance::UserInput | crate::value::Provenance::ChildReturn { .. } => cast.scope.is_unscoped(),
     };
     if !applicable {

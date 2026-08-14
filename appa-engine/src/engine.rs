@@ -23,10 +23,11 @@ use crate::transition::{
     TransitionRefusal, ValidatedFactBatch,
 };
 use crate::value::{
-    CanonicalDigest, ChildReturnId, DispatchId, ForkId, RawResultDigest, ResolvedCall, ToolName, TrajectoryId,
+    CanonicalDigest, ChildReturnId, DispatchId, ForkId, LabeledValue, Provenance, RawResultDigest, ResolvedCall,
+    ToolName, TrajectoryId,
 };
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum EngineError {
     #[error("no contract registered for tool {0}")]
     UnknownTool(String),
@@ -34,6 +35,8 @@ pub enum EngineError {
         "tool {0} is provider-run: it executes inside the inference call, so no executor of this deployment can run a proposed call naming it"
     )]
     ProviderRunTool(String),
+    #[error("tool {0} is not provider-run: this deployment releases it, so no exposed result of it can be admitted")]
+    NotProviderRun(String),
     #[error("invalid call: {0}")]
     InvalidCall(ArgumentError),
     #[error("the call does not pass the check as-is — remedy or accept it first")]
@@ -462,11 +465,6 @@ impl Engine {
     }
 
     fn decide_proposals(&self, view: &EngineView, batch: &ProposalBatch) -> Result<EngineDecision, TransitionError> {
-        match batch.proposals.len() {
-            0 => return Err(TransitionError::EmptyBatch),
-            1 => {}
-            _ => return Err(TransitionError::UncomposedBatch),
-        }
         if let Some(mark) = batch.spawn {
             if mark.index() >= batch.proposals.len() {
                 return Err(TransitionError::SpawnMarkOutOfRange);
@@ -475,99 +473,165 @@ impl Engine {
                 return Err(TransitionError::SpawnUncontrolled);
             }
         }
+        if batch.proposals.is_empty() && batch.provider_results.is_empty() {
+            return Err(TransitionError::EmptyBatch);
+        }
         let views = view.projection().view(&batch.trajectory);
+        // An ended branch is closed to new work, releases and admissions included.
         if views.has_ended(&batch.trajectory) {
             return Err(TransitionError::BranchEnded);
         }
-        let payload = CanonicalDigest::of_batch(&batch.proposals, batch.spawn);
+        let admitted = views.provider_admissions(&batch.id).len();
+        let known = admitted > 0 || views.decided_batch(&batch.id).is_some();
+        if known
+            && !views.provider_admissions(&batch.id).eq(batch
+                .provider_results
+                .iter()
+                .map(|result| (&batch.trajectory, &result.tool, &result.body)))
+        {
+            return Err(TransitionError::BatchIdentityConflict);
+        }
+        for result in &batch.provider_results {
+            if self.registry.provider_run_contract(&result.tool).is_none() {
+                return Err(TransitionError::Call(match self.registry.tool(&result.tool) {
+                    Some(_) => EngineError::NotProviderRun(result.tool.as_str().to_string()),
+                    None => EngineError::UnknownTool(result.tool.as_str().to_string()),
+                }));
+            }
+        }
+
         if let Some(decided) = views.decided_batch(&batch.id) {
-            if decided.trajectory != batch.trajectory || decided.payload != payload {
+            if decided.trajectory != batch.trajectory {
                 return Err(TransitionError::BatchIdentityConflict);
             }
-            let recorded = decided.released.clone();
+            let recorded = decided.clone();
+            let Ok(proposals) = self.resolve_proposals(batch) else {
+                return Err(TransitionError::BatchIdentityConflict);
+            };
+            if recorded.payload != CanonicalDigest::of_batch(&proposals, batch.spawn) {
+                return Err(TransitionError::BatchIdentityConflict);
+            }
             return Ok(EngineDecision {
                 append: None,
-                follow_up: self.decided_follow_up(&views, batch, &recorded)?,
+                follow_up: self.decided_follow_up(&views, batch, &proposals, &recorded.released)?,
             });
         }
 
-        let mut opened = Vec::new();
-        let mut released = Vec::new();
-        let mut refused = Vec::new();
-        let mut blocked = Vec::new();
-        for (index, call) in batch.proposals.iter().enumerate() {
-            let contract = self.validated_contract(call)?;
-            let consumed = match check::evaluate(contract, &views, call) {
-                CheckOutcome::Allow => None,
-                CheckOutcome::Block(raw) => match views.current_approval(call) {
-                    Some((offer, approval)) => Some((offer, approval.clone())),
-                    None => {
-                        refused.push((index as u32, call.clone(), raw));
-                        continue;
+        let mut facts: Vec<Fact> = match admitted {
+            0 => batch
+                .provider_results
+                .iter()
+                .enumerate()
+                .map(|(position, result)| {
+                    let contract = self
+                        .registry
+                        .provider_run_contract(&result.tool)
+                        .expect("every exposed result was classified above");
+                    Fact::ValueAdmitted {
+                        trajectory: batch.trajectory.clone(),
+                        value: LabeledValue::new(result.body.clone(), contract.output_label()),
+                        provenance: Provenance::ProviderRun {
+                            tool: result.tool.clone(),
+                            batch: batch.id.clone(),
+                            position: position as u32,
+                            effects: contract.emits.clone(),
+                        },
                     }
-                },
-            };
-            let (dispatch, opening) = opened_dispatch(contract, &views, call);
-            if let Some((offer, approval)) = consumed {
-                opened.push(Fact::CallApprovalConsumed {
-                    trajectory: batch.trajectory.clone(),
-                    offer,
-                    dispatch: dispatch.clone(),
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        let proposals = match self.resolve_proposals(batch) {
+            Ok(proposals) => proposals,
+            Err((position, error)) => {
+                return Ok(EngineDecision {
+                    append: self.seal_admissions(view, &batch.id, facts)?,
+                    follow_up: FollowUp::Malformed { position, error },
                 });
-                opened.extend(approved_release(&batch.trajectory, &dispatch, &approval));
             }
-            opened.push(opening);
-            let fork = (batch.spawn == Some(SpawnMark::at(index))).then(|| {
-                let fork = ForkId::of(&dispatch);
-                opened.push(Fact::ForkPrepared {
-                    trajectory: batch.trajectory.clone(),
-                    fork: fork.clone(),
-                    snapshot: views.freeze_basis(),
-                    return_policy: self.child_return.clone(),
-                });
-                fork
-            });
-            released.push(Released {
-                dispatch,
-                call: call.clone(),
-                fork,
-            });
+        };
+
+        let mut working = std::borrow::Cow::Borrowed(view.projection());
+        for fact in &facts {
+            working.to_mut().fold(fact);
         }
-        let mut facts = vec![Fact::ProposalBatchDecided {
+        let admissions = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
+        let composed = compose_batch(
+            &self.registry,
+            &self.child_return,
+            &mut working,
+            &batch.trajectory,
+            &proposals,
+            batch.spawn,
+            &|views, call| {
+                views
+                    .approvals_for(call)
+                    .find(|(offer, approval)| {
+                        approval.basis == views.basis_after(&admissions, &crate::basis::SubjectKey::Approval(*offer))
+                    })
+                    .map(|(offer, _)| offer)
+            },
+        )
+        .map_err(|(_, error)| TransitionError::Call(error))?;
+
+        let released: Vec<Released> = composed
+            .iter()
+            .zip(&proposals)
+            .filter_map(|(release, call)| {
+                release.as_ref().map(|release| Released {
+                    dispatch: release.dispatch.clone(),
+                    call: call.clone(),
+                    fork: release.prepares_fork.clone(),
+                })
+            })
+            .collect();
+        facts.push(Fact::ProposalBatchDecided {
             trajectory: batch.trajectory.clone(),
             batch: batch.id.clone(),
-            proposals: batch.proposals.clone(),
+            proposals: proposals.clone(),
             spawn: batch.spawn,
             released: released.iter().map(|release| release.dispatch.clone()).collect(),
-        }];
-        facts.extend(opened);
+        });
+        facts.extend(composed.iter().flatten().flat_map(|release| release.facts.clone()));
         // What this decision moves, derived before the offers that have to record where it lands.
         // The declaration prepended below re-derives it over the whole batch; an offer record
         // moves nothing, so the two agree by construction.
         let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
-        for (position, call, raw) in refused {
-            let planned = plan::plan(&self.registry, &views, &call, &raw);
+        let final_views = working.view(&batch.trajectory);
+        let mut blocked = Vec::new();
+        for (position, call) in composed
+            .iter()
+            .enumerate()
+            .filter(|(_, release)| release.is_none())
+            .map(|(position, _)| (position, &proposals[position]))
+        {
+            let contract = self.validated_contract(call)?;
+            let CheckOutcome::Block(raw) = check::evaluate(contract, &final_views, call) else {
+                unreachable!("an in-batch release only ever adds gaps to a refused sibling's block")
+            };
+            let planned = plan::plan(&self.registry, &final_views, call, &raw);
             let subject = crate::basis::SubjectKey::Call {
                 trajectory: batch.trajectory.clone(),
                 batch: batch.id.clone(),
-                position,
+                position: position as u32,
             };
             let (block_id, offers, opened_offers) =
-                self.open_offers(&views, &advance, &batch.offer_nonce, &subject, &call, &planned);
+                self.open_offers(&final_views, &advance, &batch.offer_nonce, &subject, call, &planned);
             facts.extend(opened_offers);
             blocked.push(Blocked {
-                call,
+                call: call.clone(),
                 block: planned,
                 block_id,
                 offers,
             });
         }
-        let batch = self.declaring(
+        let decided = self.declaring(
             crate::basis::DecidedAct::Proposals(batch.id.clone()),
             advance,
             FactBatch::new(views.revision(), facts),
         );
-        let append = self.seal(view, batch)?;
+        let append = self.seal(view, decided)?;
         Ok(EngineDecision {
             append: Some(append),
             follow_up: FollowUp::Proposals {
@@ -578,6 +642,37 @@ impl Engine {
                 settled: Vec::new(),
             },
         })
+    }
+
+    fn resolve_proposals(&self, batch: &ProposalBatch) -> Result<Vec<ResolvedCall>, (usize, EngineError)> {
+        batch
+            .proposals
+            .iter()
+            .enumerate()
+            .map(|(position, proposed)| {
+                self.resolve_call(proposed.tool.clone(), &proposed.arguments)
+                    .map(|call| call.with_dynamic_resolutions(proposed.dynamic_resolutions.clone()))
+                    .map_err(|error| (position, error))
+            })
+            .collect()
+    }
+
+    fn seal_admissions(
+        &self,
+        view: &EngineView,
+        id: &crate::transition::ProposalBatchId,
+        facts: Vec<Fact>,
+    ) -> Result<Option<ValidatedFactBatch>, TransitionError> {
+        if facts.is_empty() {
+            return Ok(None);
+        }
+        let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
+        let batch = self.declaring(
+            crate::basis::DecidedAct::Proposals(id.clone()),
+            advance,
+            FactBatch::new(view.revision(), facts),
+        );
+        Ok(Some(self.seal(view, batch)?))
     }
 
     fn open_offers(
@@ -636,6 +731,7 @@ impl Engine {
         &self,
         views: &Views,
         batch: &ProposalBatch,
+        proposals: &[ResolvedCall],
         recorded: &[DispatchId],
     ) -> Result<FollowUp, TransitionError> {
         let mut released = Vec::new();
@@ -643,9 +739,10 @@ impl Engine {
         let mut forks = Vec::new();
         let mut spent = Vec::new();
         let mut settled = Vec::new();
-        for (position, call) in batch.proposals.iter().enumerate() {
+        let mut next = recorded.iter().peekable();
+        for (position, call) in proposals.iter().enumerate() {
             let contract = self.validated_contract(call)?;
-            match recorded.iter().find(|dispatch| dispatch.digest() == &call.digest()) {
+            match next.next_if(|dispatch| views.dispatch_call(dispatch) == Some(call)) {
                 // Only a dispatch still awaiting its result may be handed back for invocation.
                 Some(dispatch) if views.is_open(dispatch) && !views.is_succeeded(dispatch) => released.push(Released {
                     dispatch: dispatch.clone(),
@@ -1225,13 +1322,7 @@ impl Engine {
     }
 
     fn checkable_contract(&self, tool: &ToolName) -> Result<&ToolContract, EngineError> {
-        self.registry.tool(tool).ok_or_else(|| {
-            if self.registry.provider_run_contract(tool).is_some() {
-                EngineError::ProviderRunTool(tool.as_str().to_string())
-            } else {
-                EngineError::UnknownTool(tool.as_str().to_string())
-            }
-        })
+        contract_for(&self.registry, tool)
     }
 
     fn contract(&self, call: &ResolvedCall) -> Result<&ToolContract, EngineError> {
@@ -1354,6 +1445,104 @@ pub(crate) fn opened_dispatch(contract: &ToolContract, views: &Views, call: &Res
     (dispatch, fact)
 }
 
+pub(crate) struct SiblingRelease {
+    pub(crate) dispatch: DispatchId,
+    pub(crate) consumes: Option<crate::value::OfferId>,
+    pub(crate) prepares_fork: Option<ForkId>,
+    pub(crate) facts: Vec<Fact>,
+}
+
+/// The ordered in-batch composition, position by position: what each proposed sibling
+/// does, and the records that say so. `None` at a position is a refusal.
+pub(crate) fn compose_batch<'a>(
+    registry: &Registry,
+    child_return: &ReturnPolicy,
+    working: &mut std::borrow::Cow<'a, Projection>,
+    trajectory: &TrajectoryId,
+    proposals: &[ResolvedCall],
+    spawn: Option<SpawnMark>,
+    approval: &impl Fn(&Views, &ResolvedCall) -> Option<crate::value::OfferId>,
+) -> Result<Vec<Option<SiblingRelease>>, (usize, EngineError)> {
+    let singleton = proposals.len() == 1;
+    let mut composed = Vec::with_capacity(proposals.len());
+    // Whether any earlier sibling was refused, and so will be re-planned against the final state.
+    let mut refused = false;
+    for (position, call) in proposals.iter().enumerate() {
+        let release = {
+            let views = working.view(trajectory);
+            let contract = contract_for(registry, call.tool()).map_err(|error| (position, error))?;
+            contract
+                .parameters
+                .validate(call.arguments())
+                .map_err(|error| (position, EngineError::InvalidCall(error)))?;
+            let consumes = match check::evaluate(contract, &views, call) {
+                CheckOutcome::Allow => None,
+                CheckOutcome::Block(_) if singleton => match approval(&views, call) {
+                    Some(offer) => Some(offer),
+                    None => {
+                        refused = true;
+                        composed.push(None);
+                        continue;
+                    }
+                },
+                CheckOutcome::Block(_) => {
+                    refused = true;
+                    composed.push(None);
+                    continue;
+                }
+            };
+            let (dispatch, opening) = opened_dispatch(contract, &views, call);
+            let mut facts = Vec::new();
+            if let Some(offer) = consumes {
+                let prepared = views
+                    .approval(&offer)
+                    .expect("the currency test answered with an approval this state records")
+                    .clone();
+                facts.push(Fact::CallApprovalConsumed {
+                    trajectory: trajectory.clone(),
+                    offer,
+                    dispatch: dispatch.clone(),
+                });
+                facts.extend(approved_release(trajectory, &dispatch, &prepared));
+            }
+            facts.push(opening);
+            let prepares_fork = (spawn == Some(SpawnMark::at(position))).then(|| {
+                let fork = ForkId::of(&dispatch);
+                facts.push(Fact::ForkPrepared {
+                    trajectory: trajectory.clone(),
+                    fork: fork.clone(),
+                    snapshot: views.freeze_basis(),
+                    return_policy: child_return.clone(),
+                });
+                fork
+            });
+            SiblingRelease {
+                dispatch,
+                consumes,
+                prepares_fork,
+                facts,
+            }
+        };
+        if position + 1 < proposals.len() || refused {
+            for fact in &release.facts {
+                working.to_mut().fold(fact);
+            }
+        }
+        composed.push(Some(release));
+    }
+    Ok(composed)
+}
+
+fn contract_for<'a>(registry: &'a Registry, tool: &ToolName) -> Result<&'a ToolContract, EngineError> {
+    registry.tool(tool).ok_or_else(|| {
+        if registry.provider_run_contract(tool).is_some() {
+            EngineError::ProviderRunTool(tool.as_str().to_string())
+        } else {
+            EngineError::UnknownTool(tool.as_str().to_string())
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -1437,6 +1626,14 @@ mod tests {
 
     fn call(tool: &str, args: serde_json::Value) -> ResolvedCall {
         ResolvedCall::new(ToolName::new(tool), crate::params::test_arguments(&args))
+    }
+
+    fn raw(call: &ResolvedCall) -> crate::transition::ProposedCall {
+        crate::transition::ProposedCall {
+            tool: call.tool().clone(),
+            arguments: call.canonical_arguments().canonical_bytes().to_vec(),
+            dynamic_resolutions: call.dynamic_resolutions().to_vec(),
+        }
     }
 
     fn check(engine: &Engine, log: &[Fact], call: &ResolvedCall) -> CheckOutcome {
@@ -1525,7 +1722,8 @@ mod tests {
                 EngineEvent::Proposals(ProposalBatch {
                     id: crate::transition::ProposalBatchId::new("b1"),
                     trajectory: traj(),
-                    proposals: vec![call.clone()],
+                    provider_results: Vec::new(),
+                    proposals: vec![raw(&call)],
                     spawn: None,
                     offer_nonce: nonce(),
                 }),
@@ -1569,7 +1767,8 @@ mod tests {
             EngineEvent::Proposals(ProposalBatch {
                 id: crate::transition::ProposalBatchId::new("b1"),
                 trajectory: traj(),
-                proposals,
+                provider_results: Vec::new(),
+                proposals: proposals.iter().map(raw).collect(),
                 spawn: None,
                 offer_nonce: nonce(),
             })
@@ -1729,7 +1928,8 @@ mod tests {
         let event = EngineEvent::Proposals(ProposalBatch {
             id: crate::transition::ProposalBatchId::new("b1"),
             trajectory: traj(),
-            proposals: vec![call.clone()],
+            provider_results: Vec::new(),
+            proposals: vec![raw(&call)],
             spawn: None,
             offer_nonce: nonce(),
         });
@@ -1769,7 +1969,8 @@ mod tests {
                 EngineEvent::Proposals(ProposalBatch {
                     id: crate::transition::ProposalBatchId::new("b1"),
                     trajectory: traj(),
-                    proposals: vec![call.clone()],
+                    provider_results: Vec::new(),
+                    proposals: vec![raw(&call)],
                     spawn: None,
                     offer_nonce: nonce(),
                 }),
@@ -2160,7 +2361,8 @@ mod tests {
                 EngineEvent::Proposals(ProposalBatch {
                     id: crate::transition::ProposalBatchId::new("b1"),
                     trajectory: traj(),
-                    proposals: vec![call.clone()],
+                    provider_results: Vec::new(),
+                    proposals: vec![raw(&call)],
                     spawn: None,
                     offer_nonce: nonce(),
                 }),
@@ -2596,7 +2798,8 @@ mod tests {
             EngineEvent::Proposals(ProposalBatch {
                 id: crate::transition::ProposalBatchId::new("b1"),
                 trajectory: traj(),
-                proposals: vec![call.clone()],
+                provider_results: Vec::new(),
+                proposals: vec![raw(&call)],
                 spawn,
                 offer_nonce: nonce(),
             })
@@ -2710,7 +2913,8 @@ mod tests {
                 EngineEvent::Proposals(ProposalBatch {
                     id: crate::transition::ProposalBatchId::new("b1"),
                     trajectory: traj(),
-                    proposals: vec![call.clone()],
+                    provider_results: Vec::new(),
+                    proposals: vec![raw(&call)],
                     spawn: Some(crate::transition::SpawnMark::at(0)),
                     offer_nonce: nonce(),
                 }),
@@ -2772,7 +2976,8 @@ mod tests {
                 EngineEvent::Proposals(ProposalBatch {
                     id: crate::transition::ProposalBatchId::new("b1"),
                     trajectory: traj(),
-                    proposals: vec![call("spawn", json!({}))],
+                    provider_results: Vec::new(),
+                    proposals: vec![raw(&call("spawn", json!({})))],
                     spawn: Some(crate::transition::SpawnMark::at(0)),
                     offer_nonce: nonce(),
                 })
@@ -2868,7 +3073,8 @@ mod tests {
             EngineEvent::Proposals(ProposalBatch {
                 id: crate::transition::ProposalBatchId::new(id),
                 trajectory: traj(),
-                proposals: vec![call.clone()],
+                provider_results: Vec::new(),
+                proposals: vec![raw(call)],
                 spawn: None,
                 offer_nonce: nonce(),
             }),
@@ -2984,7 +3190,8 @@ mod tests {
             EngineEvent::Proposals(ProposalBatch {
                 id: crate::transition::ProposalBatchId::new(id),
                 trajectory: traj(),
-                proposals: vec![proposal],
+                provider_results: Vec::new(),
+                proposals: vec![raw(&proposal)],
                 spawn: None,
                 offer_nonce: nonce,
             }),
@@ -4007,7 +4214,8 @@ mod tests {
                 EngineEvent::Proposals(ProposalBatch {
                     id: crate::transition::ProposalBatchId::new("b1"),
                     trajectory: traj(),
-                    proposals: vec![call.clone()],
+                    provider_results: Vec::new(),
+                    proposals: vec![raw(&call)],
                     spawn: None,
                     offer_nonce: nonce(),
                 }),
@@ -4179,7 +4387,8 @@ mod tests {
                 EngineEvent::Proposals(ProposalBatch {
                     id: crate::transition::ProposalBatchId::new("b1"),
                     trajectory: child.clone(),
-                    proposals: vec![call.clone()],
+                    provider_results: Vec::new(),
+                    proposals: vec![raw(&call)],
                     spawn: None,
                     offer_nonce: nonce(),
                 })
@@ -5709,5 +5918,1018 @@ mod tests {
         assert_eq!(p_with.view(&t).current_label(), p_without.view(&t).current_label());
         assert_eq!(p_with.view(&t).boundary_count(), p_without.view(&t).boundary_count());
         assert_eq!(e.validate_replay(&with), Ok(()));
+    }
+
+    fn raw_call(tool: &str, arguments: &[u8]) -> crate::transition::ProposedCall {
+        crate::transition::ProposedCall {
+            tool: ToolName::new(tool),
+            arguments: arguments.to_vec(),
+            dynamic_resolutions: Vec::new(),
+        }
+    }
+
+    fn exposed(tool: &str, body: &str) -> crate::transition::ProviderResult {
+        crate::transition::ProviderResult {
+            tool: ToolName::new(tool),
+            body: ValueBody::new(body),
+        }
+    }
+
+    fn viewing(e: &Engine, log: &[Fact]) -> EngineView {
+        e.view(&traj(), log.to_vec(), Revision::new(log.len() as u64))
+            .expect("the log replays")
+    }
+
+    fn batch_on(
+        trajectory: &TrajectoryId,
+        id: &str,
+        provider_results: Vec<crate::transition::ProviderResult>,
+        proposals: Vec<crate::transition::ProposedCall>,
+        spawn: Option<SpawnMark>,
+    ) -> EngineEvent {
+        EngineEvent::Proposals(ProposalBatch {
+            id: crate::transition::ProposalBatchId::new(id),
+            trajectory: trajectory.clone(),
+            provider_results,
+            proposals,
+            spawn,
+            offer_nonce: nonce(),
+        })
+    }
+
+    fn batch(
+        id: &str,
+        provider_results: Vec<crate::transition::ProviderResult>,
+        proposals: Vec<crate::transition::ProposedCall>,
+    ) -> EngineEvent {
+        batch_on(&traj(), id, provider_results, proposals, None)
+    }
+
+    fn answered(decision: &EngineDecision) -> (&[Released], &[Blocked]) {
+        match &decision.follow_up {
+            FollowUp::Proposals { released, blocked, .. } => (released, blocked),
+            other => panic!("a proposal batch answers with proposals, not {other:?}"),
+        }
+    }
+
+    fn tool_names(released: &[Released]) -> Vec<&str> {
+        released.iter().map(|release| release.call.tool().as_str()).collect()
+    }
+
+    fn blocked_names(blocked: &[Blocked]) -> Vec<&str> {
+        blocked.iter().map(|block| block.call.tool().as_str()).collect()
+    }
+
+    fn batch_engine() -> Engine {
+        let mut seen = plain_tool("seen");
+        seen.emits = EffectSet::new([EffectKind::new("k")]).unwrap();
+        let mut wire = plain_tool("wire");
+        wire.requires = Requires {
+            history: vec![HistoryRequirement::Prior(EffectKind::new("k"))],
+            ..Requires::default()
+        };
+        let mut guard = plain_tool("guard");
+        guard.requires = Requires {
+            history: vec![HistoryRequirement::NoPrior(EffectKind::new("k"))],
+            ..Requires::default()
+        };
+        let mut emit = plain_tool("emit");
+        emit.emits = EffectSet::new([EffectKind::new("k")]).unwrap();
+        engine_with_provider_run(vec![seen, wire, guard, emit, plain_tool("quiet")], &["seen"])
+    }
+
+    fn opening_log() -> Vec<Fact> {
+        vec![user_value(known(TRUSTED, Audience::Public))]
+    }
+
+    #[test]
+    fn an_exposed_provider_run_result_is_history_for_every_sibling() {
+        let e = batch_engine();
+        let log = opening_log();
+        let decision = e
+            .handle(
+                &viewing(&e, &log),
+                batch(
+                    "b1",
+                    vec![exposed("seen", "the provider ran it")],
+                    vec![raw(&call("wire", json!({}))), raw(&call("guard", json!({})))],
+                ),
+            )
+            .expect("the batch decides");
+        let (released, blocked) = answered(&decision);
+        assert_eq!(tool_names(released), ["wire"]);
+        assert_eq!(blocked_names(blocked), ["guard"]);
+        assert!(
+            blocked[0]
+                .block
+                .raw
+                .requirement_gaps
+                .contains(&Gap::NoPrior(EffectKind::new("k")))
+        );
+
+        let facts = appended_facts(decision);
+        match &facts[..2] {
+            [
+                Fact::BasisAdvanced { .. },
+                Fact::ValueAdmitted { value, provenance, .. },
+            ] => {
+                assert_eq!(value.body, ValueBody::new("the provider ran it"));
+                assert_eq!(value.label, Delta::NONE.output_label());
+                assert_eq!(
+                    provenance,
+                    &Provenance::ProviderRun {
+                        tool: ToolName::new("seen"),
+                        batch: crate::transition::ProposalBatchId::new("b1"),
+                        position: 0,
+                        effects: EffectSet::new([EffectKind::new("k")]).unwrap(),
+                    }
+                );
+            }
+            other => panic!("the admissions open the batch, not {other:?}"),
+        }
+        assert!(
+            !facts
+                .iter()
+                .any(|fact| matches!(fact, Fact::DispatchSucceeded { .. } | Fact::DispatchClosed { .. }))
+        );
+        assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
+    }
+
+    #[test]
+    fn a_provider_run_result_the_response_hides_establishes_no_effect() {
+        let e = batch_engine();
+        let log = opening_log();
+        let decision = e
+            .handle(
+                &viewing(&e, &log),
+                batch(
+                    "b1",
+                    Vec::new(),
+                    vec![raw(&call("wire", json!({}))), raw(&call("guard", json!({})))],
+                ),
+            )
+            .expect("the batch decides");
+        let (released, blocked) = answered(&decision);
+        assert_eq!(tool_names(released), ["guard"]);
+        assert_eq!(blocked_names(blocked), ["wire"]);
+        assert!(
+            blocked[0]
+                .block
+                .raw
+                .requirement_gaps
+                .contains(&Gap::Prior(EffectKind::new("k")))
+        );
+    }
+
+    #[test]
+    fn a_malformed_sibling_mediates_none_of_them_and_the_admissions_stand() {
+        let e = batch_engine();
+        let log = opening_log();
+        for (position, malformed) in [
+            (1, raw_call("nowhere", b"{}")),
+            (1, raw_call("seen", b"{}")),
+            (1, raw_call("quiet", b"not json")),
+        ] {
+            let decision = e
+                .handle(
+                    &viewing(&e, &log),
+                    batch(
+                        "b1",
+                        vec![exposed("seen", "the provider ran it")],
+                        vec![raw(&call("quiet", json!({}))), malformed],
+                    ),
+                )
+                .expect("the batch answers");
+            match &decision.follow_up {
+                FollowUp::Malformed { position: at, .. } => assert_eq!(*at, position),
+                other => panic!("a malformed batch answers with its refusal, not {other:?}"),
+            }
+            let facts = appended_facts(decision);
+            assert!(matches!(&facts[0], Fact::BasisAdvanced { .. }));
+            assert!(matches!(
+                &facts[1],
+                Fact::ValueAdmitted {
+                    provenance: Provenance::ProviderRun { .. },
+                    ..
+                }
+            ));
+            assert_eq!(facts.len(), 2, "nothing beyond the admissions: {facts:?}");
+            assert_eq!(e.validate_replay(&[log.clone(), facts].concat()), Ok(()));
+        }
+    }
+
+    #[test]
+    fn a_retry_of_a_malformed_batch_admits_its_results_once_and_then_decides() {
+        let e = batch_engine();
+        let log = opening_log();
+        let malformed = || {
+            batch(
+                "b1",
+                vec![exposed("seen", "the provider ran it")],
+                vec![raw_call("quiet", b"not json")],
+            )
+        };
+        let first = e.handle(&viewing(&e, &log), malformed()).expect("the batch answers");
+        let log = [log, appended_facts(first)].concat();
+
+        let repeat = e.handle(&viewing(&e, &log), malformed()).expect("the repeat answers");
+        assert!(matches!(repeat.follow_up, FollowUp::Malformed { position: 0, .. }));
+        assert_eq!(repeat.append, None, "a repeat admits nothing a second time");
+
+        let corrected = e
+            .handle(
+                &viewing(&e, &log),
+                batch(
+                    "b1",
+                    vec![exposed("seen", "the provider ran it")],
+                    vec![raw(&call("wire", json!({})))],
+                ),
+            )
+            .expect("the corrected batch decides");
+        let (released, _) = answered(&corrected);
+        assert_eq!(tool_names(released), ["wire"], "the admission is history for the retry");
+        let facts = appended_facts(corrected);
+        assert!(
+            !facts.iter().any(|fact| matches!(fact, Fact::ValueAdmitted { .. })),
+            "the results were admitted by the first attempt: {facts:?}"
+        );
+        assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
+    }
+
+    #[test]
+    fn a_batch_identity_is_bound_to_its_exposed_results_and_their_trajectory() {
+        let e = batch_engine();
+        let log = opening_log();
+        let first = e
+            .handle(
+                &viewing(&e, &log),
+                batch(
+                    "b1",
+                    vec![exposed("seen", "the provider ran it")],
+                    vec![raw_call("quiet", b"not json")],
+                ),
+            )
+            .expect("the batch answers");
+        let log = [log, appended_facts(first)].concat();
+
+        let other_body = e.handle(
+            &viewing(&e, &log),
+            batch(
+                "b1",
+                vec![exposed("seen", "something else")],
+                vec![raw(&call("quiet", json!({})))],
+            ),
+        );
+        assert_eq!(other_body.unwrap_err(), TransitionError::BatchIdentityConflict);
+
+        let dropped = e.handle(
+            &viewing(&e, &log),
+            batch("b1", Vec::new(), vec![raw(&call("quiet", json!({})))]),
+        );
+        assert_eq!(dropped.unwrap_err(), TransitionError::BatchIdentityConflict);
+
+        let elsewhere = e.handle(
+            &viewing(&e, &log),
+            batch_on(
+                &TrajectoryId::new("other"),
+                "b1",
+                vec![exposed("seen", "the provider ran it")],
+                vec![raw(&call("quiet", json!({})))],
+                None,
+            ),
+        );
+        assert_eq!(elsewhere.unwrap_err(), TransitionError::BatchIdentityConflict);
+
+        let decided = appended_facts(
+            e.handle(
+                &viewing(&e, &log),
+                batch("b2", Vec::new(), vec![raw(&call("quiet", json!({})))]),
+            )
+            .expect("the batch decides"),
+        );
+        let log = [log, decided].concat();
+        let smuggled = e.handle(
+            &viewing(&e, &log),
+            batch(
+                "b2",
+                vec![exposed("seen", "the provider ran it")],
+                vec![raw(&call("quiet", json!({})))],
+            ),
+        );
+        assert_eq!(smuggled.unwrap_err(), TransitionError::BatchIdentityConflict);
+
+        let swapped = e.handle(
+            &viewing(&e, &log),
+            batch(
+                "b1",
+                vec![exposed("nowhere", "the provider ran it")],
+                vec![raw(&call("quiet", json!({})))],
+            ),
+        );
+        assert_eq!(swapped.unwrap_err(), TransitionError::BatchIdentityConflict);
+    }
+
+    #[test]
+    fn an_exposed_result_of_a_tool_this_deployment_releases_is_refused() {
+        let e = batch_engine();
+        let log = opening_log();
+        for (tool, expected) in [
+            ("quiet", EngineError::NotProviderRun("quiet".to_string())),
+            ("nowhere", EngineError::UnknownTool("nowhere".to_string())),
+        ] {
+            let refusal = e.handle(
+                &viewing(&e, &log),
+                batch(
+                    "b1",
+                    vec![exposed(tool, "a body")],
+                    vec![raw(&call("quiet", json!({})))],
+                ),
+            );
+            assert_eq!(refusal.unwrap_err(), TransitionError::Call(expected));
+        }
+    }
+
+    #[test]
+    fn a_provider_admission_advances_flow_and_the_family_whose_effects_it_records() {
+        let e = engine_with_provider_run(
+            vec![plain_tool("quiet"), {
+                let mut emitting = plain_tool("loud");
+                emitting.emits = EffectSet::new([EffectKind::new("k")]).unwrap();
+                emitting
+            }],
+            &["quiet", "loud"],
+        );
+        let log = opening_log();
+        let declared = |tool: &str| {
+            let decision = e
+                .handle(
+                    &viewing(&e, &log),
+                    batch("b1", vec![exposed(tool, "a body")], Vec::new()),
+                )
+                .expect("an admission-only batch decides");
+            match &appended_facts(decision)[0] {
+                Fact::BasisAdvanced { advance, .. } => advance.clone(),
+                other => panic!("the declaration opens the batch, not {other:?}"),
+            }
+        };
+        let quiet = declared("quiet");
+        assert!(quiet.flows.contains(&traj()));
+        assert!(
+            !quiet.family,
+            "an observation with no declared effects moves no family state"
+        );
+        assert!(declared("loud").family);
+    }
+
+    #[test]
+    fn an_admission_only_batch_decides_and_an_empty_one_is_no_event() {
+        let e = batch_engine();
+        let log = opening_log();
+        let decision = e
+            .handle(
+                &viewing(&e, &log),
+                batch("b1", vec![exposed("seen", "the provider ran it")], Vec::new()),
+            )
+            .expect("an admission-only batch decides");
+        let (released, blocked) = answered(&decision);
+        assert!(released.is_empty() && blocked.is_empty());
+        let facts = appended_facts(decision);
+        assert!(matches!(
+            &facts[2],
+            Fact::ProposalBatchDecided { proposals, released, .. } if proposals.is_empty() && released.is_empty()
+        ));
+        assert_eq!(e.validate_replay(&[log.clone(), facts].concat()), Ok(()));
+
+        let empty = e.handle(&viewing(&e, &log), batch("b2", Vec::new(), Vec::new()));
+        assert_eq!(empty.unwrap_err(), TransitionError::EmptyBatch);
+
+        let marked = e.handle(
+            &viewing(&e, &log),
+            batch_on(&traj(), "b3", Vec::new(), Vec::new(), Some(SpawnMark::at(0))),
+        );
+        assert_eq!(marked.unwrap_err(), TransitionError::SpawnMarkOutOfRange);
+    }
+
+    #[test]
+    fn a_siblings_release_is_state_for_the_siblings_after_it() {
+        let e = batch_engine();
+        let log = opening_log();
+        let decision = e
+            .handle(
+                &viewing(&e, &log),
+                batch(
+                    "b1",
+                    Vec::new(),
+                    vec![
+                        raw(&call("quiet", json!({}))),
+                        raw(&call("quiet", json!({}))),
+                        raw(&call("emit", json!({}))),
+                        raw(&call("guard", json!({}))),
+                    ],
+                ),
+            )
+            .expect("the batch decides");
+        let (released, blocked) = answered(&decision);
+        assert_eq!(tool_names(released), ["quiet", "quiet", "emit"]);
+        assert_eq!(
+            (released[0].dispatch.occurrence(), released[1].dispatch.occurrence()),
+            (0, 1),
+            "two identical siblings are two occurrences of one call"
+        );
+        assert_eq!(blocked_names(blocked), ["guard"]);
+        assert!(
+            blocked[0]
+                .block
+                .raw
+                .requirement_gaps
+                .contains(&Gap::NoPrior(EffectKind::new("k")))
+        );
+        let facts = appended_facts(decision);
+        assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
+    }
+
+    #[test]
+    fn a_refused_sibling_is_planned_against_the_batchs_final_state() {
+        let mut strict = plain_tool("strict");
+        strict.requires = Requires {
+            label: LabelRequirements {
+                trust_floor: Some(TRUSTED),
+                audience: vec![],
+            },
+            history: vec![HistoryRequirement::NoPrior(EffectKind::new("k"))],
+            ..Requires::default()
+        };
+        let mut emit = plain_tool("emit");
+        emit.emits = EffectSet::new([EffectKind::new("k")]).unwrap();
+        let e = engine(vec![strict, emit]);
+        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let decision = e
+            .handle(
+                &viewing(&e, &log),
+                batch(
+                    "b1",
+                    Vec::new(),
+                    vec![raw(&call("strict", json!({}))), raw(&call("emit", json!({})))],
+                ),
+            )
+            .expect("the batch decides");
+        let (released, blocked) = answered(&decision);
+        assert_eq!(tool_names(released), ["emit"]);
+        assert_eq!(blocked_names(blocked), ["strict"]);
+        let gaps = &blocked[0].block.raw.requirement_gaps;
+        assert!(
+            gaps.contains(&Gap::TrustFloor {
+                required: TRUSTED,
+                actual: SUSPICIOUS
+            }),
+            "the gap it was refused for: {gaps:?}"
+        );
+        assert!(
+            gaps.contains(&Gap::NoPrior(EffectKind::new("k"))),
+            "the gap the sibling's own release opened: {gaps:?}"
+        );
+        let facts = appended_facts(decision);
+        assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
+    }
+
+    #[test]
+    fn a_marked_spawn_prepares_its_fork_from_its_own_position() {
+        let mut spawn = plain_tool("spawn");
+        spawn.requires = Requires {
+            history: vec![HistoryRequirement::Prior(EffectKind::new("k"))],
+            ..Requires::default()
+        };
+        let e = engine(vec![plain_tool("quiet"), spawn]);
+        let log = opening_log();
+        let decision = e
+            .handle(
+                &viewing(&e, &log),
+                batch_on(
+                    &traj(),
+                    "b1",
+                    Vec::new(),
+                    vec![raw(&call("quiet", json!({}))), raw(&call("spawn", json!({})))],
+                    Some(SpawnMark::at(1)),
+                ),
+            )
+            .expect("the batch decides");
+        let (released, blocked) = answered(&decision);
+        assert_eq!(tool_names(released), ["quiet"]);
+        assert_eq!(blocked_names(blocked), ["spawn"]);
+        assert!(released[0].fork.is_none(), "the unmarked sibling prepares nothing");
+        let facts = appended_facts(decision);
+        assert!(
+            !facts.iter().any(|fact| matches!(fact, Fact::ForkPrepared { .. })),
+            "a refused spawn prepares no fork: {facts:?}"
+        );
+
+        let released_spawn = e
+            .handle(
+                &viewing(&e, &log),
+                batch_on(
+                    &traj(),
+                    "b2",
+                    Vec::new(),
+                    vec![raw(&call("quiet", json!({}))), raw(&call("quiet", json!({})))],
+                    Some(SpawnMark::at(1)),
+                ),
+            )
+            .expect("the batch decides");
+        let (released, _) = answered(&released_spawn);
+        assert!(released[0].fork.is_none());
+        let fork = released[1].fork.clone().expect("the marked sibling prepared its fork");
+        assert_eq!(fork, ForkId::of(&released[1].dispatch));
+        let facts = appended_facts(released_spawn);
+        assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
+    }
+
+    #[test]
+    fn an_approval_is_spent_only_by_a_singleton_batch() {
+        let e = engine(vec![crm_tool(), neutral_tool()]);
+        let log = opening_log();
+        let opened = appended_facts(blocked_batch(&e, &log, "b1", nonce()));
+        let offer = opened_offers(&opened)[0].0;
+        let log = [log, opened].concat();
+        let approved = appended_facts(
+            execute_offer(&e, &log, offer, OfferOutcome::Approved(Vec::new())).expect("the offer executes"),
+        );
+        let log = [log, approved].concat();
+
+        let decision = e
+            .handle(
+                &viewing(&e, &log),
+                batch(
+                    "b2",
+                    Vec::new(),
+                    vec![raw(&call("get_ticket", json!({}))), raw(&call("read_note", json!({})))],
+                ),
+            )
+            .expect("the batch decides");
+        let (released, blocked) = answered(&decision);
+        assert_eq!(tool_names(released), ["read_note"]);
+        assert_eq!(blocked_names(blocked), ["get_ticket"]);
+        let facts = appended_facts(decision);
+        assert!(
+            !facts
+                .iter()
+                .any(|fact| matches!(fact, Fact::CallApprovalConsumed { .. })),
+            "a sibling batch spends no approval: {facts:?}"
+        );
+        let alone = e
+            .handle(
+                &viewing(&e, &[log.clone(), facts].concat()),
+                batch("b3", Vec::new(), vec![raw(&call("get_ticket", json!({})))]),
+            )
+            .expect("the singleton decides");
+        let (released, _) = answered(&alone);
+        assert_eq!(tool_names(released), ["get_ticket"]);
+    }
+
+    #[test]
+    fn an_exposed_admission_stales_the_approval_its_own_batch_would_spend() {
+        let e = engine_with_provider_run(vec![crm_tool(), plain_tool("seen")], &["seen"]);
+        let log = opening_log();
+        let opened = appended_facts(blocked_batch(&e, &log, "b1", nonce()));
+        let offer = opened_offers(&opened)[0].0;
+        let log = [log, opened].concat();
+        let approved = appended_facts(
+            execute_offer(&e, &log, offer, OfferOutcome::Approved(Vec::new())).expect("the offer executes"),
+        );
+        let log = [log, approved].concat();
+
+        let decision = e
+            .handle(
+                &viewing(&e, &log),
+                batch(
+                    "b2",
+                    vec![exposed("seen", "the provider ran it")],
+                    vec![raw(&call("get_ticket", json!({})))],
+                ),
+            )
+            .expect("the batch decides");
+        let (released, blocked) = answered(&decision);
+        assert!(released.is_empty(), "the approval was stale before the proposal");
+        assert_eq!(blocked_names(blocked), ["get_ticket"]);
+        assert_eq!(
+            e.validate_replay(&[log.clone(), appended_facts(decision)].concat()),
+            Ok(())
+        );
+
+        let release = appended_facts(
+            e.handle(
+                &viewing(&e, &log),
+                batch("b3", Vec::new(), vec![raw(&call("get_ticket", json!({})))]),
+            )
+            .expect("the singleton releases"),
+        );
+        assert_eq!(e.validate_replay(&[log.clone(), release.clone()].concat()), Ok(()));
+        let mut spliced = release;
+        spliced.insert(
+            1,
+            Fact::ValueAdmitted {
+                trajectory: traj(),
+                value: LabeledValue::new(ValueBody::new("the provider ran it"), Delta::NONE.output_label()),
+                provenance: Provenance::ProviderRun {
+                    tool: ToolName::new("seen"),
+                    batch: crate::transition::ProposalBatchId::new("b3"),
+                    position: 0,
+                    effects: EffectSet::default(),
+                },
+            },
+        );
+        assert_eq!(
+            e.validate_replay(&[log, spliced].concat()),
+            Err(TransitionRefusal::MisdecidedBatch)
+        );
+    }
+
+    #[test]
+    fn a_repeat_of_a_multi_sibling_batch_answers_each_position_from_the_record() {
+        let e = batch_engine();
+        let log = opening_log();
+        let proposals = || {
+            vec![
+                raw(&call("quiet", json!({}))),
+                raw(&call("quiet", json!({}))),
+                raw(&call("wire", json!({}))),
+            ]
+        };
+        let first = e
+            .handle(&viewing(&e, &log), batch("b1", Vec::new(), proposals()))
+            .expect("the batch decides");
+        let (released, _) = answered(&first);
+        let dispatches: Vec<DispatchId> = released.iter().map(|release| release.dispatch.clone()).collect();
+        let log = [log, appended_facts(first)].concat();
+
+        let repeat = e
+            .handle(&viewing(&e, &log), batch("b1", Vec::new(), proposals()))
+            .expect("the repeat answers");
+        assert_eq!(repeat.append, None);
+        let (released, blocked) = answered(&repeat);
+        assert_eq!(
+            released.iter().map(|r| r.dispatch.clone()).collect::<Vec<_>>(),
+            dispatches
+        );
+        assert_eq!(blocked_names(blocked), ["wire"]);
+    }
+
+    #[test]
+    fn a_repeat_matches_each_sibling_to_the_dispatch_its_own_answers_opened() {
+        let binding = crate::contract::DynamicAudienceBinding {
+            resolver: crate::names::DynamicResolverName::new("acl"),
+            argument: "room".to_string(),
+        };
+        let mut notify = plain_tool("notify");
+        notify.requires = Requires {
+            label: LabelRequirements {
+                trust_floor: None,
+                audience: vec![AudienceRequirement::Includes(RecipientSpec::Dynamic(binding.clone()))],
+            },
+            ..Requires::default()
+        };
+        let e = engine(vec![notify]);
+        let internal = Audience::restricted([ReaderId::new("internal")]);
+        let log = vec![user_value(known(TRUSTED, internal.clone()))];
+        let pinned = |audience: &Audience| {
+            raw(&call("notify", json!({})).with_dynamic_resolutions(vec![
+                crate::contract::PinnedDynamicResolution::from_answer(binding.clone(), Some(audience.clone())),
+            ]))
+        };
+        let outsider = Audience::restricted([ReaderId::new("outsider")]);
+        let proposals = || vec![pinned(&outsider), pinned(&internal)];
+
+        let first = e
+            .handle(&viewing(&e, &log), batch("b1", Vec::new(), proposals()))
+            .expect("the batch decides");
+        let (released, blocked) = answered(&first);
+        assert_eq!(released.len(), 1);
+        assert_eq!(blocked.len(), 1);
+        let ran = released[0].dispatch.clone();
+        assert_eq!(released[0].call.dynamic_resolution(&binding), Some(&internal));
+        let log = [log, appended_facts(first)].concat();
+
+        let repeat = e
+            .handle(&viewing(&e, &log), batch("b1", Vec::new(), proposals()))
+            .expect("the repeat answers");
+        assert_eq!(repeat.append, None);
+        let (released, blocked) = answered(&repeat);
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].dispatch, ran);
+        assert_eq!(
+            released[0].call.dynamic_resolution(&binding),
+            Some(&internal),
+            "the repeat names the sibling that actually ran"
+        );
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].call.dynamic_resolution(&binding), Some(&outsider));
+    }
+
+    #[test]
+    fn replay_refuses_a_provider_admission_no_act_declared() {
+        let e = batch_engine();
+        let log = opening_log();
+        let decided = appended_facts(
+            e.handle(
+                &viewing(&e, &log),
+                batch("b1", vec![exposed("seen", "the provider ran it")], Vec::new()),
+            )
+            .expect("an admission-only batch decides"),
+        );
+        assert_eq!(e.validate_replay(&[log.clone(), decided.clone()].concat()), Ok(()));
+
+        let undeclared: Vec<Fact> = decided
+            .iter()
+            .filter(|fact| !matches!(fact, Fact::BasisAdvanced { .. }))
+            .cloned()
+            .collect();
+        assert_eq!(
+            e.validate_replay(&[log.clone(), undeclared].concat()),
+            Err(TransitionRefusal::UndeclaredAdmission)
+        );
+
+        let child = TrajectoryId::new("child");
+        let parent = Projection::build(&log, Revision::new(log.len() as u64));
+        let seeded = e
+            .seed_child(&parent.view(&traj()), &child)
+            .expect("the child seeds")
+            .facts;
+        let ended = e
+            .submit_void_return(
+                &Projection::build(&[log.clone(), seeded.clone()].concat(), Revision::new(2)).view(&traj()),
+                &child,
+            )
+            .expect("the child ends its errand")
+            .facts;
+        let forked = [log, seeded, ended].concat();
+        let on_ended: Vec<Fact> = decided
+            .into_iter()
+            .map(|fact| match fact {
+                Fact::BasisAdvanced { act, advance, .. } => Fact::BasisAdvanced {
+                    trajectory: child.clone(),
+                    act,
+                    advance: crate::basis::BasisAdvance {
+                        flows: [child.clone()].into(),
+                        ..advance
+                    },
+                },
+                Fact::ValueAdmitted { value, provenance, .. } => Fact::ValueAdmitted {
+                    trajectory: child.clone(),
+                    value,
+                    provenance,
+                },
+                other => other,
+            })
+            .filter(|fact| !matches!(fact, Fact::ProposalBatchDecided { .. }))
+            .collect();
+        assert_eq!(
+            e.validate_replay(&[forked, on_ended].concat()),
+            Err(TransitionRefusal::BranchEnded)
+        );
+    }
+
+    #[test]
+    fn replay_refuses_one_batchs_admissions_split_across_two_decisions() {
+        let e = batch_engine();
+        let log = opening_log();
+        let decided = appended_facts(
+            e.handle(
+                &viewing(&e, &log),
+                batch(
+                    "b1",
+                    vec![exposed("seen", "the first"), exposed("seen", "the second")],
+                    Vec::new(),
+                ),
+            )
+            .expect("an admission-only batch decides"),
+        );
+        assert_eq!(e.validate_replay(&[log.clone(), decided.clone()].concat()), Ok(()));
+
+        let split = vec![
+            decided[0].clone(),
+            decided[1].clone(),
+            decided[0].clone(),
+            decided[2].clone(),
+        ];
+        assert_eq!(
+            e.validate_replay(&[log, split].concat()),
+            Err(TransitionRefusal::SplitAdmission)
+        );
+    }
+
+    #[test]
+    fn replay_refuses_a_decision_whose_own_declaration_is_missing() {
+        let e = batch_engine();
+        let opening = opening_log();
+        let decide = |log: &[Fact], id: &str| {
+            appended_facts(
+                e.handle(
+                    &viewing(&e, log),
+                    batch(id, Vec::new(), vec![raw(&call("emit", json!({})))]),
+                )
+                .expect("the batch decides"),
+            )
+        };
+        let log = [opening.clone(), decide(&opening, "b1")].concat();
+        let second = decide(&log, "b2");
+        assert_eq!(e.validate_replay(&[log.clone(), second.clone()].concat()), Ok(()));
+
+        let undeclared: Vec<Fact> = second
+            .into_iter()
+            .filter(|fact| !matches!(fact, Fact::BasisAdvanced { .. }))
+            .collect();
+        assert_eq!(
+            e.validate_replay(&[log, undeclared].concat()),
+            Err(TransitionRefusal::UndeclaredAdvance)
+        );
+    }
+
+    #[test]
+    fn a_decision_releases_exactly_what_the_ordered_composition_allows() {
+        let e = batch_engine();
+        let log = opening_log();
+        let decided = appended_facts(
+            e.handle(
+                &viewing(&e, &log),
+                batch(
+                    "b1",
+                    Vec::new(),
+                    vec![
+                        raw(&call("quiet", json!({}))),
+                        raw(&call("emit", json!({}))),
+                        raw(&call("guard", json!({}))),
+                    ],
+                ),
+            )
+            .expect("the batch decides"),
+        );
+        assert_eq!(e.validate_replay(&[log.clone(), decided.clone()].concat()), Ok(()));
+
+        let rewritten = |mutate: &dyn Fn(&mut Vec<DispatchId>)| {
+            let mut facts = decided.clone();
+            for fact in &mut facts {
+                if let Fact::ProposalBatchDecided { released, .. } = fact {
+                    mutate(released);
+                }
+            }
+            e.validate_replay(&[log.clone(), facts].concat())
+        };
+        assert_eq!(
+            rewritten(&|released| {
+                released.pop();
+            }),
+            Err(TransitionRefusal::MisdecidedBatch)
+        );
+        assert_eq!(
+            rewritten(&|released| released.swap(0, 1)),
+            Err(TransitionRefusal::MisdecidedBatch)
+        );
+        assert_eq!(
+            rewritten(&|released| {
+                let first = released[0].clone();
+                released.push(first);
+            }),
+            Err(TransitionRefusal::MisdecidedBatch)
+        );
+    }
+
+    #[test]
+    fn replay_refuses_a_rewritten_provider_admission() {
+        let e = batch_engine();
+        let log = opening_log();
+        let decided = appended_facts(
+            e.handle(
+                &viewing(&e, &log),
+                batch(
+                    "b1",
+                    vec![exposed("seen", "the provider ran it")],
+                    vec![raw(&call("quiet", json!({})))],
+                ),
+            )
+            .expect("the batch decides"),
+        );
+        assert_eq!(e.validate_replay(&[log.clone(), decided.clone()].concat()), Ok(()));
+
+        let rewritten = |mutate: &dyn Fn(&mut Fact)| {
+            let mut facts = decided.clone();
+            mutate(&mut facts[1]);
+            e.validate_replay(&[log.clone(), facts].concat())
+        };
+        assert_eq!(
+            rewritten(&|fact| {
+                if let Fact::ValueAdmitted { value, .. } = fact {
+                    value.label = Label::new(Dim::Known(TRUSTED), Dim::Unknown);
+                }
+            }),
+            Err(TransitionRefusal::ForgedLabel)
+        );
+        assert_eq!(
+            rewritten(&|fact| {
+                if let Fact::ValueAdmitted {
+                    provenance: Provenance::ProviderRun { effects, .. },
+                    ..
+                } = fact
+                {
+                    *effects = EffectSet::default();
+                }
+            }),
+            Err(TransitionRefusal::EffectsMismatch)
+        );
+        assert_eq!(
+            rewritten(&|fact| {
+                if let Fact::ValueAdmitted {
+                    provenance: Provenance::ProviderRun { position, .. },
+                    ..
+                } = fact
+                {
+                    *position = 1;
+                }
+            }),
+            Err(TransitionRefusal::WrongAdmissionPosition)
+        );
+        assert_eq!(
+            rewritten(&|fact| {
+                if let Fact::ValueAdmitted {
+                    provenance: Provenance::ProviderRun { tool, .. },
+                    ..
+                } = fact
+                {
+                    *tool = ToolName::new("quiet");
+                }
+            }),
+            Err(TransitionRefusal::NotProviderRun("quiet".to_string()))
+        );
+        let admission_only = appended_facts(
+            e.handle(
+                &viewing(&e, &log),
+                batch("b2", vec![exposed("seen", "the provider ran it")], Vec::new()),
+            )
+            .expect("an admission-only batch decides"),
+        );
+        let mut reordered = admission_only.clone();
+        reordered.swap(1, 2);
+        assert_eq!(e.validate_replay(&[log.clone(), admission_only].concat()), Ok(()));
+        assert_eq!(
+            e.validate_replay(&[log, reordered].concat()),
+            Err(TransitionRefusal::AdmissionAfterDecision)
+        );
+    }
+
+    #[test]
+    fn a_batch_admits_every_result_it_exposed() {
+        let e = batch_engine();
+        let log = opening_log();
+        let decision = e
+            .handle(
+                &viewing(&e, &log),
+                batch(
+                    "b1",
+                    vec![exposed("seen", "the first"), exposed("seen", "the second")],
+                    vec![raw(&call("wire", json!({})))],
+                ),
+            )
+            .expect("the batch decides");
+        let (released, _) = answered(&decision);
+        assert_eq!(tool_names(released), ["wire"]);
+        let facts = appended_facts(decision);
+        let slots: Vec<u32> = facts
+            .iter()
+            .filter_map(|fact| match fact {
+                Fact::ValueAdmitted {
+                    provenance: Provenance::ProviderRun { position, .. },
+                    ..
+                } => Some(*position),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(slots, [0, 1]);
+        assert_eq!(e.validate_replay(&[log.clone(), facts.clone()].concat()), Ok(()));
+
+        let child = TrajectoryId::new("child");
+        let parent = Projection::build(&log, Revision::new(log.len() as u64));
+        let seeded = e
+            .seed_child(&parent.view(&traj()), &child)
+            .expect("the child seeds")
+            .facts;
+        let forked = [log, seeded].concat();
+        let decided = appended_facts(
+            e.handle(
+                &viewing(&e, &forked),
+                batch(
+                    "b2",
+                    vec![exposed("seen", "the first"), exposed("seen", "the second")],
+                    Vec::new(),
+                ),
+            )
+            .expect("the batch decides"),
+        );
+        assert_eq!(e.validate_replay(&[forked.clone(), decided.clone()].concat()), Ok(()));
+        let mut elsewhere = decided;
+        if let Fact::ValueAdmitted { trajectory, .. } = &mut elsewhere[2] {
+            *trajectory = child;
+        }
+        assert_eq!(
+            e.validate_replay(&[forked, elsewhere].concat()),
+            Err(TransitionRefusal::ForeignAdmission)
+        );
     }
 }

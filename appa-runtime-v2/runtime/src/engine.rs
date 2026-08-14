@@ -715,9 +715,11 @@ impl RuntimeEngine {
                 "[appa] tool {tool} is provider-run: it executes inside the inference call and cannot be proposed as a tool call"
             ))),
             Err(EngineError::InvalidCall(error)) => Ok(deny(format!("[appa] invalid call: {error}"))),
-            Err(EngineError::NotAllowed | EngineError::BranchEnded) => Err(EngineRefusal::Invariant {
-                detail: "check returned a dispatch-path refusal".to_string(),
-            }),
+            Err(EngineError::NotAllowed | EngineError::BranchEnded | EngineError::NotProviderRun(_)) => {
+                Err(EngineRefusal::Invariant {
+                    detail: "check returned a dispatch-path refusal".to_string(),
+                })
+            }
         }
     }
 
@@ -1539,6 +1541,7 @@ fn unestablished_source(views: &Views, value: ValueId) -> String {
             .map(|tool| format!("the result of {}", tool.as_str())),
         Some(Provenance::UserInput) => Some("your prompt".to_string()),
         Some(Provenance::ChildReturn { .. }) => Some("a subagent's return".to_string()),
+        Some(Provenance::ProviderRun { tool, .. }) => Some(format!("the provider's {} result", tool.as_str())),
         None => None,
     };
     match source {

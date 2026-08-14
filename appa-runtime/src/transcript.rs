@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 
-use appa_engine::fact::{BoundaryKind, Fact, ProposedCall};
+use appa_engine::fact::{BoundaryKind, Fact, TranscriptCall};
 use appa_engine::value::{Provenance, ToolCallId, TrajectoryId};
 
 use crate::wire::{WireFunctionCall, WireMessage, WireToolCall};
@@ -150,7 +150,7 @@ fn flush_if_drained(pending: &VecDeque<ToolCallId>, deferred: &mut Vec<WireMessa
     }
 }
 
-fn assistant_message(content: Option<&str>, calls: &[ProposedCall]) -> Option<WireMessage> {
+fn assistant_message(content: Option<&str>, calls: &[TranscriptCall]) -> Option<WireMessage> {
     if calls.is_empty() {
         return content.map(WireMessage::assistant);
     }
@@ -162,7 +162,7 @@ fn assistant_message(content: Option<&str>, calls: &[ProposedCall]) -> Option<Wi
     })
 }
 
-fn render_call(call: &ProposedCall) -> WireToolCall {
+fn render_call(call: &TranscriptCall) -> WireToolCall {
     WireToolCall {
         id: call.id.as_str().to_string(),
         kind: "function".to_string(),
@@ -213,8 +213,8 @@ mod tests {
         }
     }
 
-    fn proposed(id: &str, tool: &str, args: serde_json::Value) -> ProposedCall {
-        ProposedCall {
+    fn proposed(id: &str, tool: &str, args: serde_json::Value) -> TranscriptCall {
+        TranscriptCall {
             id: ToolCallId::new(id),
             tool: ToolName::new(tool),
             arguments: args,
