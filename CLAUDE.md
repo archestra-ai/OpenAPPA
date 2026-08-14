@@ -49,12 +49,7 @@ outdated.
    `CFG`, `EXT`, `IMP`, `THR`). Cite ids from code comments, tests and
    issues; they outlive section numbers. Takes priority over implementation
    details where they conflict.
-2. `paper/` — the LaTeX paper (AISec '26 draft, merged in #37): the same
-   model with its formal claims, theorem scoping, and citation anchors.
-   Coding work is grounded in the spec, not the paper — coding never
-   changes the paper. It stays as published, so the golden set's
-   same-commit rule does not reach it.
-3. `appa-engine/src/lib.rs` — concepts and semantics of the engine as
+2. `appa-engine/src/lib.rs` — concepts and semantics of the engine as
    implemented.
 
 The rest of the golden set is not normative and must not be cited as if it
@@ -83,7 +78,7 @@ Until explicitly declared public, APPA owes nothing to its own past. Docs
 describe the current model only — no retired rules, no "formerly", no
 migration notes. Rule ids may be renumbered and freed numbers reused; keep
 each family contiguous. Config and wire surfaces may break without shims
-or deprecation paths. The paper is the exception: it stays as published.
+or deprecation paths.
 
 ## Collaboration
 
@@ -108,9 +103,9 @@ Applies to discussion and work in this repository.
 ## Writing (public docs)
 
 Applies to `docs/` and other material written for readers outside the project.
-`paper/` has its own register. Except for correctness, defined terminology,
-and claim scope, these are defaults rather than lint rules; depart from them
-when the document reads better as a result.
+Except for correctness, defined terminology, and claim scope, these are
+defaults rather than lint rules; depart from them when the document reads
+better as a result.
 
 **Audience and purpose**
 
