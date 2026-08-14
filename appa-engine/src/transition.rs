@@ -627,6 +627,8 @@ pub enum TransitionRefusal {
     UnbackedApproval,
     #[error("this offer already prepared its call approval, or this call already has one")]
     ApprovalRepeated,
+    #[error("an accepted offer's batch does not prepare the call approval it promised")]
+    UnpreparedCallApproval,
     #[error("the denial record is not backed by a denial of this authority for this call")]
     UnbackedDenial,
     #[error("a record spends a call approval this log never prepared")]
@@ -693,6 +695,7 @@ pub(crate) struct Sequence<'a> {
     declared: Option<Declaration>,
     admitting: Option<ProposalBatchId>,
     deciding: Option<ProposalBatchId>,
+    approving: Option<crate::value::OfferId>,
 }
 
 struct Declaration {
@@ -736,6 +739,7 @@ impl<'a> Sequence<'a> {
             admitting: None,
             deciding: None,
             menu: None,
+            approving: None,
         }
     }
 
@@ -764,11 +768,27 @@ impl<'a> Sequence<'a> {
             admitting: None,
             deciding: None,
             menu: None,
+            approving: None,
         }
     }
 
     pub(crate) fn admit(&mut self, fact: &Fact) -> Result<(), TransitionRefusal> {
         self.member(fact)?;
+        if let Some(owed) = self.approving {
+            match fact {
+                Fact::OfferInvalidated { trajectory, offer } => {
+                    let views = self.projection.view(trajectory);
+                    if let Some(ending) = views.offer(offer) {
+                        let spent = views.offer(&owed).map(|recorded| (&recorded.subject, recorded.basis));
+                        if Some((&ending.subject, ending.basis)) != spent {
+                            return Err(TransitionRefusal::UnpreparedCallApproval);
+                        }
+                    }
+                }
+                Fact::CallApproved { offer, .. } if offer == &owed => self.approving = None,
+                _ => return Err(TransitionRefusal::UnpreparedCallApproval),
+            }
+        }
         let released = self.obliged(fact)?;
         if !matches!(fact, Fact::OfferOpened { .. }) {
             self.menu = None;
@@ -1210,7 +1230,10 @@ impl<'a> Sequence<'a> {
         let (basis, subject) = (recorded.basis, recorded.subject.clone());
         self.may_spend(trajectory, &subject, &basis)?;
         match &self.declared {
-            Some(open) if open.act == crate::basis::DecidedAct::Offer(*offer) => Ok(()),
+            Some(open) if open.act == crate::basis::DecidedAct::Offer(*offer) => {
+                self.approving = Some(*offer);
+                Ok(())
+            }
             _ => Err(TransitionRefusal::UnbackedOffer),
         }
     }
@@ -1522,6 +1545,9 @@ impl<'a> Sequence<'a> {
         }
         if self.declared.as_ref().is_some_and(|open| !open.owed.is_empty()) {
             return Err(TransitionRefusal::UnbackedAdvance);
+        }
+        if self.approving.is_some() {
+            return Err(TransitionRefusal::UnpreparedCallApproval);
         }
         Ok(self.projection)
     }

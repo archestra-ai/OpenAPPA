@@ -872,7 +872,7 @@ impl Engine {
             (OfferEnd::Accepted, OfferOutcome::Approved(_)) => OfferFollowUp::Approved {
                 call: views
                     .approval(&execution.offer)
-                    .expect("an accepted offer prepared its approval in the same batch")
+                    .ok_or(TransitionRefusal::UnpreparedCallApproval)?
                     .call
                     .clone(),
             },
@@ -4104,6 +4104,157 @@ mod tests {
         assert_eq!(
             e.validate_replay(&[opening, orphan].concat()),
             Err(TransitionRefusal::OfferEnded)
+        );
+    }
+
+    #[test]
+    fn an_acceptance_whose_batch_prepares_no_approval_is_refused() {
+        let e = two_officer_engine();
+        let opening = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let wire = call("wire", json!({}));
+        let opened = appended_facts(proposed(&e, &opening, "b1", nonce(), wire.clone()).expect("the batch decides"));
+        let offers = opened_offers(&opened);
+        let (chosen, plan) = offers[0].clone();
+        let opening = [opening, opened].concat();
+        let elsewhere = appended_facts(proposed(&e, &opening, "b2", nonce(), wire).expect("the batch decides"));
+        let unrelated = opened_offers(&elsewhere)[0].0;
+        let opening = [opening, elsewhere].concat();
+
+        let evidence = evidence_for(chosen, &plan, "wire", partial(SUSPICIOUS, Audience::Public));
+        let approval = appended_facts(
+            execute_offer(&e, &opening, chosen, OfferOutcome::Approved(evidence)).expect("the offer executes"),
+        );
+        assert_eq!(e.validate_replay(&[opening.clone(), approval.clone()].concat()), Ok(()));
+
+        let position = approval
+            .iter()
+            .position(|fact| matches!(fact, Fact::CallApproved { .. }))
+            .expect("the acceptance prepared one");
+        let mut truncated = approval.clone();
+        truncated.remove(position);
+        assert!(
+            truncated
+                .iter()
+                .any(|fact| matches!(fact, Fact::OfferInvalidated { .. }))
+        );
+        let stopped = [opening.clone(), truncated].concat();
+        assert_eq!(
+            e.validate_replay(&stopped),
+            Err(TransitionRefusal::UnpreparedCallApproval)
+        );
+        assert_eq!(
+            e.view(&traj(), stopped.clone(), Revision::new(stopped.len() as u64))
+                .err(),
+            Some(TransitionRefusal::UnpreparedCallApproval)
+        );
+
+        let mut deferred = approval.clone();
+        deferred.insert(position, user_value(known(TRUSTED, Audience::Public)));
+        assert_eq!(
+            e.validate_replay(&[opening.clone(), deferred].concat()),
+            Err(TransitionRefusal::UnpreparedCallApproval)
+        );
+
+        let mut foreign = approval;
+        foreign.insert(
+            position,
+            Fact::OfferInvalidated {
+                trajectory: traj(),
+                offer: unrelated,
+            },
+        );
+        assert_eq!(
+            e.validate_replay(&[opening, foreign].concat()),
+            Err(TransitionRefusal::UnpreparedCallApproval)
+        );
+    }
+
+    #[test]
+    fn the_approval_window_admits_no_ending_from_before_the_offer_it_approves() {
+        let e = two_officer_engine();
+        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let wire = call("wire", json!({}));
+        let opened = appended_facts(proposed(&e, &log, "b1", nonce(), wire).expect("the batch decides"));
+        let offers = opened_offers(&opened);
+        let authority = offers[0].1.required[0].authority.clone();
+        let (target, survivor) = (offers[0].0, offers[1].0);
+        let log = [log, opened].concat();
+
+        let denial = appended_facts(
+            execute_offer(&e, &log, target, OfferOutcome::Denied { authority }).expect("the denial is recorded"),
+        );
+        let log = [log, denial].concat();
+        let (fresh, fresh_plan) = opened_offers(&log)
+            .into_iter()
+            .find(|(offer, _)| offer != &target && offer != &survivor)
+            .expect("the denial re-offered the surviving plan");
+        assert_eq!(
+            execute_offer(&e, &log, survivor, OfferOutcome::Approved(Vec::new())),
+            Err(TransitionError::StaleOffer),
+            "the predecessor is stale, and no record ended it"
+        );
+
+        let evidence = evidence_for(fresh, &fresh_plan, "wire", partial(SUSPICIOUS, Audience::Public));
+        let approval = appended_facts(
+            execute_offer(&e, &log, fresh, OfferOutcome::Approved(evidence)).expect("the fresh offer executes"),
+        );
+        assert_eq!(e.validate_replay(&[log.clone(), approval.clone()].concat()), Ok(()));
+
+        let position = approval
+            .iter()
+            .position(|fact| matches!(fact, Fact::CallApproved { .. }))
+            .expect("the acceptance prepared one");
+        let mut forged = approval;
+        forged.insert(
+            position,
+            Fact::OfferInvalidated {
+                trajectory: traj(),
+                offer: survivor,
+            },
+        );
+        assert_eq!(
+            e.validate_replay(&[log, forged].concat()),
+            Err(TransitionRefusal::UnpreparedCallApproval)
+        );
+    }
+
+    #[test]
+    fn a_repeat_of_an_unapproved_acceptance_answers_a_refusal() {
+        let e = engine(vec![crm_tool()]);
+        let opening = vec![user_value(known(TRUSTED, Audience::Public))];
+        let opened = appended_facts(blocked_batch(&e, &opening, "b1", nonce()));
+        let offer = opened_offers(&opened)[0].0;
+        let approval = appended_facts(
+            execute_offer(
+                &e,
+                &[opening.clone(), opened.clone()].concat(),
+                offer,
+                OfferOutcome::Approved(Vec::new()),
+            )
+            .expect("the offer executes"),
+        );
+        let unpaired: Vec<Fact> = [opening, opened, approval]
+            .concat()
+            .into_iter()
+            .filter(|fact| !matches!(fact, Fact::CallApproved { .. }))
+            .collect();
+
+        let mut projection = Projection::empty(Revision::new(unpaired.len() as u64));
+        for fact in &unpaired {
+            projection.fold(fact);
+        }
+        let view = crate::transition::EngineView::validated(projection, e.identity, traj());
+        assert_eq!(
+            e.handle(
+                &view,
+                EngineEvent::ExecuteOffer(OfferExecution {
+                    trajectory: traj(),
+                    offer,
+                    outcome: OfferOutcome::Approved(Vec::new()),
+                    offer_nonce: nonce(),
+                }),
+            ),
+            Err(TransitionError::Invalid(TransitionRefusal::UnpreparedCallApproval))
         );
     }
 
