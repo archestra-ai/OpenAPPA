@@ -85,18 +85,37 @@ impl PlanId {
 /// narrowing; `Sanitize` binds an output sanitizer to the dispatch. None edits a trajectory label —
 /// `Sanitize` changes only which value is admitted when the result comes back, and the fold does
 /// the rest.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RemedyStep {
     Authorize(AuthorityName),
     Accept(Narrowing),
     Sanitize(SanitizerName),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutableRemedyPlan {
     pub id: PlanId,
     pub steps: Vec<RemedyStep>,
     pub required: Vec<RequiredRuling>,
+}
+
+impl ExecutableRemedyPlan {
+    /// The narrowing this plan asks the agent to accept, where its route carries one.
+    /// A raw release path orders that acceptance before its rulings; an output-sanitizer path
+    /// accepts no residual up front and has none here.
+    pub fn narrowing(&self) -> Option<&Narrowing> {
+        self.steps.iter().find_map(|step| match step {
+            RemedyStep::Accept(narrowing) => Some(narrowing),
+            RemedyStep::Authorize(_) | RemedyStep::Sanitize(_) => None,
+        })
+    }
+
+    pub fn sanitizer(&self) -> Option<&SanitizerName> {
+        self.steps.iter().find_map(|step| match step {
+            RemedyStep::Sanitize(sanitizer) => Some(sanitizer),
+            RemedyStep::Authorize(_) | RemedyStep::Accept(_) => None,
+        })
+    }
 }
 
 /// An id-less redispatch recommendation: the named tool and the displayed
@@ -495,7 +514,7 @@ fn sanitized_commit(current: &PartialLabel, output: &Label, sanitizer: &Sanitize
 /// engine; the runtime only gathers a ruling from each named authority for its gaps and hands them to
 /// `execute_remedy_plan`. A gap with no covering authority is omitted — the plan is then not executable and
 /// `execute_remedy_plan` reports the gap uncovered.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequiredRuling {
     pub authority: AuthorityName,
     pub covers: Vec<Gap>,

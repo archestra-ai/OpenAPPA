@@ -138,6 +138,101 @@ impl RawResultDigest {
     }
 }
 
+/// Domain-separated hashing over **length-prefixed** fields.
+///
+/// Bare concatenation over variable-length names is ambiguous: `("ab", "c")` and `("a", "bc")`
+/// would hash alike, so a trajectory and a batch name could be chosen to collide with another
+/// pair. Every field carries its own length, which makes the encoding injective.
+struct Framed(Sha256);
+
+impl Framed {
+    fn tagged(domain: &'static [u8]) -> Framed {
+        let mut hasher = Sha256::new();
+        hasher.update(domain);
+        Framed(hasher)
+    }
+
+    fn field(mut self, bytes: &[u8]) -> Framed {
+        self.0.update((bytes.len() as u64).to_be_bytes());
+        self.0.update(bytes);
+        self
+    }
+
+    fn finish(self) -> [u8; 32] {
+        self.0.finalize().into()
+    }
+}
+
+/// One act's fresh 256 bits of runtime entropy. The engine mixes it into every
+/// identity it derives for that act and keeps none of it: explicit entropy is input data, never
+/// engine state. Runtime supplies it and persists the result; it never allocates or
+/// binds an individual offer identity itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfferNonce([u8; 32]);
+
+impl OfferNonce {
+    pub const fn new(bytes: [u8; 32]) -> Self {
+        OfferNonce(bytes)
+    }
+}
+
+/// One surfaced block's identity, derived by the engine from the act's nonce and what
+/// the block is about. Fresh per surfaced block: the same call blocked again under a new act gets
+/// a new one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct BlockId([u8; 32]);
+
+impl BlockId {
+    /// The block one proposal's refusal surfaces. Bound to the deciding act and the exact position
+    /// within it, so two identical siblings surface two blocks.
+    pub(crate) fn of_proposal(
+        nonce: &OfferNonce,
+        trajectory: &TrajectoryId,
+        batch: &crate::transition::ProposalBatchId,
+        position: u32,
+        call: &CanonicalDigest,
+    ) -> Self {
+        BlockId(
+            Framed::tagged(b"appa.block.v1")
+                .field(&nonce.0)
+                .field(trajectory.0.as_bytes())
+                .field(batch.as_str().as_bytes())
+                .field(&position.to_be_bytes())
+                .field(&call.0)
+                .finish(),
+        )
+    }
+
+    pub fn bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// One executable offer's identity. Unguessable without the act's nonce, so
+/// possession of one proves the offer reached model context before the acceptance naming it was
+/// authored — which is what makes an acceptance informed without any turn or round counter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct OfferId([u8; 32]);
+
+impl OfferId {
+    /// One plan of one block: its deterministic position in the derived order, and the canonical
+    /// digest of the plan itself, so two blocks never share an identity and one block's plans
+    /// never collide with each other.
+    pub(crate) fn of_plan(block: &BlockId, position: u32, plan: &[u8]) -> Self {
+        OfferId(
+            Framed::tagged(b"appa.offer.v1")
+                .field(&block.0)
+                .field(&position.to_be_bytes())
+                .field(plan)
+                .finish(),
+        )
+    }
+
+    pub fn bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 /// Identifies one dispatch of one call within a trajectory. The occurrence counter distinguishes a
 /// repeated identical call — a second `transfer(A, $1)` is a new dispatch, not a re-issue.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

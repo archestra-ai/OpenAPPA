@@ -18,6 +18,7 @@
 //!
 pub mod admit;
 pub mod authority;
+pub mod basis;
 pub mod branch;
 pub mod check;
 pub mod contract;

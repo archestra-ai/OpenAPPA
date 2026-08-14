@@ -52,7 +52,48 @@ static NO_INHERITED: BTreeSet<ValueId> = BTreeSet::new();
 pub(crate) struct DecidedBatch {
     pub(crate) trajectory: TrajectoryId,
     pub(crate) payload: CanonicalDigest,
+    /// What the decision was about, in proposal order. An offer names its proposal by position,
+    /// and both a live execution and a replay re-derive the block from that call — so the decision
+    /// record is where the call has to be readable from.
+    pub(crate) proposals: Vec<ResolvedCall>,
     pub(crate) released: Vec<DispatchId>,
+}
+
+/// One offer the log has opened. Whether it is still *pending* is not stored: that is
+/// the comparison between `basis` and what its subject stands at now, which only the versions can
+/// answer — so an offer cannot be marked fresh by a record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RecordedOffer {
+    pub(crate) trajectory: TrajectoryId,
+    /// The surfaced block this plan is one of. A repeat reports the identity its offers were
+    /// derived under rather than one minted for the retry.
+    pub(crate) block: crate::value::BlockId,
+    pub(crate) call: CanonicalDigest,
+    pub(crate) subject: crate::basis::SubjectKey,
+    pub(crate) plan: crate::plan::ExecutableRemedyPlan,
+    pub(crate) basis: crate::basis::PolicyBasis,
+    pub(crate) end: Option<OfferEnd>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum OfferEnd {
+    Accepted,
+    Denied(crate::names::AuthorityName),
+    Invalidated,
+}
+
+/// One prepared call approval: the whole release its consumption will land. Keyed by the
+/// offer it came from, which is also its subject — so a second approval from one offer is not a
+/// state the table can hold.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PreparedApproval {
+    pub(crate) trajectory: TrajectoryId,
+    pub(crate) call: ResolvedCall,
+    pub(crate) plan: crate::plan::PlanId,
+    pub(crate) acceptance: Option<crate::check::Narrowing>,
+    pub(crate) rulings: Vec<crate::execute::AuthorityEvidence>,
+    pub(crate) sanitizer: Option<crate::names::SanitizerName>,
+    pub(crate) basis: crate::basis::PolicyBasis,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,6 +134,9 @@ pub struct Projection {
     denials: BTreeMap<TrajectoryId, BTreeMap<CanonicalDigest, BTreeSet<AuthorityName>>>,
     active: BTreeSet<TrajectoryId>,
     decided: BTreeMap<crate::transition::ProposalBatchId, DecidedBatch>,
+    offers: BTreeMap<crate::value::OfferId, RecordedOffer>,
+    approvals: BTreeMap<crate::value::OfferId, PreparedApproval>,
+    versions: crate::basis::Versions,
 }
 
 impl Projection {
@@ -119,6 +163,9 @@ impl Projection {
             denials: BTreeMap::new(),
             active: BTreeSet::new(),
             decided: BTreeMap::new(),
+            offers: BTreeMap::new(),
+            approvals: BTreeMap::new(),
+            versions: crate::basis::Versions::default(),
         }
     }
 
@@ -160,11 +207,77 @@ impl Projection {
             denials,
             active,
             decided,
+            offers,
+            approvals,
+            versions,
         } = self;
         {
             active.insert(fact.trajectory().clone());
             match fact {
                 Fact::TrajectoryOpened { .. } => {}
+                Fact::BasisAdvanced { advance, .. } => versions.advance(advance),
+                Fact::OfferOpened {
+                    trajectory,
+                    offer,
+                    block,
+                    call,
+                    subject,
+                    plan,
+                    basis,
+                    ..
+                } => {
+                    offers.insert(
+                        *offer,
+                        RecordedOffer {
+                            trajectory: trajectory.clone(),
+                            block: *block,
+                            call: *call,
+                            subject: subject.clone(),
+                            plan: plan.clone(),
+                            basis: *basis,
+                            end: None,
+                        },
+                    );
+                }
+                Fact::OfferAccepted { offer, .. } => {
+                    if let Some(open) = offers.get_mut(offer) {
+                        open.end = Some(OfferEnd::Accepted);
+                    }
+                }
+                Fact::OfferDenied { offer, authority, .. } => {
+                    if let Some(open) = offers.get_mut(offer) {
+                        open.end = Some(OfferEnd::Denied(authority.clone()));
+                    }
+                }
+                Fact::OfferInvalidated { offer, .. } => {
+                    if let Some(open) = offers.get_mut(offer) {
+                        open.end = Some(OfferEnd::Invalidated);
+                    }
+                }
+                Fact::CallApprovalConsumed { .. } => {}
+                Fact::CallApproved {
+                    trajectory,
+                    offer,
+                    call,
+                    plan,
+                    acceptance,
+                    rulings,
+                    sanitizer,
+                    basis,
+                } => {
+                    approvals.insert(
+                        *offer,
+                        PreparedApproval {
+                            trajectory: trajectory.clone(),
+                            call: call.clone(),
+                            plan: *plan,
+                            acceptance: acceptance.clone(),
+                            rulings: rulings.clone(),
+                            sanitizer: sanitizer.clone(),
+                            basis: *basis,
+                        },
+                    );
+                }
                 Fact::ProposalBatchDecided {
                     trajectory,
                     batch,
@@ -177,6 +290,7 @@ impl Projection {
                         DecidedBatch {
                             trajectory: trajectory.clone(),
                             payload: CanonicalDigest::of_batch(proposals, *spawn),
+                            proposals: proposals.clone(),
                             released: released.clone(),
                         },
                     );
@@ -517,6 +631,105 @@ impl Views<'_> {
     /// and the payload digest. `None` means the identity is fresh.
     pub(crate) fn decided_batch(&self, batch: &crate::transition::ProposalBatchId) -> Option<&DecidedBatch> {
         self.projection.decided.get(batch)
+    }
+
+    /// The offers of one subject that are still **pending**: opened, and recording the basis that
+    /// subject stands at now. An offer whose basis has moved is stale and never revives,
+    /// so this is what a repeat of the same act is answered with — current guidance, derived from
+    /// the facts rather than from anything the runtime remembered.
+    pub(crate) fn pending_block(
+        &self,
+        subject: &crate::basis::SubjectKey,
+    ) -> Option<(crate::value::BlockId, Vec<(crate::value::OfferId, crate::plan::PlanId)>)> {
+        let current = self.basis_for(subject);
+        let pending: Vec<_> = self
+            .projection
+            .offers
+            .iter()
+            .filter(|(_, open)| &open.subject == subject && open.basis == current && open.end.is_none())
+            .collect();
+        let block = pending.first().map(|(_, open)| open.block)?;
+        let mut offers: Vec<_> = pending.into_iter().map(|(id, open)| (*id, open.plan.id)).collect();
+        offers.sort_by_key(|(_, plan)| *plan);
+        Some((block, offers))
+    }
+
+    /// Every pending offer of this trajectory whose plan names `authority` for exactly this
+    /// rendered call — the set one denial ends together.
+    pub(crate) fn offers_naming(
+        &self,
+        call: &CanonicalDigest,
+        authority: &crate::names::AuthorityName,
+    ) -> Vec<crate::value::OfferId> {
+        self.projection
+            .offers
+            .iter()
+            .filter(|(_, open)| {
+                &open.trajectory == self.trajectory
+                    && &open.call == call
+                    && open.end.is_none()
+                    && open.basis == self.basis_for(&open.subject)
+                    && open.plan.names_authority(authority)
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    pub(crate) fn approval(&self, offer: &crate::value::OfferId) -> Option<&PreparedApproval> {
+        self.projection.approvals.get(offer)
+    }
+
+    /// Every approval prepared for this exact call in this trajectory, whatever their freshness.
+    /// The caller decides what current means: a live decision compares against the basis it stands
+    /// at, and the validator against the basis its decision began from.
+    pub(crate) fn approvals_for(
+        &self,
+        call: &ResolvedCall,
+    ) -> impl Iterator<Item = (crate::value::OfferId, &PreparedApproval)> {
+        self.projection
+            .approvals
+            .iter()
+            .filter(move |(_, approval)| &approval.trajectory == self.trajectory && &approval.call == call)
+            .map(|(offer, approval)| (*offer, approval))
+    }
+
+    /// The approval this exact call may consume right now. Spending one advances its own
+    /// subject, so a spent approval is not current and cannot be found here a second time.
+    pub(crate) fn current_approval(&self, call: &ResolvedCall) -> Option<(crate::value::OfferId, &PreparedApproval)> {
+        self.approvals_for(call)
+            .find(|(offer, approval)| approval.basis == self.basis_for(&crate::basis::SubjectKey::Approval(*offer)))
+    }
+
+    /// One opened offer, whatever its freshness. `None` means the identity is unknown to
+    /// this family — which is the first thing an execution has to refuse.
+    pub(crate) fn offer(&self, offer: &crate::value::OfferId) -> Option<&RecordedOffer> {
+        self.projection.offers.get(offer)
+    }
+
+    /// Does this dispatch still hold an unsettled effect reservation? A close that
+    /// evaporates one changes what `no_prior` sees family-wide.
+    pub(crate) fn reserves(&self, dispatch: &DispatchId) -> bool {
+        self.projection
+            .reservations
+            .get(dispatch)
+            .is_some_and(|effects| !effects.is_empty())
+    }
+
+    /// The `PolicyBasis` one subject stands at right now: the family's version, this
+    /// trajectory's flow version, and the subject's own generation. An offer is pending exactly
+    /// while the basis it recorded still equals this one.
+    pub(crate) fn basis_for(&self, subject: &crate::basis::SubjectKey) -> crate::basis::PolicyBasis {
+        self.projection.versions.basis_for(self.trajectory, subject)
+    }
+
+    /// The basis a subject will stand at once `advance` has been applied: the **post-decision**
+    /// value an offer or an approval records.
+    pub(crate) fn basis_after(
+        &self,
+        advance: &crate::basis::BasisAdvance,
+        subject: &crate::basis::SubjectKey,
+    ) -> crate::basis::PolicyBasis {
+        self.basis_for(subject).advanced_by(advance, self.trajectory, subject)
     }
 
     /// Does the family log name `trajectory` at all? A fork takes an unused child id:

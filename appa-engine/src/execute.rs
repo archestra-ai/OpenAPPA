@@ -25,6 +25,15 @@ pub struct Ruling {
     pub reviewed: AuthorityReview,
 }
 
+/// One authority's approval of the exact canonical call an offer names.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorityEvidence {
+    pub offer: crate::value::OfferId,
+    pub authority: AuthorityName,
+    pub covers: Vec<Gap>,
+    pub reviewed: AuthorityReview,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorityReview {
     pub tool: crate::value::ToolName,
@@ -61,6 +70,8 @@ pub enum PlanError {
     RulingAssignmentMismatch,
     #[error("a ruling's recorded review does not match the live state it would admit")]
     ReviewMismatch,
+    #[error("this authority response was approved for a different offer")]
+    EvidenceOfferMismatch,
 }
 
 /// The mandate envelope of a released block: no ruling claims a gap the block
@@ -172,15 +183,12 @@ pub(crate) fn execute_remedy_plan(
     let trajectory = views.trajectory().clone();
 
     let mut facts = Vec::new();
-    if let Some(narrowing) = chosen.steps.iter().find_map(|step| match step {
-        plan::RemedyStep::Accept(narrowing) => Some(narrowing.clone()),
-        plan::RemedyStep::Authorize(_) | plan::RemedyStep::Sanitize(_) => None,
-    }) {
+    if let Some(narrowing) = chosen.narrowing() {
         facts.push(Fact::Acceptance {
             trajectory: trajectory.clone(),
             dispatch: dispatch.clone(),
             plan,
-            narrowing,
+            narrowing: narrowing.clone(),
         });
     }
     for required in &chosen.required {
@@ -197,15 +205,12 @@ pub(crate) fn execute_remedy_plan(
             reviewed: ruling.reviewed.clone(),
         });
     }
-    if let Some(sanitizer) = chosen.steps.iter().find_map(|step| match step {
-        plan::RemedyStep::Sanitize(sanitizer) => Some(sanitizer.clone()),
-        plan::RemedyStep::Authorize(_) | plan::RemedyStep::Accept(_) => None,
-    }) {
+    if let Some(sanitizer) = chosen.sanitizer() {
         facts.push(Fact::OutputSanitizerBound {
             trajectory: trajectory.clone(),
             dispatch: dispatch.clone(),
             plan,
-            sanitizer,
+            sanitizer: sanitizer.clone(),
         });
     }
     facts.push(dispatch_opened);

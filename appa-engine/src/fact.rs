@@ -321,6 +321,66 @@ pub enum Fact {
         spawn: Option<crate::transition::SpawnMark>,
         released: Vec<DispatchId>,
     },
+    /// One executable plan of one surfaced block, bound to the identity the model will name to
+    /// execute it.
+    ///
+    /// Offers are durable lifecycle records, not an outer-layer pending collection: APPA has no
+    /// turn and no clock to expire them on, so what makes one current is the `PolicyBasis` it
+    /// records here. It stays pending while that basis still equals its subject's, and the moment
+    /// one component differs it is stale — permanently, because a counter only moves forward.
+    ///
+    /// The plan travels with the record. Without it the runtime would have to hold the offered
+    /// plan in memory to execute it later, which is exactly the process-lifetime cache this record
+    /// removes; with it, an offer survives a restart the way every other engine fact does.
+    OfferOpened {
+        trajectory: TrajectoryId,
+        offer: crate::value::OfferId,
+        block: crate::value::BlockId,
+        batch: crate::transition::ProposalBatchId,
+        call: CanonicalDigest,
+        subject: crate::basis::SubjectKey,
+        plan: crate::plan::ExecutableRemedyPlan,
+        basis: crate::basis::PolicyBasis,
+    },
+    /// The agent selected this offer, and the engine prepared what its plan promised. Terminal: an offer is accepted once and never revives.
+    ///
+    /// For a terminal call plan it lands with the [`Fact::CallApproved`] it prepared. Accepting
+    /// consumes the candidate the offer was about, which is why the decision that records this
+    /// also advances that subject's generation — the sibling offers on the same candidate lose
+    /// their basis in the same act that took it.
+    OfferAccepted {
+        trajectory: TrajectoryId,
+        offer: crate::value::OfferId,
+    },
+    OfferDenied {
+        trajectory: TrajectoryId,
+        offer: crate::value::OfferId,
+        authority: AuthorityName,
+    },
+    OfferInvalidated {
+        trajectory: TrajectoryId,
+        offer: crate::value::OfferId,
+    },
+    CallApproved {
+        trajectory: TrajectoryId,
+        offer: crate::value::OfferId,
+        call: crate::value::ResolvedCall,
+        plan: PlanId,
+        acceptance: Option<Narrowing>,
+        rulings: Vec<crate::execute::AuthorityEvidence>,
+        sanitizer: Option<SanitizerName>,
+        basis: crate::basis::PolicyBasis,
+    },
+    CallApprovalConsumed {
+        trajectory: TrajectoryId,
+        offer: crate::value::OfferId,
+        dispatch: DispatchId,
+    },
+    BasisAdvanced {
+        trajectory: TrajectoryId,
+        act: crate::basis::DecidedAct,
+        advance: crate::basis::BasisAdvance,
+    },
     ForkPrepared {
         trajectory: TrajectoryId,
         fork: crate::value::ForkId,
@@ -359,6 +419,13 @@ impl Fact {
             | Fact::OutputSanitizerBound { trajectory, .. }
             | Fact::OutputSanitizerApplied { trajectory, .. }
             | Fact::ChildReturn { trajectory, .. }
+            | Fact::OfferOpened { trajectory, .. }
+            | Fact::OfferAccepted { trajectory, .. }
+            | Fact::OfferDenied { trajectory, .. }
+            | Fact::OfferInvalidated { trajectory, .. }
+            | Fact::CallApproved { trajectory, .. }
+            | Fact::CallApprovalConsumed { trajectory, .. }
+            | Fact::BasisAdvanced { trajectory, .. }
             | Fact::ForkPrepared { trajectory, .. }
             | Fact::ForkOpened { trajectory, .. }
             | Fact::Boundary { trajectory, .. } => trajectory,
