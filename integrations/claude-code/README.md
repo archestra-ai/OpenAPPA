@@ -37,7 +37,7 @@ checkout:
 
 ```text
 Set up APPA gating for Claude Code sessions I start through the
-claude-appa alias. Work from this OpenAPPA checkout and use absolute
+clappa alias. Work from this OpenAPPA checkout and use absolute
 paths everywhere.
 
 1. Statusline overlay: create ~/.claude/appa-session-settings.json
@@ -49,8 +49,8 @@ paths everywhere.
    untouched — the overlay loads only through the alias.
 
 2. Alias: add to my shell rc, as one line:
-     alias claude-appa='claude --settings ~/.claude/appa-session-settings.json --plugin-dir <checkout>/integrations/claude-code/plugin'
-   Remind me that only sessions started with claude-appa are gated, and
+     alias clappa='claude --settings ~/.claude/appa-session-settings.json --plugin-dir <checkout>/integrations/claude-code/plugin'
+   Remind me that only sessions started with clappa are gated, and
    that a gated session blocks whenever the runtime process is down.
 
 3. Check the runtime: curl -sS -m 2 http://127.0.0.1:8787/health should
@@ -66,7 +66,7 @@ paths everywhere.
    blocks a tool the policy does not name — every MCP tool I have
    installed stays blocked until the policy declares it. Close by
    telling me to start a gated session and run /appa-tool-sync there:
-   the skill ships with the plugin, so it exists only in claude-appa
+   the skill ships with the plugin, so it exists only in clappa
    sessions. It inventories my MCP servers and proposes policy entries
    for their tools, and I review each one.
 
@@ -74,7 +74,7 @@ Show me what you changed when you are done.
 ```
 
 The alias form is opt-in gating: nothing stops a plain `claude` in the
-same repo, and nothing outside a claude-appa session changes.
+same repo, and nothing outside a clappa session changes.
 
 If the process listens on a port other than 8787, set
 `APPA_RUNTIME_URL=http://127.0.0.1:<port>` in the session's
@@ -91,7 +91,7 @@ Remove APPA gating from my Claude Code sessions. Remove only the
 Claude Code <-> APPA wiring and shut the runtime down; the policy
 survives the uninstall.
 
-1. Remove the claude-appa alias from my shell rc.
+1. Remove the clappa alias from my shell rc.
 
 2. Statusline: delete ~/.claude/appa-session-settings.json and the
    wrapper script it points at, if there is one. Do not touch the
