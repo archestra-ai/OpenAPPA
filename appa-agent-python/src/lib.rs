@@ -556,13 +556,14 @@ delta    = {}
     }
 
     fn offer_id(blocked: &str) -> String {
-        serde_json::from_str::<serde_json::Value>(blocked).expect("a JSON response")["feedback"]
+        let feedback = serde_json::from_str::<serde_json::Value>(blocked).expect("a JSON response")["feedback"]
             .as_str()
             .expect("a block carries feedback")
-            .split_whitespace()
-            .find(|word| word.starts_with("offer-"))
+            .to_string();
+        feedback
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+            .find(|word| word.starts_with("offer-") && word.len() > "offer-".len())
             .expect("blocking feedback surfaces an offer")
-            .trim_end_matches('.')
             .to_string()
     }
 

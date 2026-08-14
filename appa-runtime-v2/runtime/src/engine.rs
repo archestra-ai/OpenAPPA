@@ -17,6 +17,7 @@ use appa_engine::fact::{
 use appa_engine::label::{Audience, Dim, Dimension, Label, PartialLabel, ReaderId, Trust};
 use appa_engine::plan::{ExecutableRemedyPlan, PlannedBlock, RemedyPlan};
 use appa_engine::projection::Views;
+use appa_engine::registry::TrustChain;
 use appa_engine::transition::EngineView as ValidatedView;
 use appa_engine::value::{
     CanonicalDigest, DispatchId as EngineDispatchId, Provenance, RawResultDigest, ResolvedCall, ToolName, ValueBody,
@@ -882,7 +883,7 @@ impl RuntimeEngine {
                     ));
                     offer_ids.push(id);
                 }
-                let text = block_feedback(views, &planned, &offer_ids);
+                let text = block_feedback(views, &planned, &offer_ids, self.engine.registry().trust_chain());
                 let mut decision = EngineDecision::deliver(Next::ModelResponse {
                     invocations: Vec::new(),
                     feedback: vec![Feedback {
@@ -1764,57 +1765,126 @@ fn unestablished_feedback(views: &Views, facts: &[UnestablishedFact]) -> String 
         .map(|fact| {
             let dims: Vec<String> = fact.dimensions.iter().map(|dim| format!("{dim:?}")).collect();
             format!(
-                "{} has unestablished dimensions: {}",
+                "{} is missing label facts for {}",
                 unestablished_source(views, fact.value),
                 dims.join(", ")
             )
         })
         .collect();
     format!(
-        "[appa] blocked on missing facts: {}. A fact clears this, not a plan",
+        "{}. A fact must resolve this before a remedy can run",
         entries.join("; ")
     )
 }
 
-fn block_feedback(views: &Views, planned: &PlannedBlock, offers: &[OfferId]) -> String {
-    let mut lines = vec!["[appa] this call is blocked.".to_string()];
+fn trust_feedback(trust: Trust, chain: &TrustChain) -> String {
+    let named = if trust == Trust::new(u8::MAX) {
+        chain.name_of(Trust::new((chain.len() - 1) as u8))
+    } else {
+        chain.name_of(trust)
+    };
+    terminal_safe(
+        named
+            .map_or_else(|| format!("rank {}", trust.rank()), str::to_string)
+            .as_str(),
+    )
+}
+
+fn narrowing_feedback(narrowing: &appa_engine::check::Narrowing, chain: &TrustChain) -> Vec<String> {
+    let mut changes = Vec::new();
+    if narrowing.from.trust != narrowing.to.trust {
+        changes.push(format!(
+            "session trust would fall: {} -> {}",
+            trust_feedback(narrowing.from.trust, chain),
+            trust_feedback(narrowing.to.trust, chain),
+        ));
+    }
+    if narrowing.from.audience != narrowing.to.audience {
+        changes.push(format!(
+            "allowed readers would narrow: {} -> {}",
+            terminal_safe(&audience_wire(&narrowing.from.audience)),
+            terminal_safe(&audience_wire(&narrowing.to.audience)),
+        ));
+    }
+    changes
+}
+
+fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId) -> String {
+    let needs_approval = !plan.required.is_empty();
+    let action = match (needs_approval, plan.narrowing().is_some(), plan.sanitizer()) {
+        (true, _, Some(sanitizer)) => {
+            format!(
+                "Request approval and use sanitizer {}'s result",
+                terminal_safe(sanitizer.as_str())
+            )
+        }
+        (false, _, Some(sanitizer)) => {
+            format!("Use sanitizer {}'s result", terminal_safe(sanitizer.as_str()))
+        }
+        (true, true, None) => "Request approval and accept this change for the rest of this session".to_string(),
+        (false, true, None) => "Accept this change for the rest of this session".to_string(),
+        (true, false, None) => "Request approval".to_string(),
+        (false, false, None) => "Apply the offered remedy".to_string(),
+    };
+    format!(
+        "  - {action}:\n    execute_remedy_plan(offer_id: \"{}\")",
+        terminal_safe(&id.0),
+    )
+}
+
+fn block_feedback(views: &Views, planned: &PlannedBlock, offers: &[OfferId], chain: &TrustChain) -> String {
+    let mut reasons = Vec::new();
     for gap in &planned.raw.requirement_gaps {
-        lines.push(format!("- {}", gap_text(gap)));
+        reasons.push(terminal_safe(&gap_text(gap)));
     }
     if let Some(narrowing) = &planned.raw.narrowing {
-        lines.push(format!(
-            "- committing it would narrow the release frontier from {:?} to {:?}",
-            narrowing.from, narrowing.to
-        ));
+        reasons.extend(narrowing_feedback(narrowing, chain));
     }
     if !planned.raw.unestablished.is_empty() {
-        lines.push(format!(
-            "- {}",
-            unestablished_feedback(views, &planned.raw.unestablished)
-        ));
+        reasons.push(terminal_safe(&unestablished_feedback(
+            views,
+            &planned.raw.unestablished,
+        )));
     }
+
+    let mut lines = vec![
+        "[appa] Blocked: this call cannot run yet.".to_string(),
+        String::new(),
+        "Why:".to_string(),
+    ];
+    lines.extend(reasons.into_iter().map(|reason| format!("  - {reason}")));
+
+    let mut remedies = Vec::new();
     let mut offer_iter = offers.iter();
     for plan in &planned.plans {
         match plan {
-            RemedyPlan::Executable(_) => {
+            RemedyPlan::Executable(plan) => {
                 if let Some(id) = offer_iter.next() {
-                    lines.push(format!(
-                        "Option: call execute_remedy_plan with offer id {} to clear this atomically.",
-                        id.0
-                    ));
+                    remedies.push(remedy_instruction(plan, id));
                 }
             }
             RemedyPlan::Redispatch(redispatch) => {
-                lines.push(format!(
-                    "Option: run tool {} first — it clears: {}.",
-                    redispatch.tool().as_str(),
-                    redispatch.clears().iter().map(gap_text).collect::<Vec<_>>().join("; ")
+                remedies.push(format!(
+                    "  - Run {} first; it clears: {}.",
+                    terminal_safe(redispatch.tool().as_str()),
+                    terminal_safe(&redispatch.clears().iter().map(gap_text).collect::<Vec<_>>().join("; ")),
                 ));
             }
         }
     }
+    if !remedies.is_empty() {
+        lines.push(String::new());
+        lines.push("Continue:".to_string());
+        lines.extend(remedies);
+    }
     if let Some(advice) = &planned.fork_advice {
-        lines.push(format!("Advice: {advice}"));
+        lines.push(String::new());
+        lines.push(if planned.raw.narrowing.is_some() {
+            "Keep this session unchanged:".to_string()
+        } else {
+            "Alternative:".to_string()
+        });
+        lines.push(format!("  {}", advice.replace('\n', "\n  ")));
     }
     lines.join("\n")
 }

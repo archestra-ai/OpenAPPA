@@ -44,8 +44,7 @@ impl RemedyService {
 fn render(outcome: RemedyOutcome) -> CallToolResult {
     match outcome {
         RemedyOutcome::Authorized { tool } => CallToolResult::success(vec![ContentBlock::text(format!(
-            "Authorized. Propose the {tool} call again, byte-for-byte identical; \
-             it will run without a new check.",
+            "[appa] Authorized. Retry the original {tool} call with exactly the same arguments.",
         ))]),
         RemedyOutcome::Returned { value } => CallToolResult::success(vec![ContentBlock::text(value)]),
         RemedyOutcome::Declined { feedback } | RemedyOutcome::NoAnswer { feedback } => {

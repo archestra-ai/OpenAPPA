@@ -106,18 +106,26 @@ async fn released(runtime: &Arc<Runtime>, within: Option<&TrajectoryId>, tool: &
 }
 
 fn offer_for(feedback: &str, wanted: &str) -> OfferId {
-    let line = feedback
-        .lines()
-        .find(|line| line.contains("offer id ") && line.contains(wanted))
+    let lines: Vec<&str> = feedback.lines().collect();
+    let start = lines
+        .iter()
+        .position(|line| line.contains(wanted))
         .unwrap_or_else(|| panic!("no option mentioning {wanted:?} in: {feedback}"));
-    let (_, tail) = line.split_once("offer id ").expect("the line surfaces an id");
-    OfferId(
-        tail.split_whitespace()
-            .next()
-            .expect("an id follows")
-            .trim_end_matches('.')
-            .to_string(),
-    )
+    let id = lines[start..]
+        .iter()
+        .find_map(|line| opaque_offer_id(line))
+        .unwrap_or_else(|| panic!("the {wanted:?} option has no offer id in: {feedback}"));
+    OfferId(id)
+}
+
+fn first_offer(feedback: &str) -> OfferId {
+    OfferId(opaque_offer_id(feedback).unwrap_or_else(|| panic!("no offer id in feedback: {feedback}")))
+}
+
+fn opaque_offer_id(text: &str) -> Option<String> {
+    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+        .find(|word| word.starts_with("offer-") && word.len() > "offer-".len())
+        .map(str::to_string)
 }
 
 fn feedback_of(decision: &HookDecision) -> String {
@@ -195,7 +203,7 @@ async fn an_accepted_narrowing_records_where_the_label_moved() {
     let runtime = deployment(&dir).await;
 
     let blocked = propose(&runtime, None, call("read_hr")).await;
-    let offer = offer_for(&feedback_of(&blocked), "atomically");
+    let offer = first_offer(&feedback_of(&blocked));
     assert!(matches!(
         runtime.execute_remedy(offer).await,
         RemedyOutcome::Authorized { .. }
@@ -241,7 +249,7 @@ async fn a_branch_records_its_seed_its_own_flows_and_how_its_return_crossed() {
     assert_eq!(opened, HookDecision::Ack);
 
     let blocked = propose(&runtime, Some(&child()), call("read_hr")).await;
-    let offer = offer_for(&feedback_of(&blocked), "atomically");
+    let offer = first_offer(&feedback_of(&blocked));
     assert!(matches!(
         runtime.execute_remedy(offer).await,
         RemedyOutcome::Authorized { .. }

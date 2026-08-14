@@ -223,10 +223,16 @@ fn call_of(id: &str, tool: &str, arguments: &str) -> WireToolCall {
 
 fn surfaced_offer(request: &serde_json::Value) -> Option<String> {
     let messages = request["messages"].as_array()?;
-    messages.iter().rev().find_map(|message| {
-        let (_, tail) = message["content"].as_str()?.split_once("with offer id ")?;
-        Some(tail.split_whitespace().next()?.to_string())
-    })
+    messages
+        .iter()
+        .rev()
+        .find_map(|message| offer_id(message["content"].as_str()?))
+}
+
+fn offer_id(text: &str) -> Option<String> {
+    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+        .find(|word| word.starts_with("offer-") && word.len() > "offer-".len())
+        .map(str::to_string)
 }
 
 async fn spawn(app: axum::Router) -> SocketAddr {

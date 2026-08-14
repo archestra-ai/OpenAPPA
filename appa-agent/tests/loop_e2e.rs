@@ -243,8 +243,10 @@ audience = { exactly = ["public"] }
     );
     let feedback = provider.tool_result(1, "call_0");
     assert!(
-        feedback.contains("with offer id "),
-        "the block names the options by offer id. Got: {feedback}",
+        feedback
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+            .any(|word| word.starts_with("offer-") && word.len() > "offer-".len()),
+        "the block must surface an opaque offer id. Got: {feedback}",
     );
 }
 
