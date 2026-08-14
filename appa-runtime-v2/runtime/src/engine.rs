@@ -718,7 +718,8 @@ impl RuntimeEngine {
             },
             Fact::Acceptance { narrowing, .. }
             | Fact::ChildReturnAcceptance { narrowing, .. }
-            | Fact::OutputCastAccepted { narrowing, .. } => AuditEvent::Narrowed {
+            | Fact::OutputCastAccepted { narrowing, .. }
+            | Fact::CandidateAccepted { narrowing, .. } => AuditEvent::Narrowed {
                 from: self.render_label(&narrowing.from.clone().into_label())?,
                 to: self.render_label(&narrowing.to.clone().into_label())?,
             },
@@ -735,7 +736,7 @@ impl RuntimeEngine {
             Fact::OutputSanitizerBound { sanitizer, .. } => AuditEvent::SanitizerBound {
                 sanitizer: terminal_safe(sanitizer.as_str()),
             },
-            Fact::OutputSanitizerApplied { sanitizer, .. } => AuditEvent::Sanitized {
+            Fact::CandidateDerived { sanitizer, .. } => AuditEvent::Sanitized {
                 sanitizer: terminal_safe(sanitizer.as_str()),
             },
             Fact::ChildReturn { value, derivation, .. } => AuditEvent::ChildReturn {

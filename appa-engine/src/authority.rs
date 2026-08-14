@@ -125,13 +125,19 @@ impl Transition {
     }
 }
 
-/// A registered sanitizer: one transition bound to its application points, plus the operator's own
-/// account of what it is for.
+/// A registered sanitizer: one transition bound to its application points and the tags it has
+/// jurisdiction over, plus the operator's own account of what it is for.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sanitizer {
     pub name: SanitizerName,
     pub on: SanitizerPoints,
     pub transition: Transition,
+    /// Where this sanitizer is offered: the called tool's tags for a result, the
+    /// callee's for a `tool_input` substitution. Scope narrows where a component is offered; it
+    /// never changes what the mandate claims. An unscoped sanitizer applies everywhere,
+    /// a child return included — nothing else does, because a return originates from no tool.
+    #[serde(default)]
+    pub scope: Scope,
     pub hint: Option<Hint>,
 }
 
@@ -234,12 +240,31 @@ pub struct Cast {
 
 impl Sanitizer {
     /// The label this sanitizer's derivation of `raw` would carry at an output point, or `None`
-    /// where it does not apply there: it must be registered for output, and the source
-    /// must satisfy its declared `from`. The one predicate live admission, the child crossing and
-    /// the transition validator share, so none of them can drift from the others.
-    pub(crate) fn derive_output(&self, raw: &crate::label::Label) -> Option<crate::label::Label> {
-        (self.on.output && self.transition.admits(raw) == crate::label::Adequacy::Holds)
-            .then(|| self.transition.derive(raw))
+    /// where it does not apply there: it must be registered for output, its scope must
+    /// cover the tags of the contract the value originates from, and the source must
+    /// satisfy its declared `from`. The one predicate live admission, the child crossing
+    /// and the transition validator share, so none of them can drift from the others.
+    pub(crate) fn derive_output(&self, raw: &crate::label::Label, tags: &[TagName]) -> Option<crate::label::Label> {
+        (self.on.output && self.applies_to(tags)).then_some(())?;
+        self.derives(raw)
+    }
+
+    /// The label this sanitizer's derivation of the call's argument bytes would carry, or `None`
+    /// where it does not apply at tool input: registered for input, scope covering the
+    /// callee, and the raw bytes satisfying its declared `from`.
+    pub(crate) fn derive_input(&self, raw: &crate::label::Label, tags: &[TagName]) -> Option<crate::label::Label> {
+        (self.on.input && self.applies_to(tags)).then_some(())?;
+        self.derives(raw)
+    }
+
+    /// Does this sanitizer's jurisdiction reach a value originating from a contract carrying
+    /// `tags`?
+    pub(crate) fn applies_to(&self, tags: &[TagName]) -> bool {
+        self.scope.covers(tags)
+    }
+
+    fn derives(&self, raw: &crate::label::Label) -> Option<crate::label::Label> {
+        (self.transition.admits(raw) == crate::label::Adequacy::Holds).then(|| self.transition.derive(raw))
     }
 }
 

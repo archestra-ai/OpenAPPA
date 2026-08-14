@@ -3,10 +3,11 @@
 use thiserror::Error;
 
 use crate::authority::CastRefusal;
+use crate::candidate::{ConfinedFrom, DerivedCandidate, SanitizerLineage};
 use crate::check::Narrowing;
 use crate::fact::{CloseOutcome, EffectSet, Fact, FactBatch, ObservedResult};
 use crate::label::{EstablishedLabel, Label};
-use crate::names::CastName;
+use crate::names::{CastName, SanitizerName};
 use crate::projection::Views;
 use crate::registry::Registry;
 use crate::value::{DispatchId, LabeledValue, Provenance, RawResultDigest, ResolvedCall, ValueBody, ValueId};
@@ -37,6 +38,8 @@ pub enum ResultAdmission {
         sanitizer: crate::names::SanitizerName,
         raw_digest: RawResultDigest,
     },
+    CandidateAccepted { offer: crate::value::OfferId },
+    CandidateAdmissible,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -81,6 +84,12 @@ pub enum AdmitError {
     SanitizerBindingMismatch,
     #[error("the bound sanitizer is not registered for output, or the raw result does not satisfy its `from`")]
     SanitizerTransitionUnmet,
+    #[error(
+        "the derivation still narrows the bound its dispatch pinned: the residual is the agent's to accept or improve at the confined stage"
+    )]
+    ConfinedResidual,
+    #[error("this dispatch has no confined candidate standing, or its candidate owes no residual")]
+    NoCandidate,
 }
 
 pub(crate) fn observe_success(
@@ -120,6 +129,58 @@ pub(crate) fn pending_cast_narrowing(views: &Views, resolved: &EstablishedLabel)
     let from = views.current_label().bound().clone();
     let to = from.combine(resolved);
     if to == from { None } else { Some(Narrowing { from, to }) }
+}
+
+/// What a confined candidate still narrows against the bound its dispatch pinned, or `None` where
+/// it narrows nothing and may admit immediately.
+pub(crate) fn confined_residual(receiving: &EstablishedLabel, derived: &Label) -> Option<Narrowing> {
+    let to = receiving.combine(&derived.established_part());
+    (&to != receiving).then(|| Narrowing {
+        from: receiving.clone(),
+        to,
+    })
+}
+
+/// Does this candidate cross now, or does its residual still owe the agent an acceptance?
+pub(crate) fn settles_now(views: &Views, dispatch: &DispatchId, residual: Option<&Narrowing>) -> bool {
+    residual.is_none() || views.accepted_narrowing(dispatch) == residual
+}
+
+/// The candidate a bound sanitizer's first derivation makes of one confined result.
+pub(crate) fn bound_candidate(
+    registry: &Registry,
+    views: &Views,
+    dispatch: &DispatchId,
+    contract: &crate::contract::ToolContract,
+    sanitizer: &SanitizerName,
+    raw_digest: RawResultDigest,
+    body: ValueBody,
+) -> Result<(crate::authority::Transition, DerivedCandidate, SanitizerLineage), AdmitError> {
+    if views.bound_sanitizer(dispatch) != Some(sanitizer) {
+        return Err(AdmitError::SanitizerBindingMismatch);
+    }
+    let registered = registry
+        .sanitizer(sanitizer)
+        .ok_or_else(|| AdmitError::UnknownTool(sanitizer.as_str().to_string()))?;
+    let raw_label = contract.output_label_for_resolutions(views.dynamic_resolutions(dispatch).unwrap_or_default());
+    let derived = registered
+        .derive_output(&raw_label, &contract.tags)
+        .ok_or(AdmitError::SanitizerTransitionUnmet)?;
+    let receiving = views.receiving_bound(dispatch).ok_or(AdmitError::NotOpen)?;
+    let residual = confined_residual(receiving, &derived);
+    Ok((
+        registered.transition.clone(),
+        DerivedCandidate::Result {
+            dispatch: dispatch.clone(),
+            source: raw_digest,
+            from: ConfinedFrom::Bound,
+            value: LabeledValue::new(body, derived),
+            residual,
+        },
+        SanitizerLineage::default()
+            .extend(sanitizer.clone())
+            .expect("an empty lineage spends no sanitizer yet"),
+    ))
 }
 
 fn refusal_error(refusal: CastRefusal) -> AdmitError {
@@ -216,7 +277,11 @@ pub(crate) fn admit_result(
         | ResultAdmission::SuccessCastAccepted { body, .. }
         | ResultAdmission::SuccessCastLapsed { body, .. } => Some(RawResultDigest::of(body.as_str().as_bytes())),
         ResultAdmission::SuccessSanitized { raw_digest, .. } => Some(*raw_digest),
-        ResultAdmission::SuccessNoValue | ResultAdmission::Failure | ResultAdmission::Indeterminate => None,
+        ResultAdmission::CandidateAccepted { .. }
+        | ResultAdmission::CandidateAdmissible
+        | ResultAdmission::SuccessNoValue
+        | ResultAdmission::Failure
+        | ResultAdmission::Indeterminate => None,
     };
     if let (Some(reported), Some(observed)) = (reported, views.observed_result(dispatch))
         && observed != &ObservedResult::Available(reported)
@@ -238,13 +303,14 @@ pub(crate) fn admit_result(
             },
         },
     };
-    let admit_value = |label: Label, body: ValueBody| Fact::ValueAdmitted {
+    let admit_derived = |value: LabeledValue| Fact::ValueAdmitted {
         trajectory: trajectory.clone(),
-        value: LabeledValue::new(body, label),
+        value,
         provenance: Provenance::ToolResult {
             dispatch: dispatch.clone(),
         },
     };
+    let admit_value = |label: Label, body: ValueBody| admit_derived(LabeledValue::new(body, label));
 
     let bound = views.bound_sanitizer(dispatch);
     if bound.is_some() && matches!(admission, ResultAdmission::SuccessRaw { .. }) {
@@ -320,29 +386,58 @@ pub(crate) fn admit_result(
             sanitizer,
             raw_digest,
         } => {
-            match bound {
-                Some(name) if name == &sanitizer => {}
-                Some(_) => return Err(AdmitError::SanitizerBindingMismatch),
-                None => return Err(AdmitError::SanitizerBindingMismatch),
+            let (transition, derived, lineage) =
+                bound_candidate(registry, views, dispatch, contract, &sanitizer, raw_digest, body)?;
+            let DerivedCandidate::Result { value, residual, .. } = &derived else {
+                unreachable!("a bound output sanitizer derives a confined result")
+            };
+            if !settles_now(views, dispatch, residual.as_ref()) {
+                return Err(AdmitError::ConfinedResidual);
             }
-            let registered = registry
-                .sanitizer(&sanitizer)
-                .ok_or_else(|| AdmitError::UnknownTool(sanitizer.as_str().to_string()))?;
-            let raw_label = output_label();
-            let derived = registered
-                .derive_output(&raw_label)
-                .ok_or(AdmitError::SanitizerTransitionUnmet)?;
+            let value = value.clone();
             vec![
                 close_success(),
-                Fact::OutputSanitizerApplied {
+                Fact::CandidateDerived {
                     trajectory: trajectory.clone(),
-                    dispatch: dispatch.clone(),
+                    subject: crate::basis::SubjectKey::ConfinedResult(dispatch.clone()),
                     sanitizer,
-                    transition: registered.transition.clone(),
-                    raw_digest,
+                    transition,
+                    derived,
+                    lineage,
                 },
-                admit_value(derived, body),
+                admit_derived(value),
             ]
+        }
+        ResultAdmission::CandidateAccepted { offer } => {
+            let subject = crate::basis::SubjectKey::ConfinedResult(dispatch.clone());
+            let Some(DerivedCandidate::Result {
+                value,
+                residual: Some(narrowing),
+                ..
+            }) = views.candidate(&subject)
+            else {
+                return Err(AdmitError::NoCandidate);
+            };
+            vec![
+                Fact::CandidateAccepted {
+                    trajectory: trajectory.clone(),
+                    subject,
+                    offer,
+                    narrowing: narrowing.clone(),
+                },
+                close_success(),
+                admit_derived(value.clone()),
+            ]
+        }
+        ResultAdmission::CandidateAdmissible => {
+            let subject = crate::basis::SubjectKey::ConfinedResult(dispatch.clone());
+            let Some(DerivedCandidate::Result {
+                value, residual: None, ..
+            }) = views.candidate(&subject)
+            else {
+                return Err(AdmitError::NoCandidate);
+            };
+            vec![close_success(), admit_derived(value.clone())]
         }
         ResultAdmission::SuccessCastLapsed { body, cast, resolved } => {
             validate_pending_cast(registry, contract, &output_label(), &cast, &resolved)?;
@@ -474,6 +569,7 @@ mod tests {
                 from_includes: internal(),
                 to: Audience::Public,
             },
+            scope: Scope::default(),
             hint: None,
         };
         let finance_san = Sanitizer {
@@ -486,6 +582,7 @@ mod tests {
                 from_includes: Audience::restricted([ReaderId::new("finance")]),
                 to: Audience::Public,
             },
+            scope: Scope::default(),
             hint: None,
         };
         let const_cast = Cast {
@@ -562,8 +659,10 @@ mod tests {
             tool: call.tool().clone(),
             arguments: call.canonical_arguments().clone(),
             proposed_label: EstablishedLabel::top(),
+            receiving: EstablishedLabel::top(),
             proposed_effects: EffectSet::new([EffectKind::new("read")]).unwrap(),
             dynamic_resolutions: Vec::new(),
+            subject: None,
         }];
         (log, dispatch)
     }
@@ -740,8 +839,10 @@ mod tests {
                 tool: call.tool().clone(),
                 arguments: call.canonical_arguments().clone(),
                 proposed_label: EstablishedLabel::top(),
+                receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::default(),
                 dynamic_resolutions: Vec::new(),
+                subject: None,
             },
             Fact::ValueAdmitted {
                 trajectory: traj(),
@@ -1081,8 +1182,10 @@ mod tests {
             tool: call.tool().clone(),
             arguments: call.canonical_arguments().clone(),
             proposed_label: EstablishedLabel::top(),
+            receiving: EstablishedLabel::top(),
             proposed_effects: EffectSet::new([EffectKind::new("read")]).unwrap(),
             dynamic_resolutions: vec![PinnedDynamicResolution::from_answer(binding, Some(internal()))],
+            subject: None,
         }];
         let projection = views_of(&log);
         let trajectory = traj();
@@ -1567,6 +1670,13 @@ mod tests {
             dispatch: dispatch.clone(),
             plan: crate::plan::PlanId::new(1),
             sanitizer: crate::names::SanitizerName::new("declassify"),
+            contribution: crate::plan::bound_contribution(
+                &reg,
+                reg.tool(call.tool()).expect("the fixture registers the tool"),
+                &call,
+                &crate::names::SanitizerName::new("declassify"),
+            )
+            .expect("declassify applies to this output"),
         });
         let p = views_of(&log);
 
@@ -1598,6 +1708,32 @@ mod tests {
             Err(AdmitError::SanitizerBindingMismatch)
         );
 
+        let residual = Narrowing {
+            from: EstablishedLabel::top(),
+            to: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
+        };
+        assert_eq!(
+            admit_result(
+                &reg,
+                &p.view(&t),
+                &dispatch,
+                &call,
+                ResultAdmission::SuccessSanitized {
+                    body: ValueBody::new("redacted"),
+                    sanitizer: crate::names::SanitizerName::new("declassify"),
+                    raw_digest: RawResultDigest::of(b"ticket"),
+                },
+            ),
+            Err(AdmitError::ConfinedResidual)
+        );
+
+        log.push(Fact::Acceptance {
+            trajectory: t.clone(),
+            dispatch: dispatch.clone(),
+            plan: crate::plan::PlanId::new(1),
+            narrowing: residual.clone(),
+        });
+        let p = views_of(&log);
         let batch = admit_result(
             &reg,
             &p.view(&t),
@@ -1612,8 +1748,14 @@ mod tests {
         .unwrap();
         assert!(batch.facts.iter().any(|fact| matches!(
             fact,
-            Fact::OutputSanitizerApplied { sanitizer, raw_digest, .. }
-                if sanitizer.as_str() == "declassify" && raw_digest == &RawResultDigest::of(b"ticket")
+            Fact::CandidateDerived {
+                sanitizer,
+                derived: DerivedCandidate::Result { source, residual: Some(_), .. },
+                lineage,
+                ..
+            } if sanitizer.as_str() == "declassify"
+                && source == &RawResultDigest::of(b"ticket")
+                && lineage.names() == [sanitizer.clone()]
         )));
         let admitted = batch
             .facts

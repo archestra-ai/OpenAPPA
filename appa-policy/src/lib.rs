@@ -43,12 +43,8 @@ pub enum ConfigError {
     ReservedRankName,
     #[error("bad reader set in {context}: {reason}")]
     BadAudience { context: String, reason: String },
-    #[error("bad sanitizer point {token:?}: expected \"tool_output\"")]
+    #[error("bad sanitizer point {token:?}: expected \"tool_input\" or \"tool_output\"")]
     UnknownSanitizerPoint { token: String },
-    #[error(
-        "sanitizer {name} registers on \"tool_input\": input-argument substitution is not implemented — an input sanitizer would sit inert, so it is refused, not accepted silently"
-    )]
-    InputSanitizerPoint { name: String },
     #[error("sanitizer {name} declares no application point (`on` is empty)")]
     NoSanitizerPoint { name: String },
     #[error("sanitizer {name} mandate: {reason}")]
@@ -695,6 +691,8 @@ struct RawSanitizer {
     on: Vec<String>,
     #[serde(default)]
     hint: Option<String>,
+    #[serde(default)]
+    scope: RawScope,
     mandate: RawSanitizerMandate,
     implementation: Option<toml::Value>,
 }
@@ -713,6 +711,9 @@ impl RawSanitizer {
             name: SanitizerName::new(self.name),
             on,
             transition,
+            scope: Scope {
+                tags: self.scope.tags.into_iter().map(TagName::new).collect(),
+            },
             hint: self.hint.map(Hint::new),
         })
     }
@@ -907,9 +908,7 @@ fn parse_points(tokens: &[String], name: &str) -> Result<SanitizerPoints, Config
     };
     for token in tokens {
         match token.as_str() {
-            "tool_input" => {
-                return Err(ConfigError::InputSanitizerPoint { name: name.to_string() });
-            }
+            "tool_input" => points.input = true,
             "tool_output" => points.output = true,
             other => {
                 return Err(ConfigError::UnknownSanitizerPoint {
@@ -918,7 +917,7 @@ fn parse_points(tokens: &[String], name: &str) -> Result<SanitizerPoints, Config
             }
         }
     }
-    if !points.output {
+    if !points.input && !points.output {
         return Err(ConfigError::NoSanitizerPoint { name: name.to_string() });
     }
     Ok(points)
@@ -1003,6 +1002,42 @@ confined_results = ["lookup"]
                 "{kind} inline binding was accepted"
             );
         }
+    }
+
+    #[test]
+    fn an_input_sanitizer_registers_with_its_scope_and_refuses_a_trust_mandate() {
+        let policy = |mandate: &str| {
+            format!(
+                "version = 1\n\
+                 [[tool]]\nname = \"post\"\ntags = [\"outbound\"]\ndelta = {{}}\n\
+                 [[sanitizer]]\nname = \"redact\"\non = [\"tool_input\"]\n\
+                 scope = {{ tags = [\"outbound\"] }}\n\
+                 [sanitizer.mandate]\n{mandate}\n"
+            )
+        };
+        let config = Config::from_toml_str(&policy(
+            "audience = { from = { includes = [\"internal\"] }, to = { exactly = [\"partner\"] } }",
+        ))
+        .expect("an input substitution compiles");
+        let sanitizer = config
+            .registry()
+            .sanitizer(&SanitizerName::new("redact"))
+            .expect("the input point registers the sanitizer");
+        assert!(sanitizer.on.input && !sanitizer.on.output);
+        assert!(sanitizer.scope.covers(&[TagName::new("outbound")]));
+        assert!(!sanitizer.scope.covers(&[TagName::new("inbound")]));
+
+        assert!(matches!(
+            Config::from_toml_str(&policy("trust = { from = \"suspicious\", to = \"trusted\" }")),
+            Err(ConfigError::Registry(LoadError::InputSanitizerTrust(name))) if name == "redact"
+        ));
+        assert!(matches!(
+            Config::from_toml_str(
+                &policy("audience = { from = { includes = [\"internal\"] }, to = { exactly = [\"partner\"] } }")
+                    .replace("on = [\"tool_input\"]", "on = []")
+            ),
+            Err(ConfigError::NoSanitizerPoint { name }) if name == "redact"
+        ));
     }
 
     #[test]

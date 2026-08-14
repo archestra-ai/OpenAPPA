@@ -31,11 +31,10 @@
 //!
 //! **Implemented remedy subset (the honest bound).** `Authorize` (trust floor via `trust_ceiling`,
 //! `includes` via `reader_ceiling`, `no_prior` via `waivers`, attention via `attends`), `Accept`
-//! (narrowing), `Sanitize` (an output sanitizer's relabel standing in for the raw crossing,
-//! `SAN-2`/`RMD-18`), and `Redispatch` over direct `prior(k)` emitters and static cap-narrowing
-//! tools, in name order — the agent picks, and each redispatch is separately checked for real.
-//! **De-scoped — each spec-marked, so the claim and the spec's enumeration coincide:**
-//! input-sanitizer argument substitution (spec: design direction, refused at load) and cast
+//! (narrowing), `Sanitize` (an output sanitizer's relabel standing in for the raw crossing),
+//! `Derive` (an input sanitizer's substitution of the whole argument set), and `Redispatch` over direct `prior(k)` emitters and static cap-narrowing tools, in
+//! name order — the agent picks, and each redispatch is separately checked for real.
+//! **De-scoped, and spec-marked so the claim and the spec's enumeration coincide:** cast
 //! resolution of an Unknown (spec: attempted by the harness itself at check and at admission,
 //! never surfaced as a plan object). The empty-proof is complete over exactly this subset.
 //!
@@ -57,11 +56,12 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::authority::{Authority, Mandate, Sanitizer};
+use crate::authority::{Authority, Mandate, Sanitizer, Transition};
+use crate::candidate::{CallStage, SanitizerLineage};
 use crate::check::{self, Gap, Narrowing, RawBlock};
 use crate::contract::ToolContract;
 use crate::fact::EffectKind;
-use crate::label::{Adequacy, EstablishedLabel, Label, PartialLabel};
+use crate::label::{Adequacy, Audience, EstablishedLabel, Label, PartialLabel};
 use crate::names::{AuthorityName, SanitizerName, TagName};
 use crate::projection::Views;
 use crate::registry::Registry;
@@ -90,6 +90,7 @@ pub enum RemedyStep {
     Authorize(AuthorityName),
     Accept(Narrowing),
     Sanitize(SanitizerName),
+    Derive(SanitizerName),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,15 +107,26 @@ impl ExecutableRemedyPlan {
     pub fn narrowing(&self) -> Option<&Narrowing> {
         self.steps.iter().find_map(|step| match step {
             RemedyStep::Accept(narrowing) => Some(narrowing),
-            RemedyStep::Authorize(_) | RemedyStep::Sanitize(_) => None,
+            RemedyStep::Authorize(_) | RemedyStep::Sanitize(_) | RemedyStep::Derive(_) => None,
         })
     }
 
     pub fn sanitizer(&self) -> Option<&SanitizerName> {
         self.steps.iter().find_map(|step| match step {
             RemedyStep::Sanitize(sanitizer) => Some(sanitizer),
-            RemedyStep::Authorize(_) | RemedyStep::Accept(_) => None,
+            RemedyStep::Authorize(_) | RemedyStep::Accept(_) | RemedyStep::Derive(_) => None,
         })
+    }
+
+    /// The sanitizer this plan runs on the offer's own candidate, if it is a progress hop.
+    /// A hop is exactly one `Derive` step and nothing else: it clears no requirement
+    /// gap and settles no narrowing, so a plan pairing it with anything is not one this engine
+    /// enumerates.
+    pub fn hop(&self) -> Option<&SanitizerName> {
+        match self.steps.as_slice() {
+            [RemedyStep::Derive(sanitizer)] if self.required.is_empty() => Some(sanitizer),
+            _ => None,
+        }
     }
 }
 
@@ -196,18 +208,25 @@ impl PlannedBlock {
 /// atomic step, and every direct redispatch when only a prior tool call unlocks it. Both land in
 /// the one `plans` list; fork advice is separate and never a remedy. See the module docs
 /// for the direct-clearing model.
-pub(crate) fn plan(registry: &Registry, views: &Views, call: &ResolvedCall, raw: &RawBlock) -> PlannedBlock {
+pub(crate) fn plan(
+    registry: &Registry,
+    views: &Views,
+    call: &ResolvedCall,
+    raw: &RawBlock,
+    stage: &CallStage,
+) -> PlannedBlock {
     let current = views.current_label();
     let no_denials = BTreeSet::new();
     let denied = views.denied_authorities(&call.digest()).unwrap_or(&no_denials);
 
-    let mut plans: Vec<RemedyPlan> = enumerate_plans(registry, &current, views, call)
+    let mut plans: Vec<RemedyPlan> = enumerate_plans(registry, &current, views, call, stage)
         .into_iter()
         .filter(|plan| !denied.iter().any(|authority| plan.names_authority(authority)))
         .map(RemedyPlan::Executable)
         .collect();
 
-    if plans.is_empty() && !raw.requirement_gaps.is_empty() {
+    let terminal = |plan: &RemedyPlan| plan.executable().is_some_and(|plan| plan.hop().is_none());
+    if !plans.iter().any(terminal) && !raw.requirement_gaps.is_empty() {
         plans.extend(
             direct_redispatches(registry, &current, raw)
                 .into_iter()
@@ -237,37 +256,42 @@ fn enumerate_plans(
     current: &PartialLabel,
     views: &Views,
     call: &ResolvedCall,
+    stage: &CallStage,
 ) -> Vec<ExecutableRemedyPlan> {
     let Some(contract) = registry.tool(call.tool()) else {
         return Vec::new();
     };
     let has_committed = |kind: &EffectKind| views.has_effect(kind);
     let has_reserved = |kind: &EffectKind| views.has_reservation(kind);
-    let block = check::evaluate_state(contract, current, &has_committed, &has_reserved, call);
+    let block = check::evaluate_state(contract, current, &has_committed, &has_reserved, call, stage);
     if block.requirement_gaps.is_empty() && block.narrowing.is_none() {
         return Vec::new();
     }
 
-    let Some(assignments) = enumerate_assignments(registry, &block.requirement_gaps, &contract.tags) else {
-        return Vec::new();
-    };
-    let settlements = narrowing_remedies(registry, current, contract, call, block.narrowing.as_ref());
-
-    let mut candidates: Vec<PlanCandidate> = Vec::new();
-    for required in assignments {
-        for settlement in &settlements {
-            let mut steps: Vec<RemedyStep> = Vec::new();
-            if let Some(narrowing) = &settlement.accept {
-                steps.push(RemedyStep::Accept(narrowing.clone()));
+    let mut candidates: Vec<PlanCandidate> = input_hops(registry, contract, stage, &block.requirement_gaps, current)
+        .into_iter()
+        .map(|sanitizer| PlanCandidate {
+            steps: vec![RemedyStep::Derive(sanitizer)],
+            required: Vec::new(),
+        })
+        .collect();
+    if let Some(assignments) = enumerate_assignments(registry, &block.requirement_gaps, &contract.tags) {
+        let settlements = narrowing_remedies(registry, current, contract, call, block.narrowing.as_ref());
+        for required in assignments {
+            for settlement in &settlements {
+                let mut steps: Vec<RemedyStep> = Vec::new();
+                if let Some(narrowing) = &settlement.accept {
+                    steps.push(RemedyStep::Accept(narrowing.clone()));
+                }
+                steps.extend(required.iter().map(|r| RemedyStep::Authorize(r.authority.clone())));
+                if let Some(sanitizer) = &settlement.sanitize {
+                    steps.push(RemedyStep::Sanitize(sanitizer.clone()));
+                }
+                candidates.push(PlanCandidate {
+                    steps,
+                    required: required.clone(),
+                });
             }
-            steps.extend(required.iter().map(|r| RemedyStep::Authorize(r.authority.clone())));
-            if let Some(sanitizer) = &settlement.sanitize {
-                steps.push(RemedyStep::Sanitize(sanitizer.clone()));
-            }
-            candidates.push(PlanCandidate {
-                steps,
-                required: required.clone(),
-            });
         }
     }
     least_mandate_first(registry, &block.requirement_gaps, candidates)
@@ -284,6 +308,15 @@ fn enumerate_plans(
 struct PlanCandidate {
     steps: Vec<RemedyStep>,
     required: Vec<RequiredRuling>,
+}
+
+impl PlanCandidate {
+    fn hop(&self) -> Option<&SanitizerName> {
+        match self.steps.as_slice() {
+            [RemedyStep::Derive(sanitizer)] if self.required.is_empty() => Some(sanitizer),
+            _ => None,
+        }
+    }
 }
 
 fn least_mandate_first(registry: &Registry, gaps: &[Gap], candidates: Vec<PlanCandidate>) -> Vec<PlanCandidate> {
@@ -311,11 +344,7 @@ fn least_mandate_first(registry: &Registry, gaps: &[Gap], candidates: Vec<PlanCa
 fn plan_precedes(registry: &Registry, gaps: &[Gap], a: &PlanCandidate, b: &PlanCandidate) -> bool {
     let mut strictly_less = false;
     for gap in gaps {
-        match gap_power_cmp(
-            gap,
-            assigned_mandate(registry, a, gap),
-            assigned_mandate(registry, b, gap),
-        ) {
+        match gap_power_cmp(gap, assigned_power(registry, a, gap), assigned_power(registry, b, gap)) {
             Some(Ordering::Less) => strictly_less = true,
             Some(Ordering::Equal) => {}
             Some(Ordering::Greater) | None => return false,
@@ -324,20 +353,46 @@ fn plan_precedes(registry: &Registry, gaps: &[Gap], a: &PlanCandidate, b: &PlanC
     strictly_less
 }
 
-fn assigned_mandate<'a>(registry: &'a Registry, candidate: &PlanCandidate, gap: &Gap) -> &'a Mandate {
-    let authority = &candidate
-        .required
-        .iter()
-        .find(|ruling| ruling.covers.contains(gap))
-        .expect("every requirement gap is covered by the assignment")
-        .authority;
-    &registry
-        .authority(authority)
-        .expect("assignments name only registered authorities")
-        .mandate
+enum GapPower<'a> {
+    None,
+    Substitution(&'a Audience),
+    Ruling(&'a Mandate),
 }
 
-fn gap_power_cmp(gap: &Gap, a: &Mandate, b: &Mandate) -> Option<Ordering> {
+fn assigned_power<'a>(registry: &'a Registry, candidate: &PlanCandidate, gap: &Gap) -> GapPower<'a> {
+    if let Some(required) = candidate.required.iter().find(|ruling| ruling.covers.contains(gap)) {
+        return GapPower::Ruling(
+            &registry
+                .authority(&required.authority)
+                .expect("assignments name only registered authorities")
+                .mandate,
+        );
+    }
+    let (Some(sanitizer), Gap::Includes { recipients }) = (candidate.hop(), gap) else {
+        return GapPower::None;
+    };
+    match &registry
+        .sanitizer(sanitizer)
+        .expect("hops name only registered sanitizers")
+        .transition
+    {
+        Transition::Audience { to, .. } if to.includes(recipients) => GapPower::Substitution(to),
+        Transition::Audience { .. } | Transition::Trust { .. } => GapPower::None,
+    }
+}
+
+fn gap_power_cmp(gap: &Gap, a: GapPower<'_>, b: GapPower<'_>) -> Option<Ordering> {
+    let (a, b) = match (a, b) {
+        (GapPower::None, GapPower::None) => return Some(Ordering::Equal),
+        (GapPower::None, _) => return Some(Ordering::Less),
+        (_, GapPower::None) => return Some(Ordering::Greater),
+        (GapPower::Substitution(a), GapPower::Substitution(b)) => {
+            return inclusion_cmp(a.within(b), b.within(a));
+        }
+        (GapPower::Substitution(_), GapPower::Ruling(_)) => return Some(Ordering::Less),
+        (GapPower::Ruling(_), GapPower::Substitution(_)) => return Some(Ordering::Greater),
+        (GapPower::Ruling(a), GapPower::Ruling(b)) => (a, b),
+    };
     match gap {
         Gap::TrustFloor { .. } => {
             let (a, b) = (a.trust_ceiling, b.trust_ceiling);
@@ -464,19 +519,60 @@ pub(crate) fn narrowing_remedies(
     }
     let output = contract.output_label_for_call(call);
     for sanitizer in applicable_output_sanitizers(registry, contract, &output) {
-        let Some(sanitized) = sanitized_commit(current, &output, sanitizer) else {
+        if sanitized_commit(current, &output, sanitizer).is_none() {
             continue;
-        };
-        let accept = (&sanitized != current.bound()).then(|| Narrowing {
-            from: current.bound().clone(),
-            to: sanitized,
-        });
+        }
         settlements.push(NarrowingSettlement {
-            accept,
+            accept: None,
             sanitize: Some(sanitizer.name.clone()),
         });
     }
     settlements
+}
+
+/// Every input-substitution progress hop this call stage offers, in registry name order.
+pub(crate) fn input_hops(
+    registry: &Registry,
+    contract: &ToolContract,
+    stage: &CallStage,
+    gaps: &[Gap],
+    current: &PartialLabel,
+) -> Vec<SanitizerName> {
+    if !gaps.iter().any(|gap| matches!(gap, Gap::Includes { .. })) {
+        return Vec::new();
+    }
+    let released = stage.released(current);
+    registry
+        .sanitizers()
+        .filter(|sanitizer| !stage.lineage().contains(&sanitizer.name))
+        .filter(|sanitizer| {
+            sanitizer
+                .derive_input(&released, &contract.tags)
+                .is_some_and(|derived| clears_a_recipient(&derived, gaps))
+        })
+        .map(|sanitizer| sanitizer.name.clone())
+        .collect()
+}
+
+/// Does a validated substitution strictly improve the call candidate it replaces?
+pub(crate) fn substitution_helps(before: &RawBlock, after: &check::CheckOutcome) -> bool {
+    let after = match after {
+        check::CheckOutcome::Allow => return !before.requirement_gaps.is_empty(),
+        check::CheckOutcome::Block(raw) => raw,
+    };
+    after.unestablished.is_empty()
+        && after.requirement_gaps.len() < before.requirement_gaps.len()
+        && after
+            .requirement_gaps
+            .iter()
+            .all(|gap| before.requirement_gaps.contains(gap))
+}
+
+fn clears_a_recipient(derived: &Label, gaps: &[Gap]) -> bool {
+    gaps.iter().any(|gap| match gap {
+        Gap::Includes { recipients } => derived.audience.covers(recipients) == Adequacy::Holds,
+        _ => false,
+    })
 }
 
 fn applicable_output_sanitizers<'r>(
@@ -489,7 +585,7 @@ fn applicable_output_sanitizers<'r>(
     }
     registry
         .sanitizers()
-        .filter(|sanitizer| sanitizer.on.output && sanitizer.transition.admits(output) == Adequacy::Holds)
+        .filter(|sanitizer| sanitizer.derive_output(output, &contract.tags).is_some())
         .collect()
 }
 
@@ -507,6 +603,86 @@ fn sanitized_commit(current: &PartialLabel, output: &Label, sanitizer: &Sanitize
         .bound()
         .combine(&sanitizer.transition.derive(output).established_part());
     (sanitized != raw).then_some(sanitized)
+}
+
+/// The residual a bound sanitizer's relabel is *predicted* to leave, before its derivation exists.
+pub(crate) fn predicted_residual(
+    registry: &Registry,
+    contract: &ToolContract,
+    call: &ResolvedCall,
+    sanitizer: &SanitizerName,
+    current: &PartialLabel,
+) -> Option<Narrowing> {
+    let sanitizer = registry.sanitizer(sanitizer)?;
+    let sanitized = sanitized_commit(current, &contract.output_label_for_call(call), sanitizer)?;
+    (&sanitized != current.bound()).then(|| Narrowing {
+        from: current.bound().clone(),
+        to: sanitized,
+    })
+}
+
+/// Is a further output sanitizer helpful on a confined candidate?
+pub(crate) fn confined_hop_helps(receiving: &EstablishedLabel, candidate: &Label, derived: &Label) -> bool {
+    let (candidate, derived) = (candidate.established_part(), derived.established_part());
+    candidate.combine(&derived) == candidate && receiving.combine(&derived) != receiving.combine(&candidate)
+}
+
+/// The next stage of one confined candidate: a progress hop for every registered output
+/// sanitizer that still helps, then acceptance of exactly the residual this candidate leaves.
+///
+/// Total by construction. Acceptance is always available, so a confined candidate is
+/// never stuck whatever the catalogue holds, and no chain is precomputed — each hop persists one
+/// candidate and this runs again from it. The order is presentation only; hops come
+/// first because a hop costs the trajectory nothing and acceptance costs exactly the residual.
+///
+/// The pending-cast exclusion of `RMD-18` needs no guard here: a confined result exists only under
+/// a bound output sanitizer, which the dispatch stage never offers for such a tool.
+pub(crate) fn confined_stage(
+    registry: &Registry,
+    contract: &ToolContract,
+    receiving: &EstablishedLabel,
+    candidate: &Label,
+    residual: &Narrowing,
+    lineage: &SanitizerLineage,
+) -> Vec<ExecutableRemedyPlan> {
+    let mut plans: Vec<ExecutableRemedyPlan> = Vec::new();
+    let hops = registry
+        .sanitizers()
+        .filter(|sanitizer| !lineage.contains(&sanitizer.name))
+        .filter(|sanitizer| {
+            sanitizer
+                .derive_output(candidate, &contract.tags)
+                .is_some_and(|derived| confined_hop_helps(receiving, candidate, &derived))
+        });
+    for sanitizer in hops {
+        plans.push(ExecutableRemedyPlan {
+            id: PlanId(plans.len() as u32),
+            steps: vec![RemedyStep::Derive(sanitizer.name.clone())],
+            required: Vec::new(),
+        });
+    }
+    plans.push(ExecutableRemedyPlan {
+        id: PlanId(plans.len() as u32),
+        steps: vec![RemedyStep::Accept(residual.clone())],
+        required: Vec::new(),
+    });
+    plans
+}
+
+/// The established contribution a bound output sanitizer's first derivation would make, resolved
+/// here at dispatch. `None` where the sanitizer is unregistered or does not apply to
+/// this output at all. Resolved rather than left to a later registry read because a mandate group
+/// resolves at application time, so what the binding promised is fixed now and recorded.
+pub(crate) fn bound_contribution(
+    registry: &Registry,
+    contract: &ToolContract,
+    call: &ResolvedCall,
+    sanitizer: &SanitizerName,
+) -> Option<EstablishedLabel> {
+    let derived = registry
+        .sanitizer(sanitizer)?
+        .derive_output(&contract.output_label_for_call(call), &contract.tags)?;
+    Some(derived.established_part())
 }
 
 /// The rulings a block's remedy plan needs gathered: for each authority the block routes to, the gaps
@@ -617,11 +793,11 @@ mod tests {
         let trajectory = traj();
         let views = projection.view(&trajectory);
         let contract = registry.tool(call.tool()).unwrap();
-        let raw = match check::evaluate(contract, &views, call) {
+        let raw = match check::evaluate(contract, &views, call, &CallStage::default()) {
             CheckOutcome::Block(raw) => raw,
             other => panic!("expected a block, got {other:?}"),
         };
-        plan(registry, &views, call, &raw)
+        plan(registry, &views, call, &raw, &CallStage::default())
     }
 
     fn call(tool: &str, args: serde_json::Value) -> ResolvedCall {
@@ -684,6 +860,71 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_input_hop_does_not_stand_in_for_the_redispatch_that_clears_a_prior_gap() {
+        let emitter = ToolContract {
+            name: ToolName::new("backup"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
+            emits: EffectSet::new([EffectKind::new("backup")]).unwrap(),
+            requires: Requires::default(),
+        };
+        let partner = Audience::restricted([ReaderId::new("partner")]);
+        let wipe = ToolContract {
+            name: ToolName::new("wipe"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
+            emits: EffectSet::default(),
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(partner.clone()))],
+                },
+                history: vec![HistoryRequirement::Prior(EffectKind::new("backup"))],
+                ..Requires::default()
+            },
+        };
+        let internal = Audience::restricted([ReaderId::new("internal")]);
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![emitter, wipe],
+            authorities: vec![],
+            sanitizers: vec![Sanitizer {
+                name: SanitizerName::new("redact"),
+                on: SanitizerPoints {
+                    input: true,
+                    output: false,
+                },
+                transition: Transition::Audience {
+                    from_includes: internal.clone(),
+                    to: Audience::restricted([ReaderId::new("internal"), ReaderId::new("partner")]),
+                },
+                scope: Scope::default(),
+                hint: None,
+            }],
+            casts: vec![],
+        });
+        let log = vec![user_value(Label::new(Dim::Known(TRUSTED), Dim::Known(internal)))];
+
+        let planned = plan_of(&registry, &log, &call("wipe", json!({})));
+        assert!(
+            planned.plans.iter().any(
+                |plan| plan.executable().and_then(ExecutableRemedyPlan::hop) == Some(&SanitizerName::new("redact"))
+            ),
+            "the substitution clears the recipient gap and is offered"
+        );
+        assert!(
+            planned.plans.iter().any(|plan| matches!(
+                plan,
+                RemedyPlan::Redispatch(r)
+                    if r.tool().as_str() == "backup" && r.clears() == [Gap::Prior(EffectKind::new("backup"))]
+            )),
+            "the prior gap keeps the redispatch that clears it"
+        );
+    }
+
     fn output_sanitizer(name: &str, transition: Transition) -> Sanitizer {
         Sanitizer {
             name: SanitizerName::new(name),
@@ -692,6 +933,7 @@ mod tests {
                 output: true,
             },
             transition,
+            scope: Scope::default(),
             hint: None,
         }
     }
@@ -711,20 +953,21 @@ mod tests {
         Audience::restricted([ReaderId::new("internal")])
     }
 
-    fn sanitize_offers(planned: &PlannedBlock) -> Vec<(String, bool)> {
+    fn sanitize_offers(planned: &PlannedBlock) -> Vec<String> {
         planned
             .plans
             .iter()
             .filter_map(RemedyPlan::executable)
-            .filter_map(|plan| {
-                let name = plan.steps.iter().find_map(|step| match step {
-                    RemedyStep::Sanitize(name) => Some(name.as_str().to_string()),
-                    _ => None,
-                })?;
-                let residual = plan.steps.iter().any(|step| matches!(step, RemedyStep::Accept(_)));
-                Some((name, residual))
-            })
+            .filter_map(|plan| Some(plan.sanitizer()?.as_str().to_string()))
             .collect()
+    }
+
+    fn any_prebundled_residual(planned: &PlannedBlock) -> bool {
+        planned
+            .plans
+            .iter()
+            .filter_map(RemedyPlan::executable)
+            .any(|plan| plan.sanitizer().is_some() && plan.narrowing().is_some())
     }
 
     #[test]
@@ -768,14 +1011,16 @@ mod tests {
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
 
         let planned = plan_of(&registry, &log, &call("crm", json!({})));
-        assert_eq!(sanitize_offers(&planned), [("declassify".to_string(), false)]);
+        assert_eq!(sanitize_offers(&planned), ["declassify".to_string()]);
+        assert!(!any_prebundled_residual(&planned));
 
         let planned = plan_of(&registry, &log, &call("tracker", json!({})));
         assert_eq!(
             sanitize_offers(&planned),
-            [("declassify".to_string(), true), ("scrub".to_string(), true)],
+            ["declassify".to_string(), "scrub".to_string()],
             "both mandates apply, and each leaves the dimension it does not transition"
         );
+        assert!(!any_prebundled_residual(&planned));
         assert!(
             planned
                 .plans
@@ -828,21 +1073,22 @@ mod tests {
         let planned = plan_of(&registry, &log, &call);
         assert_eq!(
             sanitize_offers(&planned),
-            [("declassify".to_string(), false), ("finance-only".to_string(), true)]
+            ["declassify".to_string(), "finance-only".to_string()]
         );
-        let finance_plan = planned
-            .plans
-            .iter()
-            .filter_map(RemedyPlan::executable)
-            .find(|plan| {
-                plan.steps
-                    .contains(&RemedyStep::Sanitize(SanitizerName::new("finance-only")))
+        assert!(!any_prebundled_residual(&planned));
+        assert_eq!(
+            predicted_residual(
+                &registry,
+                registry.tool(&ToolName::new("lookup")).unwrap(),
+                &call,
+                &SanitizerName::new("finance-only"),
+                &PartialLabel::established(established(TRUSTED, Audience::Public)),
+            ),
+            Some(Narrowing {
+                from: established(TRUSTED, Audience::Public),
+                to: established(TRUSTED, finance),
             })
-            .unwrap();
-        assert!(finance_plan.steps.contains(&RemedyStep::Accept(Narrowing {
-            from: established(TRUSTED, Audience::Public),
-            to: established(TRUSTED, finance),
-        })));
+        );
     }
 
     #[test]
@@ -878,7 +1124,12 @@ mod tests {
         ]);
         let projection = Projection::build(&log, Revision::new(log.len() as u64));
         assert_eq!(
-            check::evaluate(registry.tool(empty.tool()).unwrap(), &projection.view(&traj()), &empty,),
+            check::evaluate(
+                registry.tool(empty.tool()).unwrap(),
+                &projection.view(&traj()),
+                &empty,
+                &CallStage::default(),
+            ),
             CheckOutcome::Allow
         );
     }
@@ -1559,9 +1810,11 @@ mod tests {
             tool: seed.tool().clone(),
             arguments: seed.canonical_arguments().clone(),
             proposed_label: established(TRUSTED, Audience::Public),
+            receiving: established(TRUSTED, Audience::Public),
             proposed_effects: EffectSet::new(kinds.iter().copied().map(EffectKind::new))
                 .expect("distinct generated effect kinds"),
             dynamic_resolutions: vec![],
+            subject: None,
         }
     }
 
@@ -2742,6 +2995,7 @@ mod tests {
                 output: true,
             },
             transition,
+            scope: Scope::default(),
             hint: None,
         })
     }
@@ -2793,6 +3047,7 @@ mod tests {
                 &has_committed,
                 &has_reserved,
                 &call,
+            &CallStage::default(),
             );
             if !eval.consumed.is_empty() || (eval.requirement_gaps.is_empty() && eval.narrowing.is_none()) {
                 return Ok(());
@@ -2810,7 +3065,7 @@ mod tests {
             let projection = Projection::build(&log, Revision::new(log.len() as u64));
             let trajectory = traj();
             let views = projection.view(&trajectory);
-            let planned = plan(&registry, &views, &call, &raw);
+            let planned = plan(&registry, &views, &call, &raw, &CallStage::default());
 
             let coverable = raw
                 .requirement_gaps
@@ -2874,7 +3129,14 @@ mod tests {
             let call = synthetic_call(contract);
             let has_committed = |kind: &EffectKind| state.effects.contains(kind);
             let has_reserved = |kind: &EffectKind| state.reservations.contains(kind);
-            let eval = check::evaluate_state(contract, &state.partial(), &has_committed, &has_reserved, &call);
+            let eval = check::evaluate_state(
+                contract,
+                &state.partial(),
+                &has_committed,
+                &has_reserved,
+                &call,
+                &CallStage::default(),
+            );
             if !eval.consumed.is_empty() || (eval.requirement_gaps.is_empty() && eval.narrowing.is_none()) {
                 return Ok(());
             }
@@ -2890,7 +3152,7 @@ mod tests {
             let projection = Projection::build(&log, Revision::new(log.len() as u64));
             let trajectory = traj();
             let views = projection.view(&trajectory);
-            let planned = plan(&registry, &views, &call, &raw);
+            let planned = plan(&registry, &views, &call, &raw, &CallStage::default());
 
             let authorities = registry.authorities();
             let mut bound: u128 = 1;
@@ -3011,6 +3273,7 @@ mod tests {
                 &has_committed,
                 &has_reserved,
                 &call,
+            &CallStage::default(),
             );
             if !eval.consumed.is_empty() || (eval.requirement_gaps.is_empty() && eval.narrowing.is_none()) {
                 return Ok(());
@@ -3028,7 +3291,7 @@ mod tests {
             let projection = Projection::build(&log, Revision::new(log.len() as u64));
             let trajectory = traj();
             let views = projection.view(&trajectory);
-            let planned = plan(&registry, &views, &call, &raw);
+            let planned = plan(&registry, &views, &call, &raw, &CallStage::default());
 
             let competent = |authority: &Authority, gap: &Gap| -> bool {
                 let scoped = authority.scope.covers(&contract.tags);

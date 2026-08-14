@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::authority::Transition;
+use crate::basis::SubjectKey;
+use crate::candidate::{DerivedCandidate, SanitizerLineage};
 use crate::check::{Gap, Narrowing};
 use crate::execute::AuthorityReview;
 use crate::label::{EstablishedLabel, Label, PartialLabel};
@@ -221,9 +223,17 @@ pub enum Fact {
         tool: ToolName,
         arguments: crate::params::CanonicalArguments,
         proposed_label: EstablishedLabel,
+        /// The established bound this dispatch's result is received against, snapshotted here
+        /// because the bound is pinned at dispatch: admissions between the opening and the result
+        /// move the live fold, so a later comparison against that fold would be race-dependent.
+        /// `proposed_label` is the *post*-delta committed bound `L ⊓ δ(c)`; this is the `L` it was
+        /// computed from, and what a confined candidate's residual is measured against.
+        receiving: EstablishedLabel,
         proposed_effects: EffectSet,
         #[serde(default)]
         dynamic_resolutions: Vec<crate::contract::PinnedDynamicResolution>,
+        #[serde(default)]
+        subject: Option<crate::basis::SubjectKey>,
     },
     DispatchSucceeded {
         trajectory: TrajectoryId,
@@ -290,13 +300,21 @@ pub enum Fact {
         dispatch: DispatchId,
         plan: PlanId,
         sanitizer: SanitizerName,
+        contribution: EstablishedLabel,
     },
-    OutputSanitizerApplied {
+    CandidateDerived {
         trajectory: TrajectoryId,
-        dispatch: DispatchId,
+        subject: SubjectKey,
         sanitizer: SanitizerName,
         transition: Transition,
-        raw_digest: RawResultDigest,
+        derived: DerivedCandidate,
+        lineage: SanitizerLineage,
+    },
+    CandidateAccepted {
+        trajectory: TrajectoryId,
+        subject: SubjectKey,
+        offer: crate::value::OfferId,
+        narrowing: crate::check::Narrowing,
     },
     ChildReturn {
         trajectory: TrajectoryId,
@@ -336,7 +354,7 @@ pub enum Fact {
         trajectory: TrajectoryId,
         offer: crate::value::OfferId,
         block: crate::value::BlockId,
-        batch: crate::transition::ProposalBatchId,
+        act: crate::basis::DecidedAct,
         call: CanonicalDigest,
         subject: crate::basis::SubjectKey,
         plan: crate::plan::ExecutableRemedyPlan,
@@ -417,7 +435,8 @@ impl Fact {
             | Fact::OutputCastAccepted { trajectory, .. }
             | Fact::OutputCastLapsed { trajectory, .. }
             | Fact::OutputSanitizerBound { trajectory, .. }
-            | Fact::OutputSanitizerApplied { trajectory, .. }
+            | Fact::CandidateDerived { trajectory, .. }
+            | Fact::CandidateAccepted { trajectory, .. }
             | Fact::ChildReturn { trajectory, .. }
             | Fact::OfferOpened { trajectory, .. }
             | Fact::OfferAccepted { trajectory, .. }

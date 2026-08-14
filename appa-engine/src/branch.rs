@@ -279,7 +279,7 @@ pub(crate) fn check_child_return(
         return Ok(ReturnCheck::Block(ReturnBlock::Narrowing { narrowing, plans }));
     }
     for sanitizer in registry.sanitizers() {
-        let Some(derived) = sanitizer.derive_output(&fold_label) else {
+        let Some(derived) = sanitizer.derive_output(&fold_label, &[]) else {
             continue;
         };
         let sanitized =
@@ -389,7 +389,7 @@ fn sanitized_crossing(
     }
     let fold_label = fold.bound().clone().into_label();
     let derived = registered
-        .derive_output(&fold_label)
+        .derive_output(&fold_label, &[])
         .ok_or(BranchError::TransitionSourceUnmet)?;
     let value = LabeledValue::new(body, derived);
     let derivation = ReturnDerivation::Sanitized {
@@ -464,6 +464,7 @@ mod tests {
                 from_includes: internal(),
                 to: Audience::Public,
             },
+            scope: Scope::default(),
             hint: None,
         };
         Registry::build_covered(RegistryConfig {
@@ -619,6 +620,7 @@ mod tests {
                 from_includes: internal(),
                 to: Audience::Public,
             },
+            scope: Scope::default(),
             hint: None,
         };
         let to_finance = Sanitizer {
@@ -631,6 +633,7 @@ mod tests {
                 from_includes: internal(),
                 to: Audience::restricted([ReaderId::new("finance")]),
             },
+            scope: Scope::default(),
             hint: None,
         };
         let input_only = Sanitizer {
@@ -643,6 +646,7 @@ mod tests {
                 from_includes: internal(),
                 to: Audience::Public,
             },
+            scope: Scope::default(),
             hint: None,
         };
         Registry::build_covered(RegistryConfig {
@@ -1418,8 +1422,10 @@ mod tests {
             tool: call.tool().clone(),
             arguments: call.canonical_arguments().clone(),
             proposed_label: EstablishedLabel::top(),
+            receiving: EstablishedLabel::top(),
             proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
             dynamic_resolutions: Vec::new(),
+            subject: None,
         });
         log.push(Fact::DispatchClosed {
             trajectory: child(),
@@ -1607,8 +1613,10 @@ mod tests {
             tool: call.tool().clone(),
             arguments: call.canonical_arguments().clone(),
             proposed_label: EstablishedLabel::top(),
+            receiving: EstablishedLabel::top(),
             proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
             dynamic_resolutions: Vec::new(),
+            subject: None,
         });
         let projection = build(&log);
         let parent_id = parent();

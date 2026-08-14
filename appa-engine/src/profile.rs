@@ -364,6 +364,7 @@ fn identity_document(
                 "name": sanitizer.name,
                 "on": sanitizer.on,
                 "transition": sanitizer.transition,
+                "scope": sorted_set(&sanitizer.scope.tags),
             })
         })
         .collect();
@@ -376,6 +377,7 @@ fn identity_document(
             serde_json::json!({
                 "name": cast.name,
                 "resolution": cast.resolution,
+                "scope": sorted_set(&cast.scope.tags),
             })
         })
         .collect();
@@ -483,7 +485,10 @@ pub(crate) fn validate_coverage(
             return Err(LoadError::ChildWithoutContextControl);
         }
         match registry.sanitizer(name) {
-            Some(sanitizer) if sanitizer.on.output => {}
+            Some(sanitizer) if sanitizer.on.output && sanitizer.scope.is_unscoped() => {}
+            Some(sanitizer) if sanitizer.on.output => {
+                return Err(LoadError::ChildReturnSanitizerScoped(name.as_str().to_string()));
+            }
             Some(_) => {
                 return Err(LoadError::ChildReturnSanitizerNotOutput(name.as_str().to_string()));
             }
@@ -548,7 +553,7 @@ mod tests {
     use crate::engine::Engine;
     use crate::fact::EffectSet;
     use crate::label::{Audience, ReaderId};
-    use crate::names::{AuthorityName, DynamicResolverName, SanitizerName};
+    use crate::names::{AuthorityName, DynamicResolverName, SanitizerName, TagName};
 
     fn chain() -> TrustChain {
         TrustChain::new(vec!["suspicious".into(), "trusted".into()])
@@ -586,6 +591,7 @@ mod tests {
                 from_floor: Trust::new(0),
                 to: Trust::new(1),
             },
+            scope: Scope::default(),
             hint: None,
         }
     }
@@ -895,6 +901,7 @@ mod tests {
                 from_includes: Audience::restricted([ReaderId::new("internal")]),
                 to: Audience::Public,
             },
+            scope: Scope::default(),
             hint: None,
         }];
         cfg
@@ -1047,6 +1054,18 @@ mod tests {
             ),
             Err(LoadError::ChildReturnSanitizerNotOutput(name)) if name == "scrub"
         ));
+        let mut scoped = cfg.clone();
+        scoped.sanitizers[0].scope = Scope {
+            tags: vec![crate::names::TagName::new("outbound")],
+        };
+        assert!(matches!(
+            open(
+                scoped,
+                covering_declaration(&cfg),
+                ReturnPolicy::Sanitized(SanitizerName::new("scrub")),
+            ),
+            Err(LoadError::ChildReturnSanitizerScoped(name)) if name == "scrub"
+        ));
     }
 
     #[test]
@@ -1156,6 +1175,45 @@ mod tests {
         cfg.authorities[0].hint = Some(Hint::new("the wire-approval desk"));
         cfg.sanitizers[0].hint = Some(Hint::new("strips PII"));
         assert_eq!(identity(&cfg, &ReturnPolicy::Raw, &profile), bare);
+    }
+
+    #[test]
+    fn rescoping_a_cast_moves_the_identity() {
+        let mut cfg = config(vec![tool("fetch")]);
+        cfg.casts = vec![crate::authority::Cast {
+            name: crate::names::CastName::new("vouch"),
+            resolution: crate::authority::CastResolution::Constant(crate::label::EstablishedLabel::new(
+                Trust::new(1),
+                Audience::Public,
+            )),
+            scope: Scope::default(),
+        }];
+        let profile = covering_profile(&cfg);
+        let unscoped = identity(&cfg, &ReturnPolicy::Raw, &profile);
+
+        cfg.casts[0].scope = Scope {
+            tags: vec![TagName::new("inbound")],
+        };
+        assert_ne!(identity(&cfg, &ReturnPolicy::Raw, &profile), unscoped);
+    }
+
+    #[test]
+    fn rescoping_a_sanitizer_moves_the_identity() {
+        let mut cfg = config(vec![tool("fetch")]);
+        cfg.sanitizers = vec![output_sanitizer("redactor")];
+        let profile = covering_profile(&cfg);
+        let unscoped = identity(&cfg, &ReturnPolicy::Raw, &profile);
+
+        cfg.sanitizers[0].scope = Scope {
+            tags: vec![TagName::new("outbound")],
+        };
+        let scoped = identity(&cfg, &ReturnPolicy::Raw, &profile);
+        assert_ne!(scoped, unscoped);
+
+        cfg.sanitizers[0].scope = Scope {
+            tags: vec![TagName::new("inbound")],
+        };
+        assert_ne!(identity(&cfg, &ReturnPolicy::Raw, &profile), scoped);
     }
 
     #[test]

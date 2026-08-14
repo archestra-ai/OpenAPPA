@@ -20,6 +20,7 @@ pub mod admit;
 pub mod authority;
 pub mod basis;
 pub mod branch;
+pub mod candidate;
 pub mod check;
 pub mod contract;
 pub mod engine;

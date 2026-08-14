@@ -199,6 +199,24 @@ impl BlockId {
         )
     }
 
+    /// The stage one confined candidate surfaces. Bound to the dispatch and to the
+    /// generation the candidate stands at, so each successive stage of the same confinement is a
+    /// stage of its own even under a repeated nonce.
+    pub(crate) fn of_candidate(
+        nonce: &OfferNonce,
+        dispatch: &DispatchId,
+        generation: crate::basis::SubjectGeneration,
+    ) -> Self {
+        BlockId(
+            Framed::tagged(b"appa.block.v1")
+                .field(&nonce.0)
+                .field(dispatch.trajectory().0.as_bytes())
+                .field(dispatch.digest().0.as_slice())
+                .field(&generation.value().to_be_bytes())
+                .finish(),
+        )
+    }
+
     pub fn bytes(&self) -> &[u8; 32] {
         &self.0
     }
@@ -429,8 +447,27 @@ impl ResolvedCall {
             .and_then(PinnedDynamicResolution::audience)
     }
 
+    /// The canonical digest of this exact rendered call, recomputed from the tool and arguments.
+    /// The pinned answers are **not** part of it: a repeat is the same rendered call whatever a
+    /// resolver said, which is why anything holding a call by identity alone must compare the call
+    /// itself where the answers decide a check.
     pub fn digest(&self) -> CanonicalDigest {
         CanonicalDigest::of_call(&self.tool, &self.arguments)
+    }
+
+    /// The call a substitution of this one's arguments renders: the same callee, the
+    /// replacement arguments, and only those pinned answers the replacement leaves standing.
+    pub(crate) fn substituting(&self, arguments: CanonicalArguments) -> ResolvedCall {
+        let inherited = self
+            .dynamic_resolutions
+            .iter()
+            .filter(|resolution| {
+                let argument = &resolution.binding().argument;
+                arguments.value().get(argument) == self.arguments.value().get(argument)
+            })
+            .cloned()
+            .collect();
+        ResolvedCall::new(self.tool.clone(), arguments).with_dynamic_resolutions(inherited)
     }
 }
 

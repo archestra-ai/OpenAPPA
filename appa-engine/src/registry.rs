@@ -7,8 +7,8 @@ use thiserror::Error;
 
 use crate::authority::{Authority, Cast, CastResolution, Hint, Sanitizer, Transition};
 use crate::contract::{AudienceDelta, AudienceRequirement, RecipientSpec, ToolContract};
-use crate::label::{Adequacy, Audience, Dim, Dimension, Trust};
-use crate::names::{AuthorityName, CastName, SanitizerName};
+use crate::label::{Audience, Dim, Dimension, Trust};
+use crate::names::{AuthorityName, CastName, SanitizerName, TagName};
 use crate::value::ToolName;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,6 +149,14 @@ pub enum LoadError {
     #[error("[child] return_sanitizer {0} is not registered for tool output")]
     ChildReturnSanitizerNotOutput(String),
     #[error(
+        "[child] return_sanitizer {0} declares a scope: a child return originates from no tool, so only an unscoped sanitizer can be bound to it"
+    )]
+    ChildReturnSanitizerScoped(String),
+    #[error(
+        "sanitizer {0} registers on tool_input with a trust transition: only the `includes` check reads an input substitution, so a trust `to` can never help a call and the sanitizer would sit inert"
+    )]
+    InputSanitizerTrust(String),
+    #[error(
         "provider-run tool {tool} declares {construct}: a provider-run contract may declare only a static delta"
     )]
     ProviderRunConstruct {
@@ -269,11 +277,14 @@ fn worst_case_plan_alternatives(
             Some(AudienceDelta::Dynamic(_))
         ) =>
         {
-            sanitizers.iter().filter(|sanitizer| sanitizer.on.output).count()
+            sanitizers
+                .iter()
+                .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(&tool.tags))
+                .count()
         }
         None => sanitizers
             .iter()
-            .filter(|sanitizer| sanitizer.on.output && sanitizer.transition.admits(&output) == Adequacy::Holds)
+            .filter(|sanitizer| sanitizer.derive_output(&output, &tool.tags).is_some())
             .count(),
     };
     multiply(applicable + 1);
@@ -304,14 +315,26 @@ fn worst_case_plan_alternatives(
                     ))
         })
         .count() as u128;
-    count.saturating_add(redispatches)
+    let input_hops = sanitizers
+        .iter()
+        .filter(|sanitizer| sanitizer.on.input && sanitizer.applies_to(&tool.tags))
+        .count() as u128;
+    count
+        .saturating_add(redispatches)
+        .saturating_add(input_hops)
+        .max(worst_case_confined_stage(sanitizers, confined, &tool.tags))
 }
 
-fn worst_case_return_alternatives(sanitizers: &[Sanitizer], confined_child_return: bool) -> u128 {
-    if !confined_child_return {
+fn worst_case_confined_stage(sanitizers: &[Sanitizer], confined: bool, tags: &[TagName]) -> u128 {
+    if !confined {
         return 1;
     }
-    1u128.saturating_add(sanitizers.iter().filter(|sanitizer| sanitizer.on.output).count() as u128)
+    1u128.saturating_add(
+        sanitizers
+            .iter()
+            .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(tags))
+            .count() as u128,
+    )
 }
 
 /// The validated, indexed, immutable registry: the engine's whole static capability, contracts
@@ -350,6 +373,9 @@ impl Registry {
                 Transition::Trust { from_floor, to } => {
                     check_rank(&config.trust_chain, Some(*from_floor), || format!("{} from", context()))?;
                     check_rank(&config.trust_chain, Some(*to), || format!("{} to", context()))?;
+                    if sanitizer.on.input {
+                        return Err(LoadError::InputSanitizerTrust(sanitizer.name.as_str().to_string()));
+                    }
                 }
                 Transition::Audience { from_includes, to } => {
                     check_readers(from_includes, || format!("{} from", context()))?;
@@ -438,7 +464,7 @@ impl Registry {
                 });
             }
         }
-        let confined = worst_case_return_alternatives(&sanitizer_list, profile.confines_child_return());
+        let confined = worst_case_confined_stage(&sanitizer_list, profile.confines_child_return(), &[]);
         if confined > planner_cap.0 {
             return Err(LoadError::TooManyReturnPlanAlternatives {
                 count: confined,
@@ -681,7 +707,7 @@ mod tests {
     use crate::fact::{EffectKind, EffectSet};
     use crate::label::EstablishedLabel;
     use crate::label::{Audience, ReaderId, Trust};
-    use crate::names::{AuthorityName, MarkName};
+    use crate::names::{AuthorityName, MarkName, TagName};
 
     fn chain() -> TrustChain {
         TrustChain::new(vec!["suspicious".into(), "trusted".into()])
@@ -761,6 +787,7 @@ mod tests {
                 output: true,
             },
             transition,
+            scope: Scope::default(),
             hint: None,
         };
         let mut transition_from = base();
@@ -1382,6 +1409,7 @@ mod tests {
                 from_includes: Audience::Public,
                 to: Audience::Public,
             },
+            scope: Scope::default(),
             hint: None,
         };
         let mut cfg = base();
@@ -1423,6 +1451,7 @@ mod tests {
                 from_includes: Audience::Public,
                 to: Audience::Public,
             },
+            scope: Scope::default(),
             hint: None,
         }
     }
@@ -1567,6 +1596,127 @@ mod tests {
             Err(LoadError::TooManyReturnPlanAlternatives { count: 6, max: 4 })
         ));
         assert!(Registry::build_covered_with_cap(cfg, PlannerCap::new(6).expect("nonzero")).is_ok());
+    }
+
+    #[test]
+    fn a_confined_stage_bound_counts_only_the_sanitizers_whose_scope_reaches_it() {
+        let mut cfg = base();
+        cfg.tools = vec![];
+        cfg.sanitizers = (0..9)
+            .map(|index| Sanitizer {
+                scope: Scope {
+                    tags: vec![TagName::new("outbound")],
+                },
+                ..output_sanitizer(index)
+            })
+            .collect();
+        assert!(Registry::build_covered_with_cap(cfg, PlannerCap::new(1).expect("nonzero")).is_ok());
+
+        let mut untagged = tool("read");
+        untagged.delta = Some(crate::contract::Delta::NONE);
+        let mut cfg = base();
+        cfg.tools = vec![untagged];
+        cfg.sanitizers = (0..9)
+            .map(|index| Sanitizer {
+                scope: Scope {
+                    tags: vec![TagName::new("outbound")],
+                },
+                ..output_sanitizer(index)
+            })
+            .collect();
+        assert!(Registry::build_covered_with_cap(cfg, PlannerCap::new(1).expect("nonzero")).is_ok());
+    }
+
+    #[test]
+    fn a_trust_transition_is_refused_at_the_input_point() {
+        let sanitizer = |on: SanitizerPoints, transition| Sanitizer {
+            name: SanitizerName::new("vouch"),
+            on,
+            transition,
+            scope: Scope::default(),
+            hint: None,
+        };
+        let trust = Transition::Trust {
+            from_floor: Trust::new(0),
+            to: Trust::new(1),
+        };
+        let audience = Transition::Audience {
+            from_includes: Audience::restricted([ReaderId::new("internal")]),
+            to: Audience::restricted([ReaderId::new("partner")]),
+        };
+        let built = |sanitizer: Sanitizer| {
+            let mut cfg = base();
+            cfg.sanitizers = vec![sanitizer];
+            Registry::build_covered(cfg).map(|_| ())
+        };
+        let input_only = SanitizerPoints {
+            input: true,
+            output: false,
+        };
+        let both = SanitizerPoints {
+            input: true,
+            output: true,
+        };
+        let output_only = SanitizerPoints {
+            input: false,
+            output: true,
+        };
+        assert!(matches!(
+            built(sanitizer(input_only, trust.clone())),
+            Err(LoadError::InputSanitizerTrust(ref name)) if name == "vouch"
+        ));
+        assert!(matches!(
+            built(sanitizer(both, trust.clone())),
+            Err(LoadError::InputSanitizerTrust(_))
+        ));
+        assert_eq!(built(sanitizer(output_only, trust)), Ok(()));
+        assert_eq!(built(sanitizer(input_only, audience)), Ok(()));
+    }
+
+    #[test]
+    fn input_hops_add_to_the_call_stage_bound_and_only_where_they_are_in_scope() {
+        let input_sanitizer = |index: usize, scope: Scope| Sanitizer {
+            name: SanitizerName::new(format!("redact-{index}")),
+            on: SanitizerPoints {
+                input: true,
+                output: false,
+            },
+            transition: Transition::Audience {
+                from_includes: Audience::restricted([ReaderId::new("internal")]),
+                to: Audience::restricted([ReaderId::new("partner")]),
+            },
+            scope,
+            hint: None,
+        };
+        let outbound = Scope {
+            tags: vec![TagName::new("outbound")],
+        };
+        let mut target = tool("post");
+        target.tags = vec![TagName::new("outbound")];
+        target.requires.label.audience = vec![AudienceRequirement::Includes(RecipientSpec::Static(
+            Audience::restricted([ReaderId::new("partner")]),
+        ))];
+        let with = |sanitizers: Vec<Sanitizer>| {
+            let mut cfg = base();
+            cfg.tools = vec![target.clone()];
+            cfg.sanitizers = sanitizers;
+            cfg
+        };
+        let cap = PlannerCap::new(4).expect("nonzero");
+        let in_scope: Vec<Sanitizer> = (0..3).map(|i| input_sanitizer(i, outbound.clone())).collect();
+        assert!(Registry::build_covered_with_cap(with(in_scope.clone()), cap).is_ok());
+        assert!(matches!(
+            Registry::build_covered_with_cap(
+                with([in_scope, vec![input_sanitizer(3, outbound)]].concat()),
+                cap
+            ),
+            Err(LoadError::TooManyPlanAlternatives { count: 5, max: 4, ref tool }) if tool == "post"
+        ));
+        let elsewhere = Scope {
+            tags: vec![TagName::new("inbound")],
+        };
+        let scoped_away: Vec<Sanitizer> = (0..9).map(|i| input_sanitizer(i, elsewhere.clone())).collect();
+        assert!(Registry::build_covered_with_cap(with(scoped_away), PlannerCap::new(1).expect("nonzero")).is_ok());
     }
 
     #[test]

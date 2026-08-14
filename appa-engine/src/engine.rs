@@ -4,12 +4,13 @@ use thiserror::Error;
 
 use crate::admit::{self, AdmitError, CastAnswer, CastError, ResultAdmission};
 use crate::branch::{self, BranchError, ReturnSubmission};
+use crate::candidate::{CallStage, ConfinedFrom, DerivedCandidate, SanitizerLineage};
 use crate::check::{self, CheckOutcome, Narrowing, RawBlock};
 use crate::contract::ToolContract;
 use crate::execute::{self, PlanError, Ruling};
 use crate::fact::{Fact, FactBatch, ObservedResult, ReturnPolicy, Revision};
 use crate::label::EstablishedLabel;
-use crate::names::AuthorityName;
+use crate::names::{AuthorityName, SanitizerName};
 use crate::params::{ArgumentError, CanonicalArguments};
 use crate::plan::{self, PlannedBlock};
 use crate::profile::{self, DeploymentPolicy, DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentityV1};
@@ -17,14 +18,14 @@ use crate::projection::Projection;
 use crate::projection::Views;
 use crate::registry::{LoadError, Registry};
 use crate::transition::{
-    Blocked, ChildFollowUp, ChildReport, ChildSubmission, EngineDecision, EngineEvent, EngineView, Evidence,
+    Blocked, ChildFollowUp, ChildReport, ChildSubmission, Confined, EngineDecision, EngineEvent, EngineView, Evidence,
     EvidenceRequest, FollowUp, ForkBinding, OfferExecution, OfferFollowUp, OfferOutcome, OutcomeBody, OutcomeFollowUp,
     ProposalBatch, Released, Sequence, Settled, SettledOutcome, SpawnMark, ToolOutcome, ToolReport, TransitionError,
     TransitionRefusal, ValidatedFactBatch,
 };
 use crate::value::{
     CanonicalDigest, ChildReturnId, DispatchId, ForkId, LabeledValue, Provenance, RawResultDigest, ResolvedCall,
-    ToolName, TrajectoryId,
+    ToolName, TrajectoryId, ValueBody,
 };
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -375,6 +376,12 @@ impl Engine {
             }
             _ => {}
         }
+        if views
+            .candidate(&crate::basis::SubjectKey::ConfinedResult(dispatch.clone()))
+            .is_some()
+        {
+            return self.restage(view, &views, dispatch, report.offer_nonce);
+        }
 
         let admission = match &report.outcome {
             ToolOutcome::Failure => ResultAdmission::Failure,
@@ -398,12 +405,13 @@ impl Engine {
                         ResultAdmission::SuccessRaw { body: raw.clone() }
                     }
                     Some(sanitizer) => {
+                        let sanitizer = sanitizer.clone();
                         let derived = report.evidence.iter().find_map(|evidence| match evidence {
                             Evidence::Sanitizer {
                                 sanitizer: named,
                                 source,
                                 derived,
-                            } if named == sanitizer && source == &raw_digest => Some(derived.clone()),
+                            } if named == &sanitizer && source == &raw_digest => Some(derived.clone()),
                             Evidence::Sanitizer { .. } => None,
                         });
                         let Some(derived) = derived else {
@@ -425,23 +433,74 @@ impl Engine {
                             return Ok(EngineDecision {
                                 append,
                                 follow_up: FollowUp::Outcome(OutcomeFollowUp::Resolve(EvidenceRequest::Sanitizer {
-                                    sanitizer: sanitizer.clone(),
+                                    sanitizer,
                                     source: raw_digest,
                                     body: raw.clone(),
                                 })),
                             });
                         };
-                        ResultAdmission::SuccessSanitized {
-                            body: derived,
-                            sanitizer: sanitizer.clone(),
+                        let contract = self.validated_contract(&call)?;
+                        let (transition, candidate, lineage) = crate::admit::bound_candidate(
+                            &self.registry,
+                            &views,
+                            dispatch,
+                            contract,
+                            &sanitizer,
                             raw_digest,
-                        }
+                            derived.clone(),
+                        )
+                        .map_err(|error| match error {
+                            AdmitError::SanitizerTransitionUnmet | AdmitError::SanitizerBindingMismatch => {
+                                TransitionError::SanitizerUnapplicable
+                            }
+                            other => unreachable!("the outcome path derives what the log already proved: {other}"),
+                        })?;
+                        let DerivedCandidate::Result { residual: Some(_), .. } = &candidate else {
+                            return self.admitting_outcome(
+                                view,
+                                &views,
+                                dispatch,
+                                &call,
+                                ResultAdmission::SuccessSanitized {
+                                    body: derived,
+                                    sanitizer,
+                                    raw_digest,
+                                },
+                            );
+                        };
+                        return self.stage_candidate(
+                            view,
+                            &views,
+                            dispatch,
+                            &call,
+                            checkpointed.is_some(),
+                            report.offer_nonce,
+                            Fact::CandidateDerived {
+                                trajectory: views.trajectory().clone(),
+                                subject: crate::basis::SubjectKey::ConfinedResult(dispatch.clone()),
+                                sanitizer,
+                                transition,
+                                derived: candidate,
+                                lineage,
+                            },
+                        );
                     }
                 }
             }
         };
+        self.admitting_outcome(view, &views, dispatch, &call, admission)
+    }
+
+    fn admitting_outcome(
+        &self,
+        view: &EngineView,
+        views: &Views,
+        dispatch: &DispatchId,
+        call: &ResolvedCall,
+        admission: ResultAdmission,
+    ) -> Result<EngineDecision, TransitionError> {
         let batch = self
-            .admit_result(&views, dispatch, &call, admission)
+            .admit_result(views, dispatch, call, admission)
             .map_err(|error| match error {
                 AdmitError::SanitizerTransitionUnmet | AdmitError::SanitizerBindingMismatch => {
                     TransitionError::SanitizerUnapplicable
@@ -461,6 +520,141 @@ impl Engine {
         Ok(EngineDecision {
             append: Some(self.seal(view, batch)?),
             follow_up: FollowUp::Outcome(OutcomeFollowUp::Closed { admitted }),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stage_candidate(
+        &self,
+        view: &EngineView,
+        views: &Views,
+        dispatch: &DispatchId,
+        call: &ResolvedCall,
+        checkpointed: bool,
+        nonce: crate::value::OfferNonce,
+        derived: Fact,
+    ) -> Result<EngineDecision, TransitionError> {
+        let mut facts = Vec::new();
+        if !checkpointed {
+            let source = match &derived {
+                Fact::CandidateDerived {
+                    derived: DerivedCandidate::Result { source, .. },
+                    ..
+                } => *source,
+                _ => unreachable!("a staged record is a derived candidate"),
+            };
+            facts.extend(
+                self.observe_success(views, dispatch, call, ObservedResult::Available(source))
+                    .expect("an open, unreported dispatch checkpoints its observed success")
+                    .facts,
+            );
+        }
+        facts.push(derived);
+        let (batch, confined) = self.staged(
+            view,
+            views,
+            crate::basis::DecidedAct::Outcome(dispatch.clone()),
+            nonce,
+            dispatch,
+            facts,
+        )?;
+        Ok(EngineDecision {
+            append: Some(batch),
+            follow_up: FollowUp::Outcome(OutcomeFollowUp::Staged(Box::new(confined))),
+        })
+    }
+
+    fn staged(
+        &self,
+        view: &EngineView,
+        views: &Views,
+        act: crate::basis::DecidedAct,
+        nonce: crate::value::OfferNonce,
+        dispatch: &DispatchId,
+        mut facts: Vec<Fact>,
+    ) -> Result<(crate::transition::ValidatedFactBatch, Confined), TransitionError> {
+        let Some(Fact::CandidateDerived {
+            subject,
+            derived:
+                DerivedCandidate::Result {
+                    value,
+                    residual: Some(residual),
+                    ..
+                },
+            lineage,
+            ..
+        }) = facts.last()
+        else {
+            unreachable!("a staged act ends on the candidate it derived")
+        };
+        let (subject, value, residual, lineage) = (subject.clone(), value.clone(), residual.clone(), lineage.clone());
+        let receiving = views
+            .receiving_bound(dispatch)
+            .ok_or(TransitionError::UnknownDispatch)?
+            .clone();
+        let contract = self.dispatch_contract(views, dispatch)?;
+        let stage = plan::confined_stage(&self.registry, contract, &receiving, &value.label, &residual, &lineage);
+        let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
+        let (_, offers, opened) = self.open_offers(views, &act, &advance, &nonce, &subject, dispatch.digest(), &stage);
+        facts.extend(opened);
+        let batch = self.declaring(act, advance, FactBatch::new(views.revision(), facts));
+        Ok((
+            self.seal(view, batch)?,
+            Confined {
+                dispatch: dispatch.clone(),
+                candidate: value,
+                residual,
+                offers,
+            },
+        ))
+    }
+
+    fn restage(
+        &self,
+        view: &EngineView,
+        views: &Views,
+        dispatch: &DispatchId,
+        nonce: crate::value::OfferNonce,
+    ) -> Result<EngineDecision, TransitionError> {
+        let subject = crate::basis::SubjectKey::ConfinedResult(dispatch.clone());
+        let Some(DerivedCandidate::Result {
+            value,
+            residual: Some(residual),
+            ..
+        }) = views.candidate(&subject).cloned()
+        else {
+            unreachable!("a standing candidate owes a residual")
+        };
+        if let Some((_, offers)) = views.pending_block(&subject) {
+            return Ok(EngineDecision {
+                append: None,
+                follow_up: FollowUp::Outcome(OutcomeFollowUp::Staged(Box::new(Confined {
+                    dispatch: dispatch.clone(),
+                    candidate: value,
+                    residual,
+                    offers,
+                }))),
+            });
+        }
+        let receiving = views
+            .receiving_bound(dispatch)
+            .ok_or(TransitionError::UnknownDispatch)?
+            .clone();
+        let lineage = views.lineage(&subject);
+        let contract = self.dispatch_contract(views, dispatch)?;
+        let stage = plan::confined_stage(&self.registry, contract, &receiving, &value.label, &residual, &lineage);
+        let act = crate::basis::DecidedAct::Outcome(dispatch.clone());
+        let advance = crate::basis::BasisAdvance::default();
+        let (_, offers, opened) = self.open_offers(views, &act, &advance, &nonce, &subject, dispatch.digest(), &stage);
+        let batch = self.declaring(act, advance, FactBatch::new(views.revision(), opened));
+        Ok(EngineDecision {
+            append: Some(self.seal(view, batch)?),
+            follow_up: FollowUp::Outcome(OutcomeFollowUp::Staged(Box::new(Confined {
+                dispatch: dispatch.clone(),
+                candidate: value,
+                residual,
+                offers,
+            }))),
         })
     }
 
@@ -561,7 +755,10 @@ impl Engine {
             &self.registry,
             &self.child_return,
             &mut working,
-            &batch.trajectory,
+            ComposingBatch {
+                trajectory: &batch.trajectory,
+                id: &batch.id,
+            },
             &proposals,
             batch.spawn,
             &|views, call| {
@@ -607,17 +804,24 @@ impl Engine {
             .map(|(position, _)| (position, &proposals[position]))
         {
             let contract = self.validated_contract(call)?;
-            let CheckOutcome::Block(raw) = check::evaluate(contract, &final_views, call) else {
+            let CheckOutcome::Block(raw) = check::evaluate(contract, &final_views, call, &CallStage::default()) else {
                 unreachable!("an in-batch release only ever adds gaps to a refused sibling's block")
             };
-            let planned = plan::plan(&self.registry, &final_views, call, &raw);
+            let planned = plan::plan(&self.registry, &final_views, call, &raw, &CallStage::default());
             let subject = crate::basis::SubjectKey::Call {
                 trajectory: batch.trajectory.clone(),
                 batch: batch.id.clone(),
                 position: position as u32,
             };
-            let (block_id, offers, opened_offers) =
-                self.open_offers(&final_views, &advance, &batch.offer_nonce, &subject, call, &planned);
+            let (block_id, offers, opened_offers) = self.open_offers(
+                &final_views,
+                &crate::basis::DecidedAct::Proposals(batch.id.clone()),
+                &advance,
+                &batch.offer_nonce,
+                &subject,
+                &call.digest(),
+                &Engine::executable(&planned),
+            );
             facts.extend(opened_offers);
             blocked.push(Blocked {
                 call: call.clone(),
@@ -675,38 +879,41 @@ impl Engine {
         Ok(Some(self.seal(view, batch)?))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn open_offers(
         &self,
         views: &Views,
+        act: &crate::basis::DecidedAct,
         advance: &crate::basis::BasisAdvance,
         nonce: &crate::value::OfferNonce,
         subject: &crate::basis::SubjectKey,
-        call: &ResolvedCall,
-        planned: &PlannedBlock,
+        call: &crate::value::CanonicalDigest,
+        plans: &[plan::ExecutableRemedyPlan],
     ) -> (
         crate::value::BlockId,
         Vec<(crate::value::OfferId, plan::PlanId)>,
         Vec<Fact>,
     ) {
-        let crate::basis::SubjectKey::Call {
-            trajectory,
-            batch,
-            position,
-        } = subject
-        else {
-            unreachable!("offers open against a call candidate")
-        };
-        let digest = call.digest();
-        let block_id = crate::value::BlockId::of_proposal(nonce, trajectory, batch, *position, &digest);
         let basis = views.basis_after(advance, subject);
+        let (trajectory, block_id) = match subject {
+            crate::basis::SubjectKey::Call {
+                trajectory,
+                batch,
+                position,
+            } => (
+                trajectory,
+                crate::value::BlockId::of_proposal(nonce, trajectory, batch, *position, call),
+            ),
+            crate::basis::SubjectKey::ConfinedResult(dispatch) => (
+                dispatch.trajectory(),
+                crate::value::BlockId::of_candidate(nonce, dispatch, basis.subject),
+            ),
+            // A prepared approval is spent by releasing its call, never by an offer of its own.
+            crate::basis::SubjectKey::Approval(_) => unreachable!("no stage stands on an approval"),
+        };
         let mut ids = Vec::new();
         let mut facts = Vec::new();
-        for (index, executable) in planned
-            .plans
-            .iter()
-            .filter_map(plan::RemedyPlan::executable)
-            .enumerate()
-        {
+        for (index, executable) in plans.iter().enumerate() {
             let offer = crate::value::OfferId::of_plan(
                 &block_id,
                 index as u32,
@@ -717,14 +924,23 @@ impl Engine {
                 trajectory: trajectory.clone(),
                 offer,
                 block: block_id,
-                batch: batch.clone(),
-                call: digest,
+                act: act.clone(),
+                call: *call,
                 subject: subject.clone(),
                 plan: executable.clone(),
                 basis,
             });
         }
         (block_id, ids, facts)
+    }
+
+    fn executable(planned: &PlannedBlock) -> Vec<plan::ExecutableRemedyPlan> {
+        planned
+            .plans
+            .iter()
+            .filter_map(plan::RemedyPlan::executable)
+            .cloned()
+            .collect()
     }
 
     fn decided_follow_up(
@@ -754,40 +970,57 @@ impl Engine {
                     settled.push(Settled {
                         dispatch: dispatch.clone(),
                         call: call.clone(),
-                        outcome: match views.is_open(dispatch) {
-                            true => SettledOutcome::Confined,
-                            false => SettledOutcome::Closed {
-                                admitted: views.admitted_body(dispatch).cloned(),
-                            },
-                        },
+                        outcome: settled_outcome(views, dispatch),
                     });
                 }
-                None => match check::evaluate(contract, views, call) {
-                    CheckOutcome::Block(raw) => {
-                        let subject = crate::basis::SubjectKey::Call {
-                            trajectory: batch.trajectory.clone(),
-                            batch: batch.id.clone(),
-                            position: position as u32,
-                        };
-                        let (block_id, offers) = views.pending_block(&subject).unwrap_or_else(|| {
-                            let block_id = crate::value::BlockId::of_proposal(
-                                &batch.offer_nonce,
-                                &batch.trajectory,
-                                &batch.id,
-                                position as u32,
-                                &call.digest(),
-                            );
-                            (block_id, Vec::new())
-                        });
-                        blocked.push(Blocked {
-                            call: call.clone(),
-                            block: plan::plan(&self.registry, views, call, &raw),
-                            block_id,
-                            offers,
-                        });
+                None => {
+                    let subject = crate::basis::SubjectKey::Call {
+                        trajectory: batch.trajectory.clone(),
+                        batch: batch.id.clone(),
+                        position: position as u32,
+                    };
+                    // An input hop the agent has since run replaced this proposal, so the call
+                    // this position is about now is the candidate, and the check reads its
+                    // substitution. Its offers are the ones already pending on
+                    // the same subject, which is why the two must be reported together.
+                    let candidate = views.call_candidate(&subject).unwrap_or(call).clone();
+                    let stage = views.call_stage(&subject);
+                    match check::evaluate(contract, views, &candidate, &stage) {
+                        CheckOutcome::Block(raw) => {
+                            let (block_id, offers) = views.pending_block(&subject).unwrap_or_else(|| {
+                                let block_id = crate::value::BlockId::of_proposal(
+                                    &batch.offer_nonce,
+                                    &batch.trajectory,
+                                    &batch.id,
+                                    position as u32,
+                                    &candidate.digest(),
+                                );
+                                (block_id, Vec::new())
+                            });
+                            blocked.push(Blocked {
+                                block: plan::plan(&self.registry, views, &candidate, &raw, &stage),
+                                call: candidate,
+                                block_id,
+                                offers,
+                            });
+                        }
+                        CheckOutcome::Allow => match dispatch_for(views, &subject, &candidate) {
+                            Some(dispatch) if views.is_open(&dispatch) && !views.is_succeeded(&dispatch) => {
+                                released.push(Released {
+                                    dispatch,
+                                    call: candidate,
+                                    fork: None,
+                                });
+                            }
+                            Some(dispatch) => settled.push(Settled {
+                                outcome: settled_outcome(views, &dispatch),
+                                dispatch,
+                                call: candidate,
+                            }),
+                            None => spent.push(candidate),
+                        },
                     }
-                    CheckOutcome::Allow => spent.push(call.clone()),
-                },
+                }
             }
         }
         Ok(FollowUp::Proposals {
@@ -814,10 +1047,15 @@ impl Engine {
         if recorded.basis != views.basis_for(&recorded.subject) {
             return Err(TransitionError::StaleOffer);
         }
+        if let crate::basis::SubjectKey::ConfinedResult(dispatch) = &recorded.subject {
+            let dispatch = dispatch.clone();
+            return self.decide_confined(view, &views, execution, &recorded, &dispatch);
+        }
         let call = self.offer_call(&views, &recorded);
         let contract = self.validated_contract(&call)?;
-        let live = match check::evaluate(contract, &views, &call) {
-            CheckOutcome::Block(raw) => plan::plan(&self.registry, &views, &call, &raw)
+        let stage = views.call_stage(&recorded.subject);
+        let live = match check::evaluate(contract, &views, &call, &stage) {
+            CheckOutcome::Block(raw) => plan::plan(&self.registry, &views, &call, &raw, &stage)
                 .plans
                 .iter()
                 .filter_map(plan::RemedyPlan::executable)
@@ -827,29 +1065,381 @@ impl Engine {
             CheckOutcome::Allow => None,
         };
         let Some(raw) = live else {
-            let batch = FactBatch::new(
-                views.revision(),
-                vec![Fact::OfferInvalidated {
-                    trajectory: recorded.trajectory.clone(),
-                    offer: execution.offer,
-                }],
-            );
-            return Ok(EngineDecision {
-                append: Some(self.seal(view, batch)?),
-                follow_up: FollowUp::Offer(OfferFollowUp::Invalidated),
-            });
+            return self.invalidated(view, &views, execution, &recorded);
         };
-        match &execution.outcome {
-            OfferOutcome::Approved(evidence) => {
+        match (&execution.outcome, recorded.plan.hop()) {
+            (OfferOutcome::Derived(evidence), Some(sanitizer)) => self.hop_call(
+                view, &views, execution, &recorded, contract, &raw, &call, &stage, sanitizer, evidence,
+            ),
+            (OfferOutcome::Approved(evidence), None) => {
                 self.approve_offer(view, &views, execution, &recorded, contract, &raw, &call, evidence)
             }
-            OfferOutcome::Denied { authority } => {
-                self.deny_offer(view, &views, execution, &recorded, &call, &raw, authority)
+            (OfferOutcome::Denied { authority }, None) => {
+                self.deny_offer(view, &views, execution, &recorded, &call, &raw, &stage, authority)
             }
+            _ => Err(TransitionError::PlanOutcomeMismatch),
+        }
+    }
+
+    fn invalidated(
+        &self,
+        view: &EngineView,
+        views: &Views,
+        execution: &OfferExecution,
+        recorded: &crate::projection::RecordedOffer,
+    ) -> Result<EngineDecision, TransitionError> {
+        let batch = FactBatch::new(
+            views.revision(),
+            vec![Fact::OfferInvalidated {
+                trajectory: recorded.trajectory.clone(),
+                offer: execution.offer,
+            }],
+        );
+        Ok(EngineDecision {
+            append: Some(self.seal(view, batch)?),
+            follow_up: FollowUp::Offer(OfferFollowUp::Invalidated),
+        })
+    }
+
+    fn decide_confined(
+        &self,
+        view: &EngineView,
+        views: &Views,
+        execution: &OfferExecution,
+        recorded: &crate::projection::RecordedOffer,
+        dispatch: &DispatchId,
+    ) -> Result<EngineDecision, TransitionError> {
+        let subject = crate::basis::SubjectKey::ConfinedResult(dispatch.clone());
+        let call = views
+            .dispatch_call(dispatch)
+            .ok_or(TransitionError::UnknownDispatch)?
+            .clone();
+        let receiving = views
+            .receiving_bound(dispatch)
+            .ok_or(TransitionError::UnknownDispatch)?
+            .clone();
+        let Some(DerivedCandidate::Result {
+            value,
+            residual: Some(residual),
+            ..
+        }) = views.candidate(&subject).cloned()
+        else {
+            return self.invalidated(view, views, execution, recorded);
+        };
+        let lineage = views.lineage(&subject);
+        let contract = self.dispatch_contract(views, dispatch)?;
+        let stage = plan::confined_stage(&self.registry, contract, &receiving, &value.label, &residual, &lineage);
+        if !stage.contains(&recorded.plan) {
+            return self.invalidated(view, views, execution, recorded);
+        }
+        let mut facts = vec![Fact::OfferAccepted {
+            trajectory: recorded.trajectory.clone(),
+            offer: execution.offer,
+        }];
+        facts.extend(invalidated_siblings(
+            views,
+            &recorded.trajectory,
+            &subject,
+            execution.offer,
+        ));
+        match (&execution.outcome, recorded.plan.hop()) {
+            (OfferOutcome::Derived(evidence), Some(sanitizer)) => self.hop_candidate(
+                view, views, execution, dispatch, &call, &receiving, &value, &lineage, sanitizer, evidence, facts,
+            ),
+            (OfferOutcome::Approved(evidence), None) if evidence.is_empty() => {
+                self.accept_candidate(view, views, execution, dispatch, &call, facts)
+            }
+            _ => Err(TransitionError::PlanOutcomeMismatch),
+        }
+    }
+
+    fn accept_candidate(
+        &self,
+        view: &EngineView,
+        views: &Views,
+        execution: &OfferExecution,
+        dispatch: &DispatchId,
+        call: &ResolvedCall,
+        mut facts: Vec<Fact>,
+    ) -> Result<EngineDecision, TransitionError> {
+        let admitted = self
+            .admit_result(
+                views,
+                dispatch,
+                call,
+                ResultAdmission::CandidateAccepted { offer: execution.offer },
+            )
+            .unwrap_or_else(|error| unreachable!("the confined stage admits what the log already proved: {error}"));
+        facts.extend(admitted.facts);
+        let value = crossed(&facts);
+        let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
+        let batch = self.declaring(
+            crate::basis::DecidedAct::Offer(execution.offer),
+            advance,
+            FactBatch::new(views.revision(), facts),
+        );
+        Ok(EngineDecision {
+            append: Some(self.seal(view, batch)?),
+            follow_up: FollowUp::Offer(OfferFollowUp::Admitted { value }),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn hop_candidate(
+        &self,
+        view: &EngineView,
+        views: &Views,
+        execution: &OfferExecution,
+        dispatch: &DispatchId,
+        call: &ResolvedCall,
+        receiving: &EstablishedLabel,
+        predecessor: &crate::value::LabeledValue,
+        lineage: &SanitizerLineage,
+        sanitizer: &SanitizerName,
+        evidence: &Evidence,
+        mut facts: Vec<Fact>,
+    ) -> Result<EngineDecision, TransitionError> {
+        let Evidence::Sanitizer {
+            sanitizer: named,
+            source,
+            derived: body,
+        } = evidence;
+        let source_digest = RawResultDigest::of(predecessor.body.as_str().as_bytes());
+        if named != sanitizer || source != &source_digest {
+            return Err(TransitionError::EvidenceMismatch);
+        }
+        let registered = self
+            .registry
+            .sanitizer(sanitizer)
+            .ok_or(TransitionError::SanitizerUnapplicable)?;
+        let label = registered
+            .derive_output(&predecessor.label, &self.validated_contract(call)?.tags)
+            .ok_or(TransitionError::SanitizerUnapplicable)?;
+        if !plan::confined_hop_helps(receiving, &predecessor.label, &label) {
+            return Err(TransitionError::SanitizerUnapplicable);
+        }
+        let lineage = lineage
+            .extend(sanitizer.clone())
+            .ok_or(TransitionError::SanitizerUnapplicable)?;
+        let residual = crate::admit::confined_residual(receiving, &label);
+        let staged = residual.is_some();
+        facts.push(Fact::CandidateDerived {
+            trajectory: views.trajectory().clone(),
+            subject: crate::basis::SubjectKey::ConfinedResult(dispatch.clone()),
+            sanitizer: sanitizer.clone(),
+            transition: registered.transition.clone(),
+            derived: DerivedCandidate::Result {
+                dispatch: dispatch.clone(),
+                source: source_digest,
+                from: ConfinedFrom::Offer(execution.offer),
+                value: crate::value::LabeledValue::new(body.clone(), label),
+                residual,
+            },
+            lineage,
+        });
+        if staged {
+            let (batch, confined) = self.staged(
+                view,
+                views,
+                crate::basis::DecidedAct::Offer(execution.offer),
+                execution.offer_nonce,
+                dispatch,
+                facts,
+            )?;
+            return Ok(EngineDecision {
+                append: Some(batch),
+                follow_up: FollowUp::Offer(OfferFollowUp::Staged(Box::new(confined))),
+            });
+        }
+        // The successor owes nothing, so it crosses here. The admission re-derives from the record
+        // just written, which is why the candidate is folded first: the one admission choke point
+        // reads state, never a caller's claim.
+        let mut after = view.projection().clone();
+        for fact in &facts {
+            after.fold(fact);
+        }
+        let admitted = self
+            .admit_result(
+                &after.view(views.trajectory()),
+                dispatch,
+                call,
+                ResultAdmission::CandidateAdmissible,
+            )
+            .unwrap_or_else(|error| unreachable!("the confined stage admits what this act just derived: {error}"));
+        facts.extend(admitted.facts);
+        let value = crossed(&facts);
+        let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
+        let batch = self.declaring(
+            crate::basis::DecidedAct::Offer(execution.offer),
+            advance,
+            FactBatch::new(views.revision(), facts),
+        );
+        Ok(EngineDecision {
+            append: Some(self.seal(view, batch)?),
+            follow_up: FollowUp::Offer(OfferFollowUp::Admitted { value }),
+        })
+    }
+
+    /// One input-substitution progress hop.
+    ///
+    /// The sanitizer read the engine's own canonical argument bytes and returned one complete
+    /// replacement object. Its bytes are untrusted: the engine strictly parses them, schema-checks
+    /// them against the callee's declared parameters, constructs the canonical arguments itself,
+    /// and only then has a call to measure. Nothing about the replacement is taken on the runtime's
+    /// word, and the tool is never replaced.
+    ///
+    /// A valid strictly helpful replacement commits as the next candidate on this subject and ends
+    /// every sibling offer standing on its predecessor. The engine then re-checks it: where nothing
+    /// is left to remedy it is released in this same batch — the immediate-admissibility exception
+    /// — and otherwise the stage it leaves is the agent's next choice. An invalid
+    /// derivation produces no record and no dispatch, and leaves the offer pending for a deliberate
+    /// retry.
+    #[allow(clippy::too_many_arguments)]
+    fn hop_call(
+        &self,
+        view: &EngineView,
+        views: &Views,
+        execution: &OfferExecution,
+        recorded: &crate::projection::RecordedOffer,
+        contract: &ToolContract,
+        raw: &crate::check::RawBlock,
+        call: &ResolvedCall,
+        stage: &CallStage,
+        sanitizer: &SanitizerName,
+        evidence: &Evidence,
+    ) -> Result<EngineDecision, TransitionError> {
+        if !raw.unestablished.is_empty() {
+            return Err(PlanError::Unestablished(raw.unestablished.clone()).into());
+        }
+        let Evidence::Sanitizer {
+            sanitizer: named,
+            source,
+            derived: body,
+        } = evidence;
+        if named != sanitizer || source != &RawResultDigest::of(call.canonical_arguments().canonical_bytes()) {
+            return Err(TransitionError::EvidenceMismatch);
+        }
+        let registered = self
+            .registry
+            .sanitizer(sanitizer)
+            .ok_or(TransitionError::SanitizerUnapplicable)?;
+        let label = registered
+            .derive_input(&stage.released(&views.current_label()), &contract.tags)
+            .ok_or(TransitionError::SanitizerUnapplicable)?;
+        let lineage = stage
+            .lineage()
+            .extend(sanitizer.clone())
+            .ok_or(TransitionError::SanitizerUnapplicable)?;
+        let substituted = substituted_call(contract, call, body)?;
+        let next = CallStage::substituting(label.clone(), lineage.clone());
+        let after = check::evaluate(contract, views, &substituted, &next);
+        if !plan::substitution_helps(raw, &after) {
+            return Err(TransitionError::SanitizerUnapplicable);
+        }
+        let derived = DerivedCandidate::Call {
+            source: *source,
+            from: execution.offer,
+            call: substituted.clone(),
+            label,
+        };
+        let trajectory = &recorded.trajectory;
+        let mut facts = vec![Fact::OfferAccepted {
+            trajectory: trajectory.clone(),
+            offer: execution.offer,
+        }];
+        facts.extend(invalidated_siblings(
+            views,
+            trajectory,
+            &recorded.subject,
+            execution.offer,
+        ));
+        facts.push(Fact::CandidateDerived {
+            trajectory: trajectory.clone(),
+            subject: recorded.subject.clone(),
+            sanitizer: sanitizer.clone(),
+            transition: registered.transition.clone(),
+            derived,
+            lineage,
+        });
+        let staged = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
+        let act = crate::basis::DecidedAct::Offer(execution.offer);
+        let follow_up = match after {
+            CheckOutcome::Allow => {
+                let (dispatch, opening) =
+                    opened_dispatch(contract, views, &substituted, Some(recorded.subject.clone()));
+                facts.push(opening);
+                OfferFollowUp::Released(Box::new(Released {
+                    dispatch,
+                    call: substituted,
+                    fork: None,
+                }))
+            }
+            CheckOutcome::Block(raw) => {
+                let planned = plan::plan(&self.registry, views, &substituted, &raw, &next);
+                let (block_id, offers, opened) = self.open_offers(
+                    views,
+                    &act,
+                    &staged,
+                    &execution.offer_nonce,
+                    &recorded.subject,
+                    &substituted.digest(),
+                    &Engine::executable(&planned),
+                );
+                facts.extend(opened);
+                OfferFollowUp::Substituted {
+                    block: Box::new(Blocked {
+                        call: substituted,
+                        block: planned,
+                        block_id,
+                        offers,
+                    }),
+                }
+            }
+        };
+        let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
+        let batch = self.declaring(act, advance, FactBatch::new(views.revision(), facts));
+        Ok(EngineDecision {
+            append: Some(self.seal(view, batch)?),
+            follow_up: FollowUp::Offer(follow_up),
+        })
+    }
+
+    fn substituted_repeat(
+        &self,
+        views: &Views,
+        recorded: &crate::projection::RecordedOffer,
+        execution: &OfferExecution,
+    ) -> OfferFollowUp {
+        let Some(candidate) = views.call_candidate(&recorded.subject).cloned() else {
+            return OfferFollowUp::Invalidated;
+        };
+        if views.pending_block(&recorded.subject).is_some() {
+            return match self.reblocked(views, recorded, execution) {
+                Ok(Some(block)) => OfferFollowUp::Substituted { block: Box::new(block) },
+                _ => OfferFollowUp::Invalidated,
+            };
+        }
+        match dispatch_for(views, &recorded.subject, &candidate) {
+            Some(dispatch) if views.is_open(&dispatch) && !views.is_succeeded(&dispatch) => {
+                OfferFollowUp::Released(Box::new(Released {
+                    dispatch,
+                    call: candidate,
+                    fork: None,
+                }))
+            }
+            Some(dispatch) => OfferFollowUp::Settled(Box::new(Settled {
+                outcome: settled_outcome(views, &dispatch),
+                dispatch,
+                call: candidate,
+            })),
+            None => OfferFollowUp::Invalidated,
         }
     }
 
     fn offer_call(&self, views: &Views, recorded: &crate::projection::RecordedOffer) -> ResolvedCall {
+        if let Some(candidate) = views.call_candidate(&recorded.subject) {
+            return candidate.clone();
+        }
         let crate::basis::SubjectKey::Call { batch, position, .. } = &recorded.subject else {
             unreachable!("an opened offer's subject is a call candidate")
         };
@@ -868,11 +1458,43 @@ impl Engine {
         execution: &OfferExecution,
     ) -> Result<EngineDecision, TransitionError> {
         use crate::projection::OfferEnd;
+        if let crate::basis::SubjectKey::ConfinedResult(dispatch) = &recorded.subject {
+            return match (end, &execution.outcome, recorded.plan.hop()) {
+                (OfferEnd::Accepted, OfferOutcome::Derived(_), Some(_))
+                | (OfferEnd::Accepted, OfferOutcome::Approved(_), None) => Ok(EngineDecision {
+                    append: None,
+                    follow_up: FollowUp::Offer(self.confined_repeat(views, dispatch)),
+                }),
+                (OfferEnd::Invalidated, _, _) => Ok(EngineDecision {
+                    append: None,
+                    follow_up: FollowUp::Offer(OfferFollowUp::Invalidated),
+                }),
+                (_, OfferOutcome::Derived(_), None) | (_, OfferOutcome::Approved(_), Some(_)) => {
+                    Err(TransitionError::PlanOutcomeMismatch)
+                }
+                _ => Err(TransitionError::TerminalOffer),
+            };
+        }
+        if recorded.plan.hop().is_some() {
+            return match (end, &execution.outcome) {
+                (OfferEnd::Accepted, OfferOutcome::Derived(_)) => Ok(EngineDecision {
+                    append: None,
+                    follow_up: FollowUp::Offer(self.substituted_repeat(views, recorded, execution)),
+                }),
+                (OfferEnd::Invalidated, _) => Ok(EngineDecision {
+                    append: None,
+                    follow_up: FollowUp::Offer(OfferFollowUp::Invalidated),
+                }),
+                (_, OfferOutcome::Approved(_)) => Err(TransitionError::PlanOutcomeMismatch),
+                // A hop assigns no authority, so none of its offers can have been denied.
+                _ => Err(TransitionError::TerminalOffer),
+            };
+        }
         let follow_up = match (end, &execution.outcome) {
             (OfferEnd::Accepted, OfferOutcome::Approved(_)) => OfferFollowUp::Approved {
                 call: views
                     .approval(&execution.offer)
-                    .ok_or(TransitionRefusal::UnpreparedCallApproval)?
+                    .ok_or(TransitionRefusal::UndischargedAcceptance)?
                     .call
                     .clone(),
             },
@@ -885,12 +1507,37 @@ impl Engine {
                 }
             }
             (OfferEnd::Invalidated, _) => OfferFollowUp::Invalidated,
+            // A terminal plan never took a sanitizer's derivation, spent or not.
+            (_, OfferOutcome::Derived(_)) => return Err(TransitionError::PlanOutcomeMismatch),
             _ => return Err(TransitionError::TerminalOffer),
         };
         Ok(EngineDecision {
             append: None,
             follow_up: FollowUp::Offer(follow_up),
         })
+    }
+
+    fn confined_repeat(&self, views: &Views, dispatch: &DispatchId) -> OfferFollowUp {
+        if let Some(value) = views.admitted_body(dispatch) {
+            return OfferFollowUp::Admitted { value: value.clone() };
+        }
+        let subject = crate::basis::SubjectKey::ConfinedResult(dispatch.clone());
+        match (views.candidate(&subject), views.pending_block(&subject)) {
+            (
+                Some(DerivedCandidate::Result {
+                    value,
+                    residual: Some(residual),
+                    ..
+                }),
+                Some((_, offers)),
+            ) => OfferFollowUp::Staged(Box::new(Confined {
+                dispatch: dispatch.clone(),
+                candidate: value.clone(),
+                residual: residual.clone(),
+                offers,
+            })),
+            _ => OfferFollowUp::Invalidated,
+        }
     }
 
     fn reblocked(
@@ -901,15 +1548,16 @@ impl Engine {
     ) -> Result<Option<Blocked>, TransitionError> {
         let call = self.offer_call(views, recorded);
         let contract = self.validated_contract(&call)?;
-        let CheckOutcome::Block(raw) = check::evaluate(contract, views, &call) else {
+        let stage = views.call_stage(&recorded.subject);
+        let CheckOutcome::Block(raw) = check::evaluate(contract, views, &call, &stage) else {
             return Ok(None);
         };
         let (block_id, offers) = views
             .pending_block(&recorded.subject)
             .unwrap_or((offer_block(recorded, execution, &call), Vec::new()));
         Ok(Some(Blocked {
-            call: call.clone(),
-            block: plan::plan(&self.registry, views, &call, &raw),
+            block: plan::plan(&self.registry, views, &call, &raw, &stage),
+            call,
             block_id,
             offers,
         }))
@@ -970,20 +1618,12 @@ impl Engine {
             trajectory: trajectory.clone(),
             offer: execution.offer,
         }];
-        let siblings = views
-            .pending_block(&recorded.subject)
-            .map(|(_, offers)| offers)
-            .unwrap_or_default();
-        facts.extend(
-            siblings
-                .into_iter()
-                .map(|(offer, _)| offer)
-                .filter(|offer| offer != &execution.offer)
-                .map(|offer| Fact::OfferInvalidated {
-                    trajectory: trajectory.clone(),
-                    offer,
-                }),
-        );
+        facts.extend(invalidated_siblings(
+            views,
+            trajectory,
+            &recorded.subject,
+            execution.offer,
+        ));
         let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
         let subject = crate::basis::SubjectKey::Approval(execution.offer);
         facts.push(Fact::CallApproved {
@@ -1027,6 +1667,7 @@ impl Engine {
         recorded: &crate::projection::RecordedOffer,
         call: &ResolvedCall,
         raw: &crate::check::RawBlock,
+        stage: &CallStage,
         authority: &AuthorityName,
     ) -> Result<EngineDecision, TransitionError> {
         if !recorded.plan.names_authority(authority) {
@@ -1057,14 +1698,15 @@ impl Engine {
         }
         let after = after.view(trajectory);
         let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
-        let planned = plan::plan(&self.registry, &after, call, raw);
+        let planned = plan::plan(&self.registry, &after, call, raw, stage);
         let (block_id, offers, opened) = self.open_offers(
             &after,
+            &crate::basis::DecidedAct::Offer(execution.offer),
             &advance,
             &execution.offer_nonce,
             &recorded.subject,
-            call,
-            &planned,
+            &call.digest(),
+            &Engine::executable(&planned),
         );
         facts.extend(opened);
         let batch = self.declaring(
@@ -1164,7 +1806,7 @@ impl Engine {
     /// the runtime re-checks after each landed cast, so a surfaced block is the residual.
     pub fn check(&self, views: &Views, call: &ResolvedCall) -> Result<CheckOutcome, EngineError> {
         let contract = self.validated_contract(call)?;
-        Ok(check::evaluate(contract, views, call))
+        Ok(check::evaluate(contract, views, call, &CallStage::default()))
     }
 
     /// Open a dispatch for a call that **passes the check as-is**. Re-checks and refuses any
@@ -1177,9 +1819,9 @@ impl Engine {
         if views.has_ended(views.trajectory()) {
             return Err(EngineError::BranchEnded);
         }
-        match check::evaluate(contract, views, call) {
+        match check::evaluate(contract, views, call, &CallStage::default()) {
             CheckOutcome::Allow => {
-                let (_, fact) = opened_dispatch(contract, views, call);
+                let (_, fact) = opened_dispatch(contract, views, call, None);
                 Ok(FactBatch::new(views.revision(), vec![fact]))
             }
             _ => Err(EngineError::NotAllowed),
@@ -1252,7 +1894,7 @@ impl Engine {
     /// implemented remedy subset — see [`crate::plan`].
     pub fn plan(&self, views: &Views, call: &ResolvedCall, raw: &RawBlock) -> Result<PlannedBlock, EngineError> {
         self.validated_contract(call)?;
-        Ok(plan::plan(&self.registry, views, call, raw))
+        Ok(plan::plan(&self.registry, views, call, raw, &CallStage::default()))
     }
 
     /// Establish an admitted Unknown value's complete label by a validated whole-source cast
@@ -1321,6 +1963,11 @@ impl Engine {
         branch::execute_child_return_plan(&self.registry, parent, child, chosen, submission)
     }
 
+    fn dispatch_contract(&self, views: &Views, dispatch: &DispatchId) -> Result<&ToolContract, TransitionError> {
+        let tool = views.dispatch_tool(dispatch).ok_or(TransitionError::UnknownDispatch)?;
+        self.checkable_contract(tool).map_err(TransitionError::Call)
+    }
+
     fn checkable_contract(&self, tool: &ToolName) -> Result<&ToolContract, EngineError> {
         contract_for(&self.registry, tool)
     }
@@ -1339,11 +1986,70 @@ impl Engine {
     }
 }
 
+fn crossed(facts: &[Fact]) -> ValueBody {
+    facts
+        .iter()
+        .find_map(|fact| match fact {
+            Fact::ValueAdmitted { value, .. } => Some(value.body.clone()),
+            _ => None,
+        })
+        .expect("a candidate's admission carries the value that crossed")
+}
+
+fn substituted_call(
+    contract: &ToolContract,
+    call: &ResolvedCall,
+    body: &ValueBody,
+) -> Result<ResolvedCall, TransitionError> {
+    let arguments = crate::params::CanonicalArguments::from_raw(body.as_str().as_bytes(), &contract.parameters)
+        .map_err(|error| TransitionError::Call(EngineError::InvalidCall(error)))?;
+    Ok(call.substituting(arguments))
+}
+
+fn dispatch_for(views: &Views, subject: &crate::basis::SubjectKey, candidate: &ResolvedCall) -> Option<DispatchId> {
+    views
+        .subject_dispatch(subject)
+        .cloned()
+        .or_else(|| views.dispatch_of(candidate))
+}
+
+fn invalidated_siblings(
+    views: &Views,
+    trajectory: &TrajectoryId,
+    subject: &crate::basis::SubjectKey,
+    spent: crate::value::OfferId,
+) -> Vec<Fact> {
+    views
+        .pending_block(subject)
+        .map(|(_, offers)| offers)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(offer, _)| offer)
+        .filter(|offer| offer != &spent)
+        .map(|offer| Fact::OfferInvalidated {
+            trajectory: trajectory.clone(),
+            offer,
+        })
+        .collect()
+}
+
+fn settled_outcome(views: &Views, dispatch: &DispatchId) -> SettledOutcome {
+    match views.is_open(dispatch) {
+        true => SettledOutcome::Confined,
+        false => SettledOutcome::Closed {
+            admitted: views.admitted_body(dispatch).cloned(),
+        },
+    }
+}
+
 fn advance_of(engine: &Engine, view: &EngineView, batch: &FactBatch) -> crate::basis::BasisAdvance {
     Sequence::advance_of(&engine.registry, &engine.child_return, view, &batch.facts)
 }
 
 fn approved_release(
+    registry: &Registry,
+    contract: &ToolContract,
+    call: &ResolvedCall,
     trajectory: &TrajectoryId,
     dispatch: &DispatchId,
     approval: &crate::projection::PreparedApproval,
@@ -1371,6 +2077,8 @@ fn approved_release(
             dispatch: dispatch.clone(),
             plan: approval.plan,
             sanitizer: sanitizer.clone(),
+            contribution: crate::plan::bound_contribution(registry, contract, call, sanitizer)
+                .expect("a prepared approval binds an output sanitizer enumeration found applicable"),
         });
     }
     facts
@@ -1425,22 +2133,31 @@ fn branch_refusal(error: BranchError) -> TransitionError {
 }
 
 /// Build the `DispatchOpened` fact for a call: its proposed committed label, the effects it would
-/// commit on success, and its occurrence (a repeat identical call is a new dispatch). Shared by the
-/// clean-allow path ([`Engine::open_dispatch`]) and atomic plan execution ([`crate::execute`]).
-pub(crate) fn opened_dispatch(contract: &ToolContract, views: &Views, call: &ResolvedCall) -> (DispatchId, Fact) {
+/// commit on success, its occurrence (a repeat identical call is a new dispatch), and the subject
+/// whose decision released it where one did. Shared by the clean-allow path
+/// ([`Engine::open_dispatch`]) and atomic plan execution ([`crate::execute`]).
+pub(crate) fn opened_dispatch(
+    contract: &ToolContract,
+    views: &Views,
+    call: &ResolvedCall,
+    subject: Option<crate::basis::SubjectKey>,
+) -> (DispatchId, Fact) {
     let digest = call.digest();
     let occurrence = views.dispatch_count(&digest);
     let dispatch = DispatchId::new(views.trajectory().clone(), digest, occurrence);
+    let current = views.current_label();
     let fact = Fact::DispatchOpened {
         trajectory: views.trajectory().clone(),
         dispatch: dispatch.clone(),
         tool: call.tool().clone(),
         arguments: call.canonical_arguments().clone(),
-        proposed_label: check::committed_label_for_call(contract, &views.current_label(), call)
+        proposed_label: check::committed_label_for_call(contract, &current, call)
             .bound()
             .clone(),
+        receiving: current.bound().clone(),
         proposed_effects: contract.emits.clone(),
         dynamic_resolutions: call.dynamic_resolutions().to_vec(),
+        subject,
     };
     (dispatch, fact)
 }
@@ -1452,17 +2169,37 @@ pub(crate) struct SiblingRelease {
     pub(crate) facts: Vec<Fact>,
 }
 
+/// Which batch a composition is running: the trajectory it belongs to, and the batch's own id.
+/// Together they name each position's subject — what the openings record, so a repeat
+/// answers with the dispatch its own position opened.
+#[derive(Clone, Copy)]
+pub(crate) struct ComposingBatch<'a> {
+    pub(crate) trajectory: &'a TrajectoryId,
+    pub(crate) id: &'a crate::transition::ProposalBatchId,
+}
+
+impl ComposingBatch<'_> {
+    pub(crate) fn subject(&self, position: usize) -> crate::basis::SubjectKey {
+        crate::basis::SubjectKey::Call {
+            trajectory: self.trajectory.clone(),
+            batch: self.id.clone(),
+            position: position as u32,
+        }
+    }
+}
+
 /// The ordered in-batch composition, position by position: what each proposed sibling
 /// does, and the records that say so. `None` at a position is a refusal.
 pub(crate) fn compose_batch<'a>(
     registry: &Registry,
     child_return: &ReturnPolicy,
     working: &mut std::borrow::Cow<'a, Projection>,
-    trajectory: &TrajectoryId,
+    batch: ComposingBatch<'_>,
     proposals: &[ResolvedCall],
     spawn: Option<SpawnMark>,
     approval: &impl Fn(&Views, &ResolvedCall) -> Option<crate::value::OfferId>,
 ) -> Result<Vec<Option<SiblingRelease>>, (usize, EngineError)> {
+    let trajectory = batch.trajectory;
     let singleton = proposals.len() == 1;
     let mut composed = Vec::with_capacity(proposals.len());
     // Whether any earlier sibling was refused, and so will be re-planned against the final state.
@@ -1475,7 +2212,7 @@ pub(crate) fn compose_batch<'a>(
                 .parameters
                 .validate(call.arguments())
                 .map_err(|error| (position, EngineError::InvalidCall(error)))?;
-            let consumes = match check::evaluate(contract, &views, call) {
+            let consumes = match check::evaluate(contract, &views, call, &CallStage::default()) {
                 CheckOutcome::Allow => None,
                 CheckOutcome::Block(_) if singleton => match approval(&views, call) {
                     Some(offer) => Some(offer),
@@ -1491,7 +2228,8 @@ pub(crate) fn compose_batch<'a>(
                     continue;
                 }
             };
-            let (dispatch, opening) = opened_dispatch(contract, &views, call);
+            let subject = batch.subject(position);
+            let (dispatch, opening) = opened_dispatch(contract, &views, call, Some(subject));
             let mut facts = Vec::new();
             if let Some(offer) = consumes {
                 let prepared = views
@@ -1503,7 +2241,9 @@ pub(crate) fn compose_batch<'a>(
                     offer,
                     dispatch: dispatch.clone(),
                 });
-                facts.extend(approved_release(trajectory, &dispatch, &prepared));
+                facts.extend(approved_release(
+                    registry, contract, call, trajectory, &dispatch, &prepared,
+                ));
             }
             facts.push(opening);
             let prepares_fork = (spawn == Some(SpawnMark::at(position))).then(|| {
@@ -1750,7 +2490,20 @@ mod tests {
             &appended.facts()[1],
             Fact::ProposalBatchDecided { batch, .. } if batch.as_str() == "b1"
         ));
-        assert_eq!(&appended.facts()[2..], composed.facts.as_slice());
+        let mut decided = appended.facts()[2..].to_vec();
+        let subject = match &mut decided[0] {
+            Fact::DispatchOpened { subject, .. } => subject.take(),
+            other => panic!("the decision's first release record is its opening, got {other:?}"),
+        };
+        assert_eq!(
+            subject,
+            Some(crate::basis::SubjectKey::Call {
+                trajectory: traj(),
+                batch: crate::transition::ProposalBatchId::new("b1"),
+                position: 0,
+            })
+        );
+        assert_eq!(decided.as_slice(), composed.facts.as_slice());
         assert!(matches!(
             &appended.facts()[2],
             Fact::DispatchOpened { dispatch, .. } if dispatch == &released[0].dispatch
@@ -1908,8 +2661,10 @@ mod tests {
                 tool: call.tool().clone(),
                 arguments: call.canonical_arguments().clone(),
                 proposed_label: EstablishedLabel::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
+                receiving: EstablishedLabel::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
                 proposed_effects: crate::fact::EffectSet::default(),
                 dynamic_resolutions: Vec::new(),
+                subject: None,
             },
         ];
         assert_eq!(e.validate_replay(&forged), Err(TransitionRefusal::MisdecidedBatch));
@@ -2379,6 +3134,7 @@ mod tests {
             dispatch: dispatch.clone(),
             outcome,
             evidence: Vec::new(),
+            offer_nonce: nonce(),
         };
         let body = ValueBody::new("the ticket");
         let success = || {
@@ -2444,10 +3200,98 @@ mod tests {
                     dispatch: DispatchId::new(traj(), call.digest(), 7),
                     outcome: ToolOutcome::Failure,
                     evidence: Vec::new(),
+                    offer_nonce: nonce(),
                 })
             ),
             Err(crate::transition::TransitionError::UnknownDispatch)
         );
+    }
+
+    #[test]
+    fn the_composed_admission_of_an_accepted_residual_replays() {
+        let redactor = crate::authority::Sanitizer {
+            name: crate::names::SanitizerName::new("redactor"),
+            on: crate::authority::SanitizerPoints {
+                input: false,
+                output: true,
+            },
+            transition: crate::authority::Transition::Trust {
+                from_floor: SUSPICIOUS,
+                to: Trust::new(1),
+            },
+            scope: crate::authority::Scope::default(),
+            hint: None,
+        };
+        let fetch = ToolContract {
+            name: ToolName::new("fetch"),
+            tags: vec![],
+            delta: Some(Delta {
+                trust: Some(Dim::Known(SUSPICIOUS)),
+                audience: None,
+            }),
+            parameters: crate::params::ToolParameters::open(),
+            emits: EffectSet::new([EffectKind::new("web.read")]).unwrap(),
+            requires: Requires::default(),
+        };
+        let e = open_engine(RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "limited".into(), "trusted".into()]),
+            tools: vec![fetch],
+            authorities: vec![],
+            sanitizers: vec![redactor],
+            casts: vec![],
+        });
+        let call = call("fetch", json!({}));
+        let mut log = vec![user_value(known(Trust::new(2), Audience::Public))];
+        let projection = Projection::build(&log, Revision::new(log.len() as u64));
+        let trajectory = traj();
+        let views = projection.view(&trajectory);
+        let block = match e.check(&views, &call).unwrap() {
+            CheckOutcome::Block(raw) => raw,
+            other => panic!("the narrowing call blocks, got {other:?}"),
+        };
+        let sanitize = e
+            .plan(&views, &call, &block)
+            .unwrap()
+            .plans
+            .iter()
+            .filter_map(crate::plan::RemedyPlan::executable)
+            .find(|plan| {
+                plan.steps
+                    .iter()
+                    .any(|step| matches!(step, crate::plan::RemedyStep::Sanitize(_)))
+            })
+            .expect("a confined result point offers the sanitize plan")
+            .clone();
+        let executed = e.execute_remedy_plan(&views, &sanitize, &call, &[]).unwrap();
+        let dispatch = executed
+            .facts
+            .iter()
+            .find_map(|fact| match fact {
+                Fact::DispatchOpened { dispatch, .. } => Some(dispatch.clone()),
+                _ => None,
+            })
+            .expect("the executed plan opens the dispatch");
+        log.extend(executed.facts);
+        assert_eq!(e.validate_replay(&log), Ok(()));
+
+        let raw = ValueBody::new("page bytes");
+        let view = e
+            .view(&trajectory, log.clone(), Revision::new(log.len() as u64))
+            .unwrap();
+        let admitted = e
+            .admit_result(
+                &view.projection().view(&trajectory),
+                &dispatch,
+                &call,
+                crate::admit::ResultAdmission::SuccessSanitized {
+                    body: ValueBody::new("page bytes, redacted"),
+                    sanitizer: crate::names::SanitizerName::new("redactor"),
+                    raw_digest: crate::value::RawResultDigest::of(raw.as_str().as_bytes()),
+                },
+            )
+            .expect("the release accepted exactly this residual");
+        let log = [log, admitted.facts].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
     }
 
     #[test]
@@ -2462,6 +3306,7 @@ mod tests {
                 from_floor: SUSPICIOUS,
                 to: TRUSTED,
             },
+            scope: crate::authority::Scope::default(),
             hint: None,
         };
         let fetch = ToolContract {
@@ -2524,6 +3369,7 @@ mod tests {
                 body: OutcomeBody::Available(raw.clone()),
             },
             evidence,
+            offer_nonce: nonce(),
         };
 
         let asked = e.handle(&view, EngineEvent::Outcome(report(Vec::new()))).unwrap();
@@ -2571,6 +3417,7 @@ mod tests {
                         body: OutcomeBody::Available(ValueBody::new("other bytes")),
                     },
                     evidence: Vec::new(),
+                    offer_nonce: nonce(),
                 })
             ),
             Err(crate::transition::TransitionError::ObservationMismatch)
@@ -2582,6 +3429,7 @@ mod tests {
                     dispatch: dispatch.clone(),
                     outcome: ToolOutcome::Failure,
                     evidence: Vec::new(),
+                    offer_nonce: nonce(),
                 })
             ),
             Err(crate::transition::TransitionError::ContradictedSuccess)
@@ -2613,7 +3461,7 @@ mod tests {
                     outcome: crate::fact::CloseOutcome::Success { effects },
                     ..
                 },
-                Fact::OutputSanitizerApplied { .. },
+                Fact::CandidateDerived { .. },
                 Fact::ValueAdmitted { .. }
             ] if effects.is_empty()
         ));
@@ -2653,6 +3501,7 @@ mod tests {
                         body: OutcomeBody::Available(ValueBody::new("other bytes")),
                     },
                     evidence: Vec::new(),
+                    offer_nonce: nonce(),
                 })
             ),
             Err(crate::transition::TransitionError::ObservationMismatch)
@@ -2664,9 +3513,927 @@ mod tests {
                     dispatch,
                     outcome: ToolOutcome::Failure,
                     evidence: Vec::new(),
+                    offer_nonce: nonce(),
                 })
             ),
             Err(crate::transition::TransitionError::ContradictedSuccess)
+        );
+    }
+
+    fn staged_engine() -> Engine {
+        let sanitizer = |name: &str, from_floor: Trust, to: Trust| crate::authority::Sanitizer {
+            name: crate::names::SanitizerName::new(name),
+            on: crate::authority::SanitizerPoints {
+                input: false,
+                output: true,
+            },
+            transition: crate::authority::Transition::Trust { from_floor, to },
+            scope: crate::authority::Scope::default(),
+            hint: None,
+        };
+        open_engine(RegistryConfig {
+            trust_chain: TrustChain::new(vec!["secret".into(), "suspicious".into(), "trusted".into()]),
+            tools: vec![
+                ToolContract {
+                    name: ToolName::new("fetch"),
+                    tags: vec![],
+                    delta: Some(Delta {
+                        trust: Some(Dim::Known(Trust::new(0))),
+                        audience: None,
+                    }),
+                    parameters: crate::params::ToolParameters::open(),
+                    emits: EffectSet::new([EffectKind::new("web.read")]).unwrap(),
+                    requires: Requires::default(),
+                },
+                open_tool("ping"),
+            ],
+            authorities: vec![],
+            sanitizers: vec![
+                sanitizer("redactor", Trust::new(0), Trust::new(1)),
+                sanitizer("scrubber", Trust::new(1), Trust::new(2)),
+            ],
+            casts: vec![],
+        })
+    }
+
+    fn staged_candidate(e: &Engine) -> (Vec<Fact>, DispatchId, ValueBody, EngineDecision) {
+        let call = call("fetch", json!({}));
+        let mut log = vec![user_value(known(Trust::new(2), Audience::Public))];
+        let blocked = proposed(e, &log, "b1", nonce(), call.clone()).expect("the batch decides");
+        let bound = opened_offers(&appended_facts(blocked))
+            .into_iter()
+            .find(|(_, plan)| plan.sanitizer() == Some(&crate::names::SanitizerName::new("redactor")))
+            .expect("a narrowing block offers the applicable output sanitizer's dispatch path")
+            .0;
+        log = [
+            log.clone(),
+            appended_facts(proposed(e, &log, "b1", nonce(), call.clone()).expect("the batch decides")),
+        ]
+        .concat();
+        log = [
+            log.clone(),
+            appended_facts(execute_offer(e, &log, bound, OfferOutcome::Approved(Vec::new())).expect("the offer runs")),
+        ]
+        .concat();
+        let released = proposed(e, &log, "b2", nonce(), call).expect("the approved call releases");
+        let dispatch = match &released.follow_up {
+            FollowUp::Proposals { released, .. } => released[0].dispatch.clone(),
+            other => panic!("the approved proposal releases, got {other:?}"),
+        };
+        log = [log, appended_facts(released)].concat();
+
+        let raw = ValueBody::new("page bytes");
+        let derived = ValueBody::new("page bytes, redacted");
+        let report = |evidence: Vec<crate::transition::Evidence>| ToolReport {
+            dispatch: dispatch.clone(),
+            outcome: ToolOutcome::Success {
+                body: OutcomeBody::Available(raw.clone()),
+            },
+            evidence,
+            offer_nonce: nonce(),
+        };
+        let view = |log: &[Fact]| {
+            e.view(&traj(), log.to_vec(), Revision::new(log.len() as u64))
+                .expect("the log replays")
+        };
+        let asked = e
+            .handle(&view(&log), EngineEvent::Outcome(report(Vec::new())))
+            .expect("the confined result asks for its derivation");
+        log = [log, appended_facts(asked)].concat();
+        let staged = e
+            .handle(
+                &view(&log),
+                EngineEvent::Outcome(report(vec![crate::transition::Evidence::Sanitizer {
+                    sanitizer: crate::names::SanitizerName::new("redactor"),
+                    source: crate::value::RawResultDigest::of(raw.as_str().as_bytes()),
+                    derived: derived.clone(),
+                }])),
+            )
+            .expect("the derivation stages");
+        (log, dispatch, derived, staged)
+    }
+
+    fn confined_of(follow_up: &FollowUp) -> &Confined {
+        match follow_up {
+            FollowUp::Outcome(OutcomeFollowUp::Staged(confined)) | FollowUp::Offer(OfferFollowUp::Staged(confined)) => {
+                confined
+            }
+            other => panic!("a residual-bearing derivation stages, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_narrowing_derivation_stages_its_candidate_instead_of_admitting_it() {
+        let e = staged_engine();
+        let (log, dispatch, derived, staged) = staged_candidate(&e);
+        let confined = confined_of(&staged.follow_up);
+        assert_eq!(confined.dispatch, dispatch);
+        assert_eq!(confined.candidate.body, derived);
+        assert_eq!(
+            confined.residual,
+            crate::check::Narrowing {
+                from: established(Trust::new(2), Audience::Public),
+                to: established(Trust::new(1), Audience::Public),
+            }
+        );
+        let facts = appended_facts(staged.clone());
+        assert!(
+            !facts
+                .iter()
+                .any(|fact| matches!(fact, Fact::ValueAdmitted { .. } | Fact::DispatchClosed { .. })),
+            "a staged candidate admits nothing and closes nothing: {facts:?}"
+        );
+        let stage: Vec<_> = opened_offers(&facts).into_iter().map(|(_, plan)| plan).collect();
+        assert_eq!(
+            stage
+                .iter()
+                .filter_map(plan::ExecutableRemedyPlan::hop)
+                .collect::<Vec<_>>(),
+            vec![&crate::names::SanitizerName::new("scrubber")],
+            "the stage offers the sanitizer that only became applicable once the first hop widened the candidate"
+        );
+        assert_eq!(
+            stage
+                .iter()
+                .filter_map(plan::ExecutableRemedyPlan::narrowing)
+                .collect::<Vec<_>>(),
+            vec![&confined.residual],
+            "and acceptance of exactly the residual, never a guess made before the derivation existed"
+        );
+
+        let log = [log, facts].concat();
+        let again = e
+            .handle(
+                &e.view(&traj(), log.clone(), Revision::new(log.len() as u64)).unwrap(),
+                EngineEvent::Outcome(ToolReport {
+                    dispatch,
+                    outcome: ToolOutcome::Success {
+                        body: OutcomeBody::Available(ValueBody::new("page bytes")),
+                    },
+                    evidence: Vec::new(),
+                    offer_nonce: nonce(),
+                }),
+            )
+            .expect("the repeat hears the stage");
+        assert_eq!(again.append, None);
+        assert_eq!(confined_of(&again.follow_up), confined);
+    }
+
+    #[test]
+    fn a_spend_of_an_offer_the_log_never_accepted_is_refused() {
+        let without_acceptance = |log: &[Fact], batch: Vec<Fact>| {
+            let kept: Vec<Fact> = batch
+                .into_iter()
+                .filter(|fact| !matches!(fact, Fact::OfferAccepted { .. }))
+                .collect();
+            [log.to_vec(), kept].concat()
+        };
+
+        let e = staged_engine();
+        let (log, _, derived, staged) = staged_candidate(&e);
+        let confined = confined_of(&staged.follow_up).clone();
+        let log = [log, appended_facts(staged)].concat();
+        let hop = confined.offers[0].0;
+        let accept = confined.offers[1].0;
+
+        let hopped = appended_facts(
+            execute_offer(
+                &e,
+                &log,
+                hop,
+                OfferOutcome::Derived(crate::transition::Evidence::Sanitizer {
+                    sanitizer: crate::names::SanitizerName::new("scrubber"),
+                    source: crate::value::RawResultDigest::of(derived.as_str().as_bytes()),
+                    derived: ValueBody::new("page bytes, redacted, scrubbed"),
+                }),
+            )
+            .expect("the hop runs"),
+        );
+        assert_eq!(
+            e.validate_replay(&without_acceptance(&log, hopped)),
+            Err(crate::transition::TransitionRefusal::OfferEnded),
+            "a confined hop's successor stands on the acceptance that authorised it"
+        );
+
+        let accepted = appended_facts(
+            execute_offer(&e, &log, accept, OfferOutcome::Approved(Vec::new())).expect("the acceptance runs"),
+        );
+        assert_eq!(
+            e.validate_replay(&without_acceptance(&log, accepted)),
+            Err(crate::transition::TransitionRefusal::OfferEnded),
+            "a candidate crosses at a cost the agent accepted, never one the log asserts"
+        );
+
+        let e = substituting_engine();
+        let proposal = call("post", json!({ "body": "ssn 123" }));
+        let log = internal_log(TRUSTED);
+        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
+        let offers = opened_offers(&facts);
+        let log = [log, facts].concat();
+        let substituted = appended_facts(
+            execute_offer(&e, &log, offers[0].0, substitution(&proposal, REDACTED)).expect("the hop runs"),
+        );
+        assert_eq!(
+            e.validate_replay(&without_acceptance(&log, substituted)),
+            Err(crate::transition::TransitionRefusal::OfferEnded),
+            "a substituted candidate stands on the acceptance that authorised it"
+        );
+    }
+
+    #[test]
+    fn a_confined_stage_is_left_by_a_hop_or_by_accepting_its_residual() {
+        let e = staged_engine();
+        let (log, dispatch, derived, staged) = staged_candidate(&e);
+        let confined = confined_of(&staged.follow_up).clone();
+        let log = [log, appended_facts(staged)].concat();
+        let plan_of = |offer: &crate::value::OfferId| {
+            confined
+                .offers
+                .iter()
+                .find(|(id, _)| id == offer)
+                .map(|(_, plan)| *plan)
+                .expect("the stage's own offer")
+        };
+        let scrubbed = ValueBody::new("page bytes, redacted, scrubbed");
+        let hop = confined.offers[0].0;
+        let accept = confined.offers[1].0;
+        assert_ne!(plan_of(&hop), plan_of(&accept));
+
+        assert_eq!(
+            execute_offer(
+                &e,
+                &log,
+                hop,
+                OfferOutcome::Derived(crate::transition::Evidence::Sanitizer {
+                    sanitizer: crate::names::SanitizerName::new("scrubber"),
+                    source: crate::value::RawResultDigest::of(b"page bytes"),
+                    derived: scrubbed.clone(),
+                })
+            ),
+            Err(TransitionError::EvidenceMismatch),
+            "a derivation of the raw bytes is not a derivation of the candidate standing on them"
+        );
+        assert_eq!(
+            execute_offer(&e, &log, hop, OfferOutcome::Approved(Vec::new())),
+            Err(TransitionError::PlanOutcomeMismatch)
+        );
+
+        let hopped = execute_offer(
+            &e,
+            &log,
+            hop,
+            OfferOutcome::Derived(crate::transition::Evidence::Sanitizer {
+                sanitizer: crate::names::SanitizerName::new("scrubber"),
+                source: crate::value::RawResultDigest::of(derived.as_str().as_bytes()),
+                derived: scrubbed.clone(),
+            }),
+        )
+        .expect("the hop runs");
+        assert_eq!(
+            offer_answer(&hopped),
+            &OfferFollowUp::Admitted {
+                value: scrubbed.clone()
+            }
+        );
+        let hopped = appended_facts(hopped);
+        assert!(
+            hopped
+                .iter()
+                .any(|fact| matches!(fact, Fact::OfferInvalidated { offer, .. } if offer == &accept)),
+            "taking the candidate ends every other offer standing on it: {hopped:?}"
+        );
+        let after = e
+            .view(
+                &traj(),
+                [log.clone(), hopped].concat(),
+                Revision::new((log.len() + 8) as u64),
+            )
+            .expect("the hop's batch replays");
+        assert_eq!(
+            after.projection().view(&traj()).current_label().bound(),
+            &established(Trust::new(2), Audience::Public),
+            "a candidate that narrows nothing costs the trajectory nothing"
+        );
+        assert!(
+            after
+                .projection()
+                .view(&traj())
+                .candidate(&crate::basis::SubjectKey::ConfinedResult(dispatch.clone()))
+                .is_none(),
+            "an admitted candidate leaves the staging model"
+        );
+
+        let accepted =
+            execute_offer(&e, &log, accept, OfferOutcome::Approved(Vec::new())).expect("the acceptance runs");
+        assert_eq!(offer_answer(&accepted), &OfferFollowUp::Admitted { value: derived });
+        let accepted = appended_facts(accepted);
+        assert!(
+            accepted.iter().any(|fact| matches!(
+                fact,
+                Fact::CandidateAccepted { narrowing, .. } if narrowing == &confined.residual
+            )),
+            "the acceptance names exactly the residual the candidate owed: {accepted:?}"
+        );
+        let after = e
+            .view(
+                &traj(),
+                [log.clone(), accepted.clone()].concat(),
+                Revision::new((log.len() + 8) as u64),
+            )
+            .expect("the acceptance's batch replays");
+        assert_eq!(
+            after.projection().view(&traj()).current_label().bound(),
+            &established(Trust::new(1), Audience::Public)
+        );
+        assert!(
+            after
+                .projection()
+                .view(&traj())
+                .candidate(&crate::basis::SubjectKey::ConfinedResult(dispatch.clone()))
+                .is_none(),
+            "accepting the residual ends the stage as surely as hopping past it"
+        );
+        assert_eq!(
+            e.view(
+                &traj(),
+                [log.clone(), accepted[..accepted.len() - 1].to_vec()].concat(),
+                Revision::new((log.len() + 8) as u64),
+            )
+            .map(|_| ())
+            .unwrap_err(),
+            crate::transition::TransitionRefusal::UnadmittedDerivation
+        );
+        let settled = [log, accepted].concat();
+        assert_eq!(
+            offer_answer(
+                &execute_offer(&e, &settled, accept, OfferOutcome::Approved(Vec::new())).expect("the repeat answers")
+            ),
+            &OfferFollowUp::Admitted {
+                value: ValueBody::new("page bytes, redacted")
+            }
+        );
+        assert_eq!(
+            execute_offer(
+                &e,
+                &settled,
+                accept,
+                OfferOutcome::Derived(crate::transition::Evidence::Sanitizer {
+                    sanitizer: crate::names::SanitizerName::new("scrubber"),
+                    source: crate::value::RawResultDigest::of(b"page bytes, redacted"),
+                    derived: scrubbed,
+                })
+            )
+            .map(|_| ()),
+            Err(TransitionError::PlanOutcomeMismatch)
+        );
+    }
+
+    #[test]
+    fn a_confined_stage_goes_stale_with_its_basis_and_is_planned_again() {
+        let e = staged_engine();
+        let (log, dispatch, _, staged) = staged_candidate(&e);
+        let confined = confined_of(&staged.follow_up).clone();
+        let log = [log, appended_facts(staged)].concat();
+        let log = [
+            log.clone(),
+            appended_facts(proposed(&e, &log, "b3", nonce(), call("ping", json!({}))).expect("the open call releases")),
+        ]
+        .concat();
+        assert_eq!(
+            execute_offer(&e, &log, confined.offers[1].0, OfferOutcome::Approved(Vec::new())),
+            Err(TransitionError::StaleOffer)
+        );
+
+        let replanned = e
+            .handle(
+                &e.view(&traj(), log.clone(), Revision::new(log.len() as u64)).unwrap(),
+                EngineEvent::Outcome(ToolReport {
+                    dispatch,
+                    outcome: ToolOutcome::Success {
+                        body: OutcomeBody::Available(ValueBody::new("page bytes")),
+                    },
+                    evidence: Vec::new(),
+                    offer_nonce: crate::value::OfferNonce::new([13u8; 32]),
+                }),
+            )
+            .expect("the candidate is planned again");
+        let fresh = confined_of(&replanned.follow_up);
+        assert_eq!(fresh.candidate, confined.candidate, "the candidate itself is durable");
+        assert_eq!(fresh.residual, confined.residual);
+        assert!(
+            fresh
+                .offers
+                .iter()
+                .all(|(offer, _)| !confined.offers.iter().any(|(stale, _)| stale == offer)),
+            "a stale offer never revives: the new stage carries identities of its own"
+        );
+        let fresh = fresh.offers[1].0;
+        let log = [log, appended_facts(replanned)].concat();
+        assert!(matches!(
+            offer_answer(
+                &execute_offer(&e, &log, fresh, OfferOutcome::Approved(Vec::new())).expect("the fresh offer runs")
+            ),
+            OfferFollowUp::Admitted { .. }
+        ));
+    }
+
+    fn substituting_engine() -> Engine {
+        let partner = Audience::restricted([ReaderId::new("partner")]);
+        let post = |name: &str, tags: Vec<crate::names::TagName>| ToolContract {
+            name: ToolName::new(name),
+            tags,
+            delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::compile(&json!({
+                "type": "object",
+                "properties": { "body": { "type": "string" } },
+                "required": ["body"],
+            }))
+            .unwrap(),
+            emits: EffectSet::new([EffectKind::new("outbound.post")]).unwrap(),
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(TRUSTED),
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(partner.clone()))],
+                },
+                ..Requires::default()
+            },
+        };
+        open_engine(RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: vec![
+                post("post", vec![crate::names::TagName::new("outbound")]),
+                post("post_untagged", vec![]),
+                open_tool("ping"),
+            ],
+            authorities: vec![crate::authority::Authority {
+                name: AuthorityName::new("officer"),
+                mandate: crate::authority::Mandate {
+                    trust_ceiling: Some(TRUSTED),
+                    reader_ceiling: Some(partner),
+                    ..crate::authority::Mandate::default()
+                },
+                scope: crate::authority::Scope::default(),
+                hint: None,
+            }],
+            sanitizers: vec![crate::authority::Sanitizer {
+                name: crate::names::SanitizerName::new("redact"),
+                on: crate::authority::SanitizerPoints {
+                    input: true,
+                    output: false,
+                },
+                transition: crate::authority::Transition::Audience {
+                    from_includes: Audience::restricted([ReaderId::new("internal")]),
+                    to: Audience::restricted([ReaderId::new("internal"), ReaderId::new("partner")]),
+                },
+                scope: crate::authority::Scope {
+                    tags: vec![crate::names::TagName::new("outbound")],
+                },
+                hint: None,
+            }],
+            casts: vec![],
+        })
+    }
+
+    fn internal_log(trust: Trust) -> Vec<Fact> {
+        vec![user_value(known(
+            trust,
+            Audience::restricted([ReaderId::new("internal")]),
+        ))]
+    }
+
+    fn substitution(call: &ResolvedCall, replacement: &str) -> OfferOutcome {
+        OfferOutcome::Derived(crate::transition::Evidence::Sanitizer {
+            sanitizer: crate::names::SanitizerName::new("redact"),
+            source: crate::value::RawResultDigest::of(call.canonical_arguments().canonical_bytes()),
+            derived: ValueBody::new(replacement),
+        })
+    }
+
+    const REDACTED: &str = r#"{"body":"[redacted]"}"#;
+
+    #[test]
+    fn an_input_hop_is_offered_before_the_ruling_that_covers_the_same_gap() {
+        let e = substituting_engine();
+        let log = internal_log(TRUSTED);
+        let plans = |tool: &str| {
+            opened_offers(&appended_facts(
+                proposed(&e, &log, "b1", nonce(), call(tool, json!({ "body": "ssn 123" }))).expect("the batch decides"),
+            ))
+            .into_iter()
+            .map(|(_, plan)| plan)
+            .collect::<Vec<_>>()
+        };
+        let tagged = plans("post");
+        assert_eq!(
+            tagged.iter().map(plan::ExecutableRemedyPlan::hop).collect::<Vec<_>>(),
+            vec![Some(&crate::names::SanitizerName::new("redact")), None]
+        );
+        assert_eq!(
+            tagged[1]
+                .required
+                .iter()
+                .map(|required| required.authority.clone())
+                .collect::<Vec<_>>(),
+            vec![AuthorityName::new("officer")]
+        );
+        assert!(
+            plans("post_untagged").iter().all(|plan| plan.hop().is_none()),
+            "a sanitizer scoped to a tag the callee does not carry has no jurisdiction over it"
+        );
+    }
+
+    #[test]
+    fn a_substitution_that_clears_the_last_gap_dispatches_in_the_hops_own_batch() {
+        let e = substituting_engine();
+        let proposal = call("post", json!({ "body": "ssn 123" }));
+        let log = internal_log(TRUSTED);
+        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
+        let offers = opened_offers(&facts);
+        let log = [log, facts].concat();
+
+        let hopped = execute_offer(&e, &log, offers[0].0, substitution(&proposal, REDACTED)).expect("the hop runs");
+        let released = match offer_answer(&hopped) {
+            OfferFollowUp::Released(released) => (**released).clone(),
+            other => panic!("an immediately admissible substitution dispatches, got {other:?}"),
+        };
+        assert_eq!(released.call.canonical_arguments().canonical_text(), REDACTED);
+        let facts = appended_facts(hopped);
+        assert!(
+            matches!(
+                facts.as_slice(),
+                [
+                    Fact::BasisAdvanced { .. },
+                    Fact::OfferAccepted { .. },
+                    Fact::OfferInvalidated { offer, .. },
+                    Fact::CandidateDerived {
+                        derived: DerivedCandidate::Call { call, .. },
+                        ..
+                    },
+                    Fact::DispatchOpened { dispatch, .. },
+                ] if offer == &offers[1].0 && call == &released.call && dispatch == &released.dispatch
+            ),
+            "the hop commits its candidate, ends the sibling standing on the predecessor it \
+             replaced, and opens the dispatch: {facts:?}"
+        );
+        let before = basis_of(&e, &log);
+        let log = [log, facts].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+        assert_eq!(
+            basis_of(&e, &log).family,
+            before.family.next(),
+            "the release the hop earned reserves its effect, and the act declared that advance"
+        );
+
+        let mut forged = log.clone();
+        let mut second = forged.last().expect("the opening is the batch's last record").clone();
+        let Fact::DispatchOpened { dispatch, .. } = &mut second else {
+            panic!("the hop's batch ends with its opening")
+        };
+        *dispatch = DispatchId::new(traj(), *dispatch.digest(), 1);
+        forged.push(second);
+        assert_eq!(
+            e.validate_replay(&forged),
+            Err(crate::transition::TransitionRefusal::UnbackedDecision)
+        );
+
+        let plain = proposed(&e, &log, "b2", nonce(), call("post", json!({ "body": "[redacted]" })))
+            .expect("the batch decides");
+        match &plain.follow_up {
+            FollowUp::Proposals { released, blocked, .. } => {
+                assert!(released.is_empty());
+                assert_eq!(
+                    blocked[0].block.raw.requirement_gaps,
+                    vec![Gap::Includes {
+                        recipients: Audience::restricted([ReaderId::new("partner")])
+                    }]
+                );
+            }
+            other => panic!("a fresh proposal decides as proposals, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_forged_answer_neither_persists_on_a_candidate_nor_releases_one() {
+        let e = substituting_engine();
+        let proposal = call("post", json!({ "body": "ssn 123" }));
+        let log = internal_log(TRUSTED);
+        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
+        let offers = opened_offers(&facts);
+        let log = [log, facts].concat();
+        let facts = appended_facts(
+            execute_offer(&e, &log, offers[0].0, substitution(&proposal, REDACTED)).expect("the hop runs"),
+        );
+        let log = [log, facts].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+
+        let answer = || {
+            crate::contract::PinnedDynamicResolution::from_answer(
+                crate::contract::DynamicAudienceBinding {
+                    resolver: crate::names::DynamicResolverName::new("acl"),
+                    argument: "body".to_string(),
+                },
+                Some(Audience::restricted([ReaderId::new("partner")])),
+            )
+        };
+
+        let mut forged = log.clone();
+        let candidate = forged.len() - 2;
+        let Fact::CandidateDerived {
+            derived: DerivedCandidate::Call { call, .. },
+            ..
+        } = &mut forged[candidate]
+        else {
+            panic!("the hop's batch records its candidate before the opening")
+        };
+        *call = call.clone().with_dynamic_resolutions(vec![answer()]);
+        assert_eq!(
+            e.validate_replay(&forged),
+            Err(crate::transition::TransitionRefusal::ForgedLabel),
+            "the candidate is the call the predecessor's own substitution renders, answers included"
+        );
+
+        let mut forged = log.clone();
+        let Fact::DispatchOpened {
+            dynamic_resolutions, ..
+        } = forged.last_mut().expect("the opening is the batch's last record")
+        else {
+            panic!("the hop's batch ends with its opening")
+        };
+        *dynamic_resolutions = vec![answer()];
+        assert_eq!(
+            e.validate_replay(&forged),
+            Err(crate::transition::TransitionRefusal::UnbackedDecision),
+            "the release a candidate earned is that exact call; an opening of any other claims a \
+             subject this decision never released"
+        );
+    }
+
+    #[test]
+    fn a_repeat_of_a_hop_names_the_dispatch_that_hop_opened() {
+        let e = substituting_engine();
+        let proposal = call("post", json!({ "body": "ssn 123" }));
+        let log = internal_log(TRUSTED);
+
+        let hop_of = |log: &Vec<Fact>, batch: &str| {
+            let facts = appended_facts(proposed(&e, log, batch, nonce(), proposal.clone()).expect("the batch decides"));
+            let offer = opened_offers(&facts)[0].0;
+            ([log.clone(), facts].concat(), offer)
+        };
+        let released_by = |log: &Vec<Fact>, offer| match offer_answer(
+            &execute_offer(&e, log, offer, substitution(&proposal, REDACTED)).expect("the hop runs"),
+        ) {
+            OfferFollowUp::Released(released) => released.dispatch.clone(),
+            other => panic!("an immediately admissible substitution dispatches, got {other:?}"),
+        };
+
+        let (log, first) = hop_of(&log, "b1");
+        let ran = released_by(&log, first);
+        let log = [
+            log.clone(),
+            appended_facts(execute_offer(&e, &log, first, substitution(&proposal, REDACTED)).expect("the hop runs")),
+        ]
+        .concat();
+
+        let (log, second) = hop_of(&log, "b2");
+        let again = released_by(&log, second);
+        assert_ne!(ran, again, "each candidate earns its own dispatch");
+        let log = [
+            log.clone(),
+            appended_facts(execute_offer(&e, &log, second, substitution(&proposal, REDACTED)).expect("the hop runs")),
+        ]
+        .concat();
+
+        let repeat = |offer| match offer_answer(
+            &execute_offer(&e, &log, offer, substitution(&proposal, REDACTED)).expect("the repeat answers"),
+        ) {
+            OfferFollowUp::Released(released) => released.dispatch.clone(),
+            OfferFollowUp::Settled(settled) => settled.dispatch.clone(),
+            other => panic!("a spent hop answers from its record, got {other:?}"),
+        };
+        assert_eq!(repeat(first), ran);
+        assert_eq!(repeat(second), again, "the second hop's repeat names its own dispatch");
+    }
+
+    #[test]
+    fn an_opening_names_the_position_the_decision_released_it_for() {
+        let e = engine(vec![plain_tool("ping")]);
+        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let ping = call("ping", json!({}));
+        let decided = e
+            .handle(
+                &viewing(&e, &log),
+                batch("b1", Vec::new(), vec![raw(&ping), raw(&ping)]),
+            )
+            .expect("the batch decides");
+        let (released, blocked) = answered(&decided);
+        assert!(blocked.is_empty());
+        assert_eq!(released.len(), 2, "identical siblings take their own occurrences");
+        let log = [log, appended_facts(decided)].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+
+        let subject = |position: u32| crate::basis::SubjectKey::Call {
+            trajectory: traj(),
+            batch: crate::transition::ProposalBatchId::new("b1"),
+            position,
+        };
+        let openings: Vec<_> = log
+            .iter()
+            .filter_map(|fact| match fact {
+                Fact::DispatchOpened { dispatch, subject, .. } => Some((dispatch.clone(), subject.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(openings[0].1, Some(subject(0)));
+        assert_eq!(openings[1].1, Some(subject(1)));
+
+        let mut forged = log.clone();
+        let second = forged
+            .iter_mut()
+            .filter_map(|fact| match fact {
+                Fact::DispatchOpened { subject, .. } => Some(subject),
+                _ => None,
+            })
+            .nth(1)
+            .expect("the batch opened two dispatches");
+        *second = Some(subject(0));
+        assert_eq!(
+            e.validate_replay(&forged),
+            Err(crate::transition::TransitionRefusal::UnbackedDecision)
+        );
+    }
+
+    #[test]
+    fn a_substitution_that_leaves_a_gap_re_plans_over_the_derived_call() {
+        let e = substituting_engine();
+        let proposal = call("post", json!({ "body": "ssn 123" }));
+        let log = internal_log(SUSPICIOUS);
+        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
+        let hop = opened_offers(&facts)[0].0;
+        let log = [log, facts].concat();
+
+        let hopped = execute_offer(&e, &log, hop, substitution(&proposal, REDACTED)).expect("the hop runs");
+        let block = match offer_answer(&hopped) {
+            OfferFollowUp::Substituted { block } => (**block).clone(),
+            other => panic!("a substitution that still blocks re-plans, got {other:?}"),
+        };
+        assert_eq!(block.call.canonical_arguments().canonical_text(), REDACTED);
+        assert_eq!(
+            block.block.raw.requirement_gaps,
+            vec![Gap::TrustFloor {
+                required: TRUSTED,
+                actual: SUSPICIOUS,
+            }],
+            "the substitution cleared the recipients its `to` declared, and nothing else"
+        );
+        let facts = appended_facts(hopped);
+        let stage = opened_offers(&facts);
+        assert_eq!(
+            stage.len(),
+            1,
+            "the spent sanitizer is not offered again on its own successor"
+        );
+        assert!(stage[0].1.hop().is_none());
+        let log = [log, facts].concat();
+
+        let (offer, plan) = stage[0].clone();
+        let evidence = evidence_for(
+            offer,
+            &plan,
+            "post",
+            partial(SUSPICIOUS, Audience::restricted([ReaderId::new("internal")])),
+        );
+        let approved = execute_offer(&e, &log, offer, OfferOutcome::Approved(evidence)).expect("the officer answers");
+        assert_eq!(
+            offer_answer(&approved),
+            &OfferFollowUp::Approved {
+                call: block.call.clone()
+            }
+        );
+        let log = [log, appended_facts(approved)].concat();
+
+        let released = proposed(&e, &log, "b2", nonce(), block.call).expect("the approved call releases");
+        match &released.follow_up {
+            FollowUp::Proposals { released, .. } => assert_eq!(released.len(), 1),
+            other => panic!("the approved proposal releases, got {other:?}"),
+        }
+        let log = [log, appended_facts(released)].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+        match &proposed(&e, &log, "b3", nonce(), proposal)
+            .expect("the batch decides")
+            .follow_up
+        {
+            FollowUp::Proposals { released, blocked, .. } => {
+                assert!(released.is_empty());
+                assert_eq!(blocked.len(), 1);
+            }
+            other => panic!("a fresh proposal decides as proposals, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_replacement_the_engine_cannot_bind_leaves_the_hop_unspent() {
+        let e = substituting_engine();
+        let proposal = call("post", json!({ "body": "ssn 123" }));
+        let log = internal_log(TRUSTED);
+        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
+        let hop = opened_offers(&facts)[0].0;
+        let log = [log, facts].concat();
+        let run = |outcome: OfferOutcome| execute_offer(&e, &log, hop, outcome).map(|_| ());
+
+        for unbindable in [
+            r#"{"body":"a"} {"body":"b"}"#,
+            r#"["body"]"#,
+            r#"{"body":7}"#,
+            r#"{"other":"a"}"#,
+            "",
+        ] {
+            assert!(
+                matches!(
+                    run(substitution(&proposal, unbindable)),
+                    Err(TransitionError::Call(EngineError::InvalidCall(_)))
+                ),
+                "{unbindable:?} was bound as a replacement call"
+            );
+        }
+        assert_eq!(
+            run(OfferOutcome::Derived(crate::transition::Evidence::Sanitizer {
+                sanitizer: crate::names::SanitizerName::new("officer"),
+                source: crate::value::RawResultDigest::of(proposal.canonical_arguments().canonical_bytes()),
+                derived: ValueBody::new(REDACTED),
+            })),
+            Err(TransitionError::EvidenceMismatch)
+        );
+        assert_eq!(
+            run(substitution(&call("post", json!({ "body": "other" })), REDACTED)),
+            Err(TransitionError::EvidenceMismatch),
+            "a derivation of other bytes is not a derivation of this candidate's arguments"
+        );
+        assert_eq!(
+            run(OfferOutcome::Approved(Vec::new())),
+            Err(TransitionError::PlanOutcomeMismatch)
+        );
+        assert!(execute_offer(&e, &log, hop, substitution(&proposal, REDACTED)).is_ok());
+    }
+
+    #[test]
+    fn a_hop_goes_stale_with_its_basis_and_a_spent_one_answers_from_the_record() {
+        let e = substituting_engine();
+        let proposal = call("post", json!({ "body": "ssn 123" }));
+        let log = internal_log(TRUSTED);
+        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
+        let hop = opened_offers(&facts)[0].0;
+        let log = [log, facts].concat();
+
+        let moved = [
+            log.clone(),
+            appended_facts(proposed(&e, &log, "b2", nonce(), call("ping", json!({}))).expect("the open call releases")),
+        ]
+        .concat();
+        assert_eq!(
+            execute_offer(&e, &moved, hop, substitution(&proposal, REDACTED)).map(|_| ()),
+            Err(TransitionError::StaleOffer)
+        );
+
+        let taken = execute_offer(&e, &log, hop, substitution(&proposal, REDACTED)).expect("the hop runs");
+        let answer = offer_answer(&taken).clone();
+        let dispatch = match &answer {
+            OfferFollowUp::Released(released) => released.dispatch.clone(),
+            other => panic!("an immediately admissible substitution dispatches, got {other:?}"),
+        };
+        let log = [log, appended_facts(taken)].concat();
+        let repeat = execute_offer(&e, &log, hop, substitution(&proposal, REDACTED)).expect("the repeat answers");
+        assert_eq!(repeat.append, None);
+        assert_eq!(offer_answer(&repeat), &answer);
+        assert_eq!(
+            execute_offer(&e, &log, hop, OfferOutcome::Approved(Vec::new())).map(|_| ()),
+            Err(TransitionError::PlanOutcomeMismatch)
+        );
+
+        let body = ValueBody::new("posted");
+        let reported = e
+            .handle(
+                &e.view(&traj(), log.clone(), Revision::new(log.len() as u64)).unwrap(),
+                EngineEvent::Outcome(ToolReport {
+                    dispatch,
+                    outcome: ToolOutcome::Success {
+                        body: OutcomeBody::Available(body.clone()),
+                    },
+                    evidence: Vec::new(),
+                    offer_nonce: nonce(),
+                }),
+            )
+            .expect("the raw result crosses");
+        let log = [log, appended_facts(reported)].concat();
+        let settled = execute_offer(&e, &log, hop, substitution(&proposal, REDACTED)).expect("the repeat answers");
+        assert_eq!(settled.append, None);
+        assert!(
+            matches!(
+                offer_answer(&settled),
+                OfferFollowUp::Settled(settled)
+                    if settled.outcome == crate::transition::SettledOutcome::Closed { admitted: Some(body.clone()) }
+            ),
+            "got {:?}",
+            offer_answer(&settled)
         );
     }
 
@@ -3199,14 +4966,14 @@ mod tests {
     }
 
     fn two_officer_engine() -> Engine {
-        use crate::authority::{Authority, Mandate, Scope};
+        use crate::authority::{Authority, Mandate};
         let officer = |name: &str| Authority {
             name: AuthorityName::new(name),
             mandate: Mandate {
                 trust_ceiling: Some(TRUSTED),
                 ..Mandate::default()
             },
-            scope: Scope::default(),
+            scope: crate::authority::Scope::default(),
             hint: None,
         };
         open_engine(RegistryConfig {
@@ -3385,6 +5152,7 @@ mod tests {
                 from_includes: Audience::restricted([ReaderId::new("internal")]),
                 to: Audience::Public,
             },
+            scope: crate::authority::Scope::default(),
             hint: None,
         };
         let e = open_engine(RegistryConfig {
@@ -3565,6 +5333,7 @@ mod tests {
                         body: OutcomeBody::Available(ValueBody::new("result")),
                     },
                     evidence: Vec::new(),
+                    offer_nonce: nonce(),
                 }),
             )
             .expect("the outcome closes it");
@@ -3740,6 +5509,7 @@ mod tests {
                     dispatch,
                     outcome: ToolOutcome::Failure,
                     evidence: Vec::new(),
+                    offer_nonce: nonce(),
                 }),
             )
             .expect("the dispatch is still the engine's to close");
@@ -4140,19 +5910,19 @@ mod tests {
         let stopped = [opening.clone(), truncated].concat();
         assert_eq!(
             e.validate_replay(&stopped),
-            Err(TransitionRefusal::UnpreparedCallApproval)
+            Err(TransitionRefusal::UndischargedAcceptance)
         );
         assert_eq!(
             e.view(&traj(), stopped.clone(), Revision::new(stopped.len() as u64))
                 .err(),
-            Some(TransitionRefusal::UnpreparedCallApproval)
+            Some(TransitionRefusal::UndischargedAcceptance)
         );
 
         let mut deferred = approval.clone();
         deferred.insert(position, user_value(known(TRUSTED, Audience::Public)));
         assert_eq!(
             e.validate_replay(&[opening.clone(), deferred].concat()),
-            Err(TransitionRefusal::UnpreparedCallApproval)
+            Err(TransitionRefusal::UndischargedAcceptance)
         );
 
         let mut foreign = approval;
@@ -4165,7 +5935,7 @@ mod tests {
         );
         assert_eq!(
             e.validate_replay(&[opening, foreign].concat()),
-            Err(TransitionRefusal::UnpreparedCallApproval)
+            Err(TransitionRefusal::UndischargedAcceptance)
         );
     }
 
@@ -4214,7 +5984,7 @@ mod tests {
         );
         assert_eq!(
             e.validate_replay(&[log, forged].concat()),
-            Err(TransitionRefusal::UnpreparedCallApproval)
+            Err(TransitionRefusal::UndischargedAcceptance)
         );
     }
 
@@ -4254,7 +6024,7 @@ mod tests {
                     offer_nonce: nonce(),
                 }),
             ),
-            Err(TransitionError::Invalid(TransitionRefusal::UnpreparedCallApproval))
+            Err(TransitionError::Invalid(TransitionRefusal::UndischargedAcceptance))
         );
     }
 
@@ -4569,8 +6339,10 @@ mod tests {
                 tool: call.tool().clone(),
                 arguments: call.canonical_arguments().clone(),
                 proposed_label: EstablishedLabel::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
+                receiving: EstablishedLabel::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
                 proposed_effects: EffectSet::default(),
                 dynamic_resolutions: Vec::new(),
+                subject: None,
             }],
         ]
         .concat();
@@ -4632,6 +6404,7 @@ mod tests {
                 from_includes: Audience::restricted([ReaderId::new("internal")]),
                 to: Audience::Public,
             },
+            scope: crate::authority::Scope::default(),
             hint: None,
         };
         let config = RegistryConfig {
@@ -4777,6 +6550,7 @@ mod tests {
                 from_includes: Audience::restricted([ReaderId::new("internal")]),
                 to: Audience::Public,
             },
+            scope: crate::authority::Scope::default(),
             hint: None,
         };
         let e = open_engine(RegistryConfig {
@@ -5384,8 +7158,10 @@ mod tests {
                     tool: fetch_call.tool().clone(),
                     arguments: fetch_call.canonical_arguments().clone(),
                     proposed_label: EstablishedLabel::top(),
+                    receiving: EstablishedLabel::top(),
                     proposed_effects: crate::fact::EffectSet::default(),
                     dynamic_resolutions: Vec::new(),
+                    subject: None,
                 },
                 Fact::ValueAdmitted {
                     trajectory: sibling.clone(),
@@ -5547,7 +7323,7 @@ mod tests {
 
     #[test]
     fn required_rulings_route_each_gap_to_its_authority() {
-        use crate::authority::{Authority, Mandate, Scope};
+        use crate::authority::{Authority, Mandate};
         use crate::names::AuthorityName;
 
         let wire = ToolContract {
@@ -5570,7 +7346,7 @@ mod tests {
                 trust_ceiling: Some(TRUSTED),
                 ..Mandate::default()
             },
-            scope: Scope::default(),
+            scope: crate::authority::Scope::default(),
             hint: None,
         };
         let cfg = RegistryConfig {
@@ -5692,8 +7468,10 @@ mod tests {
             tool: ToolName::new(tool),
             arguments: crate::params::test_arguments(&payload),
             proposed_label: established(TRUSTED, Audience::Public),
+            receiving: established(TRUSTED, Audience::Public),
             proposed_effects: EffectSet::default(),
             dynamic_resolutions: vec![],
+            subject: None,
         };
         let ghost_call = call("ghost", json!({}));
         assert!(matches!(
@@ -5713,7 +7491,7 @@ mod tests {
 
     #[test]
     fn the_dispatched_payload_is_persisted_exactly_once() {
-        use crate::authority::{Authority, Mandate, Scope};
+        use crate::authority::{Authority, Mandate};
         use crate::names::AuthorityName;
         let mut wire = strict_tool("wire");
         wire.requires.label.trust_floor = Some(TRUSTED);
@@ -5723,7 +7501,7 @@ mod tests {
                 trust_ceiling: Some(TRUSTED),
                 ..Mandate::default()
             },
-            scope: Scope::default(),
+            scope: crate::authority::Scope::default(),
             hint: None,
         };
         let cfg = RegistryConfig {
@@ -6030,6 +7808,7 @@ mod tests {
                 from_floor: SUSPICIOUS,
                 to: TRUSTED,
             },
+            scope: crate::authority::Scope::default(),
             hint: None,
         }];
         let bound = ReturnPolicy::Sanitized(crate::names::SanitizerName::new("redactor"));

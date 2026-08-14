@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::candidate::{CallStage, ConfinedFrom, DerivedCandidate, SanitizerLineage};
 use crate::check::{CheckOutcome, Gap, Narrowing, RawBlock};
 use crate::contract::ToolContract;
 use crate::execute::AuthorityEvidence;
@@ -130,6 +131,7 @@ pub struct OfferExecution {
 pub enum OfferOutcome {
     Approved(Vec<AuthorityEvidence>),
     Denied { authority: AuthorityName },
+    Derived(Evidence),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,6 +139,24 @@ pub enum OfferFollowUp {
     Approved { call: ResolvedCall },
     Denied { block: Box<Blocked> },
     Invalidated,
+    Staged(Box<Confined>),
+    Substituted { block: Box<Blocked> },
+    Released(Box<Released>),
+    Settled(Box<Settled>),
+    Admitted { value: ValueBody },
+}
+
+/// One confined result and the ways to move it. Not a [`Blocked`]: no call is
+/// refused here. The dispatch ran, its effects stand, and what waits is the derived value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Confined {
+    pub dispatch: DispatchId,
+    pub candidate: crate::value::LabeledValue,
+    pub residual: Narrowing,
+    /// The offer opened for each next-stage plan, paired with the plan it binds: acceptance of
+    /// exactly `residual`, and every sanitizer hop that strictly improves the candidate. Runtime
+    /// renders these and routes `execute_remedy_plan` by them; it mints none of its own.
+    pub offers: Vec<(crate::value::OfferId, crate::plan::PlanId)>,
 }
 
 /// The host's child identity for one prepared fork. Idempotent: repeating the same pair
@@ -186,6 +206,9 @@ pub struct ToolReport {
     /// Typed evidence the runtime resolved for this exact report. An external that gave
     /// no answer contributes nothing here: it is not an outcome, and it resumes no act.
     pub evidence: Vec<Evidence>,
+    /// Fresh entropy for the offers this act may surface: a derivation that still narrows
+    /// opens its confined stage in the same decision, and those plans need identities of their own.
+    pub offer_nonce: crate::value::OfferNonce,
 }
 
 /// How a tool run ended. `Failure` commits no effects; `Indeterminate` commits none and
@@ -233,6 +256,7 @@ pub enum EvidenceRequest {
 pub enum OutcomeFollowUp {
     Closed { admitted: Option<ValueBody> },
     Resolve(EvidenceRequest),
+    Staged(Box<Confined>),
 }
 
 /// One released call: the dispatch the engine opened for it, and the canonical call to invoke.
@@ -317,6 +341,10 @@ pub enum TransitionError {
     TerminalOffer,
     #[error("the offer's plan assigns no such authority")]
     UnassignedAuthority,
+    #[error("the reported outcome is not one this plan's execution produces")]
+    PlanOutcomeMismatch,
+    #[error("the evidence does not derive this offer's candidate through the sanitizer its plan names")]
+    EvidenceMismatch,
     /// A second approval for a call that already carries a current one. Proposing the call
     /// releases the approval that stands; approving it again would leave the release choosing
     /// between two plans the agent selected separately.
@@ -627,8 +655,8 @@ pub enum TransitionRefusal {
     UnbackedApproval,
     #[error("this offer already prepared its call approval, or this call already has one")]
     ApprovalRepeated,
-    #[error("an accepted offer's batch does not prepare the call approval it promised")]
-    UnpreparedCallApproval,
+    #[error("an accepted offer's batch does not carry the record its plan promised")]
+    UndischargedAcceptance,
     #[error("the denial record is not backed by a denial of this authority for this call")]
     UnbackedDenial,
     #[error("a record spends a call approval this log never prepared")]
@@ -639,6 +667,7 @@ pub enum TransitionRefusal {
 
 struct PendingRelease {
     dispatch: DispatchId,
+    subject: crate::basis::SubjectKey,
     call: ResolvedCall,
     prepares_fork: bool,
     next: ReleasePart,
@@ -666,6 +695,7 @@ struct Remedy {
     reviewed: Vec<crate::execute::AuthorityReview>,
     acceptance: Option<Narrowing>,
     sanitizer: Option<SanitizerName>,
+    contribution: Option<EstablishedLabel>,
 }
 
 /// The one sequential transition validator. It admits records one at a time against the
@@ -681,6 +711,7 @@ pub(crate) struct Sequence<'a> {
     remedies: BTreeMap<DispatchId, Remedy>,
     derived: BTreeMap<DispatchId, Derived>,
     cast_accepted: BTreeMap<DispatchId, Narrowing>,
+    candidate_accepted: BTreeMap<DispatchId, Narrowing>,
     admitted: BTreeSet<DispatchId>,
     /// Crossings recorded and not yet admitted into the parent, and merges not yet made: a
     /// crossing ends the child, so a log that records one without folding it into the parent
@@ -695,7 +726,30 @@ pub(crate) struct Sequence<'a> {
     declared: Option<Declaration>,
     admitting: Option<ProposalBatchId>,
     deciding: Option<ProposalBatchId>,
-    approving: Option<crate::value::OfferId>,
+    owing: Option<Owed>,
+    substituted: Option<Substitution>,
+}
+
+struct Substitution {
+    call: ResolvedCall,
+    subject: crate::basis::SubjectKey,
+    stage: CallStage,
+    released: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Owed {
+    Approval(crate::value::OfferId),
+    Derived(crate::value::OfferId),
+    Accepted(crate::value::OfferId),
+}
+
+impl Owed {
+    fn offer(self) -> crate::value::OfferId {
+        match self {
+            Owed::Approval(offer) | Owed::Derived(offer) | Owed::Accepted(offer) => offer,
+        }
+    }
 }
 
 struct Declaration {
@@ -706,7 +760,7 @@ struct Declaration {
 
 enum Derived {
     Cast(EstablishedLabel, RawResultDigest),
-    Sanitized(Label),
+    Sanitized(crate::value::LabeledValue),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -732,6 +786,7 @@ impl<'a> Sequence<'a> {
             remedies: BTreeMap::new(),
             derived: BTreeMap::new(),
             cast_accepted: BTreeMap::new(),
+            candidate_accepted: BTreeMap::new(),
             admitted: BTreeSet::new(),
             crossed: BTreeMap::new(),
             accepted: BTreeMap::new(),
@@ -739,7 +794,8 @@ impl<'a> Sequence<'a> {
             admitting: None,
             deciding: None,
             menu: None,
-            approving: None,
+            owing: None,
+            substituted: None,
         }
     }
 
@@ -761,6 +817,7 @@ impl<'a> Sequence<'a> {
             remedies: BTreeMap::new(),
             derived: BTreeMap::new(),
             cast_accepted: BTreeMap::new(),
+            candidate_accepted: BTreeMap::new(),
             admitted: view.projection().admitted_dispatches(),
             crossed: BTreeMap::new(),
             accepted: BTreeMap::new(),
@@ -768,25 +825,41 @@ impl<'a> Sequence<'a> {
             admitting: None,
             deciding: None,
             menu: None,
-            approving: None,
+            owing: None,
+            substituted: None,
         }
     }
 
     pub(crate) fn admit(&mut self, fact: &Fact) -> Result<(), TransitionRefusal> {
         self.member(fact)?;
-        if let Some(owed) = self.approving {
-            match fact {
-                Fact::OfferInvalidated { trajectory, offer } => {
+        if let Some(owed) = self.owing {
+            match (owed, fact) {
+                (_, Fact::OfferInvalidated { trajectory, offer }) => {
                     let views = self.projection.view(trajectory);
                     if let Some(ending) = views.offer(offer) {
-                        let spent = views.offer(&owed).map(|recorded| (&recorded.subject, recorded.basis));
+                        let spent = views
+                            .offer(&owed.offer())
+                            .map(|recorded| (&recorded.subject, recorded.basis));
                         if Some((&ending.subject, ending.basis)) != spent {
-                            return Err(TransitionRefusal::UnpreparedCallApproval);
+                            return Err(TransitionRefusal::UndischargedAcceptance);
                         }
                     }
                 }
-                Fact::CallApproved { offer, .. } if offer == &owed => self.approving = None,
-                _ => return Err(TransitionRefusal::UnpreparedCallApproval),
+                (Owed::Approval(owed), Fact::CallApproved { offer, .. }) if offer == &owed => self.owing = None,
+                (
+                    Owed::Derived(owed),
+                    Fact::CandidateDerived {
+                        derived:
+                            DerivedCandidate::Result {
+                                from: ConfinedFrom::Offer(offer),
+                                ..
+                            }
+                            | DerivedCandidate::Call { from: offer, .. },
+                        ..
+                    },
+                ) if offer == &owed => self.owing = None,
+                (Owed::Accepted(owed), Fact::CandidateAccepted { offer, .. }) if offer == &owed => self.owing = None,
+                _ => return Err(TransitionRefusal::UndischargedAcceptance),
             }
         }
         let released = self.obliged(fact)?;
@@ -800,13 +873,13 @@ impl<'a> Sequence<'a> {
             Fact::OfferOpened {
                 trajectory,
                 offer,
-                batch,
+                act,
                 call,
                 subject,
                 plan,
                 basis,
                 ..
-            } => self.offer_opened(trajectory, offer, batch, call, subject, plan, basis)?,
+            } => self.offer_opened(trajectory, offer, act, call, subject, plan, basis)?,
             Fact::OfferAccepted { trajectory, offer } => self.offer_accepted(trajectory, offer)?,
             Fact::CallApprovalConsumed { trajectory, offer, .. } => {
                 let views = self.projection.view(trajectory);
@@ -845,15 +918,17 @@ impl<'a> Sequence<'a> {
                 tool,
                 arguments,
                 proposed_label,
+                receiving,
                 proposed_effects,
                 dynamic_resolutions,
+                subject,
             } => {
                 let call = ResolvedCall::new(tool.clone(), arguments.clone())
                     .with_dynamic_resolutions(dynamic_resolutions.clone());
                 if call.dynamic_resolutions() != dynamic_resolutions.as_slice() {
                     return Err(TransitionRefusal::ForgedLabel);
                 }
-                self.opened(trajectory, dispatch, &call, released)?;
+                self.opened(trajectory, dispatch, &call, subject.as_ref(), released)?;
                 let contract = self
                     .registry
                     .tool(tool)
@@ -861,10 +936,10 @@ impl<'a> Sequence<'a> {
                 if proposed_effects != &contract.emits {
                     return Err(TransitionRefusal::EffectsMismatch);
                 }
-                // And the bound it pins is the one the release committed.
                 let views = self.projection.view(trajectory);
-                if proposed_label
-                    != crate::check::committed_label_for_call(contract, &views.current_label(), &call).bound()
+                let current = views.current_label();
+                if proposed_label != crate::check::committed_label_for_call(contract, &current, &call).bound()
+                    || receiving != current.bound()
                 {
                     return Err(TransitionRefusal::ForgedLabel);
                 }
@@ -889,7 +964,7 @@ impl<'a> Sequence<'a> {
                 dispatch,
                 outcome,
             } => {
-                self.declaring(&crate::basis::DecidedAct::Outcome(dispatch.clone()))?;
+                self.closing_act(dispatch)?;
                 let contract = self.open_dispatch_contract(trajectory, dispatch)?;
                 let checkpointed = self.projection.view(trajectory).is_succeeded(dispatch);
                 match (outcome, checkpointed) {
@@ -965,30 +1040,20 @@ impl<'a> Sequence<'a> {
                 }
                 self.cast_accepted.insert(dispatch.clone(), narrowing.clone());
             }
-            Fact::OutputSanitizerApplied {
+            Fact::CandidateDerived {
                 trajectory,
-                dispatch,
+                subject,
                 sanitizer,
                 transition,
-                raw_digest,
-            } => {
-                let contract = self.dispatch_contract(trajectory, dispatch)?;
-                self.settling(trajectory, dispatch)?;
-                self.observed_as(trajectory, dispatch, raw_digest)?;
-                let raw = self.output_label(trajectory, dispatch, contract);
-                let registered = self
-                    .registry
-                    .sanitizer(sanitizer)
-                    .ok_or_else(|| TransitionRefusal::UnknownSanitizer(sanitizer.as_str().to_string()))?;
-                let bound = self.projection.view(trajectory).bound_sanitizer(dispatch) == Some(sanitizer);
-                let derived = registered.derive_output(&raw);
-                match derived {
-                    Some(label) if bound && &registered.transition == transition => {
-                        self.derived.insert(dispatch.clone(), Derived::Sanitized(label));
-                    }
-                    _ => return Err(TransitionRefusal::SanitizerUnapplicable),
-                }
-            }
+                derived,
+                lineage,
+            } => self.candidate_derived(trajectory, subject, sanitizer, transition, derived, lineage)?,
+            Fact::CandidateAccepted {
+                trajectory,
+                subject,
+                offer,
+                narrowing,
+            } => self.candidate_accepted(trajectory, subject, offer, narrowing)?,
             Fact::Ruling {
                 trajectory,
                 dispatch,
@@ -1022,6 +1087,7 @@ impl<'a> Sequence<'a> {
                 dispatch,
                 plan,
                 sanitizer,
+                contribution,
             } => {
                 self.pending_dispatch(trajectory, dispatch)?;
                 if self.registry.sanitizer(sanitizer).is_none_or(|s| !s.on.output) {
@@ -1029,6 +1095,7 @@ impl<'a> Sequence<'a> {
                 }
                 let remedy = self.remedies.entry(dispatch.clone()).or_default();
                 remedy.sanitizer = Some(sanitizer.clone());
+                remedy.contribution = Some(contribution.clone());
                 remedy.plans.insert(*plan);
             }
             Fact::Denial {
@@ -1145,7 +1212,7 @@ impl<'a> Sequence<'a> {
         &mut self,
         trajectory: &TrajectoryId,
         offer: &crate::value::OfferId,
-        batch: &ProposalBatchId,
+        act: &crate::basis::DecidedAct,
         call: &crate::value::CanonicalDigest,
         subject: &crate::basis::SubjectKey,
         plan: &crate::plan::ExecutableRemedyPlan,
@@ -1156,20 +1223,8 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::OfferReopened);
         }
         match &self.declared {
-            Some(open) if open.act == crate::basis::DecidedAct::Proposals(batch.clone()) => {}
-            Some(open) if matches!(open.act, crate::basis::DecidedAct::Offer(_)) => {}
+            Some(open) if &open.act == act => {}
             _ => return Err(TransitionRefusal::UnbackedOffer),
-        }
-        let crate::basis::SubjectKey::Call {
-            trajectory: subject_trajectory,
-            batch: subject_batch,
-            position,
-        } = subject
-        else {
-            return Err(TransitionRefusal::ForeignOffer);
-        };
-        if subject_trajectory != trajectory || subject_batch != batch {
-            return Err(TransitionRefusal::ForeignOffer);
         }
         if let Some((derived_for, derived_from, offered)) = &self.menu
             && derived_for == subject
@@ -1182,33 +1237,7 @@ impl<'a> Sequence<'a> {
                 false => Err(TransitionRefusal::ForgedBasis),
             };
         }
-        let proposal = match views.decided_batch(batch) {
-            Some(decided) if decided.trajectory == *trajectory => decided
-                .proposals
-                .get(*position as usize)
-                .ok_or(TransitionRefusal::UnbackedOffer)?
-                .clone(),
-            // An offer naming a decision this log never made, or one of another branch.
-            _ => return Err(TransitionRefusal::UnbackedOffer),
-        };
-        if proposal.digest() != *call {
-            return Err(TransitionRefusal::UnbackedOffer);
-        }
-        let proposal = &proposal;
-        let contract = self
-            .registry
-            .tool(proposal.tool())
-            .ok_or_else(|| TransitionRefusal::UnknownTool(proposal.tool().as_str().to_string()))?;
-        let CheckOutcome::Block(block) = crate::check::evaluate(contract, &views, proposal) else {
-            return Err(TransitionRefusal::UnbackedOffer);
-        };
-        let offered = crate::plan::plan(self.registry, &views, proposal, &block);
-        let offered: Vec<_> = offered
-            .plans
-            .iter()
-            .filter_map(crate::plan::RemedyPlan::executable)
-            .cloned()
-            .collect();
+        let offered = self.stage_menu(&views, trajectory, act, call, subject)?;
         if !offered.contains(plan) {
             return Err(TransitionRefusal::UnbackedOffer);
         }
@@ -1220,18 +1249,102 @@ impl<'a> Sequence<'a> {
         Ok(())
     }
 
+    fn stage_menu(
+        &self,
+        views: &Views,
+        trajectory: &TrajectoryId,
+        act: &crate::basis::DecidedAct,
+        call: &crate::value::CanonicalDigest,
+        subject: &crate::basis::SubjectKey,
+    ) -> Result<Vec<crate::plan::ExecutableRemedyPlan>, TransitionRefusal> {
+        match subject {
+            crate::basis::SubjectKey::Call {
+                trajectory: subject_trajectory,
+                batch,
+                ..
+            } => {
+                if subject_trajectory != trajectory {
+                    return Err(TransitionRefusal::ForeignOffer);
+                }
+                if !matches!(act, crate::basis::DecidedAct::Proposals(decided) if decided == batch)
+                    && !matches!(act, crate::basis::DecidedAct::Offer(_))
+                {
+                    return Err(TransitionRefusal::ForeignOffer);
+                }
+                let candidate = subject_call(views, subject).ok_or(TransitionRefusal::UnbackedOffer)?;
+                if candidate.digest() != *call {
+                    return Err(TransitionRefusal::UnbackedOffer);
+                }
+                let contract = self
+                    .registry
+                    .tool(candidate.tool())
+                    .ok_or_else(|| TransitionRefusal::UnknownTool(candidate.tool().as_str().to_string()))?;
+                let stage = views.call_stage(subject);
+                let CheckOutcome::Block(block) = crate::check::evaluate(contract, views, &candidate, &stage) else {
+                    return Err(TransitionRefusal::UnbackedOffer);
+                };
+                Ok(crate::plan::plan(self.registry, views, &candidate, &block, &stage)
+                    .plans
+                    .iter()
+                    .filter_map(crate::plan::RemedyPlan::executable)
+                    .cloned()
+                    .collect())
+            }
+            crate::basis::SubjectKey::ConfinedResult(dispatch) => {
+                if dispatch.trajectory() != trajectory || dispatch.digest() != call {
+                    return Err(TransitionRefusal::ForeignOffer);
+                }
+                match act {
+                    crate::basis::DecidedAct::Outcome(decided) if decided == dispatch => {}
+                    crate::basis::DecidedAct::Offer(_) => {}
+                    _ => return Err(TransitionRefusal::ForeignOffer),
+                }
+                let receiving = views
+                    .receiving_bound(dispatch)
+                    .ok_or(TransitionRefusal::UnknownDispatch)?;
+                let Some(DerivedCandidate::Result {
+                    value,
+                    residual: Some(residual),
+                    ..
+                }) = views.candidate(subject)
+                else {
+                    return Err(TransitionRefusal::UnbackedOffer);
+                };
+                let lineage = views.lineage(subject);
+                let contract = self.dispatch_contract(trajectory, dispatch)?;
+                Ok(crate::plan::confined_stage(
+                    self.registry,
+                    contract,
+                    receiving,
+                    &value.label,
+                    residual,
+                    &lineage,
+                ))
+            }
+            crate::basis::SubjectKey::Approval(_) => Err(TransitionRefusal::ForeignOffer),
+        }
+    }
+
     fn offer_accepted(
         &mut self,
         trajectory: &TrajectoryId,
         offer: &crate::value::OfferId,
     ) -> Result<(), TransitionRefusal> {
+        use crate::basis::SubjectKey;
         let views = self.projection.view(trajectory);
         let recorded = ending_offer(&views, trajectory, offer)?;
         let (basis, subject) = (recorded.basis, recorded.subject.clone());
+        let owed = match (&subject, recorded.plan.hop().is_some()) {
+            (SubjectKey::Call { .. }, false) => Owed::Approval(*offer),
+            (SubjectKey::Call { .. } | SubjectKey::ConfinedResult(_), true) => Owed::Derived(*offer),
+            (SubjectKey::ConfinedResult(_), false) => Owed::Accepted(*offer),
+            // No offer ever stands on an approval — that subject exists to be spent by a release.
+            (SubjectKey::Approval(_), _) => return Err(TransitionRefusal::UnbackedOffer),
+        };
         self.may_spend(trajectory, &subject, &basis)?;
         match &self.declared {
             Some(open) if open.act == crate::basis::DecidedAct::Offer(*offer) => {
-                self.approving = Some(*offer);
+                self.owing = Some(owed);
                 Ok(())
             }
             _ => Err(TransitionRefusal::UnbackedOffer),
@@ -1331,8 +1444,8 @@ impl<'a> Sequence<'a> {
             declared: advance.clone(),
             owed: advance.clone(),
         });
-        // A new decision has read no response yet, whatever the last one admitted.
         self.admitting = None;
+        self.substituted = None;
         Ok(())
     }
 
@@ -1346,7 +1459,11 @@ impl<'a> Sequence<'a> {
             return Ok(());
         }
         let own_act = self.settles_its_own_declaration(fact, obligation);
-        if !self.declared.as_ref().is_some_and(|open| belongs_to(&open.act, fact)) {
+        if !self
+            .declared
+            .as_ref()
+            .is_some_and(|open| belongs_to(self, &open.act, fact))
+        {
             return Ok(());
         }
         let Some(declaration) = self.declared.as_mut() else {
@@ -1406,6 +1523,16 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::StaleSpend);
         }
         Ok(())
+    }
+
+    fn closing_act(&self, dispatch: &DispatchId) -> Result<(), TransitionRefusal> {
+        if let Some(open) = &self.declared
+            && let crate::basis::DecidedAct::Offer(offer) = &open.act
+            && confines(self, offer, dispatch)
+        {
+            return Ok(());
+        }
+        self.declaring(&crate::basis::DecidedAct::Outcome(dispatch.clone()))
     }
 
     fn declaring(&self, act: &crate::basis::DecidedAct) -> Result<(), TransitionRefusal> {
@@ -1498,6 +1625,10 @@ impl<'a> Sequence<'a> {
                 },
                 None => BasisAdvance::default(),
             },
+            Fact::CandidateDerived { subject, .. } => BasisAdvance {
+                subjects: vec![subject.clone()],
+                ..BasisAdvance::default()
+            },
             _ => BasisAdvance::default(),
         }
     }
@@ -1537,7 +1668,7 @@ impl<'a> Sequence<'a> {
         if !self.remedies.is_empty() {
             return Err(TransitionRefusal::DanglingRemedy);
         }
-        if !self.derived.is_empty() || !self.cast_accepted.is_empty() {
+        if !self.derived.is_empty() || !self.cast_accepted.is_empty() || !self.candidate_accepted.is_empty() {
             return Err(TransitionRefusal::UnadmittedDerivation);
         }
         if self.crossed.values().any(|crossing| crossing != &Crossing::Merged) {
@@ -1546,8 +1677,8 @@ impl<'a> Sequence<'a> {
         if self.declared.as_ref().is_some_and(|open| !open.owed.is_empty()) {
             return Err(TransitionRefusal::UnbackedAdvance);
         }
-        if self.approving.is_some() {
-            return Err(TransitionRefusal::UnpreparedCallApproval);
+        if self.owing.is_some() {
+            return Err(TransitionRefusal::UndischargedAcceptance);
         }
         Ok(self.projection)
     }
@@ -1577,12 +1708,13 @@ impl<'a> Sequence<'a> {
                     tool,
                     arguments,
                     dynamic_resolutions,
+                    subject,
                     ..
                 },
             ) if dispatch == &next.dispatch => {
                 let opened = ResolvedCall::new(tool.clone(), arguments.clone())
                     .with_dynamic_resolutions(dynamic_resolutions.clone());
-                if opened != next.call {
+                if opened != next.call || subject.as_ref() != Some(&next.subject) {
                     return Err(TransitionRefusal::UnbackedDecision);
                 }
                 let authorized = match next.next {
@@ -1676,7 +1808,7 @@ impl<'a> Sequence<'a> {
             self.registry,
             self.child_return,
             &mut working,
-            trajectory,
+            crate::engine::ComposingBatch { trajectory, id: batch },
             proposals,
             spawn,
             &|views, call| {
@@ -1703,17 +1835,24 @@ impl<'a> Sequence<'a> {
         }
         self.deciding = Some(batch.clone());
         self.pending
-            .extend(composed.into_iter().zip(proposals).filter_map(|(release, call)| {
-                release.map(|release| PendingRelease {
-                    dispatch: release.dispatch,
-                    call: call.clone(),
-                    prepares_fork: release.prepares_fork.is_some(),
-                    next: match release.consumes {
-                        Some(offer) => ReleasePart::Consumption(offer),
-                        None => ReleasePart::Opening,
-                    },
-                })
-            }));
+            .extend(
+                composed
+                    .into_iter()
+                    .zip(proposals)
+                    .enumerate()
+                    .filter_map(|(position, (release, call))| {
+                        release.map(|release| PendingRelease {
+                            dispatch: release.dispatch,
+                            subject: crate::engine::ComposingBatch { trajectory, id: batch }.subject(position),
+                            call: call.clone(),
+                            prepares_fork: release.prepares_fork.is_some(),
+                            next: match release.consumes {
+                                Some(offer) => ReleasePart::Consumption(offer),
+                                None => ReleasePart::Opening,
+                            },
+                        })
+                    }),
+            );
         Ok(())
     }
 
@@ -1722,6 +1861,7 @@ impl<'a> Sequence<'a> {
         trajectory: &TrajectoryId,
         dispatch: &DispatchId,
         call: &ResolvedCall,
+        subject: Option<&crate::basis::SubjectKey>,
         authorized: Obligation,
     ) -> Result<(), TransitionRefusal> {
         if dispatch.trajectory() != trajectory {
@@ -1749,6 +1889,18 @@ impl<'a> Sequence<'a> {
         if views.has_ended(trajectory) {
             return Err(TransitionRefusal::BranchEnded);
         }
+        let (stage, earned) = match &mut self.substituted {
+            Some(substitution)
+                if &substitution.call == call && subject == Some(&substitution.subject) && !substitution.released =>
+            {
+                substitution.released = true;
+                (substitution.stage.clone(), true)
+            }
+            _ => (CallStage::default(), false),
+        };
+        if subject.is_some() && !earned && matches!(authorized, Obligation::Free) {
+            return Err(TransitionRefusal::UnbackedDecision);
+        }
         let remedy = self.remedies.remove(dispatch);
         match authorized {
             Obligation::Decided => {
@@ -1770,18 +1922,22 @@ impl<'a> Sequence<'a> {
                     reviewed: approval.rulings.iter().map(|given| given.reviewed.clone()).collect(),
                     acceptance: approval.acceptance.clone(),
                     sanitizer: approval.sanitizer.clone(),
+                    contribution: approval
+                        .sanitizer
+                        .as_ref()
+                        .and_then(|name| crate::plan::bound_contribution(self.registry, contract, call, name)),
                 };
                 if remedy.is_none_or(|landed| landed != expected) {
                     return Err(TransitionRefusal::UnbackedApproval);
                 }
-                return match crate::check::evaluate(contract, &views, call) {
+                return match crate::check::evaluate(contract, &views, call, &stage) {
                     CheckOutcome::Block(block) if block.unestablished.is_empty() => Ok(()),
                     _ => Err(TransitionRefusal::UnreleasedDispatch),
                 };
             }
             Obligation::Free => {}
         }
-        match crate::check::evaluate(contract, &views, call) {
+        match crate::check::evaluate(contract, &views, call, &stage) {
             // Likewise for a release the check allows as it stands.
             CheckOutcome::Allow if remedy.is_some() => Err(TransitionRefusal::DanglingRemedy),
             CheckOutcome::Allow => Ok(()),
@@ -1874,20 +2030,39 @@ impl<'a> Sequence<'a> {
                         }
                         resolved.into_label()
                     }
-                    // A sanitizer's derivation crossed, not the raw.
-                    Some(Derived::Sanitized(label)) => label,
-                    None => {
-                        if contract.pending_cast_dim().is_some() || views.bound_sanitizer(dispatch).is_some() {
+                    Some(Derived::Sanitized(candidate)) => {
+                        if value != &candidate {
                             return Err(TransitionRefusal::ForgedLabel);
                         }
-                        // And these are the bytes the checkpoint observed, where one was recorded.
-                        self.observed_as(
-                            trajectory,
-                            dispatch,
-                            &RawResultDigest::of(value.body.as_str().as_bytes()),
-                        )?;
-                        self.output_label(trajectory, dispatch, contract)
+                        candidate.label
                     }
+                    None => match views.candidate(&crate::basis::SubjectKey::ConfinedResult(dispatch.clone())) {
+                        Some(DerivedCandidate::Result {
+                            value: candidate,
+                            residual,
+                            ..
+                        }) => {
+                            if value != candidate {
+                                return Err(TransitionRefusal::ForgedLabel);
+                            }
+                            if self.candidate_accepted.remove(dispatch).as_ref() != residual.as_ref() {
+                                return Err(TransitionRefusal::AcceptanceMismatch);
+                            }
+                            candidate.label.clone()
+                        }
+                        Some(DerivedCandidate::Call { .. }) => return Err(TransitionRefusal::ForgedLabel),
+                        None => {
+                            if contract.pending_cast_dim().is_some() || views.bound_sanitizer(dispatch).is_some() {
+                                return Err(TransitionRefusal::ForgedLabel);
+                            }
+                            self.observed_as(
+                                trajectory,
+                                dispatch,
+                                &RawResultDigest::of(value.body.as_str().as_bytes()),
+                            )?;
+                            self.output_label(trajectory, dispatch, contract)
+                        }
+                    },
                 };
                 if value.label != expected {
                     return Err(TransitionRefusal::ForgedLabel);
@@ -2039,7 +2214,7 @@ impl<'a> Sequence<'a> {
         if !fold.is_fully_established() {
             return Err(TransitionRefusal::ForgedLabel);
         }
-        match registered.derive_output(&fold.bound().clone().into_label()) {
+        match registered.derive_output(&fold.bound().clone().into_label(), &[]) {
             Some(label) if &registered.transition == transition => Ok(label),
             _ => Err(TransitionRefusal::SanitizerUnapplicable),
         }
@@ -2163,6 +2338,235 @@ impl<'a> Sequence<'a> {
         Ok(contract)
     }
 
+    fn candidate_derived(
+        &mut self,
+        trajectory: &TrajectoryId,
+        subject: &crate::basis::SubjectKey,
+        sanitizer: &SanitizerName,
+        transition: &crate::authority::Transition,
+        derived: &DerivedCandidate,
+        lineage: &SanitizerLineage,
+    ) -> Result<(), TransitionRefusal> {
+        let registered = self
+            .registry
+            .sanitizer(sanitizer)
+            .ok_or_else(|| TransitionRefusal::UnknownSanitizer(sanitizer.as_str().to_string()))?;
+        if &registered.transition != transition {
+            return Err(TransitionRefusal::SanitizerUnapplicable);
+        }
+        let (dispatch, source, from, value, residual) = match derived {
+            DerivedCandidate::Call {
+                source,
+                from,
+                call,
+                label,
+            } => return self.substitution(trajectory, subject, sanitizer, source, from, call, label, lineage),
+            DerivedCandidate::Result {
+                dispatch,
+                source,
+                from,
+                value,
+                residual,
+            } => (dispatch, source, from, value, residual),
+        };
+        // The subject a confined candidate advances is its own dispatch's, never another's.
+        if subject != &crate::basis::SubjectKey::ConfinedResult(dispatch.clone()) {
+            return Err(TransitionRefusal::ForgedLabel);
+        }
+        let contract = self.dispatch_contract(trajectory, dispatch)?;
+        let settles = crate::admit::settles_now(&self.projection.view(trajectory), dispatch, residual.as_ref());
+        self.deriving(trajectory, dispatch, settles)?;
+        let views = self.projection.view(trajectory);
+        let receiving = views
+            .receiving_bound(dispatch)
+            .ok_or(TransitionRefusal::UnknownDispatch)?
+            .clone();
+        let predecessor = match from {
+            ConfinedFrom::Bound => {
+                if views.bound_sanitizer(dispatch) != Some(sanitizer)
+                    || views.candidate(subject).is_some()
+                    || lineage.names() != [sanitizer.clone()]
+                {
+                    return Err(TransitionRefusal::SanitizerUnapplicable);
+                }
+                None
+            }
+            ConfinedFrom::Offer(offer) => {
+                let recorded = taken_offer(&views, offer)?;
+                if recorded.plan.hop() != Some(sanitizer) || &recorded.subject != subject {
+                    return Err(TransitionRefusal::UnbackedOffer);
+                }
+                let current = views.candidate(subject).ok_or(TransitionRefusal::UnknownOffer)?;
+                let DerivedCandidate::Result {
+                    value: predecessor,
+                    residual: owed,
+                    ..
+                } = current
+                else {
+                    return Err(TransitionRefusal::ForgedLabel);
+                };
+                let expected = views.lineage(subject).extend(sanitizer.clone());
+                if expected.as_ref() != Some(lineage) {
+                    return Err(TransitionRefusal::SanitizerUnapplicable);
+                }
+                Some((predecessor.clone(), owed.clone()))
+            }
+        };
+        // The bytes this hop read are the predecessor's, whichever it was.
+        match &predecessor {
+            None => self.observed_as(trajectory, dispatch, source)?,
+            Some((body, _)) if source == &RawResultDigest::of(body.body.as_str().as_bytes()) => {}
+            Some(_) => return Err(TransitionRefusal::ObservationMismatch),
+        }
+        let from_label = match &predecessor {
+            None => self.output_label(trajectory, dispatch, contract),
+            Some((body, _)) => body.label.clone(),
+        };
+        let label = registered
+            .derive_output(&from_label, &contract.tags)
+            .ok_or(TransitionRefusal::SanitizerUnapplicable)?;
+        if value.label != label {
+            return Err(TransitionRefusal::ForgedLabel);
+        }
+        let derived_residual = crate::admit::confined_residual(&receiving, &label);
+        if residual != &derived_residual {
+            return Err(TransitionRefusal::AcceptanceMismatch);
+        }
+        if let Some((predecessor, _)) = &predecessor
+            && !crate::plan::confined_hop_helps(&receiving, &predecessor.label, &label)
+        {
+            return Err(TransitionRefusal::SanitizerUnapplicable);
+        }
+        if settles {
+            self.derived.insert(dispatch.clone(), Derived::Sanitized(value.clone()));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn substitution(
+        &mut self,
+        trajectory: &TrajectoryId,
+        subject: &crate::basis::SubjectKey,
+        sanitizer: &SanitizerName,
+        source: &RawResultDigest,
+        from: &crate::value::OfferId,
+        call: &ResolvedCall,
+        label: &Label,
+        lineage: &SanitizerLineage,
+    ) -> Result<(), TransitionRefusal> {
+        if !matches!(subject, crate::basis::SubjectKey::Call { .. }) {
+            return Err(TransitionRefusal::ForgedLabel);
+        }
+        let registered = self
+            .registry
+            .sanitizer(sanitizer)
+            .ok_or_else(|| TransitionRefusal::UnknownSanitizer(sanitizer.as_str().to_string()))?;
+        let views = self.projection.view(trajectory);
+        let recorded = taken_offer(&views, from)?;
+        if recorded.plan.hop() != Some(sanitizer) || &recorded.subject != subject {
+            return Err(TransitionRefusal::UnbackedOffer);
+        }
+        let predecessor = subject_call(&views, subject).ok_or(TransitionRefusal::UnbackedOffer)?;
+        if predecessor.digest() != recorded.call {
+            return Err(TransitionRefusal::UnbackedOffer);
+        }
+        // The bytes this hop read are the ones the harness would have dispatched.
+        if source != &RawResultDigest::of(predecessor.canonical_arguments().canonical_bytes()) {
+            return Err(TransitionRefusal::ObservationMismatch);
+        }
+        // One name per lineage, and the chain this record claims is the chain that ran.
+        let expected = views.lineage(subject).extend(sanitizer.clone());
+        if expected.as_ref() != Some(lineage) {
+            return Err(TransitionRefusal::SanitizerUnapplicable);
+        }
+        let contract = self
+            .registry
+            .tool(predecessor.tool())
+            .ok_or_else(|| TransitionRefusal::UnknownTool(predecessor.tool().as_str().to_string()))?;
+        contract
+            .parameters
+            .validate(call.arguments())
+            .map_err(TransitionRefusal::InvalidPayload)?;
+        if call != &predecessor.substituting(call.canonical_arguments().clone()) {
+            return Err(TransitionRefusal::ForgedLabel);
+        }
+        let stage = views.call_stage(subject);
+        let derived = registered
+            .derive_input(&stage.released(&views.current_label()), &contract.tags)
+            .ok_or(TransitionRefusal::SanitizerUnapplicable)?;
+        if label != &derived {
+            return Err(TransitionRefusal::ForgedLabel);
+        }
+        let CheckOutcome::Block(before) = crate::check::evaluate(contract, &views, &predecessor, &stage) else {
+            return Err(TransitionRefusal::UnbackedOffer);
+        };
+        if !before.unestablished.is_empty() {
+            return Err(TransitionRefusal::UnreleasedDispatch);
+        }
+        let next = CallStage::substituting(derived, lineage.clone());
+        if !crate::plan::substitution_helps(&before, &crate::check::evaluate(contract, &views, call, &next)) {
+            return Err(TransitionRefusal::SanitizerUnapplicable);
+        }
+        self.substituted = Some(Substitution {
+            call: call.clone(),
+            subject: subject.clone(),
+            stage: next,
+            released: false,
+        });
+        Ok(())
+    }
+
+    fn deriving(
+        &self,
+        trajectory: &TrajectoryId,
+        dispatch: &DispatchId,
+        settles: bool,
+    ) -> Result<(), TransitionRefusal> {
+        let views = self.projection.view(trajectory);
+        if views.has_lapsed(dispatch) || self.admitted.contains(dispatch) || self.derived.contains_key(dispatch) {
+            return Err(TransitionRefusal::RepeatAdmission);
+        }
+        let confined = views.is_open(dispatch) && views.is_succeeded(dispatch);
+        let admissible = match settles {
+            true => confined || views.closed_successfully(dispatch),
+            false => confined,
+        };
+        match admissible {
+            true => Ok(()),
+            false => Err(TransitionRefusal::DispatchNotOpen),
+        }
+    }
+
+    fn candidate_accepted(
+        &mut self,
+        trajectory: &TrajectoryId,
+        subject: &crate::basis::SubjectKey,
+        offer: &crate::value::OfferId,
+        narrowing: &Narrowing,
+    ) -> Result<(), TransitionRefusal> {
+        let crate::basis::SubjectKey::ConfinedResult(dispatch) = subject else {
+            return Err(TransitionRefusal::ForgedLabel);
+        };
+        self.dispatch_contract(trajectory, dispatch)?;
+        let views = self.projection.view(trajectory);
+        let recorded = taken_offer(&views, offer)?;
+        if &recorded.subject != subject || recorded.plan.narrowing() != Some(narrowing) {
+            return Err(TransitionRefusal::UnbackedOffer);
+        }
+        let Some(DerivedCandidate::Result {
+            residual: Some(owed), ..
+        }) = views.candidate(subject)
+        else {
+            return Err(TransitionRefusal::AcceptanceMismatch);
+        };
+        if owed != narrowing || self.candidate_accepted.contains_key(dispatch) {
+            return Err(TransitionRefusal::AcceptanceMismatch);
+        }
+        self.candidate_accepted.insert(dispatch.clone(), narrowing.clone());
+        Ok(())
+    }
+
     fn pending_dispatch(&self, trajectory: &TrajectoryId, dispatch: &DispatchId) -> Result<(), TransitionRefusal> {
         if dispatch.trajectory() != trajectory {
             return Err(TransitionRefusal::ForeignDispatch);
@@ -2198,12 +2602,44 @@ fn ending_offer<'v>(
     Ok(recorded)
 }
 
-fn belongs_to(act: &crate::basis::DecidedAct, fact: &Fact) -> bool {
+fn taken_offer<'v>(
+    views: &'v Views<'_>,
+    offer: &crate::value::OfferId,
+) -> Result<&'v crate::projection::RecordedOffer, TransitionRefusal> {
+    let recorded = views.offer(offer).ok_or(TransitionRefusal::UnknownOffer)?;
+    if recorded.end != Some(crate::projection::OfferEnd::Accepted) {
+        return Err(TransitionRefusal::OfferEnded);
+    }
+    Ok(recorded)
+}
+
+fn subject_call(views: &Views<'_>, subject: &crate::basis::SubjectKey) -> Option<ResolvedCall> {
+    if let Some(candidate) = views.call_candidate(subject) {
+        return Some(candidate.clone());
+    }
+    let crate::basis::SubjectKey::Call { batch, position, .. } = subject else {
+        return None;
+    };
+    let decided = views.decided_batch(batch)?;
+    (&decided.trajectory == views.trajectory())
+        .then(|| decided.proposals.get(*position as usize).cloned())
+        .flatten()
+}
+
+fn confines(sequence: &Sequence<'_>, offer: &crate::value::OfferId, dispatch: &DispatchId) -> bool {
+    sequence
+        .projection
+        .view(dispatch.trajectory())
+        .offer(offer)
+        .is_some_and(|recorded| recorded.subject == crate::basis::SubjectKey::ConfinedResult(dispatch.clone()))
+}
+
+fn belongs_to(sequence: &Sequence<'_>, act: &crate::basis::DecidedAct, fact: &Fact) -> bool {
     use crate::basis::DecidedAct;
     match (act, fact) {
-        (DecidedAct::Proposals(act), Fact::ProposalBatchDecided { batch, .. } | Fact::OfferOpened { batch, .. }) => {
-            batch == act
-        }
+        (DecidedAct::Proposals(act), Fact::ProposalBatchDecided { batch, .. }) => batch == act,
+        // An offer names the act that surfaced its stage, so membership is what the record says.
+        (act, Fact::OfferOpened { act: surfaced, .. }) => surfaced == act,
         (
             DecidedAct::Proposals(act),
             Fact::ValueAdmitted {
@@ -2219,10 +2655,17 @@ fn belongs_to(act: &crate::basis::DecidedAct, fact: &Fact) -> bool {
             DecidedAct::Outcome(act),
             Fact::DispatchSucceeded { dispatch, .. }
             | Fact::DispatchClosed { dispatch, .. }
-            | Fact::OutputSanitizerApplied { dispatch, .. }
             | Fact::OutputCastApplied { dispatch, .. }
             | Fact::OutputCastAccepted { dispatch, .. }
             | Fact::OutputCastLapsed { dispatch, .. },
+        ) => dispatch == act,
+        // A confined hop belongs to the act that reported the outcome it derives from.
+        (
+            DecidedAct::Outcome(act),
+            Fact::CandidateDerived {
+                derived: DerivedCandidate::Result { dispatch, .. },
+                ..
+            },
         ) => dispatch == act,
         (
             DecidedAct::Outcome(act),
@@ -2249,6 +2692,31 @@ fn belongs_to(act: &crate::basis::DecidedAct, fact: &Fact) -> bool {
         ) => true,
         (DecidedAct::Binding(act), Fact::ForkOpened { fork, .. }) => fork == act,
         (DecidedAct::Offer(act), Fact::OfferAccepted { offer, .. }) => offer == act,
+        // A hop's successor names the offer it was derived under, at either point.
+        (
+            DecidedAct::Offer(act),
+            Fact::CandidateDerived {
+                derived:
+                    DerivedCandidate::Result {
+                        from: ConfinedFrom::Offer(offer),
+                        ..
+                    }
+                    | DerivedCandidate::Call { from: offer, .. },
+                ..
+            },
+        ) => offer == act,
+        (DecidedAct::Offer(_), Fact::DispatchOpened { dispatch, .. }) => sequence
+            .substituted
+            .as_ref()
+            .is_some_and(|substitution| dispatch.digest() == &substitution.call.digest()),
+        (
+            DecidedAct::Offer(act),
+            Fact::DispatchClosed { dispatch, .. }
+            | Fact::ValueAdmitted {
+                provenance: crate::value::Provenance::ToolResult { dispatch },
+                ..
+            },
+        ) => confines(sequence, act, dispatch),
         (DecidedAct::Offer(_), Fact::Denial { .. }) => true,
         _ => false,
     }
@@ -2276,14 +2744,30 @@ fn admits_block(
     )
     .map_err(|_| TransitionRefusal::RulingOutsideMandate)?;
     let offered = crate::plan::narrowing_remedies(registry, current, contract, call, block.narrowing.as_ref());
-    if offered
+    let settles = offered
         .iter()
-        .any(|settlement| settlement.accept == remedy.acceptance && settlement.sanitize == remedy.sanitizer)
-    {
-        Ok(())
-    } else {
-        Err(TransitionRefusal::UnreleasedDispatch)
+        .any(|settlement| settlement.accept == remedy.acceptance && settlement.sanitize == remedy.sanitizer);
+    let legacy = !settles
+        && remedy.sanitizer.is_some()
+        && offered
+            .iter()
+            .any(|settlement| settlement.accept.is_none() && settlement.sanitize == remedy.sanitizer)
+        && remedy.acceptance
+            == remedy
+                .sanitizer
+                .as_ref()
+                .and_then(|name| crate::plan::predicted_residual(registry, contract, call, name, current));
+    if !settles && !legacy {
+        return Err(TransitionRefusal::UnreleasedDispatch);
     }
+    let promised = remedy
+        .sanitizer
+        .as_ref()
+        .and_then(|name| crate::plan::bound_contribution(registry, contract, call, name));
+    if remedy.contribution != promised {
+        return Err(TransitionRefusal::SanitizerUnapplicable);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

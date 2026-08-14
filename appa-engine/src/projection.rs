@@ -2,6 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::basis::SubjectKey;
+use crate::candidate::{DerivedCandidate, SanitizerLineage};
+use crate::check::Narrowing;
 use crate::contract::PinnedDynamicResolution;
 use crate::fact::{
     BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ForkSnapshot, ObservedResult, ReturnPolicy, Revision,
@@ -76,6 +79,12 @@ pub(crate) struct RecordedOffer {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RecordedCandidate {
+    pub(crate) derived: DerivedCandidate,
+    pub(crate) lineage: SanitizerLineage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum OfferEnd {
     Accepted,
     Denied(crate::names::AuthorityName),
@@ -114,6 +123,8 @@ pub struct Projection {
     closed: BTreeMap<DispatchId, CloseKind>,
     occurrences: BTreeMap<(TrajectoryId, CanonicalDigest), u32>,
     dispatch_calls: BTreeMap<DispatchId, ResolvedCall>,
+    receiving_bounds: BTreeMap<DispatchId, EstablishedLabel>,
+    subject_dispatches: BTreeMap<crate::basis::SubjectKey, DispatchId>,
     observations: BTreeMap<DispatchId, ObservedResult>,
     boundaries: Vec<TrajectoryId>,
     forks: Vec<Fork>,
@@ -122,6 +133,11 @@ pub struct Projection {
     child_returns: Vec<ReturnedChild>,
     voided: BTreeSet<TrajectoryId>,
     bound_sanitizers: BTreeMap<DispatchId, SanitizerName>,
+    accepted: BTreeMap<DispatchId, Narrowing>,
+    /// The live derived candidate of each subject that has one. A successful hop
+    /// replaces its subject's entry, so this holds the candidate the next stage plans from — never
+    /// a chain, which the engine deliberately does not precompute.
+    candidates: BTreeMap<SubjectKey, RecordedCandidate>,
     /// Denied authorities per trajectory scope, keyed by rendered call (the
     /// denial-exclusion consultation). The engine scopes the exclusion "in the trajectory" and is
     /// silent on forks; the settled reading implemented here — a child snapshots its parent's
@@ -153,6 +169,8 @@ impl Projection {
             closed: BTreeMap::new(),
             occurrences: BTreeMap::new(),
             dispatch_calls: BTreeMap::new(),
+            receiving_bounds: BTreeMap::new(),
+            subject_dispatches: BTreeMap::new(),
             observations: BTreeMap::new(),
             boundaries: Vec::new(),
             forks: Vec::new(),
@@ -161,6 +179,8 @@ impl Projection {
             child_returns: Vec::new(),
             voided: BTreeSet::new(),
             bound_sanitizers: BTreeMap::new(),
+            accepted: BTreeMap::new(),
+            candidates: BTreeMap::new(),
             denials: BTreeMap::new(),
             active: BTreeSet::new(),
             decided: BTreeMap::new(),
@@ -198,6 +218,8 @@ impl Projection {
             closed,
             occurrences,
             dispatch_calls,
+            receiving_bounds,
+            subject_dispatches,
             observations,
             boundaries,
             forks,
@@ -206,6 +228,8 @@ impl Projection {
             child_returns,
             voided,
             bound_sanitizers,
+            accepted,
+            candidates,
             denials,
             active,
             decided,
@@ -257,7 +281,7 @@ impl Projection {
                         open.end = Some(OfferEnd::Invalidated);
                     }
                 }
-                Fact::CallApprovalConsumed { .. } => {}
+                Fact::CallApprovalConsumed { .. } | Fact::CandidateAccepted { .. } => {}
                 Fact::CallApproved {
                     trajectory,
                     offer,
@@ -323,21 +347,30 @@ impl Projection {
                             Provenance::UserInput | Provenance::ChildReturn { .. } => None,
                         },
                     });
+                    if let Provenance::ToolResult { dispatch } = provenance {
+                        candidates.remove(&SubjectKey::ConfinedResult(dispatch.clone()));
+                    }
                 }
                 Fact::DispatchOpened {
                     trajectory,
                     dispatch,
                     tool,
                     arguments,
+                    receiving,
                     proposed_effects,
                     dynamic_resolutions: resolutions,
-                    ..
+                    subject,
+                    proposed_label: _,
                 } => {
                     dispatch_calls.insert(
                         dispatch.clone(),
                         ResolvedCall::new(tool.clone(), arguments.clone())
                             .with_dynamic_resolutions(resolutions.clone()),
                     );
+                    receiving_bounds.insert(dispatch.clone(), receiving.clone());
+                    if let Some(subject) = subject {
+                        subject_dispatches.insert(subject.clone(), dispatch.clone());
+                    }
                     open.insert(dispatch.clone());
                     reservations.insert(dispatch.clone(), proposed_effects.clone());
                     *occurrences.entry((trajectory.clone(), *dispatch.digest())).or_insert(0) += 1;
@@ -378,7 +411,12 @@ impl Projection {
                         v.label = resolved.clone().into_label();
                     }
                 }
-                Fact::Ruling { .. } | Fact::Acceptance { .. } | Fact::ChildReturnAcceptance { .. } => {}
+                Fact::Acceptance {
+                    dispatch, narrowing, ..
+                } => {
+                    accepted.insert(dispatch.clone(), narrowing.clone());
+                }
+                Fact::Ruling { .. } | Fact::ChildReturnAcceptance { .. } => {}
                 Fact::Denial {
                     trajectory,
                     digest,
@@ -392,9 +430,7 @@ impl Projection {
                         .insert(authority.clone());
                 }
                 Fact::AssistantMessage { .. } | Fact::BlockFeedback { .. } => {}
-                Fact::OutputCastApplied { .. }
-                | Fact::OutputCastAccepted { .. }
-                | Fact::OutputSanitizerApplied { .. } => {}
+                Fact::OutputCastApplied { .. } | Fact::OutputCastAccepted { .. } => {}
                 Fact::OutputCastLapsed { dispatch, .. } => {
                     lapsed.insert(dispatch.clone());
                 }
@@ -402,6 +438,20 @@ impl Projection {
                     dispatch, sanitizer, ..
                 } => {
                     bound_sanitizers.insert(dispatch.clone(), sanitizer.clone());
+                }
+                Fact::CandidateDerived {
+                    subject,
+                    derived,
+                    lineage,
+                    ..
+                } => {
+                    candidates.insert(
+                        subject.clone(),
+                        RecordedCandidate {
+                            derived: derived.clone(),
+                            lineage: lineage.clone(),
+                        },
+                    );
                 }
                 // The spawn's release prepared this fork; the child that binds it comes later.
                 Fact::ForkPrepared {
@@ -612,6 +662,14 @@ impl Views<'_> {
     /// is what the engine reports on — never a call the caller re-supplies.
     pub(crate) fn dispatch_call(&self, dispatch: &DispatchId) -> Option<&ResolvedCall> {
         self.projection.dispatch_calls.get(dispatch)
+    }
+
+    /// The dispatch this trajectory opened for exactly this call, oldest first.
+    pub(crate) fn dispatch_of(&self, call: &ResolvedCall) -> Option<DispatchId> {
+        let digest = call.digest();
+        (0..self.dispatch_count(&digest))
+            .map(|occurrence| DispatchId::new(self.trajectory.clone(), digest, occurrence))
+            .find(|dispatch| self.dispatch_call(dispatch) == Some(call))
     }
 
     /// What the runtime observed at this dispatch's success checkpoint, if it recorded
@@ -901,6 +959,60 @@ impl Views<'_> {
         self.projection.bound_sanitizers.get(dispatch)
     }
 
+    /// The narrowing this dispatch's release accepted before it opened. `UNK-16` makes
+    /// it sufficient for what that dispatch admits, whatever the live fold has done since: a
+    /// pinned contribution that did not narrow its receiving bound cannot become newly narrowing,
+    /// and one that did already carries this acceptance.
+    pub(crate) fn accepted_narrowing(&self, dispatch: &DispatchId) -> Option<&Narrowing> {
+        self.projection.accepted.get(dispatch)
+    }
+
+    /// The live derived candidate of this subject, if a hop has produced one. The next
+    /// stage plans from it, and a successor replaces it.
+    pub(crate) fn candidate(&self, subject: &SubjectKey) -> Option<&DerivedCandidate> {
+        self.projection.candidates.get(subject).map(|held| &held.derived)
+    }
+
+    /// Where this call subject's candidate stands: the label its substituted bytes
+    /// carry and the sanitizers its chain has spent. A subject no hop has touched stands at the
+    /// origin, so a first proposal and an unspent chain read alike.
+    pub(crate) fn call_stage(&self, subject: &SubjectKey) -> crate::candidate::CallStage {
+        crate::candidate::CallStage::of(self.candidate(subject), self.lineage(subject))
+    }
+
+    /// The substituted call standing for this subject, where an input hop derived one.
+    /// Every later stage plans and checks against it rather than against the original proposal.
+    pub(crate) fn call_candidate(&self, subject: &SubjectKey) -> Option<&ResolvedCall> {
+        match self.candidate(subject) {
+            Some(DerivedCandidate::Call { call, .. }) => Some(call),
+            Some(DerivedCandidate::Result { .. }) | None => None,
+        }
+    }
+
+    /// The sanitizers this subject's chain has already spent. Empty for a subject no
+    /// hop has touched, so a first hop and an unspent chain read alike.
+    pub(crate) fn lineage(&self, subject: &SubjectKey) -> SanitizerLineage {
+        self.projection
+            .candidates
+            .get(subject)
+            .map(|held| held.lineage.clone())
+            .unwrap_or_default()
+    }
+
+    /// The established bound this dispatch pinned to receive its result against. Every
+    /// confined candidate on this dispatch measures its residual here, so admission never asks for
+    /// a race-dependent second acceptance when the live fold has moved since the opening.
+    pub(crate) fn receiving_bound(&self, dispatch: &DispatchId) -> Option<&EstablishedLabel> {
+        self.projection.receiving_bounds.get(dispatch)
+    }
+
+    /// The dispatch this subject's decision released, if one did. A repeat answers with
+    /// the act its own position performed: two subjects rendering — or substituting to — the same
+    /// call each open their own dispatch, and call equality alone cannot tell them apart.
+    pub(crate) fn subject_dispatch(&self, subject: &crate::basis::SubjectKey) -> Option<&DispatchId> {
+        self.projection.subject_dispatches.get(subject)
+    }
+
     pub fn boundary_count(&self) -> usize {
         self.projection
             .boundaries
@@ -1021,8 +1133,10 @@ mod tests {
                 tool: ToolName::new("tool"),
                 arguments: crate::params::test_arguments(&json!({ "t": "a" })),
                 proposed_label: EstablishedLabel::top(),
+                receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 dynamic_resolutions: Vec::new(),
+                subject: None,
             },
             Fact::DispatchClosed {
                 trajectory: traj("a"),
@@ -1047,8 +1161,10 @@ mod tests {
                 tool: ToolName::new("tool"),
                 arguments: crate::params::test_arguments(&json!({ "t": "a" })),
                 proposed_label: EstablishedLabel::top(),
+                receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 dynamic_resolutions: Vec::new(),
+                subject: None,
             },
             Fact::DispatchClosed {
                 trajectory: traj("a"),
@@ -1072,8 +1188,10 @@ mod tests {
                 tool: ToolName::new("tool"),
                 arguments: crate::params::test_arguments(&json!({ "t": "a" })),
                 proposed_label: EstablishedLabel::top(),
+                receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 dynamic_resolutions: Vec::new(),
+                subject: None,
             },
             Fact::DispatchClosed {
                 trajectory: traj("a"),
@@ -1212,8 +1330,10 @@ mod tests {
                 tool: ToolName::new("fetch_meeting"),
                 arguments: crate::params::test_arguments(&json!({ "t": "a" })),
                 proposed_label: EstablishedLabel::top(),
+                receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([]).unwrap(),
                 dynamic_resolutions: Vec::new(),
+                subject: None,
             },
             Fact::ValueAdmitted {
                 trajectory: traj("a"),

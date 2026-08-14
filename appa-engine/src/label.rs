@@ -108,7 +108,10 @@ impl Audience {
         }
     }
 
-    fn includes(&self, recipients: &Audience) -> bool {
+    /// `self ⊇ recipients` — the trajectory's readers include every named recipient.
+    /// Crate-visible because mandate-power comparison asks it of a substitution's
+    /// declared `to`, which is a plain audience rather than one value's dimension.
+    pub(crate) fn includes(&self, recipients: &Audience) -> bool {
         match (self, recipients) {
             (Audience::Public, _) => true,
             (Audience::Restricted(_), Audience::Public) => false,

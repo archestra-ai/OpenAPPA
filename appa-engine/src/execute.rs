@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::candidate::CallStage;
 use crate::check::{self, CheckOutcome, Gap, UnestablishedFact};
 use crate::engine::opened_dispatch;
 use crate::fact::{Fact, FactBatch};
@@ -124,7 +125,7 @@ pub(crate) fn execute_remedy_plan(
         .validate(call.arguments())
         .map_err(PlanError::InvalidCall)?;
 
-    let block = match check::evaluate(contract, views, call) {
+    let block = match check::evaluate(contract, views, call, &CallStage::default()) {
         CheckOutcome::Block(block) => block,
         CheckOutcome::Allow => return Err(PlanError::NotBlocked),
     };
@@ -132,7 +133,7 @@ pub(crate) fn execute_remedy_plan(
         return Err(PlanError::Unestablished(block.unestablished));
     }
 
-    let planned = plan::plan(registry, views, call, &block);
+    let planned = plan::plan(registry, views, call, &block, &CallStage::default());
     if !planned
         .plans
         .iter()
@@ -163,7 +164,7 @@ pub(crate) fn execute_remedy_plan(
         }
     }
 
-    let (dispatch, dispatch_opened) = opened_dispatch(contract, views, call);
+    let (dispatch, dispatch_opened) = opened_dispatch(contract, views, call, None);
 
     // Each ruling must be scoped to this exact dispatch.
     for ruling in rulings {
@@ -183,12 +184,15 @@ pub(crate) fn execute_remedy_plan(
     let trajectory = views.trajectory().clone();
 
     let mut facts = Vec::new();
-    if let Some(narrowing) = chosen.narrowing() {
+    let legacy_residual = chosen
+        .sanitizer()
+        .and_then(|name| crate::plan::predicted_residual(registry, contract, call, name, &views.current_label()));
+    if let Some(narrowing) = chosen.narrowing().cloned().or(legacy_residual) {
         facts.push(Fact::Acceptance {
             trajectory: trajectory.clone(),
             dispatch: dispatch.clone(),
             plan,
-            narrowing: narrowing.clone(),
+            narrowing,
         });
     }
     for required in &chosen.required {
@@ -211,6 +215,8 @@ pub(crate) fn execute_remedy_plan(
             dispatch: dispatch.clone(),
             plan,
             sanitizer: sanitizer.clone(),
+            contribution: crate::plan::bound_contribution(registry, contract, call, sanitizer)
+                .expect("the matched plan binds an output sanitizer enumeration found applicable"),
         });
     }
     facts.push(dispatch_opened);
@@ -225,7 +231,7 @@ mod tests {
     use crate::contract::{Delta, LabelRequirements, Requires, ToolContract};
     use crate::fact::{EffectKind, EffectSet, Fact, Revision};
     use crate::label::{Audience, Dim, EstablishedLabel, Label, ReaderId, Trust};
-    use crate::names::MarkName;
+    use crate::names::{MarkName, SanitizerName};
     use crate::projection::Projection;
     use crate::value::{LabeledValue, Provenance, ToolName, TrajectoryId, ValueBody};
     use serde_json::json;
@@ -326,8 +332,8 @@ mod tests {
     }
 
     fn offered_plan(registry: &Registry, views: &Views, call: &ResolvedCall) -> plan::ExecutableRemedyPlan {
-        let planned = match check::evaluate(registry.tool(call.tool()).unwrap(), views, call) {
-            CheckOutcome::Block(block) => plan::plan(registry, views, call, &block),
+        let planned = match check::evaluate(registry.tool(call.tool()).unwrap(), views, call, &CallStage::default()) {
+            CheckOutcome::Block(block) => plan::plan(registry, views, call, &block, &CallStage::default()),
             _ => {
                 return plan::ExecutableRemedyPlan {
                     id: plan::PlanId::new(0),
@@ -406,8 +412,10 @@ mod tests {
                 tool: seed.tool().clone(),
                 arguments: seed.canonical_arguments().clone(),
                 proposed_label: established(TRUSTED, Audience::Public),
+                receiving: established(TRUSTED, Audience::Public),
                 proposed_effects: EffectSet::new([EffectKind::new("email.sent")]).unwrap(),
                 dynamic_resolutions: vec![],
+                subject: None,
             },
         ];
         let guard_call = call("guard", json!({}));
@@ -522,8 +530,10 @@ mod tests {
                 tool: wire.tool().clone(),
                 arguments: wire.canonical_arguments().clone(),
                 proposed_label: EstablishedLabel::top(),
+                receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::default(),
                 dynamic_resolutions: Vec::new(),
+                subject: None,
             },
         ];
         let stale = Ruling {
@@ -803,6 +813,66 @@ mod tests {
         assert!(matches!(&batch.facts[0], Fact::Acceptance { narrowing, .. } if *narrowing == offered));
         assert!(matches!(batch.facts[1], Fact::Ruling { .. }));
         assert!(matches!(batch.facts[2], Fact::DispatchOpened { .. }));
+    }
+
+    fn substituting_registry() -> Registry {
+        let post = ToolContract {
+            name: ToolName::new("post"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
+            emits: EffectSet::default(),
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![crate::contract::AudienceRequirement::Includes(
+                        crate::contract::RecipientSpec::Static(Audience::restricted([ReaderId::new("partner")])),
+                    )],
+                },
+                ..Requires::default()
+            },
+        };
+        Registry::build_covered(crate::registry::RegistryConfig {
+            trust_chain: chain(),
+            tools: vec![post],
+            authorities: vec![],
+            sanitizers: vec![crate::authority::Sanitizer {
+                name: SanitizerName::new("redact"),
+                on: crate::authority::SanitizerPoints {
+                    input: true,
+                    output: false,
+                },
+                transition: crate::authority::Transition::Audience {
+                    from_includes: Audience::restricted([ReaderId::new("internal")]),
+                    to: Audience::restricted([ReaderId::new("internal"), ReaderId::new("partner")]),
+                },
+                scope: Scope::default(),
+                hint: None,
+            }],
+            casts: vec![],
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn the_composed_operation_refuses_an_input_hop_instead_of_releasing_it() {
+        let registry = substituting_registry();
+        let log = vec![user_value(known(
+            TRUSTED,
+            Audience::restricted([ReaderId::new("internal")]),
+        ))];
+        let call = call("post", json!({}));
+        let projection = Projection::build(&log, Revision::new(1));
+        let trajectory = traj();
+        let views = projection.view(&trajectory);
+        let chosen = offered_plan(&registry, &views, &call);
+        assert_eq!(chosen.hop(), Some(&SanitizerName::new("redact")));
+        assert_eq!(
+            execute_remedy_plan(&registry, &views, &chosen, &call, &[]),
+            Err(PlanError::GapUncovered(Gap::Includes {
+                recipients: Audience::restricted([ReaderId::new("partner")])
+            }))
+        );
     }
 
     fn narrowing_registry() -> Registry {
