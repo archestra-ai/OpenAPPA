@@ -1082,7 +1082,9 @@ samp {
    baseline and the value tips never jitter between rows. */
 .bench-row {
   display: grid;
-  grid-template-columns: 5.5rem minmax(0, 1fr) 3rem;
+  /* The name column fits the longest arm label ("FIDES (Microsoft)", ~95px)
+     without wrapping; the track takes whatever is left. */
+  grid-template-columns: 6.5rem minmax(0, 1fr) 3rem;
   align-items: center;
   gap: 10px;
   padding: 3px 0;

@@ -38,7 +38,7 @@ const ARMS: Arm[] = [
     detail: "10 of 35 attacks succeeded · 26 of 35 tasks completed",
   },
   {
-    name: "FIDES",
+    name: "FIDES (Microsoft)",
     attacks: 22.9,
     attacksLabel: "22.9%",
     completion: 28.6,
