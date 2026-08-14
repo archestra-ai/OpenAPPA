@@ -1,28 +1,14 @@
 name: Build and deploy appa-demo
 
-# Builds the chat-playground service image. Publishing is a deliberate act:
-# only a manual dispatch on main pushes the image to Artifact Registry and
-# rolls the appa-demo Cloud Run service to it — nothing runs on pushes to
-# main. Pull requests build without publishing; the crate itself is gated by
-# ci.yml's `--workspace` jobs, which now include it.
+# Builds the chat-playground service image, pushes it to Artifact Registry
+# and rolls the appa-demo Cloud Run service to it. Runs only on manual
+# dispatch from main; the crate itself is gated by ci.yml's `--workspace`
+# jobs, which include it.
 #
 # Required repository secrets: APPA_GCP_SERVICE_ACCOUNT,
 # APPA_GCP_WORKLOAD_IDENTITY_PROVIDER.
 
 on:
-  pull_request:
-    paths:
-      - "demo/appa-demo/**"
-      - "appa-engine/**"
-      - "appa-runtime-v2/**"
-      - "appa-policy/**"
-      - "appa-builtin/**"
-      - "appa-agent/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "Dockerfile"
-      - ".dockerignore"
-      - ".github/workflows/build-appa-demo-image.yml"
   workflow_dispatch:
 
 permissions: {}
@@ -32,7 +18,7 @@ env:
 
 jobs:
   build:
-    name: Build (push and deploy on dispatch)
+    name: Build, push and deploy
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:
@@ -53,9 +39,8 @@ jobs:
         run: docker build --tag "$IMAGE:${GITHUB_SHA::12}" --tag "$IMAGE:latest" .
 
       - name: Authenticate to Google Cloud
-        # Publishing only ever comes from a manual dispatch on main — a
-        # workflow_dispatch on a branch or a pull request builds without
-        # publishing.
+        # Publishing only ever comes from a dispatch on main — a
+        # workflow_dispatch on any other ref builds without publishing.
         if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:

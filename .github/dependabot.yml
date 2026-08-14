@@ -21,20 +21,6 @@ updates:
     cooldown:
       default-days: 7
 
-  - package-ecosystem: cargo
-    directory: /demo/kagent/notify-mcp
-    schedule:
-      interval: weekly
-    cooldown:
-      default-days: 7
-
-  - package-ecosystem: uv
-    directory: /harness-agentdojo
-    schedule:
-      interval: weekly
-    cooldown:
-      default-days: 7
-
   - package-ecosystem: github-actions
     directory: /
     schedule:
