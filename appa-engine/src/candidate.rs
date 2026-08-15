@@ -73,7 +73,7 @@ impl CallStage {
     pub(crate) fn of(candidate: Option<&DerivedCandidate>, lineage: SanitizerLineage) -> CallStage {
         match candidate {
             Some(DerivedCandidate::Call { label, .. }) => CallStage::substituting(label.clone(), lineage),
-            Some(DerivedCandidate::Result { .. }) | None => CallStage {
+            Some(DerivedCandidate::Result { .. } | DerivedCandidate::Return { .. }) | None => CallStage {
                 substituted: None,
                 lineage,
             },
@@ -118,6 +118,12 @@ pub enum DerivedCandidate {
     },
     Result {
         dispatch: DispatchId,
+        source: RawResultDigest,
+        from: ConfinedFrom,
+        value: LabeledValue,
+        residual: Option<Narrowing>,
+    },
+    Return {
         source: RawResultDigest,
         from: ConfinedFrom,
         value: LabeledValue,

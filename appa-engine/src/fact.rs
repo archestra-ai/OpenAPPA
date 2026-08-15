@@ -12,8 +12,8 @@ use crate::names::{AuthorityName, CastName, SanitizerName};
 use crate::plan::PlanId;
 use crate::profile::{DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentityV1};
 use crate::value::{
-    CanonicalDigest, ChildReturnId, DispatchId, LabeledValue, Provenance, RawResultDigest, ToolCallId, ToolName,
-    TrajectoryId, ValueId,
+    CanonicalDigest, ChildReturnId, DispatchId, ForkId, LabeledValue, Provenance, RawResultDigest, ToolCallId,
+    ToolName, TrajectoryId, ValueId,
 };
 
 /// How a child bound at fork may return: the immutable policy recorded on the `Fork` boundary.
@@ -37,6 +37,15 @@ pub enum ReturnDerivation {
         raw_digest: RawResultDigest,
         transition: Transition,
     },
+}
+
+/// Why a mandatory return sanitizer was inapplicable at submission. Closed and
+/// body-free: the reason names the failed precondition, never the refused bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReturnRejection {
+    MandateUnmet,
+    ConsumedDimensionUnresolvable,
+    PreconditionUnmet,
 }
 
 /// One tool call the model proposed in an assistant turn, recorded verbatim so the model-transcript
@@ -121,11 +130,19 @@ pub struct ForkSnapshot {
 
 impl ForkSnapshot {
     /// Freeze a basis: the established base plus every contributing source with its label at this
-    /// moment. Nested preparations pass their own flattened basis, so a snapshot never has to walk
-    /// ancestry to be understood.
-    pub fn freeze<'a>(base: EstablishedLabel, sources: impl IntoIterator<Item = (ValueId, &'a Label)>) -> ForkSnapshot {
+    /// moment, then the forking branch's absorbed merge-carried contributions. Nested
+    /// preparations pass their own flattened basis, so a snapshot never has to walk ancestry to
+    /// be understood.
+    pub fn freeze<'a>(
+        base: EstablishedLabel,
+        sources: impl IntoIterator<Item = (ValueId, &'a Label)>,
+        absorbed: impl IntoIterator<Item = (ValueId, Label)>,
+    ) -> ForkSnapshot {
         let sources: std::collections::BTreeMap<ValueId, &Label> = sources.into_iter().collect();
-        let seed = PartialLabel::from_basis(base.clone(), sources.iter().map(|(id, label)| (*id, *label)));
+        let mut seed = PartialLabel::from_basis(base.clone(), sources.iter().map(|(id, label)| (*id, *label)));
+        for (id, masked) in absorbed {
+            seed.fold_value(id, &masked);
+        }
         ForkSnapshot {
             base,
             inherited: sources.into_keys().collect(),
@@ -322,6 +339,23 @@ pub enum Fact {
         value: LabeledValue,
         derivation: ReturnDerivation,
     },
+    ReturnSubmitted {
+        trajectory: TrajectoryId,
+        id: ChildReturnId,
+        fork: ForkId,
+        parent: TrajectoryId,
+        label: crate::label::PartialLabel,
+        digest: RawResultDigest,
+        body: crate::value::ValueBody,
+        policy: ReturnPolicy,
+    },
+    ReturnRejected {
+        trajectory: TrajectoryId,
+        id: ChildReturnId,
+        fork: ForkId,
+        digest: RawResultDigest,
+        reason: ReturnRejection,
+    },
     /// One proposal batch was decided: the identity the runtime supplied and the
     /// policy content it was bound to. This is the decision boundary itself, so replay reads it
     /// rather than inferring atomic acts from flattened facts. A repeat of the identity with this
@@ -404,6 +438,7 @@ pub enum Fact {
         fork: crate::value::ForkId,
         snapshot: ForkSnapshot,
         return_policy: ReturnPolicy,
+        shape: Option<crate::shape::ReturnShape>,
     },
     ForkOpened {
         trajectory: TrajectoryId,
@@ -438,6 +473,8 @@ impl Fact {
             | Fact::CandidateDerived { trajectory, .. }
             | Fact::CandidateAccepted { trajectory, .. }
             | Fact::ChildReturn { trajectory, .. }
+            | Fact::ReturnSubmitted { trajectory, .. }
+            | Fact::ReturnRejected { trajectory, .. }
             | Fact::OfferOpened { trajectory, .. }
             | Fact::OfferAccepted { trajectory, .. }
             | Fact::OfferDenied { trajectory, .. }

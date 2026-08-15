@@ -1005,6 +1005,18 @@ confined_results = ["lookup"]
     }
 
     #[test]
+    fn an_inline_binding_on_the_reserved_attest_schema_is_refused() {
+        let policy = "version = 1\n\
+             [[sanitizer]]\nname = \"attest-schema\"\non = [\"tool_output\"]\n\
+             implementation = { url = \"https://attest.invalid\" }\n\
+             [sanitizer.mandate]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n";
+        assert!(matches!(
+            Config::from_toml_str(policy),
+            Err(ConfigError::ForbiddenInlineBinding { kind: "sanitizer", name }) if name == "attest-schema"
+        ));
+    }
+
+    #[test]
     fn an_input_sanitizer_registers_with_its_scope_and_refuses_a_trust_mandate() {
         let policy = |mandate: &str| {
             format!(

@@ -473,25 +473,11 @@ pub(crate) fn admit_cast(
     if !views.may_resolve(value) {
         return Err(CastError::ForeignValue);
     }
-    let applicable = match views
-        .value_provenance(value)
-        .expect("the value_label lookup proved the record exists")
-    {
-        crate::value::Provenance::ToolResult { dispatch } => {
-            let tool = views
-                .dispatch_tool(dispatch)
-                .expect("a result value's dispatch is opened in the log");
-            let contract = registry.tool(tool).expect("dispatches open only for registered tools");
-            cast.scope.covers(&contract.tags)
-        }
-        crate::value::Provenance::ProviderRun { tool, .. } => {
-            let contract = registry
-                .provider_run_contract(tool)
-                .expect("a provider value is admitted only under a registered provider-run contract");
-            cast.scope.covers(&contract.tags)
-        }
-        crate::value::Provenance::UserInput | crate::value::Provenance::ChildReturn { .. } => cast.scope.is_unscoped(),
-    };
+    // The scope gate, the one routing predicate planning and validation also run.
+    let applicable = cast
+        .scope
+        .reaches(registry, views, value)
+        .expect("admission resolves casts only for values whose routing records the log retains");
     if !applicable {
         return Err(CastError::OutOfScope);
     }

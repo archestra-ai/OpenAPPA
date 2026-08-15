@@ -767,7 +767,10 @@ impl RuntimeEngine {
             | Fact::CallApproved { .. }
             | Fact::CallApprovalConsumed { .. }
             | Fact::BasisAdvanced { .. } => return Some(None),
-            Fact::ForkPrepared { .. } | Fact::ForkOpened { .. } => return Some(None),
+            Fact::ForkPrepared { .. }
+            | Fact::ForkOpened { .. }
+            | Fact::ReturnSubmitted { .. }
+            | Fact::ReturnRejected { .. } => return Some(None),
         };
         Some(Some(event))
     }
@@ -902,6 +905,9 @@ impl RuntimeEngine {
                 "[appa] tool {tool} is provider-run: it executes inside the inference call and cannot be proposed as a tool call"
             ))),
             Err(EngineError::InvalidCall(error)) => Ok(deny(format!("[appa] invalid call: {error}"))),
+            Err(EngineError::InvalidReturnSchema(error)) => Ok(deny(format!(
+                "[appa] invalid call: return_schema does not compile to a canonical shape: {error}"
+            ))),
             Err(EngineError::NotAllowed | EngineError::BranchEnded | EngineError::NotProviderRun(_)) => {
                 Err(EngineRefusal::Invariant {
                     detail: "check returned a dispatch-path refusal".to_string(),
@@ -1219,8 +1225,8 @@ impl RuntimeEngine {
             }
         };
         let plans = match &check {
-            ReturnCheck::Block(ReturnBlock::Narrowing { plans, .. }) => plans.clone(),
-            ReturnCheck::Allow | ReturnCheck::Block(ReturnBlock::Unestablished(_)) => Vec::new(),
+            ReturnCheck::Block(block) => block.plans.clone(),
+            ReturnCheck::Allow => Vec::new(),
         };
         if !plans.contains(chosen) {
             return Ok(retire_declined(
@@ -1375,13 +1381,7 @@ impl RuntimeEngine {
                     Next::PresentToModel(Presentation::Value { value }),
                 ))
             }
-            ReturnCheck::Block(ReturnBlock::Unestablished(facts)) => {
-                Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
-                    feedback: unestablished_feedback(parent_views, &facts),
-                    offers: Vec::new(),
-                })))
-            }
-            ReturnCheck::Block(ReturnBlock::Narrowing { narrowing, plans }) => {
+            ReturnCheck::Block(ReturnBlock { narrowing, plans }) => {
                 let mut stage = Vec::new();
                 let mut offer_ids = Vec::new();
                 for (index, plan) in plans.iter().enumerate() {

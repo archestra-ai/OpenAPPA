@@ -585,6 +585,7 @@ fn applicable_output_sanitizers<'r>(
     }
     registry
         .sanitizers()
+        .filter(|sanitizer| !sanitizer.name.is_attest_schema())
         .filter(|sanitizer| sanitizer.derive_output(output, &contract.tags).is_some())
         .collect()
 }
@@ -649,6 +650,7 @@ pub(crate) fn confined_stage(
     let hops = registry
         .sanitizers()
         .filter(|sanitizer| !lineage.contains(&sanitizer.name))
+        .filter(|sanitizer| !sanitizer.name.is_attest_schema())
         .filter(|sanitizer| {
             sanitizer
                 .derive_output(candidate, &contract.tags)
@@ -667,6 +669,125 @@ pub(crate) fn confined_stage(
         required: Vec::new(),
     });
     plans
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ReturnStagePlan {
+    Resolve {
+        cast: crate::names::CastName,
+        value: crate::value::ValueId,
+    },
+    Stage(Vec<ExecutableRemedyPlan>),
+}
+
+/// The next stage of one pending child return: a progress hop for
+/// every registered output sanitizer that is applicable and still helps, then acceptance of
+/// exactly the residual the candidate leaves. Total like [`confined_stage`], and planned from the
+/// candidate standing now — the submitted fold's bound, or a derived successor's label.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn return_stage(
+    registry: &Registry,
+    views: &Views,
+    child: &crate::value::TrajectoryId,
+    fold: &PartialLabel,
+    candidate: &Label,
+    body: &crate::value::ValueBody,
+    residual: &Narrowing,
+    lineage: &SanitizerLineage,
+) -> ReturnStagePlan {
+    let mut plans: Vec<ExecutableRemedyPlan> = Vec::new();
+    if registry.profile().confines_child_return() {
+        for sanitizer in registry.sanitizers() {
+            if lineage.contains(&sanitizer.name) {
+                continue;
+            }
+            if !(sanitizer.on.output && sanitizer.applies_to(&[])) {
+                continue;
+            }
+            if sanitizer.name.is_attest_schema() && !attest_applicable(views, child, body, &sanitizer.transition) {
+                continue;
+            }
+            let dim = sanitizer.transition.dimension();
+            if !fold.is_established(dim) {
+                if sanitizer.derive_output(candidate, &[]).is_none() {
+                    continue;
+                }
+                if let Some((cast, value)) = resolvable_source(registry, views, fold, dim) {
+                    return ReturnStagePlan::Resolve { cast, value };
+                }
+                continue;
+            }
+            if sanitizer
+                .derive_output(candidate, &[])
+                .is_some_and(|derived| confined_hop_helps(&residual.from, candidate, &derived))
+            {
+                plans.push(ExecutableRemedyPlan {
+                    id: PlanId(plans.len() as u32),
+                    steps: vec![RemedyStep::Derive(sanitizer.name.clone())],
+                    required: Vec::new(),
+                });
+            }
+        }
+    }
+    plans.push(ExecutableRemedyPlan {
+        id: PlanId(plans.len() as u32),
+        steps: vec![RemedyStep::Accept(residual.clone())],
+        required: Vec::new(),
+    });
+    ReturnStagePlan::Stage(plans)
+}
+
+/// The preconditions of the reserved `attest-schema` builtin, checked as applicability:
+/// the fork bound a shape — every compiled shape is shape-bounded by construction —
+/// the candidate body is exactly a value that shape admits in canonical form, and the parent's
+/// fork-time trust rank covers the mandate `to`, because the answer cannot come back cleaner
+/// than the context that asked. All three are engine-held facts; no resolver variant exists.
+pub(crate) fn attest_applicable(
+    views: &Views,
+    child: &crate::value::TrajectoryId,
+    body: &crate::value::ValueBody,
+    transition: &crate::authority::Transition,
+) -> bool {
+    let Some(shape) = views.return_shape_of(child) else {
+        return false;
+    };
+    // Load validation refuses an audience mandate on the reserved name.
+    let crate::authority::Transition::Trust { to, .. } = transition else {
+        return false;
+    };
+    if !shape
+        .validate(body.as_str())
+        .is_ok_and(|canonical| canonical == body.as_str())
+    {
+        return false;
+    }
+    views
+        .fork_seed(child)
+        .is_some_and(|seed| seed.is_established(crate::label::Dimension::Trust) && seed.bound().trust >= *to)
+}
+
+/// The first unresolved source on `dim` a registered cast can establish, in registry order —
+/// deterministic, so the deciding engine and the transition validator name the same request.
+/// A cast applies where its scope covers the source's originating contract and the
+/// log retains the bytes a resolver would read; a bodiless source is charged to no cast here
+/// and fails closed at whatever consumes it.
+pub(crate) fn resolvable_source(
+    registry: &Registry,
+    views: &Views,
+    fold: &PartialLabel,
+    dim: crate::label::Dimension,
+) -> Option<(crate::names::CastName, crate::value::ValueId)> {
+    fold.unresolved(dim).find_map(|value| {
+        views.value_body(value)?;
+        let prior = views.value_label(value)?;
+        registry
+            .casts()
+            .iter()
+            .find(|cast| {
+                cast.resolution.can_establish(prior) && cast.scope.reaches(registry, views, value).unwrap_or(false)
+            })
+            .map(|cast| (cast.name.clone(), value))
+    })
 }
 
 /// The established contribution a bound output sanitizer's first derivation would make, resolved

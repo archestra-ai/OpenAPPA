@@ -57,6 +57,30 @@ impl Scope {
         self.tags.is_empty() || self.tags.iter().any(|t| call_tags.contains(t))
     }
 
+    /// The routing gate every cast consumer shares — planning, admission, and the
+    /// transition validator — so none of them can drift: does this scope reach `value`? A tool
+    /// result routes by its originating contract's tags, a provider-run result by its own
+    /// contract's, and a user turn or child return originates from no tool, so only
+    /// an unscoped component reaches it. `None` names a missing routing record; the caller
+    /// decides whether that skips the source, breaks a proven invariant, or refuses the record.
+    pub(crate) fn reaches(
+        &self,
+        registry: &crate::registry::Registry,
+        views: &crate::projection::Views<'_>,
+        value: crate::value::ValueId,
+    ) -> Option<bool> {
+        Some(match views.value_provenance(value)? {
+            crate::value::Provenance::ToolResult { dispatch } => {
+                let tool = views.dispatch_tool(dispatch)?;
+                self.covers(&registry.tool(tool)?.tags)
+            }
+            crate::value::Provenance::ProviderRun { tool, .. } => {
+                self.covers(&registry.provider_run_contract(tool)?.tags)
+            }
+            crate::value::Provenance::UserInput | crate::value::Provenance::ChildReturn { .. } => self.is_unscoped(),
+        })
+    }
+
     /// Does this scope cover every value `other` covers? Unscoped covers every
     /// scope; otherwise coverage is tag-set superset — a scoped component never covers an
     /// unscoped one.
@@ -223,6 +247,28 @@ impl CastResolution {
             }
         }
         Ok(())
+    }
+
+    /// Does any complete answer exist that [`CastResolution::validate`] would admit for a source
+    /// whose per-value label is `prior`? Selection reads this before requesting: a
+    /// request against a resolution no answer can satisfy — a constant disagreeing with an
+    /// established dimension, a resolver whose trust ceiling is empty while trust is unresolved —
+    /// would redrive forever without reaching a capable cast registered after it.
+    pub(crate) fn can_establish(&self, prior: &crate::label::Label) -> bool {
+        match self {
+            CastResolution::Constant(constant) => {
+                let trust_agrees = match prior.trust {
+                    Dim::Known(trust) => trust == constant.trust,
+                    Dim::Unknown => true,
+                };
+                let audience_agrees = match &prior.audience {
+                    Dim::Known(audience) => *audience == constant.audience,
+                    Dim::Unknown => true,
+                };
+                trust_agrees && audience_agrees
+            }
+            CastResolution::Resolver { may_cast } => !matches!(prior.trust, Dim::Unknown) || !may_cast.trust.is_empty(),
+        }
     }
 }
 

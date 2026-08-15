@@ -986,7 +986,7 @@ mod tests {
             });
             let projection = Projection::build(&log, crate::fact::Revision::new(3));
             match engine.check_child_return(&projection.view(&parent), &child).unwrap() {
-                ReturnCheck::Block(ReturnBlock::Narrowing { plans, .. }) => plans,
+                ReturnCheck::Block(ReturnBlock { plans, .. }) => plans,
                 other => panic!("expected a narrowing return block, got {other:?}"),
             }
         };

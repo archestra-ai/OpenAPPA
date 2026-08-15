@@ -546,6 +546,14 @@ fn validate_deployment(policy: &appa_policy::Config, config: &Config) -> Result<
         ));
     }
 
+    if let appa_engine::fact::ReturnPolicy::Sanitized(name) = policy.engine().child_return()
+        && name.is_attest_schema()
+    {
+        return Err(OpenError::UnsupportedPolicy(
+            "[child] return_sanitizer = \"attest-schema\" — this runtime consults an external for sanitized child returns, and the engine-applied builtin crosses only on the fork-addressed return path it does not drive yet".to_string(),
+        ));
+    }
+
     let rc = policy.registry_config();
     // Cast resolution is not wired in this runtime: an accepted
     // declaration would sit inert while unestablished blocks stay
@@ -575,8 +583,21 @@ fn validate_deployment(policy: &appa_policy::Config, config: &Config) -> Result<
             });
         }
     }
+    if config
+        .externals
+        .sanitizers
+        .contains_key(appa_engine::names::SanitizerName::ATTEST_SCHEMA)
+    {
+        return Err(OpenError::UnsupportedPolicy(
+            "[externals] binds sanitizer attest-schema — the reserved builtin is applied by the engine itself and takes no implementation"
+                .to_string(),
+        ));
+    }
     for sanitizer in &rc.sanitizers {
         let name = sanitizer.name.as_str();
+        if sanitizer.name.is_attest_schema() {
+            continue;
+        }
         if !config.externals.sanitizers.contains_key(name) {
             return Err(OpenError::UnboundExternal {
                 kind: "sanitizer",

@@ -157,6 +157,18 @@ pub enum LoadError {
     )]
     InputSanitizerTrust(String),
     #[error(
+        "sanitizer attest-schema declares an audience mandate: the reserved builtin vouches the channel shape, and structure claims only trust"
+    )]
+    AttestSchemaAudienceMandate,
+    #[error(
+        "sanitizer attest-schema lacks the tool_output point: the quarantine exit it is reserved for is a child-return crossing, a tool_output application"
+    )]
+    AttestSchemaNotOutput,
+    #[error(
+        "sanitizer attest-schema declares a scope: a child return originates from no tool, so the reserved builtin is unscoped"
+    )]
+    AttestSchemaScoped,
+    #[error(
         "provider-run tool {tool} declares {construct}: a provider-run contract may declare only a static delta"
     )]
     ProviderRunConstruct {
@@ -279,11 +291,13 @@ fn worst_case_plan_alternatives(
         {
             sanitizers
                 .iter()
+                .filter(|sanitizer| !sanitizer.name.is_attest_schema())
                 .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(&tool.tags))
                 .count()
         }
         None => sanitizers
             .iter()
+            .filter(|sanitizer| !sanitizer.name.is_attest_schema())
             .filter(|sanitizer| sanitizer.derive_output(&output, &tool.tags).is_some())
             .count(),
     };
@@ -332,7 +346,20 @@ fn worst_case_confined_stage(sanitizers: &[Sanitizer], confined: bool, tags: &[T
     1u128.saturating_add(
         sanitizers
             .iter()
+            .filter(|sanitizer| !sanitizer.name.is_attest_schema())
             .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(tags))
+            .count() as u128,
+    )
+}
+
+fn worst_case_return_stage(sanitizers: &[Sanitizer], confined: bool) -> u128 {
+    if !confined {
+        return 1;
+    }
+    1u128.saturating_add(
+        sanitizers
+            .iter()
+            .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(&[]))
             .count() as u128,
     )
 }
@@ -369,6 +396,17 @@ impl Registry {
         let mut sanitizers = BTreeMap::new();
         for sanitizer in config.sanitizers {
             let context = || format!("sanitizer {}", sanitizer.name.as_str());
+            if sanitizer.name.is_attest_schema() {
+                if matches!(sanitizer.transition, Transition::Audience { .. }) {
+                    return Err(LoadError::AttestSchemaAudienceMandate);
+                }
+                if !sanitizer.on.output {
+                    return Err(LoadError::AttestSchemaNotOutput);
+                }
+                if !sanitizer.scope.is_unscoped() {
+                    return Err(LoadError::AttestSchemaScoped);
+                }
+            }
             match &sanitizer.transition {
                 Transition::Trust { from_floor, to } => {
                     check_rank(&config.trust_chain, Some(*from_floor), || format!("{} from", context()))?;
@@ -464,7 +502,7 @@ impl Registry {
                 });
             }
         }
-        let confined = worst_case_confined_stage(&sanitizer_list, profile.confines_child_return(), &[]);
+        let confined = worst_case_return_stage(&sanitizer_list, profile.confines_child_return());
         if confined > planner_cap.0 {
             return Err(LoadError::TooManyReturnPlanAlternatives {
                 count: confined,
@@ -1440,6 +1478,50 @@ mod tests {
         assert_eq!(PlannerCap::new(0), None);
     }
 
+    #[test]
+    fn the_cap_counts_the_reserved_attest_schema_only_for_the_return_stage() {
+        let lifting = |name: &str, scope: Scope| Sanitizer {
+            name: SanitizerName::new(name),
+            on: SanitizerPoints {
+                input: false,
+                output: true,
+            },
+            transition: Transition::Trust {
+                from_floor: Trust::new(0),
+                to: Trust::new(1),
+            },
+            scope,
+            hint: None,
+        };
+        let scoped = |name: &str| {
+            lifting(
+                name,
+                Scope {
+                    tags: vec![TagName::new("t")],
+                },
+            )
+        };
+        let mut narrowing = tool("wire");
+        narrowing.tags = vec![TagName::new("t")];
+        narrowing.delta = Some(Delta {
+            trust: Some(Dim::Known(Trust::new(0))),
+            audience: None,
+        });
+        let mut cfg = base();
+        cfg.tools = vec![narrowing];
+        cfg.sanitizers = vec![lifting("attest-schema", Scope::default()), scoped("s1"), scoped("s2")];
+        let cap = PlannerCap::new(3).expect("nonzero");
+        assert!(Registry::build_covered_with_cap(cfg, cap).is_ok());
+
+        let mut only_attest = base();
+        only_attest.sanitizers = vec![lifting("attest-schema", Scope::default())];
+        let tight = PlannerCap::new(1).expect("nonzero");
+        assert!(matches!(
+            Registry::build_covered_with_cap(only_attest, tight),
+            Err(LoadError::TooManyReturnPlanAlternatives { count: 2, max: 1 })
+        ));
+    }
+
     fn output_sanitizer(index: usize) -> Sanitizer {
         Sanitizer {
             name: SanitizerName::new(format!("sanitizer-{index}")),
@@ -1671,6 +1753,62 @@ mod tests {
         ));
         assert_eq!(built(sanitizer(output_only, trust)), Ok(()));
         assert_eq!(built(sanitizer(input_only, audience)), Ok(()));
+    }
+
+    #[test]
+    fn the_reserved_attest_schema_declaration_is_validated_at_load() {
+        let attest = |on: SanitizerPoints, transition, scope| Sanitizer {
+            name: SanitizerName::new("attest-schema"),
+            on,
+            transition,
+            scope,
+            hint: None,
+        };
+        let built = |sanitizer: Sanitizer| {
+            let mut cfg = base();
+            cfg.sanitizers = vec![sanitizer];
+            Registry::build_covered(cfg).map(|_| ())
+        };
+        let trust = Transition::Trust {
+            from_floor: Trust::new(0),
+            to: Trust::new(1),
+        };
+        let output_only = SanitizerPoints {
+            input: false,
+            output: true,
+        };
+        let audience = Transition::Audience {
+            from_includes: Audience::restricted([ReaderId::new("internal")]),
+            to: Audience::restricted([ReaderId::new("partner")]),
+        };
+        assert!(matches!(
+            built(attest(output_only, audience, Scope::default())),
+            Err(LoadError::AttestSchemaAudienceMandate)
+        ));
+        let input_only = SanitizerPoints {
+            input: true,
+            output: false,
+        };
+        assert!(matches!(
+            built(attest(input_only, trust.clone(), Scope::default())),
+            Err(LoadError::AttestSchemaNotOutput)
+        ));
+        let scoped = Scope {
+            tags: vec![TagName::new("outbound")],
+        };
+        assert!(matches!(
+            built(attest(output_only, trust.clone(), scoped)),
+            Err(LoadError::AttestSchemaScoped)
+        ));
+        let both = SanitizerPoints {
+            input: true,
+            output: true,
+        };
+        assert!(matches!(
+            built(attest(both, trust.clone(), Scope::default())),
+            Err(LoadError::InputSanitizerTrust(ref name)) if name == "attest-schema"
+        ));
+        assert_eq!(built(attest(output_only, trust, Scope::default())), Ok(()));
     }
 
     #[test]

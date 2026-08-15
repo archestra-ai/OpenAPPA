@@ -144,6 +144,7 @@ pub enum OfferFollowUp {
     Released(Box<Released>),
     Settled(Box<Settled>),
     Admitted { value: ValueBody },
+    ReturnStaged(Box<PendingReturnStage>),
 }
 
 /// One confined result and the ways to move it. Not a [`Blocked`]: no call is
@@ -168,13 +169,23 @@ pub struct ForkBinding {
     pub child: TrajectoryId,
 }
 
-/// One child's return, addressed by the branch it ends. A child is forked once and
-/// returns once, so the child identity names exactly one fork and one crossing; the fork identity
-/// the parent's later offers bind is `T21`'s and `T23`'s to add.
+/// One child's return, addressed by the branch it ends and the exact fork that opened
+/// it: a two-stage child answers only to its own `ForkId`, and a one-stage boundary
+/// child has none to name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChildReport {
     pub child: TrajectoryId,
+    /// The fork the return addresses. `None` only for a one-stage `Fork`-boundary child, which
+    /// has no fork identity; a fork-bound child's report must name its own.
+    pub fork: Option<crate::value::ForkId>,
     pub submission: ChildSubmission,
+    /// Typed evidence the runtime resolved for this exact report: the mandatory
+    /// sanitizer's derivation, or a cast answer the return's planning requested. An external
+    /// that gave no answer contributes nothing here and resumes nothing.
+    pub evidence: Vec<Evidence>,
+    /// Fresh entropy for the offers this act may surface: a narrowing submission opens
+    /// its return stage in the same decision, and those plans need identities of their own.
+    pub offer_nonce: crate::value::OfferNonce,
 }
 
 /// What the child submitted: one value, or none. The crossing path is derived from the
@@ -193,7 +204,23 @@ pub enum ChildFollowUp {
         narrowing: Narrowing,
         plans: Vec<crate::branch::ReturnPlan>,
     },
-    Unresolved(Vec<crate::check::UnestablishedFact>),
+    Pending(Box<PendingReturnStage>),
+    Resolve(EvidenceRequest),
+    Rejected { reason: crate::fact::ReturnRejection },
+}
+
+/// One pending child return's open stage. Not a [`Confined`]: the custody
+/// holder is a return record, not a dispatch, and the raw submission's bytes never ride along.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingReturnStage {
+    pub id: ChildReturnId,
+    /// The label the candidate standing now would fold into the parent: the submitted fold's
+    /// established bound, or the derived candidate's label after a mandatory or staged hop.
+    pub label: Label,
+    pub residual: Narrowing,
+    /// The offer opened for each next-stage plan, paired with the plan it binds: acceptance of
+    /// exactly `residual`, and every applicable helpful sanitizer hop.
+    pub offers: Vec<(crate::value::OfferId, crate::plan::PlanId)>,
 }
 
 /// One released dispatch's outcome, as the runtime observed it. The report names the
@@ -238,6 +265,11 @@ pub enum Evidence {
         source: RawResultDigest,
         derived: ValueBody,
     },
+    Cast {
+        cast: crate::names::CastName,
+        value: crate::value::ValueId,
+        resolved: crate::label::EstablishedLabel,
+    },
 }
 
 /// What the engine needs before it can finish an act. The runtime resolves it through
@@ -248,6 +280,11 @@ pub enum EvidenceRequest {
     Sanitizer {
         sanitizer: SanitizerName,
         source: RawResultDigest,
+        body: ValueBody,
+    },
+    Cast {
+        cast: crate::names::CastName,
+        value: crate::value::ValueId,
         body: ValueBody,
     },
 }
@@ -377,10 +414,16 @@ pub enum TransitionError {
     SpawnMarkOutOfRange,
     #[error("the binding names no live prepared fork")]
     UnbindableFork,
+    #[error("the return does not address the fork that opened this child")]
+    ReturnForkMismatch,
+    #[error(transparent)]
+    Resolution(#[from] crate::admit::CastError),
     #[error("a fork takes an unused child identity")]
     ChildAlreadyUsed,
     #[error("a fork bound to a return sanitizer crosses through the composed path until T23")]
     BoundReturnSanitizer,
+    #[error("the submission does not fit the fork's return shape: {0}")]
+    ReturnShapeMismatch(crate::shape::ReturnMismatch),
 }
 
 /// One engine interaction's outcome: the sealed batch to append against its basis
@@ -603,12 +646,18 @@ pub enum TransitionRefusal {
     MisdecidedBatch,
     #[error("fork record's return policy is not the deployment's child-return binding")]
     ForkReturnPolicyMismatch,
+    #[error("fork record's shape is not the one its own spawn call authors")]
+    ForkShapeMismatch,
+    #[error("a crossing on a shaped fork carries a body its stored return shape does not admit")]
+    ReturnShapeViolation,
     #[error("a return or fork record names a branch that has already ended")]
     BranchEnded,
     #[error("a return record names a trajectory that was never forked")]
     NotForked,
     #[error("a return record's identity is not the next one for its child")]
     WrongReturnIdentity,
+    #[error("a return lifecycle record is not one this state produces")]
+    ReturnRecordMismatch,
     #[error("a crossing does not match the fork's return policy")]
     ReturnPolicyMismatch,
     #[error("a merge that narrows the parent records no acceptance, or another than the one it folds")]
@@ -717,6 +766,7 @@ pub(crate) struct Sequence<'a> {
     /// crossing ends the child, so a log that records one without folding it into the parent
     /// would leave the parent reading a label the crossing never restricted.
     crossed: BTreeMap<ChildReturnId, Crossing>,
+    return_settling: BTreeSet<ChildReturnId>,
     accepted: BTreeMap<ChildReturnId, Narrowing>,
     menu: Option<(
         crate::basis::SubjectKey,
@@ -789,6 +839,7 @@ impl<'a> Sequence<'a> {
             candidate_accepted: BTreeMap::new(),
             admitted: BTreeSet::new(),
             crossed: BTreeMap::new(),
+            return_settling: BTreeSet::new(),
             accepted: BTreeMap::new(),
             declared: None,
             admitting: None,
@@ -820,6 +871,7 @@ impl<'a> Sequence<'a> {
             candidate_accepted: BTreeMap::new(),
             admitted: view.projection().admitted_dispatches(),
             crossed: BTreeMap::new(),
+            return_settling: BTreeSet::new(),
             accepted: BTreeMap::new(),
             declared: None,
             admitting: None,
@@ -854,11 +906,24 @@ impl<'a> Sequence<'a> {
                                 from: ConfinedFrom::Offer(offer),
                                 ..
                             }
+                            | DerivedCandidate::Return {
+                                from: ConfinedFrom::Offer(offer),
+                                ..
+                            }
                             | DerivedCandidate::Call { from: offer, .. },
                         ..
                     },
                 ) if offer == &owed => self.owing = None,
                 (Owed::Accepted(owed), Fact::CandidateAccepted { offer, .. }) if offer == &owed => self.owing = None,
+                (Owed::Accepted(owed), Fact::ChildReturn { id, .. })
+                    if self
+                        .projection
+                        .view(fact.trajectory())
+                        .offer(&owed)
+                        .is_some_and(|recorded| recorded.subject == crate::basis::SubjectKey::Return(id.clone())) =>
+                {
+                    self.owing = None
+                }
                 _ => return Err(TransitionRefusal::UndischargedAcceptance),
             }
         }
@@ -1125,6 +1190,23 @@ impl<'a> Sequence<'a> {
                 self.child_return(trajectory, id, value, derivation)?;
                 self.crossed.insert(id.clone(), Crossing::Recorded);
             }
+            Fact::ReturnSubmitted {
+                trajectory,
+                id,
+                fork,
+                parent,
+                label,
+                digest,
+                body,
+                policy,
+            } => self.return_submitted(trajectory, id, fork, parent, label, digest, body, policy)?,
+            Fact::ReturnRejected {
+                trajectory,
+                id,
+                fork,
+                digest: _,
+                reason,
+            } => self.return_rejected(trajectory, id, fork, reason)?,
             Fact::ChildReturnAcceptance {
                 trajectory,
                 child_return,
@@ -1146,6 +1228,7 @@ impl<'a> Sequence<'a> {
                 fork,
                 snapshot,
                 return_policy,
+                shape,
             } => {
                 if released == Obligation::Free {
                     return Err(TransitionRefusal::UnbackedDecision);
@@ -1168,6 +1251,14 @@ impl<'a> Sequence<'a> {
                 }
                 if &views.freeze_basis() != snapshot {
                     return Err(TransitionRefusal::ForkBasisMismatch);
+                }
+                let call = views
+                    .dispatch_call(fork.dispatch())
+                    .expect("the dispatch gate above proved the spawn call recorded");
+                let expected =
+                    crate::engine::marked_return_shape(call).map_err(|_| TransitionRefusal::ForkShapeMismatch)?;
+                if shape != &expected {
+                    return Err(TransitionRefusal::ForkShapeMismatch);
                 }
             }
             Fact::ForkOpened { trajectory, fork } => {
@@ -1321,6 +1412,64 @@ impl<'a> Sequence<'a> {
                     &lineage,
                 ))
             }
+            crate::basis::SubjectKey::Return(id) => {
+                let child = id.child();
+                // The offers of a pending return belong to the parent trajectory.
+                if views.parent_of(child) != Some(trajectory) {
+                    return Err(TransitionRefusal::ForeignOffer);
+                }
+                match act {
+                    crate::basis::DecidedAct::ChildReturn(decided) if decided == id => {}
+                    crate::basis::DecidedAct::Offer(_) => {}
+                    _ => return Err(TransitionRefusal::ForeignOffer),
+                }
+                let pending = views.pending_return(id).ok_or(TransitionRefusal::UnbackedOffer)?;
+                let spawn = views
+                    .dispatch_call(pending.fork.dispatch())
+                    .ok_or(TransitionRefusal::UnknownDispatch)?;
+                if spawn.digest() != *call {
+                    return Err(TransitionRefusal::UnbackedOffer);
+                }
+                let fold = views.branch_label(child);
+                let receiving = pending.receiving.clone();
+                let (candidate, body, residual) = match views.candidate(subject) {
+                    Some(DerivedCandidate::Return {
+                        value,
+                        residual: Some(residual),
+                        ..
+                    }) => (value.label.clone(), value.body.clone(), residual.clone()),
+                    Some(_) => return Err(TransitionRefusal::UnbackedOffer),
+                    None => {
+                        let label = fold.bound().clone().into_label();
+                        let to = receiving.combine(&label.established_part());
+                        if to == receiving {
+                            return Err(TransitionRefusal::UnbackedOffer);
+                        }
+                        (
+                            label,
+                            pending.body().clone(),
+                            Narrowing {
+                                from: receiving.clone(),
+                                to,
+                            },
+                        )
+                    }
+                };
+                let lineage = views.lineage(subject);
+                match crate::plan::return_stage(
+                    self.registry,
+                    views,
+                    child,
+                    &fold,
+                    &candidate,
+                    &body,
+                    &residual,
+                    &lineage,
+                ) {
+                    crate::plan::ReturnStagePlan::Stage(plans) => Ok(plans),
+                    crate::plan::ReturnStagePlan::Resolve { .. } => Err(TransitionRefusal::UnbackedOffer),
+                }
+            }
             crate::basis::SubjectKey::Approval(_) => Err(TransitionRefusal::ForeignOffer),
         }
     }
@@ -1336,8 +1485,10 @@ impl<'a> Sequence<'a> {
         let (basis, subject) = (recorded.basis, recorded.subject.clone());
         let owed = match (&subject, recorded.plan.hop().is_some()) {
             (SubjectKey::Call { .. }, false) => Owed::Approval(*offer),
-            (SubjectKey::Call { .. } | SubjectKey::ConfinedResult(_), true) => Owed::Derived(*offer),
-            (SubjectKey::ConfinedResult(_), false) => Owed::Accepted(*offer),
+            (SubjectKey::Call { .. } | SubjectKey::ConfinedResult(_) | SubjectKey::Return(_), true) => {
+                Owed::Derived(*offer)
+            }
+            (SubjectKey::ConfinedResult(_) | SubjectKey::Return(_), false) => Owed::Accepted(*offer),
             // No offer ever stands on an approval — that subject exists to be spent by a release.
             (SubjectKey::Approval(_), _) => return Err(TransitionRefusal::UnbackedOffer),
         };
@@ -1629,6 +1780,10 @@ impl<'a> Sequence<'a> {
                 subjects: vec![subject.clone()],
                 ..BasisAdvance::default()
             },
+            Fact::ReturnSubmitted { id, .. } => BasisAdvance {
+                subjects: vec![crate::basis::SubjectKey::Return(id.clone())],
+                ..BasisAdvance::default()
+            },
             _ => BasisAdvance::default(),
         }
     }
@@ -1673,6 +1828,9 @@ impl<'a> Sequence<'a> {
         }
         if self.crossed.values().any(|crossing| crossing != &Crossing::Merged) {
             return Err(TransitionRefusal::UnmergedCrossing);
+        }
+        if !self.return_settling.is_empty() {
+            return Err(TransitionRefusal::UnadmittedDerivation);
         }
         if self.declared.as_ref().is_some_and(|open| !open.owed.is_empty()) {
             return Err(TransitionRefusal::UnbackedAdvance);
@@ -1827,6 +1985,7 @@ impl<'a> Sequence<'a> {
             crate::engine::EngineError::UnknownTool(tool) | crate::engine::EngineError::ProviderRunTool(tool) => {
                 TransitionRefusal::UnknownTool(tool)
             }
+            crate::engine::EngineError::InvalidReturnSchema(_) => TransitionRefusal::ForkShapeMismatch,
             other => unreachable!("composing a batch refuses only on the call it cannot build, not {other}"),
         })?;
         let expected: Vec<&DispatchId> = composed.iter().flatten().map(|release| &release.dispatch).collect();
@@ -2050,7 +2209,9 @@ impl<'a> Sequence<'a> {
                             }
                             candidate.label.clone()
                         }
-                        Some(DerivedCandidate::Call { .. }) => return Err(TransitionRefusal::ForgedLabel),
+                        Some(DerivedCandidate::Call { .. } | DerivedCandidate::Return { .. }) => {
+                            return Err(TransitionRefusal::ForgedLabel);
+                        }
                         None => {
                             if contract.pending_cast_dim().is_some() || views.bound_sanitizer(dispatch).is_some() {
                                 return Err(TransitionRefusal::ForgedLabel);
@@ -2079,10 +2240,13 @@ impl<'a> Sequence<'a> {
                     return Err(TransitionRefusal::ForgedLabel);
                 }
                 if let Some(bound) = EstablishedLabel::from_label(&value.label) {
-                    let current = views.current_label();
-                    let candidate = current.bound().combine(&bound);
-                    let owed = (&candidate != current.bound()).then(|| Narrowing {
-                        from: current.bound().clone(),
+                    let baseline = match views.submitted_return(id) {
+                        Some(submitted) => submitted.receiving.clone(),
+                        None => views.current_label().bound().clone(),
+                    };
+                    let candidate = baseline.combine(&bound);
+                    let owed = (candidate != baseline).then_some(Narrowing {
+                        from: baseline,
                         to: candidate,
                     });
                     if self.accepted.get(id) != owed.as_ref() {
@@ -2119,21 +2283,7 @@ impl<'a> Sequence<'a> {
             .registry
             .cast(cast)
             .ok_or_else(|| TransitionRefusal::UnknownCast(cast.as_str().to_string()))?;
-        let applicable = match views
-            .value_provenance(value)
-            .expect("the value_label lookup proved the record exists")
-        {
-            Provenance::ToolResult { dispatch } => views
-                .dispatch_tool(dispatch)
-                .and_then(|tool| self.registry.tool(tool))
-                .is_some_and(|contract| registered.scope.covers(&contract.tags)),
-            Provenance::ProviderRun { tool, .. } => self
-                .registry
-                .provider_run_contract(tool)
-                .is_some_and(|contract| registered.scope.covers(&contract.tags)),
-            Provenance::UserInput | Provenance::ChildReturn { .. } => registered.scope.is_unscoped(),
-        };
-        if !applicable {
+        if !registered.scope.reaches(self.registry, &views, value).unwrap_or(false) {
             return Err(TransitionRefusal::OutOfScopeResolution);
         }
         registered
@@ -2157,45 +2307,99 @@ impl<'a> Sequence<'a> {
             .ok_or(TransitionRefusal::NotForked)?
             .clone();
         let views = self.projection.view(&parent);
-        if views.has_ended(child) {
+        let pending = views.pending_return(id).cloned();
+        if views.has_ended(child) && pending.is_none() {
             return Err(TransitionRefusal::BranchEnded);
         }
         if id.child() != child || id.occurrence() != views.returns_by(child) {
             return Err(TransitionRefusal::WrongReturnIdentity);
         }
+        if let (None, Some(shape)) = (&pending, views.return_shape_of(child)) {
+            match shape.validate(value.body.as_str()) {
+                Ok(canonical) if canonical == value.body.as_str() => {}
+                _ => return Err(TransitionRefusal::ReturnShapeViolation),
+            }
+        }
         let fold = views.branch_label(child);
         let policy = views.return_policy_of(child).ok_or(TransitionRefusal::NotForked)?;
         let expected = match (policy, derivation) {
             (ReturnPolicy::Raw, ReturnDerivation::Raw) => {
-                if !fold.is_fully_established() {
-                    return Err(TransitionRefusal::ForgedLabel);
+                if let Some(pending) = &pending
+                    && RawResultDigest::of(value.body.as_str().as_bytes()) != pending.digest
+                {
+                    return Err(TransitionRefusal::ReturnRecordMismatch);
                 }
                 fold.bound().clone().into_label()
             }
-            (ReturnPolicy::Raw, ReturnDerivation::Sanitized { sanitizer, .. }) => {
-                let offered = match crate::branch::check_child_return(self.registry, &views, child) {
-                    Ok(crate::branch::ReturnCheck::Block(crate::branch::ReturnBlock::Narrowing { plans, .. })) => plans,
-                    _ => return Err(TransitionRefusal::ReturnPolicyMismatch),
-                };
-                if !offered.iter().any(|plan| {
-                    matches!(plan, crate::branch::ReturnPlan::Sanitize { sanitizer: offered, .. } if offered == sanitizer)
-                }) {
-                    return Err(TransitionRefusal::ReturnPolicyMismatch);
+            (ReturnPolicy::Raw, ReturnDerivation::Sanitized { sanitizer, .. }) => match &pending {
+                Some(pending) => self.consumed_candidate(&views, id, pending, value, sanitizer, derivation)?,
+                None => {
+                    let offered = match crate::branch::check_child_return(self.registry, &views, child) {
+                        Ok(crate::branch::ReturnCheck::Block(block)) => block.plans,
+                        _ => return Err(TransitionRefusal::ReturnPolicyMismatch),
+                    };
+                    if !offered.iter().any(|plan| {
+                        matches!(plan, crate::branch::ReturnPlan::Sanitize { sanitizer: offered, .. } if offered == sanitizer)
+                    }) {
+                        return Err(TransitionRefusal::ReturnPolicyMismatch);
+                    }
+                    self.sanitized_crossing(sanitizer, derivation, &fold)?
                 }
-                self.sanitized_crossing(sanitizer, derivation, &fold)?
-            }
-            (ReturnPolicy::Sanitized(bound), ReturnDerivation::Sanitized { sanitizer, .. }) => {
-                if bound != sanitizer {
-                    return Err(TransitionRefusal::ReturnPolicyMismatch);
+            },
+            (ReturnPolicy::Sanitized(bound), ReturnDerivation::Sanitized { sanitizer, .. }) => match &pending {
+                Some(pending) => self.consumed_candidate(&views, id, pending, value, sanitizer, derivation)?,
+                None => {
+                    if bound != sanitizer {
+                        return Err(TransitionRefusal::ReturnPolicyMismatch);
+                    }
+                    self.sanitized_crossing(sanitizer, derivation, &fold)?
                 }
-                self.sanitized_crossing(sanitizer, derivation, &fold)?
-            }
+            },
             _ => return Err(TransitionRefusal::ReturnPolicyMismatch),
         };
         if value.label != expected {
             return Err(TransitionRefusal::ForgedLabel);
         }
+        // A terminal derivation's crossing is the batch this record lands in.
+        self.return_settling.remove(id);
         Ok(())
+    }
+
+    fn consumed_candidate(
+        &self,
+        views: &Views,
+        id: &ChildReturnId,
+        pending: &crate::projection::SubmittedReturn,
+        value: &crate::value::LabeledValue,
+        sanitizer: &SanitizerName,
+        derivation: &ReturnDerivation,
+    ) -> Result<Label, TransitionRefusal> {
+        let ReturnDerivation::Sanitized {
+            raw_digest, transition, ..
+        } = derivation
+        else {
+            return Err(TransitionRefusal::ReturnPolicyMismatch);
+        };
+        let subject = crate::basis::SubjectKey::Return(id.clone());
+        let Some(DerivedCandidate::Return { value: candidate, .. }) = views.candidate(&subject) else {
+            return Err(TransitionRefusal::ReturnRecordMismatch);
+        };
+        // The crossing is the candidate, body and label alike — never a value beside it.
+        if candidate != value || raw_digest != &pending.digest {
+            return Err(TransitionRefusal::ReturnRecordMismatch);
+        }
+        let lineage = views.lineage(&subject);
+        if lineage.names().last() != Some(sanitizer) {
+            return Err(TransitionRefusal::ReturnRecordMismatch);
+        }
+        let registered = self
+            .registry
+            .sanitizer(sanitizer)
+            .ok_or_else(|| TransitionRefusal::UnknownSanitizer(sanitizer.as_str().to_string()))?;
+        if &registered.transition != transition {
+            return Err(TransitionRefusal::SanitizerUnapplicable);
+        }
+        Ok(candidate.label.clone())
     }
 
     fn sanitized_crossing(
@@ -2211,13 +2415,134 @@ impl<'a> Sequence<'a> {
             .registry
             .sanitizer(sanitizer)
             .ok_or_else(|| TransitionRefusal::UnknownSanitizer(sanitizer.as_str().to_string()))?;
-        if !fold.is_fully_established() {
+        if !fold.is_established(registered.transition.dimension()) {
             return Err(TransitionRefusal::ForgedLabel);
         }
         match registered.derive_output(&fold.bound().clone().into_label(), &[]) {
             Some(label) if &registered.transition == transition => Ok(label),
             _ => Err(TransitionRefusal::SanitizerUnapplicable),
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn return_submitted(
+        &self,
+        child: &TrajectoryId,
+        id: &ChildReturnId,
+        fork: &crate::value::ForkId,
+        parent: &TrajectoryId,
+        label: &crate::label::PartialLabel,
+        digest: &RawResultDigest,
+        body: &crate::value::ValueBody,
+        policy: &ReturnPolicy,
+    ) -> Result<(), TransitionRefusal> {
+        let views = self.projection.view(parent);
+        if views.parent_of(child) != Some(parent) {
+            return Err(TransitionRefusal::ForeignTrajectory);
+        }
+        if views.fork_of(child) != Some(fork) {
+            return Err(TransitionRefusal::ReturnRecordMismatch);
+        }
+        if views.has_ended(child) {
+            return Err(TransitionRefusal::BranchEnded);
+        }
+        if id.child() != child || id.occurrence() != views.returns_by(child) {
+            return Err(TransitionRefusal::WrongReturnIdentity);
+        }
+        if digest != &RawResultDigest::of(body.as_str().as_bytes()) {
+            return Err(TransitionRefusal::ReturnRecordMismatch);
+        }
+        // The recorded policy is the deployment's binding, like the fork records before it.
+        if policy != self.child_return {
+            return Err(TransitionRefusal::ForkReturnPolicyMismatch);
+        }
+        // A shaped fork's submission is the canonical text its stored shape admits.
+        if let Some(shape) = views.return_shape_of(child) {
+            match shape.validate(body.as_str()) {
+                Ok(canonical) if canonical == body.as_str() => {}
+                _ => return Err(TransitionRefusal::ReturnShapeViolation),
+            }
+        }
+        let fold = views.branch_label(child);
+        if label != &fold {
+            return Err(TransitionRefusal::ForgedLabel);
+        }
+        match policy {
+            ReturnPolicy::Raw => {
+                let receiving = views.current_label().bound().clone();
+                if receiving.combine(fold.bound()) == receiving {
+                    return Err(TransitionRefusal::ReturnRecordMismatch);
+                }
+            }
+            ReturnPolicy::Sanitized(name) => {
+                let registered = self
+                    .registry
+                    .sanitizer(name)
+                    .ok_or_else(|| TransitionRefusal::UnknownSanitizer(name.as_str().to_string()))?;
+                if !fold.is_established(registered.transition.dimension())
+                    || registered
+                        .derive_output(&fold.bound().clone().into_label(), &[])
+                        .is_none()
+                {
+                    return Err(TransitionRefusal::ReturnRecordMismatch);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// One terminal rejection: only a mandatory binding rejects, and the typed reason
+    /// is re-derived from the child fold — never taken on the record's word. The digest is the
+    /// record's own claim over bytes the log deliberately never stores.
+    fn return_rejected(
+        &self,
+        child: &TrajectoryId,
+        id: &ChildReturnId,
+        fork: &crate::value::ForkId,
+        reason: &crate::fact::ReturnRejection,
+    ) -> Result<(), TransitionRefusal> {
+        let parent = self
+            .projection
+            .view(child)
+            .parent_of(child)
+            .ok_or(TransitionRefusal::NotForked)?
+            .clone();
+        let views = self.projection.view(&parent);
+        if views.fork_of(child) != Some(fork) {
+            return Err(TransitionRefusal::ReturnRecordMismatch);
+        }
+        if views.has_ended(child) {
+            return Err(TransitionRefusal::BranchEnded);
+        }
+        if id.child() != child || id.occurrence() != views.returns_by(child) {
+            return Err(TransitionRefusal::WrongReturnIdentity);
+        }
+        let policy = views.return_policy_of(child).ok_or(TransitionRefusal::NotForked)?;
+        let ReturnPolicy::Sanitized(name) = policy else {
+            return Err(TransitionRefusal::ReturnRecordMismatch);
+        };
+        let registered = self
+            .registry
+            .sanitizer(name)
+            .ok_or_else(|| TransitionRefusal::UnknownSanitizer(name.as_str().to_string()))?;
+        let fold = views.branch_label(child);
+        let dim = registered.transition.dimension();
+        let derives = match reason {
+            crate::fact::ReturnRejection::ConsumedDimensionUnresolvable => {
+                !fold.is_established(dim) && crate::plan::resolvable_source(self.registry, &views, &fold, dim).is_none()
+            }
+            crate::fact::ReturnRejection::MandateUnmet => {
+                fold.is_established(dim)
+                    && registered
+                        .derive_output(&fold.bound().clone().into_label(), &[])
+                        .is_none()
+            }
+            crate::fact::ReturnRejection::PreconditionUnmet => name.is_attest_schema(),
+        };
+        if !derives {
+            return Err(TransitionRefusal::ReturnRecordMismatch);
+        }
+        Ok(())
     }
 
     fn boundary(&mut self, trajectory: &TrajectoryId, kind: &BoundaryKind) -> Result<(), TransitionRefusal> {
@@ -2368,6 +2693,16 @@ impl<'a> Sequence<'a> {
                 value,
                 residual,
             } => (dispatch, source, from, value, residual),
+            DerivedCandidate::Return {
+                source,
+                from,
+                value,
+                residual,
+            } => {
+                return self.return_derived(
+                    trajectory, subject, sanitizer, registered, source, from, value, residual, lineage,
+                );
+            }
         };
         // The subject a confined candidate advances is its own dispatch's, never another's.
         if subject != &crate::basis::SubjectKey::ConfinedResult(dispatch.clone()) {
@@ -2439,6 +2774,111 @@ impl<'a> Sequence<'a> {
         }
         if settles {
             self.derived.insert(dispatch.clone(), Derived::Sanitized(value.clone()));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn return_derived(
+        &mut self,
+        trajectory: &TrajectoryId,
+        subject: &crate::basis::SubjectKey,
+        sanitizer: &SanitizerName,
+        registered: &crate::authority::Sanitizer,
+        source: &RawResultDigest,
+        from: &ConfinedFrom,
+        value: &crate::value::LabeledValue,
+        residual: &Option<Narrowing>,
+        lineage: &SanitizerLineage,
+    ) -> Result<(), TransitionRefusal> {
+        let crate::basis::SubjectKey::Return(id) = subject else {
+            return Err(TransitionRefusal::ForgedLabel);
+        };
+        let child = id.child();
+        let views = self.projection.view(trajectory);
+        // The candidate is the parent's, like the offers that stand on it.
+        if views.parent_of(child) != Some(trajectory) {
+            return Err(TransitionRefusal::ForeignTrajectory);
+        }
+        let pending = views.pending_return(id).ok_or(TransitionRefusal::UnknownReturn)?;
+        let receiving = pending.receiving.clone();
+        let pending_digest = pending.digest;
+        let pending_body = pending.body().clone();
+        let policy = views
+            .return_policy_of(child)
+            .ok_or(TransitionRefusal::NotForked)?
+            .clone();
+        let fold = views.branch_label(child);
+        if !fold.is_established(registered.transition.dimension()) {
+            return Err(TransitionRefusal::ForgedLabel);
+        }
+        let (from_label, from_body) = match from {
+            ConfinedFrom::Bound => {
+                match &policy {
+                    ReturnPolicy::Sanitized(bound) if bound == sanitizer => {}
+                    _ => return Err(TransitionRefusal::SanitizerUnapplicable),
+                }
+                if views.candidate(subject).is_some() || lineage.names() != [sanitizer.clone()] {
+                    return Err(TransitionRefusal::SanitizerUnapplicable);
+                }
+                if source != &pending_digest {
+                    return Err(TransitionRefusal::ObservationMismatch);
+                }
+                (fold.bound().clone().into_label(), pending_body)
+            }
+            ConfinedFrom::Offer(offer) => {
+                let recorded = taken_offer(&views, offer)?;
+                if recorded.plan.hop() != Some(sanitizer) || &recorded.subject != subject {
+                    return Err(TransitionRefusal::UnbackedOffer);
+                }
+                let expected = views.lineage(subject).extend(sanitizer.clone());
+                if expected.as_ref() != Some(lineage) {
+                    return Err(TransitionRefusal::SanitizerUnapplicable);
+                }
+                match views.candidate(subject) {
+                    Some(DerivedCandidate::Return { value: predecessor, .. }) => {
+                        if source != &RawResultDigest::of(predecessor.body.as_str().as_bytes()) {
+                            return Err(TransitionRefusal::ObservationMismatch);
+                        }
+                        (predecessor.label.clone(), predecessor.body.clone())
+                    }
+                    Some(_) => return Err(TransitionRefusal::ForgedLabel),
+                    None => {
+                        if policy != ReturnPolicy::Raw {
+                            return Err(TransitionRefusal::SanitizerUnapplicable);
+                        }
+                        if source != &pending_digest {
+                            return Err(TransitionRefusal::ObservationMismatch);
+                        }
+                        (fold.bound().clone().into_label(), pending_body)
+                    }
+                }
+            }
+        };
+        if sanitizer.is_attest_schema() {
+            if value.body != from_body {
+                return Err(TransitionRefusal::ForgedLabel);
+            }
+            if !crate::plan::attest_applicable(&views, child, &value.body, &registered.transition) {
+                return Err(TransitionRefusal::SanitizerUnapplicable);
+            }
+        }
+        let label = registered
+            .derive_output(&from_label, &[])
+            .ok_or(TransitionRefusal::SanitizerUnapplicable)?;
+        if value.label != label {
+            return Err(TransitionRefusal::ForgedLabel);
+        }
+        if matches!(from, ConfinedFrom::Offer(_)) && !crate::plan::confined_hop_helps(&receiving, &from_label, &label) {
+            return Err(TransitionRefusal::SanitizerUnapplicable);
+        }
+        let derived_residual = crate::admit::confined_residual(&receiving, &label);
+        if residual != &derived_residual {
+            return Err(TransitionRefusal::AcceptanceMismatch);
+        }
+        // A derivation that narrows nothing settles now: its crossing lands in this same batch.
+        if derived_residual.is_none() {
+            self.return_settling.insert(id.clone());
         }
         Ok(())
     }
@@ -2634,6 +3074,14 @@ fn confines(sequence: &Sequence<'_>, offer: &crate::value::OfferId, dispatch: &D
         .is_some_and(|recorded| recorded.subject == crate::basis::SubjectKey::ConfinedResult(dispatch.clone()))
 }
 
+fn returns(sequence: &Sequence<'_>, offer: &crate::value::OfferId, id: &ChildReturnId) -> bool {
+    sequence
+        .projection
+        .view(id.child())
+        .offer(offer)
+        .is_some_and(|recorded| recorded.subject == crate::basis::SubjectKey::Return(id.clone()))
+}
+
 fn belongs_to(sequence: &Sequence<'_>, act: &crate::basis::DecidedAct, fact: &Fact) -> bool {
     use crate::basis::DecidedAct;
     match (act, fact) {
@@ -2690,14 +3138,41 @@ fn belongs_to(sequence: &Sequence<'_>, act: &crate::basis::DecidedAct, fact: &Fa
                 ..
             },
         ) => true,
+        (
+            DecidedAct::ChildReturn(act),
+            Fact::ReturnSubmitted { id, .. }
+            | Fact::ReturnRejected { id, .. }
+            | Fact::CandidateDerived {
+                subject: crate::basis::SubjectKey::Return(id),
+                ..
+            },
+        ) => id == act,
+        (DecidedAct::ChildReturn(_), Fact::CastApplied { .. }) => true,
+        (
+            DecidedAct::Offer(act),
+            Fact::ChildReturn { id, .. }
+            | Fact::ChildReturnAcceptance { child_return: id, .. }
+            | Fact::ValueAdmitted {
+                provenance: crate::value::Provenance::ChildReturn { id, .. },
+                ..
+            }
+            | Fact::Boundary {
+                kind: BoundaryKind::Merge { child_return: id },
+                ..
+            },
+        ) => returns(sequence, act, id),
         (DecidedAct::Binding(act), Fact::ForkOpened { fork, .. }) => fork == act,
         (DecidedAct::Offer(act), Fact::OfferAccepted { offer, .. }) => offer == act,
-        // A hop's successor names the offer it was derived under, at either point.
+        // A hop's successor names the offer it was derived under, at any point.
         (
             DecidedAct::Offer(act),
             Fact::CandidateDerived {
                 derived:
                     DerivedCandidate::Result {
+                        from: ConfinedFrom::Offer(offer),
+                        ..
+                    }
+                    | DerivedCandidate::Return {
                         from: ConfinedFrom::Offer(offer),
                         ..
                     }

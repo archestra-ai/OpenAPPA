@@ -97,6 +97,7 @@ pub enum SubjectKey {
     },
     Approval(OfferId),
     ConfinedResult(DispatchId),
+    Return(ChildReturnId),
 }
 
 /// Which engine act a declaration belongs to, named by the identity that act already has. No new

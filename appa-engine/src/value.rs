@@ -217,6 +217,24 @@ impl BlockId {
         )
     }
 
+    /// The stage one pending child return surfaces. Bound to the return
+    /// identity and to the generation its candidate stands at, so each successive stage of the
+    /// same pending return is a stage of its own even under a repeated nonce.
+    pub(crate) fn of_return(
+        nonce: &OfferNonce,
+        id: &ChildReturnId,
+        generation: crate::basis::SubjectGeneration,
+    ) -> Self {
+        BlockId(
+            Framed::tagged(b"appa.block.return.v1")
+                .field(&nonce.0)
+                .field(id.child().0.as_bytes())
+                .field(&id.occurrence().to_be_bytes())
+                .field(&generation.value().to_be_bytes())
+                .finish(),
+        )
+    }
+
     pub fn bytes(&self) -> &[u8; 32] {
         &self.0
     }

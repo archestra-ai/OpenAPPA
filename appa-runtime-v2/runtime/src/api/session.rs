@@ -2756,7 +2756,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
     }
 
     #[tokio::test]
-    async fn a_child_return_with_unknown_fold_blocks_without_offers() {
+    async fn a_child_return_with_unknown_fold_crosses_and_charges_the_parent() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
@@ -2778,12 +2778,30 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             .await
             .expect("the child's result is admitted at Unknown");
 
-        let blocked = child
+        let returned = child
             .on_child_end(Some("summary of untrusted data".to_string()))
             .await
+            .expect("the crossing merges");
+        assert_eq!(
+            returned,
+            crate::api::ChildReturnDecision::Returned {
+                value: "summary of untrusted data".to_string()
+            },
+        );
+        assert!(matches!(
+            runtime.session(&TrajectoryId("cc:child".to_string())),
+            Err(SessionError::Ended),
+        ));
+
+        let decision = session
+            .on_tool_call(ProposedCall {
+                tool: "send".to_string(),
+                arguments: raw(serde_json::json!({})),
+            })
+            .await
             .expect("the block is delivered");
-        let crate::api::ChildReturnDecision::Blocked { feedback } = blocked else {
-            panic!("an Unknown fold must block the merge");
+        let ToolCallDecision::Deny { feedback } = decision else {
+            panic!("the crossed unresolved identity must charge the parent's send, got {decision:?}");
         };
         assert!(
             !feedback.contains("fetch"),
@@ -2791,11 +2809,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         );
         assert!(
             feedback.contains("value ValueId(0)"),
-            "the blocked value is still named by its id: {feedback}"
-        );
-        assert!(
-            runtime.session(&TrajectoryId("cc:child".to_string())).is_ok(),
-            "the child stays unended while its crossing is pending",
+            "the charged value is named by its id: {feedback}"
         );
     }
 
@@ -3136,6 +3150,154 @@ confined_child_return = true
             runtime.session(&TrajectoryId("cc:child".to_string())).is_ok(),
             "the child stays unended and the return may be retried",
         );
+    }
+
+    const ATTESTED_CHILD: &str = r#"
+version = 1
+
+[[policy.sanitizer]]
+name = "attest-schema"
+on = ["tool_output"]
+[policy.sanitizer.mandate]
+trust = { from = "suspicious", to = "trusted" }
+
+[policy.deployment]
+context_control = true
+confined_child_return = true
+"#;
+
+    const ATTESTED_CHILD_COMPOSED: &str = r#"
+version = 1
+
+[[sanitizer]]
+name = "attest-schema"
+on = ["tool_output"]
+[sanitizer.mandate]
+trust = { from = "suspicious", to = "trusted" }
+
+[deployment]
+context_control = true
+confined_child_return = true
+"#;
+
+    const ATTEST_BOUND_CHILD: &str = r#"
+version = 1
+
+[[policy.sanitizer]]
+name = "attest-schema"
+on = ["tool_output"]
+[policy.sanitizer.mandate]
+trust = { from = "suspicious", to = "trusted" }
+
+[policy.child]
+return_sanitizer = "attest-schema"
+
+[policy.deployment]
+context_control = true
+confined_child_return = true
+"#;
+
+    fn attested_config(policy: &str, binding: Option<&str>) -> Config {
+        let binding = match binding {
+            Some(url) => format!("[externals.sanitizers.attest-schema]\nurl = \"{url}\"\n"),
+            None => String::new(),
+        };
+        let text = format!("[policy]\n{policy}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n{binding}");
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, text).expect("the fixture writes");
+        Config::load(&path).expect("the fixture validates")
+    }
+
+    fn bare_externals() -> crate::config::Externals {
+        crate::config::Externals {
+            timeout: std::time::Duration::from_millis(2000),
+            review_timeout: std::time::Duration::from_millis(2000),
+            max_body_bytes: 65536,
+            authorities: std::collections::BTreeMap::new(),
+            sanitizers: std::collections::BTreeMap::new(),
+            dynamic: None,
+        }
+    }
+
+    #[test]
+    fn the_reserved_attest_schema_needs_no_externals_binding() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        assert!(Runtime::open(attested_config(ATTESTED_CHILD, None), dir.path().join("appa.db"), None).is_ok());
+    }
+
+    #[test]
+    fn an_externals_binding_on_the_reserved_attest_schema_refuses_open() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        assert!(matches!(
+            Runtime::open(
+                attested_config(ATTESTED_CHILD, Some("http://127.0.0.1:1/")),
+                dir.path().join("appa.db"),
+                None,
+            ),
+            Err(OpenError::UnsupportedPolicy(_)),
+        ));
+    }
+
+    #[test]
+    fn a_child_bound_attest_schema_refuses_open_in_this_runtime() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        assert!(matches!(
+            Runtime::open(
+                attested_config(ATTEST_BOUND_CHILD, None),
+                dir.path().join("appa.db"),
+                None
+            ),
+            Err(OpenError::UnsupportedPolicy(_)),
+        ));
+    }
+
+    #[test]
+    fn an_embedded_attest_schema_policy_needs_no_externals_binding() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let config =
+            Config::embedded(ATTESTED_CHILD_COMPOSED.to_string(), bare_externals()).expect("the policy embeds");
+        assert!(Runtime::open(config, dir.path().join("appa.db"), None).is_ok());
+    }
+
+    #[test]
+    fn an_embedded_binding_on_the_reserved_attest_schema_refuses_open() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let mut externals = bare_externals();
+        externals.sanitizers.insert(
+            "attest-schema".to_string(),
+            crate::config::Implementation::Resolver(crate::config::Endpoint {
+                url: "http://127.0.0.1:1/".to_string(),
+                token: None,
+            }),
+        );
+        let config = Config::embedded(ATTESTED_CHILD_COMPOSED.to_string(), externals).expect("the policy embeds");
+        assert!(matches!(
+            Runtime::open(config, dir.path().join("appa.db"), None),
+            Err(OpenError::UnsupportedPolicy(_)),
+        ));
+    }
+
+    #[test]
+    fn an_unregistered_attest_schema_binding_still_refuses_open() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let mut externals = bare_externals();
+        externals.sanitizers.insert(
+            "attest-schema".to_string(),
+            crate::config::Implementation::Resolver(crate::config::Endpoint {
+                url: "http://127.0.0.1:1/".to_string(),
+                token: None,
+            }),
+        );
+        let config = Config::embedded(
+            "version = 1\n\n[deployment]\ncontext_control = true\n".to_string(),
+            externals,
+        )
+        .expect("the policy embeds");
+        assert!(matches!(
+            Runtime::open(config, dir.path().join("appa.db"), None),
+            Err(OpenError::UnsupportedPolicy(_)),
+        ));
     }
 
     const NARROWING: &str = r#"

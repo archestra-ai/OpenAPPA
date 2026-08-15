@@ -789,9 +789,7 @@ impl CanonicalArguments {
     }
 
     fn from_raw_unchecked(bytes: &[u8]) -> Result<Self, ArgumentError> {
-        // The scanner already established the input is one complete JSON object.
-        scan(bytes)?;
-        let value: Value = serde_json::from_slice(bytes).map_err(|e| ArgumentError::Syntax(e.to_string()))?;
+        let value = strict_parse(bytes)?;
         let rendered = canonical_bytes(&value);
         if rendered.len() > MAX_ARGUMENT_BYTES {
             return Err(ArgumentError::TooLarge);
@@ -813,8 +811,17 @@ impl CanonicalArguments {
     }
 }
 
-fn canonical_bytes(value: &Value) -> Vec<u8> {
+/// A default-feature `serde_json::Value` always canonicalizes: keys are strings and every
+/// representable number is a finite binary64 or exact integer.
+pub(crate) fn canonical_bytes(value: &Value) -> Vec<u8> {
     serde_json_canonicalizer::to_vec(value).expect("a serde_json::Value canonicalizes")
+}
+
+/// Strictly scan and parse one JSON object without schema validation — the same token-level gate
+/// the argument path runs, shared with the return-shape walk at the child boundary.
+pub(crate) fn strict_parse(bytes: &[u8]) -> Result<Value, ArgumentError> {
+    scan(bytes)?;
+    serde_json::from_slice(bytes).map_err(|e| ArgumentError::Syntax(e.to_string()))
 }
 
 impl Serialize for CanonicalArguments {

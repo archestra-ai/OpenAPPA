@@ -195,7 +195,7 @@ builtin = "redact-email"
 | Implementation | Description | Audit Properties |
 |---|---|---|
 | **`builtin = "redact-email"`** | The stock in-process redactor: replaces email-like tokens with a fixed placeholder. | Deterministic and offline; registering it vouches for exactly that transform. |
-| **`builtin = "attest-schema"`** | The reserved quarantine-exit sanitizer; engine-held, no service behind it. | Derives the return unchanged; claims instruction-cleanliness only. |
+| **(reserved name `attest-schema`)** | The quarantine-exit sanitizer, registered by name alone: the engine applies it itself, so it takes no `[externals]` entry, and binding one is a load error. | Derives the return unchanged; claims instruction-cleanliness only. |
 | **`builtin = "<module name>"`** | A deployer builtin module: your own compiled scrubber, loaded at startup and called in-process. | Same mandate ceiling as any implementation; deployer trusted code. |
 | **`url = ...`** | A scrubbing service behind an endpoint. | The derivation is re-validated against the declared transition before admission. |
 
@@ -223,7 +223,7 @@ The reserved builtin `attest-schema` covers the quarantine exit without touching
 
 ```toml
 [[sanitizer]]
-name = "quarantine-exit"
+name = "attest-schema"
 on   = ["tool_output"]
 hint = "Vouches a fork-bound structured return; shape only, no content claims."
 
@@ -231,10 +231,7 @@ hint = "Vouches a fork-bound structured return; shape only, no content claims."
 trust = { from = "suspicious", to = "trusted" }
 ```
 
-```toml
-[externals.sanitizers.quarantine-exit]
-builtin = "attest-schema"
-```
+Registering the reserved name is the whole wiring: the engine applies `attest-schema` itself, so the deployment binds no `[externals]` entry for it — an explicit binding, builtin or resolver, is a load error.
 
 ## Casts
 

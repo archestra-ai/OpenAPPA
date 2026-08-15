@@ -27,6 +27,18 @@ name_newtype!(
 name_newtype!(
     SanitizerName
 );
+
+impl SanitizerName {
+    /// The reserved builtin sanitizer of the quarantine exit. The engine
+    /// itself applies it — deriving the return unchanged and claiming its trust transition from
+    /// engine-held facts — so a deployment registers the name but never binds an implementation.
+    pub const ATTEST_SCHEMA: &'static str = "attest-schema";
+
+    pub fn is_attest_schema(&self) -> bool {
+        self.as_str() == Self::ATTEST_SCHEMA
+    }
+}
+
 name_newtype!(
     CastName
 );
