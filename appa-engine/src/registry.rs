@@ -336,11 +336,16 @@ fn worst_case_plan_alternatives(
     count
         .saturating_add(redispatches)
         .saturating_add(input_hops)
-        .max(worst_case_confined_stage(sanitizers, confined, &tool.tags))
+        .max(worst_case_confined_stage(
+            sanitizers,
+            confined,
+            tool.pending_cast_dim().is_some(),
+            &tool.tags,
+        ))
 }
 
-fn worst_case_confined_stage(sanitizers: &[Sanitizer], confined: bool, tags: &[TagName]) -> u128 {
-    if !confined {
+fn worst_case_confined_stage(sanitizers: &[Sanitizer], confined: bool, pending_cast: bool, tags: &[TagName]) -> u128 {
+    if !confined || pending_cast {
         return 1;
     }
     1u128.saturating_add(

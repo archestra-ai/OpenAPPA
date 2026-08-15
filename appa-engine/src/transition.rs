@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::candidate::{CallStage, ConfinedFrom, DerivedCandidate, SanitizerLineage};
+use crate::candidate::{CallStage, ConfinedFrom, DerivedCandidate, DerivedVia, SanitizerLineage};
 use crate::check::{CheckOutcome, Gap, Narrowing, RawBlock};
 use crate::contract::ToolContract;
 use crate::execute::AuthorityEvidence;
@@ -270,6 +270,11 @@ pub enum Evidence {
         value: crate::value::ValueId,
         resolved: crate::label::EstablishedLabel,
     },
+    PendingCast {
+        cast: crate::names::CastName,
+        source: RawResultDigest,
+        resolved: crate::label::EstablishedLabel,
+    },
 }
 
 /// What the engine needs before it can finish an act. The runtime resolves it through
@@ -285,6 +290,11 @@ pub enum EvidenceRequest {
     Cast {
         cast: crate::names::CastName,
         value: crate::value::ValueId,
+        body: ValueBody,
+    },
+    PendingCast {
+        casts: Vec<crate::names::CastName>,
+        source: RawResultDigest,
         body: ValueBody,
     },
 }
@@ -400,8 +410,8 @@ pub enum TransitionError {
     ObservationMismatch,
     #[error("the dispatch recorded success: a failure or indeterminate outcome contradicts it")]
     ContradictedSuccess,
-    #[error("this contract's output is confined awaiting a cast, which this boundary does not yet resolve")]
-    ConfinedResult,
+    #[error("the cast resolution is not admissible for this confined result")]
+    InadmissibleResolution,
     #[error("the bound output sanitizer does not apply to this result")]
     SanitizerUnapplicable,
     #[error("this trajectory was never forked, so it has no return channel")]
@@ -682,6 +692,8 @@ pub enum TransitionRefusal {
     DanglingRemedy,
     #[error("a cast or sanitizer settled a result the log never admitted")]
     UnadmittedDerivation,
+    #[error("a staged confined result's dispatch closes only with the admission that takes its candidate")]
+    StagedClose,
     /// A record moved policy state its decision never declared. Replay would then reach
     /// a different basis than the decision stamped onto its own offers.
     #[error("the record advances a policy basis its decision did not declare")]
@@ -759,8 +771,8 @@ pub(crate) struct Sequence<'a> {
     pending: std::collections::VecDeque<PendingRelease>,
     remedies: BTreeMap<DispatchId, Remedy>,
     derived: BTreeMap<DispatchId, Derived>,
-    cast_accepted: BTreeMap<DispatchId, Narrowing>,
     candidate_accepted: BTreeMap<DispatchId, Narrowing>,
+    cast_restated: BTreeSet<DispatchId>,
     admitted: BTreeSet<DispatchId>,
     /// Crossings recorded and not yet admitted into the parent, and merges not yet made: a
     /// crossing ends the child, so a log that records one without folding it into the parent
@@ -835,8 +847,8 @@ impl<'a> Sequence<'a> {
             pending: std::collections::VecDeque::new(),
             remedies: BTreeMap::new(),
             derived: BTreeMap::new(),
-            cast_accepted: BTreeMap::new(),
             candidate_accepted: BTreeMap::new(),
+            cast_restated: BTreeSet::new(),
             admitted: BTreeSet::new(),
             crossed: BTreeMap::new(),
             return_settling: BTreeSet::new(),
@@ -867,8 +879,8 @@ impl<'a> Sequence<'a> {
             pending: std::collections::VecDeque::new(),
             remedies: BTreeMap::new(),
             derived: BTreeMap::new(),
-            cast_accepted: BTreeMap::new(),
             candidate_accepted: BTreeMap::new(),
+            cast_restated: BTreeSet::new(),
             admitted: view.projection().admitted_dispatches(),
             crossed: BTreeMap::new(),
             return_settling: BTreeSet::new(),
@@ -1062,57 +1074,14 @@ impl<'a> Sequence<'a> {
                 cast,
                 resolved,
                 raw_digest,
-            } => {
-                let contract = self.dispatch_contract(trajectory, dispatch)?;
-                self.settling(trajectory, dispatch)?;
-                self.observed_as(trajectory, dispatch, raw_digest)?;
-                let raw = self.output_label(trajectory, dispatch, contract);
-                crate::admit::validate_pending_cast(self.registry, contract, &raw, cast, resolved)
-                    .map_err(|_| TransitionRefusal::InadmissibleResolution)?;
-                self.derived
-                    .insert(dispatch.clone(), Derived::Cast(resolved.clone(), *raw_digest));
-            }
-            Fact::OutputCastLapsed {
-                trajectory,
-                dispatch,
-                cast,
-                resolved,
-                raw_digest,
-            } => {
-                let contract = self.dispatch_contract(trajectory, dispatch)?;
-                self.settling(trajectory, dispatch)?;
-                self.observed_as(trajectory, dispatch, raw_digest)?;
-                let raw = self.output_label(trajectory, dispatch, contract);
-                crate::admit::validate_pending_cast(self.registry, contract, &raw, cast, resolved)
-                    .map_err(|_| TransitionRefusal::InadmissibleResolution)?;
-            }
-            Fact::OutputCastAccepted {
-                trajectory,
-                dispatch,
-                narrowing,
-            } => {
-                self.dispatch_contract(trajectory, dispatch)?;
-                let Some(Derived::Cast(resolved, _)) = self.derived.get(dispatch) else {
-                    return Err(TransitionRefusal::AcceptanceMismatch);
-                };
-                if self.cast_accepted.contains_key(dispatch) {
-                    return Err(TransitionRefusal::AcceptanceMismatch);
-                }
-                if crate::admit::pending_cast_narrowing(&self.projection.view(trajectory), resolved).as_ref()
-                    != Some(narrowing)
-                {
-                    return Err(TransitionRefusal::AcceptanceMismatch);
-                }
-                self.cast_accepted.insert(dispatch.clone(), narrowing.clone());
-            }
+            } => self.output_cast_applied(trajectory, dispatch, cast, resolved, raw_digest)?,
             Fact::CandidateDerived {
                 trajectory,
                 subject,
-                sanitizer,
-                transition,
+                via,
                 derived,
                 lineage,
-            } => self.candidate_derived(trajectory, subject, sanitizer, transition, derived, lineage)?,
+            } => self.candidate_derived(trajectory, subject, via, derived, lineage)?,
             Fact::CandidateAccepted {
                 trajectory,
                 subject,
@@ -1677,6 +1646,14 @@ impl<'a> Sequence<'a> {
     }
 
     fn closing_act(&self, dispatch: &DispatchId) -> Result<(), TransitionRefusal> {
+        let subject = crate::basis::SubjectKey::ConfinedResult(dispatch.clone());
+        if matches!(
+            self.projection.view(dispatch.trajectory()).candidate(&subject),
+            Some(DerivedCandidate::Result { residual: Some(_), .. })
+        ) && !self.candidate_accepted.contains_key(dispatch)
+        {
+            return Err(TransitionRefusal::StagedClose);
+        }
         if let Some(open) = &self.declared
             && let crate::basis::DecidedAct::Offer(offer) = &open.act
             && confines(self, offer, dispatch)
@@ -1823,7 +1800,7 @@ impl<'a> Sequence<'a> {
         if !self.remedies.is_empty() {
             return Err(TransitionRefusal::DanglingRemedy);
         }
-        if !self.derived.is_empty() || !self.cast_accepted.is_empty() || !self.candidate_accepted.is_empty() {
+        if !self.derived.is_empty() || !self.candidate_accepted.is_empty() || !self.cast_restated.is_empty() {
             return Err(TransitionRefusal::UnadmittedDerivation);
         }
         if self.crossed.values().any(|crossing| crossing != &Crossing::Merged) {
@@ -2178,13 +2155,15 @@ impl<'a> Sequence<'a> {
                 if !self.admitted.insert(dispatch.clone()) {
                     return Err(TransitionRefusal::RepeatAdmission);
                 }
-                let accepted = self.cast_accepted.remove(dispatch);
                 let expected = match self.derived.remove(dispatch) {
                     Some(Derived::Cast(resolved, raw_digest)) => {
                         if RawResultDigest::of(value.body.as_str().as_bytes()) != raw_digest {
                             return Err(TransitionRefusal::ForgedLabel);
                         }
-                        if crate::admit::pending_cast_narrowing(&views, &resolved) != accepted {
+                        let receiving = views
+                            .receiving_bound(dispatch)
+                            .ok_or(TransitionRefusal::UnknownDispatch)?;
+                        if crate::admit::confined_residual(receiving, &resolved.clone().into_label()).is_some() {
                             return Err(TransitionRefusal::AcceptanceMismatch);
                         }
                         resolved.into_label()
@@ -2206,6 +2185,12 @@ impl<'a> Sequence<'a> {
                             }
                             if self.candidate_accepted.remove(dispatch).as_ref() != residual.as_ref() {
                                 return Err(TransitionRefusal::AcceptanceMismatch);
+                            }
+                            let subject = crate::basis::SubjectKey::ConfinedResult(dispatch.clone());
+                            if matches!(views.candidate_via(&subject), Some(DerivedVia::Cast { .. }))
+                                && !self.cast_restated.remove(dispatch)
+                            {
+                                return Err(TransitionRefusal::ForgedLabel);
                             }
                             candidate.label.clone()
                         }
@@ -2610,12 +2595,47 @@ impl<'a> Sequence<'a> {
         Ok(())
     }
 
+    fn output_cast_applied(
+        &mut self,
+        trajectory: &TrajectoryId,
+        dispatch: &DispatchId,
+        cast: &crate::names::CastName,
+        resolved: &crate::label::EstablishedLabel,
+        raw_digest: &RawResultDigest,
+    ) -> Result<(), TransitionRefusal> {
+        let contract = self.dispatch_contract(trajectory, dispatch)?;
+        self.settling(trajectory, dispatch)?;
+        self.observed_as(trajectory, dispatch, raw_digest)?;
+        let views = self.projection.view(trajectory);
+        let subject = crate::basis::SubjectKey::ConfinedResult(dispatch.clone());
+        if let Some(DerivedVia::Cast { name }) = views.candidate_via(&subject) {
+            let Some(DerivedCandidate::Result { source, value, .. }) = views.candidate(&subject) else {
+                unreachable!("a subject with a recorded provenance holds its candidate")
+            };
+            let restated = crate::label::EstablishedLabel::from_label(&value.label)
+                .is_some_and(|label| &label == resolved && name == cast && source == raw_digest);
+            if !restated {
+                return Err(TransitionRefusal::InadmissibleResolution);
+            }
+            if !self.cast_restated.insert(dispatch.clone()) {
+                return Err(TransitionRefusal::RepeatAdmission);
+            }
+            return Ok(());
+        }
+        let raw = self.output_label(trajectory, dispatch, contract);
+        crate::admit::validate_pending_cast(self.registry, contract, &raw, cast, resolved)
+            .map_err(|_| TransitionRefusal::InadmissibleResolution)?;
+        self.derived
+            .insert(dispatch.clone(), Derived::Cast(resolved.clone(), *raw_digest));
+        Ok(())
+    }
+
     fn settling(&self, trajectory: &TrajectoryId, dispatch: &DispatchId) -> Result<(), TransitionRefusal> {
         let views = self.projection.view(trajectory);
         if !views.closed_successfully(dispatch) {
             return Err(TransitionRefusal::DispatchNotOpen);
         }
-        if views.has_lapsed(dispatch) || self.admitted.contains(dispatch) || self.derived.contains_key(dispatch) {
+        if self.admitted.contains(dispatch) || self.derived.contains_key(dispatch) {
             return Err(TransitionRefusal::RepeatAdmission);
         }
         Ok(())
@@ -2667,11 +2687,14 @@ impl<'a> Sequence<'a> {
         &mut self,
         trajectory: &TrajectoryId,
         subject: &crate::basis::SubjectKey,
-        sanitizer: &SanitizerName,
-        transition: &crate::authority::Transition,
+        via: &DerivedVia,
         derived: &DerivedCandidate,
         lineage: &SanitizerLineage,
     ) -> Result<(), TransitionRefusal> {
+        let (sanitizer, transition) = match via {
+            DerivedVia::Sanitizer { name, transition } => (name, transition),
+            DerivedVia::Cast { name } => return self.cast_candidate(trajectory, subject, name, derived, lineage),
+        };
         let registered = self
             .registry
             .sanitizer(sanitizer)
@@ -2776,6 +2799,57 @@ impl<'a> Sequence<'a> {
             self.derived.insert(dispatch.clone(), Derived::Sanitized(value.clone()));
         }
         Ok(())
+    }
+
+    fn cast_candidate(
+        &mut self,
+        trajectory: &TrajectoryId,
+        subject: &crate::basis::SubjectKey,
+        cast: &crate::names::CastName,
+        derived: &DerivedCandidate,
+        lineage: &SanitizerLineage,
+    ) -> Result<(), TransitionRefusal> {
+        let DerivedCandidate::Result {
+            dispatch,
+            source,
+            from,
+            value,
+            residual,
+        } = derived
+        else {
+            return Err(TransitionRefusal::ForgedLabel);
+        };
+        if subject != &crate::basis::SubjectKey::ConfinedResult(dispatch.clone()) {
+            return Err(TransitionRefusal::ForgedLabel);
+        }
+        // A resolution is no hop: nothing precedes it, and no sanitizer is spent beside it.
+        if from != &ConfinedFrom::Bound || !lineage.names().is_empty() {
+            return Err(TransitionRefusal::ForgedLabel);
+        }
+        let contract = self.dispatch_contract(trajectory, dispatch)?;
+        let views = self.projection.view(trajectory);
+        if views.candidate(subject).is_some() {
+            return Err(TransitionRefusal::InadmissibleResolution);
+        }
+        self.deriving(trajectory, dispatch, false)?;
+        self.observed_as(trajectory, dispatch, source)?;
+        if source != &RawResultDigest::of(value.body.as_str().as_bytes()) {
+            return Err(TransitionRefusal::ObservationMismatch);
+        }
+        let Some(resolved) = crate::label::EstablishedLabel::from_label(&value.label) else {
+            return Err(TransitionRefusal::ForgedLabel);
+        };
+        let raw = self.output_label(trajectory, dispatch, contract);
+        crate::admit::validate_pending_cast(self.registry, contract, &raw, cast, &resolved)
+            .map_err(|_| TransitionRefusal::InadmissibleResolution)?;
+        let views = self.projection.view(trajectory);
+        let receiving = views
+            .receiving_bound(dispatch)
+            .ok_or(TransitionRefusal::UnknownDispatch)?;
+        match crate::admit::confined_residual(receiving, &value.label) {
+            derived_residual @ Some(_) if residual == &derived_residual => Ok(()),
+            _ => Err(TransitionRefusal::AcceptanceMismatch),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2964,7 +3038,7 @@ impl<'a> Sequence<'a> {
         settles: bool,
     ) -> Result<(), TransitionRefusal> {
         let views = self.projection.view(trajectory);
-        if views.has_lapsed(dispatch) || self.admitted.contains(dispatch) || self.derived.contains_key(dispatch) {
+        if self.admitted.contains(dispatch) || self.derived.contains_key(dispatch) {
             return Err(TransitionRefusal::RepeatAdmission);
         }
         let confined = views.is_open(dispatch) && views.is_succeeded(dispatch);
@@ -3103,9 +3177,7 @@ fn belongs_to(sequence: &Sequence<'_>, act: &crate::basis::DecidedAct, fact: &Fa
             DecidedAct::Outcome(act),
             Fact::DispatchSucceeded { dispatch, .. }
             | Fact::DispatchClosed { dispatch, .. }
-            | Fact::OutputCastApplied { dispatch, .. }
-            | Fact::OutputCastAccepted { dispatch, .. }
-            | Fact::OutputCastLapsed { dispatch, .. },
+            | Fact::OutputCastApplied { dispatch, .. },
         ) => dispatch == act,
         // A confined hop belongs to the act that reported the outcome it derives from.
         (
@@ -3187,6 +3259,7 @@ fn belongs_to(sequence: &Sequence<'_>, act: &crate::basis::DecidedAct, fact: &Fa
         (
             DecidedAct::Offer(act),
             Fact::DispatchClosed { dispatch, .. }
+            | Fact::OutputCastApplied { dispatch, .. }
             | Fact::ValueAdmitted {
                 provenance: crate::value::Provenance::ToolResult { dispatch },
                 ..

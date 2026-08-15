@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::authority::Transition;
 use crate::basis::SubjectKey;
-use crate::candidate::{DerivedCandidate, SanitizerLineage};
+use crate::candidate::{DerivedCandidate, DerivedVia, SanitizerLineage};
 use crate::check::{Gap, Narrowing};
 use crate::execute::AuthorityReview;
 use crate::label::{EstablishedLabel, Label, PartialLabel};
@@ -300,18 +300,6 @@ pub enum Fact {
         resolved: EstablishedLabel,
         raw_digest: RawResultDigest,
     },
-    OutputCastAccepted {
-        trajectory: TrajectoryId,
-        dispatch: DispatchId,
-        narrowing: Narrowing,
-    },
-    OutputCastLapsed {
-        trajectory: TrajectoryId,
-        dispatch: DispatchId,
-        cast: CastName,
-        resolved: EstablishedLabel,
-        raw_digest: RawResultDigest,
-    },
     OutputSanitizerBound {
         trajectory: TrajectoryId,
         dispatch: DispatchId,
@@ -322,8 +310,7 @@ pub enum Fact {
     CandidateDerived {
         trajectory: TrajectoryId,
         subject: SubjectKey,
-        sanitizer: SanitizerName,
-        transition: Transition,
+        via: DerivedVia,
         derived: DerivedCandidate,
         lineage: SanitizerLineage,
     },
@@ -467,8 +454,6 @@ impl Fact {
             | Fact::ChildReturnAcceptance { trajectory, .. }
             | Fact::CastApplied { trajectory, .. }
             | Fact::OutputCastApplied { trajectory, .. }
-            | Fact::OutputCastAccepted { trajectory, .. }
-            | Fact::OutputCastLapsed { trajectory, .. }
             | Fact::OutputSanitizerBound { trajectory, .. }
             | Fact::CandidateDerived { trajectory, .. }
             | Fact::CandidateAccepted { trajectory, .. }

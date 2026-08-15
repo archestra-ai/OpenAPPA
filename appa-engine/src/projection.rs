@@ -97,8 +97,11 @@ pub(crate) struct RecordedOffer {
     pub(crate) end: Option<OfferEnd>,
 }
 
+/// The live derived candidate of one subject, with the transformer that claimed it and the chain
+/// that produced it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RecordedCandidate {
+    pub(crate) via: crate::candidate::DerivedVia,
     pub(crate) derived: DerivedCandidate,
     pub(crate) lineage: SanitizerLineage,
 }
@@ -173,7 +176,6 @@ pub struct Projection {
     effects: Vec<EffectKind>,
     open: BTreeSet<DispatchId>,
     reservations: BTreeMap<DispatchId, EffectSet>,
-    lapsed: BTreeSet<DispatchId>,
     closed: BTreeMap<DispatchId, CloseKind>,
     occurrences: BTreeMap<(TrajectoryId, CanonicalDigest), u32>,
     dispatch_calls: BTreeMap<DispatchId, ResolvedCall>,
@@ -222,7 +224,6 @@ impl Projection {
             effects: Vec::new(),
             open: BTreeSet::new(),
             reservations: BTreeMap::new(),
-            lapsed: BTreeSet::new(),
             closed: BTreeMap::new(),
             occurrences: BTreeMap::new(),
             dispatch_calls: BTreeMap::new(),
@@ -308,7 +309,6 @@ impl Projection {
             effects,
             open,
             reservations,
-            lapsed,
             closed,
             occurrences,
             dispatch_calls,
@@ -527,10 +527,7 @@ impl Projection {
                         .insert(authority.clone());
                 }
                 Fact::AssistantMessage { .. } | Fact::BlockFeedback { .. } => {}
-                Fact::OutputCastApplied { .. } | Fact::OutputCastAccepted { .. } => {}
-                Fact::OutputCastLapsed { dispatch, .. } => {
-                    lapsed.insert(dispatch.clone());
-                }
+                Fact::OutputCastApplied { .. } => {}
                 Fact::OutputSanitizerBound {
                     dispatch, sanitizer, ..
                 } => {
@@ -538,13 +535,14 @@ impl Projection {
                 }
                 Fact::CandidateDerived {
                     subject,
+                    via,
                     derived,
                     lineage,
-                    transition,
                     ..
                 } => {
                     if let crate::basis::SubjectKey::Return(id) = subject
                         && let Some(submitted) = submitted_returns.get_mut(id)
+                        && let crate::candidate::DerivedVia::Sanitizer { transition, .. } = via
                     {
                         let consumed = transition.dimension();
                         submitted.derivation_unresolved.retain(|(_, dim)| *dim != consumed);
@@ -555,6 +553,7 @@ impl Projection {
                     candidates.insert(
                         subject.clone(),
                         RecordedCandidate {
+                            via: via.clone(),
                             derived: derived.clone(),
                             lineage: lineage.clone(),
                         },
@@ -1182,10 +1181,6 @@ impl Views<'_> {
         self.projection.open.contains(dispatch)
     }
 
-    pub(crate) fn has_lapsed(&self, dispatch: &DispatchId) -> bool {
-        self.projection.lapsed.contains(dispatch)
-    }
-
     pub(crate) fn closed_successfully(&self, dispatch: &DispatchId) -> bool {
         matches!(self.projection.closed.get(dispatch), Some(CloseKind::Success))
     }
@@ -1220,6 +1215,12 @@ impl Views<'_> {
     /// stage plans from it, and a successor replaces it.
     pub(crate) fn candidate(&self, subject: &SubjectKey) -> Option<&DerivedCandidate> {
         self.projection.candidates.get(subject).map(|held| &held.derived)
+    }
+
+    /// The transformer this subject's live candidate claims: the sanitizer hop that
+    /// derived it, or the cast whose resolution it stages. The crossing paths branch on it.
+    pub(crate) fn candidate_via(&self, subject: &SubjectKey) -> Option<&crate::candidate::DerivedVia> {
+        self.projection.candidates.get(subject).map(|held| &held.via)
     }
 
     /// Where this call subject's candidate stands: the label its substituted bytes
@@ -1632,10 +1633,12 @@ mod tests {
             Fact::CandidateDerived {
                 trajectory: traj("root"),
                 subject: crate::basis::SubjectKey::Return(id.clone()),
-                sanitizer: crate::names::SanitizerName::new("redactor"),
-                transition: crate::authority::Transition::Trust {
-                    from_floor: Trust::new(0),
-                    to: Trust::new(2),
+                via: crate::candidate::DerivedVia::Sanitizer {
+                    name: crate::names::SanitizerName::new("redactor"),
+                    transition: crate::authority::Transition::Trust {
+                        from_floor: Trust::new(0),
+                        to: Trust::new(2),
+                    },
                 },
                 derived: crate::candidate::DerivedCandidate::Return {
                     source: RawResultDigest::of(body.as_str().as_bytes()),
@@ -1729,10 +1732,12 @@ mod tests {
             Fact::CandidateDerived {
                 trajectory: traj("root"),
                 subject: crate::basis::SubjectKey::Return(id.clone()),
-                sanitizer: crate::names::SanitizerName::new("redactor"),
-                transition: crate::authority::Transition::Audience {
-                    from_includes: Audience::Public,
-                    to: Audience::Public,
+                via: crate::candidate::DerivedVia::Sanitizer {
+                    name: crate::names::SanitizerName::new("redactor"),
+                    transition: crate::authority::Transition::Audience {
+                        from_includes: Audience::Public,
+                        to: Audience::Public,
+                    },
                 },
                 derived: crate::candidate::DerivedCandidate::Return {
                     source,
@@ -1751,10 +1756,12 @@ mod tests {
             Fact::CandidateDerived {
                 trajectory: traj("root"),
                 subject: crate::basis::SubjectKey::Return(id.clone()),
-                sanitizer: crate::names::SanitizerName::new("lifter"),
-                transition: crate::authority::Transition::Trust {
-                    from_floor: Trust::new(0),
-                    to: Trust::new(2),
+                via: crate::candidate::DerivedVia::Sanitizer {
+                    name: crate::names::SanitizerName::new("lifter"),
+                    transition: crate::authority::Transition::Trust {
+                        from_floor: Trust::new(0),
+                        to: Trust::new(2),
+                    },
                 },
                 derived: crate::candidate::DerivedCandidate::Return {
                     source,

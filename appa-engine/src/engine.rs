@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::admit::{self, AdmitError, CastAnswer, CastError, ResultAdmission};
 use crate::branch::{self, BranchError, ReturnSubmission};
-use crate::candidate::{CallStage, ConfinedFrom, DerivedCandidate, SanitizerLineage};
+use crate::candidate::{CallStage, ConfinedFrom, DerivedCandidate, DerivedVia, SanitizerLineage};
 use crate::check::{self, CheckOutcome, Narrowing, RawBlock};
 use crate::contract::ToolContract;
 use crate::execute::{self, PlanError, Ruling};
@@ -646,8 +646,10 @@ impl Engine {
         facts.push(Fact::CandidateDerived {
             trajectory: views.trajectory().clone(),
             subject: crate::basis::SubjectKey::Return(id.clone()),
-            sanitizer: name.clone(),
-            transition: registered.transition.clone(),
+            via: DerivedVia::Sanitizer {
+                name: name.clone(),
+                transition: registered.transition.clone(),
+            },
             derived: DerivedCandidate::Return {
                 source: digest,
                 from: ConfinedFrom::Bound,
@@ -1092,15 +1094,24 @@ impl Engine {
             ToolOutcome::Success {
                 body: OutcomeBody::Available(raw),
             } => {
-                let raw_digest = RawResultDigest::of(raw.as_str().as_bytes());
+                let Some(ObservedResult::Available(raw_digest)) = observed else {
+                    unreachable!("an available success observed its body digest above")
+                };
                 match views.bound_sanitizer(dispatch) {
                     None => {
-                        if self
-                            .registry
-                            .tool(call.tool())
-                            .is_some_and(|contract| contract.pending_cast_dim().is_some())
-                        {
-                            return Err(TransitionError::ConfinedResult);
+                        let contract = self.validated_contract(&call)?;
+                        if contract.pending_cast_dim().is_some() {
+                            return self.resolving_cast(
+                                view,
+                                &views,
+                                dispatch,
+                                &call,
+                                contract,
+                                raw,
+                                raw_digest,
+                                report,
+                                checkpointed.is_some(),
+                            );
                         }
                         ResultAdmission::SuccessRaw { body: raw.clone() }
                     }
@@ -1112,7 +1123,7 @@ impl Engine {
                                 source,
                                 derived,
                             } if named == &sanitizer && source == &raw_digest => Some(derived.clone()),
-                            Evidence::Sanitizer { .. } | Evidence::Cast { .. } => None,
+                            Evidence::Sanitizer { .. } | Evidence::Cast { .. } | Evidence::PendingCast { .. } => None,
                         });
                         let Some(derived) = derived else {
                             let append = match checkpointed {
@@ -1178,8 +1189,10 @@ impl Engine {
                             Fact::CandidateDerived {
                                 trajectory: views.trajectory().clone(),
                                 subject: crate::basis::SubjectKey::ConfinedResult(dispatch.clone()),
-                                sanitizer,
-                                transition,
+                                via: DerivedVia::Sanitizer {
+                                    name: sanitizer,
+                                    transition,
+                                },
                                 derived: candidate,
                                 lineage,
                             },
@@ -1189,6 +1202,87 @@ impl Engine {
             }
         };
         self.admitting_outcome(view, &views, dispatch, &call, admission)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolving_cast(
+        &self,
+        view: &EngineView,
+        views: &Views,
+        dispatch: &DispatchId,
+        call: &ResolvedCall,
+        contract: &crate::contract::ToolContract,
+        raw: &ValueBody,
+        raw_digest: RawResultDigest,
+        report: &ToolReport,
+        checkpointed: bool,
+    ) -> Result<EngineDecision, TransitionError> {
+        let resolution = report.evidence.iter().find_map(|evidence| match evidence {
+            Evidence::PendingCast { cast, source, resolved } if source == &raw_digest => {
+                Some((cast.clone(), resolved.clone()))
+            }
+            _ => None,
+        });
+        let Some((cast, resolved)) = resolution else {
+            let append = match checkpointed {
+                true => None,
+                false => {
+                    let checkpoint = self
+                        .observe_success(views, dispatch, call, ObservedResult::Available(raw_digest))
+                        .expect("an open, unreported dispatch checkpoints its observed success");
+                    let advance = advance_of(self, view, &checkpoint);
+                    let batch =
+                        self.declaring(crate::basis::DecidedAct::Outcome(dispatch.clone()), advance, checkpoint);
+                    Some(self.seal(view, batch)?)
+                }
+            };
+            let casts = self
+                .registry
+                .casts()
+                .iter()
+                .filter(|registered| registered.scope.covers(&contract.tags))
+                .map(|registered| registered.name.clone())
+                .collect();
+            return Ok(EngineDecision {
+                append,
+                follow_up: FollowUp::Outcome(OutcomeFollowUp::Resolve(EvidenceRequest::PendingCast {
+                    casts,
+                    source: raw_digest,
+                    body: raw.clone(),
+                })),
+            });
+        };
+        let candidate =
+            crate::admit::cast_candidate(&self.registry, views, dispatch, contract, &cast, raw.clone(), &resolved)
+                .map_err(|_| TransitionError::InadmissibleResolution)?;
+        let DerivedCandidate::Result { residual: Some(_), .. } = &candidate else {
+            return self.admitting_outcome(
+                view,
+                views,
+                dispatch,
+                call,
+                ResultAdmission::SuccessCast {
+                    body: raw.clone(),
+                    cast,
+                    resolved,
+                },
+            );
+        };
+        self.stage_candidate(
+            view,
+            views,
+            dispatch,
+            call,
+            checkpointed,
+            report.offer_nonce,
+            Fact::CandidateDerived {
+                trajectory: views.trajectory().clone(),
+                subject: crate::basis::SubjectKey::ConfinedResult(dispatch.clone()),
+                via: crate::candidate::DerivedVia::Cast { name: cast },
+                derived: candidate,
+                lineage: SanitizerLineage::default(),
+            },
+        )
     }
 
     fn admitting_outcome(
@@ -1205,7 +1299,6 @@ impl Engine {
                 AdmitError::SanitizerTransitionUnmet | AdmitError::SanitizerBindingMismatch => {
                     TransitionError::SanitizerUnapplicable
                 }
-                AdmitError::OutputPendingCast => TransitionError::ConfinedResult,
                 other => unreachable!("the outcome path admits what the log already proved: {other}"),
             })?;
         let admitted = batch.facts.iter().find_map(|fact| match fact {
@@ -1943,8 +2036,10 @@ impl Engine {
         facts.push(Fact::CandidateDerived {
             trajectory: views.trajectory().clone(),
             subject: crate::basis::SubjectKey::ConfinedResult(dispatch.clone()),
-            sanitizer: sanitizer.clone(),
-            transition: registered.transition.clone(),
+            via: crate::candidate::DerivedVia::Sanitizer {
+                name: sanitizer.clone(),
+                transition: registered.transition.clone(),
+            },
             derived: DerivedCandidate::Result {
                 dispatch: dispatch.clone(),
                 source: source_digest,
@@ -2220,8 +2315,10 @@ impl Engine {
         facts.push(Fact::CandidateDerived {
             trajectory: views.trajectory().clone(),
             subject: crate::basis::SubjectKey::Return(id.clone()),
-            sanitizer: sanitizer.clone(),
-            transition: registered.transition.clone(),
+            via: DerivedVia::Sanitizer {
+                name: sanitizer.clone(),
+                transition: registered.transition.clone(),
+            },
             derived: DerivedCandidate::Return {
                 source: source_digest,
                 from: ConfinedFrom::Offer(execution.offer),
@@ -2368,8 +2465,10 @@ impl Engine {
         facts.push(Fact::CandidateDerived {
             trajectory: trajectory.clone(),
             subject: recorded.subject.clone(),
-            sanitizer: sanitizer.clone(),
-            transition: registered.transition.clone(),
+            via: DerivedVia::Sanitizer {
+                name: sanitizer.clone(),
+                transition: registered.transition.clone(),
+            },
             derived,
             lineage,
         });
@@ -2946,21 +3045,6 @@ impl Engine {
         observed: crate::fact::ObservedResult,
     ) -> Result<FactBatch, AdmitError> {
         admit::observe_success(&self.registry, views, dispatch, call, observed)
-    }
-
-    /// The narrowing admitting a cast-resolved value of `call` would fold into the live
-    /// established bound, or `None` when it does not move it — the whole resolved label,
-    /// established dimensions included (see `admit::pending_cast_narrowing`). The runtime derives
-    /// the acceptance offer from this; admission re-derives it under the family lock, so a stale
-    /// offer refuses by value (D2).
-    pub fn cast_narrowing(
-        &self,
-        views: &Views,
-        call: &ResolvedCall,
-        resolved: &EstablishedLabel,
-    ) -> Result<Option<Narrowing>, EngineError> {
-        self.validated_contract(call)?;
-        Ok(admit::pending_cast_narrowing(views, resolved))
     }
 
     /// Attach the sound remedies to a raw block: executable plans and prose recommendations. An empty
@@ -7812,82 +7896,642 @@ mod tests {
         );
     }
 
-    #[test]
-    fn every_composed_cast_admission_replays() {
-        let scan = ToolContract {
-            name: ToolName::new("scan_inbox"),
-            tags: vec![],
+    fn pending_cast_tool(name: &str, tag: &str) -> ToolContract {
+        ToolContract {
+            name: ToolName::new(name),
+            tags: vec![crate::names::TagName::new(tag)],
             delta: Some(Delta {
                 trust: Some(Dim::Unknown),
                 audience: None,
             }),
             parameters: crate::params::ToolParameters::open(),
-            emits: EffectSet::default(),
+            emits: EffectSet::new([EffectKind::new(format!("{tag}.read").as_str())]).unwrap(),
             requires: Requires::default(),
-        };
-        let paranoid = crate::authority::Cast {
-            name: crate::names::CastName::new("paranoid"),
+        }
+    }
+
+    fn resolver_cast(name: &str, trust: Vec<Trust>, tags: Vec<crate::names::TagName>) -> crate::authority::Cast {
+        crate::authority::Cast {
+            name: crate::names::CastName::new(name),
             resolution: crate::authority::CastResolution::Resolver {
                 may_cast: crate::authority::CastCeiling {
-                    trust: vec![SUSPICIOUS, TRUSTED],
+                    trust,
                     audience: Audience::Public,
                 },
             },
-            scope: crate::authority::Scope { tags: vec![] },
-        };
-        let e = open_engine(RegistryConfig {
+            scope: crate::authority::Scope { tags },
+        }
+    }
+
+    fn cast_engine() -> Engine {
+        open_engine(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![scan],
+            tools: vec![
+                pending_cast_tool("scan_inbox", "mail"),
+                pending_cast_tool("browse", "web"),
+                open_tool("ping"),
+            ],
+            authorities: vec![],
+            sanitizers: vec![crate::authority::Sanitizer {
+                name: crate::names::SanitizerName::new("launder"),
+                on: crate::authority::SanitizerPoints {
+                    input: false,
+                    output: true,
+                },
+                transition: crate::authority::Transition::Trust {
+                    from_floor: SUSPICIOUS,
+                    to: TRUSTED,
+                },
+                scope: crate::authority::Scope::default(),
+                hint: None,
+            }],
+            casts: vec![
+                resolver_cast("paranoid", vec![SUSPICIOUS, TRUSTED], vec![]),
+                resolver_cast("stingy", vec![TRUSTED], vec![]),
+                resolver_cast(
+                    "elsewhere",
+                    vec![SUSPICIOUS, TRUSTED],
+                    vec![crate::names::TagName::new("web")],
+                ),
+            ],
+        })
+    }
+
+    fn cast_report(
+        dispatch: &crate::value::DispatchId,
+        raw: &ValueBody,
+        evidence: Vec<crate::transition::Evidence>,
+    ) -> ToolReport {
+        ToolReport {
+            dispatch: dispatch.clone(),
+            outcome: ToolOutcome::Success {
+                body: OutcomeBody::Available(raw.clone()),
+            },
+            evidence,
+            offer_nonce: nonce(),
+        }
+    }
+
+    fn replayed(e: &Engine, log: &[Fact]) -> EngineView {
+        e.view(&traj(), log.to_vec(), Revision::new(log.len() as u64))
+            .expect("the log replays")
+    }
+
+    fn resolving_dispatch(
+        e: &Engine,
+    ) -> (
+        Vec<Fact>,
+        crate::value::DispatchId,
+        ValueBody,
+        crate::value::RawResultDigest,
+    ) {
+        let call = call("scan_inbox", json!({}));
+        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let released = proposed(e, &log, "b1", nonce(), call).expect("the open call releases");
+        let dispatch = match &released.follow_up {
+            FollowUp::Proposals { released, .. } => released[0].dispatch.clone(),
+            other => panic!("the proposal releases, got {other:?}"),
+        };
+        log = [log, appended_facts(released)].concat();
+        let raw = ValueBody::new("inbox bytes");
+        let source = crate::value::RawResultDigest::of(raw.as_str().as_bytes());
+        let asked = e
+            .handle(
+                &replayed(e, &log),
+                EngineEvent::Outcome(cast_report(&dispatch, &raw, Vec::new())),
+            )
+            .expect("the confined result asks for its resolution");
+        log = [log, appended_facts(asked)].concat();
+        (log, dispatch, raw, source)
+    }
+
+    #[test]
+    fn a_pending_cast_report_asks_for_the_applicable_casts_and_stays_repeatable() {
+        let e = cast_engine();
+        let call = call("scan_inbox", json!({}));
+        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let released = proposed(&e, &log, "b1", nonce(), call).expect("the open call releases");
+        let dispatch = match &released.follow_up {
+            FollowUp::Proposals { released, .. } => released[0].dispatch.clone(),
+            other => panic!("the proposal releases, got {other:?}"),
+        };
+        log = [log, appended_facts(released)].concat();
+        let raw = ValueBody::new("inbox bytes");
+        let source = crate::value::RawResultDigest::of(raw.as_str().as_bytes());
+        let asked = e
+            .handle(
+                &replayed(&e, &log),
+                EngineEvent::Outcome(cast_report(&dispatch, &raw, Vec::new())),
+            )
+            .expect("the confined result asks for its resolution");
+        assert_eq!(
+            asked.follow_up,
+            FollowUp::Outcome(OutcomeFollowUp::Resolve(
+                crate::transition::EvidenceRequest::PendingCast {
+                    casts: vec![
+                        crate::names::CastName::new("paranoid"),
+                        crate::names::CastName::new("stingy"),
+                    ],
+                    source,
+                    body: raw.clone(),
+                }
+            )),
+            "the ask names the casts whose scope covers the tool, in registration order"
+        );
+        let log = [log, appended_facts(asked.clone())].concat();
+        let view = replayed(&e, &log);
+        let trajectory = traj();
+        let views = view.projection().view(&trajectory);
+        assert!(
+            views.has_effect(&EffectKind::new("mail.read")),
+            "the effects commit at the checkpoint, before the external step"
+        );
+        assert!(
+            views.is_open(&dispatch),
+            "the dispatch stays open awaiting its resolution"
+        );
+        let again = e
+            .handle(&view, EngineEvent::Outcome(cast_report(&dispatch, &raw, Vec::new())))
+            .expect("the report stays repeatable");
+        assert_eq!(again.append, None);
+        assert_eq!(again.follow_up, asked.follow_up);
+
+        let alone = open_engine(RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: vec![
+                pending_cast_tool("scan_inbox", "mail"),
+                pending_cast_tool("browse", "web"),
+            ],
             authorities: vec![],
             sanitizers: vec![],
-            casts: vec![paranoid],
+            casts: vec![resolver_cast(
+                "elsewhere",
+                vec![SUSPICIOUS, TRUSTED],
+                vec![crate::names::TagName::new("web")],
+            )],
         });
-        let call = call("scan_inbox", json!({}));
-        let body = ValueBody::new("inbox");
-        let cast = crate::names::CastName::new("paranoid");
-
-        let mut open_log = vec![user_value(known(TRUSTED, Audience::Public))];
-        let dispatch = open(&e, &mut open_log, &call);
-        let admit = |admission: crate::admit::ResultAdmission| {
-            let projection = Projection::build(&open_log, Revision::new(open_log.len() as u64));
-            let batch = e
-                .admit_result(&projection.view(&traj()), &dispatch, &call, admission)
-                .expect("the admission is legal");
-            [open_log.clone(), batch.facts].concat()
-        };
-        assert_eq!(
-            e.validate_replay(&admit(crate::admit::ResultAdmission::SuccessCast {
-                body: body.clone(),
-                cast: cast.clone(),
-                resolved: EstablishedLabel::new(TRUSTED, Audience::Public),
-            })),
-            Ok(())
-        );
-        let narrowing = e
-            .cast_narrowing(
-                &Projection::build(&open_log, Revision::new(open_log.len() as u64)).view(&traj()),
-                &call,
-                &EstablishedLabel::new(SUSPICIOUS, Audience::Public),
+        let (log, dispatch, raw, _) = resolving_dispatch(&alone);
+        let again = alone
+            .handle(
+                &replayed(&alone, &log),
+                EngineEvent::Outcome(cast_report(&dispatch, &raw, Vec::new())),
             )
-            .expect("the contract is registered")
-            .expect("a lower trust narrows the trajectory");
+            .expect("the unresolvable result stays pending");
+        assert!(matches!(
+            again.follow_up,
+            FollowUp::Outcome(OutcomeFollowUp::Resolve(crate::transition::EvidenceRequest::PendingCast { casts, .. }))
+                if casts.is_empty()
+        ));
+    }
+
+    #[test]
+    fn a_non_narrowing_resolution_admits_directly_with_its_cast_record() {
+        let e = cast_engine();
+        let (log, dispatch, raw, source) = resolving_dispatch(&e);
+        let resolved = established(TRUSTED, Audience::Public);
+        let crossed = e
+            .handle(
+                &replayed(&e, &log),
+                EngineEvent::Outcome(cast_report(
+                    &dispatch,
+                    &raw,
+                    vec![crate::transition::Evidence::PendingCast {
+                        cast: crate::names::CastName::new("paranoid"),
+                        source,
+                        resolved: resolved.clone(),
+                    }],
+                )),
+            )
+            .expect("the non-narrowing resolution admits");
         assert_eq!(
-            e.validate_replay(&admit(crate::admit::ResultAdmission::SuccessCastAccepted {
-                body: body.clone(),
-                cast: cast.clone(),
-                resolved: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
-                accepted: narrowing,
-            })),
-            Ok(())
+            crossed.follow_up,
+            FollowUp::Outcome(OutcomeFollowUp::Closed {
+                admitted: Some(raw.clone())
+            })
+        );
+        let facts = crossed.append.expect("the admission appends").facts().to_vec();
+        assert!(
+            matches!(
+                facts.as_slice(),
+                [
+                    Fact::BasisAdvanced { .. },
+                    Fact::DispatchClosed {
+                        outcome: crate::fact::CloseOutcome::Success { effects },
+                        ..
+                    },
+                    Fact::OutputCastApplied {
+                        cast,
+                        resolved: restated,
+                        raw_digest,
+                        ..
+                    },
+                    Fact::ValueAdmitted { .. },
+                ] if effects.is_empty() && cast.as_str() == "paranoid" && restated == &resolved && raw_digest == &source
+            ),
+            "close (no duplicate effects), the cast record, and the admitted value share one batch: {facts:?}"
+        );
+        let whole = [log, facts].concat();
+        assert_eq!(e.validate_replay(&whole), Ok(()));
+        assert_eq!(
+            e.validate_replay(&whole[..whole.len() - 1]),
+            Err(crate::transition::TransitionRefusal::UnadmittedDerivation)
+        );
+    }
+
+    #[test]
+    fn a_narrowing_resolution_stages_an_acceptance_only_candidate() {
+        let e = cast_engine();
+        let (log, dispatch, raw, source) = resolving_dispatch(&e);
+        let resolved = established(SUSPICIOUS, Audience::Public);
+        let staged = e
+            .handle(
+                &replayed(&e, &log),
+                EngineEvent::Outcome(cast_report(
+                    &dispatch,
+                    &raw,
+                    vec![crate::transition::Evidence::PendingCast {
+                        cast: crate::names::CastName::new("paranoid"),
+                        source,
+                        resolved: resolved.clone(),
+                    }],
+                )),
+            )
+            .expect("the narrowing resolution stages");
+        let confined = confined_of(&staged.follow_up);
+        assert_eq!(confined.dispatch, dispatch);
+        assert_eq!(
+            confined.candidate.body, raw,
+            "the candidate is the raw itself, confined"
         );
         assert_eq!(
-            e.validate_replay(&admit(crate::admit::ResultAdmission::SuccessCastLapsed {
-                body,
-                cast,
-                resolved: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
-            })),
-            Ok(())
+            confined.residual,
+            crate::check::Narrowing {
+                from: established(TRUSTED, Audience::Public),
+                to: established(SUSPICIOUS, Audience::Public),
+            }
         );
+        let facts = appended_facts(staged.clone());
+        assert!(
+            !facts
+                .iter()
+                .any(|fact| matches!(fact, Fact::ValueAdmitted { .. } | Fact::DispatchClosed { .. })),
+            "a staged candidate admits nothing and closes nothing: {facts:?}"
+        );
+        assert!(facts.iter().any(|fact| matches!(
+            fact,
+            Fact::CandidateDerived {
+                via: DerivedVia::Cast { name },
+                ..
+            } if name.as_str() == "paranoid"
+        )));
+        let stage: Vec<_> = opened_offers(&facts).into_iter().map(|(_, plan)| plan).collect();
+        assert_eq!(
+            stage.iter().filter_map(plan::ExecutableRemedyPlan::hop).count(),
+            0,
+            "no sanitizer hop is offered on a pending-cast stage, applicable or not"
+        );
+        assert_eq!(
+            stage
+                .iter()
+                .filter_map(plan::ExecutableRemedyPlan::narrowing)
+                .collect::<Vec<_>>(),
+            vec![&confined.residual],
+            "acceptance of exactly the pinned residual"
+        );
+        assert_eq!(stage.len(), 1, "the stage is the acceptance alone");
+        let log = [log, facts].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+
+        let again = e
+            .handle(
+                &replayed(&e, &log),
+                EngineEvent::Outcome(cast_report(
+                    &dispatch,
+                    &raw,
+                    vec![crate::transition::Evidence::PendingCast {
+                        cast: crate::names::CastName::new("paranoid"),
+                        source,
+                        resolved: established(TRUSTED, Audience::Public),
+                    }],
+                )),
+            )
+            .expect("the repeat hears the stage");
+        assert_eq!(again.append, None);
+        assert_eq!(confined_of(&again.follow_up), confined);
+    }
+
+    #[test]
+    fn an_accepted_cast_candidate_crosses_atomically_and_survives_replay() {
+        let e = cast_engine();
+        let (log, dispatch, raw, source) = resolving_dispatch(&e);
+        let resolved = established(SUSPICIOUS, Audience::Public);
+        let staged = e
+            .handle(
+                &replayed(&e, &log),
+                EngineEvent::Outcome(cast_report(
+                    &dispatch,
+                    &raw,
+                    vec![crate::transition::Evidence::PendingCast {
+                        cast: crate::names::CastName::new("paranoid"),
+                        source,
+                        resolved: resolved.clone(),
+                    }],
+                )),
+            )
+            .expect("the narrowing resolution stages");
+        let confined = confined_of(&staged.follow_up).clone();
+        let log = [log, appended_facts(staged)].concat();
+        let accept = confined.offers[0].0;
+        let accepted =
+            execute_offer(&e, &log, accept, OfferOutcome::Approved(Vec::new())).expect("the acceptance runs");
+        assert_eq!(offer_answer(&accepted), &OfferFollowUp::Admitted { value: raw.clone() });
+        let facts = appended_facts(accepted);
+        assert!(
+            matches!(
+                facts.as_slice(),
+                [
+                    Fact::BasisAdvanced { .. },
+                    Fact::OfferAccepted { .. },
+                    Fact::CandidateAccepted { narrowing, .. },
+                    Fact::DispatchClosed {
+                        outcome: crate::fact::CloseOutcome::Success { effects },
+                        ..
+                    },
+                    Fact::OutputCastApplied {
+                        cast,
+                        resolved: restated,
+                        raw_digest,
+                        ..
+                    },
+                    Fact::ValueAdmitted { .. },
+                ] if narrowing == &confined.residual
+                    && effects.is_empty()
+                    && cast.as_str() == "paranoid"
+                    && restated == &resolved
+                    && raw_digest == &source
+            ),
+            "one atomic commit: acceptance, close, cast record, admitted value: {facts:?}"
+        );
+        let whole = [log, facts].concat();
+        let after = replayed(&e, &whole);
+        assert_eq!(
+            after.projection().view(&traj()).current_label().bound(),
+            &established(SUSPICIOUS, Audience::Public),
+            "the accepted narrowing is the admission's whole fold move"
+        );
+        assert!(
+            after
+                .projection()
+                .view(&traj())
+                .candidate(&crate::basis::SubjectKey::ConfinedResult(dispatch.clone()))
+                .is_none(),
+            "the crossing ends the stage"
+        );
+        assert_eq!(
+            e.validate_replay(&whole[..whole.len() - 1]),
+            Err(crate::transition::TransitionRefusal::UnadmittedDerivation)
+        );
+        assert_eq!(
+            offer_answer(
+                &execute_offer(&e, &whole, accept, OfferOutcome::Approved(Vec::new())).expect("the repeat answers")
+            ),
+            &OfferFollowUp::Admitted { value: raw }
+        );
+    }
+
+    #[test]
+    fn a_cast_stage_goes_stale_with_its_basis_and_the_durable_candidate_is_planned_again() {
+        let e = cast_engine();
+        let (log, dispatch, raw, source) = resolving_dispatch(&e);
+        let staged = e
+            .handle(
+                &replayed(&e, &log),
+                EngineEvent::Outcome(cast_report(
+                    &dispatch,
+                    &raw,
+                    vec![crate::transition::Evidence::PendingCast {
+                        cast: crate::names::CastName::new("paranoid"),
+                        source,
+                        resolved: established(SUSPICIOUS, Audience::Public),
+                    }],
+                )),
+            )
+            .expect("the narrowing resolution stages");
+        let confined = confined_of(&staged.follow_up).clone();
+        let log = [log, appended_facts(staged)].concat();
+        let log = [
+            log.clone(),
+            appended_facts(proposed(&e, &log, "b2", nonce(), call("ping", json!({}))).expect("the open call releases")),
+        ]
+        .concat();
+        assert_eq!(
+            execute_offer(&e, &log, confined.offers[0].0, OfferOutcome::Approved(Vec::new())),
+            Err(TransitionError::StaleOffer)
+        );
+
+        let replanned = e
+            .handle(
+                &replayed(&e, &log),
+                EngineEvent::Outcome(ToolReport {
+                    dispatch,
+                    outcome: ToolOutcome::Success {
+                        body: OutcomeBody::Available(raw.clone()),
+                    },
+                    evidence: Vec::new(),
+                    offer_nonce: crate::value::OfferNonce::new([13u8; 32]),
+                }),
+            )
+            .expect("the candidate is planned again");
+        let fresh = confined_of(&replanned.follow_up);
+        assert_eq!(fresh.candidate, confined.candidate, "the candidate itself is durable");
+        assert_eq!(fresh.residual, confined.residual);
+        assert!(
+            fresh
+                .offers
+                .iter()
+                .all(|(offer, _)| !confined.offers.iter().any(|(stale, _)| stale == offer)),
+            "a stale offer never revives: the new stage carries identities of its own"
+        );
+        assert_eq!(
+            fresh.offers.len(),
+            1,
+            "the replanned stage is still the acceptance alone"
+        );
+        let fresh = fresh.offers[0].0;
+        let log = [log, appended_facts(replanned)].concat();
+        assert_eq!(
+            offer_answer(
+                &execute_offer(&e, &log, fresh, OfferOutcome::Approved(Vec::new())).expect("the fresh offer runs")
+            ),
+            &OfferFollowUp::Admitted { value: raw }
+        );
+    }
+
+    #[test]
+    fn a_resolution_is_measured_against_the_pinned_bound_not_the_live_fold() {
+        let e = cast_engine();
+        let (log, dispatch, raw, source) = resolving_dispatch(&e);
+        let log = [log, vec![user_value(known(SUSPICIOUS, Audience::Public))]].concat();
+        let crossed = e
+            .handle(
+                &replayed(&e, &log),
+                EngineEvent::Outcome(cast_report(
+                    &dispatch,
+                    &raw,
+                    vec![crate::transition::Evidence::PendingCast {
+                        cast: crate::names::CastName::new("paranoid"),
+                        source,
+                        resolved: established(TRUSTED, Audience::Public),
+                    }],
+                )),
+            )
+            .expect("the pinned bound, not the live fold, measures the resolution");
+        assert_eq!(
+            crossed.follow_up,
+            FollowUp::Outcome(OutcomeFollowUp::Closed { admitted: Some(raw) })
+        );
+        let whole = [log, crossed.append.expect("the admission appends").facts().to_vec()].concat();
+        assert_eq!(e.validate_replay(&whole), Ok(()));
+    }
+
+    #[test]
+    fn a_forged_cast_record_is_refused_on_replay() {
+        let e = cast_engine();
+        let (log, dispatch, raw, source) = resolving_dispatch(&e);
+        let staged = e
+            .handle(
+                &replayed(&e, &log),
+                EngineEvent::Outcome(cast_report(
+                    &dispatch,
+                    &raw,
+                    vec![crate::transition::Evidence::PendingCast {
+                        cast: crate::names::CastName::new("paranoid"),
+                        source,
+                        resolved: established(SUSPICIOUS, Audience::Public),
+                    }],
+                )),
+            )
+            .expect("the narrowing resolution stages");
+        let confined = confined_of(&staged.follow_up).clone();
+        let mut forged = appended_facts(staged.clone());
+        for fact in &mut forged {
+            if let Fact::CandidateDerived {
+                via: DerivedVia::Cast { name },
+                ..
+            } = fact
+            {
+                *name = crate::names::CastName::new("bogus");
+            }
+        }
+        assert_eq!(
+            e.validate_replay(&[log.clone(), forged].concat()),
+            Err(crate::transition::TransitionRefusal::InadmissibleResolution),
+            "a candidate claiming an unregistered cast is refused"
+        );
+
+        let log = [log, appended_facts(staged)].concat();
+        let closed_past_the_stage = vec![Fact::DispatchClosed {
+            trajectory: traj(),
+            dispatch: dispatch.clone(),
+            outcome: crate::fact::CloseOutcome::Success {
+                effects: EffectSet::default(),
+            },
+        }];
+        assert_eq!(
+            e.validate_replay(&[log.clone(), closed_past_the_stage].concat()),
+            Err(crate::transition::TransitionRefusal::StagedClose),
+            "a staged confined result's dispatch closes only with its settlement"
+        );
+        let accepted = execute_offer(&e, &log, confined.offers[0].0, OfferOutcome::Approved(Vec::new()))
+            .expect("the acceptance runs");
+        let crossing = appended_facts(accepted);
+        let mut forged = crossing.clone();
+        for fact in &mut forged {
+            if let Fact::OutputCastApplied { resolved, .. } = fact {
+                *resolved = established(TRUSTED, Audience::Public);
+            }
+        }
+        assert_eq!(
+            e.validate_replay(&[log.clone(), forged].concat()),
+            Err(crate::transition::TransitionRefusal::InadmissibleResolution),
+            "the atomic commit's cast record must restate exactly the candidate's resolution"
+        );
+        let unaccepted: Vec<Fact> = crossing
+            .iter()
+            .filter(|fact| !matches!(fact, Fact::CandidateAccepted { .. }))
+            .cloned()
+            .collect();
+        assert_eq!(
+            e.validate_replay(&[log.clone(), unaccepted].concat()),
+            Err(crate::transition::TransitionRefusal::UndischargedAcceptance),
+            "a crossing without its acceptance never closes the stage"
+        );
+        let dropped: Vec<Fact> = crossing
+            .iter()
+            .filter(|fact| !matches!(fact, Fact::OutputCastApplied { .. }))
+            .cloned()
+            .collect();
+        assert_eq!(
+            e.validate_replay(&[log.clone(), dropped].concat()),
+            Err(crate::transition::TransitionRefusal::ForgedLabel),
+            "a cast candidate crosses only beside its cast record"
+        );
+        let mut doubled = crossing.clone();
+        let record = crossing
+            .iter()
+            .find(|fact| matches!(fact, Fact::OutputCastApplied { .. }))
+            .expect("the crossing carries its cast record")
+            .clone();
+        let admission = doubled.len() - 1;
+        doubled.insert(admission, record);
+        assert_eq!(
+            e.validate_replay(&[log, doubled].concat()),
+            Err(crate::transition::TransitionRefusal::RepeatAdmission),
+            "one crossing restates its resolution once"
+        );
+    }
+
+    #[test]
+    fn an_out_of_scope_or_out_of_ceiling_resolution_is_refused() {
+        let e = cast_engine();
+        let (log, dispatch, raw, source) = resolving_dispatch(&e);
+        let view = replayed(&e, &log);
+        assert_eq!(
+            e.handle(
+                &view,
+                EngineEvent::Outcome(cast_report(
+                    &dispatch,
+                    &raw,
+                    vec![crate::transition::Evidence::PendingCast {
+                        cast: crate::names::CastName::new("elsewhere"),
+                        source,
+                        resolved: established(TRUSTED, Audience::Public),
+                    }],
+                )),
+            ),
+            Err(TransitionError::InadmissibleResolution)
+        );
+        assert_eq!(
+            e.handle(
+                &view,
+                EngineEvent::Outcome(cast_report(
+                    &dispatch,
+                    &raw,
+                    vec![crate::transition::Evidence::PendingCast {
+                        cast: crate::names::CastName::new("stingy"),
+                        source,
+                        resolved: established(SUSPICIOUS, Audience::Public),
+                    }],
+                )),
+            ),
+            Err(TransitionError::InadmissibleResolution)
+        );
+        assert!(matches!(
+            e.handle(&view, EngineEvent::Outcome(cast_report(&dispatch, &raw, Vec::new())))
+                .expect("the ask stands")
+                .follow_up,
+            FollowUp::Outcome(OutcomeFollowUp::Resolve(_))
+        ));
     }
 
     #[test]

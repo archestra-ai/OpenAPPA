@@ -5,6 +5,7 @@ use std::sync::Mutex;
 
 use appa_engine::admit::{AdmitError, ResultAdmission};
 use appa_engine::branch::{BranchError, ReturnBlock, ReturnCheck, ReturnPlan, ReturnSubmission};
+use appa_engine::candidate::DerivedVia;
 use appa_engine::check::{CheckOutcome, UnestablishedFact};
 use appa_engine::contract::{
     AudienceRequirement, DynamicAudienceBinding, PinnedDynamicResolution, RecipientSpec, ToolContract,
@@ -302,7 +303,6 @@ pub enum AuditEvent {
     Denied { authority: String },
     Narrowed { from: AuditLabel, to: AuditLabel },
     Cast { cast: String, resolved: AuditLabel },
-    CastLapsed { cast: String, resolved: AuditLabel },
     SanitizerBound { sanitizer: String },
     Sanitized { sanitizer: String },
     ChildReturn {
@@ -718,7 +718,6 @@ impl RuntimeEngine {
             },
             Fact::Acceptance { narrowing, .. }
             | Fact::ChildReturnAcceptance { narrowing, .. }
-            | Fact::OutputCastAccepted { narrowing, .. }
             | Fact::CandidateAccepted { narrowing, .. } => AuditEvent::Narrowed {
                 from: self.render_label(&narrowing.from.clone().into_label())?,
                 to: self.render_label(&narrowing.to.clone().into_label())?,
@@ -729,15 +728,14 @@ impl RuntimeEngine {
                     resolved: self.render_label(&resolved.clone().into_label())?,
                 }
             }
-            Fact::OutputCastLapsed { cast, resolved, .. } => AuditEvent::CastLapsed {
-                cast: terminal_safe(cast.as_str()),
-                resolved: self.render_label(&resolved.clone().into_label())?,
-            },
             Fact::OutputSanitizerBound { sanitizer, .. } => AuditEvent::SanitizerBound {
                 sanitizer: terminal_safe(sanitizer.as_str()),
             },
-            Fact::CandidateDerived { sanitizer, .. } => AuditEvent::Sanitized {
-                sanitizer: terminal_safe(sanitizer.as_str()),
+            Fact::CandidateDerived { via, .. } => match via {
+                DerivedVia::Sanitizer { name, .. } => AuditEvent::Sanitized {
+                    sanitizer: terminal_safe(name.as_str()),
+                },
+                DerivedVia::Cast { .. } => return Some(None),
             },
             Fact::ChildReturn { value, derivation, .. } => AuditEvent::ChildReturn {
                 sanitizer: match derivation {

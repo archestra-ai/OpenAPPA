@@ -143,7 +143,7 @@ fn the_declared_audit(runtime: &Runtime, id: &TrajectoryId) {
             AuditEvent::Narrowed { from, to } => {
                 let _: (AuditLabel, AuditLabel) = (from, to);
             }
-            AuditEvent::Cast { cast, resolved } | AuditEvent::CastLapsed { cast, resolved } => {
+            AuditEvent::Cast { cast, resolved } => {
                 let _: (String, AuditLabel) = (cast, resolved);
             }
             AuditEvent::SanitizerBound { sanitizer } | AuditEvent::Sanitized { sanitizer } => {

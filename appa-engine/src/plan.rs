@@ -636,8 +636,10 @@ pub(crate) fn confined_hop_helps(receiving: &EstablishedLabel, candidate: &Label
 /// candidate and this runs again from it. The order is presentation only; hops come
 /// first because a hop costs the trajectory nothing and acceptance costs exactly the residual.
 ///
-/// The pending-cast exclusion of `RMD-18` needs no guard here: a confined result exists only under
-/// a bound output sanitizer, which the dispatch stage never offers for such a tool.
+/// A pending-cast candidate's stage is the acceptance alone: the two confinement paths do not
+/// compose, so no sanitizer hop is ever offered over a cast-resolved result. The
+/// contract decides — a pending-cast dispatch is never sanitizer-bound, so its confined candidate
+/// is always the cast's.
 pub(crate) fn confined_stage(
     registry: &Registry,
     contract: &ToolContract,
@@ -647,21 +649,23 @@ pub(crate) fn confined_stage(
     lineage: &SanitizerLineage,
 ) -> Vec<ExecutableRemedyPlan> {
     let mut plans: Vec<ExecutableRemedyPlan> = Vec::new();
-    let hops = registry
-        .sanitizers()
-        .filter(|sanitizer| !lineage.contains(&sanitizer.name))
-        .filter(|sanitizer| !sanitizer.name.is_attest_schema())
-        .filter(|sanitizer| {
-            sanitizer
-                .derive_output(candidate, &contract.tags)
-                .is_some_and(|derived| confined_hop_helps(receiving, candidate, &derived))
-        });
-    for sanitizer in hops {
-        plans.push(ExecutableRemedyPlan {
-            id: PlanId(plans.len() as u32),
-            steps: vec![RemedyStep::Derive(sanitizer.name.clone())],
-            required: Vec::new(),
-        });
+    if contract.pending_cast_dim().is_none() {
+        let hops = registry
+            .sanitizers()
+            .filter(|sanitizer| !lineage.contains(&sanitizer.name))
+            .filter(|sanitizer| !sanitizer.name.is_attest_schema())
+            .filter(|sanitizer| {
+                sanitizer
+                    .derive_output(candidate, &contract.tags)
+                    .is_some_and(|derived| confined_hop_helps(receiving, candidate, &derived))
+            });
+        for sanitizer in hops {
+            plans.push(ExecutableRemedyPlan {
+                id: PlanId(plans.len() as u32),
+                steps: vec![RemedyStep::Derive(sanitizer.name.clone())],
+                required: Vec::new(),
+            });
+        }
     }
     plans.push(ExecutableRemedyPlan {
         id: PlanId(plans.len() as u32),

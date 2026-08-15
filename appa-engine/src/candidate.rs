@@ -4,8 +4,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::check::Narrowing;
 use crate::label::Label;
-use crate::names::SanitizerName;
+use crate::names::{CastName, SanitizerName};
 use crate::value::{DispatchId, LabeledValue, OfferId, RawResultDigest, ResolvedCall};
+
+/// The transformer whose application one candidate record audits.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DerivedVia {
+    Sanitizer {
+        name: SanitizerName,
+        transition: crate::authority::Transition,
+    },
+    Cast { name: CastName },
+}
 
 /// The sanitizers a candidate's chain has already spent, in application order.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

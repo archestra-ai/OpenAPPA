@@ -22,17 +22,6 @@ pub enum ResultAdmission {
         cast: CastName,
         resolved: EstablishedLabel,
     },
-    SuccessCastAccepted {
-        body: ValueBody,
-        cast: CastName,
-        resolved: EstablishedLabel,
-        accepted: Narrowing,
-    },
-    SuccessCastLapsed {
-        body: ValueBody,
-        cast: CastName,
-        resolved: EstablishedLabel,
-    },
     SuccessSanitized {
         body: ValueBody,
         sanitizer: crate::names::SanitizerName,
@@ -70,8 +59,6 @@ pub enum AdmitError {
     OutOfScopeCast,
     #[error("the cast resolution narrows the trajectory label: admission requires the agent's acceptance")]
     NarrowingUnaccepted,
-    #[error("the accepted narrowing does not match the live trajectory state")]
-    AcceptanceMismatch,
     #[error("the dispatch already recorded its success checkpoint")]
     AlreadySucceeded,
     #[error("the dispatch recorded success: a failure or indeterminate close contradicts it")]
@@ -125,12 +112,6 @@ pub(crate) fn observe_success(
     ))
 }
 
-pub(crate) fn pending_cast_narrowing(views: &Views, resolved: &EstablishedLabel) -> Option<Narrowing> {
-    let from = views.current_label().bound().clone();
-    let to = from.combine(resolved);
-    if to == from { None } else { Some(Narrowing { from, to }) }
-}
-
 /// What a confined candidate still narrows against the bound its dispatch pinned, or `None` where
 /// it narrows nothing and may admit immediately.
 pub(crate) fn confined_residual(receiving: &EstablishedLabel, derived: &Label) -> Option<Narrowing> {
@@ -181,6 +162,30 @@ pub(crate) fn bound_candidate(
             .extend(sanitizer.clone())
             .expect("an empty lineage spends no sanitizer yet"),
     ))
+}
+
+/// The candidate a validated pending-cast resolution makes of one confined result.
+pub(crate) fn cast_candidate(
+    registry: &Registry,
+    views: &Views,
+    dispatch: &DispatchId,
+    contract: &crate::contract::ToolContract,
+    cast: &CastName,
+    body: ValueBody,
+    resolved: &EstablishedLabel,
+) -> Result<DerivedCandidate, AdmitError> {
+    let output_label = contract.output_label_for_resolutions(views.dynamic_resolutions(dispatch).unwrap_or_default());
+    validate_pending_cast(registry, contract, &output_label, cast, resolved)?;
+    let receiving = views.receiving_bound(dispatch).ok_or(AdmitError::NotOpen)?;
+    let label = resolved.clone().into_label();
+    let residual = confined_residual(receiving, &label);
+    Ok(DerivedCandidate::Result {
+        dispatch: dispatch.clone(),
+        source: RawResultDigest::of(body.as_str().as_bytes()),
+        from: ConfinedFrom::Bound,
+        value: LabeledValue::new(body, label),
+        residual,
+    })
 }
 
 fn refusal_error(refusal: CastRefusal) -> AdmitError {
@@ -272,10 +277,9 @@ pub(crate) fn admit_result(
         return Err(AdmitError::SuccessContradicted);
     }
     let reported = match &admission {
-        ResultAdmission::SuccessRaw { body }
-        | ResultAdmission::SuccessCast { body, .. }
-        | ResultAdmission::SuccessCastAccepted { body, .. }
-        | ResultAdmission::SuccessCastLapsed { body, .. } => Some(RawResultDigest::of(body.as_str().as_bytes())),
+        ResultAdmission::SuccessRaw { body } | ResultAdmission::SuccessCast { body, .. } => {
+            Some(RawResultDigest::of(body.as_str().as_bytes()))
+        }
         ResultAdmission::SuccessSanitized { raw_digest, .. } => Some(*raw_digest),
         ResultAdmission::CandidateAccepted { .. }
         | ResultAdmission::CandidateAdmissible
@@ -336,49 +340,29 @@ pub(crate) fn admit_result(
             vec![close_success(), admit_value(output_label(), body)]
         }
         ResultAdmission::SuccessCast { body, cast, resolved } => {
-            validate_pending_cast(registry, contract, &output_label(), &cast, &resolved)?;
-            if pending_cast_narrowing(views, &resolved).is_some() {
+            let candidate = cast_candidate(registry, views, dispatch, contract, &cast, body, &resolved)?;
+            let DerivedCandidate::Result {
+                source,
+                value,
+                residual,
+                ..
+            } = candidate
+            else {
+                unreachable!("a pending-cast resolution derives a confined result")
+            };
+            if residual.is_some() {
                 return Err(AdmitError::NarrowingUnaccepted);
             }
-            let raw_digest = RawResultDigest::of(body.as_str().as_bytes());
             vec![
                 close_success(),
                 Fact::OutputCastApplied {
                     trajectory: trajectory.clone(),
                     dispatch: dispatch.clone(),
                     cast,
-                    resolved: resolved.clone(),
-                    raw_digest,
+                    resolved,
+                    raw_digest: source,
                 },
-                admit_value(resolved.into_label(), body),
-            ]
-        }
-        ResultAdmission::SuccessCastAccepted {
-            body,
-            cast,
-            resolved,
-            accepted,
-        } => {
-            validate_pending_cast(registry, contract, &output_label(), &cast, &resolved)?;
-            if pending_cast_narrowing(views, &resolved) != Some(accepted.clone()) {
-                return Err(AdmitError::AcceptanceMismatch);
-            }
-            let raw_digest = RawResultDigest::of(body.as_str().as_bytes());
-            vec![
-                close_success(),
-                Fact::OutputCastApplied {
-                    trajectory: trajectory.clone(),
-                    dispatch: dispatch.clone(),
-                    cast,
-                    resolved: resolved.clone(),
-                    raw_digest,
-                },
-                Fact::OutputCastAccepted {
-                    trajectory: trajectory.clone(),
-                    dispatch: dispatch.clone(),
-                    narrowing: accepted,
-                },
-                admit_value(resolved.into_label(), body),
+                admit_derived(value),
             ]
         }
         ResultAdmission::SuccessSanitized {
@@ -400,8 +384,10 @@ pub(crate) fn admit_result(
                 Fact::CandidateDerived {
                     trajectory: trajectory.clone(),
                     subject: crate::basis::SubjectKey::ConfinedResult(dispatch.clone()),
-                    sanitizer,
-                    transition,
+                    via: crate::candidate::DerivedVia::Sanitizer {
+                        name: sanitizer,
+                        transition,
+                    },
                     derived,
                     lineage,
                 },
@@ -411,6 +397,7 @@ pub(crate) fn admit_result(
         ResultAdmission::CandidateAccepted { offer } => {
             let subject = crate::basis::SubjectKey::ConfinedResult(dispatch.clone());
             let Some(DerivedCandidate::Result {
+                source,
                 value,
                 residual: Some(narrowing),
                 ..
@@ -418,16 +405,28 @@ pub(crate) fn admit_result(
             else {
                 return Err(AdmitError::NoCandidate);
             };
-            vec![
+            let mut facts = vec![
                 Fact::CandidateAccepted {
                     trajectory: trajectory.clone(),
-                    subject,
+                    subject: subject.clone(),
                     offer,
                     narrowing: narrowing.clone(),
                 },
                 close_success(),
-                admit_derived(value.clone()),
-            ]
+            ];
+            if let Some(crate::candidate::DerivedVia::Cast { name }) = views.candidate_via(&subject) {
+                let resolved = EstablishedLabel::from_label(&value.label)
+                    .expect("a cast candidate carries the complete resolved label");
+                facts.push(Fact::OutputCastApplied {
+                    trajectory: trajectory.clone(),
+                    dispatch: dispatch.clone(),
+                    cast: name.clone(),
+                    resolved,
+                    raw_digest: *source,
+                });
+            }
+            facts.push(admit_derived(value.clone()));
+            facts
         }
         ResultAdmission::CandidateAdmissible => {
             let subject = crate::basis::SubjectKey::ConfinedResult(dispatch.clone());
@@ -438,20 +437,6 @@ pub(crate) fn admit_result(
                 return Err(AdmitError::NoCandidate);
             };
             vec![close_success(), admit_derived(value.clone())]
-        }
-        ResultAdmission::SuccessCastLapsed { body, cast, resolved } => {
-            validate_pending_cast(registry, contract, &output_label(), &cast, &resolved)?;
-            let raw_digest = RawResultDigest::of(body.as_str().as_bytes());
-            vec![
-                close_success(),
-                Fact::OutputCastLapsed {
-                    trajectory: trajectory.clone(),
-                    dispatch: dispatch.clone(),
-                    cast,
-                    resolved,
-                    raw_digest,
-                },
-            ]
         }
     };
 
@@ -510,7 +495,7 @@ mod tests {
     use crate::authority::{Cast, CastCeiling, CastResolution, Sanitizer, SanitizerPoints, Scope, Transition};
     use crate::contract::{AudienceDelta, Delta, DynamicAudienceBinding, PinnedDynamicResolution, ToolContract};
     use crate::fact::{EffectKind, Revision};
-    use crate::label::{Audience, Dim, PartialLabel, ReaderId, Trust};
+    use crate::label::{Audience, Dim, ReaderId, Trust};
     use crate::projection::Projection;
     use crate::registry::{RegistryConfig, TrustChain};
     use crate::value::{LabeledValue, ToolName, TrajectoryId};
@@ -655,6 +640,43 @@ mod tests {
 
     fn views_of(log: &[Fact]) -> Projection {
         Projection::build(log, Revision::new(log.len() as u64))
+    }
+
+    fn offer() -> crate::value::OfferId {
+        crate::value::OfferId::of_plan(
+            &crate::value::BlockId::of_proposal(
+                &crate::value::OfferNonce::new([7u8; 32]),
+                &traj(),
+                &crate::transition::ProposalBatchId::new("b"),
+                0,
+                &scan_call().digest(),
+            ),
+            0,
+            b"acceptance",
+        )
+    }
+
+    fn staged_cast_candidate(
+        dispatch: &DispatchId,
+        body: &str,
+        resolved: EstablishedLabel,
+        residual: Narrowing,
+    ) -> Fact {
+        Fact::CandidateDerived {
+            trajectory: traj(),
+            subject: crate::basis::SubjectKey::ConfinedResult(dispatch.clone()),
+            via: crate::candidate::DerivedVia::Cast {
+                name: CastName::new("paranoid"),
+            },
+            derived: DerivedCandidate::Result {
+                dispatch: dispatch.clone(),
+                source: RawResultDigest::of(body.as_bytes()),
+                from: ConfinedFrom::Bound,
+                value: LabeledValue::new(ValueBody::new(body), resolved.into_label()),
+                residual: Some(residual),
+            },
+            lineage: SanitizerLineage::default(),
+        }
     }
 
     #[test]
@@ -1123,30 +1145,6 @@ mod tests {
             ),
             Err(AdmitError::NarrowingUnaccepted)
         );
-        let p = views_of(&log);
-        let batch = admit_result(
-            &reg,
-            &p.view(&t),
-            &dispatch,
-            &call,
-            ResultAdmission::SuccessCastAccepted {
-                body: ValueBody::new("room roster"),
-                cast: CastName::new("paranoid"),
-                resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
-                accepted: Narrowing {
-                    from: EstablishedLabel::top(),
-                    to: EstablishedLabel::new(SUSPICIOUS, internal()),
-                },
-            },
-        )
-        .unwrap();
-        match batch.facts.last().unwrap() {
-            Fact::ValueAdmitted { value, .. } => {
-                assert_eq!(value.label.trust, Dim::Known(SUSPICIOUS));
-                assert_eq!(value.label.audience, Dim::Known(internal()));
-            }
-            other => panic!("expected ValueAdmitted, got {other:?}"),
-        }
     }
 
     #[test]
@@ -1181,7 +1179,10 @@ mod tests {
             to: EstablishedLabel::new(SUSPICIOUS, internal()),
         };
         let resolved = EstablishedLabel::new(SUSPICIOUS, internal());
-        assert_eq!(pending_cast_narrowing(&views, &resolved), Some(expected.clone()));
+        assert_eq!(
+            confined_residual(&EstablishedLabel::top(), &resolved.clone().into_label()),
+            Some(expected.clone())
+        );
         assert_eq!(
             admit_result(
                 &reg,
@@ -1211,17 +1212,15 @@ mod tests {
             Err(AdmitError::NarrowingUnaccepted)
         );
 
+        let mut log = log;
+        log.push(staged_cast_candidate(&dispatch, "scan", resolved, expected));
+        let projection = views_of(&log);
         let batch = admit_result(
             &reg,
-            &views,
+            &projection.view(&trajectory),
             &dispatch,
             &call,
-            ResultAdmission::SuccessCastAccepted {
-                body: ValueBody::new("scan"),
-                cast: CastName::new("paranoid"),
-                resolved,
-                accepted: expected,
-            },
+            ResultAdmission::CandidateAccepted { offer: offer() },
         )
         .unwrap();
         match batch.facts.last().unwrap() {
@@ -1266,6 +1265,10 @@ mod tests {
                 provenance: Provenance::UserInput,
             },
         );
+        let Fact::DispatchOpened { receiving, .. } = &mut log[1] else {
+            unreachable!("open_log holds exactly one DispatchOpened")
+        };
+        *receiving = EstablishedLabel::new(SUSPICIOUS, internal());
         (log, dispatch)
     }
 
@@ -1332,37 +1335,45 @@ mod tests {
     fn an_accepted_cast_narrowing_admits_in_one_batch() {
         let reg = registry();
         let call = scan_call();
-        let (log, dispatch) = open_log(&call);
-        let p = views_of(&log);
+        let (mut log, dispatch) = open_log(&call);
         let t = traj();
         let accepted = Narrowing {
             from: EstablishedLabel::top(),
             to: EstablishedLabel::new(SUSPICIOUS, internal()),
         };
+        let resolved = EstablishedLabel::new(SUSPICIOUS, internal());
+        log.push(staged_cast_candidate(
+            &dispatch,
+            "inbox contents",
+            resolved.clone(),
+            accepted.clone(),
+        ));
+        let p = views_of(&log);
         let batch = admit_result(
             &reg,
             &p.view(&t),
             &dispatch,
             &call,
-            ResultAdmission::SuccessCastAccepted {
-                body: ValueBody::new("inbox contents"),
-                cast: CastName::new("paranoid"),
-                resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
-                accepted: accepted.clone(),
-            },
+            ResultAdmission::CandidateAccepted { offer: offer() },
         )
         .unwrap();
         assert!(matches!(
             &batch.facts[0],
+            Fact::CandidateAccepted { narrowing, .. } if narrowing == &accepted
+        ));
+        assert!(matches!(
+            &batch.facts[1],
             Fact::DispatchClosed {
                 outcome: CloseOutcome::Success { .. },
                 ..
             }
         ));
-        assert!(matches!(&batch.facts[1], Fact::OutputCastApplied { .. }));
         assert!(matches!(
             &batch.facts[2],
-            Fact::OutputCastAccepted { narrowing, .. } if narrowing == &accepted
+            Fact::OutputCastApplied { cast, resolved: restated, raw_digest, .. }
+                if cast.as_str() == "paranoid"
+                    && restated == &resolved
+                    && raw_digest == &RawResultDigest::of(b"inbox contents")
         ));
         match &batch.facts[3] {
             Fact::ValueAdmitted { value, .. } => {
@@ -1378,7 +1389,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_cast_acceptance_is_refused() {
+    fn an_acceptance_without_a_matching_candidate_is_refused() {
         let reg = registry();
         let call = scan_call();
         let t = traj();
@@ -1390,81 +1401,20 @@ mod tests {
                 &p.view(&t),
                 &dispatch,
                 &call,
-                ResultAdmission::SuccessCastAccepted {
-                    body: ValueBody::new("inbox contents"),
-                    cast: CastName::new("paranoid"),
-                    resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
-                    accepted: Narrowing {
-                        from: EstablishedLabel::top(),
-                        to: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
-                    },
-                },
+                ResultAdmission::CandidateAccepted { offer: offer() },
             ),
-            Err(AdmitError::AcceptanceMismatch)
+            Err(AdmitError::NoCandidate)
         );
-        let (narrowed, dispatch) = narrowed_open_log(&call);
-        let p = views_of(&narrowed);
-        assert_eq!(
-            admit_result(
-                &reg,
-                &p.view(&t),
-                &dispatch,
-                &call,
-                ResultAdmission::SuccessCastAccepted {
-                    body: ValueBody::new("inbox contents"),
-                    cast: CastName::new("paranoid"),
-                    resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
-                    accepted: Narrowing {
-                        from: EstablishedLabel::top(),
-                        to: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
-                    },
-                },
-            ),
-            Err(AdmitError::AcceptanceMismatch)
-        );
-    }
-
-    #[test]
-    fn a_lapsed_cast_closes_with_audit_and_no_value() {
-        let reg = registry();
-        let call = scan_call();
-        let (log, dispatch) = open_log(&call);
-        let p = views_of(&log);
-        let t = traj();
-        let batch = admit_result(
-            &reg,
-            &p.view(&t),
+        let mut log = log;
+        log.push(staged_cast_candidate(
             &dispatch,
-            &call,
-            ResultAdmission::SuccessCastLapsed {
-                body: ValueBody::new("inbox contents"),
-                cast: CastName::new("paranoid"),
-                resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
+            "inbox contents",
+            EstablishedLabel::new(SUSPICIOUS, internal()),
+            Narrowing {
+                from: EstablishedLabel::top(),
+                to: EstablishedLabel::new(SUSPICIOUS, internal()),
             },
-        )
-        .unwrap();
-        assert_eq!(batch.facts.len(), 2);
-        assert!(matches!(
-            &batch.facts[0],
-            Fact::DispatchClosed { outcome: CloseOutcome::Success { effects }, .. } if effects == &EffectSet::new([EffectKind::new("read")]).unwrap()
         ));
-        assert!(matches!(
-            &batch.facts[1],
-            Fact::OutputCastLapsed {
-                resolved,
-                raw_digest,
-                ..
-            } if resolved == &EstablishedLabel::new(SUSPICIOUS, internal())
-                && raw_digest == &RawResultDigest::of(b"inbox contents")
-        ));
-        let mut next = log.clone();
-        next.extend(batch.facts);
-        let p2 = views_of(&next);
-        assert_eq!(
-            p2.view(&t).current_label(),
-            PartialLabel::established(EstablishedLabel::top())
-        );
-        let (log, dispatch) = open_log(&call);
         let p = views_of(&log);
         assert_eq!(
             admit_result(
@@ -1472,13 +1422,9 @@ mod tests {
                 &p.view(&t),
                 &dispatch,
                 &call,
-                ResultAdmission::SuccessCastLapsed {
-                    body: ValueBody::new("inbox contents"),
-                    cast: CastName::new("bogus"),
-                    resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
-                },
+                ResultAdmission::CandidateAdmissible
             ),
-            Err(AdmitError::UnknownCast("bogus".to_string()))
+            Err(AdmitError::NoCandidate)
         );
     }
 
@@ -1542,7 +1488,7 @@ mod tests {
     fn a_success_checkpoint_commits_effects_once_and_pins_the_close_family() {
         let reg = registry();
         let call = scan_call();
-        let (mut log, dispatch) = open_log(&call);
+        let (mut log, dispatch) = narrowed_open_log(&call);
         let t = traj();
 
         let p = views_of(&log);
@@ -1572,7 +1518,7 @@ mod tests {
             &p.view(&t),
             &dispatch,
             &call,
-            ResultAdmission::SuccessCastLapsed {
+            ResultAdmission::SuccessCast {
                 body: ValueBody::new(BODY),
                 cast: CastName::new("paranoid"),
                 resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
@@ -1735,13 +1681,13 @@ mod tests {
         assert!(batch.facts.iter().any(|fact| matches!(
             fact,
             Fact::CandidateDerived {
-                sanitizer,
+                via: crate::candidate::DerivedVia::Sanitizer { name, .. },
                 derived: DerivedCandidate::Result { source, residual: Some(_), .. },
                 lineage,
                 ..
-            } if sanitizer.as_str() == "declassify"
+            } if name.as_str() == "declassify"
                 && source == &RawResultDigest::of(b"ticket")
-                && lineage.names() == [sanitizer.clone()]
+                && lineage.names() == [name.clone()]
         )));
         let admitted = batch
             .facts
