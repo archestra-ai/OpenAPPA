@@ -528,6 +528,142 @@ requires = { audience = { includes = ["public"] } }
 delta = {}
 "#;
 
+const SUBSTITUTING: &str = r#"
+version = 1
+
+[[policy.tool]]
+name = "read_hr"
+delta = { audience = { exactly = ["staff"] } }
+
+[[policy.tool]]
+name = "send_email"
+parameters = { type = "object", properties = { body = { type = "string" } }, required = ["body"] }
+requires = { audience = { includes = ["public"] } }
+delta = {}
+
+[[policy.sanitizer]]
+name = "scrub"
+on = ["tool_input"]
+[policy.sanitizer.mandate]
+audience = { from = { includes = ["staff"] }, to = { exactly = ["public"] } }
+"#;
+
+#[tokio::test]
+async fn pursuing_an_input_sanitizer_offer_runs_the_replaced_call() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let host = ToolHost::default();
+    host.answers("read_hr", "Alice Chen, Staff Engineer")
+        .answers("send_email", "queued")
+        .sanitizes_to(r#"{"body":"the figures, redacted"}"#);
+    let sanitizer_url = format!("{}/sanitizer", host.clone().serve().await);
+    let externals = format!("[externals.sanitizers.scrub]\nurl = \"{sanitizer_url}\"\n");
+
+    let provider = Provider::default();
+    provider
+        .calls("read_hr", serde_json::json!({"who": "alice"}))
+        .pursues_the_offer()
+        .calls("read_hr", serde_json::json!({"who": "alice"}))
+        .calls(
+            "send_email",
+            serde_json::json!({"body": "the figures, with Alice's salary"}),
+        )
+        .pursues_the_offer()
+        .says("Sent.");
+
+    let agent = agent(
+        runtime(&dir, SUBSTITUTING, &externals),
+        &provider,
+        &host,
+        &["read_hr", "send_email"],
+    )
+    .await;
+    let outcome = agent.run(root(), "Mail the figures.", Default::default()).await;
+
+    assert_eq!(outcome, Outcome::Answer("Sent.".to_string()));
+    let sends: Vec<_> = host
+        .calls()
+        .into_iter()
+        .filter(|call| call["tool"] == "send_email")
+        .collect();
+    assert_eq!(
+        sends,
+        vec![serde_json::json!({"tool": "send_email", "arguments": {"body": "the figures, redacted"}})],
+        "the host runs the sanitizer's replacement, once, and never the model's arguments",
+    );
+    assert_eq!(
+        provider.tool_result(5, "call_4"),
+        "queued",
+        "the replaced call's output answers the control call",
+    );
+}
+
+const SUBSTITUTING_SPAWN: &str = r#"
+version = 1
+
+[[policy.tool]]
+name = "read_hr"
+delta = { audience = { exactly = ["staff"] } }
+
+[[policy.tool]]
+name = "delegate"
+parameters = { type = "object", properties = { task = { type = "string" } }, required = ["task"] }
+requires = { audience = { includes = ["public"] } }
+delta = {}
+
+[[policy.sanitizer]]
+name = "scrub"
+on = ["tool_input"]
+[policy.sanitizer.mandate]
+audience = { from = { includes = ["staff"] }, to = { exactly = ["public"] } }
+
+[policy.deployment]
+context_control = true
+"#;
+
+#[tokio::test]
+async fn a_substituted_spawn_opens_no_child_and_never_reaches_the_host() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let host = ToolHost::default();
+    host.answers("read_hr", "Alice Chen, Staff Engineer")
+        .answers("delegate", "a child that must not run")
+        .sanitizes_to(r#"{"task":"look it up, redacted"}"#);
+    let sanitizer_url = format!("{}/sanitizer", host.clone().serve().await);
+    let externals = format!("[externals.sanitizers.scrub]\nurl = \"{sanitizer_url}\"\n");
+
+    let provider = Provider::default();
+    provider
+        .calls("read_hr", serde_json::json!({"who": "alice"}))
+        .pursues_the_offer()
+        .calls("read_hr", serde_json::json!({"who": "alice"}))
+        .calls("delegate", serde_json::json!({"task": "look up Alice's salary"}))
+        .pursues_the_offer()
+        .calls("read_hr", serde_json::json!({"who": "bob"}))
+        .says("Done.");
+
+    let agent = delegating(
+        agent(
+            runtime(&dir, SUBSTITUTING_SPAWN, &externals),
+            &provider,
+            &host,
+            &["read_hr", "delegate"],
+        )
+        .await,
+    );
+    let outcome = agent.run(root(), "Delegate the lookup.", Default::default()).await;
+
+    assert_eq!(outcome, Outcome::Answer("Done.".to_string()));
+    let tools: Vec<String> = host
+        .calls()
+        .into_iter()
+        .map(|call| call["tool"].as_str().expect("the host records the tool").to_string())
+        .collect();
+    assert_eq!(
+        tools,
+        vec!["read_hr", "read_hr"],
+        "the substituted spawn is not dispatched to the host, and the next call runs",
+    );
+}
+
 #[tokio::test]
 async fn a_second_turn_continues_where_the_first_one_left_the_trajectory() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");

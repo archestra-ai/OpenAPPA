@@ -982,10 +982,20 @@ impl RuntimeEngine {
             outcome,
             offer_nonce: engine_nonce(entropy),
         };
-        let decision = self
-            .engine
-            .handle(view, CoreEvent::ExecuteOffer(execution))
-            .map_err(offer_refusal)?;
+        let decision = match self.engine.handle(view, CoreEvent::ExecuteOffer(execution)) {
+            Ok(decision) => decision,
+            // A sanitizer's derivation the engine cannot use — malformed, schema-invalid, or not
+            // a strict improvement — lands no fact and opens no dispatch; the offer stands for a
+            // later deliberate retry. The external's answer is not an
+            // integration fault, so it is not a refusal.
+            Err(TransitionError::Call(_) | TransitionError::SanitizerUnapplicable) => {
+                return Ok(no_answer(
+                    "[appa] the sanitizer's derivation was not usable; the offer stands and may be executed again"
+                        .to_string(),
+                ));
+            }
+            Err(error) => return Err(offer_refusal(error)),
+        };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
         let then = match decision.follow_up {
             FollowUp::Offer(OfferFollowUp::Approved { call }) => Next::Approved {
@@ -1010,7 +1020,7 @@ impl RuntimeEngine {
             }
             FollowUp::Offer(OfferFollowUp::Released(release)) => Next::InvokeTool(released(&release)),
             FollowUp::Offer(OfferFollowUp::Settled(_)) => Next::PresentToModel(Presentation::Declined {
-                feedback: "[appa] this call already ran; propose a fresh call".to_string(),
+                feedback: "[appa] the call this offer released is already settled; propose a fresh call".to_string(),
             }),
             other => {
                 return Err(EngineRefusal::Invariant {

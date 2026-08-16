@@ -12,8 +12,8 @@ use crate::external::{ConsultKind, ConsultOutcome, DynamicResolution};
 use crate::store::{BatchAppend, DispatchRow, DispatchState, EventWrite, Revision, RuntimeRecord};
 
 use super::{
-    AuthorizedCall, ChildReturnDecision, DispatchId, EventError, Inner, OfferId, OutcomeBody, ProposedCall,
-    RemedyDecision, SpawnBinding, ToolCallDecision, ToolOutcome, ToolResultDecision, TrajectoryId,
+    ChildReturnDecision, DispatchId, EventError, ExactCall, Inner, OfferId, OutcomeBody, ProposedCall, RemedyDecision,
+    SpawnBinding, ToolCallDecision, ToolOutcome, ToolResultDecision, TrajectoryId,
 };
 
 /// The runtime's own control tool, recognized by its exact
@@ -34,7 +34,7 @@ pub(crate) fn is_control_tool(tool: &str) -> bool {
 /// diagnose for it. The model-facing refusal is unchanged — the case
 /// goes to the operator, not into feedback.
 ///
-/// These are the three contexts the runtime can observe, which are not
+/// These are the contexts the runtime can observe, which are not
 /// the threat model's three cases. An already-consumed report is
 /// indistinguishable from an unknown one here: closed dispatches leave
 /// the open view, and an outcome is attributable solely through its
@@ -44,6 +44,7 @@ pub(crate) fn is_control_tool(tool: &str) -> bool {
 enum UnreportableOutcome {
     NoOpenDispatch,
     ByteMismatch,
+    NotStarted,
 }
 
 impl UnreportableOutcome {
@@ -51,6 +52,7 @@ impl UnreportableOutcome {
         match self {
             UnreportableOutcome::NoOpenDispatch => "no_open_dispatch",
             UnreportableOutcome::ByteMismatch => "byte_mismatch",
+            UnreportableOutcome::NotStarted => "not_started",
         }
     }
 
@@ -58,23 +60,29 @@ impl UnreportableOutcome {
         match self {
             UnreportableOutcome::NoOpenDispatch => EventError::UnknownDispatch,
             UnreportableOutcome::ByteMismatch => EventError::OutcomeMismatch,
+            UnreportableOutcome::NotStarted => EventError::DispatchNotStarted,
         }
     }
 }
 
-fn classify_report(
+fn is_open_call(call: &ProposedCall, canonical: impl FnOnce() -> Option<Vec<u8>>, open: &DispatchRow) -> bool {
+    call.tool == open.tool && canonical().as_deref() == Some(open.bytes.as_slice())
+}
+
+fn classify_report<'a>(
     call: &ProposedCall,
     canonical: impl FnOnce() -> Option<Vec<u8>>,
-    open: Option<&DispatchRow>,
-) -> Result<DispatchId, UnreportableOutcome> {
+    open: Option<&'a DispatchRow>,
+) -> Result<&'a DispatchRow, UnreportableOutcome> {
     let Some(open) = open else {
         return Err(UnreportableOutcome::NoOpenDispatch);
     };
-    if call.tool != open.tool || canonical().as_deref() != Some(open.bytes.as_slice()) {
+    if !is_open_call(call, canonical, open) {
         return Err(UnreportableOutcome::ByteMismatch);
     }
     match open.state {
-        DispatchState::Executing => Ok(open.id.clone()),
+        DispatchState::Executing => Ok(open),
+        DispatchState::Awaiting => Err(UnreportableOutcome::NotStarted),
     }
 }
 
@@ -129,14 +137,16 @@ impl Session {
         }
         self.refuse_if_ended()?;
         let policy = self.inner.resolve_policy(&self.family)?;
-        if self
+        if let Some(open) = self
             .inner
             .store
             .open_dispatch(&self.trajectory)
             .map_err(|error| EventError::Storage(error.to_string()))?
-            .is_some()
         {
-            return Err(EventError::CallOutstanding);
+            return match open.state {
+                DispatchState::Executing => Err(EventError::CallOutstanding),
+                DispatchState::Awaiting => self.claim_or_abandon(&policy, &call, open).await,
+            };
         }
 
         let trajectory = self.trajectory.clone();
@@ -201,6 +211,38 @@ impl Session {
         }
     }
 
+    async fn claim_or_abandon(
+        &self,
+        policy: &PolicyEngine<'_>,
+        call: &ProposedCall,
+        open: DispatchRow,
+    ) -> Result<ToolCallDecision, EventError> {
+        if is_open_call(call, || self.inner.engine.canonical_bytes(policy, call), &open) {
+            if let Err(refused) = self.commit_records(vec![RuntimeRecord::StartDispatch { id: open.id.clone() }]) {
+                self.refuse_if_ended()?;
+                return Err(refused);
+            }
+            tracing::debug!(
+                trajectory = %self.trajectory.0,
+                dispatch = %open.id.0,
+                tool = %open.tool,
+                "substituted call claimed"
+            );
+            return Ok(ToolCallDecision::Allow { spawn: None });
+        }
+        let outcome = ToolOutcome::Failure {
+            message: "the harness did not run the substituted call".to_string(),
+        };
+        self.report_outcome(policy, &open, &outcome).await?;
+        tracing::debug!(
+            trajectory = %self.trajectory.0,
+            dispatch = %open.id.0,
+            tool = %open.tool,
+            "substituted call abandoned"
+        );
+        Err(EventError::SubstitutionAbandoned { tool: open.tool })
+    }
+
     pub async fn on_tool_result(
         &mut self,
         call: ProposedCall,
@@ -226,34 +268,7 @@ impl Session {
             Err(case) => return Err(self.refuse_report(case, &call, open.as_ref())),
         };
         let o = self.cap_outcome(o);
-
-        let engine_dispatch = crate::engine::parse_dispatch(&dispatch.0).ok_or_else(|| {
-            EventError::Storage("an open dispatch row does not carry a recoverable engine dispatch id".to_string())
-        })?;
-        let owner = self.trajectory.clone();
-        let decision = self
-            .drive_with_evidence(
-                &policy,
-                |evidence| EngineEvent::ToolOutcome {
-                    dispatch: engine_dispatch.clone(),
-                    outcome: o.clone(),
-                    evidence,
-                    entropy: fresh_entropy(),
-                },
-                move |decision| {
-                    match &decision.then {
-                        Next::PresentToModel(Presentation::KeepOutput)
-                        | Next::PresentToModel(Presentation::Value { .. })
-                        | Next::PresentToModel(Presentation::ReplaceOutput { .. }) => {
-                            vec![RuntimeRecord::CloseDispatch { id: dispatch.clone() }]
-                        }
-                        Next::PresentToModel(Presentation::Blocked { offers, .. }) => offer_records(&owner, offers),
-                        _ => Vec::new(),
-                    }
-                },
-                None,
-            )
-            .await?;
+        let decision = self.report_outcome(&policy, dispatch, &o).await?;
 
         match decision.then {
             Next::PresentToModel(Presentation::KeepOutput) => Ok(ToolResultDecision::Keep),
@@ -269,6 +284,43 @@ impl Session {
             }
             _ => Err(EventError::UnexpectedDecision),
         }
+    }
+
+    async fn report_outcome(
+        &self,
+        policy: &PolicyEngine<'_>,
+        open: &DispatchRow,
+        o: &ToolOutcome,
+    ) -> Result<EngineDecision, EventError> {
+        let engine_dispatch = crate::engine::parse_dispatch(&open.id.0).ok_or_else(|| {
+            EventError::Storage("an open dispatch row does not carry a recoverable engine dispatch id".to_string())
+        })?;
+        let owner = self.trajectory.clone();
+        let dispatch = open.id.clone();
+        let from = open.state;
+        self.drive_with_evidence(
+            policy,
+            |evidence| EngineEvent::ToolOutcome {
+                dispatch: engine_dispatch.clone(),
+                outcome: o.clone(),
+                evidence,
+                entropy: fresh_entropy(),
+            },
+            move |decision| {
+                match &decision.then {
+                    Next::PresentToModel(Presentation::KeepOutput)
+                    | Next::PresentToModel(Presentation::Value { .. })
+                    | Next::PresentToModel(Presentation::ReplaceOutput { .. }) => match from {
+                        DispatchState::Executing => vec![RuntimeRecord::CloseDispatch { id: dispatch.clone() }],
+                        DispatchState::Awaiting => vec![RuntimeRecord::AbandonDispatch { id: dispatch.clone() }],
+                    },
+                    Next::PresentToModel(Presentation::Blocked { offers, .. }) => offer_records(&owner, offers),
+                    _ => Vec::new(),
+                }
+            },
+            None,
+        )
+        .await
     }
 
     /// The model called the `execute_remedy_plan` MCP tool. Executes
@@ -309,7 +361,7 @@ impl Session {
                             trajectory: route.clone(),
                             tool: released.tool.clone(),
                             bytes: released.bytes.clone(),
-                            state: DispatchState::Executing,
+                            state: DispatchState::Awaiting,
                         }],
                         Next::PresentToModel(Presentation::Blocked { offers, .. }) => offer_records(&route, offers),
                         _ => Vec::new(),
@@ -334,10 +386,10 @@ impl Session {
 
         match decision.then {
             Next::Approved { tool, bytes } => Ok(RemedyDecision::Authorized {
-                call: AuthorizedCall { tool, bytes },
+                call: ExactCall { tool, bytes },
             }),
-            Next::InvokeTool(released) => Ok(RemedyDecision::Authorized {
-                call: AuthorizedCall {
+            Next::InvokeTool(released) => Ok(RemedyDecision::Substituted {
+                call: ExactCall {
                     tool: released.tool,
                     bytes: released.bytes,
                 },
@@ -1323,8 +1375,13 @@ mod tests {
 
         assert_eq!(
             classify_report(&call(), canonical(&call()), Some(&row(DispatchState::Executing))),
-            Ok(DispatchId("d1".to_string())),
+            Ok(&row(DispatchState::Executing)),
             "the executing dispatch takes its own call's outcome",
+        );
+        assert_eq!(
+            classify_report(&call(), canonical(&call()), Some(&row(DispatchState::Awaiting))),
+            Err(UnreportableOutcome::NotStarted),
+            "a substituted call the harness never claimed was never handed out to run",
         );
         assert_eq!(
             classify_report(&call(), canonical(&call()), None),
@@ -1437,7 +1494,7 @@ mod tests {
         assert_eq!(
             outcome,
             RemedyDecision::Authorized {
-                call: AuthorizedCall {
+                call: ExactCall {
                     tool: "Bash".to_string(),
                     bytes: expected_bytes.clone()
                 },
@@ -3153,6 +3210,515 @@ attends = ["irreversible"]
                 .expect("the reopened offer executes"),
             RemedyDecision::Authorized { .. },
         ));
+    }
+
+    const SUBSTITUTED_SEND: &str = r#"
+version = 1
+
+[[policy.tool]]
+name = "read_hr"
+delta = { audience = { exactly = ["hr"] } }
+
+[[policy.tool]]
+name = "send"
+parameters = { type = "object", properties = { body = { type = "string" } }, required = ["body"] }
+requires = { audience = { includes = ["public"] } }
+delta = {}
+
+[[policy.sanitizer]]
+name = "redactor"
+on = ["tool_input"]
+[policy.sanitizer.mandate]
+audience = { from = { includes = ["hr"] }, to = { exactly = ["public"] } }
+"#;
+
+    const SUBSTITUTED_ATTENDED_SEND: &str = r#"
+version = 1
+
+[[policy.tool]]
+name = "read_hr"
+delta = { audience = { exactly = ["hr"] } }
+
+[[policy.tool]]
+name = "send"
+parameters = { type = "object", properties = { body = { type = "string" } }, required = ["body"] }
+requires = { audience = { includes = ["public"] }, attention = ["irreversible"] }
+delta = {}
+
+[[policy.sanitizer]]
+name = "redactor"
+on = ["tool_input"]
+[policy.sanitizer.mandate]
+audience = { from = { includes = ["hr"] }, to = { exactly = ["public"] } }
+
+[[policy.authority]]
+name = "approver"
+[policy.authority.mandate]
+attends = ["irreversible"]
+"#;
+
+    fn substituting_config(policy: &str, authority_url: Option<&str>) -> Config {
+        let binding = match authority_url {
+            Some(url) => format!("[externals.authorities.approver]\nurl = \"{url}\"\n"),
+            None => String::new(),
+        };
+        let text = format!(
+            "[policy]\n{policy}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n\
+             [externals.sanitizers.redactor]\nbuiltin = \"redact-email\"\n{binding}"
+        );
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, text).expect("the fixture writes");
+        Config::load(&path).expect("the fixture validates")
+    }
+
+    fn send(body: &str) -> ProposedCall {
+        ProposedCall {
+            tool: "send".to_string(),
+            arguments: raw(serde_json::json!({"body": body})),
+        }
+    }
+
+    const RAW_BODY: &str = "mail alice@corp.example today";
+    const REDACTED_BODY: &str = "mail [redacted-email] today";
+
+    async fn narrowed_and_blocked(runtime: &Runtime, session: &mut Session) -> OfferId {
+        let read = ProposedCall {
+            tool: "read_hr".to_string(),
+            arguments: raw(serde_json::json!({})),
+        };
+        assert!(matches!(
+            session.on_tool_call(read.clone(), false).await,
+            Ok(ToolCallDecision::Deny { .. }),
+        ));
+        let accept = surfaced_offer(runtime);
+        assert!(matches!(
+            session.on_remedy(accept, None).await,
+            Ok(RemedyDecision::Authorized { .. }),
+        ));
+        assert_eq!(
+            session
+                .on_tool_call(read.clone(), false)
+                .await
+                .expect("the read releases"),
+            ToolCallDecision::Allow { spawn: None },
+        );
+        session
+            .on_tool_result(
+                read,
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("Alice Chen".to_string()),
+                },
+            )
+            .await
+            .expect("the read closes");
+        assert!(matches!(
+            session.on_tool_call(send(RAW_BODY), false).await,
+            Ok(ToolCallDecision::Deny { .. }),
+        ));
+        runtime
+            .inner
+            .store
+            .surfaced_offers(&root())
+            .expect("the offer query runs")
+            .pop()
+            .expect("the block surfaced the hop")
+    }
+
+    fn open_state(runtime: &Runtime) -> Option<DispatchState> {
+        runtime
+            .inner
+            .store
+            .open_dispatch(&root())
+            .expect("the dispatch query runs")
+            .map(|row| row.state)
+    }
+
+    #[tokio::test]
+    async fn an_input_substitution_releases_the_replaced_call_and_its_outcome_closes_it() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(
+            substituting_config(SUBSTITUTED_SEND, None),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let hop = narrowed_and_blocked(&runtime, &mut session).await;
+
+        let substituted = session.on_remedy(hop.clone(), None).await.expect("the hop executes");
+        assert_eq!(
+            substituted,
+            RemedyDecision::Substituted {
+                call: ExactCall {
+                    tool: "send".to_string(),
+                    bytes: format!(r#"{{"body":"{REDACTED_BODY}"}}"#).into_bytes(),
+                },
+            },
+        );
+        assert_eq!(open_state(&runtime), Some(DispatchState::Awaiting));
+
+        assert_eq!(
+            session.on_remedy(hop.clone(), None).await.expect("the replay answers"),
+            substituted,
+        );
+        assert_eq!(open_state(&runtime), Some(DispatchState::Awaiting));
+
+        assert_eq!(
+            session
+                .on_tool_call(send(REDACTED_BODY), false)
+                .await
+                .expect("the substituted call is allowed"),
+            ToolCallDecision::Allow { spawn: None },
+        );
+        assert_eq!(open_state(&runtime), Some(DispatchState::Executing));
+        assert!(matches!(
+            session.on_tool_call(send(REDACTED_BODY), false).await,
+            Err(EventError::CallOutstanding),
+        ));
+
+        assert_eq!(
+            session
+                .on_tool_result(
+                    send(REDACTED_BODY),
+                    ToolOutcome::Success {
+                        body: OutcomeBody::Available("sent".to_string()),
+                    },
+                )
+                .await
+                .expect("the outcome is reported"),
+            ToolResultDecision::Keep,
+        );
+        assert_eq!(open_state(&runtime), None);
+        assert!(matches!(
+            session.on_remedy(hop, None).await,
+            Ok(RemedyDecision::Declined { .. }),
+        ));
+
+        let entries = runtime.audit(&root()).expect("the audit reads");
+        let sends: Vec<_> = entries
+            .iter()
+            .filter(|entry| matches!(&entry.event, crate::engine::AuditEvent::Released { tool, .. } if tool == "send"))
+            .collect();
+        assert_eq!(sends.len(), 1, "the replaced call is released once: {entries:?}");
+        assert!(
+            entries.iter().any(|entry| matches!(
+                &entry.event,
+                crate::engine::AuditEvent::Closed {
+                    outcome: crate::engine::DispatchOutcome::Ran { .. }
+                }
+            )),
+            "the replaced call's dispatch closed as run: {entries:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unusable_derivation_leaves_the_offer_standing() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(
+            substituting_config(SUBSTITUTED_SEND, None),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let read = ProposedCall {
+            tool: "read_hr".to_string(),
+            arguments: raw(serde_json::json!({})),
+        };
+        session
+            .on_tool_call(read.clone(), false)
+            .await
+            .expect("the read is decided");
+        session
+            .on_remedy(surfaced_offer(&runtime), None)
+            .await
+            .expect("the narrowing is accepted");
+        session
+            .on_tool_call(read.clone(), false)
+            .await
+            .expect("the read releases");
+        session
+            .on_tool_result(
+                read,
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("Alice Chen".to_string()),
+                },
+            )
+            .await
+            .expect("the read closes");
+        session
+            .on_tool_call(send("mail alice@corp.example"), false)
+            .await
+            .expect("the send is decided");
+        let hop = runtime
+            .inner
+            .store
+            .surfaced_offers(&root())
+            .expect("the offer query runs")
+            .pop()
+            .expect("the block surfaced the hop");
+
+        for _ in 0..2 {
+            assert!(matches!(
+                session.on_remedy(hop.clone(), None).await,
+                Ok(RemedyDecision::NoAnswer { .. }),
+            ));
+            assert_eq!(open_state(&runtime), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn another_call_while_a_substituted_call_awaits_abandons_it() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(
+            substituting_config(SUBSTITUTED_SEND, None),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let hop = narrowed_and_blocked(&runtime, &mut session).await;
+        session.on_remedy(hop.clone(), None).await.expect("the hop executes");
+        assert_eq!(open_state(&runtime), Some(DispatchState::Awaiting));
+
+        let other = ProposedCall {
+            tool: "read_hr".to_string(),
+            arguments: raw(serde_json::json!({})),
+        };
+        assert!(matches!(
+            session.on_tool_call(other.clone(), false).await,
+            Err(EventError::SubstitutionAbandoned { tool }) if tool == "send",
+        ));
+        assert_eq!(open_state(&runtime), None);
+        let entries = runtime.audit(&root()).expect("the audit reads");
+        assert!(
+            entries.iter().any(|entry| matches!(
+                &entry.event,
+                crate::engine::AuditEvent::Closed {
+                    outcome: crate::engine::DispatchOutcome::Failed
+                }
+            )),
+            "the abandoned dispatch closed as not run: {entries:?}"
+        );
+
+        assert_eq!(
+            session.on_tool_call(other, false).await.expect("the repeat is decided"),
+            ToolCallDecision::Allow { spawn: None },
+        );
+        assert!(matches!(
+            session.on_remedy(hop, None).await,
+            Ok(RemedyDecision::Declined { .. }),
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_abandonment_that_lost_the_race_to_a_claim_rolls_back() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(
+            substituting_config(SUBSTITUTED_SEND, None),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let hop = narrowed_and_blocked(&runtime, &mut session).await;
+        session.on_remedy(hop, None).await.expect("the hop executes");
+        let stale = runtime
+            .inner
+            .store
+            .open_dispatch(&root())
+            .expect("the dispatch query runs")
+            .expect("the substituted dispatch awaits");
+        assert_eq!(stale.state, DispatchState::Awaiting);
+
+        session
+            .on_tool_call(send(REDACTED_BODY), false)
+            .await
+            .expect("the substituted call is claimed");
+        let policy = runtime.inner.resolve_policy(&root()).expect("the policy resolves");
+        let other = ProposedCall {
+            tool: "read_hr".to_string(),
+            arguments: raw(serde_json::json!({})),
+        };
+        assert!(matches!(
+            session.claim_or_abandon(&policy, &other, stale).await,
+            Err(EventError::CallOutstanding),
+        ));
+        assert_eq!(open_state(&runtime), Some(DispatchState::Executing));
+
+        assert_eq!(
+            session
+                .on_tool_result(
+                    send(REDACTED_BODY),
+                    ToolOutcome::Success {
+                        body: OutcomeBody::Available("sent".to_string()),
+                    },
+                )
+                .await
+                .expect("the run's outcome is reported"),
+            ToolResultDecision::Keep,
+        );
+        assert_eq!(open_state(&runtime), None);
+        let entries = runtime.audit(&root()).expect("the audit reads");
+        assert!(
+            !entries.iter().any(|entry| matches!(
+                &entry.event,
+                crate::engine::AuditEvent::Closed {
+                    outcome: crate::engine::DispatchOutcome::Failed
+                }
+            )),
+            "the lost abandonment left no failed close: {entries:?}"
+        );
+        assert!(
+            entries.iter().any(|entry| matches!(
+                &entry.event,
+                crate::engine::AuditEvent::Closed {
+                    outcome: crate::engine::DispatchOutcome::Ran { .. }
+                }
+            )),
+            "the run closed as run: {entries:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unclaimed_substituted_call_reports_nothing() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(
+            substituting_config(SUBSTITUTED_SEND, None),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let hop = narrowed_and_blocked(&runtime, &mut session).await;
+        session.on_remedy(hop, None).await.expect("the hop executes");
+
+        assert!(matches!(
+            session
+                .on_tool_result(
+                    send(REDACTED_BODY),
+                    ToolOutcome::Success {
+                        body: OutcomeBody::Available("sent".to_string()),
+                    },
+                )
+                .await,
+            Err(EventError::DispatchNotStarted),
+        ));
+        assert_eq!(open_state(&runtime), Some(DispatchState::Awaiting));
+    }
+
+    #[tokio::test]
+    async fn a_substituted_call_survives_a_restart_and_is_claimed() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let db = dir.path().join("appa.db");
+        {
+            let runtime = Runtime::open(substituting_config(SUBSTITUTED_SEND, None), db.clone(), None)
+                .expect("the deployment opens");
+            let mut session = runtime.create_session(root()).expect("a fresh id opens");
+            let hop = narrowed_and_blocked(&runtime, &mut session).await;
+            session.on_remedy(hop, None).await.expect("the hop executes");
+        }
+        let runtime =
+            Runtime::open(substituting_config(SUBSTITUTED_SEND, None), db, None).expect("the deployment reopens");
+        let mut session = runtime.session(&root()).expect("the trajectory reopens");
+        assert_eq!(open_state(&runtime), Some(DispatchState::Awaiting));
+        assert_eq!(
+            session
+                .on_tool_call(send(REDACTED_BODY), false)
+                .await
+                .expect("the substituted call is allowed after the restart"),
+            ToolCallDecision::Allow { spawn: None },
+        );
+        assert_eq!(open_state(&runtime), Some(DispatchState::Executing));
+    }
+
+    #[tokio::test]
+    async fn a_failed_commit_leaves_the_substituted_call_awaiting() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(
+            substituting_config(SUBSTITUTED_SEND, None),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let hop = narrowed_and_blocked(&runtime, &mut session).await;
+        session.on_remedy(hop, None).await.expect("the hop executes");
+
+        let other = ProposedCall {
+            tool: "read_hr".to_string(),
+            arguments: raw(serde_json::json!({})),
+        };
+        runtime.inner.store.fail_next_commit();
+        assert!(matches!(
+            session.on_tool_call(other, false).await,
+            Err(EventError::Storage(_)),
+        ));
+        assert_eq!(open_state(&runtime), Some(DispatchState::Awaiting));
+
+        runtime.inner.store.fail_next_commit();
+        assert!(matches!(
+            session.on_tool_call(send(REDACTED_BODY), false).await,
+            Err(EventError::Storage(_)),
+        ));
+        assert_eq!(open_state(&runtime), Some(DispatchState::Awaiting));
+
+        assert_eq!(
+            session
+                .on_tool_call(send(REDACTED_BODY), false)
+                .await
+                .expect("the retry claims the dispatch"),
+            ToolCallDecision::Allow { spawn: None },
+        );
+        assert_eq!(open_state(&runtime), Some(DispatchState::Executing));
+    }
+
+    #[tokio::test]
+    async fn a_hop_that_leaves_a_gap_chains_into_an_approval_of_the_replaced_call() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let url = stub(serde_json::json!({"ruling": "approve"})).await;
+        let runtime = Runtime::open(
+            substituting_config(SUBSTITUTED_ATTENDED_SEND, Some(&url)),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let hop = narrowed_and_blocked(&runtime, &mut session).await;
+
+        assert!(matches!(
+            session.on_remedy(hop, None).await,
+            Ok(RemedyDecision::Declined { .. }),
+        ));
+        assert_eq!(open_state(&runtime), None);
+        let approval = runtime
+            .inner
+            .store
+            .surfaced_offers(&root())
+            .expect("the offer query runs")
+            .pop()
+            .expect("the re-planned block surfaced the approval");
+        assert_eq!(
+            session.on_remedy(approval, None).await.expect("the approval executes"),
+            RemedyDecision::Authorized {
+                call: ExactCall {
+                    tool: "send".to_string(),
+                    bytes: format!(r#"{{"body":"{REDACTED_BODY}"}}"#).into_bytes(),
+                },
+            },
+        );
+        assert!(matches!(
+            session.on_tool_call(send(RAW_BODY), false).await,
+            Ok(ToolCallDecision::Deny { .. }),
+        ));
+        assert_eq!(
+            session
+                .on_tool_call(send(REDACTED_BODY), false)
+                .await
+                .expect("the approved call releases"),
+            ToolCallDecision::Allow { spawn: None },
+        );
     }
 
     const SANITIZED_CHILD: &str = r#"

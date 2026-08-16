@@ -251,7 +251,15 @@ impl Engine {
         }
         match &recorded.subject {
             crate::basis::SubjectKey::Call { .. } => match recorded.plan.hop() {
-                Some(_) => Ok(OfferConsult::Stale),
+                Some(sanitizer) => {
+                    let call = self.offer_call(&views, recorded);
+                    let arguments = call.canonical_arguments();
+                    Ok(OfferConsult::Sanitizer {
+                        sanitizer: sanitizer.clone(),
+                        source: crate::value::RawResultDigest::of(arguments.canonical_bytes()),
+                        body: ValueBody::new(arguments.canonical_text()),
+                    })
+                }
                 None if recorded.plan.required.is_empty() => Ok(OfferConsult::Accept),
                 None => Ok(OfferConsult::Authorities {
                     call: self.offer_call(&views, recorded),
@@ -5064,7 +5072,11 @@ mod tests {
         let log = [log, facts].concat();
         assert_eq!(
             e.offer_consults(&viewing(&e, &log), &traj(), &input_hop),
-            Ok(OfferConsult::Stale),
+            Ok(OfferConsult::Sanitizer {
+                sanitizer: crate::names::SanitizerName::new("redact"),
+                source: crate::value::RawResultDigest::of(br#"{"body":"ssn 123"}"#),
+                body: ValueBody::new(r#"{"body":"ssn 123"}"#),
+            }),
         );
     }
 

@@ -35,20 +35,25 @@ pub(crate) struct DispatchId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OfferId(pub String);
 
-/// An authorized call: the exact canonical bytes the harness must now
-/// execute, never re-rendered and never edited.
+/// The exact call the harness must now propose: the engine's canonical
+/// bytes, never re-rendered and never edited.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct AuthorizedCall {
+pub(crate) struct ExactCall {
     pub tool: String,
     pub bytes: Vec<u8>,
 }
 
-/// Answer to a proposed tool call: run it, do not run it — `feedback`
-/// tells the model why not and what its options are — or pass it
-/// through: `Control` is the runtime's own control tool, not a checked
-/// flow; it passes unchecked and opens no dispatch. An
-/// allowed call always runs with the arguments the model proposed;
-/// input substitution is outside this runtime's coverage.
+impl ExactCall {
+    fn proposed(self) -> ProposedCall {
+        let text = String::from_utf8(self.bytes).expect("canonical argument bytes are UTF-8 JSON");
+        ProposedCall {
+            tool: self.tool,
+            arguments: serde_json::value::RawValue::from_string(text)
+                .expect("canonical argument bytes are one JSON value"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ToolCallDecision {
     Allow {
@@ -71,7 +76,8 @@ pub(crate) enum ToolResultDecision {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum RemedyDecision {
-    Authorized { call: AuthorizedCall },
+    Authorized { call: ExactCall },
+    Substituted { call: ExactCall },
     Returned { value: String },
     Declined { feedback: String },
     NoAnswer { feedback: String },
@@ -84,7 +90,8 @@ pub(crate) enum RemedyDecision {
 /// because the id is the proof.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RemedyOutcome {
-    Authorized { tool: String },
+    Authorized { call: ProposedCall },
+    Substituted { call: ProposedCall },
     Returned { value: String },
     Declined { feedback: String },
     NoAnswer { feedback: String },
@@ -140,6 +147,12 @@ pub(crate) enum SessionError {
 pub(crate) enum EventError {
     #[error("a call is already outstanding; propose one call at a time")]
     CallOutstanding,
+    #[error(
+        "the substituted {tool} call did not run and is now closed; propose your call again (a substituted call needs a fresh offer)"
+    )]
+    SubstitutionAbandoned { tool: String },
+    #[error("this outcome names a substituted call that was never proposed; it is not reported")]
+    DispatchNotStarted,
     #[error("the trajectory has ended")]
     TrajectoryEnded,
     #[error("no trajectory with this id exists")]
@@ -186,6 +199,8 @@ impl EventError {
             | EventError::Contended { .. }
             | EventError::UnexpectedDecision => true,
             EventError::CallOutstanding
+            | EventError::SubstitutionAbandoned { .. }
+            | EventError::DispatchNotStarted
             | EventError::TrajectoryEnded
             | EventError::UnknownTrajectory
             | EventError::TrajectoryExists
@@ -466,7 +481,8 @@ impl Runtime {
             }
         };
         match session.on_remedy(offer, elicitation).await {
-            Ok(RemedyDecision::Authorized { call }) => RemedyOutcome::Authorized { tool: call.tool },
+            Ok(RemedyDecision::Authorized { call }) => RemedyOutcome::Authorized { call: call.proposed() },
+            Ok(RemedyDecision::Substituted { call }) => RemedyOutcome::Substituted { call: call.proposed() },
             Ok(RemedyDecision::Returned { value }) => RemedyOutcome::Returned { value },
             Ok(RemedyDecision::Declined { feedback }) => RemedyOutcome::Declined { feedback },
             Ok(RemedyDecision::NoAnswer { feedback }) => RemedyOutcome::NoAnswer { feedback },

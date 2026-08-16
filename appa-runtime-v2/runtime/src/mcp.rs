@@ -43,8 +43,16 @@ impl RemedyService {
 
 fn render(outcome: RemedyOutcome) -> CallToolResult {
     match outcome {
-        RemedyOutcome::Authorized { tool } => CallToolResult::success(vec![ContentBlock::text(format!(
-            "[appa] Authorized. Retry the original {tool} call with exactly the same arguments.",
+        RemedyOutcome::Authorized { call } => CallToolResult::success(vec![ContentBlock::text(format!(
+            "[appa] Authorized. Propose the {} call again with exactly these arguments: {}",
+            call.tool,
+            call.arguments.get(),
+        ))]),
+        RemedyOutcome::Substituted { call } => CallToolResult::success(vec![ContentBlock::text(format!(
+            "[appa] Substituted. The sanitizer replaced the arguments and the call is released. \
+             Propose the {} call with exactly these arguments to run it: {}",
+            call.tool,
+            call.arguments.get(),
         ))]),
         RemedyOutcome::Returned { value } => CallToolResult::success(vec![ContentBlock::text(value)]),
         RemedyOutcome::Declined { feedback } | RemedyOutcome::NoAnswer { feedback } => {

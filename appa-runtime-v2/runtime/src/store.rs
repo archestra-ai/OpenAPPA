@@ -38,23 +38,41 @@ pub enum RuntimeRecord {
         bytes: Vec<u8>,
         state: DispatchState,
     },
+    StartDispatch { id: DispatchId },
+    AbandonDispatch { id: DispatchId },
     CloseDispatch { id: DispatchId },
     SurfaceOffer { id: OfferId, trajectory: TrajectoryId },
 }
 
-/// Where a dispatch stands. Every open dispatch is executing: a call the
-/// engine released and the harness is running. An approval the
-/// agent must re-propose is the engine's own durable state, not a runtime
-/// dispatch row, so there is no waiting-to-be-reproposed state here.
+/// Where an open dispatch stands. `Executing`: a call the engine released
+/// and the harness is running. `Awaiting`: a substituted call
+/// the engine released at offer execution that the harness has
+/// not yet claimed — a matching proposal starts it, exactly once. An
+/// approval the agent must re-propose is the engine's own durable state,
+/// not a runtime dispatch row, so it has no state here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchState {
+    Awaiting,
     Executing,
 }
 
 impl DispatchState {
     fn as_sql(self) -> &'static str {
         match self {
+            DispatchState::Awaiting => "awaiting",
             DispatchState::Executing => "executing",
+        }
+    }
+
+    fn from_sql(column: usize, state: String) -> Result<DispatchState, rusqlite::Error> {
+        match state.as_str() {
+            "awaiting" => Ok(DispatchState::Awaiting),
+            "executing" => Ok(DispatchState::Executing),
+            _ => Err(rusqlite::Error::FromSqlConversionFailure(
+                column,
+                rusqlite::types::Type::Text,
+                format!("dispatch state {state:?} is not an open state").into(),
+            )),
         }
     }
 }
@@ -322,12 +340,11 @@ impl Store {
                  WHERE trajectory = ?1 AND state != 'closed'",
                 params![trajectory.0],
                 |row| {
-                    let _state: String = row.get(3)?;
                     Ok(DispatchRow {
                         id: DispatchId(row.get(0)?),
                         tool: row.get(1)?,
                         bytes: row.get(2)?,
-                        state: DispatchState::Executing,
+                        state: DispatchState::from_sql(3, row.get(3)?)?,
                     })
                 },
             )
@@ -410,6 +427,17 @@ impl Store {
                     state,
                 } => {
                     require_member(&tx, family, &trajectory)?;
+                    if let Some((owner, open_tool, open_bytes)) = dispatch_row(&tx, &id)? {
+                        if owner == trajectory.0 && open_tool == tool && open_bytes == bytes {
+                            continue;
+                        }
+                        return Err(CommitError::InvalidRecord {
+                            detail: format!(
+                                "OpenDispatch {} names a dispatch already recorded for another call",
+                                id.0
+                            ),
+                        });
+                    }
                     match tx.execute(
                         "INSERT INTO dispatches (id, trajectory, tool, bytes, state)
                          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -423,6 +451,29 @@ impl Store {
                             return Err(CommitError::DispatchAlreadyOpen);
                         }
                         Err(e) => return Err(CommitError::Storage(e)),
+                    }
+                }
+                RuntimeRecord::StartDispatch { id } => {
+                    require_dispatch_member(&tx, family, &id)?;
+                    let changed = tx.execute(
+                        "UPDATE dispatches SET state = 'executing'
+                         WHERE id = ?1 AND state = 'awaiting'
+                           AND trajectory IN (SELECT id FROM trajectories WHERE ended = 0)",
+                        params![id.0],
+                    )?;
+                    if changed != 1 {
+                        return Err(CommitError::DispatchAlreadyOpen);
+                    }
+                }
+                RuntimeRecord::AbandonDispatch { id } => {
+                    require_dispatch_member(&tx, family, &id)?;
+                    let changed = tx.execute(
+                        "UPDATE dispatches SET state = 'closed'
+                         WHERE id = ?1 AND state = 'awaiting'",
+                        params![id.0],
+                    )?;
+                    if changed != 1 {
+                        return Err(CommitError::DispatchAlreadyOpen);
                     }
                 }
                 RuntimeRecord::CloseDispatch { id } => {
@@ -557,6 +608,19 @@ fn require_member(
             detail: format!("trajectory {} does not exist", trajectory.0),
         }),
     }
+}
+
+fn dispatch_row(
+    tx: &rusqlite::Transaction<'_>,
+    dispatch: &DispatchId,
+) -> Result<Option<(String, String, Vec<u8>)>, CommitError> {
+    tx.query_row(
+        "SELECT trajectory, tool, bytes FROM dispatches WHERE id = ?1",
+        params![dispatch.0],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .optional()
+    .map_err(CommitError::Storage)
 }
 
 fn require_dispatch_member(
@@ -1011,6 +1075,132 @@ mod tests {
             ),
             Err(CommitError::DispatchAlreadyOpen),
         ));
+    }
+
+    #[test]
+    fn an_awaiting_dispatch_starts_once_and_reopens_identically() {
+        let (_dir, store) = open_temp();
+        let f = family();
+        open_root(&store, &f);
+        let open = |tool: &str, bytes: &[u8]| RuntimeRecord::OpenDispatch {
+            id: DispatchId("d1".to_string()),
+            trajectory: f.clone(),
+            tool: tool.to_string(),
+            bytes: bytes.to_vec(),
+            state: DispatchState::Awaiting,
+        };
+        let commit = |records: Vec<RuntimeRecord>| store.commit_event(&f, EventWrite { batch: None, records });
+        commit(vec![open("send", b"call")]).expect("the substituted dispatch opens");
+        let row = |state: DispatchState| DispatchRow {
+            id: DispatchId("d1".to_string()),
+            tool: "send".to_string(),
+            bytes: b"call".to_vec(),
+            state,
+        };
+        assert_eq!(
+            store.open_dispatch(&f).expect("reads"),
+            Some(row(DispatchState::Awaiting))
+        );
+
+        commit(vec![open("send", b"call")]).expect("the identical record is the same act");
+        assert!(matches!(
+            commit(vec![open("send", b"other")]),
+            Err(CommitError::InvalidRecord { .. }),
+        ));
+        assert!(matches!(
+            commit(vec![open("other", b"call")]),
+            Err(CommitError::InvalidRecord { .. }),
+        ));
+        assert_eq!(
+            store.open_dispatch(&f).expect("reads"),
+            Some(row(DispatchState::Awaiting))
+        );
+
+        let start = || RuntimeRecord::StartDispatch {
+            id: DispatchId("d1".to_string()),
+        };
+        commit(vec![start()]).expect("the awaiting dispatch starts");
+        assert_eq!(
+            store.open_dispatch(&f).expect("reads"),
+            Some(row(DispatchState::Executing))
+        );
+        assert!(matches!(commit(vec![start()]), Err(CommitError::DispatchAlreadyOpen)));
+        commit(vec![open("send", b"call")]).expect("the replayed open leaves the started row alone");
+        assert_eq!(
+            store.open_dispatch(&f).expect("reads"),
+            Some(row(DispatchState::Executing))
+        );
+        let abandon = || RuntimeRecord::AbandonDispatch {
+            id: DispatchId("d1".to_string()),
+        };
+        assert!(matches!(commit(vec![abandon()]), Err(CommitError::DispatchAlreadyOpen)));
+        assert_eq!(
+            store.open_dispatch(&f).expect("reads"),
+            Some(row(DispatchState::Executing))
+        );
+
+        commit(vec![RuntimeRecord::CloseDispatch {
+            id: DispatchId("d1".to_string()),
+        }])
+        .expect("the dispatch closes");
+        assert!(matches!(commit(vec![start()]), Err(CommitError::DispatchAlreadyOpen)));
+        assert!(matches!(commit(vec![abandon()]), Err(CommitError::DispatchAlreadyOpen)));
+        assert_eq!(store.open_dispatch(&f).expect("reads"), None);
+    }
+
+    #[test]
+    fn an_awaiting_dispatch_abandons_once() {
+        let (_dir, store) = open_temp();
+        let f = TrajectoryId("cc:family".to_string());
+        open_root(&store, &f);
+        let commit = |records: Vec<RuntimeRecord>| store.commit_event(&f, EventWrite { batch: None, records });
+        commit(vec![RuntimeRecord::OpenDispatch {
+            id: DispatchId("d1".to_string()),
+            trajectory: f.clone(),
+            tool: "send".to_string(),
+            bytes: b"call".to_vec(),
+            state: DispatchState::Awaiting,
+        }])
+        .expect("the substituted dispatch opens");
+        let abandon = || RuntimeRecord::AbandonDispatch {
+            id: DispatchId("d1".to_string()),
+        };
+        commit(vec![abandon()]).expect("the awaiting dispatch abandons");
+        assert_eq!(store.open_dispatch(&f).expect("reads"), None);
+        assert!(matches!(commit(vec![abandon()]), Err(CommitError::DispatchAlreadyOpen)));
+        assert!(matches!(
+            commit(vec![RuntimeRecord::StartDispatch {
+                id: DispatchId("d1".to_string()),
+            }]),
+            Err(CommitError::DispatchAlreadyOpen)
+        ));
+    }
+
+    #[test]
+    fn an_ended_trajectory_starts_no_awaiting_dispatch() {
+        let (_dir, store) = open_temp();
+        let f = TrajectoryId("cc:family".to_string());
+        open_root(&store, &f);
+        let commit = |records: Vec<RuntimeRecord>| store.commit_event(&f, EventWrite { batch: None, records });
+        commit(vec![RuntimeRecord::OpenDispatch {
+            id: DispatchId("d1".to_string()),
+            trajectory: f.clone(),
+            tool: "send".to_string(),
+            bytes: b"call".to_vec(),
+            state: DispatchState::Awaiting,
+        }])
+        .expect("the substituted dispatch opens");
+        commit(vec![RuntimeRecord::End { id: f.clone() }]).expect("the trajectory ends");
+        assert!(matches!(
+            commit(vec![RuntimeRecord::StartDispatch {
+                id: DispatchId("d1".to_string()),
+            }]),
+            Err(CommitError::DispatchAlreadyOpen)
+        ));
+        assert_eq!(
+            store.open_dispatch(&f).expect("reads").map(|row| row.state),
+            Some(DispatchState::Awaiting)
+        );
     }
 
     #[test]

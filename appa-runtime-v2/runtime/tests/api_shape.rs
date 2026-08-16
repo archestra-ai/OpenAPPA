@@ -165,8 +165,8 @@ fn the_declared_audit(runtime: &Runtime, id: &TrajectoryId) {
 
 async fn the_declared_remedy_entry(runtime: &Runtime, offer: OfferId) {
     match runtime.execute_remedy(offer).await {
-        RemedyOutcome::Authorized { tool } => {
-            let _: String = tool;
+        RemedyOutcome::Authorized { call } | RemedyOutcome::Substituted { call } => {
+            let _: ProposedCall = call;
         }
         RemedyOutcome::Returned { value } => {
             let _: String = value;

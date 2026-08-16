@@ -348,15 +348,10 @@ impl Run<'_> {
             },
         )
         .await;
-        let spawn = self
-            .agent
-            .spawn
-            .as_ref()
-            .is_some_and(|spawn| spawn.name.0 == proposed.tool);
         let event = HookEvent::ToolCall {
             actor: self.actor(frame),
             call: proposed.clone(),
-            spawn,
+            spawn: self.marks_spawn(&proposed),
         };
         match hooks::handle(&self.agent.runtime, event).await {
             HookDecision::AllowCall { spawn } => self.run_released(frame, &id, proposed, spawn).await,
@@ -372,10 +367,14 @@ impl Run<'_> {
                 .await;
                 Ok(Answered::Reply(feedback))
             }
-            HookDecision::PassControl => Ok(Answered::Reply(self.execute_remedy(frame, &proposed).await)),
+            HookDecision::PassControl => self.execute_remedy(frame, &id, &proposed).await,
             HookDecision::Refuse { detail } => Err(StopReason::Refused(detail)),
             other => Err(unexpected("a proposed call", &other)),
         }
+    }
+
+    fn marks_spawn(&self, call: &ProposedCall) -> bool {
+        self.agent.spawn.as_ref().is_some_and(|spawn| spawn.name.0 == call.tool)
     }
 
     async fn run_released(
@@ -403,7 +402,9 @@ impl Run<'_> {
     ) -> Result<Answered, StopReason> {
         let Some(binding) = binding else {
             let outcome = ToolOutcome::Failure {
-                message: "no child was opened: this deployment does not control subagent context".to_string(),
+                message: "no child was opened: this spawn prepared no fork — the deployment does not \
+                          control subagent context, or the call was a sanitizer's substitution"
+                    .to_string(),
             };
             return self.report(frame, id, call, outcome).await.map(Answered::Reply);
         };
@@ -522,26 +523,45 @@ impl Run<'_> {
         }
     }
 
-    async fn execute_remedy(&self, frame: &Frame, call: &ProposedCall) -> String {
+    async fn execute_remedy(
+        &mut self,
+        frame: &mut Frame,
+        id: &CallId,
+        call: &ProposedCall,
+    ) -> Result<Answered, StopReason> {
         let offer = serde_json::from_str::<serde_json::Value>(call.arguments.get())
             .ok()
             .and_then(|arguments| arguments.get("offer_id")?.as_str().map(str::to_string));
         let Some(offer) = offer else {
-            return format!("{CONTROL_TOOL} needs an offer_id, quoted exactly as the feedback surfaced it.");
+            return Ok(Answered::Reply(format!(
+                "{CONTROL_TOOL} needs an offer_id, quoted exactly as the feedback surfaced it."
+            )));
         };
-        match self.agent.runtime.execute_remedy(OfferId(offer)).await {
-            RemedyOutcome::Authorized { tool } => {
+        let reply = match self.agent.runtime.execute_remedy(OfferId(offer)).await {
+            RemedyOutcome::Authorized { call } => {
                 self.record(
                     frame,
                     Record::OfferTaken {
-                        detail: format!("{tool} may now run"),
+                        detail: format!("{} may now run", call.tool),
                     },
                 )
                 .await;
                 format!(
-                    "Authorized. Propose the {tool} call again, byte-for-byte identical; \
-                     it will run without a new check.",
+                    "Authorized. Propose the {} call again with exactly these arguments; \
+                     it will run without a new check: {}",
+                    call.tool,
+                    call.arguments.get(),
                 )
+            }
+            RemedyOutcome::Substituted { call } => {
+                self.record(
+                    frame,
+                    Record::OfferTaken {
+                        detail: format!("{} runs with the sanitizer's replacement", call.tool),
+                    },
+                )
+                .await;
+                return self.run_substituted(frame, id, call).await;
             }
             RemedyOutcome::Returned { value } => {
                 self.record(
@@ -573,6 +593,26 @@ impl Run<'_> {
                 .await;
                 detail
             }
+        };
+        Ok(Answered::Reply(reply))
+    }
+
+    async fn run_substituted(
+        &mut self,
+        frame: &mut Frame,
+        id: &CallId,
+        call: ProposedCall,
+    ) -> Result<Answered, StopReason> {
+        let event = HookEvent::ToolCall {
+            actor: self.actor(frame),
+            call: call.clone(),
+            spawn: self.marks_spawn(&call),
+        };
+        match hooks::handle(&self.agent.runtime, event).await {
+            HookDecision::AllowCall { spawn } => self.run_released(frame, id, call, spawn).await,
+            HookDecision::DenyCall { feedback } => Ok(Answered::Reply(feedback)),
+            HookDecision::Refuse { detail } => Err(StopReason::Refused(detail)),
+            other => Err(unexpected("a substituted call", &other)),
         }
     }
 

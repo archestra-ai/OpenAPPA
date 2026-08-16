@@ -182,9 +182,17 @@ impl SessionInner {
             return format!("{CONTROL_TOOL} needs an {OFFER_ARGUMENT}, quoted exactly as the feedback surfaced it.");
         };
         match self.tokio.block_on(self.runtime.execute_remedy(OfferId(offer))) {
-            RemedyOutcome::Authorized { tool } => format!(
-                "Authorized. Propose the {tool} call again, byte-for-byte identical; \
-                 it will run without a new check.",
+            RemedyOutcome::Authorized { call } => format!(
+                "Authorized. Propose the {} call again with exactly these arguments; \
+                 it will run without a new check: {}",
+                call.tool,
+                call.arguments.get(),
+            ),
+            RemedyOutcome::Substituted { call } => format!(
+                "Substituted. The sanitizer replaced the arguments and the call is released. \
+                 Propose the {} call with exactly these arguments to run it: {}",
+                call.tool,
+                call.arguments.get(),
             ),
             RemedyOutcome::Returned { value } => value,
             RemedyOutcome::Declined { feedback } | RemedyOutcome::NoAnswer { feedback } => feedback,
