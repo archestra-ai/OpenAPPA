@@ -101,6 +101,7 @@ fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
             Some(call) => Ok(Some(HookEvent::ToolCall {
                 actor: event.actor(),
                 call,
+                spawn: false,
             })),
             None => Err(malformed("PreToolUse without a tool call")),
         },
@@ -115,6 +116,7 @@ fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
             Some(agent) => Ok(Some(HookEvent::ChildStart {
                 parent: event.root(),
                 child: TrajectoryId(format!("cc:{}:{agent}", event.session_id)),
+                spawn: None,
             })),
             None => Err(malformed("SubagentStart without an agent id")),
         },
@@ -153,7 +155,7 @@ fn map_outcome(response: Option<&serde_json::Value>) -> ToolOutcome {
 fn render(decision: &HookDecision) -> serde_json::Value {
     match decision {
         HookDecision::Ack => serde_json::json!({}),
-        HookDecision::AllowCall => allow("appa: the call is released"),
+        HookDecision::AllowCall { .. } => allow("appa: the call is released"),
         HookDecision::PassControl => allow("appa: the runtime's own control tool"),
         HookDecision::DenyCall { feedback } => deny(feedback),
         HookDecision::Block { reason } => block(reason),
@@ -270,6 +272,7 @@ mod tests {
                     arguments: serde_json::value::to_raw_value(&serde_json::json!({"command": "ls"}))
                         .expect("the fixture serializes"),
                 },
+                spawn: false,
             })),
         );
     }
@@ -316,6 +319,7 @@ mod tests {
             Ok(Some(HookEvent::ChildStart {
                 parent: TrajectoryId("cc:s1".to_string()),
                 child: TrajectoryId("cc:s1:a1".to_string()),
+                spawn: None,
             })),
         );
         let stop = serde_json::json!({
@@ -439,7 +443,7 @@ mod tests {
     fn every_decision_renders_its_exact_wire_body() {
         assert_eq!(render(&HookDecision::Ack), serde_json::json!({}));
         assert_eq!(
-            render(&HookDecision::AllowCall),
+            render(&HookDecision::AllowCall { spawn: None }),
             serde_json::json!({
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",

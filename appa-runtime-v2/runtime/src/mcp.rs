@@ -153,10 +153,13 @@ mod tests {
             .expect("a fresh id opens");
         testing::enqueue_deny(&runtime, "blocked; execute_remedy_plan(offer-mcp)", &["offer-mcp"]);
         let denied = session
-            .on_tool_call(ProposedCall {
-                tool: "Bash".to_string(),
-                arguments: raw(serde_json::json!({"command": "ls"})),
-            })
+            .on_tool_call(
+                ProposedCall {
+                    tool: "Bash".to_string(),
+                    arguments: raw(serde_json::json!({"command": "ls"})),
+                },
+                false,
+            )
             .await
             .expect("the deny is delivered");
         assert!(matches!(denied, ToolCallDecision::Deny { .. }));

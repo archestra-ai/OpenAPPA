@@ -232,6 +232,85 @@ impl Engine {
         }
     }
 
+    /// What the runtime must resolve before it can execute one live offer.
+    pub fn offer_consults(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        offer: &crate::value::OfferId,
+    ) -> Result<crate::transition::OfferConsult, TransitionError> {
+        use crate::transition::OfferConsult;
+        let views = view.projection().view(trajectory);
+        let recorded = views.offer(offer).ok_or(TransitionError::UnknownOffer)?;
+        if recorded.trajectory != *trajectory {
+            return Err(TransitionError::OfferElsewhere);
+        }
+        if let Some(end) = &recorded.end {
+            return Ok(OfferConsult::Replay(replay_outcome(recorded, end)));
+        }
+        if recorded.basis != views.basis_for(&recorded.subject) {
+            return Ok(OfferConsult::Stale);
+        }
+        match &recorded.subject {
+            crate::basis::SubjectKey::Call { .. } => match recorded.plan.hop() {
+                Some(_) => Ok(OfferConsult::Stale),
+                None if recorded.plan.required.is_empty() => Ok(OfferConsult::Accept),
+                None => Ok(OfferConsult::Authorities {
+                    call: self.offer_call(&views, recorded),
+                    required: recorded.plan.required.clone(),
+                }),
+            },
+            crate::basis::SubjectKey::Return(id) => match recorded.plan.hop() {
+                Some(sanitizer) if sanitizer.is_attest_schema() => Ok(OfferConsult::Accept),
+                Some(sanitizer) => {
+                    let (source, body) = match views.candidate(&recorded.subject) {
+                        Some(DerivedCandidate::Return { value, .. }) => (
+                            crate::value::RawResultDigest::of(value.body.as_str().as_bytes()),
+                            value.body.clone(),
+                        ),
+                        _ => {
+                            let body = views
+                                .pending_return(id)
+                                .ok_or(TransitionError::StaleOffer)?
+                                .body()
+                                .clone();
+                            (crate::value::RawResultDigest::of(body.as_str().as_bytes()), body)
+                        }
+                    };
+                    Ok(OfferConsult::Sanitizer {
+                        sanitizer: sanitizer.clone(),
+                        source,
+                        body,
+                    })
+                }
+                None => Ok(OfferConsult::Accept),
+            },
+            crate::basis::SubjectKey::ConfinedResult(_) => match recorded.plan.hop() {
+                Some(sanitizer) => {
+                    let DerivedCandidate::Result { value, .. } =
+                        views.candidate(&recorded.subject).ok_or(TransitionError::StaleOffer)?
+                    else {
+                        return Err(TransitionError::StaleOffer);
+                    };
+                    let body = value.body.clone();
+                    let source = crate::value::RawResultDigest::of(body.as_str().as_bytes());
+                    Ok(OfferConsult::Sanitizer {
+                        sanitizer: sanitizer.clone(),
+                        source,
+                        body,
+                    })
+                }
+                None => Ok(OfferConsult::Accept),
+            },
+            crate::basis::SubjectKey::Approval(_) => Ok(OfferConsult::Stale),
+        }
+    }
+
+    /// The fork one child was bound to, or `None` for a trajectory that never forked.
+    pub fn fork_of(&self, view: &EngineView, child: &TrajectoryId) -> Option<crate::value::ForkId> {
+        view.views(child).fork_of(child).cloned()
+    }
+
     fn decide_binding(&self, view: &EngineView, binding: &ForkBinding) -> Result<EngineDecision, TransitionError> {
         let parent = view
             .projection()
@@ -3235,6 +3314,24 @@ fn approved_release(
     facts
 }
 
+fn replay_outcome(recorded: &crate::projection::RecordedOffer, end: &crate::projection::OfferEnd) -> OfferOutcome {
+    use crate::projection::OfferEnd;
+    match end {
+        OfferEnd::Denied(authority) => OfferOutcome::Denied {
+            authority: authority.clone(),
+        },
+        OfferEnd::Accepted => match recorded.plan.hop() {
+            Some(sanitizer) if !sanitizer.is_attest_schema() => OfferOutcome::Derived(Evidence::Sanitizer {
+                sanitizer: sanitizer.clone(),
+                source: RawResultDigest::of(&[]),
+                derived: ValueBody::new(""),
+            }),
+            _ => OfferOutcome::Approved(Vec::new()),
+        },
+        OfferEnd::Invalidated => OfferOutcome::Approved(Vec::new()),
+    }
+}
+
 fn offer_block(
     recorded: &crate::projection::RecordedOffer,
     execution: &OfferExecution,
@@ -4921,6 +5018,52 @@ mod tests {
             e.validate_replay(&without_acceptance(&log, substituted)),
             Err(crate::transition::TransitionRefusal::OfferEnded),
             "a substituted candidate stands on the acceptance that authorised it"
+        );
+    }
+
+    #[test]
+    fn offer_consults_names_the_external_work_each_offer_needs() {
+        use crate::transition::{OfferConsult, OfferOutcome};
+
+        let e = staged_engine();
+        let (log, _dispatch, derived, staged) = staged_candidate(&e);
+        let confined = confined_of(&staged.follow_up).clone();
+        let log = [log, appended_facts(staged)].concat();
+        let hop = confined.offers[0].0;
+        let accept = confined.offers[1].0;
+
+        assert_eq!(
+            e.offer_consults(&viewing(&e, &log), &traj(), &hop),
+            Ok(OfferConsult::Sanitizer {
+                sanitizer: crate::names::SanitizerName::new("scrubber"),
+                source: crate::value::RawResultDigest::of(derived.as_str().as_bytes()),
+                body: derived.clone(),
+            }),
+        );
+        assert_eq!(
+            e.offer_consults(&viewing(&e, &log), &traj(), &accept),
+            Ok(OfferConsult::Accept),
+        );
+
+        let crossed = [
+            log.clone(),
+            appended_facts(execute_offer(&e, &log, accept, OfferOutcome::Approved(Vec::new())).expect("it crosses")),
+        ]
+        .concat();
+        assert_eq!(
+            e.offer_consults(&viewing(&e, &crossed), &traj(), &accept),
+            Ok(OfferConsult::Replay(OfferOutcome::Approved(Vec::new()))),
+        );
+
+        let e = substituting_engine();
+        let proposal = call("post", json!({ "body": "ssn 123" }));
+        let log = internal_log(TRUSTED);
+        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
+        let input_hop = opened_offers(&facts)[0].0;
+        let log = [log, facts].concat();
+        assert_eq!(
+            e.offer_consults(&viewing(&e, &log), &traj(), &input_hop),
+            Ok(OfferConsult::Stale),
         );
     }
 
@@ -12110,6 +12253,11 @@ mod tests {
         let hop = return_offer(&ended, true);
 
         assert_eq!(
+            e.offer_consults(&viewing(&e, &ended), &traj(), &hop),
+            Ok(crate::transition::OfferConsult::Accept),
+        );
+
+        assert_eq!(
             execute_offer(
                 &e,
                 &ended,
@@ -12133,6 +12281,13 @@ mod tests {
         assert_eq!(restaged.offers.len(), 1);
         let staged_log = [ended, appended_facts(hopped)].concat();
         assert_eq!(e.validate_replay(&staged_log), Ok(()));
+
+        assert_eq!(
+            e.offer_consults(&viewing(&e, &staged_log), &traj(), &hop),
+            Ok(crate::transition::OfferConsult::Replay(OfferOutcome::Approved(
+                Vec::new()
+            ))),
+        );
 
         let repeat = execute_offer(&e, &staged_log, hop, OfferOutcome::Approved(vec![]))
             .expect("the spent attest selection answers from the record");

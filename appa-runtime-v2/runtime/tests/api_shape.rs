@@ -3,7 +3,8 @@
 use std::path::PathBuf;
 
 use appa_runtime_api::{
-    Actor, Codec, HookDecision, HookEvent, OutcomeBody, ParseRefusal, ProposedCall, ToolOutcome, TrajectoryId,
+    Actor, Codec, HookDecision, HookEvent, OutcomeBody, ParseRefusal, ProposedCall, SpawnBinding, ToolOutcome,
+    TrajectoryId,
 };
 use appa_runtime_v2::api::{
     AuditEvent, AuditLabel, DispatchOutcome, OfferId, OpenError, RemedyOutcome, Runtime, TrajectoryStatus,
@@ -42,10 +43,11 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
             let _: Option<TrajectoryId> = child;
             let _: String = text;
         }
-        HookEvent::ToolCall { actor: _, call } => {
+        HookEvent::ToolCall { actor: _, call, spawn } => {
             let ProposedCall { tool, arguments } = call;
             let _: String = tool;
             let _: Box<serde_json::value::RawValue> = arguments;
+            let _: bool = spawn;
         }
         HookEvent::ToolResult {
             actor: _,
@@ -54,9 +56,10 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
         } => {
             let _: ToolOutcome = outcome;
         }
-        HookEvent::ChildStart { parent, child } => {
+        HookEvent::ChildStart { parent, child, spawn } => {
             let _: TrajectoryId = parent;
             let _: TrajectoryId = child;
+            let _: Option<SpawnBinding> = spawn;
         }
         HookEvent::ChildEnd {
             parent: _,
@@ -67,7 +70,10 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
         }
     }
     match decision {
-        HookDecision::Ack | HookDecision::AllowCall | HookDecision::PassControl => {}
+        HookDecision::Ack | HookDecision::PassControl => {}
+        HookDecision::AllowCall { spawn } => {
+            let _: Option<SpawnBinding> = spawn;
+        }
         HookDecision::DenyCall { feedback } => {
             let _: String = feedback;
         }

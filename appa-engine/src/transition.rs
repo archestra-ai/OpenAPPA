@@ -125,6 +125,23 @@ pub struct OfferExecution {
     pub offer_nonce: crate::value::OfferNonce,
 }
 
+/// What the runtime must resolve before it can execute one live offer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OfferConsult {
+    Accept,
+    Authorities {
+        call: ResolvedCall,
+        required: Vec<crate::plan::RequiredRuling>,
+    },
+    Sanitizer {
+        sanitizer: SanitizerName,
+        source: RawResultDigest,
+        body: ValueBody,
+    },
+    Replay(OfferOutcome),
+    Stale,
+}
+
 /// What the runtime resolved for a selected offer. There is no "no answer" variant: a consult that
 /// returns nothing does not resume the act at all, and the offer simply stands.
 #[derive(Clone, Debug, PartialEq, Eq)]

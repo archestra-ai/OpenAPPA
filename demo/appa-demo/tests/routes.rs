@@ -196,10 +196,10 @@ fn offer_in(request: &serde_json::Value) -> String {
         .rev()
         .filter_map(|message| message["content"].as_str())
         .find_map(|content| {
-            content
-                .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
-                .find(|word| word.starts_with("offer-") && word.len() > "offer-".len())
-                .map(str::to_string)
+            let after = content.split("offer_id:").nth(1)?;
+            let rest = after.trim_start().strip_prefix('"')?;
+            let end = rest.find('"')?;
+            Some(rest[..end].to_string())
         })
         .expect("the feedback surfaced an offer")
 }

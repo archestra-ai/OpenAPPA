@@ -146,6 +146,7 @@ async fn deployment_with(review_timeout_ms: u64) -> Deployment {
                 tool: "publish".to_string(),
                 arguments: raw(serde_json::json!({"body": "the quarterly figures"})),
             },
+            spawn: false,
         },
     )
     .await;
@@ -170,12 +171,13 @@ async fn deployment_with(review_timeout_ms: u64) -> Deployment {
 }
 
 fn offer_id(feedback: &str) -> String {
-    feedback
-        .split_whitespace()
-        .map(|word| word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-'))
-        .find(|word| word.starts_with("offer-"))
-        .unwrap_or_else(|| panic!("the feedback surfaces an offer id: {feedback}"))
-        .to_string()
+    let after = feedback
+        .split("offer_id:")
+        .nth(1)
+        .unwrap_or_else(|| panic!("the feedback surfaces an offer id: {feedback}"));
+    let rest = after.trim_start().strip_prefix('"').expect("the offer id is quoted");
+    let end = rest.find('"').expect("the offer id closes its quote");
+    rest[..end].to_string()
 }
 
 async fn execute<H: ClientHandler>(deployment: &Deployment, reviewer: H) -> String {

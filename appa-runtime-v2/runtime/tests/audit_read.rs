@@ -83,6 +83,7 @@ async fn propose(runtime: &Arc<Runtime>, within: Option<&TrajectoryId>, call: Pr
         HookEvent::ToolCall {
             actor: actor(within),
             call,
+            spawn: false,
         },
     )
     .await
@@ -91,7 +92,11 @@ async fn propose(runtime: &Arc<Runtime>, within: Option<&TrajectoryId>, call: Pr
 async fn released(runtime: &Arc<Runtime>, within: Option<&TrajectoryId>, tool: &str, body: &str) {
     let call = call(tool);
     let decision = propose(runtime, within, call.clone()).await;
-    assert_eq!(decision, HookDecision::AllowCall, "{tool} must be released here");
+    assert_eq!(
+        decision,
+        HookDecision::AllowCall { spawn: None },
+        "{tool} must be released here"
+    );
     hooks::handle(
         runtime,
         HookEvent::ToolResult {
@@ -105,27 +110,43 @@ async fn released(runtime: &Arc<Runtime>, within: Option<&TrajectoryId>, tool: &
     .await;
 }
 
-fn offer_for(feedback: &str, wanted: &str) -> OfferId {
-    let lines: Vec<&str> = feedback.lines().collect();
-    let start = lines
-        .iter()
-        .position(|line| line.contains(wanted))
-        .unwrap_or_else(|| panic!("no option mentioning {wanted:?} in: {feedback}"));
-    let id = lines[start..]
-        .iter()
-        .find_map(|line| opaque_offer_id(line))
-        .unwrap_or_else(|| panic!("the {wanted:?} option has no offer id in: {feedback}"));
-    OfferId(id)
+async fn open_child(runtime: &Arc<Runtime>, spawn: ProposedCall) -> HookDecision {
+    let released = hooks::handle(
+        runtime,
+        HookEvent::ToolCall {
+            actor: actor(None),
+            call: spawn,
+            spawn: true,
+        },
+    )
+    .await;
+    let HookDecision::AllowCall { spawn: Some(binding) } = released else {
+        panic!("a context-controlled spawn releases a fork binding, got {released:?}");
+    };
+    hooks::handle(
+        runtime,
+        HookEvent::ChildStart {
+            parent: root(),
+            child: child(),
+            spawn: Some(binding),
+        },
+    )
+    .await
 }
 
 fn first_offer(feedback: &str) -> OfferId {
     OfferId(opaque_offer_id(feedback).unwrap_or_else(|| panic!("no offer id in feedback: {feedback}")))
 }
 
+fn all_offers(feedback: &str) -> Vec<OfferId> {
+    feedback.lines().filter_map(opaque_offer_id).map(OfferId).collect()
+}
+
 fn opaque_offer_id(text: &str) -> Option<String> {
-    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
-        .find(|word| word.starts_with("offer-") && word.len() > "offer-".len())
-        .map(str::to_string)
+    let after = text.split("offer_id:").nth(1)?;
+    let rest = after.trim_start().strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 fn feedback_of(decision: &HookDecision) -> String {
@@ -166,11 +187,10 @@ async fn a_released_call_records_its_label_its_effects_and_what_it_admitted() {
                 label: label("internal", "public"),
                 effects: vec!["egress".to_string()],
             },
-            &AuditEvent::EffectsCommitted {
-                effects: vec!["egress".to_string()],
-            },
             &AuditEvent::Closed {
-                outcome: DispatchOutcome::Ran { effects: Vec::new() },
+                outcome: DispatchOutcome::Ran {
+                    effects: vec!["egress".to_string()],
+                },
             },
             &AuditEvent::Admitted {
                 label: label("internal", "public"),
@@ -237,16 +257,7 @@ async fn a_branch_records_its_seed_its_own_flows_and_how_its_return_crossed() {
         tool: "delegate".to_string(),
         arguments: raw(serde_json::json!({"task": "look Alice up"})),
     };
-    assert_eq!(propose(&runtime, None, spawn).await, HookDecision::AllowCall);
-    let opened = hooks::handle(
-        &runtime,
-        HookEvent::ChildStart {
-            parent: root(),
-            child: child(),
-        },
-    )
-    .await;
-    assert_eq!(opened, HookDecision::Ack);
+    assert_eq!(open_child(&runtime, spawn).await, HookDecision::Ack);
 
     let blocked = propose(&runtime, Some(&child()), call("read_hr")).await;
     let offer = first_offer(&feedback_of(&blocked));
@@ -262,7 +273,10 @@ async fn a_branch_records_its_seed_its_own_flows_and_how_its_return_crossed() {
         value: Some("Alice Chen, alice@corp.example".to_string()),
     };
     let stopped = hooks::handle(&runtime, end).await;
-    let derivation = offer_for(&feedback_of(&stopped), "redactor");
+    let derivation = all_offers(&feedback_of(&stopped))
+        .into_iter()
+        .next()
+        .expect("the stop surfaces the derivation plan");
     assert!(matches!(
         runtime.execute_remedy(derivation).await,
         RemedyOutcome::Returned { .. }
@@ -307,16 +321,7 @@ async fn only_a_root_names_the_audit() {
         tool: "delegate".to_string(),
         arguments: raw(serde_json::json!({"task": "look Alice up"})),
     };
-    assert_eq!(propose(&runtime, None, spawn).await, HookDecision::AllowCall);
-    let opened = hooks::handle(
-        &runtime,
-        HookEvent::ChildStart {
-            parent: root(),
-            child: child(),
-        },
-    )
-    .await;
-    assert_eq!(opened, HookDecision::Ack);
+    assert_eq!(open_child(&runtime, spawn).await, HookDecision::Ack);
 
     assert!(runtime.audit(&root()).is_some());
     assert!(runtime.audit(&child()).is_none(), "a child shares its family's log");

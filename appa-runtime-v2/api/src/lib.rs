@@ -58,6 +58,9 @@ pub struct Actor {
     pub child: Option<TrajectoryId>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SpawnBinding(pub String);
+
 /// One hook event in the runtime's vocabulary. The adapter maps each
 /// of its harness's hooks onto exactly one variant — or onto no event
 /// at all for hooks the deployment does not gate.
@@ -65,13 +68,21 @@ pub struct Actor {
 pub enum HookEvent {
     SessionStart { root: TrajectoryId },
     Prompt { actor: Actor, text: String },
-    ToolCall { actor: Actor, call: ProposedCall },
+    ToolCall {
+        actor: Actor,
+        call: ProposedCall,
+        spawn: bool,
+    },
     ToolResult {
         actor: Actor,
         call: ProposedCall,
         outcome: ToolOutcome,
     },
-    ChildStart { parent: TrajectoryId, child: TrajectoryId },
+    ChildStart {
+        parent: TrajectoryId,
+        child: TrajectoryId,
+        spawn: Option<SpawnBinding>,
+    },
     ChildEnd {
         parent: TrajectoryId,
         child: TrajectoryId,
@@ -84,7 +95,7 @@ pub enum HookEvent {
 #[derive(Debug, Clone, PartialEq)]
 pub enum HookDecision {
     Ack,
-    AllowCall,
+    AllowCall { spawn: Option<SpawnBinding> },
     PassControl,
     DenyCall { feedback: String },
     Block { reason: String },

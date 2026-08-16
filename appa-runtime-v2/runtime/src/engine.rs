@@ -1,32 +1,35 @@
 //! The engine boundary: the one module that speaks to `appa-engine`.
 
-use std::collections::HashMap;
+#[cfg(test)]
 use std::sync::Mutex;
 
-use appa_engine::admit::{AdmitError, ResultAdmission};
-use appa_engine::branch::{BranchError, ReturnBlock, ReturnCheck, ReturnPlan, ReturnSubmission};
 use appa_engine::candidate::DerivedVia;
-use appa_engine::check::{CheckOutcome, UnestablishedFact};
+use appa_engine::check::UnestablishedFact;
 use appa_engine::contract::{
     AudienceRequirement, DynamicAudienceBinding, PinnedDynamicResolution, RecipientSpec, ToolContract,
 };
 use appa_engine::engine::{Engine, EngineError};
-use appa_engine::execute::{AuthorityReview, PlanError, Ruling};
-use appa_engine::fact::{
-    BoundaryKind, CloseOutcome, EffectSet, Fact, FactBatch, ObservedResult, ReturnDerivation, ReturnPolicy, Revision,
-};
+use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
+use appa_engine::fact::{BoundaryKind, CloseOutcome, EffectSet, Fact, FactBatch, ReturnDerivation, Revision};
 use appa_engine::label::{Audience, Dim, Dimension, Label, PartialLabel, ReaderId, Trust};
-use appa_engine::plan::{ExecutableRemedyPlan, PlannedBlock, RemedyPlan};
+use appa_engine::plan::{ExecutableRemedyPlan, PlannedBlock, RemedyPlan, RequiredRuling};
 use appa_engine::projection::Views;
 use appa_engine::registry::TrustChain;
-use appa_engine::transition::EngineView as ValidatedView;
+use appa_engine::transition::Blocked as CoreBlocked;
+use appa_engine::transition::{
+    ChildFollowUp, ChildReport, ChildSubmission, Confined, EngineDecision as CoreDecision, EngineEvent as CoreEvent,
+    EngineView as ValidatedView, Evidence, EvidenceRequest, FollowUp, ForkBinding, OfferConsult, OfferExecution,
+    OfferFollowUp, OfferOutcome, OutcomeBody as CoreOutcomeBody, OutcomeFollowUp, PendingReturnStage, ProposalBatch,
+    ProposalBatchId, ProposedCall as CoreProposedCall, Released, SpawnMark, ToolOutcome as CoreToolOutcome, ToolReport,
+    TransitionError, ValidatedFactBatch,
+};
 use appa_engine::value::{
-    CanonicalDigest, DispatchId as EngineDispatchId, Provenance, RawResultDigest, ResolvedCall, ToolName, ValueBody,
-    ValueId,
+    DispatchId as EngineDispatchId, ForkId, OfferId as EngineOfferId, OfferNonce as EngineOfferNonce, Provenance,
+    RawResultDigest, ResolvedCall, ToolName, ValueBody, ValueId,
 };
 
 use crate::api::OutcomeBody;
-pub(crate) use crate::api::{DispatchId, OfferId, ProposedCall, ToolOutcome, TrajectoryId};
+pub(crate) use crate::api::{DispatchId, OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
 
 /// One fresh 256-bit random number per act that can surface offers; the
 /// runtime mixes it into every `OfferId` it mints.
@@ -40,6 +43,11 @@ pub struct ReleasedCall {
     pub dispatch: DispatchId,
     pub tool: String,
     pub bytes: Vec<u8>,
+    /// The spawn binding, when this release prepared a fork: the
+    /// runtime returns it to the harness, which echoes it on the child's
+    /// start so the child names the exact fork that opened it. `None` for
+    /// every ordinary released call.
+    pub fork: Option<SpawnBinding>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -56,11 +64,11 @@ pub enum ExternalRequest {
         authority: String,
         payload: serde_json::Value,
         review: AuthorityReview,
-        dispatch: EngineDispatchId,
     },
     Sanitizer {
         sanitizer: String,
-        payload: serde_json::Value,
+        source: RawResultDigest,
+        body: ValueBody,
     },
     Dynamic {
         resolver: String,
@@ -78,10 +86,10 @@ pub enum ExternalEvidence {
         authority: String,
         verdict: AuthorityVerdict,
         review: AuthorityReview,
-        dispatch: EngineDispatchId,
     },
     Sanitizer {
         sanitizer: String,
+        source: RawResultDigest,
         derived: Option<String>,
     },
     Dynamic {
@@ -113,30 +121,29 @@ impl AuthorityVerdict {
 }
 
 /// One session event in the seam's vocabulary. The session constructs it; the
-/// seam maps it onto the engine's composed operations.
+/// seam translates it onto the engine's `handle` boundary and back.
 #[derive(Debug, Clone)]
 pub enum EngineEvent {
     ModelResponse {
         call: ProposedCall,
         evidence: Vec<ExternalEvidence>,
         entropy: OfferNonce,
-    },
-    SuccessObserved {
-        call: ProposedCall,
-        observed: ObservedResult,
+        spawn: bool,
     },
     ToolOutcome {
-        call: ProposedCall,
+        dispatch: EngineDispatchId,
         outcome: ToolOutcome,
         evidence: Vec<ExternalEvidence>,
+        entropy: OfferNonce,
     },
     ExecuteOffer {
+        trajectory: TrajectoryId,
         offer: OfferId,
         evidence: Vec<ExternalEvidence>,
+        entropy: OfferNonce,
     },
-    ChildStart { child: TrajectoryId },
+    BindFork { fork: ForkId, child: TrajectoryId },
     ChildReturn {
-        parent: TrajectoryId,
         child: TrajectoryId,
         value: Option<String>,
         evidence: Vec<ExternalEvidence>,
@@ -153,6 +160,10 @@ pub enum Next {
     },
     PresentToModel(Presentation),
     InvokeTool(ReleasedCall),
+    Approved {
+        tool: String,
+        bytes: Vec<u8>,
+    },
     ResolveExternal(Vec<ExternalRequest>),
 }
 
@@ -167,42 +178,16 @@ pub enum Presentation {
     Blocked { feedback: String, offers: Vec<OfferId> },
 }
 
-/// One offered remedy this process remembers between the deny that surfaced
-/// it and the `execute_remedy_plan` call that names it. Never trusted at
-/// execution: the plan re-derives live and matches by value.
-#[derive(Debug, Clone, PartialEq)]
-pub enum CachedOffer {
-    Call {
-        trajectory: TrajectoryId,
-        call: ProposedCall,
-        plan: ExecutableRemedyPlan,
-    },
-    ChildReturn {
-        trajectory: TrajectoryId,
-        child: TrajectoryId,
-        raw: String,
-        plan: ReturnPlan,
-    },
-}
-
-/// Offer-cache mutations the session applies only after the decision's
-/// transaction committed — a failed append must leave the offers standing.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct OfferMutations {
-    pub stage: Vec<(OfferId, CachedOffer)>,
-    pub retire: Vec<OfferId>,
-}
-
-/// One engine interaction's outcome: the batch to append against its basis
-/// revision, the follow-up to deliver, the offer-cache mutations to
-/// apply after the commit, and the child the delivery ends, if any.
+/// One engine interaction's outcome, as the session drives it: the unsealed
+/// batch to append against its basis revision, the follow-up to
+/// deliver, and the child the delivery ends, if any.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineDecision {
     pub append: Option<FactBatch>,
     pub then: Next,
-    pub offers: OfferMutations,
     /// Set when delivering this decision ends a child trajectory — a merge
-    /// executed through the remedy path ends the child it crossed.
+    /// that crossed, a void return, a pending return whose custody transferred
+    /// durably, or a return the mandatory sanitizer rejected.
     pub ends_child: Option<TrajectoryId>,
 }
 
@@ -211,16 +196,6 @@ impl EngineDecision {
         EngineDecision {
             append: None,
             then,
-            offers: OfferMutations::default(),
-            ends_child: None,
-        }
-    }
-
-    fn append(batch: FactBatch, then: Next) -> EngineDecision {
-        EngineDecision {
-            append: Some(batch),
-            then,
-            offers: OfferMutations::default(),
             ends_child: None,
         }
     }
@@ -237,12 +212,12 @@ pub enum EngineRefusal {
     OpeningMismatch { detail: String },
     #[error("engine invariant breach: {detail}")]
     Invariant { detail: String },
-    #[error("the child is already forked")]
-    ChildAlreadyForked,
     #[error("the trajectory has ended")]
     Ended,
     #[error("the dispatch is no longer open")]
     DispatchClosed,
+    #[error("the offer is not one this family carries")]
+    UnknownOffer,
 }
 
 /// The engine's derived working picture of one family log, scoped to the
@@ -407,11 +382,10 @@ enum Decider {
 }
 
 /// The one engine boundary the session drives: the resident
-/// engine compiled at open, the process-wide offer cache shared by every
-/// resolved engine, and the decider.
+/// engine compiled at open and the decider. The runtime holds no offer
+/// state — offers are the engine's durable facts, routed by id.
 pub struct EngineSeam {
     resident: RuntimeEngine,
-    offers: Mutex<OfferCache>,
     decider: Decider,
 }
 
@@ -419,7 +393,6 @@ impl EngineSeam {
     pub fn real(resident: RuntimeEngine) -> EngineSeam {
         EngineSeam {
             resident,
-            offers: Mutex::new(OfferCache::new()),
             decider: Decider::Real,
         }
     }
@@ -430,7 +403,6 @@ impl EngineSeam {
     pub fn test(resident: RuntimeEngine, seam: TestSeam) -> EngineSeam {
         EngineSeam {
             resident,
-            offers: Mutex::new(OfferCache::new()),
             decider: Decider::Test(seam),
         }
     }
@@ -467,7 +439,7 @@ impl EngineSeam {
         event: EngineEvent,
     ) -> Result<EngineDecision, EngineRefusal> {
         match &self.decider {
-            Decider::Real => policy.engine().handle(view, event, &self.offers),
+            Decider::Real => policy.engine().handle(view, event),
             #[cfg(test)]
             Decider::Test(seam) => Ok(seam.next(event)),
         }
@@ -501,11 +473,6 @@ impl EngineSeam {
         }
     }
 
-    pub fn apply_offers(&self, mutations: OfferMutations) {
-        let mut cache = self.offers.lock().expect("the offer cache mutex is never poisoned");
-        cache.apply(mutations);
-    }
-
     /// Render one trajectory's current label from the rebuilt view, for the
     /// statusline. A projection read: no engine event, no fact, nothing
     /// gated.
@@ -536,47 +503,10 @@ impl EngineSeam {
 }
 
 /// The real engine behind the seam: the immutable registry-backed decision
-/// core. The deployment's child-return binding is the engine's own
-/// validated state. Offer payloads live in the seam, shared by
-/// every resolved engine.
+/// core. It owns every judgment and every fact; the runtime holds
+/// no engine state, and offers are the engine's own durable facts.
 pub struct RuntimeEngine {
     engine: Engine,
-}
-
-struct OfferCache {
-    entries: HashMap<String, (u64, CachedOffer)>,
-    staged: u64,
-}
-
-const OFFER_CACHE_CAP: usize = 1024;
-
-impl OfferCache {
-    fn new() -> OfferCache {
-        OfferCache {
-            entries: HashMap::new(),
-            staged: 0,
-        }
-    }
-
-    fn apply(&mut self, mutations: OfferMutations) {
-        for id in &mutations.retire {
-            self.entries.remove(&id.0);
-        }
-        for (id, offer) in mutations.stage {
-            let seq = self.staged;
-            self.staged += 1;
-            self.entries.insert(id.0, (seq, offer));
-        }
-        while self.entries.len() > OFFER_CACHE_CAP {
-            let oldest = self
-                .entries
-                .iter()
-                .min_by_key(|(_, (seq, _))| *seq)
-                .map(|(id, _)| id.clone())
-                .expect("a non-empty cache has an oldest entry");
-            self.entries.remove(&oldest);
-        }
-    }
 }
 
 impl RuntimeEngine {
@@ -666,14 +596,43 @@ impl RuntimeEngine {
         // The validator takes the records; this read keeps its own copy of
         // them, which is why the audit — and only the audit — clones a log.
         self.validated(facts.clone(), family, Revision::new(log.len() as u64))?;
+        let mut prepared: std::collections::HashMap<ForkId, (String, Label)> = std::collections::HashMap::new();
+        for fact in &facts {
+            if let Fact::ForkPrepared {
+                fork,
+                snapshot,
+                trajectory,
+                ..
+            } = fact
+            {
+                prepared.insert(
+                    fork.clone(),
+                    (terminal_safe(trajectory.as_str()), as_label(snapshot.seed())),
+                );
+            }
+        }
         let mut entries = Vec::new();
         for fact in &facts {
-            let event = match self.audit_event(fact) {
-                Some(Some(event)) => event,
-                // A record the audit does not show.
-                Some(None) => continue,
-                // A bound this deployment cannot name.
-                None => return Ok(None),
+            let event = match fact {
+                Fact::ForkOpened { fork, .. } => match prepared.get(fork) {
+                    Some((parent, seed)) => match self.render_label(seed) {
+                        Some(seed) => AuditEvent::Forked {
+                            parent: parent.clone(),
+                            seed,
+                        },
+                        // A seed bound this deployment cannot name.
+                        None => return Ok(None),
+                    },
+                    // A child opened with no recorded preparation in this read.
+                    None => continue,
+                },
+                _ => match self.audit_event(fact) {
+                    Some(Some(event)) => event,
+                    // A record the audit does not show.
+                    Some(None) => continue,
+                    // A bound this deployment cannot name.
+                    None => return Ok(None),
+                },
             };
             entries.push(AuditEntry {
                 trajectory: terminal_safe(fact.trajectory().as_str()),
@@ -773,640 +732,481 @@ impl RuntimeEngine {
         Some(Some(event))
     }
 
-    fn handle(
-        &self,
-        view: &EngineView,
-        event: EngineEvent,
-        offers: &Mutex<OfferCache>,
-    ) -> Result<EngineDecision, EngineRefusal> {
+    fn handle(&self, view: &EngineView, event: EngineEvent) -> Result<EngineDecision, EngineRefusal> {
         let EngineView { view, trajectory } = view;
-        let own = engine_id(trajectory);
         match event {
             EngineEvent::ModelResponse {
                 call,
                 evidence,
                 entropy,
-            } => {
-                let views = view.views(&own);
-                self.model_response(&views, trajectory, &call, &evidence, entropy)
-            }
-            EngineEvent::SuccessObserved { call, observed } => {
-                let views = view.views(&own);
-                self.success_observed(&views, &call, observed)
-            }
+                spawn,
+            } => self.model_response(view, trajectory, &call, &evidence, &entropy, spawn),
             EngineEvent::ToolOutcome {
-                call,
+                dispatch,
                 outcome,
                 evidence,
-            } => {
-                let views = view.views(&own);
-                self.tool_outcome(&views, &call, &outcome, &evidence)
-            }
-            EngineEvent::ExecuteOffer { offer, evidence } => self.execute_offer(view, &offer, &evidence, offers),
-            EngineEvent::ChildStart { child } => {
-                let views = view.views(&own);
-                let child_id = engine_id(&child);
-                let batch = self.engine.seed_child(&views, &child_id).map_err(|error| match error {
-                    BranchError::AlreadyForked => EngineRefusal::ChildAlreadyForked,
-                    BranchError::ParentEnded => EngineRefusal::Ended,
-                    error => EngineRefusal::Invariant {
-                        detail: format!("seeding child {}: {error}", child.0),
-                    },
-                })?;
-                Ok(EngineDecision::append(batch, Next::Done))
-            }
+                entropy,
+            } => self.tool_outcome(view, &dispatch, &outcome, &evidence, &entropy),
+            EngineEvent::ExecuteOffer {
+                trajectory: owner,
+                offer,
+                evidence,
+                entropy,
+            } => self.execute_offer(view, &owner, &offer, &evidence, &entropy),
+            EngineEvent::BindFork { fork, child } => self.bind_fork(view, &fork, &child),
             EngineEvent::ChildReturn {
-                parent,
                 child,
                 value,
                 evidence,
                 entropy,
-            } => {
-                let parent_id = engine_id(&parent);
-                let views = view.views(&parent_id);
-                self.child_return(&views, &parent, &child, value, &evidence, entropy)
-            }
+            } => self.child_return(view, &child, value, &evidence, &entropy),
         }
     }
 
     fn model_response(
         &self,
-        views: &Views,
+        view: &ValidatedView,
         trajectory: &TrajectoryId,
         call: &ProposedCall,
         evidence: &[ExternalEvidence],
-        entropy: OfferNonce,
+        entropy: &OfferNonce,
+        spawn: bool,
     ) -> Result<EngineDecision, EngineRefusal> {
-        let resolved = match self.resolve(call, evidence) {
-            Ok(resolved) => resolved,
+        let pins = match self.resolve_dynamics(call, evidence) {
+            Ok(pins) => pins,
             Err(Resolution::Feedback(text)) => return Ok(deny(text)),
-            Err(Resolution::Consult(requests)) => {
-                return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
-            }
+            Err(Resolution::Consult(requests)) => return Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
         };
-        match self.engine.check(views, &resolved) {
-            Ok(CheckOutcome::Allow) => {
-                let dispatch = predicted_dispatch(views, &resolved);
-                let batch = self
-                    .engine
-                    .open_dispatch(views, &resolved)
-                    .map_err(|error| match error {
-                        EngineError::BranchEnded => EngineRefusal::Ended,
-                        error => EngineRefusal::Invariant {
-                            detail: format!("open after allow: {error}"),
-                        },
-                    })?;
-                Ok(EngineDecision::append(
-                    batch,
-                    Next::ModelResponse {
-                        invocations: vec![released(&dispatch, &resolved)],
+        let proposed = CoreProposedCall {
+            tool: ToolName::new(call.tool.clone()),
+            arguments: call.arguments.get().as_bytes().to_vec(),
+            dynamic_resolutions: pins,
+        };
+        let decision = if spawn {
+            match self.decide_proposal(view, trajectory, proposed.clone(), entropy, true) {
+                Ok(decision) => decision,
+                Err(TransitionError::SpawnUncontrolled) => self
+                    .decide_proposal(view, trajectory, proposed, entropy, false)
+                    .map_err(proposal_refusal)?,
+                Err(error) => return Err(proposal_refusal(error)),
+            }
+        } else {
+            self.decide_proposal(view, trajectory, proposed, entropy, false)
+                .map_err(proposal_refusal)?
+        };
+        let append = decision.append.map(ValidatedFactBatch::into_unsealed);
+        let then = self.deliver_proposals(view, trajectory, decision.follow_up)?;
+        Ok(EngineDecision {
+            append,
+            then,
+            ends_child: None,
+        })
+    }
+
+    fn decide_proposal(
+        &self,
+        view: &ValidatedView,
+        trajectory: &TrajectoryId,
+        proposed: CoreProposedCall,
+        entropy: &OfferNonce,
+        spawn: bool,
+    ) -> Result<CoreDecision, TransitionError> {
+        let batch = ProposalBatch {
+            id: batch_id(entropy),
+            trajectory: engine_id(trajectory),
+            provider_results: Vec::new(),
+            proposals: vec![proposed],
+            spawn: spawn.then(|| SpawnMark::at(0)),
+            offer_nonce: engine_nonce(entropy),
+        };
+        self.engine.handle(view, CoreEvent::Proposals(batch))
+    }
+
+    fn deliver_proposals(
+        &self,
+        view: &ValidatedView,
+        trajectory: &TrajectoryId,
+        follow_up: FollowUp,
+    ) -> Result<Next, EngineRefusal> {
+        match follow_up {
+            FollowUp::Proposals {
+                released: releases,
+                blocked,
+                spent,
+                settled,
+                ..
+            } => {
+                if let Some(release) = releases.into_iter().next() {
+                    return Ok(Next::ModelResponse {
+                        invocations: vec![released(&release)],
                         feedback: Vec::new(),
-                    },
-                ))
-            }
-            Ok(CheckOutcome::Block(raw)) => {
-                let planned = self
-                    .engine
-                    .plan(views, &resolved, &raw)
-                    .map_err(|error| EngineRefusal::Invariant {
-                        detail: format!("planning a checked block: {error}"),
-                    })?;
-                let mut stage = Vec::new();
-                let mut offer_ids = Vec::new();
-                for (index, plan) in planned.plans.iter().filter_map(RemedyPlan::executable).enumerate() {
-                    let id = OfferId(offer_name(&entropy, index));
-                    stage.push((
-                        id.clone(),
-                        CachedOffer::Call {
-                            trajectory: trajectory.clone(),
-                            call: call.clone(),
-                            plan: plan.clone(),
-                        },
-                    ));
-                    offer_ids.push(id);
+                    });
                 }
-                let text = block_feedback(views, &planned, &offer_ids, self.engine.registry().trust_chain());
-                let mut decision = EngineDecision::deliver(Next::ModelResponse {
-                    invocations: Vec::new(),
-                    feedback: vec![Feedback {
-                        text,
-                        offers: offer_ids,
-                    }],
-                });
-                decision.offers.stage = stage;
-                Ok(decision)
-            }
-            Err(EngineError::UnknownTool(tool)) => Ok(deny(format!(
-                "[appa] unknown tool {tool}: not in this deployment's policy"
-            ))),
-            Err(EngineError::ProviderRunTool(tool)) => Ok(deny(format!(
-                "[appa] tool {tool} is provider-run: it executes inside the inference call and cannot be proposed as a tool call"
-            ))),
-            Err(EngineError::InvalidCall(error)) => Ok(deny(format!("[appa] invalid call: {error}"))),
-            Err(EngineError::InvalidReturnSchema(error)) => Ok(deny(format!(
-                "[appa] invalid call: return_schema does not compile to a canonical shape: {error}"
-            ))),
-            Err(EngineError::NotAllowed | EngineError::BranchEnded | EngineError::NotProviderRun(_)) => {
+                if let Some(block) = blocked.into_iter().next() {
+                    let feedback = self.block_delivery(view, trajectory, &block);
+                    return Ok(Next::ModelResponse {
+                        invocations: Vec::new(),
+                        feedback: vec![feedback],
+                    });
+                }
+                if !spent.is_empty() || !settled.is_empty() {
+                    return Ok(deny_next(
+                        "[appa] this call's earlier decision no longer stands; propose it again".to_string(),
+                    ));
+                }
                 Err(EngineRefusal::Invariant {
-                    detail: "check returned a dispatch-path refusal".to_string(),
+                    detail: "a non-empty proposal produced no release, block, or repeat answer".to_string(),
                 })
             }
+            FollowUp::Malformed { error, .. } => Ok(deny_next(malformed_feedback(&error))),
+            other => Err(EngineRefusal::Invariant {
+                detail: format!("a proposal produced a non-proposal follow-up: {other:?}"),
+            }),
         }
     }
 
-    fn success_observed(
-        &self,
-        views: &Views,
-        call: &ProposedCall,
-        observed: ObservedResult,
-    ) -> Result<EngineDecision, EngineRefusal> {
-        let (resolved, dispatch) = self.open_dispatch_for(views, call)?;
-        if views.is_succeeded(&dispatch) {
-            return Ok(EngineDecision::deliver(Next::Done));
-        }
-        let batch = self
-            .engine
-            .observe_success(views, &dispatch, &resolved, observed)
-            .map_err(|error| EngineRefusal::Invariant {
-                detail: format!("success checkpoint: {error}"),
-            })?;
-        Ok(EngineDecision::append(batch, Next::Done))
+    fn block_delivery(&self, view: &ValidatedView, trajectory: &TrajectoryId, block: &CoreBlocked) -> Feedback {
+        let owner = engine_id(trajectory);
+        let views = view.views(&owner);
+        let offers: Vec<OfferId> = block.offers.iter().map(|(offer, _)| offer_id(offer)).collect();
+        let text = block_feedback(&views, &block.block, &offers, self.engine.registry().trust_chain());
+        Feedback { text, offers }
     }
 
     fn tool_outcome(
         &self,
-        views: &Views,
-        call: &ProposedCall,
+        view: &ValidatedView,
+        dispatch: &EngineDispatchId,
         outcome: &ToolOutcome,
         evidence: &[ExternalEvidence],
+        entropy: &OfferNonce,
     ) -> Result<EngineDecision, EngineRefusal> {
-        let (resolved, dispatch) = self.open_dispatch_for(views, call)?;
-        let (admission, presentation) = match outcome {
-            ToolOutcome::Failure { .. } => (ResultAdmission::Failure, Presentation::KeepOutput),
-            ToolOutcome::Indeterminate => (ResultAdmission::Indeterminate, Presentation::KeepOutput),
-            ToolOutcome::Success {
-                body: OutcomeBody::Unavailable,
-            } => (
-                ResultAdmission::SuccessNoValue,
-                Presentation::ReplaceOutput {
-                    placeholder: "[appa] the result was not carried; nothing was admitted".to_string(),
-                },
-            ),
-            ToolOutcome::Success {
-                body: OutcomeBody::Available(raw),
-            } => match views.bound_sanitizer(&dispatch) {
-                None => (
-                    ResultAdmission::SuccessRaw {
-                        body: ValueBody::new(raw.clone()),
-                    },
-                    Presentation::KeepOutput,
-                ),
-                Some(sanitizer) => {
-                    let name = sanitizer.as_str().to_string();
-                    let derived = evidence.iter().find_map(|entry| match entry {
-                        ExternalEvidence::Sanitizer { sanitizer, derived } if *sanitizer == name => {
-                            Some(derived.clone())
-                        }
-                        _ => None,
-                    });
-                    match derived {
-                        None => {
-                            return Ok(EngineDecision::deliver(Next::ResolveExternal(vec![
-                                ExternalRequest::Sanitizer {
-                                    sanitizer: name,
-                                    payload: serde_json::json!({ "body": raw }),
-                                },
-                            ])));
-                        }
-                        Some(Some(derived)) => {
-                            let placeholder = derived.clone();
-                            (
-                                ResultAdmission::SuccessSanitized {
-                                    body: ValueBody::new(derived),
-                                    sanitizer: sanitizer.clone(),
-                                    raw_digest: RawResultDigest::of(raw.as_bytes()),
-                                },
-                                Presentation::ReplaceOutput { placeholder },
-                            )
-                        }
-                        Some(None) => (
-                            ResultAdmission::SuccessNoValue,
-                            Presentation::ReplaceOutput {
-                                placeholder: "[appa] the sanitizer gave no answer; the result is withheld".to_string(),
-                            },
-                        ),
-                    }
-                }
-            },
+        let report = ToolReport {
+            dispatch: dispatch.clone(),
+            outcome: engine_outcome(outcome),
+            evidence: sanitizer_evidence(evidence),
+            offer_nonce: engine_nonce(entropy),
         };
-        match self.engine.admit_result(views, &dispatch, &resolved, admission) {
-            Ok(batch) => Ok(EngineDecision::append(batch, Next::PresentToModel(presentation))),
-            Err(
-                error @ (AdmitError::UnknownTool(_)
-                | AdmitError::DigestMismatch
-                | AdmitError::ForeignDispatch
-                | AdmitError::NotOpen
-                | AdmitError::ObservationMismatch
-                | AdmitError::SuccessContradicted),
-            ) => Err(EngineRefusal::Invariant {
-                detail: format!("result admission identity: {error}"),
-            }),
-            Err(error) => Ok(EngineDecision::admission_refused(format!(
-                "[appa] the result was not admitted: {error}"
-            ))),
-        }
+        let decision = self
+            .engine
+            .handle(view, CoreEvent::Outcome(report))
+            .map_err(outcome_refusal)?;
+        let append = decision.append.map(ValidatedFactBatch::into_unsealed);
+        let then = match decision.follow_up {
+            FollowUp::Outcome(OutcomeFollowUp::Closed { admitted }) => {
+                Next::PresentToModel(outcome_presentation(outcome, admitted))
+            }
+            FollowUp::Outcome(OutcomeFollowUp::Resolve(request)) => resolve_or_withhold(
+                request,
+                evidence,
+                "[appa] the sanitizer gave no answer; the result is withheld and may be retried",
+            )?,
+            FollowUp::Outcome(OutcomeFollowUp::Staged(confined)) => {
+                Next::PresentToModel(self.confined_delivery(&confined))
+            }
+            other => {
+                return Err(EngineRefusal::Invariant {
+                    detail: format!("an outcome produced a non-outcome follow-up: {other:?}"),
+                });
+            }
+        };
+        Ok(EngineDecision {
+            append,
+            then,
+            ends_child: None,
+        })
     }
 
     fn execute_offer(
         &self,
         view: &ValidatedView,
+        trajectory: &TrajectoryId,
         offer: &OfferId,
         evidence: &[ExternalEvidence],
-        offers: &Mutex<OfferCache>,
+        entropy: &OfferNonce,
     ) -> Result<EngineDecision, EngineRefusal> {
-        let cached = {
-            let cache = offers.lock().expect("the offer cache mutex is never poisoned");
-            cache.entries.get(&offer.0).map(|(_, cached)| cached.clone())
-        };
-        let Some(cached) = cached else {
-            return Ok(retire_declined(
-                offer,
+        let Some(engine_offer) = parse_offer(offer) else {
+            return Ok(declined(
                 "[appa] this offer no longer stands; re-propose the call".to_string(),
             ));
         };
-        match cached {
-            CachedOffer::Call { trajectory, call, plan } => {
-                let owner = engine_id(&trajectory);
-                let views = view.views(&owner);
-                self.execute_call_offer(&views, &trajectory, offer, &call, &plan, evidence, offers)
+        let owner = engine_id(trajectory);
+        let views = view.views(&owner);
+        let outcome = match self
+            .engine
+            .offer_consults(view, &owner, &engine_offer)
+            .map_err(offer_refusal)?
+        {
+            OfferConsult::Stale => {
+                return Ok(declined(
+                    "[appa] this offer no longer stands; re-propose the call".to_string(),
+                ));
             }
-            CachedOffer::ChildReturn {
-                trajectory,
-                child,
-                raw,
-                plan,
-                ..
-            } => {
-                let owner = engine_id(&trajectory);
-                let views = view.views(&owner);
-                self.execute_return_offer(&views, offer, &child, &raw, &plan, evidence)
+            OfferConsult::Replay(outcome) => outcome,
+            OfferConsult::Accept => OfferOutcome::Approved(Vec::new()),
+            OfferConsult::Sanitizer {
+                sanitizer,
+                source,
+                body,
+            } => match sanitizer_derivation(evidence, sanitizer.as_str(), &source) {
+                SanitizerAnswer::Missing => {
+                    return Ok(EngineDecision::deliver(Next::ResolveExternal(vec![
+                        ExternalRequest::Sanitizer {
+                            sanitizer: sanitizer.as_str().to_string(),
+                            source,
+                            body,
+                        },
+                    ])));
+                }
+                SanitizerAnswer::NoAnswer => {
+                    return Ok(no_answer(format!(
+                        "[appa] sanitizer {} gave no answer; the offer stands and may be executed again",
+                        sanitizer.as_str()
+                    )));
+                }
+                SanitizerAnswer::Derived(derived) => OfferOutcome::Derived(Evidence::Sanitizer {
+                    sanitizer,
+                    source,
+                    derived,
+                }),
+            },
+            OfferConsult::Authorities { call, required } => {
+                match self.offer_authorities(&views, &engine_offer, &call, &required, evidence) {
+                    AuthorityOutcome::Outcome(outcome) => outcome,
+                    AuthorityOutcome::Consult(requests) => {
+                        return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
+                    }
+                    AuthorityOutcome::NoAnswer(feedback) => return Ok(no_answer(feedback)),
+                }
             }
-        }
+        };
+        let execution = OfferExecution {
+            trajectory: engine_id(trajectory),
+            offer: engine_offer,
+            outcome,
+            offer_nonce: engine_nonce(entropy),
+        };
+        let decision = self
+            .engine
+            .handle(view, CoreEvent::ExecuteOffer(execution))
+            .map_err(offer_refusal)?;
+        let append = decision.append.map(ValidatedFactBatch::into_unsealed);
+        let then = match decision.follow_up {
+            FollowUp::Offer(OfferFollowUp::Approved { call }) => Next::Approved {
+                tool: call.tool().as_str().to_string(),
+                bytes: call.canonical_arguments().canonical_bytes().to_vec(),
+            },
+            FollowUp::Offer(OfferFollowUp::Admitted { value }) => Next::PresentToModel(Presentation::Value {
+                value: value.as_str().to_string(),
+            }),
+            FollowUp::Offer(OfferFollowUp::Invalidated) => Next::PresentToModel(Presentation::Declined {
+                feedback: "[appa] the state changed and this offer no longer applies; re-propose the call".to_string(),
+            }),
+            FollowUp::Offer(OfferFollowUp::Denied { block }) => {
+                Next::PresentToModel(self.offer_block_delivery(&views, &block))
+            }
+            FollowUp::Offer(OfferFollowUp::Substituted { block }) => {
+                Next::PresentToModel(self.offer_block_delivery(&views, &block))
+            }
+            FollowUp::Offer(OfferFollowUp::Staged(confined)) => Next::PresentToModel(self.confined_delivery(&confined)),
+            FollowUp::Offer(OfferFollowUp::ReturnStaged(stage)) => {
+                Next::PresentToModel(self.return_stage_delivery(&stage))
+            }
+            FollowUp::Offer(OfferFollowUp::Released(release)) => Next::InvokeTool(released(&release)),
+            FollowUp::Offer(OfferFollowUp::Settled(_)) => Next::PresentToModel(Presentation::Declined {
+                feedback: "[appa] this call already ran; propose a fresh call".to_string(),
+            }),
+            other => {
+                return Err(EngineRefusal::Invariant {
+                    detail: format!("an offer produced a non-offer follow-up: {other:?}"),
+                });
+            }
+        };
+        Ok(EngineDecision {
+            append,
+            then,
+            ends_child: None,
+        })
     }
 
-    #[expect(clippy::too_many_arguments)]
-    fn execute_call_offer(
+    fn offer_authorities(
         &self,
         views: &Views,
-        trajectory: &TrajectoryId,
-        offer: &OfferId,
-        call: &ProposedCall,
-        chosen: &ExecutableRemedyPlan,
+        offer: &EngineOfferId,
+        call: &ResolvedCall,
+        required: &[RequiredRuling],
         evidence: &[ExternalEvidence],
-        offers: &Mutex<OfferCache>,
-    ) -> Result<EngineDecision, EngineRefusal> {
-        let resolved = match self.resolve(call, evidence) {
-            Ok(resolved) => resolved,
-            Err(Resolution::Feedback(text)) => return Ok(retire_declined(offer, text)),
-            Err(Resolution::Consult(requests)) => {
-                return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
-            }
-        };
-        let raw = match self.engine.check(views, &resolved) {
-            Ok(CheckOutcome::Block(raw)) => raw,
-            Ok(CheckOutcome::Allow) => {
-                return Ok(retire_declined(
-                    offer,
-                    "[appa] the state changed and this offer no longer applies; re-propose the call".to_string(),
-                ));
-            }
-            Err(error) => {
-                return Ok(retire_declined(
-                    offer,
-                    format!("[appa] the offer's call is no longer valid: {error}"),
-                ));
-            }
-        };
-        if !raw.unestablished.is_empty() {
-            return Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Declined {
-                feedback: unestablished_feedback(views, &raw.unestablished),
-            })));
-        }
-        let planned = self
-            .engine
-            .plan(views, &resolved, &raw)
-            .map_err(|error| EngineRefusal::Invariant {
-                detail: format!("re-planning a checked block: {error}"),
-            })?;
-        if !planned
-            .plans
-            .iter()
-            .filter_map(RemedyPlan::executable)
-            .any(|offered| offered == chosen)
-        {
-            return Ok(retire_declined(
-                offer,
-                "[appa] the state changed and this offer no longer applies; re-propose the call".to_string(),
-            ));
-        }
-        let dispatch = predicted_dispatch(views, &resolved);
-        let mut rulings = Vec::new();
+    ) -> AuthorityOutcome {
+        let mut approvals = Vec::new();
         let mut requests = Vec::new();
-        for requirement in &chosen.required {
+        for requirement in required {
             let name = requirement.authority.as_str().to_string();
-            let answer = evidence.iter().find_map(|entry| match entry {
-                ExternalEvidence::Authority {
-                    authority,
-                    verdict,
-                    review,
-                    dispatch: reviewed_dispatch,
-                } if *authority == name && *reviewed_dispatch == dispatch => Some((*verdict, review.clone())),
-                _ => None,
-            });
-            match answer {
+            let review = AuthorityReview {
+                tool: call.tool().clone(),
+                trajectory_label: views.current_label(),
+            };
+            match authority_verdict(evidence, &name) {
                 None => requests.push(ExternalRequest::Authority {
                     authority: name,
                     payload: authority_payload(
                         &requirement.authority,
                         self.engine.registry(),
-                        &resolved,
+                        call,
                         &requirement.covers,
                         views,
                     ),
-                    review: AuthorityReview {
-                        tool: resolved.tool().clone(),
-                        trajectory_label: views.current_label(),
-                    },
-                    dispatch: dispatch.clone(),
+                    review,
                 }),
-                Some((AuthorityVerdict::Approve, review)) => rulings.push(Ruling {
-                    dispatch: dispatch.clone(),
+                Some((AuthorityVerdict::Approve, review)) => approvals.push(AuthorityEvidence {
+                    offer: *offer,
                     authority: requirement.authority.clone(),
                     covers: requirement.covers.clone(),
                     reviewed: review,
                 }),
                 Some((AuthorityVerdict::Deny, _)) => {
-                    let denier = requirement.authority.clone();
-                    let digest = resolved.digest();
-                    let batch = FactBatch::new(
-                        views.revision(),
-                        vec![Fact::Denial {
-                            trajectory: views.trajectory().clone(),
-                            digest,
-                            authority: denier.clone(),
-                        }],
-                    );
-                    let retire = self.offers_naming(trajectory, &denier, &digest, offers);
-                    let mut decision = EngineDecision::append(
-                        batch,
-                        Next::PresentToModel(Presentation::Declined {
-                            feedback: format!(
-                                "[appa] authority {} denied this call; the offers naming it are withdrawn",
-                                denier.as_str()
-                            ),
-                        }),
-                    );
-                    decision.offers.retire = retire;
-                    return Ok(decision);
+                    return AuthorityOutcome::Outcome(OfferOutcome::Denied {
+                        authority: requirement.authority.clone(),
+                    });
                 }
                 Some((AuthorityVerdict::Abstain, _)) => {
-                    return Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::NoAnswer {
-                        feedback: format!(
-                            "[appa] authority {name} gave no answer; the offer stands and may be executed again"
-                        ),
-                    })));
+                    return AuthorityOutcome::NoAnswer(format!(
+                        "[appa] authority {name} gave no answer; the offer stands and may be executed again"
+                    ));
                 }
             }
         }
         if !requests.is_empty() {
-            return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
+            return AuthorityOutcome::Consult(requests);
         }
-        match self.engine.execute_remedy_plan(views, chosen, &resolved, &rulings) {
-            Ok(batch) => {
-                let mut decision = EngineDecision::append(batch, Next::InvokeTool(released(&dispatch, &resolved)));
-                decision.offers.retire = vec![offer.clone()];
-                Ok(decision)
-            }
-            Err(PlanError::Unestablished(facts)) => {
-                Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Declined {
-                    feedback: unestablished_feedback(views, &facts),
-                })))
-            }
-            Err(error) => Ok(retire_declined(
-                offer,
-                format!("[appa] the remedy plan could not be executed on the current state: {error}"),
-            )),
-        }
+        AuthorityOutcome::Outcome(OfferOutcome::Approved(approvals))
     }
 
-    fn execute_return_offer(
+    fn offer_block_delivery(&self, views: &Views, block: &CoreBlocked) -> Presentation {
+        let offers: Vec<OfferId> = block.offers.iter().map(|(offer, _)| offer_id(offer)).collect();
+        let feedback = block_feedback(views, &block.block, &offers, self.engine.registry().trust_chain());
+        Presentation::Blocked { feedback, offers }
+    }
+
+    fn confined_delivery(&self, confined: &Confined) -> Presentation {
+        let offers: Vec<OfferId> = confined.offers.iter().map(|(offer, _)| offer_id(offer)).collect();
+        let feedback = stage_feedback(
+            "[appa] the cleaned result still narrows this session.",
+            &confined.residual,
+            &offers,
+            self.engine.registry().trust_chain(),
+        );
+        Presentation::Blocked { feedback, offers }
+    }
+
+    fn return_stage_delivery(&self, stage: &PendingReturnStage) -> Presentation {
+        let offers: Vec<OfferId> = stage.offers.iter().map(|(offer, _)| offer_id(offer)).collect();
+        let feedback = stage_feedback(
+            "[appa] the child's return still narrows this session.",
+            &stage.residual,
+            &offers,
+            self.engine.registry().trust_chain(),
+        );
+        Presentation::Blocked { feedback, offers }
+    }
+
+    fn bind_fork(
         &self,
-        parent_views: &Views,
-        offer: &OfferId,
+        view: &ValidatedView,
+        fork: &ForkId,
         child: &TrajectoryId,
-        raw: &str,
-        chosen: &ReturnPlan,
-        evidence: &[ExternalEvidence],
     ) -> Result<EngineDecision, EngineRefusal> {
-        let check = match self.engine.check_child_return(parent_views, &engine_id(child)) {
-            Ok(check) => check,
-            Err(BranchError::AlreadyEnded) => {
-                return Ok(retire_declined(
-                    offer,
-                    "[appa] the child has already ended; this return offer no longer stands".to_string(),
-                ));
-            }
-            Err(error) => {
-                return Err(EngineRefusal::Invariant {
-                    detail: format!("re-checking a child return: {error}"),
-                });
-            }
+        let binding = ForkBinding {
+            fork: fork.clone(),
+            child: engine_id(child),
         };
-        let plans = match &check {
-            ReturnCheck::Block(block) => block.plans.clone(),
-            ReturnCheck::Allow => Vec::new(),
-        };
-        if !plans.contains(chosen) {
-            return Ok(retire_declined(
-                offer,
-                "[appa] the state changed and this return offer no longer applies".to_string(),
-            ));
-        }
-        let submission = match chosen {
-            ReturnPlan::Accept(_) => ReturnSubmission::Raw {
-                body: ValueBody::new(raw.to_string()),
-            },
-            ReturnPlan::Sanitize { sanitizer, .. } => {
-                let name = sanitizer.as_str().to_string();
-                let derived = evidence.iter().find_map(|entry| match entry {
-                    ExternalEvidence::Sanitizer { sanitizer, derived } if *sanitizer == name => Some(derived.clone()),
-                    _ => None,
-                });
-                match derived {
-                    None => {
-                        return Ok(EngineDecision::deliver(Next::ResolveExternal(vec![
-                            ExternalRequest::Sanitizer {
-                                sanitizer: name,
-                                payload: serde_json::json!({ "body": raw }),
-                            },
-                        ])));
-                    }
-                    Some(Some(derived)) => ReturnSubmission::Derived {
-                        body: ValueBody::new(derived),
-                        raw_digest: RawResultDigest::of(raw.as_bytes()),
-                    },
-                    Some(None) => {
-                        return Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::NoAnswer {
-                            feedback: format!(
-                                "[appa] sanitizer {name} gave no answer; the offer stands and may be executed again"
-                            ),
-                        })));
-                    }
-                }
-            }
-        };
-        let value = match &submission {
-            ReturnSubmission::Raw { body } | ReturnSubmission::Derived { body, .. } => body.as_str().to_string(),
-        };
-        match self
+        let decision = self
             .engine
-            .execute_child_return_plan(parent_views, &engine_id(child), chosen.clone(), submission)
-        {
-            Ok(batch) => {
-                let mut decision = EngineDecision::append(batch, Next::PresentToModel(Presentation::Value { value }));
-                decision.offers.retire = vec![offer.clone()];
-                decision.ends_child = Some(child.clone());
-                Ok(decision)
-            }
-            Err(error) => Ok(retire_declined(
-                offer,
-                format!("[appa] the return plan could not be executed on the current state: {error}"),
-            )),
+            .handle(view, CoreEvent::BindFork(binding))
+            .map_err(bind_refusal)?;
+        let append = decision.append.map(ValidatedFactBatch::into_unsealed);
+        match decision.follow_up {
+            FollowUp::Fork { .. } => Ok(EngineDecision {
+                append,
+                then: Next::Done,
+                ends_child: None,
+            }),
+            other => Err(EngineRefusal::Invariant {
+                detail: format!("a fork binding produced a non-fork follow-up: {other:?}"),
+            }),
         }
     }
 
     fn child_return(
         &self,
-        parent_views: &Views,
-        parent: &TrajectoryId,
+        view: &ValidatedView,
         child: &TrajectoryId,
         value: Option<String>,
         evidence: &[ExternalEvidence],
-        entropy: OfferNonce,
+        entropy: &OfferNonce,
     ) -> Result<EngineDecision, EngineRefusal> {
-        let child_engine = engine_id(child);
-        let Some(value) = value else {
-            let batch = self
-                .engine
-                .submit_void_return(parent_views, &child_engine)
-                .map_err(|error| match error {
-                    BranchError::AlreadyEnded => EngineRefusal::Ended,
-                    error => EngineRefusal::Invariant {
-                        detail: format!("void return: {error}"),
-                    },
-                })?;
-            return Ok(EngineDecision::append(
-                batch,
-                Next::PresentToModel(Presentation::NoValue),
-            ));
+        let fork = self.engine.fork_of(view, &engine_id(child));
+        let submission = match value {
+            None => ChildSubmission::Void,
+            Some(body) => ChildSubmission::Value {
+                body: ValueBody::new(body),
+            },
         };
-        if let Some(ReturnPolicy::Sanitized(sanitizer)) = parent_views.return_policy_of(&child_engine) {
-            let name = sanitizer.as_str().to_string();
-            let derived = evidence.iter().find_map(|entry| match entry {
-                ExternalEvidence::Sanitizer { sanitizer, derived } if *sanitizer == name => Some(derived.clone()),
-                _ => None,
-            });
-            return match derived {
-                None => Ok(EngineDecision::deliver(Next::ResolveExternal(vec![
-                    ExternalRequest::Sanitizer {
-                        sanitizer: name,
-                        payload: serde_json::json!({ "body": value }),
-                    },
-                ]))),
-                Some(None) => Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
-                    feedback: format!(
-                        "[appa] sanitizer {name} gave no answer; the return is withheld and may be retried"
-                    ),
-                    offers: Vec::new(),
-                }))),
-                Some(Some(derived)) => {
-                    match self.engine.submit_child_return(
-                        parent_views,
-                        &child_engine,
-                        ReturnSubmission::Derived {
-                            body: ValueBody::new(derived.clone()),
-                            raw_digest: RawResultDigest::of(value.as_bytes()),
-                        },
-                    ) {
-                        Ok(batch) => Ok(EngineDecision::append(
-                            batch,
-                            Next::PresentToModel(Presentation::Value { value: derived }),
-                        )),
-                        Err(BranchError::AlreadyEnded) => Err(EngineRefusal::Ended),
-                        Err(error) => Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
-                            feedback: format!("[appa] the sanitized return may not cross: {error}"),
-                            offers: Vec::new(),
-                        }))),
-                    }
-                }
-            };
-        }
-        let check = self
+        let report = ChildReport {
+            child: engine_id(child),
+            fork,
+            submission,
+            evidence: sanitizer_evidence(evidence),
+            offer_nonce: engine_nonce(entropy),
+        };
+        let decision = self
             .engine
-            .check_child_return(parent_views, &child_engine)
-            .map_err(|error| match error {
-                BranchError::AlreadyEnded => EngineRefusal::Ended,
-                error => EngineRefusal::Invariant {
-                    detail: format!("checking a child return: {error}"),
-                },
-            })?;
-        match check {
-            ReturnCheck::Allow => {
-                let batch = self
-                    .engine
-                    .submit_child_return(
-                        parent_views,
-                        &child_engine,
-                        ReturnSubmission::Raw {
-                            body: ValueBody::new(value.clone()),
-                        },
-                    )
-                    .map_err(|error| EngineRefusal::Invariant {
-                        detail: format!("submitting an allowed return: {error}"),
-                    })?;
-                Ok(EngineDecision::append(
-                    batch,
-                    Next::PresentToModel(Presentation::Value { value }),
-                ))
+            .handle(view, CoreEvent::ChildReturn(report))
+            .map_err(child_refusal)?;
+        let append = decision.append.map(ValidatedFactBatch::into_unsealed);
+        let (then, ended) = match decision.follow_up {
+            FollowUp::Child(ChildFollowUp::Merged { admitted }) => (
+                Next::PresentToModel(Presentation::Value {
+                    value: admitted.as_str().to_string(),
+                }),
+                true,
+            ),
+            FollowUp::Child(ChildFollowUp::Ended) => (Next::PresentToModel(Presentation::NoValue), true),
+            FollowUp::Child(ChildFollowUp::Pending(stage)) => {
+                (Next::PresentToModel(self.return_stage_delivery(&stage)), true)
             }
-            ReturnCheck::Block(ReturnBlock { narrowing, plans }) => {
-                let mut stage = Vec::new();
-                let mut offer_ids = Vec::new();
-                for (index, plan) in plans.iter().enumerate() {
-                    let id = OfferId(offer_name(&entropy, index));
-                    stage.push((
-                        id.clone(),
-                        CachedOffer::ChildReturn {
-                            trajectory: parent.clone(),
-                            child: child.clone(),
-                            raw: value.clone(),
-                            plan: plan.clone(),
-                        },
-                    ));
-                    offer_ids.push(id);
-                }
-                let feedback = return_block_feedback(&narrowing, &plans, &offer_ids);
-                let mut decision = EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
-                    feedback,
-                    offers: offer_ids,
-                }));
-                decision.offers.stage = stage;
-                Ok(decision)
+            FollowUp::Child(ChildFollowUp::Rejected { reason }) => (
+                Next::PresentToModel(Presentation::Blocked {
+                    feedback: format!("[appa] the child's return could not cross: {reason:?}"),
+                    offers: Vec::new(),
+                }),
+                true,
+            ),
+            FollowUp::Child(ChildFollowUp::Resolve(request)) => (
+                resolve_or_withhold(
+                    request,
+                    evidence,
+                    "[appa] the return sanitizer gave no answer; the return is withheld and may be retried",
+                )?,
+                false,
+            ),
+            other => {
+                return Err(EngineRefusal::Invariant {
+                    detail: format!("a child return produced an unexpected follow-up: {other:?}"),
+                });
             }
-        }
+        };
+        Ok(EngineDecision {
+            append,
+            then,
+            ends_child: ended.then(|| child.clone()),
+        })
     }
 
-    fn resolve(&self, call: &ProposedCall, evidence: &[ExternalEvidence]) -> Result<ResolvedCall, Resolution> {
+    fn resolve_dynamics(
+        &self,
+        call: &ProposedCall,
+        evidence: &[ExternalEvidence],
+    ) -> Result<Vec<PinnedDynamicResolution>, Resolution> {
         let tool = ToolName::new(call.tool.clone());
         let Some(contract) = self.engine.registry().tool(&tool) else {
             return Err(Resolution::Feedback(format!(
@@ -1414,13 +1214,16 @@ impl RuntimeEngine {
                 call.tool
             )));
         };
-        let resolved = self
-            .engine
-            .resolve_call(tool, call.arguments.get().as_bytes())
-            .map_err(|error| Resolution::Feedback(format!("[appa] {error}")))?;
+        let mut bindings = dynamic_bindings(contract).peekable();
+        if bindings.peek().is_none() {
+            return Ok(Vec::new());
+        }
+        let Ok(resolved) = self.engine.resolve_call(tool, call.arguments.get().as_bytes()) else {
+            return Ok(Vec::new());
+        };
         let mut pins = Vec::new();
         let mut requests = Vec::new();
-        for binding in dynamic_bindings(contract) {
+        for binding in bindings {
             let Some(argument_value) = resolved.arguments().get(&binding.argument).and_then(|v| v.as_str()) else {
                 continue;
             };
@@ -1448,62 +1251,20 @@ impl RuntimeEngine {
         if !requests.is_empty() {
             return Err(Resolution::Consult(requests));
         }
-        Ok(resolved.with_dynamic_resolutions(pins))
+        Ok(pins)
     }
+}
 
-    fn open_dispatch_for(
-        &self,
-        views: &Views,
-        call: &ProposedCall,
-    ) -> Result<(ResolvedCall, EngineDispatchId), EngineRefusal> {
-        let tool = ToolName::new(call.tool.clone());
-        let resolved = self
-            .engine
-            .resolve_call(tool, call.arguments.get().as_bytes())
-            .map_err(|_| EngineRefusal::Invariant {
-                detail: "a matched outcome's call no longer canonicalizes".to_string(),
-            })?;
-        let digest = resolved.digest();
-        let dispatch = (0..views.dispatch_count(&digest))
-            .map(|occurrence| EngineDispatchId::new(views.trajectory().clone(), digest, occurrence))
-            .find(|dispatch| views.is_open(dispatch))
-            .ok_or(EngineRefusal::DispatchClosed)?;
-        Ok((resolved, dispatch))
-    }
+enum AuthorityOutcome {
+    Outcome(OfferOutcome),
+    Consult(Vec<ExternalRequest>),
+    NoAnswer(String),
+}
 
-    fn offers_naming(
-        &self,
-        trajectory: &TrajectoryId,
-        denier: &appa_engine::names::AuthorityName,
-        digest: &CanonicalDigest,
-        offers: &Mutex<OfferCache>,
-    ) -> Vec<OfferId> {
-        let cache = offers.lock().expect("the offer cache mutex is never poisoned");
-        cache
-            .entries
-            .iter()
-            .filter(|(_, (_, cached))| match cached {
-                CachedOffer::Call {
-                    trajectory: owner,
-                    call,
-                    plan,
-                } => {
-                    owner == trajectory
-                        && plan.names_authority(denier)
-                        && self.digest_of(call).is_some_and(|d| d == *digest)
-                }
-                CachedOffer::ChildReturn { .. } => false,
-            })
-            .map(|(id, _)| OfferId(id.clone()))
-            .collect()
-    }
-
-    fn digest_of(&self, call: &ProposedCall) -> Option<CanonicalDigest> {
-        self.engine
-            .resolve_call(ToolName::new(call.tool.clone()), call.arguments.get().as_bytes())
-            .ok()
-            .map(|call| call.digest())
-    }
+enum SanitizerAnswer {
+    Missing,
+    NoAnswer,
+    Derived(ValueBody),
 }
 
 enum Resolution {
@@ -1511,33 +1272,279 @@ enum Resolution {
     Consult(Vec<ExternalRequest>),
 }
 
-impl EngineDecision {
-    fn admission_refused(feedback: String) -> EngineDecision {
-        EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
-            feedback,
-            offers: Vec::new(),
-        }))
-    }
+fn deny(text: String) -> EngineDecision {
+    EngineDecision::deliver(deny_next(text))
 }
 
-fn deny(text: String) -> EngineDecision {
-    EngineDecision::deliver(Next::ModelResponse {
+fn deny_next(text: String) -> Next {
+    Next::ModelResponse {
         invocations: Vec::new(),
         feedback: vec![Feedback {
             text,
             offers: Vec::new(),
         }],
+    }
+}
+
+fn declined(feedback: String) -> EngineDecision {
+    EngineDecision::deliver(Next::PresentToModel(Presentation::Declined { feedback }))
+}
+
+fn no_answer(feedback: String) -> EngineDecision {
+    EngineDecision::deliver(Next::PresentToModel(Presentation::NoAnswer { feedback }))
+}
+
+pub(crate) fn engine_id(id: &TrajectoryId) -> appa_engine::value::TrajectoryId {
+    appa_engine::value::TrajectoryId::new(id.0.clone())
+}
+
+fn engine_nonce(entropy: &OfferNonce) -> EngineOfferNonce {
+    EngineOfferNonce::new(entropy.0)
+}
+
+fn batch_id(entropy: &OfferNonce) -> ProposalBatchId {
+    ProposalBatchId::new(hex(&entropy.0))
+}
+
+/// One engine dispatch id as the runtime's durable row key (`T31`): serialized
+/// structurally so the outcome recovers the exact engine id, never a re-derived
+/// one.
+pub(crate) fn dispatch_wire(dispatch: &EngineDispatchId) -> String {
+    serde_json::to_string(dispatch).expect("an engine dispatch id serializes")
+}
+
+/// Recover the engine dispatch id one durable row key carries (`T31`). `None`
+/// for a key this runtime did not write — never a guess.
+pub(crate) fn parse_dispatch(key: &str) -> Option<EngineDispatchId> {
+    serde_json::from_str(key).ok()
+}
+
+fn fork_binding(fork: &ForkId) -> SpawnBinding {
+    SpawnBinding(serde_json::to_string(fork).expect("a fork id serializes"))
+}
+
+/// Recover the fork one spawn binding names. `None` for a binding
+/// this runtime did not mint.
+pub(crate) fn parse_fork(binding: &SpawnBinding) -> Option<ForkId> {
+    serde_json::from_str(&binding.0).ok()
+}
+
+fn offer_id(offer: &EngineOfferId) -> OfferId {
+    OfferId(offer.to_hex())
+}
+
+fn parse_offer(offer: &OfferId) -> Option<EngineOfferId> {
+    EngineOfferId::from_hex(&offer.0).ok()
+}
+
+fn released(release: &Released) -> ReleasedCall {
+    ReleasedCall {
+        dispatch: DispatchId(dispatch_wire(&release.dispatch)),
+        tool: release.call.tool().as_str().to_string(),
+        bytes: release.call.canonical_arguments().canonical_bytes().to_vec(),
+        fork: release.fork.as_ref().map(fork_binding),
+    }
+}
+
+fn engine_outcome(outcome: &ToolOutcome) -> CoreToolOutcome {
+    match outcome {
+        ToolOutcome::Failure { .. } => CoreToolOutcome::Failure,
+        ToolOutcome::Indeterminate => CoreToolOutcome::Indeterminate,
+        ToolOutcome::Success {
+            body: OutcomeBody::Unavailable,
+        } => CoreToolOutcome::Success {
+            body: CoreOutcomeBody::Unavailable,
+        },
+        ToolOutcome::Success {
+            body: OutcomeBody::Available(raw),
+        } => CoreToolOutcome::Success {
+            body: CoreOutcomeBody::Available(ValueBody::new(raw.clone())),
+        },
+    }
+}
+
+fn outcome_presentation(outcome: &ToolOutcome, admitted: Option<ValueBody>) -> Presentation {
+    match (outcome, admitted) {
+        (
+            ToolOutcome::Success {
+                body: OutcomeBody::Available(raw),
+            },
+            Some(value),
+        ) if value.as_str() == raw => Presentation::KeepOutput,
+        (_, Some(value)) => Presentation::ReplaceOutput {
+            placeholder: value.as_str().to_string(),
+        },
+        (
+            ToolOutcome::Success {
+                body: OutcomeBody::Unavailable,
+            },
+            None,
+        ) => Presentation::ReplaceOutput {
+            placeholder: "[appa] the result was not carried; nothing was admitted".to_string(),
+        },
+        (ToolOutcome::Failure { .. } | ToolOutcome::Indeterminate, None) => Presentation::KeepOutput,
+        (ToolOutcome::Success { .. }, None) => Presentation::ReplaceOutput {
+            placeholder: "[appa] the result is withheld".to_string(),
+        },
+    }
+}
+
+fn sanitizer_evidence(evidence: &[ExternalEvidence]) -> Vec<Evidence> {
+    evidence
+        .iter()
+        .filter_map(|entry| match entry {
+            ExternalEvidence::Sanitizer {
+                sanitizer,
+                source,
+                derived: Some(derived),
+            } => Some(Evidence::Sanitizer {
+                sanitizer: appa_engine::names::SanitizerName::new(sanitizer.clone()),
+                source: *source,
+                derived: ValueBody::new(derived.clone()),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn sanitizer_derivation(evidence: &[ExternalEvidence], name: &str, source: &RawResultDigest) -> SanitizerAnswer {
+    for entry in evidence {
+        if let ExternalEvidence::Sanitizer {
+            sanitizer,
+            source: reported,
+            derived,
+        } = entry
+            && sanitizer == name
+            && reported == source
+        {
+            return match derived {
+                Some(derived) => SanitizerAnswer::Derived(ValueBody::new(derived.clone())),
+                None => SanitizerAnswer::NoAnswer,
+            };
+        }
+    }
+    SanitizerAnswer::Missing
+}
+
+fn authority_verdict(evidence: &[ExternalEvidence], name: &str) -> Option<(AuthorityVerdict, AuthorityReview)> {
+    evidence.iter().find_map(|entry| match entry {
+        ExternalEvidence::Authority {
+            authority,
+            verdict,
+            review,
+        } if authority == name => Some((*verdict, review.clone())),
+        _ => None,
     })
 }
 
-fn retire_declined(offer: &OfferId, feedback: String) -> EngineDecision {
-    let mut decision = EngineDecision::deliver(Next::PresentToModel(Presentation::Declined { feedback }));
-    decision.offers.retire = vec![offer.clone()];
-    decision
+fn resolve_or_withhold(
+    request: EvidenceRequest,
+    evidence: &[ExternalEvidence],
+    withheld: &str,
+) -> Result<Next, EngineRefusal> {
+    match request {
+        EvidenceRequest::Sanitizer {
+            sanitizer,
+            source,
+            body,
+        } => {
+            if matches!(
+                sanitizer_derivation(evidence, sanitizer.as_str(), &source),
+                SanitizerAnswer::NoAnswer
+            ) {
+                return Ok(Next::PresentToModel(Presentation::Blocked {
+                    feedback: withheld.to_string(),
+                    offers: Vec::new(),
+                }));
+            }
+            Ok(Next::ResolveExternal(vec![ExternalRequest::Sanitizer {
+                sanitizer: sanitizer.as_str().to_string(),
+                source,
+                body,
+            }]))
+        }
+        EvidenceRequest::Cast { .. } | EvidenceRequest::PendingCast { .. } => Err(EngineRefusal::Invariant {
+            detail: "the engine asked for a cast resolution this runtime does not drive".to_string(),
+        }),
+    }
 }
 
-fn engine_id(id: &TrajectoryId) -> appa_engine::value::TrajectoryId {
-    appa_engine::value::TrajectoryId::new(id.0.clone())
+fn malformed_feedback(error: &EngineError) -> String {
+    match error {
+        EngineError::UnknownTool(tool) => format!("[appa] unknown tool {tool}: not in this deployment's policy"),
+        EngineError::ProviderRunTool(tool) => format!(
+            "[appa] tool {tool} is provider-run: it executes inside the inference call and cannot be proposed as a tool call"
+        ),
+        EngineError::InvalidReturnSchema(error) => {
+            format!("[appa] invalid call: return_schema does not compile to a canonical shape: {error}")
+        }
+        error => format!("[appa] invalid call: {error}"),
+    }
+}
+
+fn stage_feedback(
+    headline: &str,
+    residual: &appa_engine::check::Narrowing,
+    offers: &[OfferId],
+    chain: &TrustChain,
+) -> String {
+    let mut lines = vec![headline.to_string()];
+    lines.extend(
+        narrowing_feedback(residual, chain)
+            .into_iter()
+            .map(|change| format!("  - {change}")),
+    );
+    for offer in offers {
+        lines.push(format!(
+            "  - execute_remedy_plan(offer_id: \"{}\")",
+            terminal_safe(&offer.0)
+        ));
+    }
+    lines.join("\n")
+}
+
+fn proposal_refusal(error: TransitionError) -> EngineRefusal {
+    match error {
+        TransitionError::BranchEnded => EngineRefusal::Ended,
+        error => EngineRefusal::Invariant {
+            detail: format!("deciding a proposal: {error}"),
+        },
+    }
+}
+
+fn outcome_refusal(error: TransitionError) -> EngineRefusal {
+    match error {
+        TransitionError::BranchEnded => EngineRefusal::Ended,
+        TransitionError::UnknownDispatch => EngineRefusal::DispatchClosed,
+        error => EngineRefusal::Invariant {
+            detail: format!("deciding an outcome: {error}"),
+        },
+    }
+}
+
+fn offer_refusal(error: TransitionError) -> EngineRefusal {
+    match error {
+        TransitionError::UnknownOffer | TransitionError::OfferElsewhere => EngineRefusal::UnknownOffer,
+        TransitionError::BranchEnded => EngineRefusal::Ended,
+        error => EngineRefusal::Invariant {
+            detail: format!("deciding an offer: {error}"),
+        },
+    }
+}
+
+fn bind_refusal(error: TransitionError) -> EngineRefusal {
+    EngineRefusal::Invariant {
+        detail: format!("binding a fork: {error}"),
+    }
+}
+
+fn child_refusal(error: TransitionError) -> EngineRefusal {
+    match error {
+        TransitionError::BranchEnded => EngineRefusal::Ended,
+        error => EngineRefusal::Invariant {
+            detail: format!("deciding a child return: {error}"),
+        },
+    }
 }
 
 fn decode_log(log: &[Vec<u8>]) -> Result<Vec<Fact>, EngineRefusal> {
@@ -1549,32 +1556,6 @@ fn decode_log(log: &[Vec<u8>]) -> Result<Vec<Fact>, EngineRefusal> {
         facts.extend(batch);
     }
     Ok(facts)
-}
-
-fn predicted_dispatch(views: &Views, resolved: &ResolvedCall) -> EngineDispatchId {
-    let digest = resolved.digest();
-    EngineDispatchId::new(views.trajectory().clone(), digest, views.dispatch_count(&digest))
-}
-
-fn released(dispatch: &EngineDispatchId, resolved: &ResolvedCall) -> ReleasedCall {
-    ReleasedCall {
-        dispatch: DispatchId(render_dispatch(dispatch)),
-        tool: resolved.tool().as_str().to_string(),
-        bytes: resolved.canonical_arguments().canonical_bytes().to_vec(),
-    }
-}
-
-fn render_dispatch(dispatch: &EngineDispatchId) -> String {
-    format!(
-        "{}:{}:{}",
-        dispatch.trajectory().as_str(),
-        hex(dispatch.digest().bytes()),
-        dispatch.occurrence()
-    )
-}
-
-fn offer_name(entropy: &OfferNonce, index: usize) -> String {
-    format!("offer-{}-{index}", hex(&entropy.0[..16]))
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -1884,31 +1865,6 @@ fn block_feedback(views: &Views, planned: &PlannedBlock, offers: &[OfferId], cha
             "Alternative:".to_string()
         });
         lines.push(format!("  {}", advice.replace('\n', "\n  ")));
-    }
-    lines.join("\n")
-}
-
-fn return_block_feedback(
-    narrowing: &appa_engine::check::Narrowing,
-    plans: &[ReturnPlan],
-    offers: &[OfferId],
-) -> String {
-    let mut lines = vec![format!(
-        "[appa] the child's return is blocked: merging it would narrow the parent from {:?} to {:?}.",
-        narrowing.from, narrowing.to
-    )];
-    for (plan, id) in plans.iter().zip(offers) {
-        match plan {
-            ReturnPlan::Accept(_) => lines.push(format!(
-                "Option: call execute_remedy_plan with offer id {} to accept the narrowing and merge the raw return.",
-                id.0
-            )),
-            ReturnPlan::Sanitize { sanitizer, .. } => lines.push(format!(
-                "Option: call execute_remedy_plan with offer id {} to merge sanitizer {}'s derivation instead.",
-                id.0,
-                sanitizer.as_str()
-            )),
-        }
     }
     lines.join("\n")
 }

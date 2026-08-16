@@ -6,16 +6,14 @@ use std::sync::Arc;
 use crate::elicit::Elicitation;
 use crate::engine::{
     AuthorityVerdict, EngineDecision, EngineEvent, ExternalEvidence, ExternalRequest, Feedback, Next, OfferNonce,
-    PolicyEngine, Presentation,
+    PolicyEngine, Presentation, engine_id,
 };
 use crate::external::{ConsultKind, ConsultOutcome, DynamicResolution};
 use crate::store::{BatchAppend, DispatchRow, DispatchState, EventWrite, Revision, RuntimeRecord};
-use appa_engine::fact::ObservedResult;
-use appa_engine::value::RawResultDigest;
 
 use super::{
     AuthorizedCall, ChildReturnDecision, DispatchId, EventError, Inner, OfferId, OutcomeBody, ProposedCall,
-    RemedyDecision, ToolCallDecision, ToolOutcome, ToolResultDecision, TrajectoryId,
+    RemedyDecision, SpawnBinding, ToolCallDecision, ToolOutcome, ToolResultDecision, TrajectoryId,
 };
 
 /// The runtime's own control tool, recognized by its exact
@@ -46,7 +44,6 @@ pub(crate) fn is_control_tool(tool: &str) -> bool {
 enum UnreportableOutcome {
     NoOpenDispatch,
     ByteMismatch,
-    UnreleasedDispatch,
 }
 
 impl UnreportableOutcome {
@@ -54,15 +51,12 @@ impl UnreportableOutcome {
         match self {
             UnreportableOutcome::NoOpenDispatch => "no_open_dispatch",
             UnreportableOutcome::ByteMismatch => "byte_mismatch",
-            UnreportableOutcome::UnreleasedDispatch => "unreleased_dispatch",
         }
     }
 
     fn refusal(self) -> EventError {
         match self {
-            UnreportableOutcome::NoOpenDispatch | UnreportableOutcome::UnreleasedDispatch => {
-                EventError::UnknownDispatch
-            }
+            UnreportableOutcome::NoOpenDispatch => EventError::UnknownDispatch,
             UnreportableOutcome::ByteMismatch => EventError::OutcomeMismatch,
         }
     }
@@ -81,7 +75,6 @@ fn classify_report(
     }
     match open.state {
         DispatchState::Executing => Ok(open.id.clone()),
-        DispatchState::Awaiting => Err(UnreportableOutcome::UnreleasedDispatch),
     }
 }
 
@@ -129,31 +122,21 @@ impl Session {
         Ok(())
     }
 
-    pub async fn on_tool_call(&mut self, call: ProposedCall) -> Result<ToolCallDecision, EventError> {
+    pub async fn on_tool_call(&mut self, call: ProposedCall, spawn: bool) -> Result<ToolCallDecision, EventError> {
         if is_control_tool(&call.tool) {
             tracing::debug!(trajectory = %self.trajectory.0, "control tool passes unchecked");
             return Ok(ToolCallDecision::Control);
         }
         self.refuse_if_ended()?;
         let policy = self.inner.resolve_policy(&self.family)?;
-        if let Some(open) = self
+        if self
             .inner
             .store
             .open_dispatch(&self.trajectory)
             .map_err(|error| EventError::Storage(error.to_string()))?
+            .is_some()
         {
-            return match open.state {
-                DispatchState::Executing => Err(EventError::CallOutstanding),
-                DispatchState::Awaiting => {
-                    let proposed = self.inner.engine.canonical_bytes(&policy, &call);
-                    if call.tool == open.tool && proposed.as_deref() == Some(open.bytes.as_slice()) {
-                        self.commit_records(vec![RuntimeRecord::PromoteDispatch { id: open.id }])?;
-                        Ok(ToolCallDecision::Allow)
-                    } else {
-                        Err(EventError::CallOutstanding)
-                    }
-                }
-            };
+            return Err(EventError::CallOutstanding);
         }
 
         let trajectory = self.trajectory.clone();
@@ -164,6 +147,7 @@ impl Session {
                     call: call.clone(),
                     evidence,
                     entropy: fresh_entropy(),
+                    spawn,
                 },
                 move |decision| {
                     match &decision.then {
@@ -197,9 +181,12 @@ impl Session {
                             trajectory = %self.trajectory.0,
                             dispatch = %released.dispatch.0,
                             tool = %released.tool,
+                            spawn = released.fork.is_some(),
                             "call released"
                         );
-                        Ok(ToolCallDecision::Allow)
+                        Ok(ToolCallDecision::Allow {
+                            spawn: released.fork.clone(),
+                        })
                     }
                     ([], feedback) if !feedback.is_empty() => {
                         tracing::debug!(trajectory = %self.trajectory.0, "call blocked");
@@ -240,42 +227,27 @@ impl Session {
         };
         let o = self.cap_outcome(o);
 
-        if let ToolOutcome::Success { body } = &o {
-            let observed = match body {
-                OutcomeBody::Available(raw) => ObservedResult::Available(RawResultDigest::of(raw.as_bytes())),
-                OutcomeBody::Unavailable => ObservedResult::Unavailable,
-            };
-            let checkpoint = self.drive(
-                &policy,
-                || EngineEvent::SuccessObserved {
-                    call: call.clone(),
-                    observed: observed.clone(),
-                },
-                |_| Vec::new(),
-            )?;
-            match checkpoint.then {
-                Next::Done => {}
-                _ => return Err(EventError::UnexpectedDecision),
-            }
-        }
-
+        let engine_dispatch = crate::engine::parse_dispatch(&dispatch.0).ok_or_else(|| {
+            EventError::Storage("an open dispatch row does not carry a recoverable engine dispatch id".to_string())
+        })?;
+        let owner = self.trajectory.clone();
         let decision = self
             .drive_with_evidence(
                 &policy,
                 |evidence| EngineEvent::ToolOutcome {
-                    call: call.clone(),
+                    dispatch: engine_dispatch.clone(),
                     outcome: o.clone(),
                     evidence,
+                    entropy: fresh_entropy(),
                 },
                 move |decision| {
                     match &decision.then {
                         Next::PresentToModel(Presentation::KeepOutput)
-                        | Next::PresentToModel(Presentation::Value { .. }) => {
+                        | Next::PresentToModel(Presentation::Value { .. })
+                        | Next::PresentToModel(Presentation::ReplaceOutput { .. }) => {
                             vec![RuntimeRecord::CloseDispatch { id: dispatch.clone() }]
                         }
-                        Next::PresentToModel(Presentation::ReplaceOutput { .. }) => {
-                            vec![RuntimeRecord::CloseDispatch { id: dispatch.clone() }]
-                        }
+                        Next::PresentToModel(Presentation::Blocked { offers, .. }) => offer_records(&owner, offers),
                         _ => Vec::new(),
                     }
                 },
@@ -320,24 +292,37 @@ impl Session {
         }
 
         let trajectory = self.trajectory.clone();
+        let route = self.trajectory.clone();
         let decision = self
             .drive_with_evidence(
                 &policy,
                 |evidence| EngineEvent::ExecuteOffer {
+                    trajectory: trajectory.clone(),
                     offer: offer.clone(),
                     evidence,
+                    entropy: fresh_entropy(),
                 },
                 move |decision| {
                     let mut records = match &decision.then {
                         Next::InvokeTool(released) => vec![RuntimeRecord::OpenDispatch {
                             id: released.dispatch.clone(),
-                            trajectory: trajectory.clone(),
+                            trajectory: route.clone(),
                             tool: released.tool.clone(),
                             bytes: released.bytes.clone(),
-                            state: DispatchState::Awaiting,
+                            state: DispatchState::Executing,
                         }],
+                        Next::PresentToModel(Presentation::Blocked { offers, .. }) => offer_records(&route, offers),
                         _ => Vec::new(),
                     };
+                    if let Some(batch) = &decision.append {
+                        for fact in &batch.facts {
+                            if let appa_engine::fact::Fact::DispatchClosed { dispatch, .. } = fact {
+                                records.push(RuntimeRecord::CloseDispatch {
+                                    id: DispatchId(crate::engine::dispatch_wire(dispatch)),
+                                });
+                            }
+                        }
+                    }
                     if let Some(child) = &decision.ends_child {
                         records.push(RuntimeRecord::End { id: child.clone() });
                     }
@@ -348,6 +333,9 @@ impl Session {
             .await?;
 
         match decision.then {
+            Next::Approved { tool, bytes } => Ok(RemedyDecision::Authorized {
+                call: AuthorizedCall { tool, bytes },
+            }),
             Next::InvokeTool(released) => Ok(RemedyDecision::Authorized {
                 call: AuthorizedCall {
                     tool: released.tool,
@@ -357,12 +345,27 @@ impl Session {
             Next::PresentToModel(Presentation::Value { value }) => Ok(RemedyDecision::Returned { value }),
             Next::PresentToModel(Presentation::Declined { feedback }) => Ok(RemedyDecision::Declined { feedback }),
             Next::PresentToModel(Presentation::NoAnswer { feedback }) => Ok(RemedyDecision::NoAnswer { feedback }),
+            Next::PresentToModel(Presentation::Blocked { feedback, .. }) => Ok(RemedyDecision::Declined { feedback }),
             _ => Err(EventError::UnexpectedDecision),
         }
     }
 
-    pub fn on_child_start(&mut self, id: TrajectoryId) -> Result<Session, EventError> {
+    /// A child agent started. The harness echoes the [`SpawnBinding`] it
+    /// received when the parent's spawn call was released: the
+    /// binding names the exact prepared fork, and the engine's `BindFork`
+    /// opens the child before its first engine event. The child's
+    /// trajectory row opens in the same transaction as the `ForkOpened` fact.
+    pub fn on_child_start(&mut self, id: TrajectoryId, spawn: Option<SpawnBinding>) -> Result<Session, EventError> {
         self.refuse_if_ended()?;
+        let Some(binding) = spawn else {
+            return Err(EventError::SpawnNotTaken);
+        };
+        let Some(fork) = crate::engine::parse_fork(&binding) else {
+            return Err(EventError::SpawnNotTaken);
+        };
+        if fork.dispatch().trajectory() != &engine_id(&self.trajectory) {
+            return Err(EventError::SpawnNotTaken);
+        }
         let policy = self.inner.resolve_policy(&self.family)?;
         let existing = self
             .inner
@@ -376,7 +379,10 @@ impl Session {
         let parent = self.trajectory.clone();
         let decision = self.drive(
             &policy,
-            || EngineEvent::ChildStart { child: child.clone() },
+            || EngineEvent::BindFork {
+                fork: fork.clone(),
+                child: child.clone(),
+            },
             |_| {
                 vec![RuntimeRecord::OpenChild {
                     id: child.clone(),
@@ -392,8 +398,9 @@ impl Session {
 
     /// The child finished. Its final message is its only return
     /// channel and is checked before it may cross to the parent;
-    /// `None` returns no value. The child ends
-    /// in the same transaction as its return's facts.
+    /// `None` returns no value. The return names the
+    /// fork that opened the child, recovered from the log. The
+    /// child ends in the same transaction as its return's facts.
     pub async fn on_child_end(&mut self, value: Option<String>) -> Result<ChildReturnDecision, EventError> {
         self.refuse_if_ended()?;
         let policy = self.inner.resolve_policy(&self.family)?;
@@ -404,28 +411,28 @@ impl Session {
             .map_err(|error| EventError::Storage(error.to_string()))?
             .and_then(|row| row.parent)
             .ok_or(EventError::NotAChild)?;
-        let trajectory = self.trajectory.clone();
         let child = self.trajectory.clone();
-        let parent = owner.clone();
+        let owner_route = owner.clone();
         let decision = self
             .drive_with_evidence(
                 &policy,
                 |evidence| EngineEvent::ChildReturn {
-                    parent: parent.clone(),
                     child: child.clone(),
                     value: value.clone(),
                     evidence,
                     entropy: fresh_entropy(),
                 },
                 move |decision| {
-                    match &decision.then {
-                        Next::PresentToModel(Presentation::Value { .. })
-                        | Next::PresentToModel(Presentation::NoValue) => {
-                            vec![RuntimeRecord::End { id: trajectory.clone() }]
+                    let mut records = match &decision.then {
+                        Next::PresentToModel(Presentation::Blocked { offers, .. }) => {
+                            offer_records(&owner_route, offers)
                         }
-                        Next::PresentToModel(Presentation::Blocked { offers, .. }) => offer_records(&owner, offers),
                         _ => Vec::new(),
+                    };
+                    if let Some(child) = &decision.ends_child {
+                        records.push(RuntimeRecord::End { id: child.clone() });
                     }
+                    records
                 },
                 None,
             )
@@ -540,15 +547,7 @@ impl Session {
             let event_records = if matches!(decision.then, Next::ResolveExternal(_)) {
                 Vec::new()
             } else {
-                let mut event_records = records(&decision);
-                event_records.extend(
-                    decision
-                        .offers
-                        .retire
-                        .iter()
-                        .map(|id| RuntimeRecord::RetireOffer { id: id.clone() }),
-                );
-                event_records
+                records(&decision)
             };
             let batch = decision
                 .append
@@ -563,7 +562,6 @@ impl Session {
                 .transpose()?;
             if batch.is_none() {
                 if event_records.is_empty() {
-                    self.inner.engine.apply_offers(decision.offers.clone());
                     return Ok(decision);
                 }
                 return match self.inner.store.commit_event(
@@ -573,10 +571,7 @@ impl Session {
                         records: event_records,
                     },
                 ) {
-                    Ok(_) => {
-                        self.inner.engine.apply_offers(decision.offers.clone());
-                        Ok(decision)
-                    }
+                    Ok(_) => Ok(decision),
                     Err(crate::store::CommitError::DispatchAlreadyOpen) => Err(EventError::CallOutstanding),
                     Err(error) => Err(EventError::Storage(error.to_string())),
                 };
@@ -589,7 +584,6 @@ impl Session {
                 },
             ) {
                 Ok(_) => {
-                    self.inner.engine.apply_offers(decision.offers.clone());
                     return Ok(decision);
                 }
                 Err(crate::store::CommitError::Conflict { .. }) => {
@@ -615,7 +609,6 @@ impl Session {
                 authority,
                 payload,
                 review,
-                dispatch,
             } => {
                 let outcome = self
                     .inner
@@ -630,14 +623,18 @@ impl Session {
                     authority: authority.clone(),
                     verdict,
                     review: review.clone(),
-                    dispatch: dispatch.clone(),
                 }
             }
-            ExternalRequest::Sanitizer { sanitizer, payload } => {
+            ExternalRequest::Sanitizer {
+                sanitizer,
+                source,
+                body,
+            } => {
+                let payload = serde_json::json!({ "body": body.as_str() });
                 let outcome = self
                     .inner
                     .externals
-                    .consult(ConsultKind::Sanitizer, sanitizer, payload, None)
+                    .consult(ConsultKind::Sanitizer, sanitizer, &payload, None)
                     .await;
                 let derived = match outcome {
                     ConsultOutcome::Answer(body) => body.get("body").and_then(|b| b.as_str()).map(String::from),
@@ -645,6 +642,7 @@ impl Session {
                 };
                 ExternalEvidence::Sanitizer {
                     sanitizer: sanitizer.clone(),
+                    source: *source,
                     derived,
                 }
             }
@@ -744,7 +742,6 @@ mod tests {
         EngineDecision {
             append,
             then,
-            offers: crate::engine::OfferMutations::default(),
             ends_child: None,
         }
     }
@@ -788,12 +785,38 @@ mod tests {
         }
     }
 
+    fn bash_dispatch(label: &str) -> appa_engine::value::DispatchId {
+        let policy = appa_policy::Config::from_toml_str(
+            r#"
+                version = 1
+                [[tool]]
+                name = "Bash"
+            "#,
+        )
+        .expect("the fixture policy compiles");
+        let engine = policy.engine().clone();
+        let call = engine
+            .resolve_call(appa_engine::value::ToolName::new("Bash"), br#"{"command":"ls"}"#)
+            .expect("the fixture call resolves through the engine");
+        appa_engine::value::DispatchId::new(appa_engine::value::TrajectoryId::new(label), call.digest(), 0)
+    }
+
+    fn wire_dispatch_id(label: &str) -> DispatchId {
+        DispatchId(serde_json::to_string(&bash_dispatch(label)).expect("an engine dispatch id serializes"))
+    }
+
     fn released(id: &str, call: &ProposedCall) -> ReleasedCall {
         ReleasedCall {
-            dispatch: DispatchId(id.to_string()),
+            dispatch: wire_dispatch_id(id),
             tool: call.tool.clone(),
             bytes: serde_json::to_vec(call).expect("the test call serializes"),
+            fork: None,
         }
+    }
+
+    fn spawn_binding() -> SpawnBinding {
+        let fork = appa_engine::value::ForkId::of(&bash_dispatch("cc:root"));
+        SpawnBinding(serde_json::to_string(&fork).expect("a fork id serializes"))
     }
 
     fn allow_decision(id: &str, call: &ProposedCall) -> EngineDecision {
@@ -825,22 +848,6 @@ mod tests {
 
     fn done() -> EngineDecision {
         decision(None, Next::Done)
-    }
-
-    fn reviewed_dispatch() -> appa_engine::value::DispatchId {
-        let policy = appa_policy::Config::from_toml_str(
-            r#"
-                version = 1
-                [[tool]]
-                name = "Bash"
-            "#,
-        )
-        .expect("the fixture policy compiles");
-        let engine = policy.engine().clone();
-        let call = engine
-            .resolve_call(appa_engine::value::ToolName::new("Bash"), br#"{"command":"ls"}"#)
-            .expect("the fixture call resolves through the engine");
-        appa_engine::value::DispatchId::new(appa_engine::value::TrajectoryId::new("cc:root"), call.digest(), 0)
     }
 
     fn review() -> appa_engine::execute::AuthorityReview {
@@ -938,7 +945,7 @@ mod tests {
         ));
         runtime.inner.store.fail_next_commit();
         assert!(matches!(
-            session.on_tool_call(call()).await,
+            session.on_tool_call(call(), false).await,
             Err(EventError::Storage(_)),
         ));
         let (log, _) = runtime.inner.store.load_log(&root()).expect("the log loads");
@@ -972,8 +979,11 @@ mod tests {
                 feedback: Vec::new(),
             },
         ));
-        let outcome = session.on_tool_call(call()).await.expect("the replayed event commits");
-        assert_eq!(outcome, ToolCallDecision::Allow);
+        let outcome = session
+            .on_tool_call(call(), false)
+            .await
+            .expect("the replayed event commits");
+        assert_eq!(outcome, ToolCallDecision::Allow { spawn: None });
         let (log, _) = runtime.inner.store.load_log(&root()).expect("the log loads");
         assert_eq!(log.len(), 2);
         assert_eq!(log[1], batch_bytes(Marker::Two));
@@ -983,7 +993,7 @@ mod tests {
             .open_dispatch(&root())
             .expect("the dispatch query runs")
             .expect("the released call opened a dispatch");
-        assert_eq!(open.id, DispatchId("d-fresh".to_string()));
+        assert_eq!(open.id, wire_dispatch_id("d-fresh"));
         assert_eq!(open.state, DispatchState::Executing);
 
         let seen = runtime.inner.engine.seen();
@@ -1013,7 +1023,7 @@ mod tests {
             ));
         }
         assert!(matches!(
-            session.on_tool_call(call()).await,
+            session.on_tool_call(call(), false).await,
             Err(EventError::Contended { attempts: REPLAY_LIMIT }),
         ));
         assert_eq!(runtime.inner.engine.seen().len(), REPLAY_LIMIT as usize);
@@ -1036,12 +1046,12 @@ mod tests {
         let runtime = open_test_runtime(&dir);
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         runtime.inner.engine.enqueue(allow_decision("d1", &call()));
-        let outcome = session.on_tool_call(call()).await.expect("the call is allowed");
-        assert_eq!(outcome, ToolCallDecision::Allow);
+        let outcome = session.on_tool_call(call(), false).await.expect("the call is allowed");
+        assert_eq!(outcome, ToolCallDecision::Allow { spawn: None });
 
         let before = runtime.inner.engine.seen().len();
         assert!(matches!(
-            session.on_tool_call(call()).await,
+            session.on_tool_call(call(), false).await,
             Err(EventError::CallOutstanding),
         ));
         assert_eq!(runtime.inner.engine.seen().len(), before);
@@ -1065,7 +1075,7 @@ mod tests {
             "mcp__plugin_appa-runtime_appa__execute_remedy_plan",
         ] {
             let outcome = session
-                .on_tool_call(control_call(name))
+                .on_tool_call(control_call(name), false)
                 .await
                 .expect("the control tool passes");
             assert_eq!(outcome, ToolCallDecision::Control, "{name} is the control tool");
@@ -1092,7 +1102,7 @@ mod tests {
             .engine
             .enqueue(deny_decision("blocked: not the runtime's tool", &[]));
         let outcome = session
-            .on_tool_call(control_call("mcp__evil__execute_remedy_plan"))
+            .on_tool_call(control_call("mcp__evil__execute_remedy_plan"), false)
             .await
             .expect("the deny is delivered");
         assert!(matches!(outcome, ToolCallDecision::Deny { .. }));
@@ -1110,14 +1120,14 @@ mod tests {
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         runtime.inner.engine.enqueue(allow_decision("d1", &call()));
         assert_eq!(
-            session.on_tool_call(call()).await.expect("the call is allowed"),
-            ToolCallDecision::Allow,
+            session.on_tool_call(call(), false).await.expect("the call is allowed"),
+            ToolCallDecision::Allow { spawn: None },
         );
         let before = runtime.inner.engine.seen().len();
 
         assert_eq!(
             session
-                .on_tool_call(control_call("execute_remedy_plan"))
+                .on_tool_call(control_call("execute_remedy_plan"), false)
                 .await
                 .expect("the control call passes"),
             ToolCallDecision::Control,
@@ -1145,10 +1155,9 @@ mod tests {
             .open_dispatch(&root())
             .expect("the dispatch query runs")
             .expect("the original dispatch stays open");
-        assert_eq!(open.id, DispatchId("d1".to_string()));
+        assert_eq!(open.id, wire_dispatch_id("d1"));
         assert_eq!(open.state, DispatchState::Executing);
 
-        runtime.inner.engine.enqueue(done());
         runtime.inner.engine.enqueue(present(Presentation::KeepOutput));
         assert_eq!(
             session
@@ -1173,7 +1182,10 @@ mod tests {
             .inner
             .engine
             .enqueue(deny_decision("blocked: the recipient cannot read this", &["offer-1"]));
-        let outcome = session.on_tool_call(call()).await.expect("the deny is delivered");
+        let outcome = session
+            .on_tool_call(call(), false)
+            .await
+            .expect("the deny is delivered");
         assert_eq!(
             outcome,
             ToolCallDecision::Deny {
@@ -1196,9 +1208,8 @@ mod tests {
         let runtime = open_test_runtime(&dir);
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         runtime.inner.engine.enqueue(allow_decision("d1", &call()));
-        session.on_tool_call(call()).await.expect("the call is allowed");
+        session.on_tool_call(call(), false).await.expect("the call is allowed");
 
-        runtime.inner.engine.enqueue(done());
         runtime.inner.engine.enqueue(present(Presentation::KeepOutput));
         let outcome = session
             .on_tool_result(
@@ -1230,9 +1241,8 @@ mod tests {
         let runtime = open_test_runtime(&dir);
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         runtime.inner.engine.enqueue(allow_decision("d1", &call()));
-        session.on_tool_call(call()).await.expect("the call is allowed");
+        session.on_tool_call(call(), false).await.expect("the call is allowed");
 
-        runtime.inner.engine.enqueue(done());
         runtime.inner.engine.enqueue(present(Presentation::ReplaceOutput {
             placeholder: "the output is confined".to_string(),
         }));
@@ -1268,7 +1278,7 @@ mod tests {
         let runtime = open_test_runtime(&dir);
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         runtime.inner.engine.enqueue(allow_decision("d1", &call()));
-        session.on_tool_call(call()).await.expect("the call is allowed");
+        session.on_tool_call(call(), false).await.expect("the call is allowed");
 
         let error = session
             .on_tool_result(
@@ -1293,50 +1303,9 @@ mod tests {
             .open_dispatch(&root())
             .expect("the dispatch query runs")
             .expect("the dispatch stays open");
-        assert_eq!(open.id, DispatchId("d1".to_string()));
+        assert_eq!(open.id, wire_dispatch_id("d1"));
         assert_eq!(open.state, DispatchState::Executing);
         assert_eq!(runtime.inner.engine.seen().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn an_outcome_for_an_unreleased_dispatch_is_refused_and_it_stays_awaiting() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        runtime.inner.engine.enqueue(deny_decision(
-            "blocked; execute_remedy_plan(offer-1) authorizes it",
-            &["offer-1"],
-        ));
-        session.on_tool_call(call()).await.expect("the deny is delivered");
-        runtime
-            .inner
-            .engine
-            .enqueue(decision(None, Next::InvokeTool(released("d-authorized", &call()))));
-        session
-            .on_remedy(OfferId("offer-1".to_string()), None)
-            .await
-            .expect("the remedy authorizes");
-
-        let before = runtime.inner.engine.seen().len();
-        assert!(matches!(
-            session
-                .on_tool_result(
-                    call(),
-                    ToolOutcome::Success {
-                        body: OutcomeBody::Available("ran anyway".to_string()),
-                    },
-                )
-                .await,
-            Err(EventError::UnknownDispatch),
-        ));
-        assert_eq!(runtime.inner.engine.seen().len(), before);
-        let open = runtime
-            .inner
-            .store
-            .open_dispatch(&root())
-            .expect("the dispatch query runs")
-            .expect("the dispatch stays open");
-        assert_eq!(open.state, DispatchState::Awaiting);
     }
 
     #[test]
@@ -1361,11 +1330,6 @@ mod tests {
             classify_report(&call(), canonical(&call()), None),
             Err(UnreportableOutcome::NoOpenDispatch),
             "an already-consumed outcome arrives here too: closed dispatches leave the open view",
-        );
-        assert_eq!(
-            classify_report(&call(), canonical(&call()), Some(&row(DispatchState::Awaiting))),
-            Err(UnreportableOutcome::UnreleasedDispatch),
-            "an approved dispatch is not a released one",
         );
         let other = ProposedCall {
             tool: "Bash".to_string(),
@@ -1405,9 +1369,8 @@ mod tests {
         let runtime = open_test_runtime(&dir);
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         runtime.inner.engine.enqueue(allow_decision("d1", &call()));
-        session.on_tool_call(call()).await.expect("the call is allowed");
+        session.on_tool_call(call(), false).await.expect("the call is allowed");
 
-        runtime.inner.engine.enqueue(done());
         runtime.inner.engine.enqueue(present(Presentation::KeepOutput));
         let outcome = session
             .on_tool_result(
@@ -1454,17 +1417,23 @@ mod tests {
             "blocked; execute_remedy_plan(offer-3) authorizes it",
             &["offer-3"],
         ));
-        session.on_tool_call(call()).await.expect("the deny is delivered");
+        session
+            .on_tool_call(call(), false)
+            .await
+            .expect("the deny is delivered");
 
-        runtime
-            .inner
-            .engine
-            .enqueue(decision(None, Next::InvokeTool(released("d-authorized", &call()))));
+        let expected_bytes = serde_json::to_vec(&call()).expect("the test call serializes");
+        runtime.inner.engine.enqueue(decision(
+            None,
+            Next::Approved {
+                tool: "Bash".to_string(),
+                bytes: expected_bytes.clone(),
+            },
+        ));
         let outcome = session
             .on_remedy(OfferId("offer-3".to_string()), None)
             .await
             .expect("the remedy authorizes");
-        let expected_bytes = serde_json::to_vec(&call()).expect("the test call serializes");
         assert_eq!(
             outcome,
             RemedyDecision::Authorized {
@@ -1475,33 +1444,32 @@ mod tests {
             },
         );
 
-        assert!(matches!(
-            runtime.inner.store.open_dispatch(&root()),
-            Ok(Some(DispatchRow {
-                state: DispatchState::Awaiting,
-                ..
-            })),
-        ));
+        assert!(matches!(runtime.inner.store.open_dispatch(&root()), Ok(None)));
 
-        let before = runtime.inner.engine.seen().len();
-        let resumed = session.on_tool_call(call()).await.expect("the re-proposal resumes");
-        assert_eq!(resumed, ToolCallDecision::Allow);
-        assert_eq!(runtime.inner.engine.seen().len(), before);
+        runtime.inner.engine.enqueue(allow_decision("d-authorized", &call()));
+        let resumed = session
+            .on_tool_call(call(), false)
+            .await
+            .expect("the re-proposal resumes");
+        assert_eq!(resumed, ToolCallDecision::Allow { spawn: None });
         let open = runtime
             .inner
             .store
             .open_dispatch(&root())
             .expect("the dispatch query runs")
             .expect("the resumed dispatch stays open");
-        assert_eq!(open.id, DispatchId("d-authorized".to_string()));
+        assert_eq!(open.id, wire_dispatch_id("d-authorized"));
         assert_eq!(open.state, DispatchState::Executing);
 
         assert!(matches!(
             session
-                .on_tool_call(ProposedCall {
-                    tool: "Bash".to_string(),
-                    arguments: raw(serde_json::json!({"command": "rm -rf /"})),
-                })
+                .on_tool_call(
+                    ProposedCall {
+                        tool: "Bash".to_string(),
+                        arguments: raw(serde_json::json!({"command": "rm -rf /"})),
+                    },
+                    false
+                )
                 .await,
             Err(EventError::CallOutstanding),
         ));
@@ -1513,7 +1481,10 @@ mod tests {
         let runtime = open_test_runtime(&dir);
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         runtime.inner.engine.enqueue(deny_decision("blocked", &["offer-4"]));
-        session.on_tool_call(call()).await.expect("the deny is delivered");
+        session
+            .on_tool_call(call(), false)
+            .await
+            .expect("the deny is delivered");
 
         runtime.inner.engine.enqueue(present(Presentation::NoAnswer {
             feedback: "no answer yet; the offer stands".to_string(),
@@ -1564,14 +1535,16 @@ mod tests {
                 authority: "security".to_string(),
                 payload: serde_json::json!({"call": "Bash"}),
                 review: review(),
-                dispatch: reviewed_dispatch(),
             }]),
         ));
         runtime
             .inner
             .engine
             .enqueue(deny_decision("no answer is no permission", &[]));
-        let outcome = session.on_tool_call(call()).await.expect("the deny is delivered");
+        let outcome = session
+            .on_tool_call(call(), false)
+            .await
+            .expect("the deny is delivered");
         assert_eq!(
             outcome,
             ToolCallDecision::Deny {
@@ -1593,7 +1566,6 @@ mod tests {
                         authority: "security".to_string(),
                         verdict: AuthorityVerdict::Abstain,
                         review: review(),
-                        dispatch: reviewed_dispatch(),
                     }],
                     "an unconfigured authority abstains; no answer grants nothing",
                 );
@@ -1612,14 +1584,14 @@ mod tests {
             .engine
             .enqueue(decision(Some(batch(Marker::Two, 1)), Next::Done));
         let mut child = session
-            .on_child_start(TrajectoryId("cc:child".to_string()))
+            .on_child_start(TrajectoryId("cc:child".to_string()), Some(spawn_binding()))
             .expect("the child opens");
         let (log, _) = runtime.inner.store.load_log(&root()).expect("the family log loads");
         assert_eq!(log.len(), 2, "the seed follows the opening in the one family log");
         assert_eq!(log[1], batch_bytes(Marker::Two));
 
         assert!(matches!(
-            session.on_child_start(TrajectoryId("cc:child".to_string())),
+            session.on_child_start(TrajectoryId("cc:child".to_string()), Some(spawn_binding())),
             Err(EventError::TrajectoryExists),
         ));
 
@@ -1627,9 +1599,13 @@ mod tests {
             .on_prompt("work".to_string())
             .expect("the child prompt is accepted");
 
-        runtime.inner.engine.enqueue(present(Presentation::Value {
-            value: "the summary".to_string(),
-        }));
+        runtime.inner.engine.enqueue(EngineDecision {
+            append: None,
+            then: Next::PresentToModel(Presentation::Value {
+                value: "the summary".to_string(),
+            }),
+            ends_child: Some(TrajectoryId("cc:child".to_string())),
+        });
         let returned = child
             .on_child_end(Some("the summary".to_string()))
             .await
@@ -1652,19 +1628,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_blocked_child_return_carries_feedback_and_leaves_the_child_unended() {
+    async fn a_binding_from_another_parents_fork_does_not_open_the_child() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_test_runtime(&dir);
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let (before, _) = runtime.inner.store.load_log(&root()).expect("the family log loads");
+
+        let foreign = SpawnBinding(
+            serde_json::to_string(&appa_engine::value::ForkId::of(&bash_dispatch("cc:other-parent")))
+                .expect("a fork id serializes"),
+        );
+        let error = match session.on_child_start(TrajectoryId("cc:child".to_string()), Some(foreign)) {
+            Err(error) => error,
+            Ok(_) => panic!("a cross-parent binding opens no child"),
+        };
+        assert!(matches!(error, EventError::SpawnNotTaken));
+        assert!(!error.is_operational());
+
+        let (after, _) = runtime.inner.store.load_log(&root()).expect("the family log loads");
+        assert_eq!(after.len(), before.len(), "the refused start appends nothing");
+        assert!(
+            runtime
+                .inner
+                .store
+                .trajectory(&TrajectoryId("cc:child".to_string()))
+                .expect("the trajectory query runs")
+                .is_none(),
+            "the refused start opens no child trajectory",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_narrowing_child_return_ends_the_child_and_routes_its_offers_to_the_parent() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_test_runtime(&dir);
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         runtime.inner.engine.enqueue(done());
         let mut child = session
-            .on_child_start(TrajectoryId("cc:child".to_string()))
+            .on_child_start(TrajectoryId("cc:child".to_string()), Some(spawn_binding()))
             .expect("the child opens");
 
-        runtime.inner.engine.enqueue(present(Presentation::Blocked {
-            feedback: "the return may not cross; options are offered".to_string(),
-            offers: vec![OfferId("offer-6".to_string())],
-        }));
+        runtime.inner.engine.enqueue(EngineDecision {
+            append: None,
+            then: Next::PresentToModel(Presentation::Blocked {
+                feedback: "the return may not cross; options are offered".to_string(),
+                offers: vec![OfferId("offer-6".to_string())],
+            }),
+            ends_child: Some(TrajectoryId("cc:child".to_string())),
+        });
         let blocked = child
             .on_child_end(Some("the secret".to_string()))
             .await
@@ -1683,15 +1694,19 @@ mod tests {
                 .expect("the offer query runs"),
             Some(root()),
         );
-        assert!(
-            runtime.session(&TrajectoryId("cc:child".to_string())).is_ok(),
-            "the child is not ended while its crossing is pending",
-        );
+        assert!(matches!(
+            runtime.session(&TrajectoryId("cc:child".to_string())),
+            Err(SessionError::Ended),
+        ));
 
         runtime.inner.engine.enqueue(done());
-        runtime.inner.engine.enqueue(present(Presentation::NoValue));
+        runtime.inner.engine.enqueue(EngineDecision {
+            append: None,
+            then: Next::PresentToModel(Presentation::NoValue),
+            ends_child: Some(TrajectoryId("cc:child-2".to_string())),
+        });
         let none = session
-            .on_child_start(TrajectoryId("cc:child-2".to_string()))
+            .on_child_start(TrajectoryId("cc:child-2".to_string()), Some(spawn_binding()))
             .expect("a second child opens")
             .on_child_end(None)
             .await
@@ -1704,31 +1719,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_parent_executes_a_blocked_returns_offer_and_the_merge_ends_the_child() {
+    async fn a_pending_child_return_ends_the_child_and_the_parent_executes_its_offer() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_test_runtime(&dir);
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         runtime.inner.engine.enqueue(done());
         let mut child = session
-            .on_child_start(TrajectoryId("cc:child".to_string()))
+            .on_child_start(TrajectoryId("cc:child".to_string()), Some(spawn_binding()))
             .expect("the child opens");
-        runtime.inner.engine.enqueue(present(Presentation::Blocked {
-            feedback: "blocked; execute_remedy_plan(offer-7)".to_string(),
-            offers: vec![OfferId("offer-7".to_string())],
-        }));
+        runtime.inner.engine.enqueue(EngineDecision {
+            append: None,
+            then: Next::PresentToModel(Presentation::Blocked {
+                feedback: "blocked; execute_remedy_plan(offer-7)".to_string(),
+                offers: vec![OfferId("offer-7".to_string())],
+            }),
+            ends_child: Some(TrajectoryId("cc:child".to_string())),
+        });
         child
             .on_child_end(Some("the secret".to_string()))
             .await
             .expect("the block is delivered");
+        assert!(matches!(
+            runtime.session(&TrajectoryId("cc:child".to_string())),
+            Err(SessionError::Ended),
+        ));
 
-        runtime.inner.engine.enqueue(EngineDecision {
-            append: None,
-            then: Next::PresentToModel(Presentation::Value {
-                value: "the cleaned return".to_string(),
-            }),
-            offers: crate::engine::OfferMutations::default(),
-            ends_child: Some(TrajectoryId("cc:child".to_string())),
-        });
+        runtime.inner.engine.enqueue(present(Presentation::Value {
+            value: "the cleaned return".to_string(),
+        }));
         assert_eq!(
             session
                 .on_remedy(OfferId("offer-7".to_string()), None)
@@ -1738,10 +1756,6 @@ mod tests {
                 value: "the cleaned return".to_string()
             },
         );
-        assert!(matches!(
-            runtime.session(&TrajectoryId("cc:child".to_string())),
-            Err(SessionError::Ended),
-        ));
     }
 
     #[tokio::test]
@@ -1766,8 +1780,7 @@ mod tests {
                 .inner
                 .engine
                 .enqueue(allow_decision(&format!("d{turn}"), &call()));
-            session.on_tool_call(call()).await.expect("the call is allowed");
-            runtime.inner.engine.enqueue(done());
+            session.on_tool_call(call(), false).await.expect("the call is allowed");
             runtime.inner.engine.enqueue(present(Presentation::KeepOutput));
             session
                 .on_tool_result(
@@ -1835,14 +1848,6 @@ delta = {}
 context_control = true
 "#;
 
-    const EMITTING_FETCH: &str = r#"
-version = 1
-
-[[policy.tool]]
-name = "fetch"
-effects = ["fetch"]
-"#;
-
     fn root() -> TrajectoryId {
         TrajectoryId("cc:root".to_string())
     }
@@ -1852,6 +1857,17 @@ effects = ["fetch"]
             tool: "fetch".to_string(),
             arguments: raw(spelling),
         }
+    }
+
+    async fn open_child(session: &mut Session, spawn: ProposedCall, child: TrajectoryId) -> Session {
+        let ToolCallDecision::Allow { spawn: Some(binding) } =
+            session.on_tool_call(spawn, true).await.expect("the spawn releases")
+        else {
+            panic!("a context-controlled spawn releases a fork binding");
+        };
+        session
+            .on_child_start(child, Some(binding))
+            .expect("the fork binds and the child opens")
     }
 
     fn facts(row: &[u8]) -> Vec<appa_engine::fact::Fact> {
@@ -1998,10 +2014,10 @@ name = "execute_remedy_plan"
             .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let decision = session
-            .on_tool_call(fetch(serde_json::json!({"b": 1, "a": 2})))
+            .on_tool_call(fetch(serde_json::json!({"b": 1, "a": 2})), false)
             .await
             .expect("the call is decided");
-        assert_eq!(decision, ToolCallDecision::Allow);
+        assert_eq!(decision, ToolCallDecision::Allow { spawn: None });
         let open = runtime
             .inner
             .store
@@ -2014,8 +2030,8 @@ name = "execute_remedy_plan"
         let facts: Vec<appa_engine::fact::Fact> =
             serde_json::from_slice(&log[1]).expect("the persisted batch decodes as engine facts");
         assert!(matches!(
-            facts.as_slice(),
-            [appa_engine::fact::Fact::DispatchOpened { .. }]
+            facts.last(),
+            Some(appa_engine::fact::Fact::DispatchOpened { .. })
         ));
     }
 
@@ -2030,7 +2046,10 @@ name = "execute_remedy_plan"
             arguments: serde_json::value::RawValue::from_string(r#"{"a":1,"a":2}"#.to_string())
                 .expect("the fixture is well-formed JSON"),
         };
-        let decision = session.on_tool_call(duplicated).await.expect("the call is decided");
+        let decision = session
+            .on_tool_call(duplicated, false)
+            .await
+            .expect("the call is decided");
         assert!(
             matches!(decision, ToolCallDecision::Deny { .. }),
             "a duplicate key must be refused, not resolved by last-wins: {decision:?}"
@@ -2053,7 +2072,7 @@ name = "execute_remedy_plan"
             .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         session
-            .on_tool_call(fetch(serde_json::json!({"a": 1})))
+            .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
             .await
             .expect("the call is decided");
         let kept = session
@@ -2080,30 +2099,60 @@ name = "execute_remedy_plan"
     #[tokio::test]
     async fn the_success_checkpoint_commits_once_across_a_lost_admission() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = Runtime::open(config_with(EMITTING_FETCH, None), dir.path().join("appa.db"), None)
-            .expect("the deployment opens");
+        let url = stub(serde_json::json!({"body": "scrubbed"})).await;
+        let runtime =
+            Runtime::open(emitting_leak_config(&url), dir.path().join("appa.db"), None).expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let outcome = || ToolOutcome::Success {
-            body: OutcomeBody::Available("data".to_string()),
+            body: OutcomeBody::Available("raw with pii".to_string()),
         };
-        session
-            .on_tool_call(fetch(serde_json::json!({"a": 1})))
-            .await
-            .expect("the call is released");
+
+        assert!(matches!(
+            session
+                .on_tool_call(leak(), false)
+                .await
+                .expect("the block is delivered"),
+            ToolCallDecision::Deny { .. },
+        ));
+        let offer = runtime
+            .inner
+            .store
+            .surfaced_offers(&root())
+            .expect("the offer query runs")
+            .last()
+            .expect("the block surfaced the sanitize plan")
+            .clone();
+        assert!(matches!(
+            session.on_remedy(offer, None).await.expect("the sanitize offer binds"),
+            RemedyDecision::Authorized { .. },
+        ));
+        assert_eq!(
+            session
+                .on_tool_call(leak(), false)
+                .await
+                .expect("the re-proposal resumes"),
+            ToolCallDecision::Allow { spawn: None },
+        );
+        let (_, base) = runtime.inner.store.load_log(&root()).expect("the log loads");
 
         runtime.inner.store.fail_commit_after(1);
         assert!(matches!(
-            session
-                .on_tool_result(fetch(serde_json::json!({"a": 1})), outcome())
-                .await,
+            session.on_tool_result(leak(), outcome()).await,
             Err(EventError::Storage(_)),
         ));
         let (log, revision) = runtime.inner.store.load_log(&root()).expect("the log loads");
-        assert_eq!(revision, Revision(3), "the checkpoint committed, the admission did not");
-        let effects = match facts(&log[2]).as_slice() {
-            [appa_engine::fact::Fact::DispatchSucceeded { effects, .. }] => effects.clone(),
-            other => panic!("expected the success checkpoint alone, got {other:?}"),
-        };
+        assert_eq!(
+            revision,
+            Revision(base.0 + 1),
+            "the checkpoint committed, the admission did not",
+        );
+        let effects = facts(log.last().expect("the checkpoint batch"))
+            .into_iter()
+            .find_map(|fact| match fact {
+                appa_engine::fact::Fact::DispatchSucceeded { effects, .. } => Some(effects),
+                _ => None,
+            })
+            .expect("the checkpoint recorded the observed success");
         assert_eq!(effects.len(), 1, "the checkpoint committed the declared effect");
         let open = runtime
             .inner
@@ -2113,18 +2162,23 @@ name = "execute_remedy_plan"
             .expect("the lost admission left the dispatch open");
         assert_eq!(open.state, DispatchState::Executing);
 
-        let kept = session
-            .on_tool_result(fetch(serde_json::json!({"a": 1})), outcome())
+        let replaced = session
+            .on_tool_result(leak(), outcome())
             .await
             .expect("the re-reported outcome admits");
-        assert_eq!(kept, ToolResultDecision::Keep);
+        assert_eq!(
+            replaced,
+            ToolResultDecision::Replace {
+                placeholder: "scrubbed".to_string()
+            },
+        );
         let (log, revision) = runtime.inner.store.load_log(&root()).expect("the log loads");
         assert_eq!(
             revision,
-            Revision(4),
+            Revision(base.0 + 2),
             "the retry appended the admission alone — the checkpoint did not repeat",
         );
-        let closed = facts(&log[3])
+        let closed = facts(log.last().expect("the admission batch"))
             .into_iter()
             .find_map(|fact| match fact {
                 appa_engine::fact::Fact::DispatchClosed {
@@ -2147,7 +2201,7 @@ name = "execute_remedy_plan"
             .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         session
-            .on_tool_call(fetch(serde_json::json!({"a": 1})))
+            .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
             .await
             .expect("the call is decided");
         let kept = session
@@ -2170,7 +2224,7 @@ name = "execute_remedy_plan"
         );
 
         session
-            .on_tool_call(fetch(serde_json::json!({"a": 1})))
+            .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
             .await
             .expect("the second occurrence is decided");
         let kept = session
@@ -2187,7 +2241,7 @@ name = "execute_remedy_plan"
             .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let decision = session
-            .on_tool_call(fetch(serde_json::json!({"a": "not a number"})))
+            .on_tool_call(fetch(serde_json::json!({"a": "not a number"})), false)
             .await
             .expect("the refusal is delivered as feedback");
         assert!(matches!(decision, ToolCallDecision::Deny { .. }));
@@ -2214,10 +2268,13 @@ name = "execute_remedy_plan"
             .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let decision = session
-            .on_tool_call(ProposedCall {
-                tool: "wrench".to_string(),
-                arguments: raw(serde_json::json!({})),
-            })
+            .on_tool_call(
+                ProposedCall {
+                    tool: "wrench".to_string(),
+                    arguments: raw(serde_json::json!({})),
+                },
+                false,
+            )
             .await
             .expect("the refusal is delivered as feedback");
         assert!(matches!(decision, ToolCallDecision::Deny { .. }));
@@ -2255,7 +2312,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
                 Runtime::open(config_with(FETCH_AND_SEND, None), db.clone(), None).expect("the deployment opens");
             let mut session = runtime.create_session(root()).expect("a fresh id opens");
             session
-                .on_tool_call(fetch(serde_json::json!({"a": 1})))
+                .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
                 .await
                 .expect("the call is decided");
             session
@@ -2272,16 +2329,20 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
 
         let mut old = runtime.session(&root()).expect("the old root reopens");
         let decision = old
-            .on_tool_call(fetch(serde_json::json!({"a": 2})))
+            .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
             .await
             .expect("the old root decides");
-        assert_eq!(decision, ToolCallDecision::Allow, "the old root keeps fetch");
+        assert_eq!(
+            decision,
+            ToolCallDecision::Allow { spawn: None },
+            "the old root keeps fetch"
+        );
 
         let mut new = runtime
             .create_session(TrajectoryId("cc:new".to_string()))
             .expect("a fresh id opens");
         let denied = new
-            .on_tool_call(fetch(serde_json::json!({"a": 1})))
+            .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
             .await
             .expect("the new root decides");
         assert!(
@@ -2289,13 +2350,20 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             "fetch is gone for new roots"
         );
         let allowed = new
-            .on_tool_call(ProposedCall {
-                tool: "read".to_string(),
-                arguments: raw(serde_json::json!({"path": "a.txt"})),
-            })
+            .on_tool_call(
+                ProposedCall {
+                    tool: "read".to_string(),
+                    arguments: raw(serde_json::json!({"path": "a.txt"})),
+                },
+                false,
+            )
             .await
             .expect("the new root decides");
-        assert_eq!(allowed, ToolCallDecision::Allow, "the edited policy's tool releases");
+        assert_eq!(
+            allowed,
+            ToolCallDecision::Allow { spawn: None },
+            "the edited policy's tool releases"
+        );
     }
 
     #[tokio::test]
@@ -2313,7 +2381,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             .session(&TrajectoryId("cc:old".to_string()))
             .expect("the row reopens");
         let error = session
-            .on_tool_call(fetch(serde_json::json!({"a": 1})))
+            .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
             .await
             .expect_err("the event refuses");
         assert!(matches!(error, EventError::PolicyUnavailable(_)), "got {error:?}");
@@ -2331,7 +2399,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             .execute("DELETE FROM policies", [])
             .expect("the stored file deletes");
         let error = session
-            .on_tool_call(fetch(serde_json::json!({"a": 1})))
+            .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
             .await
             .expect_err("the event refuses");
         assert!(matches!(error, EventError::PolicyUnavailable(_)), "got {error:?}");
@@ -2352,7 +2420,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         sql.execute("UPDATE policies SET bytes = ?1", rusqlite::params![tampered])
             .expect("the stored file rewrites");
         let error = session
-            .on_tool_call(fetch(serde_json::json!({"a": 1})))
+            .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
             .await
             .expect_err("the event refuses");
         assert!(matches!(error, EventError::PolicyUnavailable(_)), "got {error:?}");
@@ -2375,7 +2443,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             )
             .expect("the tamper lands");
         let error = session
-            .on_tool_call(fetch(serde_json::json!({"a": 1})))
+            .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
             .await
             .expect_err("the event refuses");
         assert!(matches!(error, EventError::PolicyUnavailable(_)), "got {error:?}");
@@ -2398,7 +2466,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         sql.execute("UPDATE openings SET policy_key = ?1", rusqlite::params![key.as_str()])
             .expect("the opening rebinds");
         let error = session
-            .on_tool_call(fetch(serde_json::json!({"a": 1})))
+            .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
             .await
             .expect_err("the event refuses");
         assert!(matches!(error, EventError::PolicyUnavailable(_)), "got {error:?}");
@@ -2421,7 +2489,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         sql.execute("UPDATE openings SET policy_key = ?1", rusqlite::params![key.as_str()])
             .expect("the opening rebinds");
         let error = session
-            .on_tool_call(fetch(serde_json::json!({"a": 1})))
+            .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
             .await
             .expect_err("the event refuses");
         assert!(matches!(error, EventError::PolicyUnavailable(_)), "got {error:?}");
@@ -2439,14 +2507,20 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             )
             .expect("the deployment opens");
             let mut session = runtime.create_session(root()).expect("a fresh id opens");
-            session.on_tool_call(wire(500)).await.expect("the block is delivered");
+            session
+                .on_tool_call(wire(500), false)
+                .await
+                .expect("the block is delivered");
         }
 
         {
             let runtime =
                 Runtime::open(config_with(READ_ONLY, None), db.clone(), None).expect("the edited deployment opens");
             let mut session = runtime.session(&root()).expect("the old root reopens");
-            session.on_tool_call(wire(500)).await.expect("the block is delivered");
+            session
+                .on_tool_call(wire(500), false)
+                .await
+                .expect("the block is delivered");
             let offer = latest_offer(&runtime);
             let (log_before, _) = runtime.inner.store.load_log(&root()).expect("the log loads");
             let got = session
@@ -2470,7 +2544,10 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let runtime = Runtime::open(config_with(READ_ONLY, Some(&url)), db, None)
             .expect("the deployment with the restored binding opens");
         let mut session = runtime.session(&root()).expect("the old root reopens");
-        session.on_tool_call(wire(500)).await.expect("the block is delivered");
+        session
+            .on_tool_call(wire(500), false)
+            .await
+            .expect("the block is delivered");
         let offer = latest_offer(&runtime);
         runtime.inner.store.fail_next_commit();
         assert!(matches!(
@@ -2492,7 +2569,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
                 Runtime::open(config_with(FETCH_AND_SEND, None), db.clone(), None).expect("the deployment opens");
             let mut session = runtime.create_session(root()).expect("a fresh id opens");
             session
-                .on_tool_call(fetch(serde_json::json!({"a": 1})))
+                .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
                 .await
                 .expect("the call is decided");
             session
@@ -2508,10 +2585,10 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), db, None).expect("the deployment reopens");
         let mut session = runtime.session(&root()).expect("the trajectory reopens");
         let decision = session
-            .on_tool_call(fetch(serde_json::json!({"a": 2})))
+            .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
             .await
             .expect("the reopened trajectory decides");
-        assert_eq!(decision, ToolCallDecision::Allow);
+        assert_eq!(decision, ToolCallDecision::Allow { spawn: None });
     }
 
     #[tokio::test]
@@ -2535,7 +2612,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             )
             .expect("the store appends opaque bytes");
         assert!(matches!(
-            session.on_tool_call(fetch(serde_json::json!({"a": 1}))).await,
+            session.on_tool_call(fetch(serde_json::json!({"a": 1})), false).await,
             Err(EventError::UntrustedLog(_)),
         ));
     }
@@ -2547,7 +2624,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         session
-            .on_tool_call(fetch(serde_json::json!({"a": 1})))
+            .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
             .await
             .expect("the call is decided");
         let (log, _) = runtime.inner.store.load_log(&root()).expect("the log loads");
@@ -2582,7 +2659,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         session
-            .on_tool_call(fetch(serde_json::json!({"a": 1})))
+            .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
             .await
             .expect("the fetch is decided");
         session
@@ -2596,10 +2673,13 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             .expect("the result is admitted at Unknown");
 
         let decision = session
-            .on_tool_call(ProposedCall {
-                tool: "send".to_string(),
-                arguments: raw(serde_json::json!({})),
-            })
+            .on_tool_call(
+                ProposedCall {
+                    tool: "send".to_string(),
+                    arguments: raw(serde_json::json!({})),
+                },
+                false,
+            )
             .await
             .expect("the block is delivered");
         let ToolCallDecision::Deny { feedback } = decision else {
@@ -2642,56 +2722,11 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         };
 
         let child = TrajectoryId("cc:root:child".to_string());
-        session.on_child_start(child.clone()).expect("the child opens");
-        let error = refuse(&root(), crate::engine::EngineEvent::ChildStart { child: child.clone() });
-        assert!(
-            matches!(error, EventError::TrajectoryExists),
-            "a lost opening race answers as the store-level race does; got {error:?}",
-        );
-        assert!(!error.is_operational());
-
-        session
-            .on_tool_call(fetch(serde_json::json!({"a": 1})))
-            .await
-            .expect("the call is released");
-        session
-            .on_tool_result(
-                fetch(serde_json::json!({"a": 1})),
-                ToolOutcome::Success {
-                    body: OutcomeBody::Available("data".to_string()),
-                },
-            )
-            .await
-            .expect("the result is admitted");
-        let error = refuse(
-            &root(),
-            crate::engine::EngineEvent::SuccessObserved {
-                call: fetch(serde_json::json!({"a": 1})),
-                observed: ObservedResult::Unavailable,
-            },
-        );
-        assert!(
-            matches!(error, EventError::UnknownDispatch),
-            "a duplicate report answers as a later one would; got {error:?}",
-        );
-        assert!(!error.is_operational());
-
-        let mut child_session = runtime.session(&child).expect("the child reopens");
+        let mut child_session = open_child(&mut session, fetch(serde_json::json!({"a": 1})), child.clone()).await;
         child_session
             .on_child_end(Some("done".to_string()))
             .await
             .expect("the child returns");
-        let error = refuse(
-            &child,
-            crate::engine::EngineEvent::ChildStart {
-                child: TrajectoryId("cc:root:child:grandchild".to_string()),
-            },
-        );
-        assert!(
-            matches!(error, EventError::TrajectoryEnded),
-            "an ended parent is a lifecycle condition; got {error:?}",
-        );
-        assert!(!error.is_operational());
 
         let error = refuse(
             &child,
@@ -2699,6 +2734,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
                 call: fetch(serde_json::json!({"a": 2})),
                 evidence: Vec::new(),
                 entropy: fresh_entropy(),
+                spawn: false,
             },
         );
         assert!(
@@ -2711,7 +2747,6 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             let error = refuse(
                 &root(),
                 crate::engine::EngineEvent::ChildReturn {
-                    parent: root(),
                     child: child.clone(),
                     value: value.clone(),
                     evidence: Vec::new(),
@@ -2727,17 +2762,26 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
     }
 
     #[tokio::test]
-    async fn a_child_is_seeded_and_a_clean_return_crosses() {
+    async fn a_child_is_forked_and_a_clean_return_crosses() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        let mut child = session
-            .on_child_start(TrajectoryId("cc:child".to_string()))
-            .expect("the child seeds and opens");
+        let mut child = open_child(
+            &mut session,
+            fetch(serde_json::json!({"a": 1})),
+            TrajectoryId("cc:child".to_string()),
+        )
+        .await;
         let (log, _) = runtime.inner.store.load_log(&root()).expect("the family log loads");
-        let facts: Vec<appa_engine::fact::Fact> = serde_json::from_slice(&log[1]).expect("the seed batch decodes");
-        assert!(matches!(facts.as_slice(), [appa_engine::fact::Fact::Boundary { .. }]));
+        assert!(matches!(
+            facts(&log[1]).last(),
+            Some(appa_engine::fact::Fact::ForkPrepared { .. })
+        ));
+        assert!(matches!(
+            facts(&log[2]).as_slice(),
+            [appa_engine::fact::Fact::ForkOpened { .. }]
+        ));
 
         let returned = child
             .on_child_end(Some("all done".to_string()))
@@ -2761,11 +2805,14 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        let mut child = session
-            .on_child_start(TrajectoryId("cc:child".to_string()))
-            .expect("the child seeds and opens");
+        let mut child = open_child(
+            &mut session,
+            fetch(serde_json::json!({"a": 9})),
+            TrajectoryId("cc:child".to_string()),
+        )
+        .await;
         child
-            .on_tool_call(fetch(serde_json::json!({"a": 1})))
+            .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
             .await
             .expect("the child's fetch is decided");
         child
@@ -2793,11 +2840,24 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             Err(SessionError::Ended),
         ));
 
+        session
+            .on_tool_result(
+                fetch(serde_json::json!({"a": 9})),
+                ToolOutcome::Success {
+                    body: OutcomeBody::Unavailable,
+                },
+            )
+            .await
+            .expect("the spawn dispatch closes");
+
         let decision = session
-            .on_tool_call(ProposedCall {
-                tool: "send".to_string(),
-                arguments: raw(serde_json::json!({})),
-            })
+            .on_tool_call(
+                ProposedCall {
+                    tool: "send".to_string(),
+                    arguments: raw(serde_json::json!({})),
+                },
+                false,
+            )
             .await
             .expect("the block is delivered");
         let ToolCallDecision::Deny { feedback } = decision else {
@@ -2858,7 +2918,10 @@ attends = ["irreversible"]
             .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
 
-        let denied = session.on_tool_call(wire(500)).await.expect("the block is delivered");
+        let denied = session
+            .on_tool_call(wire(500), false)
+            .await
+            .expect("the block is delivered");
         assert!(matches!(denied, ToolCallDecision::Deny { .. }));
         let offer = surfaced_offer(&runtime);
 
@@ -2872,8 +2935,11 @@ attends = ["irreversible"]
         assert_eq!(call.tool, "wire");
         assert_eq!(call.bytes, br#"{"amount":500}"#.to_vec());
 
-        let resumed = session.on_tool_call(wire(500)).await.expect("the re-proposal resumes");
-        assert_eq!(resumed, ToolCallDecision::Allow);
+        let resumed = session
+            .on_tool_call(wire(500), false)
+            .await
+            .expect("the re-proposal resumes");
+        assert_eq!(resumed, ToolCallDecision::Allow { spawn: None });
         let kept = session
             .on_tool_result(
                 wire(500),
@@ -2887,7 +2953,7 @@ attends = ["irreversible"]
 
         assert!(matches!(
             session.on_remedy(offer, None).await,
-            Err(EventError::UnknownOffer),
+            Ok(RemedyDecision::Authorized { .. }),
         ));
     }
 
@@ -2899,7 +2965,10 @@ attends = ["irreversible"]
             .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
 
-        session.on_tool_call(wire(500)).await.expect("the block is delivered");
+        session
+            .on_tool_call(wire(500), false)
+            .await
+            .expect("the block is delivered");
         let offer = surfaced_offer(&runtime);
         assert!(matches!(
             session.on_remedy(offer, None).await.expect("the denial is delivered"),
@@ -2913,7 +2982,7 @@ attends = ["irreversible"]
             .len();
         assert!(matches!(
             session
-                .on_tool_call(wire(500))
+                .on_tool_call(wire(500), false)
                 .await
                 .expect("the re-block is delivered"),
             ToolCallDecision::Deny { .. },
@@ -2941,11 +3010,11 @@ attends = ["irreversible"]
             .expect("the second root opens");
 
         first
-            .on_tool_call(wire(500))
+            .on_tool_call(wire(500), false)
             .await
             .expect("the first block is delivered");
         second
-            .on_tool_call(wire(500))
+            .on_tool_call(wire(500), false)
             .await
             .expect("the second block is delivered");
         let first_offer = surfaced_offer_for(&runtime, &first_id);
@@ -2977,7 +3046,10 @@ attends = ["irreversible"]
             .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
 
-        session.on_tool_call(wire(500)).await.expect("the block is delivered");
+        session
+            .on_tool_call(wire(500), false)
+            .await
+            .expect("the block is delivered");
         let offer = surfaced_offer(&runtime);
         assert!(matches!(
             session
@@ -3000,7 +3072,10 @@ attends = ["irreversible"]
             .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
 
-        session.on_tool_call(wire(500)).await.expect("the block is delivered");
+        session
+            .on_tool_call(wire(500), false)
+            .await
+            .expect("the block is delivered");
         let offer = surfaced_offer(&runtime);
         runtime.inner.store.fail_next_commit();
         assert!(matches!(
@@ -3014,7 +3089,7 @@ attends = ["irreversible"]
     }
 
     #[tokio::test]
-    async fn an_offer_does_not_survive_a_restart() {
+    async fn an_offer_survives_a_restart_and_executes() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let url = stub(serde_json::json!({"ruling": "approve"})).await;
         let db = dir.path().join("appa.db");
@@ -3022,19 +3097,28 @@ attends = ["irreversible"]
             let runtime =
                 Runtime::open(config_with(ATTENTION, Some(&url)), db.clone(), None).expect("the deployment opens");
             let mut session = runtime.create_session(root()).expect("a fresh id opens");
-            session.on_tool_call(wire(500)).await.expect("the block is delivered");
+            session
+                .on_tool_call(wire(500), false)
+                .await
+                .expect("the block is delivered");
             surfaced_offer(&runtime)
         };
         let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), db, None).expect("the deployment reopens");
         let mut session = runtime.session(&root()).expect("the trajectory reopens");
         assert!(matches!(
-            session.on_remedy(offer, None).await.expect("the decline is delivered"),
-            RemedyDecision::Declined { .. },
+            session
+                .on_remedy(offer, None)
+                .await
+                .expect("the reopened offer executes"),
+            RemedyDecision::Authorized { .. },
         ));
     }
 
     const SANITIZED_CHILD: &str = r#"
 version = 1
+
+[[policy.tool]]
+name = "fetch"
 
 [[policy.sanitizer]]
 name = "scrub"
@@ -3070,9 +3154,12 @@ confined_child_return = true
         let runtime = Runtime::open(sanitized_config(Some(&url)), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        let mut child = session
-            .on_child_start(TrajectoryId("cc:child".to_string()))
-            .expect("the child seeds and opens");
+        let mut child = open_child(
+            &mut session,
+            fetch(serde_json::json!({})),
+            TrajectoryId("cc:child".to_string()),
+        )
+        .await;
         let returned = child
             .on_child_end(Some("raw with pii".to_string()))
             .await
@@ -3092,53 +3179,38 @@ confined_child_return = true
         let runtime = Runtime::open(sanitized_config(Some(&url)), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        let child_id = TrajectoryId("cc:child".to_string());
-        let mut child = session.on_child_start(child_id.clone()).expect("the child opens");
+        let mut child = open_child(
+            &mut session,
+            fetch(serde_json::json!({})),
+            TrajectoryId("cc:child".to_string()),
+        )
+        .await;
         child
             .on_child_end(Some("raw with pii".to_string()))
             .await
             .expect("the sanitized return crosses");
 
-        let policy = runtime.inner.resolve_policy(&root()).expect("the policy resolves");
-        let (log, _) = runtime.inner.store.load_log(&root()).expect("the log loads");
-        let view = runtime
-            .inner
-            .engine
-            .rebuild_view(&policy, &log, &root(), &root())
-            .expect("the log rebuilds");
-        let refusal = runtime
-            .inner
-            .engine
-            .handle(
-                &policy,
-                &view,
-                crate::engine::EngineEvent::ChildReturn {
-                    parent: root(),
-                    child: child_id,
-                    value: Some("raw with pii".to_string()),
-                    evidence: vec![crate::engine::ExternalEvidence::Sanitizer {
-                        sanitizer: "scrub".to_string(),
-                        derived: Some("scrubbed".to_string()),
-                    }],
-                    entropy: fresh_entropy(),
-                },
-            )
-            .expect_err("the duplicate return is refused");
-        let error = EventError::from(refusal);
+        let error = child
+            .on_child_end(Some("raw with pii".to_string()))
+            .await
+            .expect_err("the duplicate meets an ended child");
         assert!(matches!(error, EventError::TrajectoryEnded), "got {error:?}",);
         assert!(!error.is_operational());
     }
 
     #[tokio::test]
-    async fn sanitizer_no_answer_fails_closed() {
+    async fn a_sanitizer_with_no_answer_withholds_the_crossing() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let url = stub(serde_json::json!(42)).await;
         let runtime = Runtime::open(sanitized_config(Some(&url)), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        let mut child = session
-            .on_child_start(TrajectoryId("cc:child".to_string()))
-            .expect("the child seeds and opens");
+        let mut child = open_child(
+            &mut session,
+            fetch(serde_json::json!({})),
+            TrajectoryId("cc:child".to_string()),
+        )
+        .await;
         let blocked = child
             .on_child_end(Some("raw with pii".to_string()))
             .await
@@ -3328,6 +3400,35 @@ confined_results = ["leak"]
         Config::load(&path).expect("the fixture validates")
     }
 
+    const EMITTING_LEAK: &str = r#"
+version = 1
+
+[[policy.tool]]
+name = "leak"
+parameters = { type = "object", properties = { q = { type = "string" } } }
+effects = ["leak"]
+delta = { audience = { exactly = ["internal"] } }
+
+[[policy.sanitizer]]
+name = "scrub"
+on = ["tool_output"]
+[policy.sanitizer.mandate]
+audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+
+[policy.deployment]
+confined_results = ["leak"]
+"#;
+
+    fn emitting_leak_config(url: &str) -> Config {
+        let text = format!(
+            "[policy]\n{EMITTING_LEAK}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.sanitizers.scrub]\nurl = \"{url}\"\n"
+        );
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, text).expect("the fixture writes");
+        Config::load(&path).expect("the fixture validates")
+    }
+
     fn leak() -> ProposedCall {
         ProposedCall {
             tool: "leak".to_string(),
@@ -3345,8 +3446,11 @@ confined_results = ["leak"]
         let authorized = session.on_remedy(offer, None).await.expect("the offer executes");
         assert!(matches!(authorized, RemedyDecision::Authorized { .. }));
         assert_eq!(
-            session.on_tool_call(leak()).await.expect("the re-proposal resumes"),
-            ToolCallDecision::Allow,
+            session
+                .on_tool_call(leak(), false)
+                .await
+                .expect("the re-proposal resumes"),
+            ToolCallDecision::Allow { spawn: None },
         );
         session
             .on_tool_result(
@@ -3367,7 +3471,10 @@ confined_results = ["leak"]
             Runtime::open(narrowing_config(&url), dir.path().join("appa.db"), None).expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         assert!(matches!(
-            session.on_tool_call(leak()).await.expect("the block is delivered"),
+            session
+                .on_tool_call(leak(), false)
+                .await
+                .expect("the block is delivered"),
             ToolCallDecision::Deny { .. },
         ));
         let decision = run_sanitize_offer(&runtime, &mut session).await;
@@ -3389,14 +3496,17 @@ confined_results = ["leak"]
     }
 
     #[tokio::test]
-    async fn a_bound_sanitizer_no_answer_closes_valueless() {
+    async fn a_bound_sanitizer_no_answer_withholds_and_stays_retryable() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let url = stub(serde_json::json!(42)).await;
         let runtime =
             Runtime::open(narrowing_config(&url), dir.path().join("appa.db"), None).expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         assert!(matches!(
-            session.on_tool_call(leak()).await.expect("the block is delivered"),
+            session
+                .on_tool_call(leak(), false)
+                .await
+                .expect("the block is delivered"),
             ToolCallDecision::Deny { .. },
         ));
         let decision = run_sanitize_offer(&runtime, &mut session).await;
@@ -3410,8 +3520,8 @@ confined_results = ["leak"]
                 .store
                 .open_dispatch(&root())
                 .expect("the dispatch query runs")
-                .is_none(),
-            "the valueless success closed the dispatch",
+                .is_some(),
+            "a no-answer sanitizer leaves the dispatch open so the return may be retried",
         );
     }
 
@@ -3444,7 +3554,10 @@ context_control = true
     }
 
     async fn admit_success(runtime: &Runtime, session: &mut Session, call: ProposedCall) {
-        let decision = session.on_tool_call(call.clone()).await.expect("the call is decided");
+        let decision = session
+            .on_tool_call(call.clone(), false)
+            .await
+            .expect("the call is decided");
         if matches!(decision, ToolCallDecision::Deny { .. }) {
             let offers = runtime
                 .inner
@@ -3461,10 +3574,10 @@ context_control = true
             ));
             assert_eq!(
                 session
-                    .on_tool_call(call.clone())
+                    .on_tool_call(call.clone(), false)
                     .await
                     .expect("the re-proposal resumes"),
-                ToolCallDecision::Allow,
+                ToolCallDecision::Allow { spawn: None },
             );
         }
         let kept = session
@@ -3592,7 +3705,7 @@ context_control = true
             Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let child_id = TrajectoryId("cc:child".to_string());
-        let mut child = session.on_child_start(child_id.clone()).expect("the child opens");
+        let mut child = open_child(&mut session, fetch(serde_json::json!({"a": 1})), child_id.clone()).await;
         admit_success(&runtime, &mut child, mark()).await;
 
         let policy = runtime.inner.resolve_policy(&root()).expect("the policy resolves");

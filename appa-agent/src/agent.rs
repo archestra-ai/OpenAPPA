@@ -4,7 +4,9 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use appa_runtime_api::{Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
+use appa_runtime_api::{
+    Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId,
+};
 use appa_runtime_v2::api::{OfferId, RemedyOutcome, Runtime};
 use appa_runtime_v2::hooks;
 use serde_json::value::RawValue;
@@ -346,12 +348,18 @@ impl Run<'_> {
             },
         )
         .await;
+        let spawn = self
+            .agent
+            .spawn
+            .as_ref()
+            .is_some_and(|spawn| spawn.name.0 == proposed.tool);
         let event = HookEvent::ToolCall {
             actor: self.actor(frame),
             call: proposed.clone(),
+            spawn,
         };
         match hooks::handle(&self.agent.runtime, event).await {
-            HookDecision::AllowCall => self.run_released(frame, &id, proposed).await,
+            HookDecision::AllowCall { spawn } => self.run_released(frame, &id, proposed, spawn).await,
             HookDecision::DenyCall { feedback } => {
                 self.record(
                     frame,
@@ -375,10 +383,11 @@ impl Run<'_> {
         frame: &mut Frame,
         id: &CallId,
         call: ProposedCall,
+        binding: Option<SpawnBinding>,
     ) -> Result<Answered, StopReason> {
         if let Some(spawn) = self.agent.spawn.as_ref().filter(|spawn| spawn.name.0 == call.tool) {
             let errand = errand_of(&call, &spawn.errand);
-            return self.open_child(frame, id, call, errand).await;
+            return self.open_child(frame, id, call, errand, binding).await;
         }
         let outcome = self.agent.tools.run(&call).await;
         self.report(frame, id, call, outcome).await.map(Answered::Reply)
@@ -390,7 +399,14 @@ impl Run<'_> {
         id: &CallId,
         call: ProposedCall,
         errand: String,
+        binding: Option<SpawnBinding>,
     ) -> Result<Answered, StopReason> {
+        let Some(binding) = binding else {
+            let outcome = ToolOutcome::Failure {
+                message: "no child was opened: this deployment does not control subagent context".to_string(),
+            };
+            return self.report(frame, id, call, outcome).await.map(Answered::Reply);
+        };
         if self.budget.charge_fork(frame.depth) == Err(Exhausted) {
             let outcome = ToolOutcome::Failure {
                 message: "no child was opened: this run's fork budget is spent".to_string(),
@@ -401,6 +417,7 @@ impl Run<'_> {
         let event = HookEvent::ChildStart {
             parent: frame.id.clone(),
             child: child.clone(),
+            spawn: Some(binding),
         };
         self.expect_ack(event).await?;
         Ok(Answered::Spawned { child, call, errand })

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub use crate::engine::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, TrajectoryStatus};
-pub use appa_runtime_api::{OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
+pub use appa_runtime_api::{OutcomeBody, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
 pub(crate) use session::{Session, is_control_tool};
 
 use crate::config::{Config, PolicyFileKey};
@@ -51,8 +51,12 @@ pub(crate) struct AuthorizedCall {
 /// input substitution is outside this runtime's coverage.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ToolCallDecision {
-    Allow,
-    Deny { feedback: String },
+    Allow {
+        spawn: Option<SpawnBinding>,
+    },
+    Deny {
+        feedback: String,
+    },
     Control,
 }
 
@@ -150,6 +154,8 @@ pub(crate) enum EventError {
     UnknownOffer,
     #[error("only a child trajectory submits a return")]
     NotAChild,
+    #[error("the spawn did not take: no prepared fork to open this child")]
+    SpawnNotTaken,
     #[error("the family log stayed contended after {attempts} replays")]
     Contended { attempts: u32 },
     #[error("the engine returned a follow-up this event cannot deliver")]
@@ -186,7 +192,8 @@ impl EventError {
             | EventError::UnknownDispatch
             | EventError::OutcomeMismatch
             | EventError::UnknownOffer
-            | EventError::NotAChild => false,
+            | EventError::NotAChild
+            | EventError::SpawnNotTaken => false,
         }
     }
 }
@@ -208,9 +215,9 @@ impl From<EngineRefusal> for EventError {
             EngineRefusal::UntrustedLog { detail } => EventError::UntrustedLog(detail),
             EngineRefusal::OpeningMismatch { detail } => EventError::PolicyUnavailable(detail),
             EngineRefusal::Invariant { detail } => EventError::EngineInvariant(detail),
-            EngineRefusal::ChildAlreadyForked => EventError::TrajectoryExists,
             EngineRefusal::Ended => EventError::TrajectoryEnded,
             EngineRefusal::DispatchClosed => EventError::UnknownDispatch,
+            EngineRefusal::UnknownOffer => EventError::UnknownOffer,
         }
     }
 }
@@ -645,7 +652,7 @@ fn compile_stored_policy(bytes: &[u8]) -> Result<appa_policy::Config, String> {
 /// code too).
 #[cfg(test)]
 pub(crate) mod testing {
-    use crate::engine::{EngineDecision, Feedback, Next, OfferMutations, Presentation, ReleasedCall, TestSeam};
+    use crate::engine::{EngineDecision, Feedback, Next, Presentation, ReleasedCall, TestSeam};
 
     use super::{Config, DispatchId, OfferId, ProposedCall, Runtime};
 
@@ -661,13 +668,31 @@ pub(crate) mod testing {
         runtime.inner.engine.enqueue(EngineDecision {
             append: None,
             then,
-            offers: OfferMutations::default(),
             ends_child: None,
         });
     }
 
     pub(crate) fn enqueue_done(runtime: &Runtime) {
         enqueue(runtime, Next::Done);
+    }
+
+    fn engine_dispatch(label: &str) -> appa_engine::value::DispatchId {
+        let policy = appa_policy::Config::from_toml_str("version = 1\n[[tool]]\nname = \"Bash\"\n")
+            .expect("the fixture policy compiles");
+        let engine = policy.engine().clone();
+        let call = engine
+            .resolve_call(appa_engine::value::ToolName::new("Bash"), br#"{"command":"ls"}"#)
+            .expect("the fixture call resolves through the engine");
+        appa_engine::value::DispatchId::new(appa_engine::value::TrajectoryId::new(label), call.digest(), 0)
+    }
+
+    fn wire_dispatch(label: &str) -> DispatchId {
+        DispatchId(serde_json::to_string(&engine_dispatch(label)).expect("an engine dispatch id serializes"))
+    }
+
+    pub(crate) fn spawn_binding(label: &str) -> super::SpawnBinding {
+        let fork = appa_engine::value::ForkId::of(&engine_dispatch(label));
+        super::SpawnBinding(serde_json::to_string(&fork).expect("a fork id serializes"))
     }
 
     pub(crate) fn enqueue_release(runtime: &Runtime, dispatch: &str, tool: &str, arguments: &serde_json::Value) {
@@ -679,9 +704,10 @@ pub(crate) mod testing {
             runtime,
             Next::ModelResponse {
                 invocations: vec![ReleasedCall {
-                    dispatch: DispatchId(dispatch.to_string()),
+                    dispatch: wire_dispatch(dispatch),
                     tool: call.tool.clone(),
                     bytes: serde_json::to_vec(&call).expect("the test call serializes"),
+                    fork: None,
                 }],
                 feedback: Vec::new(),
             },

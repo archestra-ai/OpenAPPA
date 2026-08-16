@@ -243,10 +243,8 @@ audience = { exactly = ["public"] }
     );
     let feedback = provider.tool_result(1, "call_0");
     assert!(
-        feedback
-            .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
-            .any(|word| word.starts_with("offer-") && word.len() > "offer-".len()),
-        "the block must surface an opaque offer id. Got: {feedback}",
+        harness::offer_id(&feedback).is_some(),
+        "the block must surface an offer id the model can pursue. Got: {feedback}",
     );
 }
 

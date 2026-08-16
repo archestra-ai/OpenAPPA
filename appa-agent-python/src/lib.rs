@@ -160,8 +160,9 @@ impl SessionInner {
         match self.event(HookEvent::ToolCall {
             actor: self.actor(),
             call: call.clone(),
+            spawn: false,
         })? {
-            HookDecision::AllowCall => {
+            HookDecision::AllowCall { .. } => {
                 self.pending = Some(Pending { call: call.clone() });
                 Ok(Decision::Allowed { call })
             }
@@ -560,11 +561,13 @@ delta    = {}
             .as_str()
             .expect("a block carries feedback")
             .to_string();
-        feedback
-            .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
-            .find(|word| word.starts_with("offer-") && word.len() > "offer-".len())
-            .expect("blocking feedback surfaces an offer")
-            .to_string()
+        let after = feedback
+            .split("offer_id:")
+            .nth(1)
+            .expect("blocking feedback surfaces an offer");
+        let rest = after.trim_start().strip_prefix('"').expect("the offer id is quoted");
+        let end = rest.find('"').expect("the offer id closes its quote");
+        rest[..end].to_string()
     }
 
     #[test]

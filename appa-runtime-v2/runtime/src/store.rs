@@ -38,25 +38,22 @@ pub enum RuntimeRecord {
         bytes: Vec<u8>,
         state: DispatchState,
     },
-    PromoteDispatch { id: DispatchId },
     CloseDispatch { id: DispatchId },
     SurfaceOffer { id: OfferId, trajectory: TrajectoryId },
-    RetireOffer { id: OfferId },
 }
 
-/// Where a dispatch stands. `Awaiting`: authorized, waiting for the
-/// model to re-propose the call. `Executing`: released to the harness,
-/// waiting for its outcome.
+/// Where a dispatch stands. Every open dispatch is executing: a call the
+/// engine released and the harness is running. An approval the
+/// agent must re-propose is the engine's own durable state, not a runtime
+/// dispatch row, so there is no waiting-to-be-reproposed state here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchState {
-    Awaiting,
     Executing,
 }
 
 impl DispatchState {
     fn as_sql(self) -> &'static str {
         match self {
-            DispatchState::Awaiting => "awaiting",
             DispatchState::Executing => "executing",
         }
     }
@@ -325,16 +322,12 @@ impl Store {
                  WHERE trajectory = ?1 AND state != 'closed'",
                 params![trajectory.0],
                 |row| {
-                    let state: String = row.get(3)?;
+                    let _state: String = row.get(3)?;
                     Ok(DispatchRow {
                         id: DispatchId(row.get(0)?),
                         tool: row.get(1)?,
                         bytes: row.get(2)?,
-                        state: if state == "awaiting" {
-                            DispatchState::Awaiting
-                        } else {
-                            DispatchState::Executing
-                        },
+                        state: DispatchState::Executing,
                     })
                 },
             )
@@ -432,17 +425,6 @@ impl Store {
                         Err(e) => return Err(CommitError::Storage(e)),
                     }
                 }
-                RuntimeRecord::PromoteDispatch { id } => {
-                    require_dispatch_member(&tx, family, &id)?;
-                    let changed = tx.execute(
-                        "UPDATE dispatches SET state = 'executing'
-                         WHERE id = ?1 AND state = 'awaiting'",
-                        params![id.0],
-                    )?;
-                    if changed != 1 {
-                        return Err(CommitError::DispatchAlreadyOpen);
-                    }
-                }
                 RuntimeRecord::CloseDispatch { id } => {
                     require_dispatch_member(&tx, family, &id)?;
                     let changed = tx.execute(
@@ -455,7 +437,8 @@ impl Store {
                 RuntimeRecord::SurfaceOffer { id, trajectory } => {
                     require_member(&tx, family, &trajectory)?;
                     tx.execute(
-                        "INSERT INTO offers (id, trajectory) VALUES (?1, ?2)",
+                        "INSERT INTO offers (id, trajectory) VALUES (?1, ?2)
+                         ON CONFLICT (id) DO NOTHING",
                         params![id.0, trajectory.0],
                     )?;
                     tx.execute(
@@ -463,9 +446,6 @@ impl Store {
                          (SELECT rowid FROM offers ORDER BY rowid DESC LIMIT ?1)",
                         params![OFFER_ROWS_CAP],
                     )?;
-                }
-                RuntimeRecord::RetireOffer { id } => {
-                    tx.execute("DELETE FROM offers WHERE id = ?1", params![id.0])?;
                 }
             }
         }
@@ -1034,7 +1014,7 @@ mod tests {
     }
 
     #[test]
-    fn promote_and_close_refuse_a_foreign_familys_dispatch() {
+    fn close_refuses_a_foreign_familys_dispatch() {
         let (_dir, store) = open_temp();
         let a = TrajectoryId("cc:family-a".to_string());
         let b = TrajectoryId("cc:family-b".to_string());
@@ -1050,23 +1030,11 @@ mod tests {
                         trajectory: b.clone(),
                         tool: "Bash".to_string(),
                         bytes: b"call".to_vec(),
-                        state: DispatchState::Awaiting,
+                        state: DispatchState::Executing,
                     }],
                 },
             )
             .expect("family b's dispatch opens");
-        assert!(matches!(
-            store.commit_event(
-                &a,
-                EventWrite {
-                    batch: None,
-                    records: vec![RuntimeRecord::PromoteDispatch {
-                        id: DispatchId("d-b".to_string())
-                    }],
-                },
-            ),
-            Err(CommitError::InvalidRecord { .. }),
-        ));
         assert!(matches!(
             store.commit_event(
                 &a,
