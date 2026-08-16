@@ -75,9 +75,14 @@ see every hook arrive and every decision go out. The database shows
 what was recorded:
 
 ```sh
-sqlite3 appa.db 'SELECT id, parent, ended FROM trajectories;'
-sqlite3 appa.db 'SELECT trajectory, tool, state FROM dispatches;'
+# The whole log of one root, batch by batch. Everything the runtime knows —
+# a branch's parent, whether it has ended, which dispatch it has open — is
+# read back from these records; nothing is stored beside them.
+sqlite3 appa.db "SELECT seq, facts FROM logs WHERE root = 'cc:<session-id>' ORDER BY seq;"
 ```
+
+The `appa-runtime-v2 status` and `audit` reads answer the same questions
+without SQL, and are the supported way to look.
 
 ## Things to know
 

@@ -416,6 +416,7 @@ impl Run<'_> {
         }
         let child = TrajectoryId(format!("{}:c{}", self.root.0, self.budget.forks()));
         let event = HookEvent::ChildStart {
+            root: self.root.clone(),
             parent: frame.id.clone(),
             child: child.clone(),
             spawn: Some(binding),
@@ -431,7 +432,7 @@ impl Run<'_> {
         said: Option<String>,
     ) -> Result<(), StopReason> {
         let event = HookEvent::ChildEnd {
-            parent: parent.frame.id.clone(),
+            root: self.root.clone(),
             child: child.id.clone(),
             value: said.clone(),
         };

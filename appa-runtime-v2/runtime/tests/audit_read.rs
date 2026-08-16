@@ -126,6 +126,7 @@ async fn open_child(runtime: &Arc<Runtime>, spawn: ProposedCall) -> HookDecision
     hooks::handle(
         runtime,
         HookEvent::ChildStart {
+            root: root(),
             parent: root(),
             child: child(),
             spawn: Some(binding),
@@ -268,7 +269,7 @@ async fn a_branch_records_its_seed_its_own_flows_and_how_its_return_crossed() {
     released(&runtime, Some(&child()), "read_hr", "Alice Chen, alice@corp.example").await;
 
     let end = HookEvent::ChildEnd {
-        parent: root(),
+        root: root(),
         child: child(),
         value: Some("Alice Chen, alice@corp.example".to_string()),
     };
@@ -379,7 +380,7 @@ async fn a_child_bound_attest_schema_return_crosses_in_engine() {
     released(&runtime, Some(&child()), "read_untrusted", "raw notes").await;
 
     let end = HookEvent::ChildEnd {
-        parent: root(),
+        root: root(),
         child: child(),
         value: Some(r#"{"verdict":"allow"}"#.to_string()),
     };

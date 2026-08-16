@@ -15,11 +15,11 @@ pub use crate::engine::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, Tra
 pub use appa_runtime_api::{OutcomeBody, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
 pub(crate) use session::{Session, is_control_tool};
 
-use crate::config::{Config, PolicyFileKey};
+use crate::config::Config;
 use crate::elicit::Elicitation;
 use crate::engine::{EngineRefusal, EngineSeam, PolicyEngine, RuntimeEngine};
 use crate::external::ExternalServices;
-use crate::store::{Store, StoreError};
+use appa_eventlog::{Backend, Log, LogStore};
 
 /// Identity of one open dispatch: a released call the harness is
 /// executing. Runtime-internal: outcomes correlate by the
@@ -151,8 +151,6 @@ pub(crate) enum EventError {
         "the substituted {tool} call did not run and is now closed; propose your call again (a substituted call needs a fresh offer)"
     )]
     SubstitutionAbandoned { tool: String },
-    #[error("this outcome names a substituted call that was never proposed; it is not reported")]
-    DispatchNotStarted,
     #[error("the trajectory has ended")]
     TrajectoryEnded,
     #[error("no trajectory with this id exists")]
@@ -200,7 +198,6 @@ impl EventError {
             | EventError::UnexpectedDecision => true,
             EventError::CallOutstanding
             | EventError::SubstitutionAbandoned { .. }
-            | EventError::DispatchNotStarted
             | EventError::TrajectoryEnded
             | EventError::UnknownTrajectory
             | EventError::TrajectoryExists
@@ -242,7 +239,7 @@ pub struct Runtime {
 }
 
 struct Inner {
-    store: Store,
+    store: LogStore,
     engine: EngineSeam,
     externals: ExternalServices,
     config: Config,
@@ -250,38 +247,45 @@ struct Inner {
 }
 
 impl Inner {
-    pub(super) fn resolve_policy(&self, family: &TrajectoryId) -> Result<PolicyEngine<'_>, EventError> {
-        let opening = self
-            .store
-            .opening(family)
-            .map_err(|error| EventError::Storage(error.to_string()))?
-            .ok_or_else(|| EventError::PolicyUnavailable(format!("family {} has no opening record", family.0)))?;
-        let Some(bytes) = opening.policy_bytes else {
+    pub(super) fn resolve_policy(&self, log: &Log) -> Result<PolicyEngine<'_>, EventError> {
+        let opened = self.engine.opened_under(log).ok_or_else(|| {
+            EventError::PolicyUnavailable(format!(
+                "the log of {} does not open with its opening record",
+                log.root().as_str()
+            ))
+        })?;
+        if crate::engine::policy_file_key(log.policy_file()) != opened.policy_file_key {
             return Err(EventError::PolicyUnavailable(format!(
-                "the stored policy file {} is missing",
-                opening.policy_key
-            )));
-        };
-        let key = PolicyFileKey::of(&bytes);
-        if key.as_str() != opening.policy_key {
-            return Err(EventError::PolicyUnavailable(format!(
-                "the stored policy file does not hash to its key {}",
-                opening.policy_key
+                "the stored policy file does not hash to the key {} its opening names",
+                opened.policy_file_key
             )));
         }
-        let policy = if self.config.policy_file().key() == &key {
+        let policy = if crate::engine::policy_file_key(self.config.policy_file().bytes()) == opened.policy_file_key {
             self.engine.resident()
         } else {
-            let compiled = compile_stored_policy(&bytes).map_err(EventError::PolicyUnavailable)?;
+            let compiled = compile_stored_policy(log.policy_file()).map_err(EventError::PolicyUnavailable)?;
             PolicyEngine::Stored(RuntimeEngine::new(compiled.engine().clone()))
         };
-        if policy.identity_hex() != opening.policy_identity {
+        if policy.identity_hex() != opened.policy_identity {
             return Err(EventError::PolicyUnavailable(format!(
-                "the stored policy file compiles to a different identity than the opening record of family {}",
-                family.0
+                "the stored policy file compiles to a different identity than the opening of {}",
+                log.root().as_str()
             )));
         }
         Ok(policy)
+    }
+
+    pub(super) fn log(&self, root: &TrajectoryId) -> Result<Log, EventError> {
+        self.store
+            .log(&crate::engine::engine_id(root))
+            .map_err(|error| match error {
+                appa_eventlog::ReadError::UnknownRoot { .. } => EventError::UnknownTrajectory,
+                appa_eventlog::ReadError::Undecodable(detail) => EventError::UntrustedLog(detail),
+                error @ appa_eventlog::ReadError::PolicyFileMissing { .. } => {
+                    EventError::PolicyUnavailable(error.to_string())
+                }
+                error => EventError::Storage(error.to_string()),
+            })
     }
 }
 
@@ -324,16 +328,11 @@ impl Runtime {
             crate::builtins::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
         let externals = ExternalServices::new(config.externals.clone(), registry)
             .map_err(|error| OpenError::Modules(error.to_string()))?;
-        let store = Store::open(&db).map_err(|error| match error {
-            StoreError::Damaged { path, detail } => OpenError::Damaged(format!("{path}: {detail}")),
+        let store = LogStore::open(Backend::Sqlite { path: db }).map_err(|error| match error {
+            appa_eventlog::OpenError::Damaged { path, detail } => OpenError::Damaged(format!("{path}: {detail}")),
+            error @ appa_eventlog::OpenError::ForeignSchema { .. } => OpenError::Damaged(error.to_string()),
             error => OpenError::Storage(error.to_string()),
         })?;
-        store
-            .put_policy(config.policy_file().bytes())
-            .map_err(|error| match error {
-                error @ StoreError::PolicyRewrite { .. } => OpenError::Damaged(error.to_string()),
-                error => OpenError::Storage(error.to_string()),
-            })?;
         Ok(Runtime {
             inner: Arc::new(Inner {
                 store,
@@ -345,47 +344,74 @@ impl Runtime {
         })
     }
 
-    /// Opens a fresh trajectory. Refuses an id that already exists: a
-    /// reused harness id MUST NOT continue another trajectory's
-    /// history One transaction writes the
-    /// trajectory row, the opening record, and the opening batch — the
-    /// root is bound to the current policy file durably, or not opened
-    /// at all.
+    /// Opens a fresh root. Refuses an id whose log already exists: a
+    /// reused harness id MUST NOT continue another trajectory's history
+    /// One transaction writes the opening
+    /// record and stores the policy file it names, so the root is bound
+    /// to that file durably or is not opened at all.
     pub(crate) fn create_session(&self, id: TrajectoryId) -> Result<Session, SessionError> {
         let opening = self
             .inner
             .engine
-            .root_opening(&id, self.inner.config.policy_file().key());
-        let id = opening.trajectory().clone();
-        self.inner
-            .store
-            .create_root(&id, opening.into_write())
-            .map_err(|error| match error {
-                crate::store::CreateError::AlreadyExists => SessionError::AlreadyExists,
-                error => SessionError::Storage(error.to_string()),
-            })?;
-        Ok(Session::attach(Arc::clone(&self.inner), id.clone(), id))
-    }
-
-    /// Reopens a persisted trajectory. There is no stored view: the
-    /// next event rebuilds the engine's picture from the log.
-    /// Missing or ended state is refused.
-    pub(crate) fn session(&self, id: &TrajectoryId) -> Result<Session, SessionError> {
-        let row = self
+            .root_opening(&id, self.inner.config.policy_file().bytes());
+        let root = self
             .inner
             .store
-            .trajectory(id)
-            .map_err(|error| SessionError::Storage(error.to_string()))?
-            .ok_or(SessionError::Unknown)?;
-        if row.ended {
+            .create_root(opening, self.inner.config.policy_file().bytes())
+            .map_err(|error| match error {
+                appa_eventlog::CreateError::AlreadyExists { .. } => SessionError::AlreadyExists,
+                error => SessionError::Storage(error.to_string()),
+            })?;
+        let root = TrajectoryId(root.as_str().to_string());
+        Ok(Session::attach(Arc::clone(&self.inner), root.clone(), root))
+    }
+
+    /// Reopens a persisted trajectory. There is no stored view: the next
+    /// event rebuilds the engine's picture from the log.
+    pub(crate) fn session(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> Result<Session, SessionError> {
+        let known = self
+            .inner
+            .store
+            .has_root(&crate::engine::engine_id(root))
+            .map_err(|error| SessionError::Storage(error.to_string()))?;
+        if !known {
+            return Err(SessionError::Unknown);
+        }
+        Ok(Session::attach(
+            Arc::clone(&self.inner),
+            trajectory.clone(),
+            root.clone(),
+        ))
+    }
+
+    /// Whether this trajectory still accepts events. One view
+    /// rebuild, for the two callers that have no following engine event to
+    /// carry the refusal: the session-start hook, and the start-after-lazy-open
+    /// race. Every other path refuses inside the event it is already deciding.
+    pub(crate) fn live(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> Result<(), SessionError> {
+        let log = match self.inner.log(root) {
+            Ok(log) => log,
+            Err(EventError::UnknownTrajectory) => return Err(SessionError::Unknown),
+            Err(error) => return Err(SessionError::Storage(error.to_string())),
+        };
+        let policy = self
+            .inner
+            .resolve_policy(&log)
+            .map_err(|error| SessionError::Storage(error.to_string()))?;
+        let view = self
+            .inner
+            .engine
+            .rebuild_view(&policy, &log, trajectory)
+            .map_err(|refusal| SessionError::Storage(refusal.to_string()))?;
+        if self.inner.engine.has_ended(&view, trajectory) {
             return Err(SessionError::Ended);
         }
-        Ok(Session::attach(Arc::clone(&self.inner), row.id, row.family))
+        Ok(())
     }
 
     pub fn status(&self, id: &TrajectoryId) -> Option<TrajectoryStatus> {
-        let (policy, log, family) = self.root_log(id, "status")?;
-        let view = match self.inner.engine.rebuild_view(&policy, &log, &family, id) {
+        let (policy, log) = self.root_log(id, "status")?;
+        let view = match self.inner.engine.rebuild_view(&policy, &log, id) {
             Ok(view) => view,
             Err(refusal) => {
                 tracing::warn!(trajectory = %id.0, %refusal, "status read refused the persisted log");
@@ -401,8 +427,8 @@ impl Runtime {
     /// expires no offer, and it answers for an ended
     /// trajectory because an audit is read after the run.
     pub fn audit(&self, id: &TrajectoryId) -> Option<Vec<AuditEntry>> {
-        let (policy, log, family) = self.root_log(id, "audit")?;
-        match self.inner.engine.audit(&policy, &log, &family) {
+        let (policy, log) = self.root_log(id, "audit")?;
+        match self.inner.engine.audit(&policy, &log) {
             Ok(entries) => entries,
             Err(refusal) => {
                 tracing::warn!(trajectory = %id.0, %refusal, "audit read refused the persisted log");
@@ -411,37 +437,21 @@ impl Runtime {
         }
     }
 
-    fn root_log(&self, id: &TrajectoryId, read: &str) -> Option<(PolicyEngine<'_>, Vec<Vec<u8>>, TrajectoryId)> {
-        let row = match self.inner.store.trajectory(id) {
-            Ok(Some(row)) => row,
-            Ok(None) => {
-                tracing::debug!(trajectory = %id.0, read, "read refused: unknown trajectory");
-                return None;
-            }
-            Err(error) => {
-                tracing::debug!(trajectory = %id.0, read, %error, "read refused at the store");
-                return None;
-            }
-        };
-        if row.family != row.id {
-            tracing::debug!(trajectory = %id.0, read, "read refused: not a root trajectory");
-            return None;
-        }
-        let policy = match self.inner.resolve_policy(&row.family) {
-            Ok(policy) => policy,
-            Err(error) => {
-                tracing::warn!(trajectory = %id.0, read, %error, "read refused: the opening policy is unavailable");
-                return None;
-            }
-        };
-        let (log, _revision) = match self.inner.store.load_log(&row.family) {
+    fn root_log(&self, id: &TrajectoryId, read: &str) -> Option<(PolicyEngine<'_>, Log)> {
+        let log = match self.inner.log(id) {
             Ok(log) => log,
             Err(error) => {
-                tracing::debug!(trajectory = %id.0, read, %error, "read refused at the store");
+                tracing::debug!(trajectory = %id.0, read, %error, "read refused: no log for this root");
                 return None;
             }
         };
-        Some((policy, log, row.family))
+        match self.inner.resolve_policy(&log) {
+            Ok(policy) => Some((policy, log)),
+            Err(error) => {
+                tracing::warn!(trajectory = %id.0, read, %error, "read refused: the opening policy is unavailable");
+                None
+            }
+        }
     }
 
     /// Execute one surfaced remedy offer by its id (`RMD-2`,
@@ -459,20 +469,12 @@ impl Runtime {
                 detail: "this offer is already being executed".to_string(),
             };
         };
-        let trajectory = match self.offer_trajectory(&offer) {
-            Ok(Some(trajectory)) => trajectory,
-            Ok(None) => {
-                return RemedyOutcome::Refused {
-                    detail: "no live offer with this id exists".to_string(),
-                };
-            }
-            Err(error) => {
-                return RemedyOutcome::Refused {
-                    detail: error.to_string(),
-                };
-            }
+        let Some((root, trajectory)) = self.offer_owner(&offer) else {
+            return RemedyOutcome::Refused {
+                detail: "no live offer with this id exists".to_string(),
+            };
         };
-        let mut session = match self.session(&trajectory) {
+        let mut session = match self.session(&root, &trajectory) {
             Ok(session) => session,
             Err(error) => {
                 return RemedyOutcome::Refused {
@@ -492,14 +494,13 @@ impl Runtime {
         }
     }
 
-    /// Which trajectory a surfaced offer routes to. The MCP endpoint
-    /// uses this to find the session an `execute_remedy_plan` call
-    /// belongs to; liveness stays the engine's judgment.
-    pub(crate) fn offer_trajectory(&self, offer: &OfferId) -> Result<Option<TrajectoryId>, SessionError> {
-        self.inner
-            .store
-            .offer_trajectory(offer)
-            .map_err(|error| SessionError::Storage(error.to_string()))
+    fn offer_owner(&self, offer: &OfferId) -> Option<(TrajectoryId, TrajectoryId)> {
+        let root = crate::engine::offer_root(offer)?;
+        let log = self.inner.log(&root).ok()?;
+        let policy = self.inner.resolve_policy(&log).ok()?;
+        let view = self.inner.engine.rebuild_view(&policy, &log, &root).ok()?;
+        let trajectory = self.inner.engine.offer_pursuer(&view, offer)?;
+        Some((root, trajectory))
     }
 
     /// Claim one offer for the length of its execution, so two calls
@@ -517,6 +518,116 @@ impl Runtime {
             inner: Arc::clone(&self.inner),
             offer: offer.0.clone(),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn log_facts(&self, root: &TrajectoryId) -> Vec<appa_engine::fact::Fact> {
+        self.inner.log(root).expect("the log reads").facts().to_vec()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn log_basis(&self, root: &TrajectoryId) -> u64 {
+        self.inner.log(root).expect("the log reads").basis()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_dispatches(
+        &self,
+        root: &TrajectoryId,
+        trajectory: &TrajectoryId,
+    ) -> Vec<crate::engine::OpenDispatch> {
+        let log = self.inner.log(root).expect("the log reads");
+        let policy = self.inner.resolve_policy(&log).expect("the opening policy resolves");
+        let view = self
+            .inner
+            .engine
+            .rebuild_view(&policy, &log, trajectory)
+            .expect("the log rebuilds");
+        self.inner.engine.open_dispatches(&view, trajectory)
+    }
+
+    /// The substituted call a trajectory has standing, for the tests
+    /// that assert on it: the open dispatch no proposal released.
+    #[cfg(test)]
+    pub(crate) fn substituted_release(
+        &self,
+        root: &TrajectoryId,
+        trajectory: &TrajectoryId,
+    ) -> Option<crate::engine::OpenDispatch> {
+        let log = self.inner.log(root).expect("the log reads");
+        let policy = self.inner.resolve_policy(&log).expect("the opening policy resolves");
+        let view = self
+            .inner
+            .engine
+            .rebuild_view(&policy, &log, trajectory)
+            .expect("the log rebuilds");
+        self.inner.engine.substituted_release(&view, trajectory)
+    }
+
+    /// Rebuild one root's view, scoped to a trajectory in it, for the tests
+    /// that read a branch through the seam the root-only public surface does
+    /// not expose.
+    #[cfg(test)]
+    pub(crate) fn branch_status(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> Option<TrajectoryStatus> {
+        let log = self.inner.log(root).expect("the log reads");
+        let policy = self.inner.resolve_policy(&log).expect("the policy resolves");
+        let view = self
+            .inner
+            .engine
+            .rebuild_view(&policy, &log, trajectory)
+            .expect("the log rebuilds");
+        self.inner.engine.trajectory_status(&policy, &view)
+    }
+
+    /// Drive one event straight at the engine and take its refusal, for the
+    /// tests that pin how a raced lifecycle classifies.
+    #[cfg(test)]
+    pub(crate) fn refuse(
+        &self,
+        root: &TrajectoryId,
+        trajectory: &TrajectoryId,
+        event: crate::engine::EngineEvent,
+    ) -> EventError {
+        let log = self.inner.log(root).expect("the log reads");
+        let policy = self.inner.resolve_policy(&log).expect("the policy resolves");
+        let view = self
+            .inner
+            .engine
+            .rebuild_view(&policy, &log, trajectory)
+            .expect("the log rebuilds");
+        EventError::from(
+            self.inner
+                .engine
+                .handle(&policy, &view, event)
+                .expect_err("the moved subject refuses the event"),
+        )
+    }
+
+    /// The deployment's own policy file bytes, for tests that shape a stored
+    /// file relative to it.
+    #[cfg(test)]
+    pub(crate) fn config_bytes(&self) -> Vec<u8> {
+        self.inner.config.policy_file().bytes().to_vec()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn store(&self) -> &LogStore {
+        &self.inner.store
+    }
+
+    #[cfg(test)]
+    pub(crate) fn minted_offers(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> Vec<OfferId> {
+        crate::engine::minted_offers(&self.inner.log(root).expect("the log reads"), trajectory)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enqueue(&self, decision: crate::engine::EngineDecision) {
+        self.inner.engine.enqueue(decision);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn engine_seen(&self) -> Vec<crate::engine::EngineEvent> {
+        self.inner.engine.seen()
     }
 
     /// How long a human review may stay open before the runtime treats
@@ -660,7 +771,7 @@ fn compile_stored_policy(bytes: &[u8]) -> Result<appa_policy::Config, String> {
 /// code too).
 #[cfg(test)]
 pub(crate) mod testing {
-    use crate::engine::{EngineDecision, Feedback, Next, Presentation, ReleasedCall, TestSeam};
+    use crate::engine::{EngineDecision, Feedback, Next, ReleasedCall, TestSeam};
 
     use super::{Config, DispatchId, OfferId, ProposedCall, Runtime};
 
@@ -669,15 +780,11 @@ pub(crate) mod testing {
     }
 
     pub(crate) fn fail_next_commit(runtime: &Runtime) {
-        runtime.inner.store.fail_next_commit();
+        runtime.inner.store.fail_commit_after(0);
     }
 
     fn enqueue(runtime: &Runtime, then: Next) {
-        runtime.inner.engine.enqueue(EngineDecision {
-            append: None,
-            then,
-            ends_child: None,
-        });
+        runtime.inner.engine.enqueue(EngineDecision { append: None, then });
     }
 
     pub(crate) fn enqueue_done(runtime: &Runtime) {
@@ -696,11 +803,6 @@ pub(crate) mod testing {
 
     fn wire_dispatch(label: &str) -> DispatchId {
         DispatchId(serde_json::to_string(&engine_dispatch(label)).expect("an engine dispatch id serializes"))
-    }
-
-    pub(crate) fn spawn_binding(label: &str) -> super::SpawnBinding {
-        let fork = appa_engine::value::ForkId::of(&engine_dispatch(label));
-        super::SpawnBinding(serde_json::to_string(&fork).expect("a fork id serializes"))
     }
 
     pub(crate) fn enqueue_release(runtime: &Runtime, dispatch: &str, tool: &str, arguments: &serde_json::Value) {
@@ -732,28 +834,6 @@ pub(crate) mod testing {
                     offers: offers.iter().map(|id| OfferId(id.to_string())).collect(),
                 }],
             },
-        );
-    }
-
-    pub(crate) fn enqueue_keep_output(runtime: &Runtime) {
-        enqueue(runtime, Next::PresentToModel(Presentation::KeepOutput));
-    }
-
-    pub(crate) fn enqueue_replace_output(runtime: &Runtime, placeholder: &str) {
-        enqueue(
-            runtime,
-            Next::PresentToModel(Presentation::ReplaceOutput {
-                placeholder: placeholder.to_string(),
-            }),
-        );
-    }
-
-    pub(crate) fn enqueue_value(runtime: &Runtime, value: &str) {
-        enqueue(
-            runtime,
-            Next::PresentToModel(Presentation::Value {
-                value: value.to_string(),
-            }),
         );
     }
 }

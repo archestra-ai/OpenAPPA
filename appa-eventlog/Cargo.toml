@@ -1,0 +1,26 @@
+[package]
+name = "appa-eventlog"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+appa-engine = { workspace = true }
+rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+# The fail points the runtime's own tests drive: a commit that rolls back in
+# place of committing, and a foreign writer that wins the compare-and-swap.
+# A dev-dependency enables it, so it is absent from every non-test build.
+fault-injection = []
+
+[dev-dependencies]
+# A real engine builds the fixtures' opening records, so the tests store what
+# production stores rather than a hand-built stand-in.
+appa-policy = { workspace = true }
+tempfile = "3"
+
+[lints]
+workspace = true

@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::authority::CastRefusal;
 use crate::candidate::{ConfinedFrom, DerivedCandidate, SanitizerLineage};
 use crate::check::Narrowing;
-use crate::fact::{CloseOutcome, EffectSet, Fact, FactBatch, ObservedResult};
+use crate::fact::{CloseOutcome, EffectSet, Fact, ObservedResult};
 use crate::label::{EstablishedLabel, Label};
 use crate::names::{CastName, SanitizerName};
 use crate::projection::Views;
@@ -85,7 +85,7 @@ pub(crate) fn observe_success(
     dispatch: &DispatchId,
     call: &ResolvedCall,
     observed: ObservedResult,
-) -> Result<FactBatch, AdmitError> {
+) -> Result<Vec<Fact>, AdmitError> {
     let contract = registry
         .tool(call.tool())
         .ok_or_else(|| AdmitError::UnknownTool(call.tool().as_str().to_string()))?;
@@ -101,15 +101,12 @@ pub(crate) fn observe_success(
     if views.is_succeeded(dispatch) {
         return Err(AdmitError::AlreadySucceeded);
     }
-    Ok(FactBatch::new(
-        views.revision(),
-        vec![Fact::DispatchSucceeded {
-            trajectory: views.trajectory().clone(),
-            dispatch: dispatch.clone(),
-            effects: contract.emits.clone(),
-            observed,
-        }],
-    ))
+    Ok(vec![Fact::DispatchSucceeded {
+        trajectory: views.trajectory().clone(),
+        dispatch: dispatch.clone(),
+        effects: contract.emits.clone(),
+        observed,
+    }])
 }
 
 /// What a confined candidate still narrows against the bound its dispatch pinned, or `None` where
@@ -259,7 +256,7 @@ pub(crate) fn admit_result(
     dispatch: &DispatchId,
     call: &ResolvedCall,
     admission: ResultAdmission,
-) -> Result<FactBatch, AdmitError> {
+) -> Result<Vec<Fact>, AdmitError> {
     let contract = registry
         .tool(call.tool())
         .ok_or_else(|| AdmitError::UnknownTool(call.tool().as_str().to_string()))?;
@@ -440,7 +437,7 @@ pub(crate) fn admit_result(
         }
     };
 
-    Ok(FactBatch::new(views.revision(), facts))
+    Ok(facts)
 }
 
 /// Validate a whole-source cast answer against the registered cast and the target value, then
@@ -450,7 +447,7 @@ pub(crate) fn admit_cast(
     views: &Views,
     value: ValueId,
     answer: CastAnswer,
-) -> Result<FactBatch, CastError> {
+) -> Result<Vec<Fact>, CastError> {
     let cast = registry
         .cast(&answer.cast)
         .ok_or_else(|| CastError::UnknownCast(answer.cast.as_str().to_string()))?;
@@ -484,7 +481,7 @@ pub(crate) fn admit_cast(
         resolved: answer.resolved,
         cast: answer.cast,
     };
-    Ok(FactBatch::new(views.revision(), vec![fact]))
+    Ok(vec![fact])
 }
 
 #[cfg(test)]
@@ -494,7 +491,7 @@ mod tests {
     use super::*;
     use crate::authority::{Cast, CastCeiling, CastResolution, Sanitizer, SanitizerPoints, Scope, Transition};
     use crate::contract::{AudienceDelta, Delta, DynamicAudienceBinding, PinnedDynamicResolution, ToolContract};
-    use crate::fact::{EffectKind, Revision};
+    use crate::fact::EffectKind;
     use crate::label::{Audience, Dim, ReaderId, Trust};
     use crate::projection::Projection;
     use crate::registry::{RegistryConfig, TrustChain};
@@ -639,7 +636,7 @@ mod tests {
     }
 
     fn views_of(log: &[Fact]) -> Projection {
-        Projection::build(log, Revision::new(log.len() as u64))
+        Projection::build(log, log.len() as u64)
     }
 
     fn offer() -> crate::value::OfferId {
@@ -742,10 +739,10 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            &batch.facts[0],
+            &batch[0],
             Fact::DispatchClosed { outcome: CloseOutcome::Success { effects }, .. } if effects == &EffectSet::new([EffectKind::new("read")]).unwrap()
         ));
-        match &batch.facts[1] {
+        match &batch[1] {
             Fact::ValueAdmitted { value, .. } => {
                 assert_eq!(value.label.trust, Dim::Known(SUSPICIOUS));
                 assert_eq!(value.label.audience, Dim::Known(internal()));
@@ -762,9 +759,9 @@ mod tests {
         let p = views_of(&log);
         let t = traj();
         let batch = admit_result(&reg, &p.view(&t), &dispatch, &call, ResultAdmission::Failure).unwrap();
-        assert_eq!(batch.facts.len(), 1);
+        assert_eq!(batch.len(), 1);
         assert!(matches!(
-            &batch.facts[0],
+            &batch[0],
             Fact::DispatchClosed {
                 outcome: CloseOutcome::Failure,
                 ..
@@ -915,7 +912,7 @@ mod tests {
         )
         .unwrap();
         let mut next = log.clone();
-        next.extend(batch.facts);
+        next.extend(batch);
         let p2 = views_of(&next);
         let current = p2.view(&t).current_label();
         assert!(current.is_fully_established());
@@ -978,7 +975,7 @@ mod tests {
             },
         )
         .unwrap();
-        log.extend(first.facts);
+        log.extend(first);
         let p = views_of(&log);
         assert_eq!(
             admit_cast(
@@ -1116,7 +1113,7 @@ mod tests {
             Err(AdmitError::NonLiteralAnswer)
         );
         let batch = attempt(Audience::Public).unwrap();
-        match batch.facts.last().unwrap() {
+        match batch.last().unwrap() {
             Fact::ValueAdmitted { value, .. } => {
                 assert_eq!(value.label.audience, Dim::Known(Audience::Public));
             }
@@ -1223,7 +1220,7 @@ mod tests {
             ResultAdmission::CandidateAccepted { offer: offer() },
         )
         .unwrap();
-        match batch.facts.last().unwrap() {
+        match batch.last().unwrap() {
             Fact::ValueAdmitted { value, .. } => {
                 assert_eq!(value.label, Label::new(Dim::Known(SUSPICIOUS), Dim::Known(internal())));
             }
@@ -1292,14 +1289,14 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            &batch.facts[0],
+            &batch[0],
             Fact::DispatchClosed { outcome: CloseOutcome::Success { effects }, .. } if effects == &EffectSet::new([EffectKind::new("read")]).unwrap()
         ));
         assert!(matches!(
-            &batch.facts[1],
+            &batch[1],
             Fact::OutputCastApplied { resolved, .. } if resolved == &EstablishedLabel::new(SUSPICIOUS, internal())
         ));
-        match &batch.facts[2] {
+        match &batch[2] {
             Fact::ValueAdmitted { value, .. } => {
                 assert_eq!(value.label.trust, Dim::Known(SUSPICIOUS));
                 assert_eq!(value.label.audience, Dim::Known(internal()));
@@ -1358,24 +1355,24 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            &batch.facts[0],
+            &batch[0],
             Fact::CandidateAccepted { narrowing, .. } if narrowing == &accepted
         ));
         assert!(matches!(
-            &batch.facts[1],
+            &batch[1],
             Fact::DispatchClosed {
                 outcome: CloseOutcome::Success { .. },
                 ..
             }
         ));
         assert!(matches!(
-            &batch.facts[2],
+            &batch[2],
             Fact::OutputCastApplied { cast, resolved: restated, raw_digest, .. }
                 if cast.as_str() == "paranoid"
                     && restated == &resolved
                     && raw_digest == &RawResultDigest::of(b"inbox contents")
         ));
-        match &batch.facts[3] {
+        match &batch[3] {
             Fact::ValueAdmitted { value, .. } => {
                 assert_eq!(value.label.trust, Dim::Known(SUSPICIOUS));
                 assert_eq!(value.label.audience, Dim::Known(internal()));
@@ -1383,7 +1380,7 @@ mod tests {
             other => panic!("expected ValueAdmitted, got {other:?}"),
         }
         let mut next = log.clone();
-        next.extend(batch.facts);
+        next.extend(batch);
         let p2 = views_of(&next);
         assert_eq!(p2.view(&t).current_label().bound().trust, SUSPICIOUS);
     }
@@ -1494,7 +1491,7 @@ mod tests {
         let p = views_of(&log);
         let observed = ObservedResult::Available(RawResultDigest::of(BODY.as_bytes()));
         let batch = observe_success(&reg, &p.view(&t), &dispatch, &call, observed.clone()).unwrap();
-        log.extend(batch.facts);
+        log.extend(batch);
         let p = views_of(&log);
         assert!(p.view(&t).has_effect(&EffectKind::new("read")));
         assert!(p.view(&t).is_open(&dispatch));
@@ -1525,14 +1522,14 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(batch.facts.iter().any(|fact| matches!(
+        assert!(batch.iter().any(|fact| matches!(
             fact,
             Fact::DispatchClosed {
                 outcome: CloseOutcome::Success { effects },
                 ..
             } if effects.is_empty()
         )));
-        log.extend(batch.facts);
+        log.extend(batch);
         let p = views_of(&log);
         assert!(p.view(&t).has_effect(&EffectKind::new("read")));
         assert!(!p.view(&t).is_open(&dispatch));
@@ -1548,7 +1545,7 @@ mod tests {
         let p = views_of(&log);
         let observed = ObservedResult::Available(RawResultDigest::of(BODY.as_bytes()));
         let batch = observe_success(&reg, &p.view(&t), &dispatch, &call, observed.clone()).unwrap();
-        log.extend(batch.facts);
+        log.extend(batch);
         let p = views_of(&log);
         assert!(p.view(&t).has_effect(&EffectKind::new("read")));
         assert!(p.view(&t).is_open(&dispatch));
@@ -1572,20 +1569,15 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(batch.facts.iter().any(|fact| matches!(
+        assert!(batch.iter().any(|fact| matches!(
             fact,
             Fact::DispatchClosed {
                 outcome: CloseOutcome::Success { effects },
                 ..
             } if effects.is_empty()
         )));
-        assert!(
-            batch
-                .facts
-                .iter()
-                .any(|fact| matches!(fact, Fact::ValueAdmitted { .. }))
-        );
-        log.extend(batch.facts);
+        assert!(batch.iter().any(|fact| matches!(fact, Fact::ValueAdmitted { .. })));
+        log.extend(batch);
         let p = views_of(&log);
         assert!(p.view(&t).has_effect(&EffectKind::new("read")));
         assert!(!p.view(&t).is_open(&dispatch));
@@ -1678,7 +1670,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(batch.facts.iter().any(|fact| matches!(
+        assert!(batch.iter().any(|fact| matches!(
             fact,
             Fact::CandidateDerived {
                 via: crate::candidate::DerivedVia::Sanitizer { name, .. },
@@ -1690,7 +1682,6 @@ mod tests {
                 && lineage.names() == [name.clone()]
         )));
         let admitted = batch
-            .facts
             .iter()
             .find_map(|fact| match fact {
                 Fact::ValueAdmitted { value, .. } => Some(value),

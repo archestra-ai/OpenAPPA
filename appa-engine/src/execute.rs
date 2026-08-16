@@ -15,7 +15,7 @@ use crate::{
     candidate::CallStage,
     check::{self, CheckOutcome},
     engine::opened_dispatch,
-    fact::{Fact, FactBatch},
+    fact::Fact,
     plan,
     projection::Views,
     value::ResolvedCall,
@@ -123,7 +123,7 @@ pub(crate) fn execute_remedy_plan(
     chosen: &plan::ExecutableRemedyPlan,
     call: &ResolvedCall,
     rulings: &[Ruling],
-) -> Result<FactBatch, PlanError> {
+) -> Result<Vec<Fact>, PlanError> {
     let contract = registry
         .tool(call.tool())
         .ok_or_else(|| PlanError::UnknownTool(call.tool().as_str().to_string()))?;
@@ -228,7 +228,7 @@ pub(crate) fn execute_remedy_plan(
     }
     facts.push(dispatch_opened);
 
-    Ok(FactBatch::new(views.revision(), facts))
+    Ok(facts)
 }
 
 #[cfg(test)]
@@ -236,7 +236,7 @@ mod tests {
     use super::*;
     use crate::authority::{Authority, Mandate, Scope};
     use crate::contract::{Delta, LabelRequirements, Requires, ToolContract};
-    use crate::fact::{EffectKind, EffectSet, Fact, Revision};
+    use crate::fact::{EffectKind, EffectSet, Fact};
     use crate::label::{Audience, Dim, EstablishedLabel, Label, ReaderId, Trust};
     use crate::names::{MarkName, SanitizerName};
     use crate::projection::Projection;
@@ -330,8 +330,8 @@ mod tests {
         DispatchId::new(traj(), call("wire", json!({})).digest(), 0)
     }
 
-    fn run(registry: &Registry, log: &[Fact], call: &ResolvedCall, rulings: &[Ruling]) -> Result<FactBatch, PlanError> {
-        let projection = Projection::build(log, Revision::new(log.len() as u64));
+    fn run(registry: &Registry, log: &[Fact], call: &ResolvedCall, rulings: &[Ruling]) -> Result<Vec<Fact>, PlanError> {
+        let projection = Projection::build(log, log.len() as u64);
         let trajectory = traj();
         let views = projection.view(&trajectory);
         let chosen = offered_plan(registry, &views, call);
@@ -373,9 +373,9 @@ mod tests {
             covers: vec![floor_gap()],
         };
         let batch = run(&registry, &log, &call("wire", json!({})), &[ruling]).unwrap();
-        assert_eq!(batch.facts.len(), 2);
-        assert!(matches!(batch.facts[0], Fact::Ruling { .. }));
-        assert!(matches!(batch.facts[1], Fact::DispatchOpened { .. }));
+        assert_eq!(batch.len(), 2);
+        assert!(matches!(batch[0], Fact::Ruling { .. }));
+        assert!(matches!(batch[1], Fact::DispatchOpened { .. }));
     }
 
     #[test]
@@ -436,9 +436,9 @@ mod tests {
             covers: vec![Gap::NoPrior(EffectKind::new("email.sent"))],
         };
         let batch = run(&registry, &log, &guard_call, &[ruling]).unwrap();
-        assert_eq!(batch.facts.len(), 2);
-        assert!(matches!(batch.facts[0], Fact::Ruling { .. }));
-        assert!(matches!(batch.facts[1], Fact::DispatchOpened { .. }));
+        assert_eq!(batch.len(), 2);
+        assert!(matches!(batch[0], Fact::Ruling { .. }));
+        assert!(matches!(batch[1], Fact::DispatchOpened { .. }));
     }
 
     #[test]
@@ -565,7 +565,7 @@ mod tests {
             reviewed: top_review(),
             covers: vec![floor_gap()],
         };
-        let projection = Projection::build(&log, Revision::new(log.len() as u64));
+        let projection = Projection::build(&log, log.len() as u64);
         let trajectory = traj();
         let fabricated = plan::ExecutableRemedyPlan {
             id: plan::PlanId::new(999),
@@ -728,7 +728,6 @@ mod tests {
         ];
         let batch = run(&registry, &log, &call("wire", json!({})), &rulings).unwrap();
         let ruled: Vec<&str> = batch
-            .facts
             .iter()
             .filter_map(|f| match f {
                 Fact::Ruling { authority, .. } => Some(authority.as_str()),
@@ -736,7 +735,7 @@ mod tests {
             })
             .collect();
         assert_eq!(ruled, ["a1", "a2"]);
-        assert!(matches!(batch.facts.last().unwrap(), Fact::DispatchOpened { .. }));
+        assert!(matches!(batch.last().unwrap(), Fact::DispatchOpened { .. }));
     }
 
     #[test]
@@ -816,10 +815,10 @@ mod tests {
             from: established(TRUSTED, Audience::Public),
             to: established(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
         };
-        assert_eq!(batch.facts.len(), 3);
-        assert!(matches!(&batch.facts[0], Fact::Acceptance { narrowing, .. } if *narrowing == offered));
-        assert!(matches!(batch.facts[1], Fact::Ruling { .. }));
-        assert!(matches!(batch.facts[2], Fact::DispatchOpened { .. }));
+        assert_eq!(batch.len(), 3);
+        assert!(matches!(&batch[0], Fact::Acceptance { narrowing, .. } if *narrowing == offered));
+        assert!(matches!(batch[1], Fact::Ruling { .. }));
+        assert!(matches!(batch[2], Fact::DispatchOpened { .. }));
     }
 
     fn substituting_registry() -> Registry {
@@ -869,7 +868,7 @@ mod tests {
             Audience::restricted([ReaderId::new("internal")]),
         ))];
         let call = call("post", json!({}));
-        let projection = Projection::build(&log, Revision::new(1));
+        let projection = Projection::build(&log, 1);
         let trajectory = traj();
         let views = projection.view(&trajectory);
         let chosen = offered_plan(&registry, &views, &call);
@@ -915,7 +914,6 @@ mod tests {
         };
         assert!(
             batch
-                .facts
                 .iter()
                 .any(|f| matches!(f, Fact::Acceptance { narrowing, .. } if *narrowing == offered))
         );
@@ -926,7 +924,7 @@ mod tests {
         let registry = narrowing_registry();
         let trajectory = traj();
         let offered_log = vec![user_value(known(TRUSTED, Audience::Public))];
-        let projection = Projection::build(&offered_log, Revision::new(1));
+        let projection = Projection::build(&offered_log, 1);
         let stale = offered_plan(&registry, &projection.view(&trajectory), &call("get", json!({})));
         assert!(
             stale
@@ -942,7 +940,7 @@ mod tests {
                 Audience::restricted([ReaderId::new("internal"), ReaderId::new("extra")]),
             )),
         ];
-        let projection = Projection::build(&moved_log, Revision::new(2));
+        let projection = Projection::build(&moved_log, 2);
         let views = projection.view(&trajectory);
         assert_eq!(
             execute_remedy_plan(&registry, &views, &stale, &call("get", json!({})), &[]),
@@ -960,7 +958,6 @@ mod tests {
         };
         assert!(
             batch
-                .facts
                 .iter()
                 .any(|f| matches!(f, Fact::Acceptance { narrowing, .. } if *narrowing == live_narrowing))
         );

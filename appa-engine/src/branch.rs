@@ -3,7 +3,7 @@
 use thiserror::Error;
 
 use crate::check::Narrowing;
-use crate::fact::{BoundaryKind, Fact, FactBatch, ReturnDerivation, ReturnPolicy};
+use crate::fact::{BoundaryKind, Fact, ReturnDerivation, ReturnPolicy};
 use crate::label::{EstablishedLabel, PartialLabel};
 use crate::names::SanitizerName;
 use crate::projection::Views;
@@ -43,7 +43,7 @@ pub(crate) fn submit_child_return(
     parent: &Views,
     child: &TrajectoryId,
     ret: ReturnSubmission,
-) -> Result<FactBatch, BranchError> {
+) -> Result<Vec<Fact>, BranchError> {
     match parent.parent_of(child) {
         Some(direct) if direct == parent.trajectory() => {}
         _ => return Err(BranchError::NotDirectParent),
@@ -69,17 +69,14 @@ pub(crate) fn submit_child_return(
         }
         _ => return Err(BranchError::ReturnPolicyMismatch),
     };
-    Ok(FactBatch::new(
-        parent.revision(),
-        crossing_facts(parent, child, value, derivation, None),
-    ))
+    Ok(crossing_facts(parent, child, value, derivation, None))
 }
 
 /// Record a child's **void return**: the child-attributed terminal ends the branch and
 /// crosses no value — no merge, no label contribution. Refused for a non-child and for a branch
 /// that already ended by value or void. The batch is on the family's revision, so
 /// competing terminals linearize at the store's revisioned append and at most one lands.
-pub(crate) fn submit_void_return(parent: &Views, child: &TrajectoryId) -> Result<FactBatch, BranchError> {
+pub(crate) fn submit_void_return(parent: &Views, child: &TrajectoryId) -> Result<Vec<Fact>, BranchError> {
     match parent.parent_of(child) {
         Some(direct) if direct == parent.trajectory() => {}
         _ => return Err(BranchError::NotDirectParent),
@@ -87,13 +84,10 @@ pub(crate) fn submit_void_return(parent: &Views, child: &TrajectoryId) -> Result
     if parent.has_ended(child) {
         return Err(BranchError::AlreadyEnded);
     }
-    Ok(FactBatch::new(
-        parent.revision(),
-        vec![Fact::Boundary {
-            trajectory: child.clone(),
-            kind: BoundaryKind::VoidReturn,
-        }],
-    ))
+    Ok(vec![Fact::Boundary {
+        trajectory: child.clone(),
+        kind: BoundaryKind::VoidReturn,
+    }])
 }
 
 /// The one place a return's facts are assembled: the child's `ChildReturn` record, the optional
@@ -267,7 +261,7 @@ pub(crate) fn execute_child_return_plan(
     child: &TrajectoryId,
     chosen: ReturnPlan,
     submission: ReturnSubmission,
-) -> Result<FactBatch, BranchError> {
+) -> Result<Vec<Fact>, BranchError> {
     let plans = match check_child_return(registry, parent, child)? {
         ReturnCheck::Block(block) => block.plans,
         // Allow: the state moved since the offer — nothing here to execute.
@@ -292,10 +286,7 @@ pub(crate) fn execute_child_return_plan(
         _ => return Err(BranchError::SubmissionMismatch),
     };
 
-    Ok(FactBatch::new(
-        parent.revision(),
-        crossing_facts(parent, child, value, derivation, acceptance),
-    ))
+    Ok(crossing_facts(parent, child, value, derivation, acceptance))
 }
 
 fn sanitized_crossing(
@@ -334,7 +325,7 @@ mod tests {
     use super::*;
     use crate::admit::{CastAnswer, CastError, admit_cast};
     use crate::authority::{Cast, CastResolution, Sanitizer, SanitizerPoints, Scope, Transition};
-    use crate::fact::{CloseOutcome, EffectKind, EffectSet, ForkSnapshot, Revision};
+    use crate::fact::{CloseOutcome, EffectKind, EffectSet, ForkSnapshot};
     use crate::label::Adequacy;
     use crate::label::Dimension;
     use crate::label::{Audience, Dim, Label, ReaderId, Trust};
@@ -406,7 +397,7 @@ mod tests {
     }
 
     fn build(log: &[Fact]) -> Projection {
-        Projection::build(log, Revision::new(log.len() as u64))
+        Projection::build(log, log.len() as u64)
     }
 
     fn fork_records(log: &[Fact], parent: &TrajectoryId, child: &TrajectoryId, policy: ReturnPolicy) -> Vec<Fact> {
@@ -472,16 +463,16 @@ mod tests {
         let mut log = forked(known(SUSPICIOUS, internal()));
         let projection = build(&log);
         let ret = submit_child_return(&registry(), &projection.view(&parent()), &child(), raw("secret")).unwrap();
-        assert!(matches!(&ret.facts[0], Fact::ChildReturn { .. }));
-        assert!(matches!(&ret.facts[1], Fact::ValueAdmitted { .. }));
+        assert!(matches!(&ret[0], Fact::ChildReturn { .. }));
+        assert!(matches!(&ret[1], Fact::ValueAdmitted { .. }));
         assert!(matches!(
-            &ret.facts[2],
+            &ret[2],
             Fact::Boundary {
                 kind: BoundaryKind::Merge { .. },
                 ..
             }
         ));
-        log.extend(ret.facts);
+        log.extend(ret);
         let projection = build(&log);
         match projection.view(&parent()).child_return(&ChildReturnId::new(child(), 0)) {
             Some(value) => assert_eq!(value.label, known(SUSPICIOUS, internal())),
@@ -518,7 +509,7 @@ mod tests {
             },
         )
         .unwrap();
-        log.extend(ret.facts);
+        log.extend(ret);
         let projection = build(&log);
         let value = projection
             .view(&parent())
@@ -720,7 +711,7 @@ mod tests {
 
         let projection = build(&log);
         let ret = submit_child_return(&cast_registry(), &projection.view(&parent()), &child(), raw("found")).unwrap();
-        log.extend(ret.facts);
+        log.extend(ret);
         let projection = build(&log);
         let parent_label = projection.view(&parent()).current_label();
         assert_eq!(parent_label.bound(), &established(TRUSTED, Audience::Public));
@@ -731,7 +722,7 @@ mod tests {
         assert!(parent_label.is_established(Dimension::Audience));
 
         let batch = resolve(&log, &parent(), 1).expect("a merge-carried identity is in reach");
-        log.extend(batch.facts);
+        log.extend(batch);
         let projection = build(&log);
         assert_eq!(
             projection.view(&parent()).current_label(),
@@ -759,7 +750,7 @@ mod tests {
         assert_eq!(check(&registry(), &log), ReturnCheck::Allow);
         let projection = build(&log);
         let ret = submit_child_return(&registry(), &projection.view(&parent()), &child(), raw("found")).unwrap();
-        log.extend(ret.facts);
+        log.extend(ret);
         let label = build(&log).view(&parent()).current_label();
         assert_eq!(
             label.unresolved(Dimension::Trust).collect::<Vec<_>>(),
@@ -806,7 +797,7 @@ mod tests {
             },
         )
         .unwrap();
-        let (merge, before) = batch.facts.split_last().expect("the crossing ends at its merge");
+        let (merge, before) = batch.split_last().expect("the crossing ends at its merge");
         assert!(matches!(
             merge,
             Fact::Boundary {
@@ -821,7 +812,7 @@ mod tests {
                 .current_label()
                 .is_established(Dimension::Audience)
         );
-        let complete = [log, batch.facts.clone()].concat();
+        let complete = [log, batch.clone()].concat();
         assert_eq!(
             build(&complete)
                 .view(&parent())
@@ -860,7 +851,7 @@ mod tests {
         .unwrap()
     }
 
-    fn classify(registry: &Registry, log: &[Fact], actor: &TrajectoryId) -> Result<FactBatch, CastError> {
+    fn classify(registry: &Registry, log: &[Fact], actor: &TrajectoryId) -> Result<Vec<Fact>, CastError> {
         admit_cast(
             registry,
             &build(log).view(actor),
@@ -890,7 +881,7 @@ mod tests {
             },
         )
         .expect("the transitioned dimension is established, so the crossing derives");
-        log.extend(ret.facts);
+        log.extend(ret);
         log
     }
 
@@ -906,7 +897,7 @@ mod tests {
         );
 
         let batch = classify(&registry, &log, &parent()).expect("the parent resolves the merge-carried identity");
-        log.extend(batch.facts);
+        log.extend(batch);
         let projection = build(&log);
         assert_eq!(
             projection.view(&parent()).current_label(),
@@ -960,7 +951,7 @@ mod tests {
         );
 
         let batch = classify(&registry, &log, &sibling).expect("the absorbed identity is in the fork's reach");
-        log.extend(batch.facts);
+        log.extend(batch);
         let projection = build(&log);
         assert_eq!(
             projection.view(&parent()).current_label(),
@@ -987,11 +978,10 @@ mod tests {
             .expect("a known return merges into an Unknown parent");
         assert!(
             batch
-                .facts
                 .iter()
                 .any(|fact| matches!(fact, Fact::ChildReturn { trajectory, .. } if *trajectory == child()))
         );
-        assert!(batch.facts.iter().any(|fact| matches!(
+        assert!(batch.iter().any(|fact| matches!(
             fact,
             Fact::Boundary {
                 kind: BoundaryKind::Merge { .. },
@@ -1021,7 +1011,7 @@ mod tests {
         log: &[Fact],
         chosen: &ReturnPlan,
         submission: ReturnSubmission,
-    ) -> Result<FactBatch, BranchError> {
+    ) -> Result<Vec<Fact>, BranchError> {
         let projection = build(log);
         execute_child_return_plan(
             registry,
@@ -1052,13 +1042,13 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            &batch.facts[0],
+            &batch[0],
             Fact::ChildReturn {
                 derivation: ReturnDerivation::Raw,
                 ..
             }
         ));
-        match &batch.facts[1] {
+        match &batch[1] {
             Fact::ChildReturnAcceptance {
                 trajectory,
                 child_return,
@@ -1071,15 +1061,15 @@ mod tests {
             }
             other => panic!("expected ChildReturnAcceptance, got {other:?}"),
         }
-        assert!(matches!(&batch.facts[2], Fact::ValueAdmitted { .. }));
+        assert!(matches!(&batch[2], Fact::ValueAdmitted { .. }));
         assert!(matches!(
-            &batch.facts[3],
+            &batch[3],
             Fact::Boundary {
                 kind: BoundaryKind::Merge { .. },
                 ..
             }
         ));
-        log.extend(batch.facts);
+        log.extend(batch);
         let projection = build(&log);
         assert_eq!(
             projection.view(&parent()).current_label(),
@@ -1107,13 +1097,13 @@ mod tests {
             },
         )
         .unwrap();
-        match &batch.facts[1] {
+        match &batch[1] {
             Fact::ChildReturnAcceptance { narrowing, .. } => {
                 assert_eq!(narrowing.to, established(SUSPICIOUS, Audience::Public));
             }
             other => panic!("expected ChildReturnAcceptance, got {other:?}"),
         }
-        log.extend(batch.facts);
+        log.extend(batch);
         let projection = build(&log);
         assert_eq!(
             projection.view(&parent()).current_label(),
@@ -1145,13 +1135,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(
-            !batch
-                .facts
-                .iter()
-                .any(|f| matches!(f, Fact::ChildReturnAcceptance { .. }))
-        );
-        log.extend(batch.facts);
+        assert!(!batch.iter().any(|f| matches!(f, Fact::ChildReturnAcceptance { .. })));
+        log.extend(batch);
         let projection = build(&log);
         assert_eq!(
             projection.view(&parent()).current_label(),
@@ -1260,7 +1245,7 @@ mod tests {
             },
         )
         .unwrap();
-        log.extend(batch.facts);
+        log.extend(batch);
         assert_eq!(
             execute(
                 &registry(),
@@ -1297,7 +1282,7 @@ mod tests {
             },
         )
         .unwrap();
-        log.extend(batch.facts);
+        log.extend(batch);
         assert_eq!(
             execute(
                 &registry(),
@@ -1316,7 +1301,7 @@ mod tests {
         let mut log = forked(known(SUSPICIOUS, internal()));
         let projection = build(&log);
         let ret = submit_child_return(&registry(), &projection.view(&parent()), &child(), raw("first")).unwrap();
-        log.extend(ret.facts);
+        log.extend(ret);
         let projection = build(&log);
         assert_eq!(
             submit_child_return(&registry(), &projection.view(&parent()), &child(), raw("second")),
@@ -1339,13 +1324,13 @@ mod tests {
         let label_before = projection.view(&parent()).current_label();
         let batch = submit_void_return(&projection.view(&parent()), &child()).unwrap();
         assert_eq!(
-            batch.facts,
+            batch,
             [Fact::Boundary {
                 trajectory: child(),
                 kind: BoundaryKind::VoidReturn,
             }]
         );
-        log.extend(batch.facts);
+        log.extend(batch);
         let projection = build(&log);
         assert!(projection.view(&parent()).has_ended(&child()));
         assert_eq!(projection.view(&parent()).returns_by(&child()), 0);
@@ -1370,9 +1355,8 @@ mod tests {
         let mut log = forked(known(SUSPICIOUS, internal()));
         let projection = build(&log);
         let ret = submit_child_return(&registry(), &projection.view(&parent()), &child(), raw("finding")).unwrap();
-        let competing = submit_void_return(&projection.view(&parent()), &child()).unwrap();
-        assert_eq!(competing.basis, ret.basis);
-        log.extend(ret.facts);
+        submit_void_return(&projection.view(&parent()), &child()).unwrap();
+        log.extend(ret);
         let projection = build(&log);
         assert_eq!(
             submit_void_return(&projection.view(&parent()), &child()),
@@ -1419,7 +1403,7 @@ mod tests {
         let log = forked(known(SUSPICIOUS, internal()));
         let projection = build(&log);
         let ret = submit_child_return(&registry(), &projection.view(&parent()), &child(), raw("secret")).unwrap();
-        match &ret.facts[0] {
+        match &ret[0] {
             Fact::ChildReturn { derivation, .. } => assert_eq!(derivation, &ReturnDerivation::Raw),
             other => panic!("expected ChildReturn, got {other:?}"),
         }
@@ -1436,7 +1420,7 @@ mod tests {
             },
         )
         .unwrap();
-        match &ret.facts[0] {
+        match &ret[0] {
             Fact::ChildReturn { derivation, .. } => assert_eq!(
                 derivation,
                 &ReturnDerivation::Sanitized {
@@ -1486,7 +1470,7 @@ mod tests {
             },
         )
         .unwrap();
-        log.extend(ret.facts);
+        log.extend(ret);
         let projection = build(&log);
         assert_eq!(
             projection.value_label(ValueId::new(values_before as u64)),
@@ -1581,7 +1565,7 @@ mod tests {
             .expect("the fork was prepared with a snapshot")
     }
 
-    fn resolve(log: &[Fact], actor: &TrajectoryId, value: u64) -> Result<FactBatch, CastError> {
+    fn resolve(log: &[Fact], actor: &TrajectoryId, value: u64) -> Result<Vec<Fact>, CastError> {
         let projection = build(log);
         admit_cast(
             &cast_registry(),
@@ -1619,7 +1603,7 @@ mod tests {
         assert_eq!(snapshot.seed(), &at_fork);
 
         let batch = resolve(&log, &parent(), 0).expect("a branch resolves its own source");
-        log.extend(batch.facts);
+        log.extend(batch);
         let projection = build(&log);
         assert_eq!(
             projection.view(&child()).current_label(),
@@ -1640,7 +1624,7 @@ mod tests {
         fork_under(&mut log, &parent(), &sibling);
 
         let batch = resolve(&log, &child(), 0).expect("an inherited source is in reach");
-        log.extend(batch.facts);
+        log.extend(batch);
         let projection = build(&log);
         for branch in [parent(), child(), sibling] {
             assert_eq!(
@@ -1688,7 +1672,7 @@ mod tests {
         );
 
         let batch = resolve(&log, &grandchild, 0).expect("an inherited ancestor source is in reach");
-        log.extend(batch.facts);
+        log.extend(batch);
         assert_eq!(unresolved_trust(&log, &parent()), vec![]);
         assert_eq!(unresolved_trust(&log, &child()), vec![ValueId::new(1)]);
         assert_eq!(unresolved_trust(&log, &grandchild), vec![ValueId::new(1)]);
@@ -1699,10 +1683,9 @@ mod tests {
         let mut log = vec![unknown_source(parent())];
         fork_under(&mut log, &parent(), &child());
         let by_child = resolve(&log, &child(), 0).unwrap();
-        let by_parent = resolve(&log, &parent(), 0).unwrap();
-        assert_eq!(by_child.basis, by_parent.basis);
+        resolve(&log, &parent(), 0).unwrap();
 
-        log.extend(by_child.facts);
+        log.extend(by_child);
         assert_eq!(resolve(&log, &parent(), 0), Err(CastError::AlreadyEstablished));
     }
 

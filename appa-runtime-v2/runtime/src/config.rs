@@ -22,13 +22,11 @@ pub struct Config {
 pub struct PolicyFile {
     bytes: Vec<u8>,
     value: toml::Value,
-    key: PolicyFileKey,
 }
 
 impl PolicyFile {
     fn new(bytes: Vec<u8>, value: toml::Value) -> PolicyFile {
-        let key = PolicyFileKey::of(&bytes);
-        PolicyFile { bytes, value, key }
+        PolicyFile { bytes, value }
     }
 
     pub fn bytes(&self) -> &[u8] {
@@ -37,28 +35,6 @@ impl PolicyFile {
 
     pub fn value(&self) -> &toml::Value {
         &self.value
-    }
-
-    pub fn key(&self) -> &PolicyFileKey {
-        &self.key
-    }
-}
-
-/// The key of a stored policy file: the SHA-256 of its exact bytes,
-/// lowercase hex. Distinct from the policy identity digest,
-/// which excludes source syntax, runtime bindings, `[limits]`, and
-/// hints — two files can share one identity and still get two keys.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PolicyFileKey(String);
-
-impl PolicyFileKey {
-    pub fn of(bytes: &[u8]) -> PolicyFileKey {
-        use sha2::Digest as _;
-        PolicyFileKey(format!("{:x}", sha2::Sha256::digest(bytes)))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -430,7 +406,6 @@ mod tests {
             Some("the runtime does not interpret this"),
         );
         assert_eq!(config.policy_file().bytes(), MINIMAL.as_bytes());
-        assert_eq!(config.policy_file().key(), &PolicyFileKey::of(MINIMAL.as_bytes()),);
     }
 
     #[test]

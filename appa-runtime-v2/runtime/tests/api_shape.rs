@@ -56,13 +56,18 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
         } => {
             let _: ToolOutcome = outcome;
         }
-        HookEvent::ChildStart { parent, child, spawn } => {
+        HookEvent::ChildStart {
+            root: _,
+            parent,
+            child,
+            spawn,
+        } => {
             let _: TrajectoryId = parent;
             let _: TrajectoryId = child;
             let _: Option<SpawnBinding> = spawn;
         }
         HookEvent::ChildEnd {
-            parent: _,
+            root: _,
             child: _,
             value,
         } => {

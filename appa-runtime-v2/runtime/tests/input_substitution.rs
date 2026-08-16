@@ -187,7 +187,7 @@ async fn the_replaced_call_runs_through_the_hooks_and_closes() {
 }
 
 #[tokio::test]
-async fn another_call_abandons_the_awaiting_replaced_call() {
+async fn another_call_abandons_the_standing_replaced_call() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (runtime, hop) = narrowed_and_blocked(&dir).await;
     assert!(matches!(
@@ -224,7 +224,7 @@ async fn another_call_abandons_the_awaiting_replaced_call() {
 }
 
 #[tokio::test]
-async fn the_awaiting_replaced_call_survives_a_reopen() {
+async fn the_standing_replaced_call_survives_a_reopen() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (runtime, hop) = narrowed_and_blocked(&dir).await;
     assert!(matches!(

@@ -153,31 +153,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_surfaced_offer_executes_and_returns_the_value() {
+    async fn a_surfaced_offer_routes_by_its_own_id_to_the_trajectory_that_raised_it() {
+        let policy = r#"
+            [policy]
+            version = 1
+
+            [[policy.tool]]
+            name = "wire"
+            parameters = { type = "object", properties = { amount = { type = "integer" } } }
+            requires = { attention = ["irreversible"] }
+            delta = {}
+
+            [[policy.authority]]
+            name = "approver"
+            [policy.authority.mandate]
+            attends = ["irreversible"]
+
+            [externals]
+            timeout_ms = 1000
+            max_body_bytes = 4096
+
+            # Bound, as the deployment lint requires, but to a port nothing
+            # listens on: the consult refuses at once and abstains, which is
+            # the outcome this test wants.
+            [externals.authorities.approver]
+            url = "http://127.0.0.1:1/authority"
+        "#;
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = testing::runtime(config(), dir.path().join("appa.db"));
-        let mut session = runtime
-            .create_session(crate::api::TrajectoryId("cc:mcp-test".to_string()))
-            .expect("a fresh id opens");
-        testing::enqueue_deny(&runtime, "blocked; execute_remedy_plan(offer-mcp)", &["offer-mcp"]);
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, policy).expect("the fixture writes");
+        let config = Config::load(&path).expect("the fixture validates");
+        let runtime =
+            crate::api::Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
+
+        let root = crate::api::TrajectoryId("cc:mcp-test".to_string());
+        let mut session = runtime.create_session(root.clone()).expect("a fresh id opens");
         let denied = session
             .on_tool_call(
                 ProposedCall {
-                    tool: "Bash".to_string(),
-                    arguments: raw(serde_json::json!({"command": "ls"})),
+                    tool: "wire".to_string(),
+                    arguments: raw(serde_json::json!({"amount": 500})),
                 },
                 false,
             )
             .await
-            .expect("the deny is delivered");
+            .expect("the block is delivered");
         assert!(matches!(denied, ToolCallDecision::Deny { .. }));
 
-        testing::enqueue_value(&runtime, "the cleaned result");
-        assert_eq!(
-            runtime.execute_remedy(OfferId("offer-mcp".to_string())).await,
-            RemedyOutcome::Returned {
-                value: "the cleaned result".to_string(),
-            },
+        let offer = runtime
+            .minted_offers(&root, &root)
+            .into_iter()
+            .next()
+            .expect("the block surfaced an offer");
+        assert!(
+            offer.0.contains(root.0.as_str()),
+            "the minted id names the log to load: {}",
+            offer.0,
         );
+        assert!(matches!(
+            runtime.execute_remedy(offer).await,
+            RemedyOutcome::Declined { .. } | RemedyOutcome::NoAnswer { .. },
+        ));
     }
 }

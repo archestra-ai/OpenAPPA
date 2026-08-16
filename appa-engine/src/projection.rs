@@ -7,7 +7,7 @@ use crate::candidate::{DerivedCandidate, SanitizerLineage};
 use crate::check::Narrowing;
 use crate::contract::PinnedDynamicResolution;
 use crate::fact::{
-    BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ForkSnapshot, ObservedResult, ReturnPolicy, Revision,
+    BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ForkSnapshot, ObservedResult, ReturnPolicy,
 };
 use crate::label::{Dimension, EstablishedLabel, Label, PartialLabel};
 use crate::names::{AuthorityName, SanitizerName};
@@ -161,7 +161,7 @@ pub(crate) struct RejectedReturn {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Projection {
-    revision: Revision,
+    revision: u64,
     values: Vec<AdmittedValue>,
     local: BTreeMap<TrajectoryId, Vec<ValueId>>,
     effects: Vec<EffectKind>,
@@ -207,7 +207,7 @@ pub struct Projection {
 }
 
 impl Projection {
-    pub(crate) fn empty(revision: Revision) -> Self {
+    pub(crate) fn empty(revision: u64) -> Self {
         Projection {
             revision,
             values: Vec::new(),
@@ -245,7 +245,7 @@ impl Projection {
 
     /// Fold every view from the family log **without** the transition rules.
     #[cfg(test)]
-    pub(crate) fn build(log: &[Fact], revision: Revision) -> Self {
+    pub(crate) fn build(log: &[Fact], revision: u64) -> Self {
         let mut projection = Projection::empty(revision);
         for fact in log {
             projection.fold(fact);
@@ -253,7 +253,7 @@ impl Projection {
         projection
     }
 
-    pub(crate) fn set_revision(&mut self, revision: Revision) {
+    pub(crate) fn set_revision(&mut self, revision: u64) {
         self.revision = revision;
     }
 
@@ -518,7 +518,6 @@ impl Projection {
                         .or_default()
                         .insert(authority.clone());
                 }
-                Fact::AssistantMessage { .. } | Fact::BlockFeedback { .. } => {}
                 Fact::OutputCastApplied { .. } => {}
                 Fact::OutputSanitizerBound {
                     dispatch, sanitizer, ..
@@ -650,7 +649,7 @@ impl Projection {
         }
     }
 
-    pub fn revision(&self) -> Revision {
+    pub fn revision(&self) -> u64 {
         self.revision
     }
 
@@ -763,6 +762,12 @@ impl Projection {
         self.bound.get(fork)
     }
 
+    /// Which trajectory surfaced this offer. Family-wide, because the caller that
+    /// needs it has only the offer's identity.
+    pub(crate) fn offer_trajectory(&self, offer: &crate::value::OfferId) -> Option<&TrajectoryId> {
+        self.offers.get(offer).map(|recorded| &recorded.trajectory)
+    }
+
     pub fn view<'a>(&'a self, trajectory: &'a TrajectoryId) -> Views<'a> {
         Views {
             projection: self,
@@ -785,7 +790,7 @@ impl Views<'_> {
             .get(dispatch)
             .map(ResolvedCall::dynamic_resolutions)
     }
-    pub fn revision(&self) -> Revision {
+    pub fn revision(&self) -> u64 {
         self.projection.revision
     }
 
@@ -996,10 +1001,11 @@ impl Views<'_> {
         self.basis_for(subject).advanced_by(advance, self.trajectory, subject)
     }
 
-    /// Does the family log name `trajectory` at all? A fork takes an unused child id:
-    /// activity recorded before the fork was decided under no parent restriction at all, and the
-    /// fork cannot retract it afterwards.
-    pub(crate) fn is_active(&self, trajectory: &TrajectoryId) -> bool {
+    /// Does the log name this trajectory at all, whatever the record? A fork may
+    /// open only a child the log has never used, so this is the gate an outer layer asks
+    /// before it binds one: activity recorded before the fork was decided under no parent
+    /// restriction at all, and the fork cannot retract it afterwards.
+    pub fn is_active(&self, trajectory: &TrajectoryId) -> bool {
         self.projection.active.contains(trajectory)
     }
 
@@ -1140,6 +1146,32 @@ impl Views<'_> {
             .reservations
             .values()
             .any(|reserved| reserved.iter().any(|e| e == kind))
+    }
+
+    /// The dispatches this trajectory has open, with the exact call each released: the payload is persisted once, on the opening record, so this is where an outer
+    /// layer reads a live call back rather than keeping a row of its own.
+    pub fn open_dispatches(&self) -> impl Iterator<Item = (&DispatchId, &ResolvedCall)> {
+        let trajectory = self.trajectory;
+        self.projection
+            .open
+            .iter()
+            .filter(move |dispatch| dispatch.trajectory() == trajectory)
+            .filter_map(|dispatch| {
+                self.projection
+                    .dispatch_calls
+                    .get(dispatch)
+                    .map(|call| (dispatch, call))
+            })
+    }
+
+    /// Did a decided proposal batch release this dispatch? False for a call an offer
+    /// execution released on its own: the agent never proposed it, so the
+    /// outer layer still owes the harness the call rather than holding it as one in flight.
+    pub fn released_by_proposal(&self, dispatch: &DispatchId) -> bool {
+        self.projection
+            .decided
+            .values()
+            .any(|batch| batch.released.contains(dispatch))
     }
 
     pub fn is_open(&self, dispatch: &DispatchId) -> bool {
@@ -1291,16 +1323,12 @@ mod tests {
             LabeledValue::new(ValueBody::new("body"), resolved.clone().into_label()),
         )];
 
-        let cast_fold = Projection::build(&via_cast, Revision::new(2))
-            .view(&traj("t"))
-            .current_label();
-        let direct_fold = Projection::build(&direct, Revision::new(1))
-            .view(&traj("t"))
-            .current_label();
+        let cast_fold = Projection::build(&via_cast, 2).view(&traj("t")).current_label();
+        let direct_fold = Projection::build(&direct, 1).view(&traj("t")).current_label();
         assert_eq!(cast_fold, direct_fold);
         assert!(cast_fold.is_fully_established());
         assert_eq!(cast_fold.bound(), &resolved);
-        let p = Projection::build(&via_cast, Revision::new(2));
+        let p = Projection::build(&via_cast, 2);
         assert_eq!(
             p.view(&traj("t")).value_label(ValueId::new(0)),
             Some(&resolved.into_label())
@@ -1330,7 +1358,7 @@ mod tests {
     }
 
     fn build(log: &[Fact]) -> Projection {
-        Projection::build(log, Revision::new(log.len() as u64))
+        Projection::build(log, log.len() as u64)
     }
 
     #[test]
@@ -1790,38 +1818,6 @@ mod tests {
             build(&log).view(&traj("root")).current_label().bound(),
             &EstablishedLabel::new(Trust::new(2), Audience::Public)
         );
-    }
-
-    #[test]
-    fn transcript_facts_are_inert_in_the_fold_and_effects() {
-        use crate::fact::TranscriptCall;
-        use crate::value::{ToolCallId, ToolName};
-
-        let egress = EffectKind::new("egress");
-        let log = vec![
-            admit("a", labeled(2, Audience::Public)),
-            Fact::AssistantMessage {
-                trajectory: traj("a"),
-                content: None,
-                calls: vec![TranscriptCall {
-                    id: ToolCallId::new("call_1"),
-                    tool: ToolName::new("send_email"),
-                    arguments: json!({ "to": "auditor" }),
-                }],
-            },
-            Fact::BlockFeedback {
-                trajectory: traj("a"),
-                call_id: ToolCallId::new("call_1"),
-                content: "blocked: releasing to auditor is not permitted".to_string(),
-            },
-        ];
-        let with = build(&log);
-        let without = build(&log[..1]);
-        assert_eq!(
-            with.view(&traj("a")).current_label(),
-            without.view(&traj("a")).current_label()
-        );
-        assert!(!with.view(&traj("a")).has_effect(&egress));
     }
 
     #[test]

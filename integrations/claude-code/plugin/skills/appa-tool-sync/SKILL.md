@@ -69,11 +69,15 @@ old database, so the process must be restarted with a fresh `--db`
 path. Whether you can do that yourself depends on whether **this**
 session is gated.
 
-Detect it from the store: if this session is gated, the prompt that
-invoked this skill passed through a `UserPromptSubmit` hook and appears
-in the runtime's recorded requests. Query the `--db` from step 1 for
-the recorded request texts and look for this conversation's own
-prompts.
+Detect it from the store: a gated session has a log under its own id.
+Query the `--db` from step 1 for a row whose `root` is `cc:` followed by
+this conversation's session id:
+
+```sh
+sqlite3 <db> "SELECT 1 FROM logs WHERE root = 'cc:<session-id>' LIMIT 1;"
+```
+
+A row means this session is gated by that runtime.
 
 Either way, first warn the user that any other gated session still
 running is attached to the old deployment and should be wound down

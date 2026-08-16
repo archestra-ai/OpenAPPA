@@ -5,6 +5,7 @@ members = [
     "appa-agent-python",
     "appa-builtin",
     "appa-engine",
+    "appa-eventlog",
     "appa-policy",
     "appa-runtime-v2/adapters/claude-code",
     "appa-runtime-v2/api",
@@ -39,6 +40,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1"] }
 tokio-util = { version = "0.7", default-features = false }
 appa-engine = { path = "appa-engine" }
+appa-eventlog = { path = "appa-eventlog" }
 appa-policy = { path = "appa-policy" }
 appa-runtime-api = { path = "appa-runtime-v2/api" }
 appa-runtime-v2 = { path = "appa-runtime-v2/runtime" }

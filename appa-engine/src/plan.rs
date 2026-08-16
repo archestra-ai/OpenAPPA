@@ -869,7 +869,7 @@ mod tests {
         AudienceDelta, AudienceRequirement, Delta, DynamicAudienceBinding, HistoryRequirement, LabelRequirements,
         PinnedDynamicResolution, RecipientSpec, Requires, ToolContract,
     };
-    use crate::fact::{EffectSet, Fact, Revision};
+    use crate::fact::{EffectSet, Fact};
     use crate::label::{Audience, Dim, ReaderId, Trust};
     use crate::names::MarkName;
     use crate::projection::Projection;
@@ -914,7 +914,7 @@ mod tests {
     }
 
     fn plan_of(registry: &Registry, log: &[Fact], call: &ResolvedCall) -> PlannedBlock {
-        let projection = Projection::build(log, Revision::new(log.len() as u64));
+        let projection = Projection::build(log, log.len() as u64);
         let trajectory = traj();
         let views = projection.view(&trajectory);
         let contract = registry.tool(call.tool()).unwrap();
@@ -1247,7 +1247,7 @@ mod tests {
         let empty = call("send", json!({ "channel": "empty" })).with_dynamic_resolutions(vec![
             PinnedDynamicResolution::from_answer(binding, Some(Audience::restricted([]))),
         ]);
-        let projection = Projection::build(&log, Revision::new(log.len() as u64));
+        let projection = Projection::build(&log, log.len() as u64);
         assert_eq!(
             check::evaluate(
                 registry.tool(empty.tool()).unwrap(),
@@ -2273,7 +2273,7 @@ mod tests {
             user_value(known(SUSPICIOUS, Audience::Public)),
             denial(&wire, "officer-a"),
         ];
-        let projection = Projection::build(&log, Revision::new(log.len() as u64));
+        let projection = Projection::build(&log, log.len() as u64);
         let trajectory = traj();
         let views = projection.view(&trajectory);
         let refused = crate::execute::execute_remedy_plan(&registry, &views, &stale, &wire, &[]);
@@ -3187,7 +3187,7 @@ mod tests {
             for kind in &state.effects {
                 log.push(committed_effect(kind.clone()));
             }
-            let projection = Projection::build(&log, Revision::new(log.len() as u64));
+            let projection = Projection::build(&log, log.len() as u64);
             let trajectory = traj();
             let views = projection.view(&trajectory);
             let planned = plan(&registry, &views, &call, &raw, &CallStage::default());
@@ -3274,7 +3274,7 @@ mod tests {
             for kind in &state.effects {
                 log.push(committed_effect(kind.clone()));
             }
-            let projection = Projection::build(&log, Revision::new(log.len() as u64));
+            let projection = Projection::build(&log, log.len() as u64);
             let trajectory = traj();
             let views = projection.view(&trajectory);
             let planned = plan(&registry, &views, &call, &raw, &CallStage::default());
@@ -3413,7 +3413,7 @@ mod tests {
             for kind in &state.effects {
                 log.push(committed_effect(kind.clone()));
             }
-            let projection = Projection::build(&log, Revision::new(log.len() as u64));
+            let projection = Projection::build(&log, log.len() as u64);
             let trajectory = traj();
             let views = projection.view(&trajectory);
             let planned = plan(&registry, &views, &call, &raw, &CallStage::default());

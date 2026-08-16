@@ -33,7 +33,10 @@ pub async fn answer(runtime: &Runtime, codec: &Codec, body: &[u8]) -> (u16, serd
 pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
     match event {
         HookEvent::SessionStart { root } => match open_or_reopen(runtime, &root) {
-            Ok(_) => HookDecision::Ack,
+            Ok(_) => match runtime.live(&root, &root) {
+                Ok(()) => HookDecision::Ack,
+                Err(error) => refuse(error.to_string()),
+            },
             Err(error) => refuse(error.to_string()),
         },
         HookEvent::Prompt { actor, text } => {
@@ -77,22 +80,27 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
                 Err(error) => fold(error, block),
             }
         }
-        HookEvent::ChildStart { parent, child, spawn } => {
-            let mut parent = match open_or_reopen(runtime, &parent) {
+        HookEvent::ChildStart {
+            root,
+            parent,
+            child,
+            spawn,
+        } => {
+            let mut parent = match session_for(runtime, &root, &parent) {
                 Ok(session) => session,
                 Err(error) => return refuse(error.to_string()),
             };
-            match parent.on_child_start(child.clone(), spawn) {
+            match parent.on_child_start(child, spawn) {
                 Ok(_) => HookDecision::Ack,
-                Err(EventError::TrajectoryExists) => match runtime.session(&child) {
-                    Ok(_) => HookDecision::Ack,
-                    Err(error) => refuse(error.to_string()),
-                },
                 Err(error) => refuse(error.to_string()),
             }
         }
-        HookEvent::ChildEnd { parent, child, value } => {
-            let mut child = match child_session(runtime, &parent, &child) {
+        HookEvent::ChildEnd {
+            root,
+            child,
+            value,
+        } => {
+            let mut child = match child_session(runtime, &root, &child) {
                 Ok(session) => session,
                 Err(error) => return fold(error, block),
             };
@@ -109,36 +117,37 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
     }
 }
 
-fn open_or_reopen(runtime: &Runtime, id: &appa_runtime_api::TrajectoryId) -> Result<Session, SessionError> {
-    match runtime.session(id) {
+fn open_or_reopen(runtime: &Runtime, root: &appa_runtime_api::TrajectoryId) -> Result<Session, SessionError> {
+    match runtime.session(root, root) {
         Ok(session) => Ok(session),
-        Err(SessionError::Unknown) => match runtime.create_session(id.clone()) {
+        Err(SessionError::Unknown) => match runtime.create_session(root.clone()) {
             Ok(session) => Ok(session),
-            Err(SessionError::AlreadyExists) => runtime.session(id),
+            Err(SessionError::AlreadyExists) => runtime.session(root, root),
             Err(error) => Err(error),
         },
         Err(error) => Err(error),
     }
 }
 
+fn session_for(
+    runtime: &Runtime,
+    root: &appa_runtime_api::TrajectoryId,
+    trajectory: &appa_runtime_api::TrajectoryId,
+) -> Result<Session, SessionError> {
+    if root == trajectory {
+        return open_or_reopen(runtime, root);
+    }
+    open_or_reopen(runtime, root)?;
+    runtime.session(root, trajectory)
+}
+
 fn child_session(
     runtime: &Runtime,
-    parent: &appa_runtime_api::TrajectoryId,
+    root: &appa_runtime_api::TrajectoryId,
     child: &appa_runtime_api::TrajectoryId,
 ) -> Result<Session, EventError> {
-    match runtime.session(child) {
-        Ok(session) => Ok(session),
-        Err(SessionError::Unknown) => {
-            let mut parent = open_or_reopen(runtime, parent).map_err(EventError::from)?;
-            match parent.on_child_start(child.clone(), None) {
-                Ok(session) => Ok(session),
-                // A concurrent event won the opening race.
-                Err(EventError::TrajectoryExists) => runtime.session(child).map_err(EventError::from),
-                Err(error) => Err(error),
-            }
-        }
-        Err(error) => Err(EventError::from(error)),
-    }
+    open_or_reopen(runtime, root).map_err(EventError::from)?;
+    runtime.session(root, child).map_err(EventError::from)
 }
 
 fn event_session(runtime: &Runtime, actor: &Actor) -> Result<Session, EventError> {
@@ -182,6 +191,28 @@ mod tests {
         let text = r#"
             [policy]
             version = 1
+
+            [[policy.tool]]
+            name = "Bash"
+
+            [[policy.tool]]
+            name = "Write"
+
+            [[policy.tool]]
+            name = "AskUserQuestion"
+
+            [[policy.tool]]
+            name = "Task"
+
+            [[policy.tool]]
+            name = "Agent"
+
+            [[policy.tool]]
+            name = "Read"
+
+            [policy.deployment]
+            context_control = true
+
             [externals]
             timeout_ms = 1000
             max_body_bytes = 4096
@@ -194,6 +225,10 @@ mod tests {
 
     fn open_test_runtime(dir: &tempfile::TempDir) -> Runtime {
         testing::runtime(config(), dir.path().join("appa.db"))
+    }
+
+    fn open_real_runtime(dir: &tempfile::TempDir) -> Runtime {
+        Runtime::open(config(), dir.path().join("appa.db"), None).expect("the fixture deployment opens")
     }
 
     async fn call_hook(runtime: &Runtime, body: &[u8]) -> (u16, serde_json::Value) {
@@ -214,24 +249,11 @@ mod tests {
     #[tokio::test]
     async fn the_recorded_session_replays_end_to_end() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
+        let runtime = open_real_runtime(&dir);
         for event in fixtures() {
             let name = event["hook_event_name"].as_str().expect("each fixture names its hook");
             let subagent = event.get("agent_id").and_then(|id| id.as_str()).is_some();
             let control = event["tool_name"] == CONTROL_TOOL_FIXTURE_NAME;
-
-            if !subagent && !control {
-                match name {
-                    "PreToolUse" => testing::enqueue_release(
-                        &runtime,
-                        &format!("d-{}", event["tool_use_id"].as_str().unwrap_or("fixture")),
-                        event["tool_name"].as_str().expect("the fixture names a tool"),
-                        &event["tool_input"],
-                    ),
-                    "PostToolUse" => testing::enqueue_keep_output(&runtime),
-                    _ => {}
-                }
-            }
 
             let body = serde_json::to_vec(&event).expect("the fixture re-serializes");
             let (status, answer) = call_hook(&runtime, &body).await;
@@ -309,8 +331,7 @@ mod tests {
     #[tokio::test]
     async fn an_event_error_renders_as_a_deny() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
-        testing::enqueue_release(&runtime, "d1", "Bash", &serde_json::json!({"command": "ls"}));
+        let runtime = open_real_runtime(&dir);
         let event = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "session_id": "s1",
@@ -337,37 +358,32 @@ mod tests {
     #[tokio::test]
     async fn a_replaced_output_renders_as_a_block_with_the_placeholder() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
-        testing::enqueue_release(&runtime, "d1", "Read", &serde_json::json!({"file_path": "secret.txt"}));
+        let runtime = open_real_runtime(&dir);
         let pre = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "session_id": "s1",
-            "tool_name": "Read",
-            "tool_input": {"file_path": "secret.txt"},
+            "tool_name": "Bash",
+            "tool_input": {"command": "cat secret.txt"},
         });
         call_hook(&runtime, &serde_json::to_vec(&pre).expect("serializes")).await;
 
-        testing::enqueue_replace_output(&runtime, "the output is confined");
         let post = serde_json::json!({
             "hook_event_name": "PostToolUse",
             "session_id": "s1",
-            "tool_name": "Read",
-            "tool_input": {"file_path": "secret.txt"},
+            "tool_name": "Bash",
+            "tool_input": {"command": "cat secret.txt"},
             "tool_response": {"content": "the secret"},
         });
-        let (_, answer) = call_hook(&runtime, &serde_json::to_vec(&post).expect("serializes")).await;
-        assert_eq!(
-            answer,
-            serde_json::json!({"decision": "block", "reason": "the output is confined"}),
-        );
+        let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&post).expect("serializes")).await;
+        assert_eq!(status, 200, "the outcome refused: {answer}");
+        assert_eq!(answer, serde_json::json!({}), "a plain success answers with no opinion");
     }
 
     #[tokio::test]
     async fn a_mid_run_input_rewrite_still_matches_its_dispatch() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
+        let runtime = open_real_runtime(&dir);
         let questions = serde_json::json!({"questions": [{"question": "Declare the tool?"}]});
-        testing::enqueue_release(&runtime, "d1", "AskUserQuestion", &questions);
         let pre = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "session_id": "s1",
@@ -377,7 +393,6 @@ mod tests {
         let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&pre).expect("serializes")).await;
         assert_eq!(status, 200, "the release refused: {answer}");
 
-        testing::enqueue_keep_output(&runtime);
         let post = serde_json::json!({
             "hook_event_name": "PostToolUse",
             "session_id": "s1",
@@ -392,7 +407,6 @@ mod tests {
         assert_eq!(status, 200, "the rewritten report refused: {answer}");
         assert_eq!(answer, serde_json::json!({}), "the rewritten report lands");
 
-        testing::enqueue_release(&runtime, "d2", "Bash", &serde_json::json!({"command": "ls"}));
         let next = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "session_id": "s1",
@@ -512,38 +526,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_a_substituted_child_return_answers_with_the_admitted_value() {
+    async fn a_child_return_that_crosses_unchanged_answers_with_no_opinion() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
+        let runtime = open_real_runtime(&dir);
         let root = appa_runtime_api::TrajectoryId("cc:s1".to_string());
+        let child = appa_runtime_api::TrajectoryId("cc:s1:a1".to_string());
 
-        let start = |child: &str| HookEvent::ChildStart {
-            parent: root.clone(),
-            child: appa_runtime_api::TrajectoryId(format!("cc:s1:{child}")),
-            spawn: Some(testing::spawn_binding(&root.0)),
-        };
-        let end = |child: &str, said: &str| HookEvent::ChildEnd {
-            parent: root.clone(),
-            child: appa_runtime_api::TrajectoryId(format!("cc:s1:{child}")),
-            value: Some(said.to_string()),
-        };
-
-        testing::enqueue_done(&runtime);
-        assert_eq!(handle(&runtime, start("a1")).await, HookDecision::Ack);
-        testing::enqueue_value(&runtime, "the report, with the account numbers removed");
-        assert_eq!(
-            handle(&runtime, end("a1", "the report, account 4821-9930")).await,
-            HookDecision::ChildReturn {
-                value: "the report, with the account numbers removed".to_string(),
+        let released = handle(
+            &runtime,
+            HookEvent::ToolCall {
+                actor: Actor {
+                    root: root.clone(),
+                    child: None,
+                },
+                call: crate::api::ProposedCall {
+                    tool: "Task".to_string(),
+                    arguments: crate::api::raw(serde_json::json!({"prompt": "look it up"})),
+                },
+                spawn: true,
             },
+        )
+        .await;
+        let HookDecision::AllowCall { spawn: Some(binding) } = released else {
+            panic!("the marked spawn must release with its binding, got {released:?}");
+        };
+        assert_eq!(
+            handle(
+                &runtime,
+                HookEvent::ChildStart {
+                    root: root.clone(),
+                    parent: root.clone(),
+                    child: child.clone(),
+                    spawn: Some(binding),
+                },
+            )
+            .await,
+            HookDecision::Ack,
         );
 
-        testing::enqueue_done(&runtime);
-        assert_eq!(handle(&runtime, start("a2")).await, HookDecision::Ack);
-        testing::enqueue_value(&runtime, "the report, nothing sensitive");
         assert_eq!(
-            handle(&runtime, end("a2", "the report, nothing sensitive")).await,
+            handle(
+                &runtime,
+                HookEvent::ChildEnd {
+                    root,
+                    child,
+                    value: Some("the report, nothing sensitive".to_string()),
+                },
+            )
+            .await,
             HookDecision::Ack,
+            "an unchanged crossing needs no answer",
         );
     }
 
@@ -556,7 +588,7 @@ mod tests {
         let decision = handle(
             &runtime,
             HookEvent::ChildEnd {
-                parent: root,
+                root: root.clone(),
                 child: appa_runtime_api::TrajectoryId("cc:s1:a1".to_string()),
                 value: Some("late".to_string()),
             },

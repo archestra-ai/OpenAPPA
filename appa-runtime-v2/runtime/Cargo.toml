@@ -17,6 +17,7 @@ appa-adapter-claude-code = { path = "../adapters/claude-code" }
 # statuses, and version shared with deployer modules.
 appa-builtin = { path = "../../appa-builtin" }
 appa-engine = { workspace = true }
+appa-eventlog = { workspace = true }
 appa-policy = { workspace = true }
 appa-runtime-api = { path = "../api" }
 # `query` decodes the statusline's one GET parameter (`/status`).
@@ -28,11 +29,9 @@ reqwest = { workspace = true }
 # `server` carries the tool macros' schema derive; `transport-streamable-http-server`
 # is the HTTP transport Claude Code's MCP client speaks.
 rmcp = { version = "3", features = ["server", "macros", "transport-streamable-http-server", "elicitation"] }
-rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
 # Must stay 1.x to match rmcp's `#[tool]` schema derive.
 schemars = "1"
 serde = { workspace = true }
-sha2 = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
@@ -42,6 +41,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 
 [dev-dependencies]
+# The fail points the orchestration tests drive. A dev-dependency, so they are
+# absent from the binary.
+appa-eventlog = { workspace = true, features = ["fault-injection"] }
 tempfile = "3"
 # The elicitation round trip is only real with a real client on the
 # other end: these features exist for `tests/hitl_elicitation.rs` and

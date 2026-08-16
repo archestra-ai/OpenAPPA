@@ -10,10 +10,10 @@ use crate::execute::AuthorityReview;
 use crate::label::{EstablishedLabel, Label, PartialLabel};
 use crate::names::{AuthorityName, CastName, SanitizerName};
 use crate::plan::PlanId;
-use crate::profile::{DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentityV1};
+use crate::profile::{DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyFileKey, PolicyIdentityV1};
 use crate::value::{
-    CanonicalDigest, ChildReturnId, DispatchId, ForkId, LabeledValue, Provenance, RawResultDigest, ToolCallId,
-    ToolName, TrajectoryId, ValueId,
+    CanonicalDigest, ChildReturnId, DispatchId, ForkId, LabeledValue, Provenance, RawResultDigest, ToolName,
+    TrajectoryId, ValueId,
 };
 
 /// How a child bound at fork may return: the immutable policy recorded on the `Fork` boundary.
@@ -46,17 +46,6 @@ pub enum ReturnRejection {
     MandateUnmet,
     ConsumedDimensionUnresolvable,
     PreconditionUnmet,
-}
-
-/// One tool call the model proposed in an assistant turn, recorded verbatim so the model-transcript
-/// view replays from the log alone (CC2/RP1). Algebraically inert: the engine never checks this record
-/// — the runtime resolves the call into a [`ResolvedCall`](crate::value::ResolvedCall) for the check
-/// separately, and pairs it to its model-visible response by `id`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TranscriptCall {
-    pub id: ToolCallId,
-    pub tool: ToolName,
-    pub arguments: serde_json::Value,
 }
 
 /// A configurable effect kind — the log's outer-world vocabulary (`egress`, `mutation`,
@@ -211,22 +200,13 @@ pub enum Fact {
         dialect: PolicyDialectVersion,
         profile: DeploymentProfile,
         policy_digest: PolicyIdentityV1,
+        policy_file_key: PolicyFileKey,
         open_vectors: Vec<OpenVector>,
     },
     ValueAdmitted {
         trajectory: TrajectoryId,
         value: LabeledValue,
         provenance: Provenance,
-    },
-    AssistantMessage {
-        trajectory: TrajectoryId,
-        content: Option<String>,
-        calls: Vec<TranscriptCall>,
-    },
-    BlockFeedback {
-        trajectory: TrajectoryId,
-        call_id: ToolCallId,
-        content: String,
     },
     DispatchOpened {
         trajectory: TrajectoryId,
@@ -437,8 +417,6 @@ impl Fact {
             Fact::TrajectoryOpened { trajectory, .. }
             | Fact::ProposalBatchDecided { trajectory, .. }
             | Fact::ValueAdmitted { trajectory, .. }
-            | Fact::AssistantMessage { trajectory, .. }
-            | Fact::BlockFeedback { trajectory, .. }
             | Fact::DispatchOpened { trajectory, .. }
             | Fact::DispatchSucceeded { trajectory, .. }
             | Fact::DispatchClosed { trajectory, .. }
@@ -465,61 +443,6 @@ impl Fact {
             | Fact::ForkOpened { trajectory, .. }
             | Fact::Boundary { trajectory, .. } => trajectory,
         }
-    }
-}
-
-/// A monotone version marker over the family log's frontier. Every appended batch advances it; the
-/// runtime's conditional append is a compare-and-swap on it (concurrent-branch double-consume
-/// protection).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct Revision(u64);
-
-impl Revision {
-    pub const ZERO: Revision = Revision(0);
-
-    pub const fn new(version: u64) -> Self {
-        Revision(version)
-    }
-
-    pub const fn next(self) -> Self {
-        Revision(self.0 + 1)
-    }
-
-    pub const fn value(self) -> u64 {
-        self.0
-    }
-}
-
-/// A batch the engine produced: the [`Revision`] it was computed against plus the facts to append
-/// atomically. Only the engine builds one; the runtime reads it through the accessors and
-/// appends it only if the log is still at `basis`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FactBatch {
-    pub(crate) basis: Revision,
-    pub(crate) facts: Vec<Fact>,
-}
-
-impl FactBatch {
-    /// Assemble a batch from a basis and its facts. The engine builds every batch a decision
-    /// carries; the runtime also builds one to carry an append it already holds, and a test builds
-    /// one with a chosen basis to exercise the compare-and-swap path. The trust boundary is
-    /// [`crate::transition::ValidatedFactBatch`], which only `Engine::handle` produces and no
-    /// caller can construct — an unvalidated `FactBatch` is re-checked whenever its log reopens.
-    /// The fields stay `pub(crate)`, so a built batch is read-only outside the crate.
-    pub fn new(basis: Revision, facts: Vec<Fact>) -> Self {
-        FactBatch { basis, facts }
-    }
-
-    pub fn basis(&self) -> Revision {
-        self.basis
-    }
-
-    pub fn facts(&self) -> &[Fact] {
-        &self.facts
-    }
-
-    pub fn into_facts(self) -> Vec<Fact> {
-        self.facts
     }
 }
 

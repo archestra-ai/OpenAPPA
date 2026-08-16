@@ -166,6 +166,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "appa-eventlog"
+version = "0.0.0"
+dependencies = [
+ "appa-engine",
+ "appa-policy",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "appa-module-fixture"
 version = "0.0.0"
 dependencies = [
@@ -203,6 +215,7 @@ dependencies = [
  "appa-adapter-claude-code",
  "appa-builtin",
  "appa-engine",
+ "appa-eventlog",
  "appa-policy",
  "appa-runtime-api",
  "axum",
@@ -211,11 +224,9 @@ dependencies = [
  "rand 0.10.2",
  "reqwest 0.12.28",
  "rmcp 3.1.2",
- "rusqlite",
  "schemars",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror",
  "tokio",

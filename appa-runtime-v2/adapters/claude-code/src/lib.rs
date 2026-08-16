@@ -114,6 +114,7 @@ fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
         ),
         "SubagentStart" => match event.agent_id.clone() {
             Some(agent) => Ok(Some(HookEvent::ChildStart {
+                root: event.root(),
                 parent: event.root(),
                 child: TrajectoryId(format!("cc:{}:{agent}", event.session_id)),
                 spawn: None,
@@ -121,7 +122,7 @@ fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
             None => Err(malformed("SubagentStart without an agent id")),
         },
         "SubagentStop" => Ok(Some(HookEvent::ChildEnd {
-            parent: event.root(),
+            root: event.root(),
             child: event.trajectory(),
             value: event.last_assistant_message.clone(),
         })),
@@ -317,6 +318,7 @@ mod tests {
         assert_eq!(
             parse_value(&start),
             Ok(Some(HookEvent::ChildStart {
+                root: TrajectoryId("cc:s1".to_string()),
                 parent: TrajectoryId("cc:s1".to_string()),
                 child: TrajectoryId("cc:s1:a1".to_string()),
                 spawn: None,
@@ -331,7 +333,7 @@ mod tests {
         assert_eq!(
             parse_value(&stop),
             Ok(Some(HookEvent::ChildEnd {
-                parent: TrajectoryId("cc:s1".to_string()),
+                root: TrajectoryId("cc:s1".to_string()),
                 child: TrajectoryId("cc:s1:a1".to_string()),
                 value: Some("the summary".to_string()),
             })),

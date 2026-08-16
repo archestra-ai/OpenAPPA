@@ -20,22 +20,6 @@ impl ToolName {
     }
 }
 
-/// The model-assigned identifier of a proposed tool call (OpenAI's `tool_calls[].id`). Opaque to the
-/// algebra: it exists only to pair an assistant turn's proposed call with the model-visible response
-/// the transcript later shows for it (CC2/RP1) — never a routing or security identity.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct ToolCallId(String);
-
-impl ToolCallId {
-    pub fn new(id: impl Into<String>) -> Self {
-        ToolCallId(id.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TrajectoryId(String);
 

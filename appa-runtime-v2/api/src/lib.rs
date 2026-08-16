@@ -79,12 +79,16 @@ pub enum HookEvent {
         outcome: ToolOutcome,
     },
     ChildStart {
+        root: TrajectoryId,
         parent: TrajectoryId,
         child: TrajectoryId,
         spawn: Option<SpawnBinding>,
     },
     ChildEnd {
-        parent: TrajectoryId,
+        /// The root whose log this child's records land in. No
+        /// parent: which branch this child was forked from is the log's own
+        /// record, and a caller's claim about it would be a second answer.
+        root: TrajectoryId,
         child: TrajectoryId,
         value: Option<String>,
     },

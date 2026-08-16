@@ -273,6 +273,21 @@ pub struct DeploymentPolicy {
     pub profile: ProfileDeclaration,
 }
 
+/// The key of a stored policy file: the SHA-256 of its exact bytes, lowercase hex.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct PolicyFileKey(String);
+
+impl PolicyFileKey {
+    pub fn of(bytes: &[u8]) -> PolicyFileKey {
+        use sha2::Digest as _;
+        PolicyFileKey(format!("{:x}", sha2::Sha256::digest(bytes)))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// The versioned policy identity: a domain-separated SHA-256 digest over the RFC 8785
 /// canonical bytes of the identity document — the normalized engine-visible policy and deployment
 /// declaration. The document is field-aware: it names every included field explicitly, preserves
@@ -928,7 +943,7 @@ mod tests {
         let trajectory = crate::value::TrajectoryId::new("t");
         let plans_for = |declaration: ProfileDeclaration| {
             let engine = open(narrowing_catalogue(), declaration, ReturnPolicy::Raw).unwrap();
-            let projection = Projection::build(&log, crate::fact::Revision::new(1));
+            let projection = Projection::build(&log, 1);
             let views = projection.view(&trajectory);
             let call = engine.resolve_call(ToolName::new("leak"), b"{}").unwrap();
             let raw = match engine.check(&views, &call).unwrap() {
@@ -976,7 +991,7 @@ mod tests {
             );
             let dispatch = crate::value::DispatchId::new(parent.clone(), call.digest(), 0);
             let fork = crate::value::ForkId::of(&dispatch);
-            let projection = Projection::build(&log, crate::fact::Revision::new(1));
+            let projection = Projection::build(&log, 1);
             log.push(crate::fact::Fact::ForkPrepared {
                 trajectory: parent.clone(),
                 fork: fork.clone(),
@@ -999,7 +1014,7 @@ mod tests {
                 ),
                 provenance: crate::value::Provenance::UserInput,
             });
-            let projection = Projection::build(&log, crate::fact::Revision::new(3));
+            let projection = Projection::build(&log, 3);
             match engine.check_child_return(&projection.view(&parent), &child).unwrap() {
                 ReturnCheck::Block(ReturnBlock { plans, .. }) => plans,
                 other => panic!("expected a narrowing return block, got {other:?}"),

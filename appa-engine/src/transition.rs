@@ -8,7 +8,7 @@ use crate::candidate::{CallStage, ConfinedFrom, DerivedCandidate, DerivedVia, Sa
 use crate::check::{CheckOutcome, Gap, Narrowing, RawBlock};
 use crate::contract::ToolContract;
 use crate::execute::AuthorityEvidence;
-use crate::fact::{BoundaryKind, CloseOutcome, EffectSet, Fact, FactBatch, ReturnDerivation, ReturnPolicy, Revision};
+use crate::fact::{BoundaryKind, CloseOutcome, EffectSet, Fact, ReturnDerivation, ReturnPolicy};
 use crate::label::{EstablishedLabel, Label};
 use crate::names::{AuthorityName, SanitizerName};
 use crate::plan::PlannedBlock;
@@ -458,20 +458,33 @@ pub struct EngineDecision {
 /// reconstructs engine work by reading the facts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidatedFactBatch {
-    batch: FactBatch,
+    facts: Vec<Fact>,
+    basis: u64,
     policy: PolicyIdentityV1,
     family: TrajectoryId,
 }
 
 impl ValidatedFactBatch {
     /// Seal a validated batch. Crate-private on purpose: every call site is an engine transition
-    /// that has already run the batch through the [`Sequence`] validator.
-    pub(crate) fn seal(batch: FactBatch, policy: PolicyIdentityV1, family: TrajectoryId) -> ValidatedFactBatch {
-        ValidatedFactBatch { batch, policy, family }
+    /// that has already run the facts through the [`Sequence`] validator.
+    pub(crate) fn seal(
+        facts: Vec<Fact>,
+        basis: u64,
+        policy: PolicyIdentityV1,
+        family: TrajectoryId,
+    ) -> ValidatedFactBatch {
+        ValidatedFactBatch {
+            facts,
+            basis,
+            policy,
+            family,
+        }
     }
 
-    pub fn basis(&self) -> Revision {
-        self.batch.basis
+    /// The compare-and-swap basis: the count of accepted batches the decision was
+    /// computed against.
+    pub fn basis(&self) -> u64 {
+        self.basis
     }
 
     pub(crate) fn policy(&self) -> PolicyIdentityV1 {
@@ -485,20 +498,20 @@ impl ValidatedFactBatch {
     /// The facts to append, for the store that persists them. Reading them to reconstruct
     /// released work or feedback is forbidden; the decision's follow-up carries that.
     pub fn facts(&self) -> &[Fact] {
-        &self.batch.facts
+        &self.facts
     }
 
-    /// Serialization removes the seal: what crosses to storage is the plain batch, and
-    /// what comes back is untrusted until it passes the validator again.
-    pub fn into_unsealed(self) -> FactBatch {
-        self.batch
+    /// Serialization removes the seal: what crosses to storage is the plain records,
+    /// and what comes back is untrusted until it passes the validator again.
+    pub fn into_unsealed(self) -> Vec<Fact> {
+        self.facts
     }
 }
 
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ViewMismatch {
     #[error("the batch was computed against revision {batch:?} but the view stands at {view:?}")]
-    Stale { view: Revision, batch: Revision },
+    Stale { view: u64, batch: u64 },
     #[error("the batch belongs to another trajectory family")]
     ForeignFamily,
     #[error("the batch was decided under another policy identity")]
@@ -537,15 +550,23 @@ impl EngineView {
         self.projection.view(trajectory)
     }
 
+    /// Which trajectory surfaced this offer, anywhere in the family.
+    pub fn offer_trajectory(&self, offer: &crate::value::OfferId) -> Option<&TrajectoryId> {
+        self.projection.offer_trajectory(offer)
+    }
+
     pub(crate) fn policy(&self) -> PolicyIdentityV1 {
         self.policy
     }
 
-    pub(crate) fn family(&self) -> &TrajectoryId {
+    /// The root whose log this view was built from. Public because an outer layer
+    /// mints identities that must name the log they belong to, and a view is where it learns
+    /// which log it is holding.
+    pub fn family(&self) -> &TrajectoryId {
         &self.family
     }
 
-    pub fn revision(&self) -> Revision {
+    pub fn revision(&self) -> u64 {
         self.projection.revision()
     }
 
@@ -576,7 +597,7 @@ impl EngineView {
         for fact in batch.facts() {
             self.projection.fold(fact);
         }
-        self.projection.set_revision(batch.basis().next());
+        self.projection.set_revision(batch.basis() + 1);
         Ok(())
     }
 }
@@ -845,7 +866,7 @@ impl<'a> Sequence<'a> {
         registry: &'a Registry,
         child_return: &'a ReturnPolicy,
         family: &TrajectoryId,
-        revision: Revision,
+        revision: u64,
     ) -> Sequence<'a> {
         Sequence {
             registry,
@@ -1258,8 +1279,6 @@ impl<'a> Sequence<'a> {
                 }
             }
             Fact::Boundary { trajectory, kind } => self.boundary(trajectory, kind)?,
-            // Transcript memory: algebraically inert, and outside this validator by `IMP-4`.
-            Fact::AssistantMessage { .. } | Fact::BlockFeedback { .. } => {}
         }
         self.settle_advance(fact, &implied, released)?;
         self.projection.fold(fact);
@@ -3336,18 +3355,12 @@ mod tests {
     fn advancing_a_view_matches_rebuilding_it_from_the_records() {
         let engine = engine();
         let first = vec![admit(3)];
-        let mut held = engine
-            .view(&traj(), first.clone(), Revision::new(1))
-            .expect("the log validates");
-        let batch = engine
-            .seal(&held, FactBatch::new(Revision::new(1), vec![admit(1)]))
-            .expect("the candidate validates");
+        let mut held = engine.view(&traj(), first.clone(), 1).expect("the log validates");
+        let batch = engine.seal(&held, vec![admit(1)]).expect("the candidate validates");
         held.advance(&batch).unwrap();
 
         let whole = [first, batch.facts().to_vec()].concat();
-        let rebuilt = engine
-            .view(&traj(), whole, Revision::new(2))
-            .expect("the log validates");
+        let rebuilt = engine.view(&traj(), whole, 2).expect("the log validates");
 
         assert_eq!(held.revision(), rebuilt.revision());
         assert_eq!(
@@ -3359,21 +3372,13 @@ mod tests {
             PartialLabel::established(EstablishedLabel::new(Trust::new(1), Audience::Public))
         );
 
-        assert_eq!(
-            held.advance(&batch),
-            Err(ViewMismatch::Stale {
-                view: Revision::new(2),
-                batch: Revision::new(1),
-            })
-        );
+        assert_eq!(held.advance(&batch), Err(ViewMismatch::Stale { view: 2, batch: 1 }));
     }
 
     #[test]
     fn a_view_takes_no_batch_from_another_family_or_policy() {
         let engine = engine();
-        let mut view = engine
-            .view(&traj(), vec![admit(3)], Revision::new(1))
-            .expect("the log validates");
+        let mut view = engine.view(&traj(), vec![admit(3)], 1).expect("the log validates");
         let other_family = TrajectoryId::new("other");
         let elsewhere = engine
             .view(
@@ -3386,16 +3391,15 @@ mod tests {
                     ),
                     provenance: Provenance::UserInput,
                 }],
-                Revision::new(1),
+                1,
             )
             .expect("the log validates");
-        let foreign = engine
-            .seal(&elsewhere, FactBatch::new(Revision::new(1), vec![]))
-            .expect("the candidate validates");
+        let foreign = engine.seal(&elsewhere, vec![]).expect("the candidate validates");
         assert_eq!(view.advance(&foreign), Err(ViewMismatch::ForeignFamily));
 
         let other_policy = ValidatedFactBatch::seal(
-            FactBatch::new(Revision::new(1), vec![]),
+            vec![],
+            1,
             crate::profile::PolicyIdentityV1::of(
                 &crate::registry::RegistryConfig {
                     trust_chain: crate::registry::TrustChain::new(vec!["suspicious".into()]),

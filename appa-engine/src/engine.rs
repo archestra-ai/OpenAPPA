@@ -8,7 +8,7 @@ use crate::candidate::{CallStage, ConfinedFrom, DerivedCandidate, DerivedVia, Sa
 use crate::check::{self, CheckOutcome, Narrowing};
 use crate::contract::ToolContract;
 use crate::execute::{self, PlanError};
-use crate::fact::{Fact, FactBatch, ObservedResult, ReturnDerivation, ReturnPolicy, ReturnRejection, Revision};
+use crate::fact::{Fact, ObservedResult, ReturnDerivation, ReturnPolicy, ReturnRejection};
 use crate::label::{EstablishedLabel, Label, PartialLabel};
 use crate::names::{AuthorityName, SanitizerName};
 use crate::params::{ArgumentError, CanonicalArguments};
@@ -144,7 +144,7 @@ impl Engine {
         &self,
         family: &TrajectoryId,
         records: Vec<Fact>,
-        revision: Revision,
+        revision: u64,
     ) -> Result<EngineView, TransitionRefusal> {
         let projection = self.replay(family, &records, revision)?;
         Ok(EngineView::validated(projection, self.identity, family.clone()))
@@ -158,16 +158,10 @@ impl Engine {
             Some(fact) => fact.trajectory().clone(),
             None => return Ok(()),
         };
-        self.replay(&family, facts, Revision::new(facts.len() as u64))
-            .map(|_| ())
+        self.replay(&family, facts, facts.len() as u64).map(|_| ())
     }
 
-    fn replay(
-        &self,
-        family: &TrajectoryId,
-        records: &[Fact],
-        revision: Revision,
-    ) -> Result<Projection, TransitionRefusal> {
+    fn replay(&self, family: &TrajectoryId, records: &[Fact], revision: u64) -> Result<Projection, TransitionRefusal> {
         let mut sequence = Sequence::empty(&self.registry, &self.child_return, family, revision);
         for fact in records {
             sequence.admit(fact)?;
@@ -177,41 +171,44 @@ impl Engine {
 
     /// Seal a candidate batch: the facts an engine operation just built pass the same validator a
     /// persisted log does, so the sealed batch is one no replay of it can refuse.
-    pub(crate) fn seal(&self, view: &EngineView, batch: FactBatch) -> Result<ValidatedFactBatch, TransitionRefusal> {
+    pub(crate) fn seal(&self, view: &EngineView, facts: Vec<Fact>) -> Result<ValidatedFactBatch, TransitionRefusal> {
         let mut sequence = Sequence::resuming(&self.registry, &self.child_return, view);
-        for fact in &batch.facts {
+        for fact in &facts {
             sequence.admit(fact)?;
         }
         sequence.finish()?;
-        Ok(ValidatedFactBatch::seal(batch, self.identity, view.family().clone()))
+        Ok(ValidatedFactBatch::seal(
+            facts,
+            view.revision(),
+            self.identity,
+            view.family().clone(),
+        ))
     }
 
     fn declaring(
         &self,
         act: crate::basis::DecidedAct,
         advance: crate::basis::BasisAdvance,
-        batch: FactBatch,
-    ) -> FactBatch {
-        let stamps = batch
-            .facts
+        facts: Vec<Fact>,
+    ) -> Vec<Fact> {
+        let stamps = facts
             .iter()
             .any(|fact| matches!(fact, Fact::OfferOpened { .. } | Fact::CallApproved { .. }));
         if advance.is_empty() && !stamps {
-            return batch;
+            return facts;
         }
-        let trajectory = batch
-            .facts
+        let trajectory = facts
             .first()
             .expect("a batch that advances a basis carries the record that advanced it")
             .trajectory()
             .clone();
-        let mut facts = vec![Fact::BasisAdvanced {
+        let mut declared = vec![Fact::BasisAdvanced {
             trajectory,
             act,
             advance,
         }];
-        facts.extend(batch.facts);
-        FactBatch::new(batch.basis, facts)
+        declared.extend(facts);
+        declared
     }
 
     /// The engine's one mutation boundary: decide one event against the view and return
@@ -344,13 +341,10 @@ impl Engine {
         if views.dispatch_failed(binding.fork.dispatch()) {
             return Err(TransitionError::UnbindableFork);
         }
-        let batch = FactBatch::new(
-            views.revision(),
-            vec![Fact::ForkOpened {
-                trajectory: binding.child.clone(),
-                fork: binding.fork.clone(),
-            }],
-        );
+        let batch = vec![Fact::ForkOpened {
+            trajectory: binding.child.clone(),
+            fork: binding.fork.clone(),
+        }];
         let batch = self.declaring(
             crate::basis::DecidedAct::Binding(binding.fork.clone()),
             advance_of(self, view, &batch),
@@ -398,7 +392,6 @@ impl Engine {
                         {
                             return self.rejecting(
                                 view,
-                                &views,
                                 child,
                                 &ChildReturnId::new(child.clone(), 0),
                                 &report.fork,
@@ -479,10 +472,10 @@ impl Engine {
                 )
                 .map_err(TransitionError::Resolution)?
             };
-            for fact in &batch.facts {
+            for fact in &batch {
                 working.to_mut().fold(fact);
             }
-            facts.extend(batch.facts);
+            facts.extend(batch);
         }
         Ok((working, facts))
     }
@@ -508,8 +501,8 @@ impl Engine {
                     branch::ReturnSubmission::Raw { body: body.clone() },
                 )
                 .map_err(branch_refusal)?;
-                facts.extend(crossing.facts);
-                let batch = FactBatch::new(views.revision(), facts);
+                facts.extend(crossing);
+                let batch = facts;
                 let batch = self.declaring(return_act(child), advance_of(self, view, &batch), batch);
                 Ok(EngineDecision {
                     append: Some(self.seal(view, batch)?),
@@ -585,23 +578,13 @@ impl Engine {
         let fold = views.branch_label(child);
         let digest = RawResultDigest::of(body.as_str().as_bytes());
         if name.is_attest_schema() && !plan::attest_applicable(views, child, &body, &registered.transition) {
-            return self.rejecting(
-                view,
-                views,
-                child,
-                id,
-                fork,
-                digest,
-                ReturnRejection::PreconditionUnmet,
-                facts,
-            );
+            return self.rejecting(view, child, id, fork, digest, ReturnRejection::PreconditionUnmet, facts);
         }
         if !fold.is_established(registered.transition.dimension()) {
             return match plan::resolvable_source(&self.registry, views, &fold, registered.transition.dimension()) {
                 Some((cast, value)) => self.resolving(view, views, return_act(child), facts, cast, value),
                 None => self.rejecting(
                     view,
-                    views,
                     child,
                     id,
                     fork,
@@ -615,16 +598,7 @@ impl Engine {
             .derive_output(&fold.bound().clone().into_label(), &[])
             .is_none()
         {
-            return self.rejecting(
-                view,
-                views,
-                child,
-                id,
-                fork,
-                digest,
-                ReturnRejection::MandateUnmet,
-                facts,
-            );
+            return self.rejecting(view, child, id, fork, digest, ReturnRejection::MandateUnmet, facts);
         }
         // Applicability holds: custody transfers, and the branch ends.
         facts.push(Fact::ReturnSubmitted {
@@ -652,7 +626,7 @@ impl Engine {
             _ => None,
         });
         let Some(derived) = derived else {
-            let batch = FactBatch::new(views.revision(), facts);
+            let batch = facts;
             let batch = self.declaring(return_act(child), advance_of(self, view, &batch), batch);
             return Ok(EngineDecision {
                 append: Some(self.seal(view, batch)?),
@@ -725,7 +699,7 @@ impl Engine {
                 },
                 None,
             ));
-            let batch = FactBatch::new(views.revision(), facts);
+            let batch = facts;
             let batch = self.declaring(return_act(child), advance_of(self, view, &batch), batch);
             return Ok(EngineDecision {
                 append: Some(self.seal(view, batch)?),
@@ -769,7 +743,6 @@ impl Engine {
     fn rejecting(
         &self,
         view: &EngineView,
-        views: &Views,
         child: &TrajectoryId,
         id: &ChildReturnId,
         fork: &ForkId,
@@ -784,7 +757,7 @@ impl Engine {
             digest,
             reason: reason.clone(),
         });
-        let batch = FactBatch::new(views.revision(), facts);
+        let batch = facts;
         let batch = self.declaring(return_act(child), advance_of(self, view, &batch), batch);
         Ok(EngineDecision {
             append: Some(self.seal(view, batch)?),
@@ -808,7 +781,7 @@ impl Engine {
         let append = match facts.is_empty() {
             true => None,
             false => {
-                let batch = FactBatch::new(views.revision(), facts);
+                let batch = facts;
                 let batch = self.declaring(act, advance_of(self, view, &batch), batch);
                 Some(self.seal(view, batch)?)
             }
@@ -841,7 +814,7 @@ impl Engine {
         let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
         let (_, offers, opened) = self.open_offers(views, &act, &advance, &nonce, &subject, &call, &stage);
         facts.extend(opened);
-        let batch = self.declaring(act, advance, FactBatch::new(views.revision(), facts));
+        let batch = self.declaring(act, advance, facts);
         Ok((
             self.seal(view, batch)?,
             PendingReturnStage {
@@ -955,7 +928,7 @@ impl Engine {
                         let append = match cast_facts.is_empty() {
                             true => None,
                             false => {
-                                let batch = FactBatch::new(views.revision(), cast_facts);
+                                let batch = cast_facts;
                                 let batch = self.declaring(return_act(child), advance_of(self, view, &batch), batch);
                                 Some(self.seal(view, batch)?)
                             }
@@ -1355,7 +1328,7 @@ impl Engine {
                 }
                 other => unreachable!("the outcome path admits what the log already proved: {other}"),
             })?;
-        let admitted = batch.facts.iter().find_map(|fact| match fact {
+        let admitted = batch.iter().find_map(|fact| match fact {
             Fact::ValueAdmitted { value, .. } => Some(value.body.clone()),
             _ => None,
         });
@@ -1392,8 +1365,7 @@ impl Engine {
             };
             facts.extend(
                 self.observe_success(views, dispatch, call, ObservedResult::Available(source))
-                    .expect("an open, unreported dispatch checkpoints its observed success")
-                    .facts,
+                    .expect("an open, unreported dispatch checkpoints its observed success"),
             );
         }
         facts.push(derived);
@@ -1444,7 +1416,7 @@ impl Engine {
         let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
         let (_, offers, opened) = self.open_offers(views, &act, &advance, &nonce, &subject, dispatch.digest(), &stage);
         facts.extend(opened);
-        let batch = self.declaring(act, advance, FactBatch::new(views.revision(), facts));
+        let batch = self.declaring(act, advance, facts);
         Ok((
             self.seal(view, batch)?,
             Confined {
@@ -1493,7 +1465,7 @@ impl Engine {
         let act = crate::basis::DecidedAct::Outcome(dispatch.clone());
         let advance = crate::basis::BasisAdvance::default();
         let (_, offers, opened) = self.open_offers(views, &act, &advance, &nonce, &subject, dispatch.digest(), &stage);
-        let batch = self.declaring(act, advance, FactBatch::new(views.revision(), opened));
+        let batch = self.declaring(act, advance, opened);
         Ok(EngineDecision {
             append: Some(self.seal(view, batch)?),
             follow_up: FollowUp::Outcome(OutcomeFollowUp::Staged(Box::new(Confined {
@@ -1677,11 +1649,7 @@ impl Engine {
                 offers,
             });
         }
-        let decided = self.declaring(
-            crate::basis::DecidedAct::Proposals(batch.id.clone()),
-            advance,
-            FactBatch::new(views.revision(), facts),
-        );
+        let decided = self.declaring(crate::basis::DecidedAct::Proposals(batch.id.clone()), advance, facts);
         let append = self.seal(view, decided)?;
         Ok(EngineDecision {
             append: Some(append),
@@ -1724,11 +1692,7 @@ impl Engine {
             return Ok(None);
         }
         let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
-        let batch = self.declaring(
-            crate::basis::DecidedAct::Proposals(id.clone()),
-            advance,
-            FactBatch::new(view.revision(), facts),
-        );
+        let batch = self.declaring(crate::basis::DecidedAct::Proposals(id.clone()), advance, facts);
         Ok(Some(self.seal(view, batch)?))
     }
 
@@ -1926,7 +1890,7 @@ impl Engine {
             CheckOutcome::Allow => None,
         };
         let Some(raw) = live else {
-            return self.invalidated(view, &views, execution, &recorded);
+            return self.invalidated(view, execution, &recorded);
         };
         match (&execution.outcome, recorded.plan.hop()) {
             (OfferOutcome::Derived(evidence), Some(sanitizer)) => self.hop_call(
@@ -1945,17 +1909,13 @@ impl Engine {
     fn invalidated(
         &self,
         view: &EngineView,
-        views: &Views,
         execution: &OfferExecution,
         recorded: &crate::projection::RecordedOffer,
     ) -> Result<EngineDecision, TransitionError> {
-        let batch = FactBatch::new(
-            views.revision(),
-            vec![Fact::OfferInvalidated {
-                trajectory: recorded.trajectory.clone(),
-                offer: execution.offer,
-            }],
-        );
+        let batch = vec![Fact::OfferInvalidated {
+            trajectory: recorded.trajectory.clone(),
+            offer: execution.offer,
+        }];
         Ok(EngineDecision {
             append: Some(self.seal(view, batch)?),
             follow_up: FollowUp::Offer(OfferFollowUp::Invalidated),
@@ -1985,13 +1945,13 @@ impl Engine {
             ..
         }) = views.candidate(&subject).cloned()
         else {
-            return self.invalidated(view, views, execution, recorded);
+            return self.invalidated(view, execution, recorded);
         };
         let lineage = views.lineage(&subject);
         let contract = self.dispatch_contract(views, dispatch)?;
         let stage = plan::confined_stage(&self.registry, contract, &receiving, &value.label, &residual, &lineage);
         if !stage.contains(&recorded.plan) {
-            return self.invalidated(view, views, execution, recorded);
+            return self.invalidated(view, execution, recorded);
         }
         let mut facts = vec![Fact::OfferAccepted {
             trajectory: recorded.trajectory.clone(),
@@ -2031,14 +1991,10 @@ impl Engine {
                 ResultAdmission::CandidateAccepted { offer: execution.offer },
             )
             .unwrap_or_else(|error| unreachable!("the confined stage admits what the log already proved: {error}"));
-        facts.extend(admitted.facts);
+        facts.extend(admitted);
         let value = crossed(&facts);
         let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
-        let batch = self.declaring(
-            crate::basis::DecidedAct::Offer(execution.offer),
-            advance,
-            FactBatch::new(views.revision(), facts),
-        );
+        let batch = self.declaring(crate::basis::DecidedAct::Offer(execution.offer), advance, facts);
         Ok(EngineDecision {
             append: Some(self.seal(view, batch)?),
             follow_up: FollowUp::Offer(OfferFollowUp::Admitted { value }),
@@ -2132,14 +2088,10 @@ impl Engine {
                 ResultAdmission::CandidateAdmissible,
             )
             .unwrap_or_else(|error| unreachable!("the confined stage admits what this act just derived: {error}"));
-        facts.extend(admitted.facts);
+        facts.extend(admitted);
         let value = crossed(&facts);
         let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
-        let batch = self.declaring(
-            crate::basis::DecidedAct::Offer(execution.offer),
-            advance,
-            FactBatch::new(views.revision(), facts),
-        );
+        let batch = self.declaring(crate::basis::DecidedAct::Offer(execution.offer), advance, facts);
         Ok(EngineDecision {
             append: Some(self.seal(view, batch)?),
             follow_up: FollowUp::Offer(OfferFollowUp::Admitted { value }),
@@ -2156,7 +2108,7 @@ impl Engine {
     ) -> Result<EngineDecision, TransitionError> {
         let subject = crate::basis::SubjectKey::Return(id.clone());
         let Some(pending) = views.pending_return(id).cloned() else {
-            return self.invalidated(view, views, execution, recorded);
+            return self.invalidated(view, execution, recorded);
         };
         let fold = views.branch_label(id.child());
         let lineage = views.lineage(&subject);
@@ -2166,9 +2118,9 @@ impl Engine {
                 residual: Some(residual),
                 ..
             }) => Some((value, residual)),
-            Some(_) => return self.invalidated(view, views, execution, recorded),
+            Some(_) => return self.invalidated(view, execution, recorded),
             None if pending.policy == ReturnPolicy::Raw => None,
-            None => return self.invalidated(view, views, execution, recorded),
+            None => return self.invalidated(view, execution, recorded),
         };
         let (label, body, residual) = match &standing {
             Some((value, residual)) => (value.label.clone(), value.body.clone(), residual.clone()),
@@ -2192,10 +2144,10 @@ impl Engine {
             &lineage,
         ) {
             plan::ReturnStagePlan::Stage(plans) => plans,
-            plan::ReturnStagePlan::Resolve { .. } => return self.invalidated(view, views, execution, recorded),
+            plan::ReturnStagePlan::Resolve { .. } => return self.invalidated(view, execution, recorded),
         };
         if !stage.contains(&recorded.plan) {
-            return self.invalidated(view, views, execution, recorded);
+            return self.invalidated(view, execution, recorded);
         }
         let mut facts = vec![Fact::OfferAccepted {
             trajectory: recorded.trajectory.clone(),
@@ -2307,11 +2259,7 @@ impl Engine {
             Some(residual),
         ));
         let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
-        let batch = self.declaring(
-            crate::basis::DecidedAct::Offer(execution.offer),
-            advance,
-            FactBatch::new(views.revision(), facts),
-        );
+        let batch = self.declaring(crate::basis::DecidedAct::Offer(execution.offer), advance, facts);
         Ok(EngineDecision {
             append: Some(self.seal(view, batch)?),
             follow_up: FollowUp::Offer(OfferFollowUp::Admitted { value: admitted }),
@@ -2395,11 +2343,7 @@ impl Engine {
                 None,
             ));
             let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
-            let batch = self.declaring(
-                crate::basis::DecidedAct::Offer(execution.offer),
-                advance,
-                FactBatch::new(views.revision(), facts),
-            );
+            let batch = self.declaring(crate::basis::DecidedAct::Offer(execution.offer), advance, facts);
             return Ok(EngineDecision {
                 append: Some(self.seal(view, batch)?),
                 follow_up: FollowUp::Offer(OfferFollowUp::Admitted { value: body.clone() }),
@@ -2562,7 +2506,7 @@ impl Engine {
             }
         };
         let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
-        let batch = self.declaring(act, advance, FactBatch::new(views.revision(), facts));
+        let batch = self.declaring(act, advance, facts);
         Ok(EngineDecision {
             append: Some(self.seal(view, batch)?),
             follow_up: FollowUp::Offer(follow_up),
@@ -2874,11 +2818,7 @@ impl Engine {
             sanitizer: recorded.plan.sanitizer().cloned(),
             basis: views.basis_after(&advance, &subject),
         });
-        let batch = self.declaring(
-            crate::basis::DecidedAct::Offer(execution.offer),
-            advance,
-            FactBatch::new(views.revision(), facts),
-        );
+        let batch = self.declaring(crate::basis::DecidedAct::Offer(execution.offer), advance, facts);
         Ok(EngineDecision {
             append: Some(self.seal(view, batch)?),
             follow_up: FollowUp::Offer(OfferFollowUp::Approved { call: call.clone() }),
@@ -2936,11 +2876,7 @@ impl Engine {
             &Engine::executable(&planned),
         );
         facts.extend(opened);
-        let batch = self.declaring(
-            crate::basis::DecidedAct::Offer(execution.offer),
-            advance,
-            FactBatch::new(views.revision(), facts),
-        );
+        let batch = self.declaring(crate::basis::DecidedAct::Offer(execution.offer), advance, facts);
         Ok(EngineDecision {
             append: Some(self.seal(view, batch)?),
             follow_up: FollowUp::Offer(OfferFollowUp::Denied {
@@ -2956,14 +2892,20 @@ impl Engine {
 
     /// The opening batch of a fresh root trajectory family: one `TrajectoryOpened`
     /// record against the empty log. The runtime appends it before any other family event.
-    pub fn open_trajectory(&self, trajectory: &TrajectoryId) -> FactBatch {
-        FactBatch::new(
-            Revision::ZERO,
+    pub fn open_trajectory(
+        &self,
+        trajectory: &TrajectoryId,
+        policy_file_key: crate::profile::PolicyFileKey,
+    ) -> Result<ValidatedFactBatch, TransitionRefusal> {
+        let empty = EngineView::validated(Projection::empty(0), self.identity, trajectory.clone());
+        self.seal(
+            &empty,
             vec![Fact::TrajectoryOpened {
                 trajectory: trajectory.clone(),
                 dialect: self.dialect,
                 profile: self.profile().clone(),
                 policy_digest: self.identity,
+                policy_file_key,
                 open_vectors: self.open_vectors(),
             }],
         )
@@ -2977,12 +2919,16 @@ impl Engine {
     /// from it exactly.
     pub fn verify_opening(&self, facts: &[Fact], trajectory: &TrajectoryId) -> Result<(), OpeningTransitionRefusal> {
         let mut openings = facts.iter().enumerate().filter_map(|(index, fact)| match fact {
+            // `policy_file_key` is deliberately not re-derived here: it names a stored file
+            // this engine never sees. The outer layer re-hashes the file it loaded against
+            // this record on every event, which is the check the engine cannot make.
             Fact::TrajectoryOpened {
                 trajectory,
                 dialect,
                 profile,
                 policy_digest,
                 open_vectors,
+                ..
             } => Some((index, trajectory, dialect, profile, policy_digest, open_vectors)),
             _ => None,
         });
@@ -3043,7 +2989,7 @@ impl Engine {
     /// the engine never emits an appendable dispatch for a call it would not allow. Folds nothing —
     /// the label folds only when the result value is admitted.
     #[cfg(test)]
-    pub(crate) fn open_dispatch(&self, views: &Views, call: &ResolvedCall) -> Result<FactBatch, EngineError> {
+    pub(crate) fn open_dispatch(&self, views: &Views, call: &ResolvedCall) -> Result<Vec<Fact>, EngineError> {
         let contract = self.validated_contract(call)?;
         if views.has_ended(views.trajectory()) {
             return Err(EngineError::BranchEnded);
@@ -3051,7 +2997,7 @@ impl Engine {
         match check::evaluate(contract, views, call, &CallStage::default()) {
             CheckOutcome::Allow => {
                 let (_, fact) = opened_dispatch(contract, views, call, None);
-                Ok(FactBatch::new(views.revision(), vec![fact]))
+                Ok(vec![fact])
             }
             _ => Err(EngineError::NotAllowed),
         }
@@ -3067,7 +3013,7 @@ impl Engine {
         chosen: &plan::ExecutableRemedyPlan,
         call: &ResolvedCall,
         rulings: &[Ruling],
-    ) -> Result<FactBatch, PlanError> {
+    ) -> Result<Vec<Fact>, PlanError> {
         if self.registry.provider_run_contract(call.tool()).is_some() {
             return Err(PlanError::ProviderRunTool(call.tool().as_str().to_string()));
         }
@@ -3086,7 +3032,7 @@ impl Engine {
         dispatch: &DispatchId,
         call: &ResolvedCall,
         admission: ResultAdmission,
-    ) -> Result<FactBatch, AdmitError> {
+    ) -> Result<Vec<Fact>, AdmitError> {
         admit::admit_result(&self.registry, views, dispatch, call, admission)
     }
 
@@ -3100,7 +3046,7 @@ impl Engine {
         dispatch: &DispatchId,
         call: &ResolvedCall,
         observed: crate::fact::ObservedResult,
-    ) -> Result<FactBatch, AdmitError> {
+    ) -> Result<Vec<Fact>, AdmitError> {
         admit::observe_success(&self.registry, views, dispatch, call, observed)
     }
 
@@ -3123,7 +3069,7 @@ impl Engine {
         parent: &Views,
         child: &TrajectoryId,
         ret: ReturnSubmission,
-    ) -> Result<FactBatch, BranchError> {
+    ) -> Result<Vec<Fact>, BranchError> {
         branch::submit_child_return(&self.registry, parent, child, ret)
     }
 
@@ -3143,7 +3089,7 @@ impl Engine {
     /// crosses no value — no merge, no label contribution. A branch ends at most once.
     /// See [`crate::branch`].
     #[cfg(test)]
-    pub(crate) fn submit_void_return(&self, parent: &Views, child: &TrajectoryId) -> Result<FactBatch, BranchError> {
+    pub(crate) fn submit_void_return(&self, parent: &Views, child: &TrajectoryId) -> Result<Vec<Fact>, BranchError> {
         branch::submit_void_return(parent, child)
     }
 
@@ -3157,7 +3103,7 @@ impl Engine {
         child: &TrajectoryId,
         chosen: branch::ReturnPlan,
         submission: ReturnSubmission,
-    ) -> Result<FactBatch, BranchError> {
+    ) -> Result<Vec<Fact>, BranchError> {
         branch::execute_child_return_plan(&self.registry, parent, child, chosen, submission)
     }
 
@@ -3240,8 +3186,8 @@ fn settled_outcome(views: &Views, dispatch: &DispatchId) -> SettledOutcome {
     }
 }
 
-fn advance_of(engine: &Engine, view: &EngineView, batch: &FactBatch) -> crate::basis::BasisAdvance {
-    Sequence::advance_of(&engine.registry, &engine.child_return, view, &batch.facts)
+fn advance_of(engine: &Engine, view: &EngineView, facts: &[Fact]) -> crate::basis::BasisAdvance {
+    Sequence::advance_of(&engine.registry, &engine.child_return, view, facts)
 }
 
 fn approved_release(
@@ -3524,7 +3470,7 @@ mod tests {
     use crate::contract::{
         AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, RecipientSpec, Requires, ToolContract,
     };
-    use crate::fact::{EffectKind, EffectSet, Fact, Revision};
+    use crate::fact::{EffectKind, EffectSet, Fact};
     use crate::label::PartialLabel;
     use crate::label::{Audience, Dim, Dimension, Label, ReaderId, Trust};
     use crate::names::MarkName;
@@ -3557,7 +3503,7 @@ mod tests {
 
     fn forked_child(e: &Engine, log: &[Fact], child: &TrajectoryId) -> Vec<Fact> {
         let view = e
-            .view(&traj(), log.to_vec(), Revision::new(log.len() as u64))
+            .view(&traj(), log.to_vec(), log.len() as u64)
             .expect("the parent view builds");
         let spawn = call("spawn", json!({}));
         let decision = e
@@ -3580,11 +3526,7 @@ mod tests {
         let mut facts = decision.append.expect("the release appends").facts().to_vec();
         let bound_at = log.len() + facts.len();
         let prepared = e
-            .view(
-                &traj(),
-                [log.to_vec(), facts.clone()].concat(),
-                Revision::new(bound_at as u64),
-            )
+            .view(&traj(), [log.to_vec(), facts.clone()].concat(), bound_at as u64)
             .expect("the prepared view builds");
         let bound = e
             .handle(
@@ -3667,7 +3609,7 @@ mod tests {
     }
 
     fn check(engine: &Engine, log: &[Fact], call: &ResolvedCall) -> CheckOutcome {
-        let p = Projection::build(log, Revision::new(log.len() as u64));
+        let p = Projection::build(log, log.len() as u64);
         let t = traj();
         engine.check(&p.view(&t), call).unwrap()
     }
@@ -3703,7 +3645,7 @@ mod tests {
             requires: Requires::default(),
         };
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
-        let p = Projection::build(&log, Revision::new(1));
+        let p = Projection::build(&log, 1);
         let open = |contract: ToolContract| {
             engine(vec![contract])
                 .open_dispatch(&p.view(&traj()), &call("pay", json!({})))
@@ -3711,18 +3653,12 @@ mod tests {
         };
         let ab = open(pay(["spend", "audit"]));
         let ba = open(pay(["audit", "spend"]));
-        assert_eq!(
-            serde_json::to_string(&ab.facts).unwrap(),
-            serde_json::to_string(&ba.facts).unwrap()
-        );
+        assert_eq!(serde_json::to_string(&ab).unwrap(), serde_json::to_string(&ba).unwrap());
         let mut log_ab = log.clone();
-        log_ab.extend(ab.facts);
+        log_ab.extend(ab);
         let mut log_ba = log;
-        log_ba.extend(ba.facts);
-        assert_eq!(
-            Projection::build(&log_ab, Revision::new(2)),
-            Projection::build(&log_ba, Revision::new(2))
-        );
+        log_ba.extend(ba);
+        assert_eq!(Projection::build(&log_ab, 2), Projection::build(&log_ba, 2));
     }
 
     #[test]
@@ -3743,7 +3679,7 @@ mod tests {
         let e = engine(vec![crm_tool()]);
         let internal = Audience::restricted([ReaderId::new("internal")]);
         let records = vec![user_value(known(TRUSTED, internal))];
-        let view = e.view(&traj(), records, Revision::new(1)).unwrap();
+        let view = e.view(&traj(), records, 1).unwrap();
         let call = call("get_ticket", json!({}));
 
         let decision = e
@@ -3793,7 +3729,7 @@ mod tests {
                 position: 0,
             })
         );
-        assert_eq!(decided.as_slice(), composed.facts.as_slice());
+        assert_eq!(decided.as_slice(), composed.as_slice());
         assert!(matches!(
             &appended.facts()[2],
             Fact::DispatchOpened { dispatch, .. } if dispatch == &released[0].dispatch
@@ -3805,7 +3741,7 @@ mod tests {
         let e = engine(vec![crm_tool()]);
         let internal = Audience::restricted([ReaderId::new("internal")]);
         let records = vec![user_value(known(TRUSTED, internal))];
-        let view = e.view(&traj(), records.clone(), Revision::new(1)).unwrap();
+        let view = e.view(&traj(), records.clone(), 1).unwrap();
         let batch = |proposals: Vec<ResolvedCall>| {
             EngineEvent::Proposals(ProposalBatch {
                 id: crate::transition::ProposalBatchId::new("b1"),
@@ -3825,10 +3761,9 @@ mod tests {
             .append
             .clone()
             .expect("the first decision records itself")
-            .into_unsealed()
-            .facts;
+            .into_unsealed();
         let decided = [records, appended_facts.clone()].concat();
-        let after = e.view(&traj(), decided, Revision::new(2)).unwrap();
+        let after = e.view(&traj(), decided, 2).unwrap();
 
         let repeat = e.handle(&after, batch(vec![call.clone()])).unwrap();
         assert_eq!(repeat.append, None);
@@ -3979,13 +3914,13 @@ mod tests {
             offer_nonce: nonce(),
         });
 
-        let view = e.view(&traj(), public.clone(), Revision::new(1)).unwrap();
+        let view = e.view(&traj(), public.clone(), 1).unwrap();
         let decision = e.handle(&view, event.clone()).unwrap();
         let decided = decision.append.expect("the block records its decision").into_unsealed();
 
         let internal = Audience::restricted([ReaderId::new("internal")]);
-        let later = [public, decided.facts, vec![user_value(known(TRUSTED, internal))]].concat();
-        let revision = Revision::new(later.len() as u64);
+        let later = [public, decided, vec![user_value(known(TRUSTED, internal))]].concat();
+        let revision = later.len() as u64;
         let after = e.view(&traj(), later, revision).unwrap();
 
         let FollowUp::Proposals {
@@ -4005,7 +3940,7 @@ mod tests {
     fn the_boundary_plans_a_blocked_proposal_and_opens_nothing() {
         let e = engine(vec![crm_tool(), plain_tool("send")]);
         let records = vec![user_value(known(TRUSTED, Audience::Public))];
-        let view = e.view(&traj(), records, Revision::new(1)).unwrap();
+        let view = e.view(&traj(), records, 1).unwrap();
         let call = call("get_ticket", json!({}));
 
         let decision = e
@@ -4278,17 +4213,16 @@ mod tests {
     }
 
     fn open(e: &Engine, log: &mut Vec<Fact>, c: &ResolvedCall) -> crate::value::DispatchId {
-        let p = Projection::build(log, Revision::new(log.len() as u64));
+        let p = Projection::build(log, log.len() as u64);
         let batch = e.open_dispatch(&p.view(&traj()), c).unwrap();
         let dispatch = batch
-            .facts
             .iter()
             .find_map(|fact| match fact {
                 Fact::DispatchOpened { dispatch, .. } => Some(dispatch.clone()),
                 _ => None,
             })
             .expect("open_dispatch appends the open fact");
-        log.extend(batch.facts);
+        log.extend(batch);
         dispatch
     }
 
@@ -4299,9 +4233,9 @@ mod tests {
         c: &ResolvedCall,
         admission: crate::admit::ResultAdmission,
     ) {
-        let p = Projection::build(log, Revision::new(log.len() as u64));
+        let p = Projection::build(log, log.len() as u64);
         let batch = e.admit_result(&p.view(&traj()), dispatch, c, admission).unwrap();
-        log.extend(batch.facts);
+        log.extend(batch);
     }
 
     #[test]
@@ -4349,14 +4283,14 @@ mod tests {
         branched.extend(forked_child(&e, &branched.clone(), &child));
         let crossing = e
             .submit_child_return(
-                &Projection::build(&branched, Revision::new(branched.len() as u64)).view(&traj()),
+                &Projection::build(&branched, branched.len() as u64).view(&traj()),
                 &child,
                 crate::branch::ReturnSubmission::Raw {
                     body: ValueBody::new("done"),
                 },
             )
             .expect("a non-narrowing return crosses");
-        branched.extend(crossing.facts);
+        branched.extend(crossing);
         assert_eq!(e.validate_replay(&branched), Ok(()));
 
         let forge = |index: usize, label: Label| {
@@ -4399,7 +4333,7 @@ mod tests {
         let internal = Audience::restricted([ReaderId::new("internal")]);
         let call = call("get_ticket", json!({}));
         let records = vec![user_value(known(TRUSTED, internal))];
-        let view = e.view(&traj(), records.clone(), Revision::new(1)).unwrap();
+        let view = e.view(&traj(), records.clone(), 1).unwrap();
         let decision = e
             .handle(
                 &view,
@@ -4418,7 +4352,7 @@ mod tests {
         };
         let dispatch = released[0].dispatch.clone();
         let log = [records, decision.append.unwrap().facts().to_vec()].concat();
-        let released_view = e.view(&traj(), log.clone(), Revision::new(2)).unwrap();
+        let released_view = e.view(&traj(), log.clone(), 2).unwrap();
 
         let report = |outcome: ToolOutcome| ToolReport {
             dispatch: dispatch.clone(),
@@ -4452,7 +4386,7 @@ mod tests {
             ]
         ));
 
-        let after = e.view(&traj(), [log, facts].concat(), Revision::new(3)).unwrap();
+        let after = e.view(&traj(), [log, facts].concat(), 3).unwrap();
         let repeat = e
             .handle(&after, EngineEvent::Outcome(success()))
             .expect("a repeat of a closed report answers from the record");
@@ -4532,7 +4466,7 @@ mod tests {
         });
         let call = call("fetch", json!({}));
         let mut log = vec![user_value(known(Trust::new(2), Audience::Public))];
-        let projection = Projection::build(&log, Revision::new(log.len() as u64));
+        let projection = Projection::build(&log, log.len() as u64);
         let trajectory = traj();
         let views = projection.view(&trajectory);
         let block = match e.check(&views, &call).unwrap() {
@@ -4554,20 +4488,17 @@ mod tests {
             .clone();
         let executed = e.execute_remedy_plan(&views, &sanitize, &call, &[]).unwrap();
         let dispatch = executed
-            .facts
             .iter()
             .find_map(|fact| match fact {
                 Fact::DispatchOpened { dispatch, .. } => Some(dispatch.clone()),
                 _ => None,
             })
             .expect("the executed plan opens the dispatch");
-        log.extend(executed.facts);
+        log.extend(executed);
         assert_eq!(e.validate_replay(&log), Ok(()));
 
         let raw = ValueBody::new("page bytes");
-        let view = e
-            .view(&trajectory, log.clone(), Revision::new(log.len() as u64))
-            .unwrap();
+        let view = e.view(&trajectory, log.clone(), log.len() as u64).unwrap();
         let admitted = e
             .admit_result(
                 &view.projection().view(&trajectory),
@@ -4580,7 +4511,7 @@ mod tests {
                 },
             )
             .expect("the release accepted exactly this residual");
-        let log = [log, admitted.facts].concat();
+        let log = [log, admitted].concat();
         assert_eq!(e.validate_replay(&log), Ok(()));
     }
 
@@ -4619,7 +4550,7 @@ mod tests {
         });
         let call = call("fetch", json!({}));
         let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
-        let projection = Projection::build(&log, Revision::new(log.len() as u64));
+        let projection = Projection::build(&log, log.len() as u64);
         let trajectory = traj();
         let views = projection.view(&trajectory);
         let block = match e.check(&views, &call).unwrap() {
@@ -4641,15 +4572,14 @@ mod tests {
             .clone();
         let executed = e.execute_remedy_plan(&views, &sanitize, &call, &[]).unwrap();
         let dispatch = executed
-            .facts
             .iter()
             .find_map(|fact| match fact {
                 Fact::DispatchOpened { dispatch, .. } => Some(dispatch.clone()),
                 _ => None,
             })
             .expect("the executed plan opens the dispatch");
-        log.extend(executed.facts);
-        let view = e.view(&traj(), log.clone(), Revision::new(2)).unwrap();
+        log.extend(executed);
+        let view = e.view(&traj(), log.clone(), 2).unwrap();
 
         let raw = ValueBody::new("page bytes");
         let source = crate::value::RawResultDigest::of(raw.as_str().as_bytes());
@@ -4686,11 +4616,7 @@ mod tests {
         ));
 
         let checkpointed = e
-            .view(
-                &traj(),
-                [log.clone(), checkpoint.facts().to_vec()].concat(),
-                Revision::new(3),
-            )
+            .view(&traj(), [log.clone(), checkpoint.facts().to_vec()].concat(), 3)
             .unwrap();
         let again = e
             .handle(&checkpointed, EngineEvent::Outcome(report(Vec::new())))
@@ -4757,15 +4683,15 @@ mod tests {
         ));
 
         let whole = [log.clone(), checkpoint.facts().to_vec(), facts.clone()].concat();
-        assert_eq!(e.view(&traj(), whole.clone(), Revision::new(4)).map(|_| ()), Ok(()));
+        assert_eq!(e.view(&traj(), whole.clone(), 4).map(|_| ()), Ok(()));
         assert_eq!(
-            e.view(&traj(), whole[..whole.len() - 1].to_vec(), Revision::new(4))
+            e.view(&traj(), whole[..whole.len() - 1].to_vec(), 4)
                 .map(|_| ())
                 .unwrap_err(),
             crate::transition::TransitionRefusal::UnadmittedDerivation
         );
 
-        let settled = e.view(&traj(), whole, Revision::new(4)).unwrap();
+        let settled = e.view(&traj(), whole, 4).unwrap();
         let derived = ValueBody::new("page bytes, redacted");
         assert_eq!(
             e.handle(
@@ -4883,7 +4809,7 @@ mod tests {
             offer_nonce: nonce(),
         };
         let view = |log: &[Fact]| {
-            e.view(&traj(), log.to_vec(), Revision::new(log.len() as u64))
+            e.view(&traj(), log.to_vec(), log.len() as u64)
                 .expect("the log replays")
         };
         let asked = e
@@ -4954,7 +4880,7 @@ mod tests {
         let log = [log, facts].concat();
         let again = e
             .handle(
-                &e.view(&traj(), log.clone(), Revision::new(log.len() as u64)).unwrap(),
+                &e.view(&traj(), log.clone(), log.len() as u64).unwrap(),
                 EngineEvent::Outcome(ToolReport {
                     dispatch,
                     outcome: ToolOutcome::Success {
@@ -5143,11 +5069,7 @@ mod tests {
             "taking the candidate ends every other offer standing on it: {hopped:?}"
         );
         let after = e
-            .view(
-                &traj(),
-                [log.clone(), hopped].concat(),
-                Revision::new((log.len() + 8) as u64),
-            )
+            .view(&traj(), [log.clone(), hopped].concat(), (log.len() + 8) as u64)
             .expect("the hop's batch replays");
         assert_eq!(
             after.projection().view(&traj()).current_label().bound(),
@@ -5178,7 +5100,7 @@ mod tests {
             .view(
                 &traj(),
                 [log.clone(), accepted.clone()].concat(),
-                Revision::new((log.len() + 8) as u64),
+                (log.len() + 8) as u64,
             )
             .expect("the acceptance's batch replays");
         assert_eq!(
@@ -5197,7 +5119,7 @@ mod tests {
             e.view(
                 &traj(),
                 [log.clone(), accepted[..accepted.len() - 1].to_vec()].concat(),
-                Revision::new((log.len() + 8) as u64),
+                (log.len() + 8) as u64,
             )
             .map(|_| ())
             .unwrap_err(),
@@ -5246,7 +5168,7 @@ mod tests {
 
         let replanned = e
             .handle(
-                &e.view(&traj(), log.clone(), Revision::new(log.len() as u64)).unwrap(),
+                &e.view(&traj(), log.clone(), log.len() as u64).unwrap(),
                 EngineEvent::Outcome(ToolReport {
                     dispatch,
                     outcome: ToolOutcome::Success {
@@ -5752,7 +5674,7 @@ mod tests {
         let body = ValueBody::new("posted");
         let reported = e
             .handle(
-                &e.view(&traj(), log.clone(), Revision::new(log.len() as u64)).unwrap(),
+                &e.view(&traj(), log.clone(), log.len() as u64).unwrap(),
                 EngineEvent::Outcome(ToolReport {
                     dispatch,
                     outcome: ToolOutcome::Success {
@@ -5784,7 +5706,7 @@ mod tests {
         let internal = Audience::restricted([ReaderId::new("internal")]);
         let mut log = vec![user_value(known(SUSPICIOUS, internal.clone()))];
         log.extend(forked_child(&e, &log.clone(), &child));
-        let view = e.view(&traj(), log.clone(), Revision::new(log.len() as u64)).unwrap();
+        let view = e.view(&traj(), log.clone(), log.len() as u64).unwrap();
 
         let body = ValueBody::new("the child's answer");
         let report = |submission: ChildSubmission| child_report(&log, &child, submission);
@@ -5796,9 +5718,7 @@ mod tests {
             FollowUp::Child(ChildFollowUp::Merged { admitted: body.clone() })
         );
         let facts = merged.append.expect("the crossing appends").facts().to_vec();
-        let after = e
-            .view(&traj(), [log.clone(), facts].concat(), Revision::new(9))
-            .unwrap();
+        let after = e.view(&traj(), [log.clone(), facts].concat(), 9).unwrap();
 
         let repeat = e
             .handle(&after, report(ChildSubmission::Value { body: body.clone() }))
@@ -5842,7 +5762,7 @@ mod tests {
         let e = engine(vec![plain_tool("spawn")]);
         let call = call("spawn", json!({}));
         let records = vec![user_value(known(TRUSTED, Audience::Public))];
-        let view = e.view(&traj(), records.clone(), Revision::new(1)).unwrap();
+        let view = e.view(&traj(), records.clone(), 1).unwrap();
         let batch = |spawn: Option<crate::transition::SpawnMark>| {
             EngineEvent::Proposals(ProposalBatch {
                 id: crate::transition::ProposalBatchId::new("b1"),
@@ -5872,7 +5792,7 @@ mod tests {
             ]
         ));
         let log = [records, facts].concat();
-        let prepared = e.view(&traj(), log.clone(), Revision::new(2)).unwrap();
+        let prepared = e.view(&traj(), log.clone(), 2).unwrap();
         assert_eq!(
             e.handle(&prepared, batch(None)),
             Err(crate::transition::TransitionError::BatchIdentityConflict)
@@ -5888,9 +5808,7 @@ mod tests {
         let opened = bound.append.expect("the binding appends").facts().to_vec();
         assert!(matches!(opened.as_slice(), [Fact::ForkOpened { .. }]));
 
-        let after = e
-            .view(&traj(), [log.clone(), opened].concat(), Revision::new(3))
-            .unwrap();
+        let after = e.view(&traj(), [log.clone(), opened].concat(), 3).unwrap();
         assert_eq!(after.views(&child).current_label(), partial(TRUSTED, Audience::Public));
         assert_eq!(after.views(&child).parent_of(&child), Some(&traj()));
 
@@ -5921,7 +5839,7 @@ mod tests {
             }],
         ]
         .concat();
-        let after_run = e.view(&traj(), ran, Revision::new(3)).unwrap();
+        let after_run = e.view(&traj(), ran, 3).unwrap();
         let repeat = e
             .handle(&after_run, batch(Some(crate::transition::SpawnMark::at(0))))
             .expect("the repeat answers from the record");
@@ -5943,7 +5861,7 @@ mod tests {
             }],
         ]
         .concat();
-        let after_failure = e.view(&traj(), failed, Revision::new(3)).unwrap();
+        let after_failure = e.view(&traj(), failed, 3).unwrap();
         assert_eq!(
             e.handle(&after_failure, bind(fork, child)),
             Err(crate::transition::TransitionError::UnbindableFork)
@@ -5955,7 +5873,7 @@ mod tests {
         let e = engine(vec![plain_tool("spawn")]);
         let call = call("spawn", json!({}));
         let records = vec![user_value(known(TRUSTED, Audience::Public))];
-        let mut held = e.view(&traj(), records.clone(), Revision::new(1)).unwrap();
+        let mut held = e.view(&traj(), records.clone(), 1).unwrap();
         let child = TrajectoryId::new("child");
 
         let prepared = e
@@ -5993,9 +5911,7 @@ mod tests {
         assert_eq!(e.fork_of(&held, &child), Some(fork.clone()));
 
         let whole = [records, prepared_batch.facts().to_vec(), bound_batch.facts().to_vec()].concat();
-        let cold = e
-            .view(&traj(), whole.clone(), Revision::new(whole.len() as u64))
-            .unwrap();
+        let cold = e.view(&traj(), whole.clone(), whole.len() as u64).unwrap();
         assert_eq!(e.fork_of(&cold, &child), Some(fork.clone()));
 
         assert_eq!(
@@ -6017,7 +5933,7 @@ mod tests {
         let e = engine(vec![plain_tool("spawn")]);
         let call = call("spawn", json!({}));
         let records = vec![user_value(known(TRUSTED, Audience::Public))];
-        let view = e.view(&traj(), records.clone(), Revision::new(1)).unwrap();
+        let view = e.view(&traj(), records.clone(), 1).unwrap();
         let marked = e
             .handle(
                 &view,
@@ -6075,11 +5991,7 @@ mod tests {
         })
         .expect("an uncontrolled deployment opens");
         let view = e
-            .view(
-                &traj(),
-                vec![user_value(known(TRUSTED, Audience::Public))],
-                Revision::new(1),
-            )
+            .view(&traj(), vec![user_value(known(TRUSTED, Audience::Public))], 1)
             .unwrap();
         assert_eq!(
             e.handle(
@@ -6104,7 +6016,7 @@ mod tests {
         };
         let call = call("spawn", args);
         let records = vec![user_value(known(TRUSTED, Audience::Public))];
-        let view = e.view(&traj(), records.clone(), Revision::new(1)).unwrap();
+        let view = e.view(&traj(), records.clone(), 1).unwrap();
         let decision = e
             .handle(
                 &view,
@@ -6123,7 +6035,7 @@ mod tests {
         };
         let fork = released[0].fork.clone().expect("the release carries its fork");
         let log = [records, decision.append.expect("the release appends").facts().to_vec()].concat();
-        let prepared = e.view(&traj(), log.clone(), Revision::new(log.len() as u64)).unwrap();
+        let prepared = e.view(&traj(), log.clone(), log.len() as u64).unwrap();
         let bound = e
             .handle(
                 &prepared,
@@ -6162,7 +6074,7 @@ mod tests {
             "the preparation persists the compiled shape itself"
         );
 
-        let view = e.view(&traj(), log.clone(), Revision::new(log.len() as u64)).unwrap();
+        let view = e.view(&traj(), log.clone(), log.len() as u64).unwrap();
         let report = |text: &str| {
             child_report(
                 &log,
@@ -6196,9 +6108,7 @@ mod tests {
             merged.append.expect("the crossing appends").facts().to_vec(),
         ]
         .concat();
-        let after = e
-            .view(&traj(), ended.clone(), Revision::new(ended.len() as u64))
-            .unwrap();
+        let after = e.view(&traj(), ended.clone(), ended.len() as u64).unwrap();
 
         let repeat = e
             .handle(&after, report(r#"{"verdict": "allow", "confidence": 97}"#))
@@ -6228,7 +6138,7 @@ mod tests {
         });
         let child = TrajectoryId::new("child");
         let log = spawn_family(&e, Some(&schema), &child);
-        let view = e.view(&traj(), log.clone(), Revision::new(log.len() as u64)).unwrap();
+        let view = e.view(&traj(), log.clone(), log.len() as u64).unwrap();
         let ended = e
             .handle(&view, child_report(&log, &child, ChildSubmission::Void))
             .expect("a void return ends the shaped branch");
@@ -6252,11 +6162,7 @@ mod tests {
         });
         let call = call("spawn", json!({ "return_schema": free }));
         let view = e
-            .view(
-                &traj(),
-                vec![user_value(known(TRUSTED, Audience::Public))],
-                Revision::new(1),
-            )
+            .view(&traj(), vec![user_value(known(TRUSTED, Audience::Public))], 1)
             .unwrap();
         let batch = |id: &str, spawn: Option<crate::transition::SpawnMark>| {
             EngineEvent::Proposals(ProposalBatch {
@@ -6328,7 +6234,7 @@ mod tests {
         assert_eq!(e.validate_replay(&plain), Ok(()));
         assert_eq!(reshape(&plain, Some(other)), Err(TransitionRefusal::ForkShapeMismatch));
 
-        let view = e.view(&traj(), log.clone(), Revision::new(log.len() as u64)).unwrap();
+        let view = e.view(&traj(), log.clone(), log.len() as u64).unwrap();
         let merged = e
             .handle(
                 &view,
@@ -6375,7 +6281,7 @@ mod tests {
             provenance: Provenance::UserInput,
         });
 
-        let projection = Projection::build(&log, Revision::new(log.len() as u64));
+        let projection = Projection::build(&log, log.len() as u64);
         let trajectory = traj();
         let views = projection.view(&trajectory);
         let accept = match e.check_child_return(&views, &child).unwrap() {
@@ -6395,7 +6301,7 @@ mod tests {
                 },
             )
             .expect("the accepted crossing merges");
-        let merged = [log, executed.facts].concat();
+        let merged = [log, executed].concat();
         assert_eq!(e.validate_replay(&merged), Ok(()));
 
         let forged: Vec<Fact> = merged
@@ -6433,7 +6339,7 @@ mod tests {
     }
 
     fn basis_of(e: &Engine, log: &[Fact]) -> crate::basis::PolicyBasis {
-        e.view(&traj(), log.to_vec(), Revision::new(log.len() as u64))
+        e.view(&traj(), log.to_vec(), log.len() as u64)
             .expect("the log replays")
             .projection()
             .view(&traj())
@@ -6442,7 +6348,7 @@ mod tests {
 
     fn decide(e: &Engine, log: &[Fact], id: &str, call: &ResolvedCall) -> EngineDecision {
         let view = e
-            .view(&traj(), log.to_vec(), Revision::new(log.len() as u64))
+            .view(&traj(), log.to_vec(), log.len() as u64)
             .expect("the log replays");
         e.handle(
             &view,
@@ -6559,7 +6465,7 @@ mod tests {
         proposal: ResolvedCall,
     ) -> Result<EngineDecision, TransitionError> {
         let view = e
-            .view(&traj(), log.to_vec(), Revision::new(log.len() as u64))
+            .view(&traj(), log.to_vec(), log.len() as u64)
             .expect("the log replays");
         e.handle(
             &view,
@@ -6644,7 +6550,7 @@ mod tests {
         outcome: OfferOutcome,
     ) -> Result<EngineDecision, TransitionError> {
         let view = e
-            .view(&traj(), log.to_vec(), Revision::new(log.len() as u64))
+            .view(&traj(), log.to_vec(), log.len() as u64)
             .expect("the log replays");
         e.handle(
             &view,
@@ -6930,9 +6836,7 @@ mod tests {
             other => panic!("a proposal batch answers with proposals, not {other:?}"),
         };
         let log = [log, appended_facts(release)].concat();
-        let view = e
-            .view(&traj(), log.clone(), Revision::new(log.len() as u64))
-            .expect("the log replays");
+        let view = e.view(&traj(), log.clone(), log.len() as u64).expect("the log replays");
         let closed = e
             .handle(
                 &view,
@@ -7108,9 +7012,7 @@ mod tests {
             appended_facts(proposed(&e, &log, "b3", nonce(), call("note", json!({}))).expect("the note releases"));
         let log = [log, moved].concat();
 
-        let view = e
-            .view(&traj(), log.clone(), Revision::new(log.len() as u64))
-            .expect("the log replays");
+        let view = e.view(&traj(), log.clone(), log.len() as u64).expect("the log replays");
         let closed = e
             .handle(
                 &view,
@@ -7412,9 +7314,7 @@ mod tests {
             execute_offer(&e, &log, unknown, OfferOutcome::Approved(Vec::new())),
             Err(TransitionError::UnknownOffer)
         );
-        let view = e
-            .view(&traj(), log.clone(), Revision::new(log.len() as u64))
-            .expect("the log replays");
+        let view = e.view(&traj(), log.clone(), log.len() as u64).expect("the log replays");
         assert_eq!(
             e.handle(
                 &view,
@@ -7522,8 +7422,7 @@ mod tests {
             Err(TransitionRefusal::UndischargedAcceptance)
         );
         assert_eq!(
-            e.view(&traj(), stopped.clone(), Revision::new(stopped.len() as u64))
-                .err(),
+            e.view(&traj(), stopped.clone(), stopped.len() as u64).err(),
             Some(TransitionRefusal::UndischargedAcceptance)
         );
 
@@ -7618,7 +7517,7 @@ mod tests {
             .filter(|fact| !matches!(fact, Fact::CallApproved { .. }))
             .collect();
 
-        let mut projection = Projection::empty(Revision::new(unpaired.len() as u64));
+        let mut projection = Projection::empty(unpaired.len() as u64);
         for fact in &unpaired {
             projection.fold(fact);
         }
@@ -7737,7 +7636,7 @@ mod tests {
         let internal = Audience::restricted([ReaderId::new("internal")]);
         let call = call("get_ticket", json!({}));
         let records = vec![user_value(known(TRUSTED, internal))];
-        let view = e.view(&traj(), records.clone(), Revision::new(1)).unwrap();
+        let view = e.view(&traj(), records.clone(), 1).unwrap();
         let decision = e
             .handle(
                 &view,
@@ -7817,7 +7716,7 @@ mod tests {
         let internal = Audience::restricted([ReaderId::new("internal")]);
         let mut log = vec![user_value(known(SUSPICIOUS, internal.clone()))];
         log.extend(forked_child(&e, &log.clone(), &child));
-        let projection = Projection::build(&log, Revision::new(log.len() as u64));
+        let projection = Projection::build(&log, log.len() as u64);
         let trajectory = traj();
         let crossing = e
             .submit_child_return(
@@ -7828,15 +7727,15 @@ mod tests {
                 },
             )
             .expect("a non-narrowing crossing merges");
-        let whole = [log.clone(), crossing.facts.clone()].concat();
+        let whole = [log.clone(), crossing.clone()].concat();
         assert_eq!(e.validate_replay(&whole), Ok(()));
 
         assert_eq!(
-            e.validate_replay(&[log.clone(), vec![crossing.facts[0].clone()]].concat()),
+            e.validate_replay(&[log.clone(), vec![crossing[0].clone()]].concat()),
             Err(TransitionRefusal::UnmergedCrossing)
         );
         assert_eq!(
-            e.validate_replay(&[log.clone(), vec![crossing.facts[0].clone(), crossing.facts[2].clone()]].concat()),
+            e.validate_replay(&[log.clone(), vec![crossing[0].clone(), crossing[2].clone()]].concat()),
             Err(TransitionRefusal::RepeatAdmission)
         );
         let mut forged = whole.clone();
@@ -7902,13 +7801,10 @@ mod tests {
         let mut log = vec![user_value(known(TRUSTED, internal))];
         log.extend(forked_child(&e, &log.clone(), &child));
         let ended = e
-            .submit_void_return(
-                &Projection::build(&log, Revision::new(log.len() as u64)).view(&traj()),
-                &child,
-            )
+            .submit_void_return(&Projection::build(&log, log.len() as u64).view(&traj()), &child)
             .expect("the child ends with no value");
-        log.extend(ended.facts);
-        let view = e.view(&traj(), log.clone(), Revision::new(log.len() as u64)).unwrap();
+        log.extend(ended);
+        let view = e.view(&traj(), log.clone(), log.len() as u64).unwrap();
 
         let call = call("get_ticket", json!({}));
         assert_eq!(
@@ -7968,14 +7864,14 @@ mod tests {
         let body = ValueBody::new("the ticket");
         let checkpoint = e
             .observe_success(
-                &Projection::build(&log, Revision::new(log.len() as u64)).view(&traj()),
+                &Projection::build(&log, log.len() as u64).view(&traj()),
                 &dispatch,
                 &call,
                 crate::fact::ObservedResult::Available(crate::value::RawResultDigest::of(body.as_str().as_bytes())),
             )
             .expect("an open dispatch checkpoints");
-        log.extend(checkpoint.facts);
-        let views = Projection::build(&log, Revision::new(log.len() as u64));
+        log.extend(checkpoint);
+        let views = Projection::build(&log, log.len() as u64);
 
         assert_eq!(
             e.admit_result(
@@ -8027,7 +7923,7 @@ mod tests {
         let records = vec![user_value(known(TRUSTED, Audience::Public))];
 
         let confining = open_engine(config.clone());
-        let projection = Projection::build(&records, Revision::new(1));
+        let projection = Projection::build(&records, 1);
         let trajectory = traj();
         let views = projection.view(&trajectory);
         let block = match confining.check(&views, &call).unwrap() {
@@ -8050,7 +7946,7 @@ mod tests {
         let released = confining
             .execute_remedy_plan(&views, &sanitize, &call, &[])
             .expect("the sanitize plan executes");
-        let log = [records.clone(), released.facts].concat();
+        let log = [records.clone(), released].concat();
         assert_eq!(confining.validate_replay(&log), Ok(()));
 
         let mut declaration = crate::profile::covering_declaration(&config);
@@ -8146,7 +8042,7 @@ mod tests {
     }
 
     fn replayed(e: &Engine, log: &[Fact]) -> EngineView {
-        e.view(&traj(), log.to_vec(), Revision::new(log.len() as u64))
+        e.view(&traj(), log.to_vec(), log.len() as u64)
             .expect("the log replays")
     }
 
@@ -8741,7 +8637,7 @@ mod tests {
             provenance: Provenance::UserInput,
         });
 
-        let projection = Projection::build(&log, Revision::new(log.len() as u64));
+        let projection = Projection::build(&log, log.len() as u64);
         let trajectory = traj();
         let views = projection.view(&trajectory);
         let sanitize = match e.check_child_return(&views, &child).unwrap() {
@@ -8763,7 +8659,7 @@ mod tests {
                 },
             )
             .expect("the offered plan executes");
-        assert_eq!(e.validate_replay(&[log, executed.facts].concat()), Ok(()));
+        assert_eq!(e.validate_replay(&[log, executed].concat()), Ok(()));
     }
 
     fn reservation_tools() -> Vec<ToolContract> {
@@ -8840,7 +8736,7 @@ mod tests {
             &send,
             crate::admit::ResultAdmission::Indeterminate,
         );
-        let p = Projection::build(&log, Revision::new(log.len() as u64));
+        let p = Projection::build(&log, log.len() as u64);
         assert!(!p.view(&traj()).is_open(&dispatch), "the dispatch is closed");
         match check(&e, &log, &call("guard", json!({}))) {
             CheckOutcome::Block(b) => {
@@ -8931,12 +8827,12 @@ mod tests {
             check(&e, &log, &call("wants_read", json!({}))),
             CheckOutcome::Block(_)
         ));
-        let p = Projection::build(&log, Revision::new(log.len() as u64));
+        let p = Projection::build(&log, log.len() as u64);
         let batch = e
             .observe_success(&p.view(&traj()), &dispatch, &scan_call, ObservedResult::Unavailable)
             .unwrap();
-        log.extend(batch.facts);
-        let p = Projection::build(&log, Revision::new(log.len() as u64));
+        log.extend(batch);
+        let p = Projection::build(&log, log.len() as u64);
         assert!(p.view(&traj()).is_open(&dispatch));
         assert_eq!(check(&e, &log, &call("wants_read", json!({}))), CheckOutcome::Allow);
         assert!(matches!(
@@ -9165,11 +9061,7 @@ mod tests {
         let child = TrajectoryId::new("child");
         let unknown_source = user_value(Label::new(Dim::Unknown, Dim::Known(Audience::Public)));
         let base = vec![unknown_source.clone()];
-        let basis_after = |log: &[Fact]| {
-            Projection::build(log, crate::fact::Revision::new(log.len() as u64))
-                .view(&traj())
-                .freeze_basis()
-        };
+        let basis_after = |log: &[Fact]| Projection::build(log, log.len() as u64).view(&traj()).freeze_basis();
         let resolve = |trajectory: TrajectoryId, value: u64| Fact::CastApplied {
             trajectory,
             value: crate::value::ValueId::new(value),
@@ -9241,14 +9133,14 @@ mod tests {
         });
         let crossing = e
             .submit_child_return(
-                &Projection::build(&log, Revision::new(log.len() as u64)).view(&traj()),
+                &Projection::build(&log, log.len() as u64).view(&traj()),
                 &child,
                 crate::branch::ReturnSubmission::Raw {
                     body: ValueBody::new("found"),
                 },
             )
             .expect("an unresolved-identity crossing merges");
-        log.extend(crossing.into_facts());
+        log.extend(crossing);
         assert_eq!(e.validate_replay(&log), Ok(()));
 
         let sibling = TrajectoryId::new("sibling");
@@ -9402,10 +9294,10 @@ mod tests {
         assert_eq!(check(&e, &log, &proposed), CheckOutcome::Allow);
 
         let t = traj();
-        let p = Projection::build(&log, Revision::new(log.len() as u64));
+        let p = Projection::build(&log, log.len() as u64);
         let batch = e.open_dispatch(&p.view(&t), &proposed).unwrap();
-        log.extend(batch.facts);
-        let p = Projection::build(&log, Revision::new(log.len() as u64));
+        log.extend(batch);
+        let p = Projection::build(&log, log.len() as u64);
         let dispatch = DispatchId::new(t.clone(), proposed.digest(), 0);
         let batch = e
             .admit_result(
@@ -9417,8 +9309,8 @@ mod tests {
                 },
             )
             .unwrap();
-        log.extend(batch.facts);
-        let p = Projection::build(&log, Revision::new(log.len() as u64));
+        log.extend(batch);
+        let p = Projection::build(&log, log.len() as u64);
         let current = p.view(&t).current_label();
         assert_eq!(current.bound(), &EstablishedLabel::new(TRUSTED, Audience::Public));
         assert!(!current.is_established(Dimension::Trust));
@@ -9450,7 +9342,7 @@ mod tests {
     #[test]
     fn unknown_tool_errors() {
         let e = engine(vec![]);
-        let p = Projection::build(&[], Revision::ZERO);
+        let p = Projection::build(&[], 0);
         let t = traj();
         assert!(matches!(
             e.check(&p.view(&t), &call("ghost", json!({}))),
@@ -9463,7 +9355,7 @@ mod tests {
         let e = engine(vec![crm_tool()]);
         let internal = Audience::restricted([ReaderId::new("internal")]);
         let log = vec![user_value(known(SUSPICIOUS, internal))];
-        let p = Projection::build(&log, Revision::new(log.len() as u64));
+        let p = Projection::build(&log, log.len() as u64);
         let t = traj();
         assert_eq!(
             e.open_dispatch(&p.view(&t), &call("get_ticket", json!({}))),
@@ -9542,7 +9434,7 @@ mod tests {
         };
         let e = open_engine(cfg);
         let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
-        let p = Projection::build(&log, Revision::new(log.len() as u64));
+        let p = Projection::build(&log, log.len() as u64);
         let t = traj();
         let wire_call = call("wire", json!({}));
         let raw = match e.check(&p.view(&t), &wire_call).unwrap() {
@@ -9583,7 +9475,7 @@ mod tests {
     fn schema_invalid_arguments_are_an_invalid_call_at_every_fresh_entry_point() {
         let e = engine(vec![strict_tool("send")]);
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
-        let p = Projection::build(&log, Revision::new(1));
+        let p = Projection::build(&log, 1);
         let t = traj();
         let views = p.view(&t);
         let bogus = call("send", json!({ "bogus": 1 }));
@@ -9641,9 +9533,9 @@ mod tests {
         let e = engine(vec![strict_tool("send")]);
         let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
         let good = call("send", json!({ "to": "hr" }));
-        let p = Projection::build(&log, Revision::new(1));
+        let p = Projection::build(&log, 1);
         let batch = e.open_dispatch(&p.view(&traj()), &good).unwrap();
-        log.extend(batch.facts);
+        log.extend(batch);
         assert_eq!(e.validate_replay(&log), Ok(()));
 
         let opened = |tool: &str, payload: serde_json::Value, minted_from: &ResolvedCall| Fact::DispatchOpened {
@@ -9697,7 +9589,7 @@ mod tests {
         };
         let e = open_engine(cfg);
         let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
-        let p = Projection::build(&log, Revision::new(1));
+        let p = Projection::build(&log, 1);
         let t = traj();
         let views = p.view(&t);
         let wire_call = call("wire", json!({ "to": "distinctive-recipient-hr" }));
@@ -9717,11 +9609,11 @@ mod tests {
             },
         };
         let batch = e.execute_remedy_plan(&views, &chosen, &wire_call, &[ruling]).unwrap();
-        let serialized = serde_json::to_string(&batch.facts).unwrap();
+        let serialized = serde_json::to_string(&batch).unwrap();
         assert_eq!(serialized.matches("distinctive-recipient-hr").count(), 1);
-        assert!(matches!(batch.facts.last().unwrap(), Fact::DispatchOpened { .. }));
+        assert!(matches!(batch.last().unwrap(), Fact::DispatchOpened { .. }));
         let restored: Vec<Fact> = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(restored, batch.facts);
+        assert_eq!(restored, batch);
     }
 
     #[test]
@@ -9729,10 +9621,10 @@ mod tests {
         let e = engine(vec![crm_tool()]);
         let internal = Audience::restricted([ReaderId::new("internal")]);
         let log = vec![user_value(known(TRUSTED, internal.clone()))];
-        let p = Projection::build(&log, Revision::new(log.len() as u64));
+        let p = Projection::build(&log, log.len() as u64);
         let t = traj();
         let batch = e.open_dispatch(&p.view(&t), &call("get_ticket", json!({}))).unwrap();
-        match &batch.facts[0] {
+        match &batch[0] {
             Fact::DispatchOpened { proposed_label, .. } => {
                 assert_eq!(*proposed_label, established(TRUSTED, internal));
             }
@@ -9780,7 +9672,7 @@ mod tests {
     fn a_proposal_naming_a_provider_run_tool_is_malformed_at_every_fresh_entry_point() {
         let e = engine_with_provider_run(vec![plain_tool("search")], &["search"]);
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
-        let p = Projection::build(&log, Revision::new(1));
+        let p = Projection::build(&log, 1);
         let t = traj();
         let views = p.view(&t);
         let proposed = call("search", json!({}));
@@ -9827,7 +9719,7 @@ mod tests {
         emitter.emits = EffectSet::new([EffectKind::new("k")]).unwrap();
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let offered_tools = |e: &Engine| -> Vec<String> {
-            let p = Projection::build(&log, Revision::new(1));
+            let p = Projection::build(&log, 1);
             let t = traj();
             let wire = call("wire", json!({}));
             let raw = match e.check(&p.view(&t), &wire).unwrap() {
@@ -9854,18 +9746,23 @@ mod tests {
     fn the_opening_batch_carries_the_identity_and_derived_vectors() {
         let e = engine_with_provider_run(vec![plain_tool("send"), plain_tool("search")], &["search"]);
         let t = traj();
-        let batch = e.open_trajectory(&t);
-        assert_eq!(batch.basis, Revision::ZERO);
-        match batch.facts.as_slice() {
+        let key = crate::profile::PolicyFileKey::of(b"the policy file");
+        let batch = e
+            .open_trajectory(&t, key.clone())
+            .expect("a fresh root's opening seals");
+        assert_eq!(batch.basis(), 0, "the opening stands on the empty log");
+        match batch.facts() {
             [
                 Fact::TrajectoryOpened {
                     trajectory,
                     dialect,
                     profile,
                     policy_digest,
+                    policy_file_key,
                     open_vectors,
                 },
             ] => {
+                assert_eq!(policy_file_key, &key, "the opening names the file it opened under");
                 assert_eq!(trajectory, &t);
                 assert_eq!(*dialect, PolicyDialectVersion::new(1));
                 assert_eq!(profile, e.profile());
@@ -9875,15 +9772,19 @@ mod tests {
             }
             other => panic!("expected exactly the opening record, got {other:?}"),
         }
-        let wire = serde_json::to_string(&batch.facts).unwrap();
-        assert_eq!(serde_json::from_str::<Vec<Fact>>(&wire).unwrap(), batch.facts);
+        let wire = serde_json::to_string(batch.facts()).unwrap();
+        assert_eq!(serde_json::from_str::<Vec<Fact>>(&wire).unwrap(), batch.facts());
     }
 
     #[test]
     fn cold_replay_verifies_the_opening_strictly() {
         let e = engine_with_provider_run(vec![plain_tool("send"), plain_tool("search")], &["search"]);
         let t = traj();
-        let opening = e.open_trajectory(&t).facts.remove(0);
+        let opening = e
+            .open_trajectory(&t, crate::profile::PolicyFileKey::of(b"the policy file"))
+            .expect("the opening seals")
+            .into_unsealed()
+            .remove(0);
         let admitted = user_value(known(TRUSTED, Audience::Public));
 
         assert_eq!(e.verify_opening(&[opening.clone(), admitted.clone()], &t), Ok(()));
@@ -9976,11 +9877,7 @@ mod tests {
         })
         .unwrap();
         let view = e
-            .view(
-                &traj(),
-                vec![user_value(known(TRUSTED, Audience::Public))],
-                Revision::new(1),
-            )
+            .view(&traj(), vec![user_value(known(TRUSTED, Audience::Public))], 1)
             .unwrap();
         let decision = e
             .handle(
@@ -10012,12 +9909,16 @@ mod tests {
     fn an_opening_record_is_inert_in_projection_and_replay_validation() {
         let e = engine(vec![plain_tool("send")]);
         let t = traj();
-        let opening = e.open_trajectory(&t).facts.remove(0);
+        let opening = e
+            .open_trajectory(&t, crate::profile::PolicyFileKey::of(b"the policy file"))
+            .expect("the opening seals")
+            .into_unsealed()
+            .remove(0);
         let admitted = user_value(known(SUSPICIOUS, Audience::Public));
         let with = [opening.clone(), admitted.clone()];
         let without = [admitted];
-        let p_with = Projection::build(&with, Revision::new(2));
-        let p_without = Projection::build(&without, Revision::new(1));
+        let p_with = Projection::build(&with, 2);
+        let p_without = Projection::build(&without, 1);
         assert_eq!(p_with.view(&t).current_label(), p_without.view(&t).current_label());
         assert_eq!(p_with.view(&t).boundary_count(), p_without.view(&t).boundary_count());
         assert_eq!(e.validate_replay(&with), Ok(()));
@@ -10039,7 +9940,7 @@ mod tests {
     }
 
     fn viewing(e: &Engine, log: &[Fact]) -> EngineView {
-        e.view(&traj(), log.to_vec(), Revision::new(log.len() as u64))
+        e.view(&traj(), log.to_vec(), log.len() as u64)
             .expect("the log replays")
     }
 
@@ -11213,7 +11114,7 @@ mod tests {
                 .all(|fact| !matches!(fact, Fact::OfferOpened { trajectory, .. } if trajectory != &traj()))
         );
 
-        let after = Projection::build(&ended, Revision::new(ended.len() as u64));
+        let after = Projection::build(&ended, ended.len() as u64);
         let parent = traj();
         let views = after.view(&parent);
         assert!(views.has_ended(&child));
@@ -11290,7 +11191,7 @@ mod tests {
         )));
         let merged = [ended, crossing].concat();
         assert_eq!(e.validate_replay(&merged), Ok(()));
-        let views = Projection::build(&merged, Revision::new(merged.len() as u64));
+        let views = Projection::build(&merged, merged.len() as u64);
         assert_eq!(
             views.view(&traj()).current_label().bound(),
             &established(SUSPICIOUS, internal)
@@ -11409,7 +11310,7 @@ mod tests {
         )));
         let merged = [ended, crossing].concat();
         assert_eq!(e.validate_replay(&merged), Ok(()));
-        let views = Projection::build(&merged, Revision::new(merged.len() as u64));
+        let views = Projection::build(&merged, merged.len() as u64);
         assert_eq!(
             views.view(&traj()).current_label().bound(),
             &established(SUSPICIOUS, internal)
@@ -11573,7 +11474,7 @@ mod tests {
         let merged = [staged_log, crossing].concat();
         assert_eq!(e.validate_replay(&merged), Ok(()));
         assert_eq!(
-            Projection::build(&merged, Revision::new(merged.len() as u64))
+            Projection::build(&merged, merged.len() as u64)
                 .view(&traj())
                 .current_label()
                 .bound(),
@@ -11660,7 +11561,7 @@ mod tests {
             Fact::ReturnSubmitted { policy, .. } if policy == &ReturnPolicy::Sanitized(SanitizerName::new("quarantine"))
         )));
         assert!(
-            Projection::build(&ended, Revision::new(ended.len() as u64))
+            Projection::build(&ended, ended.len() as u64)
                 .view(&traj())
                 .has_ended(&child)
         );
@@ -11770,7 +11671,7 @@ mod tests {
         let merged = [pending, appended_facts(accepted)].concat();
         assert_eq!(e.validate_replay(&merged), Ok(()));
         assert_eq!(
-            Projection::build(&merged, Revision::new(merged.len() as u64))
+            Projection::build(&merged, merged.len() as u64)
                 .view(&traj())
                 .current_label()
                 .bound(),
@@ -11832,7 +11733,7 @@ mod tests {
 
         let ended = [log, appended].concat();
         assert_eq!(e.validate_replay(&ended), Ok(()));
-        let views = Projection::build(&ended, Revision::new(ended.len() as u64));
+        let views = Projection::build(&ended, ended.len() as u64);
         assert!(views.view(&traj()).has_ended(&child));
         assert_eq!(
             views.view(&traj()).current_label().bound(),
@@ -12148,7 +12049,7 @@ mod tests {
         let merged = [ended, crossing].concat();
         assert_eq!(e.validate_replay(&merged), Ok(()));
         assert_eq!(
-            Projection::build(&merged, Revision::new(merged.len() as u64))
+            Projection::build(&merged, merged.len() as u64)
                 .view(&traj())
                 .current_label()
                 .bound(),
@@ -12291,7 +12192,7 @@ mod tests {
         let merged = [staged_log, crossing].concat();
         assert_eq!(e.validate_replay(&merged), Ok(()));
         assert_eq!(
-            Projection::build(&merged, Revision::new(merged.len() as u64))
+            Projection::build(&merged, merged.len() as u64)
                 .view(&traj())
                 .current_label()
                 .bound(),
@@ -12402,7 +12303,7 @@ mod tests {
         );
         let merged = [log, appended_facts(decision)].concat();
         assert_eq!(e.validate_replay(&merged), Ok(()));
-        let views = Projection::build(&merged, Revision::new(merged.len() as u64));
+        let views = Projection::build(&merged, merged.len() as u64);
         assert!(views.view(&traj()).has_ended(&child));
         assert_eq!(
             views.view(&traj()).current_label().bound(),
@@ -12451,7 +12352,7 @@ mod tests {
         let ended = [log, appended].concat();
         assert_eq!(e.validate_replay(&ended), Ok(()));
         assert!(
-            Projection::build(&ended, Revision::new(ended.len() as u64))
+            Projection::build(&ended, ended.len() as u64)
                 .view(&traj())
                 .has_ended(&child)
         );
