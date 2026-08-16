@@ -553,14 +553,6 @@ fn validate_deployment(policy: &appa_policy::Config, config: &Config) -> Result<
         ));
     }
 
-    if let appa_engine::fact::ReturnPolicy::Sanitized(name) = policy.engine().child_return()
-        && name.is_attest_schema()
-    {
-        return Err(OpenError::UnsupportedPolicy(
-            "[child] return_sanitizer = \"attest-schema\" — this runtime consults an external for sanitized child returns, and the engine-applied builtin crosses only on the fork-addressed return path it does not drive yet".to_string(),
-        ));
-    }
-
     let rc = policy.registry_config();
     // Cast resolution is not wired in this runtime: an accepted
     // declaration would sit inert while unestablished blocks stay

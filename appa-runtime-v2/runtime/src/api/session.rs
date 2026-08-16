@@ -315,7 +315,7 @@ impl Session {
                         _ => Vec::new(),
                     };
                     if let Some(batch) = &decision.append {
-                        for fact in &batch.facts {
+                        for fact in batch.facts() {
                             if let appa_engine::fact::Fact::DispatchClosed { dispatch, .. } = fact {
                                 records.push(RuntimeRecord::CloseDispatch {
                                     id: DispatchId(crate::engine::dispatch_wire(dispatch)),
@@ -554,9 +554,9 @@ impl Session {
                 .as_ref()
                 .map(|batch| {
                     Ok::<BatchAppend, EventError>(BatchAppend {
-                        bytes: serde_json::to_vec(&batch.facts)
+                        bytes: serde_json::to_vec(batch.facts())
                             .map_err(|error| EventError::Storage(format!("batch does not serialize: {error}")))?,
-                        based_on: Revision(batch.basis.value()),
+                        based_on: Revision(batch.basis().value()),
                     })
                 })
                 .transpose()?;
@@ -769,7 +769,7 @@ mod tests {
     }
 
     fn batch_bytes(marker: Marker) -> Vec<u8> {
-        serde_json::to_vec(&batch(marker, 0).facts).expect("the test facts serialize")
+        serde_json::to_vec(batch(marker, 0).facts()).expect("the test facts serialize")
     }
 
     fn assert_only_the_opening(log: &[Vec<u8>]) {
@@ -2762,6 +2762,39 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
     }
 
     #[tokio::test]
+    async fn a_marked_spawn_without_context_control_releases_unmarked() {
+        const UNCONTROLLED: &str = r#"
+version = 1
+
+[[policy.tool]]
+name = "spawn"
+delta = {}
+
+[policy.deployment]
+context_control = false
+"#;
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(UNCONTROLLED, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let decision = session
+            .on_tool_call(
+                ProposedCall {
+                    tool: "spawn".to_string(),
+                    arguments: raw(serde_json::json!({})),
+                },
+                true,
+            )
+            .await
+            .expect("the marked call is decided");
+        assert_eq!(
+            decision,
+            ToolCallDecision::Allow { spawn: None },
+            "the mark is refused and the call releases as an ordinary flow, not a fork",
+        );
+    }
+
+    #[tokio::test]
     async fn a_child_is_forked_and_a_clean_return_crosses() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
@@ -2955,6 +2988,14 @@ attends = ["irreversible"]
             session.on_remedy(offer, None).await,
             Ok(RemedyDecision::Authorized { .. }),
         ));
+
+        let (log, _) = runtime.inner.store.load_log(&root()).expect("the family log loads");
+        let consumed = log
+            .iter()
+            .flat_map(|row| facts(row))
+            .filter(|fact| matches!(fact, appa_engine::fact::Fact::CallApprovalConsumed { .. }))
+            .count();
+        assert_eq!(consumed, 1, "the approval is consumed exactly once");
     }
 
     #[tokio::test]
@@ -3312,16 +3353,16 @@ confined_child_return = true
     }
 
     #[test]
-    fn a_child_bound_attest_schema_refuses_open_in_this_runtime() {
+    fn a_child_bound_attest_schema_opens() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        assert!(matches!(
+        assert!(
             Runtime::open(
                 attested_config(ATTEST_BOUND_CHILD, None),
                 dir.path().join("appa.db"),
                 None
-            ),
-            Err(OpenError::UnsupportedPolicy(_)),
-        ));
+            )
+            .is_ok()
+        );
     }
 
     #[test]

@@ -12,18 +12,6 @@ use crate::value::{ChildReturnId, LabeledValue, Provenance, RawResultDigest, Tra
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum BranchError {
-    #[error(
-        "the deployment does not control child context — branching exists only in context-controlling deployments"
-    )]
-    ContextUncontrolled,
-    #[error("a trajectory cannot fork itself")]
-    SelfFork,
-    #[error("the child is already forked from a parent (reparenting refused)")]
-    AlreadyForked,
-    #[error("the family log already names this child trajectory — a fork takes an unused id")]
-    ChildAlreadyActive,
-    #[error("the fork parent already ended its errand — an ended branch cannot fork")]
-    ParentEnded,
     #[error("the branch already ended its errand — by one value crossing or one void, at most once")]
     AlreadyEnded,
     #[error("the child was not forked from this parent (reparenting/cross-family merge refused)")]
@@ -48,53 +36,6 @@ pub enum BranchError {
     ReturnFoldUnestablished,
     #[error("a raw return that narrows the parent merges only through an executed return plan")]
     ReturnNarrowsParent,
-}
-
-/// Seed a child branch at the parent's frozen basis snapshot with an immutable, unique `Fork`
-/// binding carrying the child's [`ReturnPolicy`]. Refuses a self-fork, a re-fork of an
-/// already-bound child, a fork from an ended branch, and a policy naming an unregistered
-/// transformer. The batch is on the family's revision.
-pub(crate) fn seed_child(
-    registry: &Registry,
-    parent: &Views,
-    child: &TrajectoryId,
-    return_policy: ReturnPolicy,
-) -> Result<FactBatch, BranchError> {
-    if !registry.profile().context_control() {
-        return Err(BranchError::ContextUncontrolled);
-    }
-    if child == parent.trajectory() {
-        return Err(BranchError::SelfFork);
-    }
-    if parent.parent_of(child).is_some() {
-        return Err(BranchError::AlreadyForked);
-    }
-    if parent.is_active(child) {
-        return Err(BranchError::ChildAlreadyActive);
-    }
-    if parent.has_ended(parent.trajectory()) {
-        return Err(BranchError::ParentEnded);
-    }
-    match &return_policy {
-        ReturnPolicy::Raw => {}
-        ReturnPolicy::Sanitized(name) => {
-            let registered = registry
-                .sanitizer(name)
-                .ok_or_else(|| BranchError::UnknownSanitizer(name.as_str().to_string()))?;
-            if !registered.on.output {
-                return Err(BranchError::SanitizerNotOutput(name.as_str().to_string()));
-            }
-        }
-    }
-    let fact = Fact::Boundary {
-        trajectory: child.clone(),
-        kind: BoundaryKind::Fork {
-            parent: parent.trajectory().clone(),
-            snapshot: parent.freeze_basis(),
-            return_policy,
-        },
-    };
-    Ok(FactBatch::new(parent.revision(), vec![fact]))
 }
 
 pub(crate) fn submit_child_return(
@@ -319,6 +260,7 @@ pub enum ReturnSubmission {
     },
 }
 
+#[cfg(test)]
 pub(crate) fn execute_child_return_plan(
     registry: &Registry,
     parent: &Views,
@@ -467,15 +409,37 @@ mod tests {
         Projection::build(log, Revision::new(log.len() as u64))
     }
 
+    fn fork_records(log: &[Fact], parent: &TrajectoryId, child: &TrajectoryId, policy: ReturnPolicy) -> Vec<Fact> {
+        let projection = build(log);
+        let call = ResolvedCall::new(
+            ToolName::new("fork"),
+            crate::params::test_arguments(&json!({ "child": child.as_str() })),
+        );
+        let dispatch = DispatchId::new(parent.clone(), call.digest(), 0);
+        let fork = crate::value::ForkId::of(&dispatch);
+        vec![
+            Fact::ForkPrepared {
+                trajectory: parent.clone(),
+                fork: fork.clone(),
+                snapshot: projection.view(parent).freeze_basis(),
+                return_policy: policy,
+                shape: None,
+            },
+            Fact::ForkOpened {
+                trajectory: child.clone(),
+                fork,
+            },
+        ]
+    }
+
     fn forked(parent_label: Label) -> Vec<Fact> {
         forked_bound(parent_label, ReturnPolicy::Raw)
     }
 
     fn forked_bound(parent_label: Label, policy: ReturnPolicy) -> Vec<Fact> {
         let mut log = vec![admit(parent(), parent_label)];
-        let projection = build(&log);
-        let seed = seed_child(&registry(), &projection.view(&parent()), &child(), policy).unwrap();
-        log.extend(seed.facts);
+        let seed = fork_records(&log, &parent(), &child(), policy);
+        log.extend(seed);
         log
     }
 
@@ -500,32 +464,6 @@ mod tests {
         assert_ne!(
             projection.view(&child()).current_label(),
             PartialLabel::established(EstablishedLabel::top())
-        );
-    }
-
-    #[test]
-    fn fork_refuses_a_self_fork_and_reparenting() {
-        let log = vec![admit(parent(), known(TRUSTED, Audience::Public))];
-        let projection = build(&log);
-        assert_eq!(
-            seed_child(&registry(), &projection.view(&parent()), &parent(), ReturnPolicy::Raw),
-            Err(BranchError::SelfFork)
-        );
-        let log = forked(known(TRUSTED, Audience::Public));
-        let projection = build(&log);
-        let other = TrajectoryId::new("other");
-        assert_eq!(
-            seed_child(&registry(), &projection.view(&other), &child(), ReturnPolicy::Raw),
-            Err(BranchError::AlreadyForked)
-        );
-        let log = vec![
-            admit(parent(), known(TRUSTED, Audience::Public)),
-            admit(child(), known(TRUSTED, Audience::Public)),
-        ];
-        let projection = build(&log);
-        assert_eq!(
-            seed_child(&registry(), &projection.view(&parent()), &child(), ReturnPolicy::Raw),
-            Err(BranchError::ChildAlreadyActive)
         );
     }
 
@@ -1008,9 +946,8 @@ mod tests {
         let registry = masking_registry();
         let mut log = masked_crossing(&registry);
         let sibling = TrajectoryId::new("sibling");
-        let projection = build(&log);
-        let seed = seed_child(&registry, &projection.view(&parent()), &sibling, ReturnPolicy::Raw).unwrap();
-        log.extend(seed.facts);
+        let seed = fork_records(&log, &parent(), &sibling, ReturnPolicy::Raw);
+        log.extend(seed);
 
         let projection = build(&log);
         let seeded = projection.view(&sibling).current_label();
@@ -1392,25 +1329,6 @@ mod tests {
     }
 
     #[test]
-    fn a_returned_child_cannot_become_a_fork_parent() {
-        let mut log = forked(known(SUSPICIOUS, internal()));
-        let projection = build(&log);
-        let ret = submit_child_return(&registry(), &projection.view(&parent()), &child(), raw("finding")).unwrap();
-        log.extend(ret.facts);
-        let projection = build(&log);
-        assert_eq!(
-            seed_child(
-                &registry(),
-                &projection.view(&child()),
-                &TrajectoryId::new("grandchild"),
-                ReturnPolicy::Raw,
-            )
-            .map(|_| ()),
-            Err(BranchError::ParentEnded)
-        );
-    }
-
-    #[test]
     fn a_void_return_ends_the_branch_and_contributes_nothing() {
         let mut log = forked(known(SUSPICIOUS, internal()));
         let projection = build(&log);
@@ -1444,16 +1362,6 @@ mod tests {
         assert_eq!(
             check_child_return(&registry(), &projection.view(&parent()), &child()),
             Err(BranchError::AlreadyEnded)
-        );
-        assert_eq!(
-            seed_child(
-                &registry(),
-                &projection.view(&child()),
-                &TrajectoryId::new("grandchild"),
-                ReturnPolicy::Raw,
-            )
-            .map(|_| ()),
-            Err(BranchError::ParentEnded)
         );
     }
 
@@ -1493,21 +1401,6 @@ mod tests {
         assert_eq!(
             submit_child_return(&registry(), &projection.view(&parent()), &child(), raw("leak")),
             Err(BranchError::ReturnPolicyMismatch)
-        );
-    }
-
-    #[test]
-    fn a_fork_policy_naming_an_unregistered_transformer_is_refused() {
-        let log = vec![admit(parent(), known(TRUSTED, internal()))];
-        let projection = build(&log);
-        assert_eq!(
-            seed_child(
-                &registry(),
-                &projection.view(&parent()),
-                &child(),
-                ReturnPolicy::Sanitized(SanitizerName::new("ghost")),
-            ),
-            Err(BranchError::UnknownSanitizer("ghost".to_string()))
         );
     }
 
@@ -1664,22 +1557,28 @@ mod tests {
     }
 
     fn fork_under(log: &mut Vec<Fact>, parent: &TrajectoryId, child: &TrajectoryId) {
-        let projection = build(log);
-        let batch = seed_child(&cast_registry(), &projection.view(parent), child, ReturnPolicy::Raw)
-            .expect("the fork is admitted");
-        log.extend(batch.facts);
+        let facts = fork_records(log, parent, child, ReturnPolicy::Raw);
+        log.extend(facts);
     }
 
     fn snapshot_of(log: &[Fact], child: &TrajectoryId) -> ForkSnapshot {
-        log.iter()
+        let fork = log
+            .iter()
             .find_map(|fact| match fact {
-                Fact::Boundary {
-                    trajectory,
-                    kind: BoundaryKind::Fork { snapshot, .. },
-                } if trajectory == child => Some(snapshot.clone()),
+                Fact::ForkOpened { trajectory, fork } if trajectory == child => Some(fork.clone()),
                 _ => None,
             })
-            .expect("the child has a fork boundary")
+            .expect("the child has a fork binding");
+        log.iter()
+            .find_map(|fact| match fact {
+                Fact::ForkPrepared {
+                    fork: prepared,
+                    snapshot,
+                    ..
+                } if *prepared == fork => Some(snapshot.clone()),
+                _ => None,
+            })
+            .expect("the fork was prepared with a snapshot")
     }
 
     fn resolve(log: &[Fact], actor: &TrajectoryId, value: u64) -> Result<FactBatch, CastError> {

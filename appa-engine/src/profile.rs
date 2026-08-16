@@ -970,9 +970,24 @@ mod tests {
             declaration.confined_child_return = confined_child_return;
             let engine = open(narrowing_catalogue(), declaration, ReturnPolicy::Raw).unwrap();
             let mut log = public_trajectory_log();
+            let call = crate::value::ResolvedCall::new(
+                ToolName::new("fork"),
+                crate::params::test_arguments(&serde_json::json!({ "child": child.as_str() })),
+            );
+            let dispatch = crate::value::DispatchId::new(parent.clone(), call.digest(), 0);
+            let fork = crate::value::ForkId::of(&dispatch);
             let projection = Projection::build(&log, crate::fact::Revision::new(1));
-            let batch = engine.seed_child(&projection.view(&parent), &child).unwrap();
-            log.extend(batch.facts);
+            log.push(crate::fact::Fact::ForkPrepared {
+                trajectory: parent.clone(),
+                fork: fork.clone(),
+                snapshot: projection.view(&parent).freeze_basis(),
+                return_policy: ReturnPolicy::Raw,
+                shape: None,
+            });
+            log.push(crate::fact::Fact::ForkOpened {
+                trajectory: child.clone(),
+                fork,
+            });
             log.push(crate::fact::Fact::ValueAdmitted {
                 trajectory: child.clone(),
                 value: crate::value::LabeledValue::new(

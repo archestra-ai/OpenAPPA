@@ -4,16 +4,22 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::candidate::CallStage;
-use crate::check::{self, CheckOutcome, Gap, UnestablishedFact};
-use crate::engine::opened_dispatch;
-use crate::fact::{Fact, FactBatch};
+use crate::check::{Gap, UnestablishedFact};
 use crate::label::PartialLabel;
 use crate::names::AuthorityName;
-use crate::plan::{self, covers_gap};
-use crate::projection::Views;
+use crate::plan::covers_gap;
 use crate::registry::Registry;
-use crate::value::{DispatchId, ResolvedCall};
+use crate::value::DispatchId;
+#[cfg(test)]
+use crate::{
+    candidate::CallStage,
+    check::{self, CheckOutcome},
+    engine::opened_dispatch,
+    fact::{Fact, FactBatch},
+    plan,
+    projection::Views,
+    value::ResolvedCall,
+};
 
 /// A ruling the runtime gathered from an authority for one **specific pending dispatch**: the exact
 /// [`DispatchId`] (trajectory + canonical digest + occurrence) it was approved for, the mandate it
@@ -110,6 +116,7 @@ pub(crate) fn rulings_cover<'a>(
 
 /// Execute a remedy plan: verify coverage, then emit the atomic
 /// rulings + acceptance + dispatch batch. See the module docs.
+#[cfg(test)]
 pub(crate) fn execute_remedy_plan(
     registry: &Registry,
     views: &Views,

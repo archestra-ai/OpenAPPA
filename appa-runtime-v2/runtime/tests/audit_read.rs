@@ -313,6 +313,97 @@ async fn a_branch_records_its_seed_its_own_flows_and_how_its_return_crossed() {
     );
 }
 
+const ATTEST_POLICY: &str = r#"
+[policy]
+version = 1
+
+[[policy.tool]]
+name = "spawn"
+delta = {}
+
+[[policy.tool]]
+name = "read_untrusted"
+delta = { trust = "suspicious" }
+
+[[policy.sanitizer]]
+name = "attest-schema"
+on = ["tool_output"]
+[policy.sanitizer.mandate]
+trust = { from = "suspicious", to = "trusted" }
+
+[policy.child]
+return_sanitizer = "attest-schema"
+
+[policy.deployment]
+context_control = true
+confined_child_return = true
+
+[externals]
+timeout_ms = 1000
+max_body_bytes = 4096
+"#;
+
+async fn attest_deployment(dir: &tempfile::TempDir) -> Arc<Runtime> {
+    let path = dir.path().join("appa.toml");
+    std::fs::write(&path, ATTEST_POLICY).expect("the fixture writes");
+    let config = Config::load(&path).expect("the fixture validates");
+    let runtime = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens"));
+    let started = hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await;
+    assert_eq!(started, HookDecision::Ack);
+    runtime
+}
+
+#[tokio::test]
+async fn a_child_bound_attest_schema_return_crosses_in_engine() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = attest_deployment(&dir).await;
+
+    let spawn = ProposedCall {
+        tool: "spawn".to_string(),
+        arguments: raw(serde_json::json!({
+            "return_schema": {
+                "type": "object",
+                "properties": { "verdict": { "type": "string", "enum": ["allow", "deny"] } },
+                "required": ["verdict"],
+            }
+        })),
+    };
+    assert_eq!(open_child(&runtime, spawn).await, HookDecision::Ack);
+
+    let blocked = propose(&runtime, Some(&child()), call("read_untrusted")).await;
+    let accept = first_offer(&feedback_of(&blocked));
+    assert!(matches!(
+        runtime.execute_remedy(accept).await,
+        RemedyOutcome::Authorized { .. }
+    ));
+    released(&runtime, Some(&child()), "read_untrusted", "raw notes").await;
+
+    let end = HookEvent::ChildEnd {
+        parent: root(),
+        child: child(),
+        value: Some(r#"{"verdict":"allow"}"#.to_string()),
+    };
+    let stopped = hooks::handle(&runtime, end).await;
+    let accept = all_offers(&feedback_of(&stopped))
+        .into_iter()
+        .next()
+        .expect("the stop surfaces the acceptance of the attested value");
+    assert!(matches!(
+        runtime.execute_remedy(accept).await,
+        RemedyOutcome::Returned { .. }
+    ));
+
+    let entries = runtime.audit(&root()).expect("the audit reads");
+    assert!(
+        entries.iter().any(|entry| entry.event
+            == AuditEvent::ChildReturn {
+                sanitizer: Some("attest-schema".to_string()),
+                label: label("trusted", "public"),
+            }),
+        "the reserved builtin carried the crossing in-engine: {entries:?}",
+    );
+}
+
 #[tokio::test]
 async fn only_a_root_names_the_audit() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");

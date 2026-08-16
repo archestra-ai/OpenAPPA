@@ -169,17 +169,11 @@ impl ForkSnapshot {
 
 /// A boundary is punctuation, not a decision: it marks the log, never gates it (pending offers
 /// die with their turn, and execution is always re-validated against the live state). The engine
-/// appends one at the end of each assistant turn, at fork, and at merge. `Fork` and `Merge` carry
-/// the branch structure — the fork's parent binding and frozen snapshot, the merge's consumed
-/// child return.
+/// appends one at the end of each assistant turn and at merge. A fork's branch structure lives on
+/// its own two records (`ForkPrepared`, `ForkOpened`); `Merge` carries the consumed child return.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BoundaryKind {
     TurnEnd,
-    Fork {
-        parent: TrajectoryId,
-        snapshot: ForkSnapshot,
-        return_policy: ReturnPolicy,
-    },
     Merge {
         child_return: ChildReturnId,
     },
@@ -496,17 +490,36 @@ impl Revision {
     }
 }
 
-/// A validated batch the engine produced: the [`Revision`] it was computed against plus the facts
-/// to append atomically. The runtime appends it only if the log is still at `basis`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A batch the engine produced: the [`Revision`] it was computed against plus the facts to append
+/// atomically. Only the engine builds one; the runtime reads it through the accessors and
+/// appends it only if the log is still at `basis`.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FactBatch {
-    pub basis: Revision,
-    pub facts: Vec<Fact>,
+    pub(crate) basis: Revision,
+    pub(crate) facts: Vec<Fact>,
 }
 
 impl FactBatch {
+    /// Assemble a batch from a basis and its facts. The engine builds every batch a decision
+    /// carries; the runtime also builds one to carry an append it already holds, and a test builds
+    /// one with a chosen basis to exercise the compare-and-swap path. The trust boundary is
+    /// [`crate::transition::ValidatedFactBatch`], which only `Engine::handle` produces and no
+    /// caller can construct — an unvalidated `FactBatch` is re-checked whenever its log reopens.
+    /// The fields stay `pub(crate)`, so a built batch is read-only outside the crate.
     pub fn new(basis: Revision, facts: Vec<Fact>) -> Self {
         FactBatch { basis, facts }
+    }
+
+    pub fn basis(&self) -> Revision {
+        self.basis
+    }
+
+    pub fn facts(&self) -> &[Fact] {
+        &self.facts
+    }
+
+    pub fn into_facts(self) -> Vec<Fact> {
+        self.facts
     }
 }
 

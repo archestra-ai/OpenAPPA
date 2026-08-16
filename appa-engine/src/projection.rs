@@ -25,15 +25,6 @@ struct AdmittedValue {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Fork {
-    child: TrajectoryId,
-    parent: TrajectoryId,
-    snapshot: ForkSnapshot,
-    return_policy: ReturnPolicy,
-    shape: Option<crate::shape::ReturnShape>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PreparedFork {
     pub(crate) parent: TrajectoryId,
     pub(crate) snapshot: ForkSnapshot,
@@ -183,9 +174,9 @@ pub struct Projection {
     subject_dispatches: BTreeMap<crate::basis::SubjectKey, DispatchId>,
     observations: BTreeMap<DispatchId, ObservedResult>,
     boundaries: Vec<TrajectoryId>,
-    forks: Vec<Fork>,
     prepared: BTreeMap<ForkId, PreparedFork>,
     bound: BTreeMap<ForkId, TrajectoryId>,
+    fork_of: BTreeMap<TrajectoryId, ForkId>,
     child_returns: Vec<ReturnedChild>,
     submitted_returns: BTreeMap<ChildReturnId, SubmittedReturn>,
     rejected_returns: BTreeMap<ChildReturnId, RejectedReturn>,
@@ -231,9 +222,9 @@ impl Projection {
             subject_dispatches: BTreeMap::new(),
             observations: BTreeMap::new(),
             boundaries: Vec::new(),
-            forks: Vec::new(),
             prepared: BTreeMap::new(),
             bound: BTreeMap::new(),
+            fork_of: BTreeMap::new(),
             child_returns: Vec::new(),
             submitted_returns: BTreeMap::new(),
             rejected_returns: BTreeMap::new(),
@@ -253,7 +244,8 @@ impl Projection {
     }
 
     /// Fold every view from the family log **without** the transition rules.
-    pub fn build(log: &[Fact], revision: Revision) -> Self {
+    #[cfg(test)]
+    pub(crate) fn build(log: &[Fact], revision: Revision) -> Self {
         let mut projection = Projection::empty(revision);
         for fact in log {
             projection.fold(fact);
@@ -316,9 +308,9 @@ impl Projection {
             subject_dispatches,
             observations,
             boundaries,
-            forks,
             prepared,
             bound,
+            fork_of,
             child_returns,
             submitted_returns,
             rejected_returns,
@@ -582,19 +574,13 @@ impl Projection {
                 Fact::ForkOpened { trajectory, fork } => {
                     if let Some(preparation) = prepared.get(fork) {
                         bound.insert(fork.clone(), trajectory.clone());
+                        fork_of.insert(trajectory.clone(), fork.clone());
                         if !preparation.denials.is_empty() {
                             denials.insert(trajectory.clone(), preparation.denials.clone());
                         }
                         if !preparation.absorbed.is_empty() {
                             absorbed.insert(trajectory.clone(), preparation.absorbed.clone());
                         }
-                        forks.push(Fork {
-                            child: trajectory.clone(),
-                            parent: preparation.parent.clone(),
-                            snapshot: preparation.snapshot.clone(),
-                            return_policy: preparation.return_policy.clone(),
-                            shape: preparation.shape.clone(),
-                        });
                     }
                 }
                 Fact::ChildReturn { id, value, .. } => {
@@ -647,25 +633,6 @@ impl Projection {
                     boundaries.push(trajectory.clone());
                     match kind {
                         BoundaryKind::TurnEnd => {}
-                        BoundaryKind::Fork {
-                            parent,
-                            snapshot,
-                            return_policy,
-                        } => {
-                            if let Some(inherited) = denials.get(parent).cloned() {
-                                denials.insert(trajectory.clone(), inherited);
-                            }
-                            if let Some(inherited) = absorbed.get(parent).cloned() {
-                                absorbed.insert(trajectory.clone(), inherited);
-                            }
-                            forks.push(Fork {
-                                child: trajectory.clone(),
-                                parent: parent.clone(),
-                                snapshot: snapshot.clone(),
-                                return_policy: return_policy.clone(),
-                                shape: None,
-                            });
-                        }
                         BoundaryKind::Merge { .. } => {
                             if !merge_absorption.is_empty() {
                                 let table = absorbed.entry(trajectory.clone()).or_default();
@@ -695,10 +662,10 @@ impl Projection {
     }
 
     fn snapshot_of(&self, trajectory: &TrajectoryId) -> Option<&ForkSnapshot> {
-        self.forks
-            .iter()
-            .find(|fork| &fork.child == trajectory)
-            .map(|fork| &fork.snapshot)
+        self.fork_of
+            .get(trajectory)
+            .and_then(|fork| self.prepared.get(fork))
+            .map(|prepared| &prepared.snapshot)
     }
 
     fn basis_sources<'a>(&'a self, trajectory: &'a TrajectoryId) -> impl Iterator<Item = (ValueId, &'a Label)> + 'a {
@@ -1036,6 +1003,8 @@ impl Views<'_> {
         self.projection.active.contains(trajectory)
     }
 
+    /// The snapshot a fork of this branch freezes — the parent-side basis the spawn
+    /// release pins.
     pub(crate) fn freeze_basis(&self) -> ForkSnapshot {
         self.projection.freeze_basis(self.trajectory)
     }
@@ -1057,30 +1026,30 @@ impl Views<'_> {
 
     pub fn parent_of(&self, child: &TrajectoryId) -> Option<&TrajectoryId> {
         self.projection
-            .forks
-            .iter()
-            .find(|fork| &fork.child == child)
-            .map(|fork| &fork.parent)
+            .fork_of
+            .get(child)
+            .and_then(|fork| self.projection.prepared.get(fork))
+            .map(|prepared| &prepared.parent)
     }
 
     /// The child's immutable fork return policy — the binding every `submit_result` crossing is
     /// derived from. `None` for a trajectory that was never forked.
     pub fn return_policy_of(&self, child: &TrajectoryId) -> Option<&ReturnPolicy> {
         self.projection
-            .forks
-            .iter()
-            .find(|fork| &fork.child == child)
-            .map(|fork| &fork.return_policy)
+            .fork_of
+            .get(child)
+            .and_then(|fork| self.projection.prepared.get(fork))
+            .map(|prepared| &prepared.return_policy)
     }
 
     /// The structured-return shape the child's fork froze: every non-void submission
     /// validates against exactly this stored form. `None` for an unshaped or unforked child.
     pub fn return_shape_of(&self, child: &TrajectoryId) -> Option<&crate::shape::ReturnShape> {
         self.projection
-            .forks
-            .iter()
-            .find(|fork| &fork.child == child)
-            .and_then(|fork| fork.shape.as_ref())
+            .fork_of
+            .get(child)
+            .and_then(|fork| self.projection.prepared.get(fork))
+            .and_then(|prepared| prepared.shape.as_ref())
     }
 
     pub fn child_return(&self, id: &ChildReturnId) -> Option<&LabeledValue> {
@@ -1128,13 +1097,9 @@ impl Views<'_> {
     }
 
     /// The fork that opened this child through the two-stage binding. `None` for a
-    /// root and for a one-stage `Fork`-boundary child, which has no fork identity to address.
+    /// root, which no fork opened.
     pub(crate) fn fork_of(&self, child: &TrajectoryId) -> Option<&ForkId> {
-        self.projection
-            .bound
-            .iter()
-            .find(|(_, bound)| *bound == child)
-            .map(|(fork, _)| fork)
+        self.projection.fork_of.get(child)
     }
 
     /// The derived fork-time pin a child's fork snapshot froze — the parent's fold
@@ -1347,6 +1312,23 @@ mod tests {
         DispatchId::new(traj(t), call.digest(), 0)
     }
 
+    fn fork_pair(parent: &str, child: &str, snapshot: ForkSnapshot) -> Vec<Fact> {
+        let fork = ForkId::of(&dispatch(parent));
+        vec![
+            Fact::ForkPrepared {
+                trajectory: traj(parent),
+                fork: fork.clone(),
+                snapshot,
+                return_policy: ReturnPolicy::Raw,
+                shape: None,
+            },
+            Fact::ForkOpened {
+                trajectory: traj(child),
+                fork,
+            },
+        ]
+    }
+
     fn build(log: &[Fact]) -> Projection {
         Projection::build(log, Revision::new(log.len() as u64))
     }
@@ -1492,27 +1474,27 @@ mod tests {
             digest: wire.digest(),
             authority: AuthorityName::new(authority),
         };
-        let fork = |child: &str, parent: &str| Fact::Boundary {
-            trajectory: traj(child),
-            kind: BoundaryKind::Fork {
-                parent: traj(parent),
-                snapshot: ForkSnapshot::freeze(EstablishedLabel::top(), std::iter::empty(), std::iter::empty()),
-                return_policy: ReturnPolicy::Raw,
-            },
+        let fork = |child: &str, parent: &str| {
+            fork_pair(
+                parent,
+                child,
+                ForkSnapshot::freeze(EstablishedLabel::top(), std::iter::empty(), std::iter::empty()),
+            )
         };
-        let log = vec![
-            denial("root", "early"),
+        let log = [
+            vec![denial("root", "early")],
             fork("child", "root"),
-            denial("root", "late"),
+            vec![denial("root", "late")],
             fork("grandchild", "child"),
-            denial("child", "own"),
-            Fact::Boundary {
+            vec![denial("child", "own")],
+            vec![Fact::Boundary {
                 trajectory: traj("root"),
                 kind: BoundaryKind::Merge {
                     child_return: crate::value::ChildReturnId::new(traj("child"), 0),
                 },
-            },
-        ];
+            }],
+        ]
+        .concat();
         let p = build(&log);
         let names = |t: &TrajectoryId| -> Vec<String> {
             p.view(t)
@@ -1538,48 +1520,48 @@ mod tests {
         assert_eq!(build(&log), build(&log));
         assert_eq!(build(&log).view(&traj("a")).boundary_count(), 1);
 
-        let crossing = vec![
-            admit("root", labeled(2, Audience::Public)),
-            Fact::Boundary {
-                trajectory: traj("kid"),
-                kind: BoundaryKind::Fork {
-                    parent: traj("root"),
-                    snapshot: ForkSnapshot::freeze(
-                        EstablishedLabel::top(),
-                        [(ValueId::new(0), &labeled(2, Audience::Public).label)],
-                        std::iter::empty(),
-                    ),
-                    return_policy: ReturnPolicy::Raw,
-                },
-            },
-            admit(
+        let crossing = [
+            vec![admit("root", labeled(2, Audience::Public))],
+            fork_pair(
+                "root",
                 "kid",
-                LabeledValue::new(
-                    ValueBody::new("body"),
-                    Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
+                ForkSnapshot::freeze(
+                    EstablishedLabel::top(),
+                    [(ValueId::new(0), &labeled(2, Audience::Public).label)],
+                    std::iter::empty(),
                 ),
             ),
-            Fact::ChildReturn {
-                trajectory: traj("kid"),
-                id: ChildReturnId::new(traj("kid"), 0),
-                value: labeled(2, Audience::Public),
-                derivation: crate::fact::ReturnDerivation::Raw,
-            },
-            Fact::ValueAdmitted {
-                trajectory: traj("root"),
-                value: labeled(2, Audience::Public),
-                provenance: Provenance::ChildReturn {
-                    child: traj("kid"),
+            vec![
+                admit(
+                    "kid",
+                    LabeledValue::new(
+                        ValueBody::new("body"),
+                        Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
+                    ),
+                ),
+                Fact::ChildReturn {
+                    trajectory: traj("kid"),
                     id: ChildReturnId::new(traj("kid"), 0),
+                    value: labeled(2, Audience::Public),
+                    derivation: crate::fact::ReturnDerivation::Raw,
                 },
-            },
-            Fact::Boundary {
-                trajectory: traj("root"),
-                kind: BoundaryKind::Merge {
-                    child_return: ChildReturnId::new(traj("kid"), 0),
+                Fact::ValueAdmitted {
+                    trajectory: traj("root"),
+                    value: labeled(2, Audience::Public),
+                    provenance: Provenance::ChildReturn {
+                        child: traj("kid"),
+                        id: ChildReturnId::new(traj("kid"), 0),
+                    },
                 },
-            },
-        ];
+                Fact::Boundary {
+                    trajectory: traj("root"),
+                    kind: BoundaryKind::Merge {
+                        child_return: ChildReturnId::new(traj("kid"), 0),
+                    },
+                },
+            ],
+        ]
+        .concat();
         assert_eq!(build(&crossing), build(&crossing));
         let unresolved = |log: &[Fact]| {
             build(log)
@@ -1602,17 +1584,20 @@ mod tests {
         );
         let log = vec![
             admit("root", labeled(2, Audience::Public)),
-            Fact::Boundary {
+            Fact::ForkPrepared {
+                trajectory: traj("root"),
+                fork: ForkId::of(&dispatch("root")),
+                snapshot: ForkSnapshot::freeze(
+                    EstablishedLabel::top(),
+                    [(ValueId::new(0), &labeled(2, Audience::Public).label)],
+                    std::iter::empty(),
+                ),
+                return_policy: ReturnPolicy::Raw,
+                shape: None,
+            },
+            Fact::ForkOpened {
                 trajectory: traj("kid"),
-                kind: BoundaryKind::Fork {
-                    parent: traj("root"),
-                    snapshot: ForkSnapshot::freeze(
-                        EstablishedLabel::top(),
-                        [(ValueId::new(0), &labeled(2, Audience::Public).label)],
-                        std::iter::empty(),
-                    ),
-                    return_policy: ReturnPolicy::Raw,
-                },
+                fork: ForkId::of(&dispatch("root")),
             },
             admit(
                 "kid",
@@ -1698,17 +1683,20 @@ mod tests {
         let source = RawResultDigest::of(body.as_str().as_bytes());
         let log = vec![
             admit("root", labeled(2, Audience::Public)),
-            Fact::Boundary {
+            Fact::ForkPrepared {
+                trajectory: traj("root"),
+                fork: ForkId::of(&dispatch("root")),
+                snapshot: ForkSnapshot::freeze(
+                    EstablishedLabel::top(),
+                    [(ValueId::new(0), &labeled(2, Audience::Public).label)],
+                    std::iter::empty(),
+                ),
+                return_policy: ReturnPolicy::Raw,
+                shape: None,
+            },
+            Fact::ForkOpened {
                 trajectory: traj("kid"),
-                kind: BoundaryKind::Fork {
-                    parent: traj("root"),
-                    snapshot: ForkSnapshot::freeze(
-                        EstablishedLabel::top(),
-                        [(ValueId::new(0), &labeled(2, Audience::Public).label)],
-                        std::iter::empty(),
-                    ),
-                    return_policy: ReturnPolicy::Raw,
-                },
+                fork: ForkId::of(&dispatch("root")),
             },
             admit(
                 "kid",

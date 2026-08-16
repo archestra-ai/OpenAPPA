@@ -312,10 +312,10 @@ pub struct RootOpening {
 
 impl RootOpening {
     fn new(batch: &FactBatch, policy_key: crate::config::PolicyFileKey) -> Result<RootOpening, String> {
-        if batch.basis.value() != 0 {
+        if batch.basis().value() != 0 {
             return Err("the opening batch is not at revision zero".to_string());
         }
-        let [fact] = batch.facts.as_slice() else {
+        let [fact] = batch.facts() else {
             return Err("the opening batch does not hold exactly one fact".to_string());
         };
         let Fact::TrajectoryOpened {
@@ -330,7 +330,7 @@ impl RootOpening {
             trajectory: TrajectoryId(trajectory.as_str().to_string()),
             policy_key,
             policy_identity: hex(policy_digest.bytes()),
-            batch: serde_json::to_vec(&batch.facts).expect("engine facts serialize"),
+            batch: serde_json::to_vec(batch.facts()).expect("engine facts serialize"),
         })
     }
 
@@ -704,10 +704,6 @@ impl RuntimeEngine {
                 label: self.render_label(&value.label)?,
             },
             Fact::Boundary { kind, .. } => match kind {
-                BoundaryKind::Fork { parent, snapshot, .. } => AuditEvent::Forked {
-                    parent: terminal_safe(parent.as_str()),
-                    seed: self.render_label(&as_label(snapshot.seed()))?,
-                },
                 BoundaryKind::Merge { .. } => AuditEvent::Merged,
                 BoundaryKind::VoidReturn => AuditEvent::VoidReturn,
                 // A turn's end is the harness's punctuation, not a decision.
@@ -1144,7 +1140,12 @@ impl RuntimeEngine {
         evidence: &[ExternalEvidence],
         entropy: &OfferNonce,
     ) -> Result<EngineDecision, EngineRefusal> {
-        let fork = self.engine.fork_of(view, &engine_id(child));
+        let fork = self
+            .engine
+            .fork_of(view, &engine_id(child))
+            .ok_or_else(|| EngineRefusal::Invariant {
+                detail: format!("child {} returned without an open fork", child.0),
+            })?;
         let submission = match value {
             None => ChildSubmission::Void,
             Some(body) => ChildSubmission::Value {

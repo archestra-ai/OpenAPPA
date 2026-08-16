@@ -8,9 +8,7 @@ use crate::candidate::{CallStage, ConfinedFrom, DerivedCandidate, DerivedVia, Sa
 use crate::check::{CheckOutcome, Gap, Narrowing, RawBlock};
 use crate::contract::ToolContract;
 use crate::execute::AuthorityEvidence;
-use crate::fact::{
-    BoundaryKind, CloseOutcome, EffectSet, Fact, FactBatch, ForkSnapshot, ReturnDerivation, ReturnPolicy, Revision,
-};
+use crate::fact::{BoundaryKind, CloseOutcome, EffectSet, Fact, FactBatch, ReturnDerivation, ReturnPolicy, Revision};
 use crate::label::{EstablishedLabel, Label};
 use crate::names::{AuthorityName, SanitizerName};
 use crate::plan::PlannedBlock;
@@ -187,14 +185,11 @@ pub struct ForkBinding {
 }
 
 /// One child's return, addressed by the branch it ends and the exact fork that opened
-/// it: a two-stage child answers only to its own `ForkId`, and a one-stage boundary
-/// child has none to name.
+/// it: a child answers only to its own `ForkId`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChildReport {
     pub child: TrajectoryId,
-    /// The fork the return addresses. `None` only for a one-stage `Fork`-boundary child, which
-    /// has no fork identity; a fork-bound child's report must name its own.
-    pub fork: Option<crate::value::ForkId>,
+    pub fork: crate::value::ForkId,
     pub submission: ChildSubmission,
     /// Typed evidence the runtime resolved for this exact report: the mandatory
     /// sanitizer's derivation, or a cast answer the return's planning requested. An external
@@ -217,10 +212,6 @@ pub enum ChildSubmission {
 pub enum ChildFollowUp {
     Merged { admitted: ValueBody },
     Ended,
-    Blocked {
-        narrowing: Narrowing,
-        plans: Vec<crate::branch::ReturnPlan>,
-    },
     Pending(Box<PendingReturnStage>),
     Resolve(EvidenceRequest),
     Rejected { reason: crate::fact::ReturnRejection },
@@ -1892,10 +1883,6 @@ impl<'a> Sequence<'a> {
     fn member(&mut self, fact: &Fact) -> Result<(), TransitionRefusal> {
         let trajectory = fact.trajectory();
         let opens_from = match fact {
-            Fact::Boundary {
-                kind: BoundaryKind::Fork { parent, .. },
-                ..
-            } => Some(parent.clone()),
             Fact::ForkOpened { fork, .. } => Some(
                 self.projection
                     .prepared_fork(fork)
@@ -2442,6 +2429,7 @@ impl<'a> Sequence<'a> {
         if views.parent_of(child) != Some(parent) {
             return Err(TransitionRefusal::ForeignTrajectory);
         }
+        // Custody transfers only on a fork-bound child, addressed to its own fork.
         if views.fork_of(child) != Some(fork) {
             return Err(TransitionRefusal::ReturnRecordMismatch);
         }
@@ -2550,11 +2538,6 @@ impl<'a> Sequence<'a> {
     fn boundary(&mut self, trajectory: &TrajectoryId, kind: &BoundaryKind) -> Result<(), TransitionRefusal> {
         match kind {
             BoundaryKind::TurnEnd => Ok(()),
-            BoundaryKind::Fork {
-                parent,
-                snapshot,
-                return_policy,
-            } => self.forked(trajectory, parent, snapshot, return_policy),
             BoundaryKind::Merge { child_return } => {
                 let views = self.projection.view(trajectory);
                 let crossed = views
@@ -2584,32 +2567,6 @@ impl<'a> Sequence<'a> {
                 Ok(())
             }
         }
-    }
-
-    fn forked(
-        &mut self,
-        child: &TrajectoryId,
-        parent: &TrajectoryId,
-        snapshot: &ForkSnapshot,
-        return_policy: &ReturnPolicy,
-    ) -> Result<(), TransitionRefusal> {
-        if !self.registry.profile().context_control() {
-            return Err(TransitionRefusal::ContextUncontrolled);
-        }
-        let views = self.projection.view(parent);
-        if views.is_active(child) || child == parent {
-            return Err(TransitionRefusal::ChildActiveBeforeFork);
-        }
-        if views.has_ended(parent) {
-            return Err(TransitionRefusal::BranchEnded);
-        }
-        if return_policy != self.child_return {
-            return Err(TransitionRefusal::ForkReturnPolicyMismatch);
-        }
-        if &views.freeze_basis() != snapshot {
-            return Err(TransitionRefusal::ForkBasisMismatch);
-        }
-        Ok(())
     }
 
     fn output_cast_applied(
