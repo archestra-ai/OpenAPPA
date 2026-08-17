@@ -45,13 +45,22 @@ report.
 Write "these tools can send data outside", not "these tools require a
 public audience".
 
-## 1. Ask about special cases
+Do not narrate your own mechanics. Sentences like "the written file is
+byte-identical to the previous sync" or "the diff is exactly the block
+you saw in the plan" mean nothing to the user. Say the outcome in
+their terms: what changed, or "nothing changed", and stop.
 
-Before probing anything, ask one short question: any special cases to
-cover? For example, tools whose data must stay inside, or servers to
-leave out. Say that with no answer, the sync applies the defaults.
-Two sentences at most, then wait. Skip this question when the extra
-instructions already answer it.
+## 1. Ask what the user wants handled differently
+
+Before probing anything, ask one short, friendly question. Do not say
+"special cases" — ask in the user's terms, for example: "Before I
+start: is there anything you want treated with extra care — data that
+must stay private, or servers I should skip? If not, I'll use sensible
+defaults." Two sentences at most, then wait. Skip this question when
+the extra instructions already answer it.
+
+An answer covers only what it names. Apply it there, use the defaults
+everywhere else, and ask nothing more before the overview.
 
 ## 2. Find the config the runtime is serving
 
@@ -160,13 +169,19 @@ Compare the inventory against the declarations:
 - declared but no longer installed → tell the user, never delete
   unasked.
 
-Keep the overview short. One line per server: its name, how many
+Group the overview by server. One line per server: its name, how many
 tools, and the mark in plain words — stays inside, keeps data private,
 or can send data outside. Expand to one line per tool only where the
 tools of one server differ. Name the tools that can send data outside
 separately — those decide what gets blocked later.
 
-End with one short call to action: approve, or say what to change.
+Print the overview as plain text in the chat, end your turn with the
+call to action on the last line, and wait for the reply. Do not use a
+question dialog (AskUserQuestion): its preview box truncates long
+plans, and the user must see every server. Never ask "write N
+entries?" with only a count.
+
+The call to action is one line: approve, or say what to change.
 Apply each correction, show the changed lines again, and repeat until
 the user approves. Never write the config without approval.
 
