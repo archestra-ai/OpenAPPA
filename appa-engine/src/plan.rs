@@ -204,6 +204,16 @@ impl PlannedBlock {
     }
 }
 
+/// What the planned call is to its deployment: an ordinary tool call, or the one proposal the
+/// runtime marked as the context-controlled spawn. The mark is a property of the
+/// subject, fixed when its batch was decided, so a substituted successor keeps its predecessor's
+/// role.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CallRole {
+    Ordinary,
+    MarkedSpawn,
+}
+
 /// Plan the remedies for a raw block. Emits the executable plans when the block clears in one
 /// atomic step, and every direct redispatch when only a prior tool call unlocks it. Both land in
 /// the one `plans` list; fork advice is separate and never a remedy. See the module docs
@@ -214,12 +224,13 @@ pub(crate) fn plan(
     call: &ResolvedCall,
     raw: &RawBlock,
     stage: &CallStage,
+    role: CallRole,
 ) -> PlannedBlock {
     let current = views.current_label();
     let no_denials = BTreeSet::new();
     let denied = views.denied_authorities(&call.digest()).unwrap_or(&no_denials);
 
-    let mut plans: Vec<RemedyPlan> = enumerate_plans(registry, &current, views, call, stage)
+    let mut plans: Vec<RemedyPlan> = enumerate_plans(registry, &current, views, call, stage, role)
         .into_iter()
         .filter(|plan| !denied.iter().any(|authority| plan.names_authority(authority)))
         .map(RemedyPlan::Executable)
@@ -257,6 +268,7 @@ fn enumerate_plans(
     views: &Views,
     call: &ResolvedCall,
     stage: &CallStage,
+    role: CallRole,
 ) -> Vec<ExecutableRemedyPlan> {
     let Some(contract) = registry.tool(call.tool()) else {
         return Vec::new();
@@ -268,13 +280,14 @@ fn enumerate_plans(
         return Vec::new();
     }
 
-    let mut candidates: Vec<PlanCandidate> = input_hops(registry, contract, stage, &block.requirement_gaps, current)
-        .into_iter()
-        .map(|sanitizer| PlanCandidate {
-            steps: vec![RemedyStep::Derive(sanitizer)],
-            required: Vec::new(),
-        })
-        .collect();
+    let mut candidates: Vec<PlanCandidate> =
+        input_hops(registry, contract, stage, role, &block.requirement_gaps, current)
+            .into_iter()
+            .map(|sanitizer| PlanCandidate {
+                steps: vec![RemedyStep::Derive(sanitizer)],
+                required: Vec::new(),
+            })
+            .collect();
     if let Some(assignments) = enumerate_assignments(registry, &block.requirement_gaps, &contract.tags) {
         let settlements = narrowing_remedies(registry, current, contract, call, block.narrowing.as_ref());
         for required in assignments {
@@ -535,9 +548,13 @@ pub(crate) fn input_hops(
     registry: &Registry,
     contract: &ToolContract,
     stage: &CallStage,
+    role: CallRole,
     gaps: &[Gap],
     current: &PartialLabel,
 ) -> Vec<SanitizerName> {
+    if role == CallRole::MarkedSpawn {
+        return Vec::new();
+    }
     if !gaps.iter().any(|gap| matches!(gap, Gap::Includes { .. })) {
         return Vec::new();
     }
@@ -922,7 +939,7 @@ mod tests {
             CheckOutcome::Block(raw) => raw,
             other => panic!("expected a block, got {other:?}"),
         };
-        plan(registry, &views, call, &raw, &CallStage::default())
+        plan(registry, &views, call, &raw, &CallStage::default(), CallRole::Ordinary)
     }
 
     fn call(tool: &str, args: serde_json::Value) -> ResolvedCall {
@@ -3196,7 +3213,7 @@ mod tests {
             let projection = Projection::build(&log, log.len() as u64);
             let trajectory = traj();
             let views = projection.view(&trajectory);
-            let planned = plan(&registry, &views, &call, &raw, &CallStage::default());
+            let planned = plan(&registry, &views, &call, &raw, &CallStage::default(), CallRole::Ordinary);
 
             let coverable = raw
                 .requirement_gaps
@@ -3283,7 +3300,7 @@ mod tests {
             let projection = Projection::build(&log, log.len() as u64);
             let trajectory = traj();
             let views = projection.view(&trajectory);
-            let planned = plan(&registry, &views, &call, &raw, &CallStage::default());
+            let planned = plan(&registry, &views, &call, &raw, &CallStage::default(), CallRole::Ordinary);
 
             let authorities = registry.authorities();
             let mut bound: u128 = 1;
@@ -3422,7 +3439,7 @@ mod tests {
             let projection = Projection::build(&log, log.len() as u64);
             let trajectory = traj();
             let views = projection.view(&trajectory);
-            let planned = plan(&registry, &views, &call, &raw, &CallStage::default());
+            let planned = plan(&registry, &views, &call, &raw, &CallStage::default(), CallRole::Ordinary);
 
             let competent = |authority: &Authority, gap: &Gap| -> bool {
                 let scoped = authority.scope.covers(&contract.tags);

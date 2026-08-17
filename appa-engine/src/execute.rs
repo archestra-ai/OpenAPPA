@@ -140,7 +140,14 @@ pub(crate) fn execute_remedy_plan(
         return Err(PlanError::Unestablished(block.unestablished));
     }
 
-    let planned = plan::plan(registry, views, call, &block, &CallStage::default());
+    let planned = plan::plan(
+        registry,
+        views,
+        call,
+        &block,
+        &CallStage::default(),
+        plan::CallRole::Ordinary,
+    );
     if !planned
         .plans
         .iter()
@@ -340,7 +347,14 @@ mod tests {
 
     fn offered_plan(registry: &Registry, views: &Views, call: &ResolvedCall) -> plan::ExecutableRemedyPlan {
         let planned = match check::evaluate(registry.tool(call.tool()).unwrap(), views, call, &CallStage::default()) {
-            CheckOutcome::Block(block) => plan::plan(registry, views, call, &block, &CallStage::default()),
+            CheckOutcome::Block(block) => plan::plan(
+                registry,
+                views,
+                call,
+                &block,
+                &CallStage::default(),
+                plan::CallRole::Ordinary,
+            ),
             _ => {
                 return plan::ExecutableRemedyPlan {
                     id: plan::PlanId::new(0),

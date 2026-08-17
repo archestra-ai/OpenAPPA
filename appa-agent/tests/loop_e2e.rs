@@ -605,6 +605,12 @@ name = "read_hr"
 delta = { audience = { exactly = ["staff"] } }
 
 [[policy.tool]]
+name = "send"
+parameters = { type = "object", properties = { body = { type = "string" } }, required = ["body"] }
+requires = { audience = { includes = ["public"] } }
+delta = {}
+
+[[policy.tool]]
 name = "delegate"
 parameters = { type = "object", properties = { task = { type = "string" } }, required = ["task"] }
 requires = { audience = { includes = ["public"] } }
@@ -621,12 +627,13 @@ context_control = true
 "#;
 
 #[tokio::test]
-async fn a_substituted_spawn_opens_no_child_and_never_reaches_the_host() {
+async fn a_marked_spawn_is_offered_no_input_hop_while_an_ordinary_call_is() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let host = ToolHost::default();
     host.answers("read_hr", "Alice Chen, Staff Engineer")
+        .answers("send", "sent")
         .answers("delegate", "a child that must not run")
-        .sanitizes_to(r#"{"task":"look it up, redacted"}"#);
+        .sanitizes_to(r#"{"body":"the figures, redacted"}"#);
     let sanitizer_url = format!("{}/sanitizer", host.clone().serve().await);
     let externals = format!("[externals.sanitizers.scrub]\nurl = \"{sanitizer_url}\"\n");
 
@@ -635,8 +642,9 @@ async fn a_substituted_spawn_opens_no_child_and_never_reaches_the_host() {
         .calls("read_hr", serde_json::json!({"who": "alice"}))
         .pursues_the_offer()
         .calls("read_hr", serde_json::json!({"who": "alice"}))
-        .calls("delegate", serde_json::json!({"task": "look up Alice's salary"}))
+        .calls("send", serde_json::json!({"body": "the figures"}))
         .pursues_the_offer()
+        .calls("delegate", serde_json::json!({"task": "look up Alice's salary"}))
         .calls("read_hr", serde_json::json!({"who": "bob"}))
         .says("Done.");
 
@@ -645,22 +653,35 @@ async fn a_substituted_spawn_opens_no_child_and_never_reaches_the_host() {
             runtime(&dir, SUBSTITUTING_SPAWN, &externals),
             &provider,
             &host,
-            &["read_hr", "delegate"],
+            &["read_hr", "send", "delegate"],
         )
         .await,
     );
     let outcome = agent.run(root(), "Delegate the lookup.", Default::default()).await;
 
     assert_eq!(outcome, Outcome::Answer("Done.".to_string()));
-    let tools: Vec<String> = host
-        .calls()
-        .into_iter()
-        .map(|call| call["tool"].as_str().expect("the host records the tool").to_string())
-        .collect();
+    assert!(
+        harness::offer_id(&provider.tool_result(4, "call_3")).is_some(),
+        "the ordinary call's block offers its hop",
+    );
+    assert!(
+        harness::offer_id(&provider.tool_result(6, "call_5")).is_none(),
+        "the marked spawn's block offers nothing: {}",
+        provider.tool_result(6, "call_5"),
+    );
     assert_eq!(
-        tools,
-        vec!["read_hr", "read_hr"],
-        "the substituted spawn is not dispatched to the host, and the next call runs",
+        host.sanitizer_consults(),
+        1,
+        "the sanitizer ran for the ordinary call only"
+    );
+    assert_eq!(
+        host.calls(),
+        vec![
+            serde_json::json!({"tool": "read_hr", "arguments": {"who": "alice"}}),
+            serde_json::json!({"tool": "send", "arguments": {"body": "the figures, redacted"}}),
+            serde_json::json!({"tool": "read_hr", "arguments": {"who": "bob"}}),
+        ],
+        "the replacement runs, the spawn never reaches the host, and the next call runs",
     );
 }
 

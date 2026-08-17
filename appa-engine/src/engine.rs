@@ -1677,28 +1677,28 @@ impl Engine {
             let CheckOutcome::Block(raw) = check::evaluate(contract, &final_views, call, &CallStage::default()) else {
                 unreachable!("an in-batch release only ever adds gaps to a refused sibling's block")
             };
-            let planned = plan::plan(&self.registry, &final_views, call, &raw, &CallStage::default());
+            let role = match batch.spawn == Some(SpawnMark::at(position)) {
+                true => plan::CallRole::MarkedSpawn,
+                false => plan::CallRole::Ordinary,
+            };
             let subject = crate::basis::SubjectKey::Call {
                 trajectory: batch.trajectory.clone(),
                 batch: batch.id.clone(),
                 position: position as u32,
             };
-            let (block_id, offers, opened_offers) = self.open_offers(
+            let (block, opened_offers) = self.surface_call_block(
                 &final_views,
                 &crate::basis::DecidedAct::Proposals(batch.id.clone()),
                 &advance,
                 &batch.offer_nonce,
                 &subject,
-                &call.digest(),
-                &Engine::executable(&planned),
+                call,
+                &raw,
+                &CallStage::default(),
+                role,
             );
             facts.extend(opened_offers);
-            blocked.push(Blocked {
-                call: call.clone(),
-                block: planned,
-                block_id,
-                offers,
-            });
+            blocked.push(block);
         }
         let decided = self.declaring(crate::basis::DecidedAct::Proposals(batch.id.clone()), advance, facts);
         let append = self.seal(view, decided)?;
@@ -1745,6 +1745,40 @@ impl Engine {
         let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
         let batch = self.declaring(crate::basis::DecidedAct::Proposals(id.clone()), advance, facts);
         Ok(Some(self.seal(view, batch)?))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn surface_call_block(
+        &self,
+        views: &Views,
+        act: &crate::basis::DecidedAct,
+        advance: &crate::basis::BasisAdvance,
+        nonce: &crate::value::OfferNonce,
+        subject: &crate::basis::SubjectKey,
+        call: &ResolvedCall,
+        raw: &crate::check::RawBlock,
+        stage: &CallStage,
+        role: plan::CallRole,
+    ) -> (Blocked, Vec<Fact>) {
+        let planned = plan::plan(&self.registry, views, call, raw, stage, role);
+        let (block_id, offers, opened) = self.open_offers(
+            views,
+            act,
+            advance,
+            nonce,
+            subject,
+            &call.digest(),
+            &Engine::executable(&planned),
+        );
+        (
+            Blocked {
+                call: call.clone(),
+                block: planned,
+                block_id,
+                offers,
+            },
+            opened,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1870,7 +1904,14 @@ impl Engine {
                                 (block_id, Vec::new())
                             });
                             blocked.push(Blocked {
-                                block: plan::plan(&self.registry, views, &candidate, &raw, &stage),
+                                block: plan::plan(
+                                    &self.registry,
+                                    views,
+                                    &candidate,
+                                    &raw,
+                                    &stage,
+                                    views.call_role(&subject),
+                                ),
                                 call: candidate,
                                 block_id,
                                 offers,
@@ -1931,12 +1972,19 @@ impl Engine {
         let contract = self.validated_contract(&call)?;
         let stage = views.call_stage(&recorded.subject);
         let live = match check::evaluate(contract, &views, &call, &stage) {
-            CheckOutcome::Block(raw) => plan::plan(&self.registry, &views, &call, &raw, &stage)
-                .plans
-                .iter()
-                .filter_map(plan::RemedyPlan::executable)
-                .any(|offered| offered == &recorded.plan)
-                .then_some(raw),
+            CheckOutcome::Block(raw) => plan::plan(
+                &self.registry,
+                &views,
+                &call,
+                &raw,
+                &stage,
+                views.call_role(&recorded.subject),
+            )
+            .plans
+            .iter()
+            .filter_map(plan::RemedyPlan::executable)
+            .any(|offered| offered == &recorded.plan)
+            .then_some(raw),
             // The block is gone: whatever the agent would have remedied, nothing needs it now.
             CheckOutcome::Allow => None,
         };
@@ -2535,25 +2583,19 @@ impl Engine {
                 }))
             }
             CheckOutcome::Block(raw) => {
-                let planned = plan::plan(&self.registry, views, &substituted, &raw, &next);
-                let (block_id, offers, opened) = self.open_offers(
+                let (block, opened) = self.surface_call_block(
                     views,
                     &act,
                     &staged,
                     &execution.offer_nonce,
                     &recorded.subject,
-                    &substituted.digest(),
-                    &Engine::executable(&planned),
+                    &substituted,
+                    &raw,
+                    &next,
+                    views.call_role(&recorded.subject),
                 );
                 facts.extend(opened);
-                OfferFollowUp::Substituted {
-                    block: Box::new(Blocked {
-                        call: substituted,
-                        block: planned,
-                        block_id,
-                        offers,
-                    }),
-                }
+                OfferFollowUp::Substituted { block: Box::new(block) }
             }
         };
         let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
@@ -2778,7 +2820,14 @@ impl Engine {
             .pending_block(&recorded.subject)
             .unwrap_or((offer_block(recorded, execution, &call), Vec::new()));
         Ok(Some(Blocked {
-            block: plan::plan(&self.registry, views, &call, &raw, &stage),
+            block: plan::plan(
+                &self.registry,
+                views,
+                &call,
+                &raw,
+                &stage,
+                views.call_role(&recorded.subject),
+            ),
             call,
             block_id,
             offers,
@@ -2916,28 +2965,22 @@ impl Engine {
         }
         let after = after.view(trajectory);
         let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
-        let planned = plan::plan(&self.registry, &after, call, raw, stage);
-        let (block_id, offers, opened) = self.open_offers(
+        let (block, opened) = self.surface_call_block(
             &after,
             &crate::basis::DecidedAct::Offer(execution.offer),
             &advance,
             &execution.offer_nonce,
             &recorded.subject,
-            &call.digest(),
-            &Engine::executable(&planned),
+            call,
+            raw,
+            stage,
+            after.call_role(&recorded.subject),
         );
         facts.extend(opened);
         let batch = self.declaring(crate::basis::DecidedAct::Offer(execution.offer), advance, facts);
         Ok(EngineDecision {
             append: Some(self.seal(view, batch)?),
-            follow_up: FollowUp::Offer(OfferFollowUp::Denied {
-                block: Box::new(Blocked {
-                    call: call.clone(),
-                    block: planned,
-                    block_id,
-                    offers,
-                }),
-            }),
+            follow_up: FollowUp::Offer(OfferFollowUp::Denied { block: Box::new(block) }),
         })
     }
 
@@ -3107,7 +3150,14 @@ impl Engine {
     #[cfg(test)]
     pub(crate) fn plan(&self, views: &Views, call: &ResolvedCall, raw: &RawBlock) -> Result<PlannedBlock, EngineError> {
         self.validated_contract(call)?;
-        Ok(plan::plan(&self.registry, views, call, raw, &CallStage::default()))
+        Ok(plan::plan(
+            &self.registry,
+            views,
+            call,
+            raw,
+            &CallStage::default(),
+            plan::CallRole::Ordinary,
+        ))
     }
 
     /// Record a child's returned value at an engine-derived label AND merge it into the direct
@@ -5356,6 +5406,67 @@ mod tests {
     }
 
     #[test]
+    fn a_marked_spawn_is_offered_no_input_hop_while_its_identical_sibling_is() {
+        let e = substituting_engine();
+        let log = internal_log(TRUSTED);
+        let post = call("post", json!({ "body": "ssn 123" }));
+        let batch = || {
+            batch_on(
+                &traj(),
+                "b1",
+                Vec::new(),
+                vec![raw(&post), raw(&post)],
+                Some(SpawnMark::at(1)),
+            )
+        };
+        let decision = e.handle(&viewing(&e, &log), batch()).expect("the batch decides");
+        let hops = |blocked: &[Blocked]| -> Vec<Vec<bool>> {
+            blocked
+                .iter()
+                .map(|block| {
+                    block
+                        .block
+                        .plans
+                        .iter()
+                        .filter_map(plan::RemedyPlan::executable)
+                        .map(|plan| plan.hop().is_some())
+                        .collect()
+                })
+                .collect()
+        };
+        let (_, blocked) = answered(&decision);
+        assert_eq!(hops(blocked), vec![vec![true, false], vec![false]]);
+        assert_eq!(blocked[0].offers.len(), 2);
+        assert_eq!(blocked[1].offers.len(), 1);
+        let facts = appended_facts(decision);
+        let log = [log, facts.clone()].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+
+        let repeat = e.handle(&viewing(&e, &log), batch()).expect("the repeat answers");
+        assert!(repeat.append.is_none());
+        let (_, blocked) = answered(&repeat);
+        assert_eq!(hops(blocked), vec![vec![true, false], vec![false]]);
+
+        let (unmarked_hop, marked_offer) = {
+            let mut opened = facts.iter().filter(|fact| matches!(fact, Fact::OfferOpened { .. }));
+            (
+                opened.next().expect("the sibling's hop").clone(),
+                opened.nth(1).expect("the marked plan").clone(),
+            )
+        };
+        let mut forged = marked_offer;
+        if let (Fact::OfferOpened { plan, offer, block, .. }, Fact::OfferOpened { plan: hop, .. }) =
+            (&mut forged, &unmarked_hop)
+        {
+            *plan = hop.clone();
+            *offer = crate::value::OfferId::of_plan(block, 9, b"forged");
+        }
+        let mut with_hop = log.clone();
+        with_hop.push(forged);
+        assert_eq!(e.validate_replay(&with_hop), Err(TransitionRefusal::UnbackedOffer));
+    }
+
+    #[test]
     fn a_substitution_that_clears_the_last_gap_dispatches_in_the_hops_own_batch() {
         let e = substituting_engine();
         let proposal = call("post", json!({ "body": "ssn 123" }));
@@ -6807,6 +6918,166 @@ mod tests {
             }),
             Err(TransitionRefusal::ForgedBasis)
         );
+    }
+
+    #[test]
+    fn a_surfacing_offers_its_whole_menu_exactly_once_under_one_block() {
+        let e = two_officer_engine();
+        let opening = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let batch =
+            appended_facts(proposed(&e, &opening, "b1", nonce(), call("wire", json!({}))).expect("the batch decides"));
+        let offers: Vec<usize> = batch
+            .iter()
+            .enumerate()
+            .filter(|(_, fact)| matches!(fact, Fact::OfferOpened { .. }))
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(offers.len(), 2, "two officers, two plans, two offers");
+        assert_eq!(e.validate_replay(&[opening.clone(), batch.clone()].concat()), Ok(()));
+
+        for at in &offers {
+            let mut facts = batch.clone();
+            facts.remove(*at);
+            assert_eq!(
+                e.validate_replay(&[opening.clone(), facts].concat()),
+                Err(TransitionRefusal::IncompleteMenu)
+            );
+        }
+        let mut doubled = batch.clone();
+        let mut again = batch[offers[1]].clone();
+        if let Fact::OfferOpened { offer, .. } = &mut again {
+            *offer = crate::value::OfferId::of_plan(
+                &crate::value::BlockId::of_proposal(
+                    &nonce(),
+                    &traj(),
+                    &crate::transition::ProposalBatchId::new("b1"),
+                    0,
+                    &call("wire", json!({})).digest(),
+                ),
+                7,
+                b"again",
+            );
+        }
+        doubled.push(again);
+        assert_eq!(
+            e.validate_replay(&[opening.clone(), doubled].concat()),
+            Err(TransitionRefusal::PlanReoffered)
+        );
+        let mut split = batch.clone();
+        if let Fact::OfferOpened { block, .. } = &mut split[offers[1]] {
+            *block = crate::value::BlockId::of_proposal(
+                &crate::value::OfferNonce::new([9u8; 32]),
+                &traj(),
+                &crate::transition::ProposalBatchId::new("b1"),
+                0,
+                &call("wire", json!({})).digest(),
+            );
+        }
+        assert_eq!(
+            e.validate_replay(&[opening.clone(), split].concat()),
+            Err(TransitionRefusal::SplitBlock)
+        );
+        let log = [opening.clone(), batch.clone()].concat();
+        let first_block = match &batch[offers[0]] {
+            Fact::OfferOpened { block, .. } => *block,
+            _ => unreachable!(),
+        };
+        let mut second = appended_facts(
+            proposed(
+                &e,
+                &log,
+                "b2",
+                crate::value::OfferNonce::new([5u8; 32]),
+                call("wire", json!({ "to": "bob" })),
+            )
+            .expect("the batch decides"),
+        );
+        assert_eq!(e.validate_replay(&[log.clone(), second.clone()].concat()), Ok(()));
+        for fact in &mut second {
+            if let Fact::OfferOpened { block, .. } = fact {
+                *block = first_block;
+            }
+        }
+        assert_eq!(
+            e.validate_replay(&[log, second].concat()),
+            Err(TransitionRefusal::BlockReused)
+        );
+    }
+
+    #[test]
+    fn sibling_blocks_of_one_batch_are_each_held_to_their_own_menu() {
+        let e = two_officer_engine();
+        let opening = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let view = e.view(&traj(), opening.clone(), 1).expect("the log replays");
+        let batch = appended_facts(
+            e.handle(
+                &view,
+                EngineEvent::Proposals(ProposalBatch {
+                    id: crate::transition::ProposalBatchId::new("b1"),
+                    trajectory: traj(),
+                    provider_results: Vec::new(),
+                    proposals: vec![
+                        raw(&call("wire", json!({ "to": "a" }))),
+                        raw(&call("wire", json!({ "to": "b" }))),
+                    ],
+                    spawn: None,
+                    offer_nonce: nonce(),
+                }),
+            )
+            .expect("the batch decides"),
+        );
+        let offers: Vec<usize> = batch
+            .iter()
+            .enumerate()
+            .filter(|(_, fact)| matches!(fact, Fact::OfferOpened { .. }))
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(offers.len(), 4, "two blocks of two plans");
+        let head = &batch[..offers[0]];
+        let [a1, a2, b1, b2] = [
+            batch[offers[0]].clone(),
+            batch[offers[1]].clone(),
+            batch[offers[2]].clone(),
+            batch[offers[3]].clone(),
+        ];
+        let replay = |offers: Vec<Fact>| e.validate_replay(&[opening.clone(), head.to_vec(), offers].concat());
+        assert_eq!(replay(vec![a1.clone(), a2.clone(), b1.clone(), b2.clone()]), Ok(()));
+        assert_eq!(replay(vec![b1.clone(), b2.clone(), a1.clone(), a2.clone()]), Ok(()));
+        assert_eq!(
+            replay(vec![a1.clone(), b1.clone(), b2.clone(), a2.clone()]),
+            Err(TransitionRefusal::IncompleteMenu)
+        );
+        let mut a3 = a2.clone();
+        if let Fact::OfferOpened { offer, block, .. } = &mut a3 {
+            *offer = crate::value::OfferId::of_plan(block, 3, b"third");
+        }
+        assert_eq!(replay(vec![a1, a2, b1, b2, a3]), Err(TransitionRefusal::BlockReused));
+    }
+
+    #[test]
+    fn a_fully_denied_block_re_plans_to_an_empty_menu_that_replays() {
+        let e = two_officer_engine();
+        let mut log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let opened =
+            appended_facts(proposed(&e, &log, "b1", nonce(), call("wire", json!({}))).expect("the batch decides"));
+        log.extend(opened.clone());
+        let mut offers = opened_offers(&opened);
+        for round in 0..2 {
+            let (offer, plan) = offers.remove(0);
+            let authority = plan.required[0].authority.clone();
+            let done =
+                execute_offer(&e, &log, offer, OfferOutcome::Denied { authority }).expect("the denial is recorded");
+            let fresh = match offer_answer(&done) {
+                OfferFollowUp::Denied { block } => block.offers.clone(),
+                other => panic!("a denial answers with the re-planned block, not {other:?}"),
+            };
+            let facts = appended_facts(done);
+            log.extend(facts.clone());
+            assert_eq!(fresh.len(), 1 - round);
+            offers = opened_offers(&facts);
+        }
+        assert!(offers.is_empty(), "nothing left to offer");
+        assert_eq!(e.validate_replay(&log), Ok(()));
     }
 
     #[test]

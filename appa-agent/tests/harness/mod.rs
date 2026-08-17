@@ -127,6 +127,7 @@ impl Provider {
 pub struct ToolHost {
     bodies: Arc<Mutex<Vec<(String, String)>>>,
     sanitized: Arc<Mutex<Option<String>>>,
+    sanitizer_consults: Arc<Mutex<usize>>,
     ruling: Arc<Mutex<Option<String>>>,
     calls: Arc<Mutex<Vec<serde_json::Value>>>,
 }
@@ -152,6 +153,10 @@ impl ToolHost {
 
     pub fn calls(&self) -> Vec<serde_json::Value> {
         self.calls.lock().expect("not poisoned").clone()
+    }
+
+    pub fn sanitizer_consults(&self) -> usize {
+        *self.sanitizer_consults.lock().expect("not poisoned")
     }
 
     pub async fn serve(self) -> String {
@@ -186,6 +191,7 @@ impl ToolHost {
                 "/sanitizer",
                 axum::routing::post(move |axum::Json(_): axum::Json<serde_json::Value>| {
                     let body = sanitizer.sanitized.lock().expect("not poisoned").clone();
+                    *sanitizer.sanitizer_consults.lock().expect("not poisoned") += 1;
                     async move {
                         axum::Json(serde_json::json!({
                             "version": 1,

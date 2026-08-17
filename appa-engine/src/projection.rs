@@ -69,6 +69,9 @@ pub(crate) struct DecidedBatch {
     /// and both a live execution and a replay re-derive the block from that call — so the decision
     /// record is where the call has to be readable from.
     pub(crate) proposals: Vec<ResolvedCall>,
+    /// The proposal the runtime marked as the context-controlled spawn, readable by
+    /// position: a marked call's block is planned differently on every later read of it.
+    pub(crate) spawn: Option<crate::transition::SpawnMark>,
     pub(crate) released: Vec<DispatchId>,
 }
 
@@ -407,6 +410,7 @@ impl Projection {
                             trajectory: trajectory.clone(),
                             payload: CanonicalDigest::of_batch(proposals, *spawn),
                             proposals: proposals.clone(),
+                            spawn: *spawn,
                             released: released.clone(),
                         },
                     );
@@ -983,6 +987,12 @@ impl Views<'_> {
         self.projection.offers.get(offer)
     }
 
+    /// Has the log already surfaced this block? Family-wide, like the identity itself,
+    /// and read off the offers that name it — a block is nothing but its offers.
+    pub(crate) fn block_surfaced(&self, block: &crate::value::BlockId) -> bool {
+        self.projection.offers.values().any(|offer| offer.block == *block)
+    }
+
     /// Does this dispatch still hold an unsettled effect reservation? A close that
     /// evaporates one changes what `no_prior` sees family-wide.
     pub(crate) fn reserves(&self, dispatch: &DispatchId) -> bool {
@@ -1233,6 +1243,25 @@ impl Views<'_> {
     /// origin, so a first proposal and an unspent chain read alike.
     pub(crate) fn call_stage(&self, subject: &SubjectKey) -> crate::candidate::CallStage {
         crate::candidate::CallStage::of(self.candidate(subject), self.lineage(subject))
+    }
+
+    /// What the call this subject stands for is to its deployment: the one proposal its batch's
+    /// decision marked as the context-controlled spawn, or an ordinary call. A subject
+    /// of no decided batch — a stage that is not a call's — is ordinary.
+    pub(crate) fn call_role(&self, subject: &SubjectKey) -> crate::plan::CallRole {
+        match subject {
+            SubjectKey::Call { batch, position, .. }
+                if self.decided_batch(batch).is_some_and(|decided| {
+                    decided.spawn == Some(crate::transition::SpawnMark::at(*position as usize))
+                }) =>
+            {
+                crate::plan::CallRole::MarkedSpawn
+            }
+            SubjectKey::Call { .. }
+            | SubjectKey::Approval(_)
+            | SubjectKey::ConfinedResult(_)
+            | SubjectKey::Return(_) => crate::plan::CallRole::Ordinary,
+        }
     }
 
     /// The substituted call standing for this subject, where an input hop derived one.

@@ -735,6 +735,14 @@ pub enum TransitionRefusal {
     UnbackedOffer,
     #[error("the recorded policy basis is not the one its subject stands at")]
     ForgedBasis,
+    #[error("a block's offers do not cover every plan its menu carries")]
+    IncompleteMenu,
+    #[error("a block offers one of its plans twice")]
+    PlanReoffered,
+    #[error("the offers of one surfacing name more than one block")]
+    SplitBlock,
+    #[error("a block identity is surfaced twice")]
+    BlockReused,
     #[error("a declared policy-basis advance is not backed by the decision's records")]
     UnbackedAdvance,
     #[error("a record names an offer this log never opened")]
@@ -809,11 +817,7 @@ pub(crate) struct Sequence<'a> {
     crossed: BTreeMap<ChildReturnId, Crossing>,
     return_settling: BTreeSet<ChildReturnId>,
     accepted: BTreeMap<ChildReturnId, Narrowing>,
-    menu: Option<(
-        crate::basis::SubjectKey,
-        crate::value::CanonicalDigest,
-        Vec<crate::plan::ExecutableRemedyPlan>,
-    )>,
+    menu: Option<MenuDebt>,
     declared: Option<Declaration>,
     admitting: Option<ProposalBatchId>,
     deciding: Option<ProposalBatchId>,
@@ -847,6 +851,21 @@ struct Declaration {
     act: crate::basis::DecidedAct,
     declared: crate::basis::BasisAdvance,
     owed: crate::basis::BasisAdvance,
+}
+
+fn settled(menu: Option<MenuDebt>) -> Result<(), TransitionRefusal> {
+    match menu {
+        Some(debt) if debt.offered.len() != debt.menu.len() => Err(TransitionRefusal::IncompleteMenu),
+        Some(_) | None => Ok(()),
+    }
+}
+
+struct MenuDebt {
+    subject: crate::basis::SubjectKey,
+    block: crate::value::BlockId,
+    call: crate::value::CanonicalDigest,
+    menu: Vec<crate::plan::ExecutableRemedyPlan>,
+    offered: BTreeSet<crate::plan::PlanId>,
 }
 
 enum Derived {
@@ -970,7 +989,7 @@ impl<'a> Sequence<'a> {
         }
         let released = self.obliged(fact)?;
         if !matches!(fact, Fact::OfferOpened { .. }) {
-            self.menu = None;
+            settled(self.menu.take())?;
         }
         let implied = self.implied_advance(fact);
         match fact {
@@ -979,13 +998,13 @@ impl<'a> Sequence<'a> {
             Fact::OfferOpened {
                 trajectory,
                 offer,
+                block,
                 act,
                 call,
                 subject,
                 plan,
                 basis,
-                ..
-            } => self.offer_opened(trajectory, offer, act, call, subject, plan, basis)?,
+            } => self.offer_opened(trajectory, offer, block, act, call, subject, plan, basis)?,
             Fact::OfferAccepted { trajectory, offer } => self.offer_accepted(trajectory, offer)?,
             Fact::CallApprovalConsumed { trajectory, offer, .. } => {
                 let views = self.projection.view(trajectory);
@@ -1299,6 +1318,7 @@ impl<'a> Sequence<'a> {
         &mut self,
         trajectory: &TrajectoryId,
         offer: &crate::value::OfferId,
+        block: &crate::value::BlockId,
         act: &crate::basis::DecidedAct,
         call: &crate::value::CanonicalDigest,
         subject: &crate::basis::SubjectKey,
@@ -1313,26 +1333,41 @@ impl<'a> Sequence<'a> {
             Some(open) if &open.act == act => {}
             _ => return Err(TransitionRefusal::UnbackedOffer),
         }
-        if let Some((derived_for, derived_from, offered)) = &self.menu
-            && derived_for == subject
-        {
-            if derived_from != call || !offered.contains(plan) {
+        if let Some(debt) = self.menu.as_mut().filter(|debt| &debt.subject == subject) {
+            if debt.block != *block {
+                return Err(TransitionRefusal::SplitBlock);
+            }
+            if debt.call != *call || !debt.menu.contains(plan) {
                 return Err(TransitionRefusal::UnbackedOffer);
             }
-            return match basis == &views.basis_for(subject) {
+            if basis != &views.basis_for(subject) {
+                return Err(TransitionRefusal::ForgedBasis);
+            }
+            return match debt.offered.insert(plan.id) {
                 true => Ok(()),
-                false => Err(TransitionRefusal::ForgedBasis),
+                false => Err(TransitionRefusal::PlanReoffered),
             };
         }
-        let offered = self.stage_menu(&views, trajectory, act, call, subject)?;
-        if !offered.contains(plan) {
+        // Another subject's block begins: the one before it is done, complete or refused.
+        settled(self.menu.take())?;
+        if views.block_surfaced(block) {
+            return Err(TransitionRefusal::BlockReused);
+        }
+        let menu = self.stage_menu(&views, trajectory, act, call, subject)?;
+        if !menu.contains(plan) {
             return Err(TransitionRefusal::UnbackedOffer);
         }
-        self.menu = Some((subject.clone(), *call, offered));
         // The post-decision basis, which the declaration admitted just above already applied.
         if basis != &views.basis_for(subject) {
             return Err(TransitionRefusal::ForgedBasis);
         }
+        self.menu = Some(MenuDebt {
+            subject: subject.clone(),
+            block: *block,
+            call: *call,
+            menu,
+            offered: BTreeSet::from([plan.id]),
+        });
         Ok(())
     }
 
@@ -1370,12 +1405,19 @@ impl<'a> Sequence<'a> {
                 let CheckOutcome::Block(block) = crate::check::evaluate(contract, views, &candidate, &stage) else {
                     return Err(TransitionRefusal::UnbackedOffer);
                 };
-                Ok(crate::plan::plan(self.registry, views, &candidate, &block, &stage)
-                    .plans
-                    .iter()
-                    .filter_map(crate::plan::RemedyPlan::executable)
-                    .cloned()
-                    .collect())
+                Ok(crate::plan::plan(
+                    self.registry,
+                    views,
+                    &candidate,
+                    &block,
+                    &stage,
+                    views.call_role(subject),
+                )
+                .plans
+                .iter()
+                .filter_map(crate::plan::RemedyPlan::executable)
+                .cloned()
+                .collect())
             }
             crate::basis::SubjectKey::ConfinedResult(dispatch) => {
                 if dispatch.trajectory() != trajectory || dispatch.digest() != call {
@@ -1820,7 +1862,9 @@ impl<'a> Sequence<'a> {
 
     /// The validated projection, once every record has been admitted. A claim left standing —
     /// a release with no opening, a ruling with no dispatch — means the log stops mid-act.
-    pub(crate) fn finish(self) -> Result<Projection, TransitionRefusal> {
+    pub(crate) fn finish(mut self) -> Result<Projection, TransitionRefusal> {
+        // A log that stops mid-menu.
+        settled(self.menu.take())?;
         if !self.pending.is_empty() {
             return Err(TransitionRefusal::UnbackedDecision);
         }

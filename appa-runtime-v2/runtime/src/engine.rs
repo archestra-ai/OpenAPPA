@@ -13,7 +13,7 @@ use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
 use appa_engine::fact::{BoundaryKind, CloseOutcome, EffectSet, Fact, ReturnDerivation};
 use appa_engine::label::{Audience, Dim, Dimension, Label, PartialLabel, ReaderId, Trust};
-use appa_engine::plan::{ExecutableRemedyPlan, PlannedBlock, RemedyPlan, RequiredRuling};
+use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RequiredRuling};
 use appa_engine::profile::PolicyFileKey as EnginePolicyFileKey;
 use appa_engine::projection::Views;
 use appa_engine::registry::TrustChain;
@@ -952,14 +952,18 @@ impl RuntimeEngine {
 
     fn block_delivery(&self, view: &ValidatedView, trajectory: &TrajectoryId, block: &CoreBlocked) -> Feedback {
         let owner = engine_id(trajectory);
-        let views = view.views(&owner);
-        let offers: Vec<OfferId> = block
+        let (text, offers) = self.rendered_block(view.family(), &view.views(&owner), block);
+        Feedback { text, offers }
+    }
+
+    fn rendered_block(&self, root: &EngineTrajectoryId, views: &Views, block: &CoreBlocked) -> (String, Vec<OfferId>) {
+        let offers: Vec<(OfferId, PlanId)> = block
             .offers
             .iter()
-            .map(|(offer, _)| offer_id(view.family(), offer))
+            .map(|(offer, plan)| (offer_id(root, offer), *plan))
             .collect();
-        let text = block_feedback(&views, &block.block, &offers, self.engine.registry().trust_chain());
-        Feedback { text, offers }
+        let text = block_feedback(views, &block.block, &offers, self.engine.registry().trust_chain());
+        (text, offers.into_iter().map(|(offer, _)| offer).collect())
     }
 
     fn tool_outcome(
@@ -1175,8 +1179,7 @@ impl RuntimeEngine {
     }
 
     fn offer_block_delivery(&self, root: &EngineTrajectoryId, views: &Views, block: &CoreBlocked) -> Presentation {
-        let offers: Vec<OfferId> = block.offers.iter().map(|(offer, _)| offer_id(root, offer)).collect();
-        let feedback = block_feedback(views, &block.block, &offers, self.engine.registry().trust_chain());
+        let (feedback, offers) = self.rendered_block(root, views, block);
         Presentation::Blocked { feedback, offers }
     }
 
@@ -1912,7 +1915,25 @@ fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId) -> String {
     )
 }
 
-fn block_feedback(views: &Views, planned: &PlannedBlock, offers: &[OfferId], chain: &TrustChain) -> String {
+fn remedy_lines(planned: &PlannedBlock, offers: &[(OfferId, PlanId)]) -> Vec<String> {
+    planned
+        .plans
+        .iter()
+        .filter_map(|plan| match plan {
+            RemedyPlan::Executable(plan) => offers
+                .iter()
+                .find(|(_, offered)| *offered == plan.id)
+                .map(|(id, _)| remedy_instruction(plan, id)),
+            RemedyPlan::Redispatch(redispatch) => Some(format!(
+                "  - Run {} first; it clears: {}.",
+                terminal_safe(redispatch.tool().as_str()),
+                terminal_safe(&redispatch.clears().iter().map(gap_text).collect::<Vec<_>>().join("; ")),
+            )),
+        })
+        .collect()
+}
+
+fn block_feedback(views: &Views, planned: &PlannedBlock, offers: &[(OfferId, PlanId)], chain: &TrustChain) -> String {
     let mut reasons = Vec::new();
     for gap in &planned.raw.requirement_gaps {
         reasons.push(terminal_safe(&gap_text(gap)));
@@ -1934,24 +1955,7 @@ fn block_feedback(views: &Views, planned: &PlannedBlock, offers: &[OfferId], cha
     ];
     lines.extend(reasons.into_iter().map(|reason| format!("  - {reason}")));
 
-    let mut remedies = Vec::new();
-    let mut offer_iter = offers.iter();
-    for plan in &planned.plans {
-        match plan {
-            RemedyPlan::Executable(plan) => {
-                if let Some(id) = offer_iter.next() {
-                    remedies.push(remedy_instruction(plan, id));
-                }
-            }
-            RemedyPlan::Redispatch(redispatch) => {
-                remedies.push(format!(
-                    "  - Run {} first; it clears: {}.",
-                    terminal_safe(redispatch.tool().as_str()),
-                    terminal_safe(&redispatch.clears().iter().map(gap_text).collect::<Vec<_>>().join("; ")),
-                ));
-            }
-        }
-    }
+    let remedies = remedy_lines(planned, offers);
     if !remedies.is_empty() {
         lines.push(String::new());
         lines.push("Continue:".to_string());
@@ -2011,9 +2015,46 @@ impl TestSeam {
 
 #[cfg(test)]
 mod tests {
-    use super::{audience_wire, terminal_safe};
+    use super::{OfferId, audience_wire, remedy_instruction, remedy_lines, terminal_safe};
     use appa_engine::label::{Audience, ReaderId};
+    use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RemedyStep};
     use std::collections::BTreeSet;
+
+    #[test]
+    fn remedies_pair_each_plan_with_its_own_offer() {
+        let plan = |id: u32| ExecutableRemedyPlan {
+            id: PlanId::new(id),
+            steps: vec![RemedyStep::Authorize(appa_engine::names::AuthorityName::new(format!(
+                "officer-{id}"
+            )))],
+            required: vec![],
+        };
+        let planned = PlannedBlock {
+            raw: appa_engine::check::RawBlock {
+                requirement_gaps: vec![],
+                narrowing: None,
+                unestablished: vec![],
+            },
+            plans: vec![
+                RemedyPlan::Executable(plan(3)),
+                RemedyPlan::Executable(plan(5)),
+                RemedyPlan::Executable(plan(8)),
+            ],
+            fork_advice: None,
+        };
+        let offers = vec![
+            (OfferId("offer-for-8".to_string()), PlanId::new(8)),
+            (OfferId("offer-for-3".to_string()), PlanId::new(3)),
+        ];
+        assert_eq!(
+            remedy_lines(&planned, &offers),
+            vec![
+                remedy_instruction(&plan(3), &offers[1].0),
+                remedy_instruction(&plan(8), &offers[0].0),
+            ],
+            "the plan with no offer is not shown; the rest carry their own offer"
+        );
+    }
 
     fn restricted(ids: &[&str]) -> Audience {
         Audience::Restricted(ids.iter().map(|id| ReaderId::new((*id).to_string())).collect())
