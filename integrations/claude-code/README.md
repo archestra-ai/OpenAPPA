@@ -22,7 +22,8 @@ receives it, in the `Agent` tool's result.
 
 - `plugin/` — the Claude Code plugin: `hooks/hooks.json`, the `appa`
   MCP server (`.mcp.json`), the `appa-tool-sync` skill (declares
-  installed MCP tools in the running runtime's policy), and
+  installed MCP tools in the running runtime's policy and marks which
+  of them read private data or send data outward), and
   `statusline.sh`.
 - `.claude-plugin/marketplace.json` — the marketplace manifest;
   `claude plugin marketplace add` points at this directory.
@@ -71,8 +72,11 @@ paths everywhere.
    installed stays blocked until the policy declares it. Close by
    telling me to start a gated session and run /appa-tool-sync there:
    the skill ships with the plugin, so it exists only in clappa
-   sessions. It inventories my MCP servers and proposes policy entries
-   for their tools, and I review each one.
+   sessions. It inventories my MCP servers, proposes a policy entry for
+   every tool, and marks which of them read data that must stay in the
+   session and which can send data outward. It asks me once about the
+   servers it cannot judge, and I review the whole list before it
+   writes anything.
 
 Show me what you changed when you are done.
 ```
@@ -158,8 +162,11 @@ every statusline refresh:
 
 ## Things to know
 
-- **A changed policy is a new deployment.** Edit `[policy]` and the old
-  database refuses to open; start the process on a fresh `--db` path.
+- **An edited policy installs without a restart.** `curl -X POST
+  http://127.0.0.1:8787/reload` re-reads the `--config` file. The
+  runtime validates before it installs, so a bad file answers 422 and
+  changes nothing. Sessions started after the reload bind the new
+  policy; sessions already running keep the file they opened with.
 - **Stopping the process blocks gated sessions.** That is the design,
   not a fault. Start a plain `claude` if you want an ungated session.
 - **The plugin adds roughly zero tokens to a session.** The gating is

@@ -1,28 +1,51 @@
 ---
 name: appa-tool-sync
-description: Probe every MCP server available to this Claude Code installation, collect their tools' wire names, and declare them in the policy config of the currently running APPA runtime for the user to review. Use when the user installs a new MCP server, wants the APPA policy to cover their MCP tools, or sees calls blocked as undeclared tools.
+description: Probe every MCP server available to this Claude Code installation, collect their tools' wire names, mark what each one reads and sends, and write them into the policy config of the currently running APPA runtime for the user to review. Use when the user installs a new MCP server, wants the APPA policy to cover their MCP tools, or sees calls blocked as undeclared tools.
 ---
 
 # appa-tool-sync
 
 Bring the running runtime's policy up to date with the MCP tools
-actually installed. You inventory and declare; what each tool is
-allowed to do is a later policy edit the user makes. A name-only entry
-admits results as fully unknown (fail-closed), so declaring a tool
-never silently releases anything.
+actually installed. You declare each tool and mark it: what its result
+carries, and whether it sends data out of the session. Mark what the
+tool's own purpose makes plain. Ask the user once about the servers
+you cannot judge.
 
-This skill tells you **where to look**, not what you will find. Do not
-assume the policy dialect, the runtime's flags, or which servers exist —
-read them from the machine each time.
+Marking is a grant. A tool the policy does not name is blocked, so
+every entry you add releases something. The user sees the full list in
+step 6 before anything is written.
 
-## 1. Find the running runtime and its config
+This skill edits one configuration file and calls one endpoint. It
+reads no database and no runtime state. It tells you **where to look**,
+not what you will find: do not assume the policy dialect or which
+servers exist — read them from the machine each time.
+
+## How to speak to the user
+
+Short sentences. Plain words. No jargon.
+
+Say what happened, then say what to do. Do not explain the model, the
+dimensions, or the algebra. Never put a rule id, a TOML key, or a term
+like *delta*, *audience*, or *label* in a sentence addressed to the
+user. Those belong in the config file and in this document, not in the
+report.
+
+Write "these tools can send data outside", not "these tools require a
+public audience".
+
+## 1. Find the config the runtime is serving
 
 ```sh
-ps ax -o command | grep 'appa-runtime-v2 --config' | grep -v grep
+ps ax -o command | grep appa-runtime-v2 | grep -v grep
 ```
 
-Take the `--config` and `--db` paths from the command line. If no
-process is running, ask the user for the config path before proceeding.
+Take the `--config` path from the command line. A process started
+without that flag reads `APPA_CONFIG`, or `appa.toml` in its working
+directory; if the path is not on the command line, ask the user for it.
+Ask as well when no process is running.
+
+The runtime's address is `${APPA_RUNTIME_URL:-http://127.0.0.1:8787}`,
+the same variable the plugin's hooks and statusline read.
 
 ## 2. Inventory MCP servers and their tools
 
@@ -32,6 +55,9 @@ process is running, ask the user for the config path before proceeding.
   appear as `mcp__<server>__<tool>`, plugin-provided servers as
   `mcp__plugin_<plugin>_<server>__<tool>`. The policy must name the
   exact wire name the harness sends — a readable alias will not match.
+- Keep each tool's description. It is the evidence you mark from in
+  step 4; a wire name alone often does not say whether a tool reads or
+  sends.
 - For servers that are configured but not visible in this session
   (disconnected, unauthenticated), report them as unprobed. Do not
   invent their tool lists.
@@ -39,58 +65,112 @@ process is running, ask the user for the config path before proceeding.
 ## 3. Read the current policy
 
 Read the config file from step 1. Learn the tool-entry shape from the
-existing entries of the config being edited — do not write keys from
-memory. List which tools the policy already declares.
+existing entries of the config being edited — the table header, the
+key names, and the reader IDs it already writes. Do not write keys
+from memory. List which tools the policy already declares.
 
-## 4. Propose the diff, then get a decision
+## 4. Mark each tool
+
+Use two audience states only. **Public** is the absence of any
+restriction. **Private** is one restricted reader set: reuse the
+reader ID the config already writes for private data, or write
+`private` when it has none.
+
+Decide two things per tool, from its name and its description.
+
+**What its result carries — the `delta`.** A tool that returns content
+from a private source narrows the audience:
+
+```toml
+delta = { audience = { exactly = ["private"] } }
+```
+
+Every other tool carries nothing:
+
+```toml
+delta = {}
+```
+
+**Whether it sends data out of the session — the `requires`.** A tool
+that publishes, posts, sends, shares, or uploads to a place other
+people read may carry unrestricted values only:
+
+```toml
+requires = { audience = { includes = ["public"] } }
+delta = {}
+```
+
+Only a Public audience includes `public`, so this is the
+wall: nothing a private tool returned reaches that sink. A tool whose
+effect stays inside the session gets no `requires`.
+
+Two rules the loader enforces:
+
+- Write a `delta` key on every entry. A `requires` on an entry with no
+  `delta` is refused at load.
+- Every audience mention carries its operator — `exactly`, `includes`,
+  `cap`, `may_add`. A bare list is a load error.
+
+A tool can be both. One that reads private data and sends it outward
+carries the private `delta` and the public `requires` together, and is
+then blocked until a remedy plan clears the gap.
+
+This skill marks the audience dimension only. It sets no `trust`, no
+attention marks, and no effects. Tell the user what the sync did not
+cover, in the plain words of the section above.
+
+## 5. Ask once, about the servers you could not mark
+
+Some servers state their purpose plainly. A web search returns public
+pages. A local filesystem or a notes server returns private ones. Mark
+those yourself.
+
+For the rest, ask **one** question, about servers and not tools: which
+of these give data that must stay inside this session? Put every
+unclear server in that single question and let the user select. Do not
+ask per tool. Do not ask a second question about the tools that send —
+mark those from their descriptions and show them in step 6.
+
+## 6. Show the list, then get a decision
 
 Compare the inventory against the declarations:
 
-- installed but undeclared → candidate entries;
-- declared but no longer installed → flag for the user, never delete
+- installed but undeclared → candidate entries, each with its mark;
+- declared but no longer installed → tell the user, never delete
   unasked.
 
-Show the candidate list grouped by server and let the user confirm or
-trim it. Write each confirmed tool as a name-only entry — no `delta`
-key — so its results are admitted as fully unknown (fail-closed). Do
-not propose per-tool annotations and do not reason from the shipped
-examples: this skill only declares tools. Annotating them is a
-separate policy edit the user makes in the config afterwards.
+Group the candidates by server. For each, give the tool name, what it
+does in a few words, and one of: stays inside, keeps data private, or
+can send data outside. Name the ones that can send data outside
+separately — those decide what gets blocked later. Let the user
+confirm or trim the list.
 
-## 5. Write the config
+## 7. Write the config
 
 Apply the confirmed entries to the config file, preserving its
 existing entries and comments. Show the diff.
 
-## 6. Restart the runtime — who does it depends on gating
-
-A changed policy is a new deployment: the runtime refuses to open the
-old database, so the process must be restarted with a fresh `--db`
-path. Whether you can do that yourself depends on whether **this**
-session is gated.
-
-Detect it from the store: a gated session has a log under its own id.
-Query the `--db` from step 1 for a row whose `root` is `cc:` followed by
-this conversation's session id:
+## 8. Reload the runtime
 
 ```sh
-sqlite3 <db> "SELECT 1 FROM logs WHERE root = 'cc:<session-id>' LIMIT 1;"
+curl --fail-with-body -sS -X POST "${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/reload"
 ```
 
-A row means this session is gated by that runtime.
+The process keeps serving and no session is interrupted. The runtime
+validates the file before it installs it: a refusal answers 422 with
+the reason, changes nothing, and leaves the policy that was already
+serving in place. Give the user the reason in plain words, fix the
+config, and reload again.
 
-Either way, first warn the user that any other gated session still
-running is attached to the old deployment and should be wound down
-before the restart — do not assume such sessions survive it.
+Then close in about four sentences. What happened, and what to do:
 
-- **This session is not gated**: restart it yourself — stop the
-  process, start it with the same flags and a fresh `--db` path, and
-  verify with `curl /health` before reporting done.
-- **This session is gated**: you cannot restart it from inside —
-  between stop and start every command of this session is blocked,
-  including the start command, and a combined stop-and-start command
-  wedges the session instead (the new process opens a fresh database
-  that has no record of this session). Print the exact commands for the
-  user to run in a terminal, built from the process line found in
-  step 1 (same flags, new `--db`), and say clearly that gated sessions
-  are blocked while the process is down.
+```text
+Added 9 tools from 3 servers. The policy is live now.
+Two of them can send data outside: <name>, <name>.
+Notes and files stay private, so those two will block them.
+Start a new session to use the new tools — this one still blocks them.
+```
+
+The last line matters and is easy to get wrong: a session keeps the
+policy file it started with, so the tools you just added do not work
+in the session that added them.
