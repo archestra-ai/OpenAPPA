@@ -1,16 +1,16 @@
 {
-  "description": "Every hook posts its event to the appa-runtime-v2 process and prints the runtime's answer. curl --fail-with-body exits non-zero on a non-2xx answer and on a connection failure; plain curl exits 0 on server errors and would fail open. The trailing exit 2 makes every failure the blocking hook outcome: no answer from the runtime blocks the action. The 120-second deadline outlasts the runtime's own evidence round trips; a hook that still times out blocks, never passes. SessionStart additionally prints session-context.md into the context: guidance for the model on how to act in a gated session. It is advice, not enforcement, so its failure does not block.",
+  "description": "Hooks gate only sessions launched with APPA_GATE=1 (the clappa alias). The guard reads the Claude Code process environment, fixed at launch, so a session cannot ungate itself. Without the variable every hook exits 0 and SessionStart prints beta-announcement.md instead of the gate context — a one-line invitation to try clappa — or, when the runtime binary is not installed, setup-appa.md: instructions for the model to offer and perform the install as a prompted task, prefixed with the resolved install target so the instructions and the gate's binary lookup cannot disagree on the path. In a gated session every hook posts its event to the appa-runtime-v2 process and prints the runtime's answer. SessionStart first runs ensure-runtime.sh, which starts the installed runtime when nothing healthy answers /health. curl --fail-with-body exits non-zero on a non-2xx answer and on a connection failure; plain curl exits 0 on server errors and would fail open. The trailing exit 2 makes every failure the blocking hook outcome: no answer from the runtime blocks the action. SessionStart itself cannot block the session; the UserPromptSubmit gate blocks the first prompt instead. The 120-second deadline outlasts the runtime's own evidence round trips; a hook that still times out blocks, never passes. The context hook is advice, not enforcement, so its failure does not block.",
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2"
+            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/ensure-runtime.sh\" </dev/null && curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2"
           },
           {
             "type": "command",
-            "command": "cat \"${CLAUDE_PLUGIN_ROOT}/hooks/session-context.md\""
+            "command": "if [ \"${APPA_GATE:-}\" = 1 ]; then cat \"${CLAUDE_PLUGIN_ROOT}/hooks/session-context.md\"; elif [ -x \"${APPA_INSTALL_DIR:-$HOME/.local/bin}/appa-runtime-v2\" ] || command -v appa-runtime-v2 >/dev/null 2>&1; then cat \"${CLAUDE_PLUGIN_ROOT}/hooks/beta-announcement.md\"; else printf 'Install target for this machine: %s\\n\\n' \"${APPA_INSTALL_DIR:-$HOME/.local/bin}/appa-runtime-v2\"; cat \"${CLAUDE_PLUGIN_ROOT}/hooks/setup-appa.md\"; fi"
           }
         ]
       }
@@ -20,7 +20,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2"
+            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2"
           }
         ]
       }
@@ -31,7 +31,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2"
+            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2"
           }
         ]
       }
@@ -42,7 +42,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2"
+            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2"
           }
         ]
       }
@@ -52,7 +52,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2"
+            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2"
           }
         ]
       }
@@ -62,7 +62,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2"
+            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2"
           }
         ]
       }
@@ -73,7 +73,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2"
+            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2"
           }
         ]
       }

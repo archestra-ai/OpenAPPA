@@ -155,8 +155,8 @@ jobs:
           merge-multiple: true
           skip-decompress: true
 
-      - name: Stage installers and version
-        run: cp install.sh install.ps1 release-source/version.txt dist/
+      - name: Stage version
+        run: cp release-source/version.txt dist/
 
       - name: Verify release assets and write checksums
         working-directory: dist
@@ -185,7 +185,7 @@ jobs:
             echo "::error::expected exactly 6 release archives, found ${#actual_archives[@]}"
             exit 1
           fi
-          sha256sum "${expected_archives[@]}" install.sh install.ps1 version.txt > SHA256SUMS
+          sha256sum "${expected_archives[@]}" version.txt > SHA256SUMS
 
       - name: Read release state
         id: release-state

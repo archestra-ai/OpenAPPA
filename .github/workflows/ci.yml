@@ -13,16 +13,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  installer-checks:
-    name: Installer Checks (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-15
-          - windows-latest
-    runs-on: ${{ matrix.os }}
+  plugin-checks:
+    name: Plugin Checks
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout project
@@ -31,22 +24,20 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Check Unix installer syntax
-        if: runner.os != 'Windows'
-        run: sh -n install.sh .github/scripts/test-install.sh
+      - name: Check plugin shell syntax
+        run: |
+          sh -n integrations/claude-code/plugin/hooks/ensure-runtime.sh \
+            integrations/claude-code/plugin/statusline.sh
 
-      - name: Lint Unix installer
-        if: runner.os == 'Linux'
-        run: shellcheck install.sh .github/scripts/test-install.sh
+      - name: Lint plugin shell scripts
+        run: shellcheck -s sh integrations/claude-code/plugin/hooks/ensure-runtime.sh
 
-      - name: Test Unix installer
-        if: runner.os != 'Windows'
-        run: sh .github/scripts/test-install.sh
-
-      - name: Test Windows installer
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: .github/scripts/test-install.ps1
+      - name: Validate plugin JSON
+        run: |
+          jq -e .hooks integrations/claude-code/plugin/hooks/hooks.json >/dev/null
+          jq -e .hooks integrations/claude-code/plugin/hooks/hooks.windows.json >/dev/null
+          jq -e .plugins .claude-plugin/marketplace.json >/dev/null
+          jq -e .plugins integrations/claude-code/.claude-plugin/marketplace.json >/dev/null
 
   rust-checks:
     name: Rust Checks

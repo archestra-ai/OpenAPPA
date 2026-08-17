@@ -1,65 +1,53 @@
 # OpenAPPA
 
-OpenAPPA checks whether a value derived from declared sources can flow into a
-proposed sink before an agent acts. The [Claude Code integration](integrations/claude-code/README.md)
-gates prompts, tool calls, tool results, and child-agent returns through the
-OpenAPPA runtime.
-
 ## Install
 
-Linux and macOS:
-
 ```sh
-curl -fsSL https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.sh | sh
+gh auth login && gh auth setup-git   # while the repo is private
+claude plugin marketplace add archestra-ai/OpenAPPA
+claude plugin install appa-runtime@appa
+claude "set up APPA"
 ```
 
-Windows (PowerShell):
+`clappa` starts a gated session; plain `claude` stays ungated.
 
-```powershell
-irm https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.ps1 | iex
-```
+## Setup
 
-Each installer selects the x86-64 or ARM64 build for the current system,
-verifies its checksum, and installs the runtime with its Claude Code plugin and
-statusline. Linux requires glibc 2.34 or newer. To read a script before you run
-it, replace `| sh` with `| less`, or `| iex` with `| more`.
-
-Running an installer again changes nothing. It prints the installed version
-beside the released one and exits.
+The default policy covers Claude Code's built-in tools only. Start
+`clappa` and run `/appa-tool-sync` to add your MCP tools to the policy.
 
 ## Upgrade
 
-The same script upgrades, with `--upgrade`. It replaces the runtime and the
-plugin, and keeps your policy and database.
-
-```sh
-curl -fsSL https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.sh | sh -s -- --upgrade
-```
-
-```powershell
-& ([scriptblock]::Create((irm https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.ps1))) -Upgrade
-```
+The plugin tracks the marketplace. To upgrade the runtime, remove
+`~/.local/bin/appa-runtime-v2` and ask a plain `claude` session to set up
+APPA again; it installs the latest release.
 
 ## Uninstall
 
 ```sh
-curl -fsSL https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.sh | sh -s -- --uninstall
+claude plugin uninstall appa-runtime
+claude plugin marketplace remove appa
+rm ~/.local/bin/appa-runtime-v2
+
+# optional — also remove the policy, database, and alias:
+rm -rf ~/.config/appa ~/.local/share/appa      # Linux
+rm -rf ~/Library/"Application Support/appa"    # macOS
+sed -i.bak '/clappa/d' ~/.zshrc                # or ~/.bashrc
 ```
 
-```powershell
-& ([scriptblock]::Create((irm https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.ps1))) -Uninstall
+## Development
+
+```sh
+claude "set up APPA from this repo for local development"
 ```
 
-Uninstall removes the runtime and the installed plugin files, and keeps your
-policy and database.
-
-Only Claude Code sessions started with the installed plugin are gated. A gated
-session blocks while the runtime is down. See the
-[integration guide](integrations/claude-code/README.md) for installed paths,
-version pinning, and the `/appa-tool-sync` policy setup flow.
+Claude starts the dev runtime from source on its own port and prints
+the command that starts a gated session against it. The steps live in
+the [integration guide](integrations/claude-code/README.md).
 
 ## Documentation
 
+- [Integration guide](integrations/claude-code/README.md) — Windows, file locations
 - [How OpenAPPA works](website/content/docs/how-it-works.md)
 - [Policy contracts](website/content/docs/contracts.md)
 - [Normative specification](docs/spec.md)

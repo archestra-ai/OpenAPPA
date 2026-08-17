@@ -6,7 +6,7 @@
   "plugins": [
     {
       "name": "appa-runtime",
-      "source": "./plugin",
+      "source": "./integrations/claude-code/plugin",
       "description": "Gates a Claude Code session's flows through the appa-runtime-v2 process: every prompt, tool call, tool result, and child return is checked before it proceeds. Hooks fail closed - the runtime process must be running first. Only sessions launched with APPA_GATE=1 are gated; they start the installed runtime on demand, and an ungated session offers the runtime install as a prompted task."
     }
   ]

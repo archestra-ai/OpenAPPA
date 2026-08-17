@@ -14,9 +14,9 @@ re-validates its persisted log before it is trusted.
 ## Install a release
 
 The [Claude Code integration guide](../integrations/claude-code/README.md)
-provides verified installers for Linux, macOS, and Windows. The
-installers configure login startup and preserve an existing policy and
-database during updates.
+covers the install: the plugin manager installs the gate, and a plain
+Claude Code session installs the verified runtime binary as a prompted
+task. An existing policy and database are always preserved.
 
 ## Development quickstart
 
