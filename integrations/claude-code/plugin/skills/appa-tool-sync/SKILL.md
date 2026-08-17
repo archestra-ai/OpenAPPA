@@ -1,6 +1,6 @@
 ---
 name: appa-tool-sync
-description: Probe every MCP server available to this Claude Code installation, collect their tools' wire names, mark what each one reads and sends, and write them into the policy config of the currently running APPA runtime for the user to review. Use when the user installs a new MCP server, wants the APPA policy to cover their MCP tools, or sees calls blocked as undeclared tools.
+description: Probe every MCP server available to this Claude Code installation, collect their tools' wire names, mark what each one reads and sends, and write them into the policy config of the currently running APPA runtime for the user to review. Accepts optional extra instructions as an argument. Use when the user installs a new MCP server, wants the APPA policy to cover their MCP tools, or sees calls blocked as undeclared tools.
 ---
 
 # appa-tool-sync
@@ -12,17 +12,29 @@ tool's own purpose makes plain. Ask the user once about the servers
 you cannot judge.
 
 Marking is a grant. A tool the policy does not name is blocked, so
-every entry you add releases something. The user sees the full list in
-step 6 before anything is written.
+every entry you add releases something. The user sees the full
+overview in step 7 and approves it before anything is written.
 
 This skill edits one configuration file and calls one endpoint. It
 reads no database and no runtime state. It tells you **where to look**,
 not what you will find: do not assume the policy dialect or which
 servers exist — read them from the machine each time.
 
+## Extra instructions
+
+The user can pass extra instructions when invoking the skill
+(`/appa-tool-sync <instructions>`). Read them before step 1. They can
+name servers to skip, marks to force, or the config path. They
+override the defaults in this document. They do not skip the approval
+in step 7 — the user still confirms the overview.
+
 ## How to speak to the user
 
 Short sentences. Plain words. No jargon.
+
+Work as a dialogue, not a report. One short message per step. One
+question at a time, with a clear call to action — "approve, or tell me
+what to change". Never one wall of text.
 
 Say what happened, then say what to do. Do not explain the model, the
 dimensions, or the algebra. Never put a rule id, a TOML key, or a term
@@ -33,7 +45,15 @@ report.
 Write "these tools can send data outside", not "these tools require a
 public audience".
 
-## 1. Find the config the runtime is serving
+## 1. Ask about special cases
+
+Before probing anything, ask one short question: any special cases to
+cover? For example, tools whose data must stay inside, or servers to
+leave out. Say that with no answer, the sync applies the defaults.
+Two sentences at most, then wait. Skip this question when the extra
+instructions already answer it.
+
+## 2. Find the config the runtime is serving
 
 ```sh
 ps ax -o command | grep appa-runtime-v2 | grep -v grep
@@ -47,7 +67,7 @@ Ask as well when no process is running.
 The runtime's address is `${APPA_RUNTIME_URL:-http://127.0.0.1:8787}`,
 the same variable the plugin's hooks and statusline read.
 
-## 2. Inventory MCP servers and their tools
+## 3. Inventory MCP servers and their tools
 
 - `claude mcp list` names the servers configured for this user and
   project.
@@ -56,20 +76,20 @@ the same variable the plugin's hooks and statusline read.
   `mcp__plugin_<plugin>_<server>__<tool>`. The policy must name the
   exact wire name the harness sends — a readable alias will not match.
 - Keep each tool's description. It is the evidence you mark from in
-  step 4; a wire name alone often does not say whether a tool reads or
+  step 5; a wire name alone often does not say whether a tool reads or
   sends.
 - For servers that are configured but not visible in this session
   (disconnected, unauthenticated), report them as unprobed. Do not
   invent their tool lists.
 
-## 3. Read the current policy
+## 4. Read the current policy
 
-Read the config file from step 1. Learn the tool-entry shape from the
+Read the config file from step 2. Learn the tool-entry shape from the
 existing entries of the config being edited — the table header, the
 key names, and the reader IDs it already writes. Do not write keys
 from memory. List which tools the policy already declares.
 
-## 4. Mark each tool
+## 5. Mark each tool
 
 Use two audience states only. **Public** is the absence of any
 restriction. **Private** is one restricted reader set: reuse the
@@ -119,7 +139,7 @@ This skill marks the audience dimension only. It sets no `trust`, no
 attention marks, and no effects. Tell the user what the sync did not
 cover, in the plain words of the section above.
 
-## 5. Ask once, about the servers you could not mark
+## 6. Ask once, about the servers you could not mark
 
 Some servers state their purpose plainly. A web search returns public
 pages. A local filesystem or a notes server returns private ones. Mark
@@ -129,28 +149,33 @@ For the rest, ask **one** question, about servers and not tools: which
 of these give data that must stay inside this session? Put every
 unclear server in that single question and let the user select. Do not
 ask per tool. Do not ask a second question about the tools that send —
-mark those from their descriptions and show them in step 6.
+mark those from their descriptions and show them in step 7.
 
-## 6. Show the list, then get a decision
+## 7. Show the overview, then get approval or corrections
 
+Before writing anything, show how each server ends up configured.
 Compare the inventory against the declarations:
 
-- installed but undeclared → candidate entries, each with its mark;
+- installed but undeclared → candidate entries;
 - declared but no longer installed → tell the user, never delete
   unasked.
 
-Group the candidates by server. For each, give the tool name, what it
-does in a few words, and one of: stays inside, keeps data private, or
-can send data outside. Name the ones that can send data outside
-separately — those decide what gets blocked later. Let the user
-confirm or trim the list.
+Keep the overview short. One line per server: its name, how many
+tools, and the mark in plain words — stays inside, keeps data private,
+or can send data outside. Expand to one line per tool only where the
+tools of one server differ. Name the tools that can send data outside
+separately — those decide what gets blocked later.
 
-## 7. Write the config
+End with one short call to action: approve, or say what to change.
+Apply each correction, show the changed lines again, and repeat until
+the user approves. Never write the config without approval.
 
-Apply the confirmed entries to the config file, preserving its
+## 8. Write the config
+
+Apply the approved entries to the config file, preserving its
 existing entries and comments. Show the diff.
 
-## 8. Reload the runtime
+## 9. Reload the runtime
 
 ```sh
 curl --fail-with-body -sS -X POST "${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/reload"
