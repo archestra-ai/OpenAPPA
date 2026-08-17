@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.2.0...v0.2.1) (2026-08-17)
+
+
+### Bug Fixes
+
+* complete cross-platform installer setup ([#297](https://github.com/archestra-ai/OpenAPPA/issues/297)) ([c73d4fa](https://github.com/archestra-ai/OpenAPPA/commit/c73d4fac73a70b6318896b733c9988adfe520087))
+* resolve legacy Windows task ownership ([#299](https://github.com/archestra-ai/OpenAPPA/issues/299)) ([364e027](https://github.com/archestra-ai/OpenAPPA/commit/364e0271df679079a7307950502dd7ac407197f0))
+
 ## [0.2.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.1.0...v0.2.0) (2026-08-17)
 
 

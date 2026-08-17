@@ -48,25 +48,22 @@ Install the latest release with one command. The same command selects the
 correct x86-64 or ARM64 archive:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.sh | sh
 ```
 
 Linux binaries require glibc 2.34 or newer. Alpine and other musl-only
 systems are not supported by these release assets.
 
-For an access-controlled repository, use an authenticated GitHub CLI. The
-installer also uses this authentication for its release downloads:
-
-```sh
-gh release download --repo archestra-ai/OpenAPPA --pattern install.sh --output - | sh
-```
+If you download `install.sh` first, run `sh install.sh`. HTTP downloads do
+not preserve its executable bit, so `./install.sh` can report
+`permission denied`.
 
 Linux uses a systemd user service. macOS uses a LaunchAgent. If the
 login service cannot run in the current environment, install without it
 and start the printed command yourself:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.sh | APPA_SKIP_SERVICE=1 sh
+curl -fsSL https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.sh | APPA_SKIP_SERVICE=1 sh
 ```
 
 ### Windows
@@ -75,14 +72,11 @@ The PowerShell installer selects the x86-64 or ARM64 native Windows runtime
 and creates a current-user Scheduled Task:
 
 ```powershell
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.ps1 | iex
+irm https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.ps1 | iex
 ```
 
-For an access-controlled repository, use an authenticated GitHub CLI:
-
-```powershell
-gh release download --repo archestra-ai/OpenAPPA --pattern install.ps1 --output - | iex
-```
+A streamed script does not go through the execution policy. To run a saved
+copy, use `powershell -ExecutionPolicy Bypass -File .\install.ps1`.
 
 The Windows installer replaces the POSIX hook commands with a native
 PowerShell adapter. The adapter blocks prompt and tool authorization failures
@@ -165,11 +159,11 @@ environment; the hooks and the MCP server both follow it.
 Run the same installer with its uninstall option:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.sh | sh -s -- --uninstall
+curl -fsSL https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.sh | sh -s -- --uninstall
 ```
 
 ```powershell
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.ps1))) -Uninstall
+& ([scriptblock]::Create((irm https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.ps1))) -Uninstall
 ```
 
 Uninstall stops and removes login startup. It removes the runtime and
