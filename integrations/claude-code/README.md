@@ -60,11 +60,11 @@ paths everywhere.
 
 3. Check the runtime: curl -sS -m 2 http://127.0.0.1:8787/health should
    print "ok". If it does not, offer to start it with the default
-   policy. Copy the default example to a working config first — do not
-   point the process at the shipped example in place; later policy
-   edits belong in the copy:
-     cp integrations/claude-code/examples/claude-code.appa.toml appa.toml
+   policy:
      cargo run --bin appa-runtime-v2 -- --config appa.toml --db appa.db
+   When appa.toml does not exist, the process creates it from the
+   default example. It never replaces an existing file, so later policy
+   edits stay in that working copy.
    Run it in the background and keep it running after you finish.
 
 4. The default policy names only Claude Code's built-in tools, and APPA

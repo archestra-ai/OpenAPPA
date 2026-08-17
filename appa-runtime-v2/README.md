@@ -19,11 +19,16 @@ re-validates its persisted log before it is trusted.
 cargo build -p appa-runtime-v2
 ```
 
-### 2. Write the configuration
+### 2. Prepare the configuration
 
 `appa.toml` holds the policy — the dialect the policy-review guide
 documents, nested under `[policy]` — and the settings for calls to
-outside services. A minimal file that releases one tool:
+outside services. If the configured path does not exist at startup, the
+process creates it from the complete Claude Code starting policy. It
+never replaces an existing file.
+
+You can instead write the file before startup. A minimal configuration
+that releases one tool:
 
 ```toml
 [policy]

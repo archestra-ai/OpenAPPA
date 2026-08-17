@@ -1,10 +1,12 @@
-//! Process entry: an HTTP listener for hooks. No policy, no state.
-//! Policy lives behind the runtime
-//! API; this file only parses flags, opens the runtime, picks the
-//! adapter codec, and serves.
+//! Process entry: an HTTP listener for hooks (`docs/runtime.md`, layers
+//! table). Policy decisions live behind the runtime API; this file
+//! parses flags, initializes a missing deployment config, opens the
+//! runtime, picks the adapter codec, and serves.
 
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -16,6 +18,22 @@ use appa_runtime_api::Codec;
 use appa_runtime_v2::api::{Reloaded, Runtime};
 use appa_runtime_v2::config::Config;
 use appa_runtime_v2::{hooks, mcp};
+
+const DEFAULT_CONFIG: &str = include_str!("../../../integrations/claude-code/examples/claude-code.appa.toml");
+
+fn ensure_default_config(path: &Path) -> io::Result<bool> {
+    let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if let Err(error) = file.write_all(DEFAULT_CONFIG.as_bytes()).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(error);
+    }
+    Ok(true)
+}
 
 #[derive(Parser)]
 #[command(name = "appa-runtime-v2")]
@@ -176,6 +194,14 @@ async fn main() -> ExitCode {
         eprintln!("appa-runtime-v2: {refusal}");
         return ExitCode::FAILURE;
     }
+    match ensure_default_config(&args.config) {
+        Ok(true) => tracing::info!(path = %args.config.display(), "created default configuration"),
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("appa-runtime-v2: cannot create {}: {error}", args.config.display());
+            return ExitCode::FAILURE;
+        }
+    }
     let config = match Config::load(&args.config) {
         Ok(config) => config,
         Err(error) => {
@@ -229,6 +255,26 @@ async fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_config_is_created_without_replacing_an_existing_file() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("appa.toml");
+
+        assert!(ensure_default_config(&path).expect("default config is created"));
+        assert_eq!(
+            fs::read_to_string(&path).expect("default config is readable"),
+            DEFAULT_CONFIG
+        );
+        Config::load(&path).expect("the embedded default config validates");
+
+        fs::write(&path, "existing deployment").expect("existing config is replaced by the test");
+        assert!(!ensure_default_config(&path).expect("existing config is preserved"));
+        assert_eq!(
+            fs::read_to_string(path).expect("existing config is readable"),
+            "existing deployment"
+        );
+    }
 
     #[test]
     fn a_non_loopback_listen_address_is_refused() {

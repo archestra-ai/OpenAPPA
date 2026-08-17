@@ -1,0 +1,195 @@
+name: Build appa-runtime-v2 binaries
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Branch, tag, or commit SHA to build
+        required: true
+        default: main
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: build-appa-runtime-v2-${{ inputs.source_ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }} ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            os: Linux
+            arch: amd64
+            target: x86_64-unknown-linux-gnu
+            executable: appa-runtime-v2
+            asset: appa-runtime-v2-x86_64-unknown-linux-gnu
+            archive: appa-runtime-v2-x86_64-unknown-linux-gnu.tar.gz
+          - runner: ubuntu-24.04-arm
+            os: Linux
+            arch: arm64
+            target: aarch64-unknown-linux-gnu
+            executable: appa-runtime-v2
+            asset: appa-runtime-v2-aarch64-unknown-linux-gnu
+            archive: appa-runtime-v2-aarch64-unknown-linux-gnu.tar.gz
+          - runner: macos-15-intel
+            os: macOS
+            arch: amd64
+            target: x86_64-apple-darwin
+            executable: appa-runtime-v2
+            asset: appa-runtime-v2-x86_64-apple-darwin
+            archive: appa-runtime-v2-x86_64-apple-darwin.tar.gz
+          - runner: macos-15
+            os: macOS
+            arch: arm64
+            target: aarch64-apple-darwin
+            executable: appa-runtime-v2
+            asset: appa-runtime-v2-aarch64-apple-darwin
+            archive: appa-runtime-v2-aarch64-apple-darwin.tar.gz
+          - runner: windows-latest
+            os: Windows
+            arch: amd64
+            target: x86_64-pc-windows-msvc
+            executable: appa-runtime-v2.exe
+            asset: appa-runtime-v2-x86_64-pc-windows-msvc
+            archive: appa-runtime-v2-x86_64-pc-windows-msvc.zip
+          - runner: windows-11-arm
+            os: Windows
+            arch: arm64
+            target: aarch64-pc-windows-msvc
+            executable: appa-runtime-v2.exe
+            asset: appa-runtime-v2-aarch64-pc-windows-msvc
+            archive: appa-runtime-v2-aarch64-pc-windows-msvc.zip
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Build binary
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --locked --package appa-runtime-v2 --target "$TARGET"
+
+      - name: Stage package
+        env:
+          ASSET: ${{ matrix.asset }}
+          EXECUTABLE: ${{ matrix.executable }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p "dist/${ASSET}"
+          cp "target/${TARGET}/release/${EXECUTABLE}" "dist/${ASSET}/${EXECUTABLE}"
+          if [[ "$RUNNER_OS" != "Windows" ]]; then
+            chmod 755 "dist/${ASSET}/${EXECUTABLE}"
+          fi
+
+      - name: Package Unix archive
+        if: runner.os != 'Windows'
+        env:
+          ARCHIVE: ${{ matrix.archive }}
+          ASSET: ${{ matrix.asset }}
+        run: tar -C "dist/${ASSET}" -czf "${PWD}/dist/${ARCHIVE}" .
+
+      - name: Package Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          ARCHIVE: ${{ matrix.archive }}
+          ASSET: ${{ matrix.asset }}
+        run: Compress-Archive -Path "dist/$env:ASSET/*" -DestinationPath "dist/$env:ARCHIVE"
+
+      - name: Verify Unix package
+        if: runner.os != 'Windows'
+        env:
+          ARCHIVE: ${{ matrix.archive }}
+          EXECUTABLE: ${{ matrix.executable }}
+        run: |
+          mkdir verify
+          tar -xzf "dist/${ARCHIVE}" -C verify
+          cd verify
+          "./${EXECUTABLE}" >runtime.stdout.log 2>runtime.stderr.log &
+          runtime_pid=$!
+          cleanup() {
+            kill "$runtime_pid" 2>/dev/null || true
+            wait "$runtime_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for _ in {1..30}; do
+            if health="$(curl --fail --silent --max-time 1 http://127.0.0.1:8787/health 2>/dev/null)"; then
+              test "$health" = "ok"
+              test -s appa.toml
+              exit 0
+            fi
+            kill -0 "$runtime_pid" 2>/dev/null || break
+            sleep 1
+          done
+          cat runtime.stderr.log
+          exit 1
+
+      - name: Verify Windows package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          ARCHIVE: ${{ matrix.archive }}
+          EXECUTABLE: ${{ matrix.executable }}
+        run: |
+          $verify = Join-Path $PWD "verify"
+          Expand-Archive -Path "dist/$env:ARCHIVE" -DestinationPath $verify
+          $package = $verify
+          $stdout = Join-Path $package "runtime.stdout.log"
+          $stderr = Join-Path $package "runtime.stderr.log"
+          $start = @{
+            FilePath = Join-Path $package $env:EXECUTABLE
+            WorkingDirectory = $package
+            PassThru = $true
+            RedirectStandardOutput = $stdout
+            RedirectStandardError = $stderr
+          }
+          $process = Start-Process @start
+          $healthy = $false
+          try {
+            for ($attempt = 0; $attempt -lt 30; $attempt++) {
+              try {
+                $health = Invoke-RestMethod -Uri "http://127.0.0.1:8787/health" -TimeoutSec 1
+                if ("$health".Trim() -eq "ok") {
+                  $healthy = $true
+                  break
+                }
+              } catch {
+                $process.Refresh()
+                if ($process.HasExited) { break }
+              }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $healthy) {
+              if (Test-Path $stderr) { Get-Content $stderr }
+              throw "Extracted runtime did not become healthy"
+            }
+            if (-not (Test-Path (Join-Path $package "appa.toml"))) {
+              throw "Extracted runtime did not create appa.toml"
+            }
+          } finally {
+            $process.Refresh()
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+          }
+
+      - name: Upload package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: dist/${{ matrix.archive }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 7
