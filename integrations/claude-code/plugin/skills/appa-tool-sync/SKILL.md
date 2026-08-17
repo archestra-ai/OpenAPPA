@@ -13,7 +13,7 @@ you cannot judge.
 
 Marking is a grant. A tool the policy does not name is blocked, so
 every entry you add releases something. The user sees the full
-overview in step 7 and approves it before anything is written.
+overview in step 6 and approves it before anything is written.
 
 This skill edits one configuration file and calls one endpoint. It
 reads no database and no runtime state. It tells you **where to look**,
@@ -26,43 +26,31 @@ The user can pass extra instructions when invoking the skill
 (`/appa-tool-sync <instructions>`). Read them before step 1. They can
 name servers to skip, marks to force, or the config path. They
 override the defaults in this document. They do not skip the approval
-in step 7 — the user still confirms the overview.
+in step 6 — the user still confirms the overview.
 
 ## How to speak to the user
 
 Short sentences. Plain words. No jargon.
 
-Work as a dialogue, not a report. One short message per step. One
-question at a time, with a clear call to action — "approve, or tell me
-what to change". Never one wall of text.
+- Work as a dialogue, not a report: one short message per step, one
+  question at a time, a clear call to action — "approve, or tell me
+  what to change". Never one wall of text.
+- Say what happened, then say what to do. Do not explain the model,
+  the dimensions, or the algebra. Never put a rule id, a TOML key, or
+  a term like *delta*, *audience*, or *label* in a sentence addressed
+  to the user. Write "these tools can send data outside", not "these
+  tools require a public audience".
+- Do not narrate your own mechanics. Sentences like "the written file
+  is byte-identical to the previous sync" mean nothing to the user.
+  Say what changed, or "nothing changed", and stop.
+- Report only what is there. A check that found nothing gets no
+  sentence: never write lines like "nothing in the policy points at a
+  tool that is no longer installed" or "no servers needed a question".
+- Ask nothing before the scan. After it, at most two questions: one
+  about the servers you could not judge (step 5), then the overview
+  with its approval (step 6).
 
-Say what happened, then say what to do. Do not explain the model, the
-dimensions, or the algebra. Never put a rule id, a TOML key, or a term
-like *delta*, *audience*, or *label* in a sentence addressed to the
-user. Those belong in the config file and in this document, not in the
-report.
-
-Write "these tools can send data outside", not "these tools require a
-public audience".
-
-Do not narrate your own mechanics. Sentences like "the written file is
-byte-identical to the previous sync" or "the diff is exactly the block
-you saw in the plan" mean nothing to the user. Say the outcome in
-their terms: what changed, or "nothing changed", and stop.
-
-## 1. Ask what the user wants handled differently
-
-Before probing anything, ask one short, friendly question. Do not say
-"special cases" — ask in the user's terms, for example: "Before I
-start: is there anything you want treated with extra care — data that
-must stay private, or servers I should skip? If not, I'll use sensible
-defaults." Two sentences at most, then wait. Skip this question when
-the extra instructions already answer it.
-
-An answer covers only what it names. Apply it there, use the defaults
-everywhere else, and ask nothing more before the overview.
-
-## 2. Find the config the runtime is serving
+## 1. Find the config the runtime is serving
 
 ```sh
 ps ax -o command | grep appa-runtime-v2 | grep -v grep
@@ -76,7 +64,7 @@ Ask as well when no process is running.
 The runtime's address is `${APPA_RUNTIME_URL:-http://127.0.0.1:8787}`,
 the same variable the plugin's hooks and statusline read.
 
-## 3. Inventory MCP servers and their tools
+## 2. Inventory MCP servers and their tools
 
 - `claude mcp list` names the servers configured for this user and
   project.
@@ -91,14 +79,14 @@ the same variable the plugin's hooks and statusline read.
   (disconnected, unauthenticated), report them as unprobed. Do not
   invent their tool lists.
 
-## 4. Read the current policy
+## 3. Read the current policy
 
-Read the config file from step 2. Learn the tool-entry shape from the
+Read the config file from step 1. Learn the tool-entry shape from the
 existing entries of the config being edited — the table header, the
-key names, and the reader IDs it already writes. Do not write keys
-from memory. List which tools the policy already declares.
+key names, and the reader IDs it already writes — and preserve it.
+List which tools the policy already declares.
 
-## 5. Mark each tool
+## 4. Mark each tool
 
 Use two audience states only. **Public** is the absence of any
 restriction. **Private** is one restricted reader set: reuse the
@@ -145,10 +133,10 @@ carries the private `delta` and the public `requires` together, and is
 then blocked until a remedy plan clears the gap.
 
 This skill marks the audience dimension only. It sets no `trust`, no
-attention marks, and no effects. Tell the user what the sync did not
-cover, in the plain words of the section above.
+attention marks, and no effects. If that limit is worth telling the
+user, one line in the step 8 close is the place — not earlier.
 
-## 6. Ask once, about the servers you could not mark
+## 5. Ask once, about the servers you could not mark
 
 Some servers state their purpose plainly. A web search returns public
 pages. A local filesystem or a notes server returns private ones. Mark
@@ -158,9 +146,9 @@ For the rest, ask **one** question, about servers and not tools: which
 of these give data that must stay inside this session? Put every
 unclear server in that single question and let the user select. Do not
 ask per tool. Do not ask a second question about the tools that send —
-mark those from their descriptions and show them in step 7.
+mark those from their descriptions and show them in step 6.
 
-## 7. Show the overview, then get approval or corrections
+## 6. Show the marks you came up with, then get approval or corrections
 
 Before writing anything, show how each server ends up configured.
 Compare the inventory against the declarations:
@@ -181,16 +169,20 @@ question dialog (AskUserQuestion): its preview box truncates long
 plans, and the user must see every server. Never ask "write N
 entries?" with only a count.
 
-The call to action is one line: approve, or say what to change.
-Apply each correction, show the changed lines again, and repeat until
-the user approves. Never write the config without approval.
+The call to action is one line: approve, or name anything you want
+treated with extra care — data that must stay private, servers to
+skip, marks to change. Apply each correction, show the changed lines
+again, and repeat until the user approves. Never write the config
+without approval.
 
-## 8. Write the config
+## 7. Write the config
 
 Apply the approved entries to the config file, preserving its
-existing entries and comments. Show the diff.
+existing entries and comments. The user approved the exact entries in
+step 6, so do not show a diff. Show one only when the write had to
+deviate from what was approved.
 
-## 9. Reload the runtime
+## 8. Reload the runtime
 
 ```sh
 curl --fail-with-body -sS -X POST "${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/reload"
@@ -208,9 +200,10 @@ Then close in about four sentences. What happened, and what to do:
 Added 9 tools from 3 servers. The policy is live now.
 Two of them can send data outside: <name>, <name>.
 Notes and files stay private, so those two will block them.
-Start a new session to use the new tools — this one still blocks them.
+To use them, start a new clappa session.
 ```
 
 The last line matters and is easy to get wrong: a session keeps the
 policy file it started with, so the tools you just added do not work
-in the session that added them.
+in the session that added them. Keep the reminder to that one short
+line, and name `clappa` — only sessions started with it are gated.
