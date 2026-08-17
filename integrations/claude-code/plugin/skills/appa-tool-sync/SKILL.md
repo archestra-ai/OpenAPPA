@@ -118,8 +118,8 @@ delta = {}
 ```
 
 Only a Public audience includes `public`, so this is the
-wall: nothing a private tool returned reaches that sink. A tool whose
-effect stays inside the session gets no `requires`.
+wall: nothing a private tool returned reaches that sink. A tool that
+publishes nowhere gets no `requires`.
 
 Two rules the loader enforces:
 
@@ -143,7 +143,7 @@ pages. A local filesystem or a notes server returns private ones. Mark
 those yourself.
 
 For the rest, ask **one** question, about servers and not tools: which
-of these give data that must stay inside this session? Put every
+of these give data that must stay private? Put every
 unclear server in that single question and let the user select. Do not
 ask per tool. Do not ask a second question about the tools that send —
 mark those from their descriptions and show them in step 6.
@@ -158,8 +158,8 @@ Compare the inventory against the declarations:
   unasked.
 
 Group the overview by server. One line per server: its name, how many
-tools, and the mark in plain words — stays inside, keeps data private,
-or can send data outside. Expand to one line per tool only where the
+tools, and the mark in plain words — no restriction, keeps data
+private, or can send data outside. Expand to one line per tool only where the
 tools of one server differ. Name the tools that can send data outside
 separately — those decide what gets blocked later.
 
