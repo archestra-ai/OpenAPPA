@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub use crate::engine::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, TrajectoryStatus};
-pub use appa_runtime_api::{OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId};
+pub use appa_runtime_api::{Actor, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId};
 pub(crate) use session::{LateOpen, Session, is_control_tool};
 
 use crate::config::Config;
@@ -28,10 +28,7 @@ use appa_eventlog::{Backend, Log, LogStore};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct DispatchId(pub String);
 
-/// Identity of one remedy offer. Engine-derived and unguessable:
-/// naming it proves the model read the offer. The model
-/// quotes it back verbatim, so a host carries the string it surfaced
-/// and never builds one.
+/// One remedy offer as it is quoted and carried.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OfferId(pub String);
 
@@ -84,10 +81,10 @@ pub(crate) enum RemedyDecision {
 }
 
 /// What one whole `execute_remedy_plan` act produced: the engine's
-/// answer, or the control channel's own refusal. `Refused` covers an
-/// id no live offer answers, an offer already executing, and a storage
-/// failure — never an engine decision, and it never says which,
-/// because the id is the proof.
+/// answer, or the control channel's own refusal. `Refused` covers a
+/// quote this trajectory pursues no offer for, an offer already
+/// executing, and a storage failure — never an engine decision, and it
+/// never says which.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RemedyOutcome {
     Authorized { call: ProposedCall },
@@ -308,6 +305,7 @@ struct Inner {
     engine: EngineSeam,
     modules: crate::builtins::ModuleRegistry,
     executing: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    permits: std::sync::Mutex<std::collections::BTreeMap<String, Vec<Actor>>>,
 }
 
 impl Inner {
@@ -428,6 +426,7 @@ impl Runtime {
                 engine,
                 modules,
                 executing: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+                permits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             }),
         })
     }
@@ -582,27 +581,38 @@ impl Runtime {
         }
     }
 
-    /// Execute one surfaced remedy offer by its id (`RMD-2`,
-    /// `RMD-12`). Naming the id proves the model read the offer.
-    pub async fn execute_remedy(&self, offer: OfferId) -> RemedyOutcome {
-        self.remedy(offer, None).await
+    /// Execute one surfaced remedy offer by its id.
+    pub async fn execute_remedy(&self, acting: &Actor, offer: OfferId) -> RemedyOutcome {
+        self.remedy(acting, offer, None).await
     }
 
-    /// The whole act: claim the offer, route it to its session, and
-    /// answer. `elicitation` is supplied rather than extracted, so the
-    /// body is reachable without a live peer.
-    pub(crate) async fn remedy(&self, offer: OfferId, elicitation: Option<&Elicitation>) -> RemedyOutcome {
+    /// The whole act: resolve the quoted id inside the acting trajectory's
+    /// own family, claim the offer, and answer. `elicitation` is supplied
+    /// rather than extracted, so the body is reachable without a live peer.
+    pub(crate) async fn remedy(
+        &self,
+        acting: &Actor,
+        quoted: OfferId,
+        elicitation: Option<&Elicitation>,
+    ) -> RemedyOutcome {
+        let unknown = || RemedyOutcome::Refused {
+            detail: "no live offer with this id exists".to_string(),
+        };
+        let root = acting.root.clone();
+        let trajectory = acting.child.clone().unwrap_or_else(|| root.clone());
+        let Some((offer, pursuer)) = self.resolve_in(&root, &quoted) else {
+            return unknown();
+        };
+        if pursuer != trajectory {
+            return unknown();
+        }
+        self.spend_vouch(&quoted, acting);
         let Some(_claim) = self.claim_offer(&offer) else {
             return RemedyOutcome::Refused {
                 detail: "this offer is already being executed".to_string(),
             };
         };
-        let Some((root, trajectory)) = self.offer_owner(&offer) else {
-            return RemedyOutcome::Refused {
-                detail: "no live offer with this id exists".to_string(),
-            };
-        };
-        let mut session = match self.session(&root, &trajectory) {
+        let mut session = match self.session(&root, &pursuer) {
             Ok(session) => session,
             Err(error) => {
                 return RemedyOutcome::Refused {
@@ -622,14 +632,44 @@ impl Runtime {
         }
     }
 
-    fn offer_owner(&self, offer: &OfferId) -> Option<(TrajectoryId, TrajectoryId)> {
-        let root = crate::engine::offer_root(offer)?;
-        let log = self.inner.log(&root).ok()?;
+    /// The canonical identity a quoted id names in this family, and the
+    /// trajectory that may execute it.
+    pub(crate) fn resolve_in(&self, root: &TrajectoryId, quoted: &OfferId) -> Option<(OfferId, TrajectoryId)> {
+        let log = self.inner.log(root).ok()?;
+        let offer = crate::engine::resolve_rendered(&log, quoted)?;
         let deployment = self.inner.deployment();
         let policy = self.inner.resolve_policy(&deployment, &log).ok()?;
         let view = self.inner.engine.rebuild_view(&policy, &log).ok()?;
-        let trajectory = self.inner.engine.offer_pursuer(&view, offer)?;
-        Some((root, trajectory))
+        let pursuer = self.inner.engine.offer_pursuer(&view, &offer)?;
+        Some((offer, pursuer))
+    }
+
+    /// Record that this trajectory quoted this offer id, for the request
+    /// that runs it.
+    pub(crate) fn vouch(&self, quoted: &OfferId, acting: &Actor) {
+        let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
+        let holders = permits.entry(quoted.0.clone()).or_default();
+        if !holders.contains(acting) {
+            holders.push(acting.clone());
+        }
+    }
+
+    /// The trajectory vouched for this quoted id, taken once.
+    pub(crate) fn take_vouched(&self, quoted: &OfferId) -> Option<Actor> {
+        let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
+        let mut holders = permits.remove(&quoted.0)?;
+        (holders.len() == 1).then(|| holders.remove(0))
+    }
+
+    fn spend_vouch(&self, quoted: &OfferId, acting: &Actor) {
+        let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
+        let Some(holders) = permits.get_mut(&quoted.0) else {
+            return;
+        };
+        holders.retain(|holder| holder != acting);
+        if holders.is_empty() {
+            permits.remove(&quoted.0);
+        }
     }
 
     /// Claim one offer for the length of its execution, so two calls

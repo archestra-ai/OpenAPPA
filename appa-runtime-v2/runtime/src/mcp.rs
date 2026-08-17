@@ -1,5 +1,12 @@
 //! The `execute_remedy_plan` MCP endpoint — the engine's reserved tool,
 //! runtime-provided and identical for every harness.
+//!
+//! Served over streamable HTTP from process start. The request carries
+//! only the quoted id and no trajectory, so the trajectory comes from the
+//! hook that preceded the call — the one place the harness names it.
+//! A request no hook vouched for is refused. The engine then
+//! judges from the log whether the offer still stands: an unknown,
+//! unpursued, cross-turn, or terminal id is refused.
 
 use std::sync::Arc;
 
@@ -36,8 +43,17 @@ impl RemedyService {
         Parameters(args): Parameters<ExecuteRemedyPlanArgs>,
         request: RequestContext<RoleServer>,
     ) -> CallToolResult {
+        let quoted = OfferId(args.offer_id);
+        // The trajectory this act belongs to was named by the hook that
+        // preceded it. Without one there is nothing to serve, and guessing
+        // would be choosing a trajectory for the caller.
+        let Some(acting) = self.runtime.take_vouched(&quoted) else {
+            return render(RemedyOutcome::Refused {
+                detail: "no live offer with this id exists".to_string(),
+            });
+        };
         let elicitation = Elicitation::new(request, self.runtime.review_timeout());
-        render(self.runtime.remedy(OfferId(args.offer_id), Some(&elicitation)).await)
+        render(self.runtime.remedy(&acting, quoted, Some(&elicitation)).await)
     }
 }
 
@@ -98,6 +114,7 @@ mod tests {
     use crate::api::raw;
     use crate::api::{ProposedCall, ToolCallDecision, testing};
     use crate::config::Config;
+    use appa_runtime_api::HookDecision;
 
     fn config() -> Config {
         let text = r#"
@@ -117,7 +134,9 @@ mod tests {
     async fn an_unknown_offer_gets_one_typed_refusal() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = testing::runtime(config(), dir.path().join("appa.db"));
-        let outcome = runtime.execute_remedy(OfferId("never-surfaced".to_string())).await;
+        let outcome = runtime
+            .execute_remedy(&acting("cc:mcp-test"), OfferId("never-surfaced".to_string()))
+            .await;
         assert_eq!(
             outcome,
             RemedyOutcome::Refused {
@@ -128,7 +147,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_offer_executes_once_at_a_time() {
+    async fn one_offer_is_claimed_once_at_a_time() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = testing::runtime(config(), dir.path().join("appa.db"));
         let offer = OfferId("offer-live".to_string());
@@ -138,12 +157,6 @@ mod tests {
             runtime.claim_offer(&offer).is_none(),
             "a second execution of one offer is refused"
         );
-        assert_eq!(
-            runtime.execute_remedy(offer.clone()).await,
-            RemedyOutcome::Refused {
-                detail: "this offer is already being executed".to_string(),
-            },
-        );
 
         drop(claim);
         assert!(
@@ -152,8 +165,19 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_surfaced_offer_routes_by_its_own_id_to_the_trajectory_that_raised_it() {
+    fn acting(trajectory: &str) -> crate::api::Actor {
+        crate::api::Actor {
+            root: crate::api::TrajectoryId(trajectory.to_string()),
+            child: None,
+        }
+    }
+
+    async fn blocked_deployment() -> (
+        crate::api::Runtime,
+        crate::api::TrajectoryId,
+        OfferId,
+        tempfile::TempDir,
+    ) {
         let policy = r#"
             [policy]
             version = 1
@@ -173,9 +197,6 @@ mod tests {
             timeout_ms = 1000
             max_body_bytes = 4096
 
-            # Bound, as the deployment lint requires, but to a port nothing
-            # listens on: the consult refuses at once and abstains, which is
-            # the outcome this test wants.
             [externals.authorities.approver]
             url = "http://127.0.0.1:1/authority"
         "#;
@@ -205,14 +226,72 @@ mod tests {
             .into_iter()
             .next()
             .expect("the block surfaced an offer");
+        (runtime, root, offer, dir)
+    }
+
+    #[tokio::test]
+    async fn a_surfaced_offer_executes_for_its_own_trajectory_and_no_other() {
+        let (runtime, root, offer, _dir) = blocked_deployment().await;
         assert!(
-            offer.0.contains(root.0.as_str()),
-            "the minted id names the log to load: {}",
+            !offer.0.contains(root.0.as_str()),
+            "the quoted id carries no trajectory: {}",
             offer.0,
         );
+        assert_eq!(
+            runtime.execute_remedy(&acting("cc:mcp-stranger"), offer.clone()).await,
+            RemedyOutcome::Refused {
+                detail: "no live offer with this id exists".to_string(),
+            },
+            "an offer executes only for the trajectory that pursues it",
+        );
         assert!(matches!(
-            runtime.execute_remedy(offer).await,
+            runtime.execute_remedy(&acting(root.0.as_str()), offer).await,
             RemedyOutcome::Declined { .. } | RemedyOutcome::NoAnswer { .. },
         ));
+    }
+
+    #[tokio::test]
+    async fn a_control_act_is_vouched_for_only_by_the_trajectory_that_pursues_it() {
+        let (runtime, root, quoted, _dir) = blocked_deployment().await;
+
+        let stranger = crate::hooks::handle(&runtime, control_act(&acting("cc:mcp-stranger"), &quoted)).await;
+        assert!(
+            matches!(stranger, HookDecision::DenyCall { .. }),
+            "another trajectory's quote is refused where the harness names it: {stranger:?}",
+        );
+        assert!(
+            runtime.take_vouched(&quoted).is_none(),
+            "a refused control act vouches for nobody"
+        );
+
+        for _ in 0..2 {
+            let admitted = crate::hooks::handle(&runtime, control_act(&acting(root.0.as_str()), &quoted)).await;
+            assert!(matches!(admitted, HookDecision::PassControl), "got {admitted:?}");
+        }
+        assert_eq!(
+            runtime.take_vouched(&quoted),
+            Some(acting(root.0.as_str())),
+            "a repeated hook is one caller"
+        );
+        assert!(runtime.take_vouched(&quoted).is_none());
+
+        let admitted = crate::hooks::handle(&runtime, control_act(&acting(root.0.as_str()), &quoted)).await;
+        assert!(matches!(admitted, HookDecision::PassControl));
+        let _ = runtime.execute_remedy(&acting(root.0.as_str()), quoted.clone()).await;
+        assert!(
+            runtime.take_vouched(&quoted).is_none(),
+            "executing the act spends its vouch on every transport"
+        );
+    }
+
+    fn control_act(actor: &crate::api::Actor, quoted: &OfferId) -> appa_runtime_api::HookEvent {
+        appa_runtime_api::HookEvent::ToolCall {
+            actor: actor.clone(),
+            call: ProposedCall {
+                tool: "execute_remedy_plan".to_string(),
+                arguments: raw(serde_json::json!({ "offer_id": quoted.0 })),
+            },
+            spawn: false,
+        }
     }
 }

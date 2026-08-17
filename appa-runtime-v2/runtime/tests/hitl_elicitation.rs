@@ -117,6 +117,8 @@ impl ClientHandler for Silent {
 struct Deployment {
     url: String,
     offer: String,
+    runtime: Arc<Runtime>,
+    root: TrajectoryId,
     _dir: tempfile::TempDir,
 }
 
@@ -167,7 +169,13 @@ async fn deployment_with(review_timeout_ms: u64) -> Deployment {
         let _ = axum::serve(listener, app).await;
     });
 
-    Deployment { url, offer, _dir: dir }
+    Deployment {
+        url,
+        offer,
+        runtime,
+        root,
+        _dir: dir,
+    }
 }
 
 fn offer_id(feedback: &str) -> String {
@@ -181,6 +189,25 @@ fn offer_id(feedback: &str) -> String {
 }
 
 async fn execute<H: ClientHandler>(deployment: &Deployment, reviewer: H) -> String {
+    let vouched = hooks::handle(
+        &deployment.runtime,
+        HookEvent::ToolCall {
+            actor: Actor {
+                root: deployment.root.clone(),
+                child: None,
+            },
+            call: ProposedCall {
+                tool: "execute_remedy_plan".to_string(),
+                arguments: raw(serde_json::json!({ "offer_id": deployment.offer })),
+            },
+            spawn: false,
+        },
+    )
+    .await;
+    assert!(
+        matches!(vouched, HookDecision::PassControl),
+        "the root's own offer is admitted: {vouched:?}"
+    );
     let transport = rmcp::transport::StreamableHttpClientTransport::from_uri(deployment.url.clone());
     let client = reviewer.serve(transport).await.expect("the client initializes");
     let mut params = rmcp::model::CallToolRequestParams::default();

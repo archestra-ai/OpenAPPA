@@ -182,7 +182,10 @@ impl SessionInner {
         let Some(offer) = offer else {
             return format!("{CONTROL_TOOL} needs an {OFFER_ARGUMENT}, quoted exactly as the feedback surfaced it.");
         };
-        match self.tokio.block_on(self.runtime.execute_remedy(OfferId(offer))) {
+        match self
+            .tokio
+            .block_on(self.runtime.execute_remedy(&self.actor(), OfferId(offer)))
+        {
             RemedyOutcome::Authorized { call } => format!(
                 "Authorized. Propose the {} call again with exactly these arguments; \
                  it will run without a new check: {}",
@@ -608,7 +611,7 @@ delta    = {}
         let answered = session
             .check(CONTROL_TOOL, r#"{"offer_id":"offer-nobody-surfaced-0"}"#)
             .unwrap();
-        assert_eq!(kind(&answered), "control");
+        assert_eq!(kind(&answered), "blocked");
         assert_eq!(
             kind(&session.check("read_external", "{}").unwrap()),
             "blocked",
@@ -619,12 +622,13 @@ delta    = {}
     #[test]
     fn the_control_tool_answers_without_opening_a_dispatch() {
         let mut session = session(None);
-        let answered = session
+        let refused = session
             .check(CONTROL_TOOL, r#"{"offer_id":"offer-nobody-surfaced"}"#)
             .unwrap();
-        assert_eq!(kind(&answered), "control");
+        assert_eq!(kind(&refused), "blocked");
         assert!(session.pending.is_none(), "no outcome is owed");
         assert_eq!(kind(&session.check(CONTROL_TOOL, "{}").unwrap()), "control");
+        assert!(session.pending.is_none(), "no outcome is owed");
     }
 
     #[test]

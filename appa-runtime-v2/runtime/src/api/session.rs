@@ -438,10 +438,10 @@ impl Session {
         }
     }
 
-    /// The model called the `execute_remedy_plan` MCP tool. Executes
-    /// one offer by its id; the id is unguessable,
-    /// so naming it proves the model read the offer. An id
-    /// this runtime never surfaced for this trajectory is refused.
+    /// The model called the `execute_remedy_plan` MCP tool. Executes one
+    /// offer by its canonical id, which the runtime
+    /// resolved from the quoted form before this point. An offer this
+    /// trajectory does not pursue is refused.
     pub async fn on_remedy(
         &mut self,
         offer: OfferId,
@@ -1596,11 +1596,12 @@ name = "execute_remedy_plan"
                 .expect("the block is delivered"),
             ToolCallDecision::Deny { .. },
         ));
-        let offer = runtime
+        let quoted = runtime
             .minted_offers(&root(), &root())
             .last()
             .expect("the block surfaced the sanitize plan")
             .clone();
+        let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
         assert!(matches!(
             session.on_remedy(offer, None).await.expect("the sanitize offer binds"),
             RemedyDecision::Authorized { .. },
@@ -1745,11 +1746,12 @@ name = "execute_remedy_plan"
     }
 
     fn latest_offer(runtime: &Runtime) -> OfferId {
-        runtime
+        let quoted = runtime
             .minted_offers(&root(), &root())
             .into_iter()
             .next_back()
-            .expect("the deny surfaced an offer")
+            .expect("the deny surfaced an offer");
+        runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0
     }
 
     const READ_ONLY: &str = r#"
@@ -2351,11 +2353,12 @@ attends = ["irreversible"]
     }
 
     fn surfaced_offer_for(runtime: &Runtime, root: &TrajectoryId, trajectory: &TrajectoryId) -> OfferId {
-        runtime
+        let quoted = runtime
             .minted_offers(root, trajectory)
             .into_iter()
             .next()
-            .expect("the deny surfaced an offer")
+            .expect("the deny surfaced an offer");
+        runtime.resolve_in(root, &quoted).expect("the quoted id resolves").0
     }
 
     #[tokio::test]
@@ -2472,9 +2475,18 @@ attends = ["irreversible"]
                 .expect("the first denial is delivered"),
             RemedyDecision::Declined { .. },
         ));
+        let still_quoted = runtime.minted_offers(&second_id, &second_id);
         assert_eq!(
-            runtime.minted_offers(&second_id, &second_id),
-            vec![second_offer],
+            still_quoted.len(),
+            1,
+            "the second trajectory keeps exactly its own offer"
+        );
+        assert_eq!(
+            runtime
+                .resolve_in(&second_id, &still_quoted[0])
+                .expect("the quoted id resolves")
+                .0,
+            second_offer,
             "one trajectory's denial must not retire another trajectory's same-call offer"
         );
     }
@@ -2690,10 +2702,11 @@ context_control = true
             session.on_tool_call(send(RAW_BODY), false).await,
             Ok(ToolCallDecision::Deny { .. }),
         ));
-        runtime
+        let quoted = runtime
             .minted_offers(&root(), trajectory)
             .pop()
-            .expect("the block surfaced an offer")
+            .expect("the block surfaced an offer");
+        runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0
     }
 
     fn standing_release(runtime: &Runtime) -> Option<crate::engine::OpenDispatch> {
@@ -2701,10 +2714,11 @@ context_control = true
     }
 
     fn last_offer(runtime: &Runtime) -> OfferId {
-        runtime
+        let quoted = runtime
             .minted_offers(&root(), &root())
             .pop()
-            .expect("the block surfaced an offer")
+            .expect("the block surfaced an offer");
+        runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0
     }
 
     #[tokio::test]
@@ -3309,7 +3323,8 @@ confined_results = ["leak"]
 
     async fn run_sanitize_offer(runtime: &Runtime, session: &mut crate::api::Session) -> ToolResultDecision {
         let offers = runtime.minted_offers(&root(), &root());
-        let offer = offers.last().expect("the block surfaced offers").clone();
+        let quoted = offers.last().expect("the block surfaced offers").clone();
+        let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
         let authorized = session.on_remedy(offer, None).await.expect("the offer executes");
         assert!(matches!(authorized, RemedyDecision::Authorized { .. }));
         assert_eq!(
@@ -3415,10 +3430,11 @@ context_control = true
             .expect("the call is decided");
         if matches!(decision, ToolCallDecision::Deny { .. }) {
             let offers = runtime.minted_offers(&root(), session.trajectory());
-            let offer = offers
+            let quoted = offers
                 .first()
                 .expect("the narrowing block surfaced its acceptance")
                 .clone();
+            let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
             assert!(matches!(
                 session.on_remedy(offer, None).await.expect("the acceptance executes"),
                 RemedyDecision::Authorized { .. },

@@ -232,9 +232,11 @@ impl BlockId {
     }
 }
 
-/// One executable offer's identity. Unguessable without the act's nonce, so
-/// possession of one proves the offer reached model context before the acceptance naming it was
-/// authored — which is what makes an acceptance informed without any turn or round counter.
+/// One executable offer's identity. Derived from the act's nonce and the
+/// plan's content, so nobody allocates it and a replayed act reproduces the identical menu
+/// rather than a second identity for one plan. It is the engine's canonical identity: which
+/// trajectory may execute an offer is the runtime's question, answered from the harness channel
+/// and never from this value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct OfferId([u8; 32]);
 

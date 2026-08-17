@@ -97,6 +97,13 @@ fn raw(value: serde_json::Value) -> Box<serde_json::value::RawValue> {
     serde_json::value::to_raw_value(&value).expect("the fixture serializes")
 }
 
+fn acting() -> Actor {
+    Actor {
+        root: root(),
+        child: None,
+    }
+}
+
 fn root() -> TrajectoryId {
     TrajectoryId("membership-test".to_string())
 }
@@ -177,7 +184,7 @@ async fn narrowed(dir: &tempfile::TempDir, membership_url: &str) -> Arc<Runtime>
         panic!("the narrowing read is offered for acceptance, got {blocked:?}");
     };
     assert!(matches!(
-        runtime.execute_remedy(last_offer(&feedback)).await,
+        runtime.execute_remedy(&acting(), last_offer(&feedback)).await,
         RemedyOutcome::Authorized { .. }
     ));
     assert_eq!(

@@ -27,9 +27,10 @@
 //! set. A missing or malformed answer stays runtime-side and fails closed
 //! — no no-answer variant ever enters an engine operation.
 //!
-//! Offers are engine-derived remedies the runtime routes by an unguessable id.
-//! The id→trajectory routing is durable (the store's `offers`
-//! table); the offered payload lives only in this process. Execution never
+//! Offers are engine-derived remedies. The trajectory that may execute one
+//! comes from the harness channel carrying the control act, never from the id;
+//! the quoted id is resolved against the offers that trajectory's
+//! own log opened. The offered payload lives only in this process. Execution never
 //! trusts the cache: the plan is re-derived from the live views and matched
 //! by value, so a stale offer declines instead of executing. A
 //! restart forgets pending offers — the model hears "no longer stands" and
@@ -67,7 +68,6 @@ use appa_engine::transition::{
     ProposedCall as CoreProposedCall, Released, SpawnMark, ToolOutcome as CoreToolOutcome, ToolReport, TransitionError,
     TransitionRefusal, ValidatedFactBatch,
 };
-use appa_engine::value::TrajectoryId as EngineTrajectoryId;
 use appa_engine::value::{
     DispatchId as EngineDispatchId, ForkId, OfferId as EngineOfferId, OfferNonce as EngineOfferNonce, Provenance,
     RawResultDigest, ResolvedCall, ToolName, ValueBody, ValueId,
@@ -468,7 +468,7 @@ impl EngineSeam {
 
     /// Which trajectory pursues this offer.
     pub fn offer_pursuer(&self, view: &EngineView, offer: &OfferId) -> Option<TrajectoryId> {
-        let (_, engine_offer) = parse_offer(offer)?;
+        let engine_offer = parse_offer(offer)?;
         let surfaced = view.offer_trajectory(&engine_offer)?.clone();
         let views = view.views(&surfaced)?;
         let pursuer = if views.has_ended(&surfaced) {
@@ -1000,15 +1000,15 @@ impl RuntimeEngine {
         let views = view
             .views(&owner)
             .expect("a block is delivered for the opened trajectory whose proposal the engine decided");
-        let (text, offers) = self.rendered_block(view.family(), &views, block);
+        let (text, offers) = self.rendered_block(&views, block);
         Feedback { text, offers }
     }
 
-    fn rendered_block(&self, root: &EngineTrajectoryId, views: &Views, block: &CoreBlocked) -> (String, Vec<OfferId>) {
+    fn rendered_block(&self, views: &Views, block: &CoreBlocked) -> (String, Vec<OfferId>) {
         let offers: Vec<(OfferId, PlanId)> = block
             .offers
             .iter()
-            .map(|(offer, plan)| (offer_id(root, offer), *plan))
+            .map(|(offer, plan)| (offer_id(offer), *plan))
             .collect();
         let text = block_feedback(views, &block.block, &offers, self.engine.registry().trust_chain());
         (text, offers.into_iter().map(|(offer, _)| offer).collect())
@@ -1060,7 +1060,7 @@ impl RuntimeEngine {
                 "[appa] the sanitizer gave no answer; the result is withheld and may be retried",
             )?,
             FollowUp::Outcome(OutcomeFollowUp::Staged(confined)) => {
-                Next::PresentToModel(self.confined_delivery(view.family(), &confined))
+                Next::PresentToModel(self.confined_delivery(&confined))
             }
             other => {
                 return Err(EngineRefusal::Invariant {
@@ -1079,7 +1079,7 @@ impl RuntimeEngine {
         evidence: &[ExternalEvidence],
         entropy: &OfferNonce,
     ) -> Result<EngineDecision, EngineRefusal> {
-        let Some((_, engine_offer)) = parse_offer(offer) else {
+        let Some(engine_offer) = parse_offer(offer) else {
             return Ok(declined(
                 "[appa] this offer no longer stands; re-propose the call".to_string(),
             ));
@@ -1183,16 +1183,14 @@ impl RuntimeEngine {
                 feedback: "[appa] the state changed and this offer no longer applies; re-propose the call".to_string(),
             }),
             FollowUp::Offer(OfferFollowUp::Denied { block }) => {
-                Next::PresentToModel(self.offer_block_delivery(view.family(), &views, &block))
+                Next::PresentToModel(self.offer_block_delivery(&views, &block))
             }
             FollowUp::Offer(OfferFollowUp::Substituted { block }) => {
-                Next::PresentToModel(self.offer_block_delivery(view.family(), &views, &block))
+                Next::PresentToModel(self.offer_block_delivery(&views, &block))
             }
-            FollowUp::Offer(OfferFollowUp::Staged(confined)) => {
-                Next::PresentToModel(self.confined_delivery(view.family(), &confined))
-            }
+            FollowUp::Offer(OfferFollowUp::Staged(confined)) => Next::PresentToModel(self.confined_delivery(&confined)),
             FollowUp::Offer(OfferFollowUp::ReturnStaged(stage)) => {
-                Next::PresentToModel(self.return_stage_delivery(view.family(), &stage))
+                Next::PresentToModel(self.return_stage_delivery(&stage))
             }
             FollowUp::Offer(OfferFollowUp::Released(release)) => Next::InvokeTool(released(&release)),
             FollowUp::Offer(OfferFollowUp::Settled(_)) => Next::PresentToModel(Presentation::Declined {
@@ -1259,13 +1257,13 @@ impl RuntimeEngine {
         AuthorityOutcome::Outcome(OfferOutcome::Approved(approvals))
     }
 
-    fn offer_block_delivery(&self, root: &EngineTrajectoryId, views: &Views, block: &CoreBlocked) -> Presentation {
-        let (feedback, offers) = self.rendered_block(root, views, block);
+    fn offer_block_delivery(&self, views: &Views, block: &CoreBlocked) -> Presentation {
+        let (feedback, offers) = self.rendered_block(views, block);
         Presentation::Blocked { feedback, offers }
     }
 
-    fn confined_delivery(&self, root: &EngineTrajectoryId, confined: &Confined) -> Presentation {
-        let offers: Vec<OfferId> = confined.offers.iter().map(|(offer, _)| offer_id(root, offer)).collect();
+    fn confined_delivery(&self, confined: &Confined) -> Presentation {
+        let offers: Vec<OfferId> = confined.offers.iter().map(|(offer, _)| offer_id(offer)).collect();
         let feedback = stage_feedback(
             "[appa] the cleaned result still narrows this session.",
             &confined.residual,
@@ -1275,8 +1273,8 @@ impl RuntimeEngine {
         Presentation::Blocked { feedback, offers }
     }
 
-    fn return_stage_delivery(&self, root: &EngineTrajectoryId, stage: &PendingReturnStage) -> Presentation {
-        let offers: Vec<OfferId> = stage.offers.iter().map(|(offer, _)| offer_id(root, offer)).collect();
+    fn return_stage_delivery(&self, stage: &PendingReturnStage) -> Presentation {
+        let offers: Vec<OfferId> = stage.offers.iter().map(|(offer, _)| offer_id(offer)).collect();
         let feedback = stage_feedback(
             "[appa] the child's return still narrows this session.",
             &stage.residual,
@@ -1366,9 +1364,7 @@ impl RuntimeEngine {
                 value: admitted.as_str().to_string(),
             }),
             FollowUp::Child(ChildFollowUp::Ended) => Next::PresentToModel(Presentation::NoValue),
-            FollowUp::Child(ChildFollowUp::Pending(stage)) => {
-                Next::PresentToModel(self.return_stage_delivery(view.family(), &stage))
-            }
+            FollowUp::Child(ChildFollowUp::Pending(stage)) => Next::PresentToModel(self.return_stage_delivery(&stage)),
             FollowUp::Child(ChildFollowUp::Rejected { reason }) => Next::PresentToModel(Presentation::Blocked {
                 feedback: format!("[appa] the child's return could not cross: {reason:?}"),
                 offers: Vec::new(),
@@ -1659,15 +1655,36 @@ pub(crate) fn parse_fork(binding: &SpawnBinding) -> Option<ForkId> {
     serde_json::from_str(&binding.0).ok()
 }
 
-const OFFER_VERSION: &str = "o1:";
+const RENDERED_OFFER_CHARS: usize = 16;
 
-fn offer_id(root: &EngineTrajectoryId, offer: &EngineOfferId) -> OfferId {
-    OfferId(format!("{OFFER_VERSION}{}:{}", root.as_str(), offer.to_hex()))
+fn offer_id(offer: &EngineOfferId) -> OfferId {
+    let mut hex = offer.to_hex();
+    hex.truncate(RENDERED_OFFER_CHARS);
+    OfferId(hex)
 }
 
-fn parse_offer(offer: &OfferId) -> Option<(TrajectoryId, EngineOfferId)> {
-    let (root, hex) = offer.0.strip_prefix(OFFER_VERSION)?.rsplit_once(':')?;
-    Some((TrajectoryId(root.to_string()), EngineOfferId::from_hex(hex).ok()?))
+fn parse_offer(offer: &OfferId) -> Option<EngineOfferId> {
+    EngineOfferId::from_hex(&offer.0).ok()
+}
+
+/// The canonical identity a quoted id names, resolved against the offers this
+/// log has opened.
+pub(crate) fn resolve_rendered(log: &Log, rendered: &OfferId) -> Option<OfferId> {
+    let mut found = None;
+    for fact in log.facts() {
+        let Fact::OfferOpened { offer, .. } = fact else {
+            continue;
+        };
+        if offer_id(offer) != *rendered {
+            continue;
+        }
+        match found {
+            None => found = Some(OfferId(offer.to_hex())),
+            Some(ref already) if already.0 == offer.to_hex() => {}
+            Some(_) => return None,
+        }
+    }
+    found
 }
 
 /// The exact-bytes key of one policy file, as text. The type is the
@@ -1685,16 +1702,10 @@ pub(crate) fn minted_offers(log: &Log, trajectory: &TrajectoryId) -> Vec<OfferId
     log.facts()
         .iter()
         .filter_map(|fact| match fact {
-            Fact::OfferOpened { trajectory, offer, .. } if trajectory == &owner => Some(offer_id(log.root(), offer)),
+            Fact::OfferOpened { trajectory, offer, .. } if trajectory == &owner => Some(offer_id(offer)),
             _ => None,
         })
         .collect()
-}
-
-/// The root whose log holds this offer, for the transport that has to find it
-/// before anything is read.
-pub(crate) fn offer_root(offer: &OfferId) -> Option<TrajectoryId> {
-    parse_offer(offer).map(|(root, _)| root)
 }
 
 fn released(release: &Released) -> ReleasedCall {

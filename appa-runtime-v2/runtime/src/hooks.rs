@@ -1,11 +1,11 @@
 //! The hook dispatcher: one typed `HookEvent` in, one `HookDecision`
 //! out.
 
-use appa_runtime_api::{Actor, Codec, HookDecision, HookEvent, ParseRefusal, TrajectoryId};
+use appa_runtime_api::{Actor, Codec, HookDecision, HookEvent, ParseRefusal, ProposedCall, TrajectoryId};
 
 use crate::api::{
-    ChildReturnDecision, EventError, LateOpen, Runtime, Session, SessionError, SpawnResultDecision, ToolCallDecision,
-    ToolResultDecision, is_control_tool,
+    ChildReturnDecision, EventError, LateOpen, OfferId, Runtime, Session, SessionError, SpawnResultDecision,
+    ToolCallDecision, ToolResultDecision, is_control_tool,
 };
 
 /// One hook call, wire to wire: parse through the codec, dispatch,
@@ -52,8 +52,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
         }
         HookEvent::ToolCall { actor, call, spawn } => {
             if is_control_tool(&call.tool) {
-                tracing::debug!(trajectory = %actor.root.0, "control tool passes unchecked");
-                return HookDecision::PassControl;
+                return control_call(runtime, &actor, &call);
             }
             match on_actor(runtime, &actor, |mut session| {
                 let call = call.clone();
@@ -157,6 +156,32 @@ fn open_or_reopen(runtime: &Runtime, root: &appa_runtime_api::TrajectoryId) -> R
         },
         Err(error) => Err(error),
     }
+}
+
+fn control_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall) -> HookDecision {
+    let Some(quoted) = quoted_offer(call) else {
+        tracing::debug!(trajectory = %actor.root.0, "control tool quotes no offer id");
+        return HookDecision::PassControl;
+    };
+    let acting = actor.child.clone().unwrap_or_else(|| actor.root.clone());
+    match runtime.resolve_in(&actor.root, &quoted) {
+        Some((_, pursuer)) if pursuer == acting => {
+            runtime.vouch(&quoted, actor);
+            tracing::debug!(trajectory = %acting.0, "control tool names an offer this trajectory pursues");
+            HookDecision::PassControl
+        }
+        _ => {
+            tracing::debug!(trajectory = %acting.0, "control tool refused: no such offer here");
+            HookDecision::DenyCall {
+                feedback: "[appa] this offer no longer stands; re-propose the call".to_string(),
+            }
+        }
+    }
+}
+
+fn quoted_offer(call: &ProposedCall) -> Option<OfferId> {
+    let arguments: serde_json::Value = serde_json::from_str(call.arguments.get()).ok()?;
+    Some(OfferId(arguments.get("offer_id")?.as_str()?.to_string()))
 }
 
 async fn on_actor<T, Run>(runtime: &Runtime, actor: &Actor, event: impl Fn(Session) -> Run) -> Result<T, EventError>
@@ -296,17 +321,17 @@ mod tests {
             assert_eq!(status, 200, "hook {name} refused: {answer}");
             match name {
                 "PreToolUse" => {
-                    let reason = if control {
-                        "appa: the runtime's own control tool"
+                    let (decision, reason) = if control {
+                        ("deny", "[appa] this offer no longer stands; re-propose the call")
                     } else {
-                        "appa: the call is released"
+                        ("allow", "appa: the call is released")
                     };
                     assert_eq!(
                         answer,
                         serde_json::json!({
                             "hookSpecificOutput": {
                                 "hookEventName": "PreToolUse",
-                                "permissionDecision": "allow",
+                                "permissionDecision": decision,
                                 "permissionDecisionReason": reason,
                             }
                         }),
@@ -445,7 +470,7 @@ mod tests {
             "hook_event_name": "PreToolUse",
             "session_id": "s1",
             "tool_name": "mcp__appa__execute_remedy_plan",
-            "tool_input": {"offer_id": "offer-1"},
+            "tool_input": {},
         });
         let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&event).expect("serializes")).await;
         assert_eq!(status, 200);
@@ -500,7 +525,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_control_call_passes_without_a_session_lookup() {
+    async fn a_control_call_answers_without_a_session_lookup() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_test_runtime(&dir);
 
@@ -526,7 +551,7 @@ mod tests {
         });
         let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&control).expect("serializes")).await;
         assert_eq!(status, 200);
-        assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "deny");
 
         let outcome = serde_json::json!({
             "hook_event_name": "PostToolUse",

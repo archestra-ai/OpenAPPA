@@ -61,6 +61,20 @@ fn actor(child: Option<&TrajectoryId>) -> Actor {
     }
 }
 
+fn acting() -> Actor {
+    Actor {
+        root: root(),
+        child: None,
+    }
+}
+
+fn acting_child() -> Actor {
+    Actor {
+        root: root(),
+        child: Some(child()),
+    }
+}
+
 fn root() -> TrajectoryId {
     TrajectoryId("audit-test".to_string())
 }
@@ -227,7 +241,7 @@ async fn an_accepted_narrowing_records_where_the_label_moved() {
     let blocked = propose(&runtime, None, call("read_hr")).await;
     let offer = first_offer(&feedback_of(&blocked));
     assert!(matches!(
-        runtime.execute_remedy(offer).await,
+        runtime.execute_remedy(&acting(), offer).await,
         RemedyOutcome::Authorized { .. }
     ));
     released(&runtime, None, "read_hr", "Alice Chen, alice@corp.example").await;
@@ -264,7 +278,7 @@ async fn a_branch_records_its_seed_its_own_flows_and_how_its_return_crossed() {
     let blocked = propose(&runtime, Some(&child()), call("read_hr")).await;
     let offer = first_offer(&feedback_of(&blocked));
     assert!(matches!(
-        runtime.execute_remedy(offer).await,
+        runtime.execute_remedy(&acting_child(), offer).await,
         RemedyOutcome::Authorized { .. }
     ));
     released(&runtime, Some(&child()), "read_hr", "Alice Chen, alice@corp.example").await;
@@ -280,7 +294,7 @@ async fn a_branch_records_its_seed_its_own_flows_and_how_its_return_crossed() {
         .next()
         .expect("the stop surfaces the derivation plan");
     assert!(matches!(
-        runtime.execute_remedy(derivation).await,
+        runtime.execute_remedy(&acting(), derivation).await,
         RemedyOutcome::Returned { .. }
     ));
 
@@ -375,7 +389,7 @@ async fn a_child_bound_attest_schema_return_crosses_in_engine() {
     let blocked = propose(&runtime, Some(&child()), call("read_untrusted")).await;
     let accept = first_offer(&feedback_of(&blocked));
     assert!(matches!(
-        runtime.execute_remedy(accept).await,
+        runtime.execute_remedy(&acting_child(), accept).await,
         RemedyOutcome::Authorized { .. }
     ));
     released(&runtime, Some(&child()), "read_untrusted", "raw notes").await;

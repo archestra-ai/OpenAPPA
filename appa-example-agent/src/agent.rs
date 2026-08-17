@@ -537,7 +537,8 @@ impl Run<'_> {
                 "{CONTROL_TOOL} needs an offer_id, quoted exactly as the feedback surfaced it."
             )));
         };
-        let reply = match self.agent.runtime.execute_remedy(OfferId(offer)).await {
+        let acting = self.actor(frame);
+        let reply = match self.agent.runtime.execute_remedy(&acting, OfferId(offer)).await {
             RemedyOutcome::Authorized { call } => {
                 self.record(
                     frame,
