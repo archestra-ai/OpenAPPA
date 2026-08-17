@@ -1641,6 +1641,9 @@ export function ChatPlayground() {
     );
   };
 
+  // Nothing has pointed at the policy until a turn runs, so the pane waits.
+  const policyOpen = thread.length > 0;
+
   // The whole right-hand pane, rendered into the desktop sidebar or the
   // mobile drawer — one JSX value so the two never drift.
   const policyPane = (
@@ -1672,20 +1675,37 @@ export function ChatPlayground() {
       {/* The sidebar is sized so the preset's longest contract line fits the
           editor unwrapped at its 13px mono; the chat pane keeps a hard floor,
           so on narrower screens the sidebar cedes room and accepts a wrap.
-          Dragging the pane edge overrides the defaults via --sidebar-w. */}
+          Dragging the pane edge overrides the defaults via --sidebar-w.
+
+          The first screen is a choice and nothing else: a policy nobody has
+          been sent to yet is scenery, so the pane arrives with the run that
+          gives it something to point at. */}
       <div
-        className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(26rem,1fr)_minmax(0,var(--sidebar-w,34rem))] xl:grid-cols-[minmax(30rem,1fr)_minmax(0,var(--sidebar-w,42rem))]"
+        className={
+          policyOpen
+            ? "grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(26rem,1fr)_minmax(0,var(--sidebar-w,34rem))] xl:grid-cols-[minmax(30rem,1fr)_minmax(0,var(--sidebar-w,42rem))]"
+            : "grid min-h-0 flex-1 grid-cols-1"
+        }
         ref={gridRef}
         style={sidebarPx !== null ? ({ "--sidebar-w": `${sidebarPx}px` } as React.CSSProperties) : undefined}
       >
         {/* ---- chat pane ---- */}
-        <div className="flex min-h-0 min-w-0 flex-col border-b border-[var(--border-weak)] bg-[var(--bg)] lg:border-r lg:border-b-0">
+        {/* The borders divide the chat from the pane, so they exist only while
+            the pane does — otherwise they draw a line against nothing. */}
+        <div
+          className={`flex min-h-0 min-w-0 flex-col bg-[var(--bg)] ${
+            policyOpen ? "border-b border-[var(--border-weak)] lg:border-r lg:border-b-0" : ""
+          }`}
+        >
           {/* No chrome strip above the chat: the stream is the interface. The
               service's state is carried by the composer's placeholder and the
               empty state, and New chat waits at the foot of the stream until
               the exchange has actually settled. */}
           <Conversation className="min-h-0">
-            <ConversationContent className="gap-0">
+            {/* The chooser is a screen of its own, so it takes the scroller's
+                full height and centres in it; a real stream keeps its natural
+                content height and its stick-to-bottom behaviour. */}
+            <ConversationContent className={thread.length === 0 ? "min-h-full gap-0" : "gap-0"}>
               {thread.length === 0 ? (
                 // An empty live chat offers starters that walk the demo's
                 // best paths; a service problem earns a message instead.
@@ -1695,14 +1715,14 @@ export function ChatPlayground() {
                   // the breakpoint suggests. Safe centering: when the cards
                   // outgrow the pane, align to the scrollable top instead of
                   // clipping both ends.
-                  /* Four choices and nothing else. A filled tile reads as a
-                     control on sight — no index, no arrow, no outline needed
-                     — so the sentence stays the only thing to read and the
-                     fill does the work of saying "press me". Each scenario
-                     leads with the site's kicker: the mechanism in small caps,
-                     then the outcome it buys. Free form chat carries no
-                     mechanism, so it drops the fill and sits apart. */
-                  <div className="flex h-full flex-col justify-center px-4 py-10">
+                  /* Four choices and nothing else. A fill alone did not read as
+                     a control — the tiles looked like a list of claims — so
+                     each carries an accent `run →` at its right edge, the same
+                     affordance the policy line below uses. Each scenario leads
+                     with the site's kicker: the mechanism in small caps, then
+                     the outcome it buys. Free form chat carries no mechanism,
+                     so it drops the fill and sits apart. */
+                  <div className="flex flex-1 flex-col justify-center px-4 py-10">
                     {/* One line of welcome, then the choices. The run itself
                         is the explanation. */}
                     <h1 className="mx-auto mb-4 w-full max-w-[36rem] text-[17px] font-semibold text-[var(--text-strong)]">
@@ -1740,65 +1760,48 @@ export function ChatPlayground() {
                         <li className={`m-0 p-0 ${choice.note ? "" : "mt-2"}`} key={choice.label}>
                           <button
                             className={
+                              // The border is always there, transparent until
+                              // hover, so lighting it moves nothing.
                               choice.note
-                                ? "group w-full cursor-pointer rounded-xl bg-[var(--bg-weak)] px-5 py-4 text-left transition-colors hover:bg-[var(--accent-bg)]"
-                                : "group w-full cursor-pointer rounded-xl border border-[var(--border-weak)] px-5 py-3.5 text-left transition-colors hover:border-[var(--accent-border)] hover:bg-[var(--accent-bg)]"
+                                ? "group flex w-full cursor-pointer items-center gap-3 rounded-xl border border-transparent bg-[var(--bg-weak)] px-5 py-4 text-left transition-colors hover:border-[var(--accent-border)] hover:bg-[var(--accent-bg)]"
+                                : "group flex w-full cursor-pointer items-center gap-3 rounded-xl border border-[var(--border-weak)] px-5 py-3.5 text-left transition-colors hover:border-[var(--accent-border)] hover:bg-[var(--accent-bg)]"
                             }
                             onClick={choice.run}
                             type="button"
                           >
-                            {/* The kicker names the part of the policy the run
-                                turns on; the sentence below is what that part
-                                buys. Small caps and letter-spacing keep the two
-                                from reading as one paragraph. */}
-                            {choice.note && (
-                              <span className="mb-1.5 block font-mono text-[10.5px] font-semibold tracking-[0.14em] text-[var(--icon)] uppercase transition-colors group-hover:text-[var(--accent)]">
-                                {choice.note}
+                            <span className="min-w-0 flex-1">
+                              {/* The kicker names the part of the policy the run
+                                  turns on; the sentence below is what that part
+                                  buys. Small caps and letter-spacing keep the
+                                  two from reading as one paragraph. */}
+                              {choice.note && (
+                                <span className="mb-1.5 block font-mono text-[10.5px] font-semibold tracking-[0.14em] text-[var(--icon)] uppercase transition-colors group-hover:text-[var(--accent)]">
+                                  {choice.note}
+                                </span>
+                              )}
+                              <span
+                                className={`block text-[15.5px] leading-snug text-balance transition-colors ${
+                                  choice.note ? "text-[var(--text-strong)]" : "text-[var(--text-weak)]"
+                                } group-hover:text-[var(--accent)]`}
+                              >
+                                {choice.label}
                               </span>
-                            )}
+                            </span>
+                            {/* Says what pressing does, not just that pressing
+                                is possible — the screen's promise is a run. */}
                             <span
-                              className={`block text-[15.5px] leading-snug text-balance transition-colors ${
-                                choice.note
-                                  ? "text-[var(--text-strong)] group-hover:text-[var(--accent)]"
-                                  : "text-[var(--text-weak)] group-hover:text-[var(--accent)]"
+                              aria-hidden
+                              className={`flex shrink-0 items-center gap-1.5 font-mono text-[11px] tracking-[0.08em] uppercase transition-transform group-hover:translate-x-0.5 ${
+                                choice.note ? "text-[var(--accent)]" : "text-[var(--icon)]"
                               }`}
                             >
-                              {choice.label}
+                              {choice.note ? "run" : "write"}
+                              <span className="text-[13px] leading-none">→</span>
                             </span>
                           </button>
                         </li>
                       ))}
                     </ul>
-                    {/* The policy sits beside the chat and reads as scenery
-                        until something points at it. The arrow follows the
-                        layout: the pane is to the right on wide screens and
-                        below the chat once the grid stacks. */}
-                    <div className="mx-auto mt-8 w-full max-w-[36rem] border-t border-[var(--border-weak)] pt-5">
-                      {/* Below `lg` the pane is a sheet and the only button that
-                          opens it sits in the composer, which this screen has
-                          not shown yet — so the line that points at the policy
-                          is also the way in. On desktop the pane is already
-                          open beside the chat. */}
-                      <button
-                        className="m-0 flex cursor-pointer items-center gap-2 text-left text-[15px] font-semibold text-[var(--text-strong)] hover:text-[var(--accent)]"
-                        onClick={() => setPanelOpen(true)}
-                        type="button"
-                      >
-                        Take a look at the policy
-                        <span aria-hidden className="text-[var(--accent)]">
-                          →
-                        </span>
-                      </button>
-                      {/* Site prose size (.prose is 15px): this is body copy,
-                          not a caption, so it reads like the docs do. */}
-                      <p className="mt-2.5 mb-0 text-[15px] leading-relaxed text-[var(--text)]">
-                        We don't block or allow specific tool calls, and we don't have any agent-specific rules.
-                      </p>
-                      <p className="mt-3 mb-0 text-[15px] leading-relaxed text-[var(--text)]">
-                        We describe "audiences", "authorities" and "sanitizers". OpenAPPA works out what to block, what to let
-                        through, and how to help the agent reach the goal.
-                      </p>
-                    </div>
                   </div>
                 ) : (
                   <ConversationEmptyState
@@ -1942,24 +1945,26 @@ export function ChatPlayground() {
         </div>
 
         {/* ---- policy pane: resizable sidebar on desktop ---- */}
-        <div className="relative hidden min-h-0 min-w-0 flex-col bg-[var(--bg)] lg:flex">
-          <div
-            aria-orientation="vertical"
-            className="absolute inset-y-0 -left-1 z-10 w-2 cursor-col-resize transition-colors hover:bg-[var(--accent-border)] active:bg-[var(--accent-border)]"
-            onDoubleClick={() => {
-              setSidebarPx(null);
-              localStorage.removeItem("appa-demo-sidebar-px");
-            }}
-            onPointerDown={startSidebarDrag}
-            role="separator"
-            title="Drag to resize · double-click to reset"
-          />
-          {policyPane}
-        </div>
+        {policyOpen && (
+          <div className="relative hidden min-h-0 min-w-0 flex-col bg-[var(--bg)] lg:flex">
+            <div
+              aria-orientation="vertical"
+              className="absolute inset-y-0 -left-1 z-10 w-2 cursor-col-resize transition-colors hover:bg-[var(--accent-border)] active:bg-[var(--accent-border)]"
+              onDoubleClick={() => {
+                setSidebarPx(null);
+                localStorage.removeItem("appa-demo-sidebar-px");
+              }}
+              onPointerDown={startSidebarDrag}
+              role="separator"
+              title="Drag to resize · double-click to reset"
+            />
+            {policyPane}
+          </div>
+        )}
       </div>
 
       {/* On mobile the pane is a right-side drawer, out of the chat's way. */}
-      {panelOpen && (
+      {panelOpen && policyOpen && (
         <div className="fixed inset-0 z-40 lg:hidden">
           <div aria-hidden className="absolute inset-0 bg-black/30" onClick={() => setPanelOpen(false)} />
           <div className="absolute top-0 right-0 flex h-full w-[88vw] max-w-[26rem] flex-col border-l border-[var(--border-weak)] bg-[var(--bg)] shadow-xl">
