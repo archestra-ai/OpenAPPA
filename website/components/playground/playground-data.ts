@@ -7,49 +7,6 @@
 // keeping a copy that nothing keeps in step. Everything the chat shows comes
 // from a live run; when the service is unavailable the card says so.
 
-/** Human copy for a system id the service reports. Unknown ids fall back to
- *  the id itself, so a new system server-side degrades rather than vanishes. */
-export const SYSTEM_COPY: Record<string, { label: string; blurb: string }> = {
-  crm: {
-    label: "CRM",
-    blurb: "Customer accounts: contacts, contract values, and private account notes.",
-  },
-  github: {
-    label: "GitHub",
-    blurb: "The public issue tracker. Anyone can open an issue, including an attacker.",
-  },
-  email: {
-    label: "Email",
-    blurb: "Outbound mail. Anything sent leaves the org.",
-  },
-  finance: {
-    label: "Finance",
-    blurb: "Invoices and transfers. Moving money always needs a human sign-off.",
-  },
-  meetings: {
-    label: "Meeting recorder",
-    blurb: "Recorded meetings and their transcripts. Retrieval only.",
-  },
-};
-
-/** A system as the service reports it, dressed with local copy. */
-export type PlaygroundSystem = {
-  id: string;
-  label: string;
-  blurb: string;
-  tools: string[];
-};
-
-export function describeSystem(system: { id: string; tools: string[] }): PlaygroundSystem {
-  const copy = SYSTEM_COPY[system.id];
-  return {
-    id: system.id,
-    label: copy?.label ?? system.id,
-    blurb: copy?.blurb ?? "",
-    tools: system.tools,
-  };
-}
-
 // The model id is OpenRouter's, and the service passes it straight through.
 // Pinned to the one model the demo is tuned for — the plain (non-reasoning)
 // slug; the runtime never sends a `reasoning` field, so no reasoning is

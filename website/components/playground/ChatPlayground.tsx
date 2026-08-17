@@ -2,7 +2,8 @@
 
 // The /landing2 chat playground: the landing demo card's chrome around a real
 // chat UI (AI Elements), driven by the appa-demo service — the visitor's own
-// OpenRouter key, the policy in the editor actually enforced, any prompt.
+// OpenRouter key, the policy shown beside the chat actually enforced, any
+// prompt.
 //
 // Everything shown is a live run. There is no canned transcript: when the
 // service is unreachable the card says so and the composer is disabled, rather
@@ -34,7 +35,7 @@ import {
   respondApproval,
   streamTurn,
 } from "./demo-client";
-import { type LabelState, PLAYGROUND_MODEL, type PlaygroundSystem, describeSystem } from "./playground-data";
+import { type LabelState, PLAYGROUND_MODEL } from "./playground-data";
 import { NEW_CHAT_EVENT } from "@/components/DocsSidebar";
 import { PolicyEditor, findBlock } from "./PolicyEditor";
 import { registerPixelMarks } from "@/components/pixel-marks";
@@ -115,17 +116,23 @@ type Mode = "probing" | "live" | "down";
 const STARTER_PROMPTS = [
   {
     outcome: "Confidential meeting notes are never published to a GitHub issue.",
+    // The mechanism the run turns on, named before it starts — so a visitor
+    // choosing between the scenarios is choosing between behaviors, not
+    // between three sentences that all sound like "nothing bad happens".
+    note: "Will use sanitizers",
     text: "Check the recent meeting recordings for bugs customers mentioned, and file any that are not on GitHub yet.",
     expectation: "In this example, OpenAPPA makes sure that confidential meeting notes never end up in a GitHub issue.",
   },
   {
     outcome: "A wire transfer happens only after a human approves it.",
+    note: "Human in the loop",
     text: "Check the open invoices and pay the overdue one by transfer.",
     expectation:
       "In this example, OpenAPPA makes sure that the invoice data is not leaked, and that the wire transfer happens only after a human approves it.",
   },
   {
     outcome: "Financial data reaches only the people allowed to read it.",
+    note: "Audiences prevent data leak",
     text: "Review the unpaid invoices and email a summary first to ap-review@corp.example. After that succeeds, send the same summary to all@acme.com.",
     expectation:
       "In this example, OpenAPPA makes sure that the invoice summary reaches only the people allowed to read it — ap-review@corp.example, but not all@acme.com. Yes, that means it refuses a malicious user prompt too.",
@@ -247,7 +254,7 @@ const STORY_TOOLS = new Set(["list_recordings", "list_issues", "create_issue", "
  * Sections the short view leaves out. The session's opening label, the resolver
  * behind an address, and how an authority or sanitizer is actually implemented
  * are all real policy — and none of them is what a reader is pointed at from
- * the stream. They stay one tab away, in the full text.
+ * the stream, so the pane does not carry them.
  */
 const SHORT_DROP = new Set([
   "[boundary]",
@@ -261,10 +268,11 @@ const SHORT_DROP = new Set([
  * The policy reduced to what the playground's stories point at: the six tools
  * the scenarios call, the authority that signs a transfer, and the two
  * sanitizers with the transitions they are allowed to make. The section
- * headings stay so the rules keep their shape; the explanatory prose does not.
+ * headings stay so the rules keep their shape; the explanatory prose does not,
+ * including the instruction a sanitizer's transform runs under.
  *
- * Derived from the live text rather than kept as a second copy, so it follows
- * an edit in the full view instead of drifting from it.
+ * Derived from the policy the service ships rather than kept as a second copy,
+ * so it follows that policy instead of drifting from it.
  */
 function shortPolicy(full: string): string {
   // A comment belongs to the section it introduces, so it travels with the
@@ -293,7 +301,10 @@ function shortPolicy(full: string): string {
       // Only the section rules survive: `# --- GitHub … ---` says where you
       // are, where a paragraph of explanation would undo the shortening.
       ...group.lead.filter((line) => line.startsWith("# ---")).flatMap((line) => [line, ""]),
-      ...group.body,
+      // A sanitizer's `hint` is the paragraph its transform runs under — the
+      // longest line in the policy, and prose rather than rule. The transition
+      // beneath it is what a reader is sent here to see, so the hint goes.
+      ...(group.head === "[[sanitizer]]" ? group.body.filter((line) => !/^\s*hint\s*=/.test(line)) : group.body),
     ])
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
@@ -384,9 +395,9 @@ function splitRuling(text: string): Ruling {
 }
 
 /**
- * The policy's trust ranks, least-trusted first, read from the editor's own
+ * The policy's trust ranks, least-trusted first, read from the policy's own
  * text — a narrowing names its target trust as a chain index, and this is what
- * gives that index the name the visitor typed. The loader validates the real
+ * gives that index its name. The loader validates the real
  * parse; this regex only has to agree with it on the happy path.
  */
 function parseTrustChain(policy: string): string[] {
@@ -451,10 +462,6 @@ export function ChatPlayground() {
   const [input, setInput] = useState("");
   const [turns, setTurns] = useState(0);
 
-  // Two independent inputs: which systems exist (so which tools the agent has)
-  // and what the policy allows those tools to do. Both arrive with the preset.
-  const [pane, setPane] = useState<"tools" | "short" | "full">("short");
-  const [editorMax, setEditorMax] = useState(false);
   // Mobile only: the pane lives in a right-side drawer, closed by default.
   const [panelOpen, setPanelOpen] = useState(false);
   /* Which call rows have their arguments open. A whole email body inline
@@ -476,8 +483,8 @@ export function ChatPlayground() {
     at: number;
     settled?: boolean;
   } | null>(null);
-  const [catalog, setCatalog] = useState<PlaygroundSystem[]>([]);
-  const [presetPolicy, setPresetPolicy] = useState("");
+  // Which systems exist, so which tools the agent has. Fixed by the preset:
+  // every system the service reports is reachable.
   const [systems, setSystems] = useState<string[]>([]);
   const [policyText, setPolicyText] = useState("");
   const [policyStatus, setPolicyStatus] = useState<{
@@ -501,9 +508,7 @@ export function ChatPlayground() {
         setMode("down");
         return;
       }
-      setCatalog(preset.systems.map(describeSystem));
       setSystems(preset.systems.map((system) => system.id));
-      setPresetPolicy(preset.policy);
       setPolicyText(preset.policy);
       setMode("live");
     });
@@ -515,7 +520,8 @@ export function ChatPlayground() {
     };
   }, []);
 
-  // Validate the editor's policy against the real loader, on a debounce.
+  // Load the preset policy through the real loader: it reports the boundary the
+  // first turn enters at, and anything the policy leaves unconstrained.
   useEffect(() => {
     if (mode !== "live") return;
     const controller = new AbortController();
@@ -528,9 +534,8 @@ export function ChatPlayground() {
           }
           if (result.boundary) {
             setBoundary(result.boundary);
-            // With no session running the label simply *is* the boundary, so
-            // editing `[boundary]` moves it. Once a session exists its live
-            // label owns it until New chat.
+            // With no session running the label simply *is* the boundary.
+            // Once a session exists its live label owns it until New chat.
             if (!sessionRef.current) {
               labelRef.current = result.boundary;
             }
@@ -589,16 +594,6 @@ export function ChatPlayground() {
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
   }, []);
-
-  // Esc leaves the full-screen editor.
-  useEffect(() => {
-    if (!editorMax) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setEditorMax(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [editorMax]);
 
   const nextId = () => ++idRef.current;
   // Every pushed item is stamped with the root label at that moment — the
@@ -1110,12 +1105,8 @@ export function ChatPlayground() {
   // The line range the engine is acting on, located in the visitor's own
   // policy text — absent when the focused name has no block there.
   const shortText = useMemo(() => shortPolicy(policyText), [policyText]);
-  // The lit block belongs to whichever view is on screen: the two texts differ,
-  // so a line number from one would light the wrong lines in the other.
-  const highlight = useMemo(
-    () => (focus ? findBlock(pane === "short" ? shortText : policyText, focus.name) : null),
-    [focus, pane, policyText, shortText],
-  );
+  // Line numbers are the short text's own: it is the only policy on screen.
+  const highlight = useMemo(() => (focus ? findBlock(shortText, focus.name) : null), [focus, shortText]);
 
   // Names a narrowing's target trust rank in the visitor's own vocabulary.
   const trustChain = useMemo(() => parseTrustChain(policyText), [policyText]);
@@ -1135,11 +1126,6 @@ export function ChatPlayground() {
   // A registered entity named in chat is a door into the policy: clicking it
   // opens the policy pane scrolled to that block, lit.
   const focusEntity = (name: string) => {
-    // Land on the shortest view that actually declares the thing: the short one
-    // omits contracts, and sending a reader to a tab without the block would
-    // show them a policy with no answer in it.
-    const inShort = Boolean(findBlock(shortText, name));
-    setPane((prev) => (!inShort ? "full" : prev === "tools" ? "short" : prev));
     setFocus({ name, at: Date.now() });
   };
 
@@ -1659,87 +1645,17 @@ export function ChatPlayground() {
   // mobile drawer — one JSX value so the two never drift.
   const policyPane = (
     <>
-      {/* Three tabs do not fit one line in the mobile sheet, so the row wraps
-          rather than clipping a label or growing a scrollbar. */}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-[var(--border-weak)] px-3 pt-3" role="tablist">
-        {(["tools", "short", "full"] as const).map((tab) => (
-          <button
-            aria-selected={pane === tab}
-            className={
-              pane === tab
-                ? "-mb-px cursor-pointer border-b-2 border-[var(--accent)] px-0.5 pb-1.5 font-mono text-[11px] text-[var(--text-strong)]"
-                : "-mb-px cursor-pointer border-b-2 border-transparent px-0.5 pb-1.5 font-mono text-[11px] text-[var(--text-weak)] hover:text-[var(--text-strong)]"
-            }
-            key={tab}
-            onClick={() => setPane(tab)}
-            role="tab"
-            type="button"
-          >
-            {tab === "tools"
-              ? `Tools · ${systems.length}/${catalog.length}`
-              : tab === "short"
-                ? "OpenAPPA Policy (Short)"
-                : "OpenAPPA Policy (Full)"}
-          </button>
-        ))}
-        {pane === "full" && (
-          <span className="ml-auto flex items-center gap-2.5 pb-1.5">
-            {presetPolicy && policyText !== presetPolicy && (
-              <button
-                className="font-mono text-[11px] text-[var(--text-weak)] underline underline-offset-2 hover:text-[var(--text-strong)]"
-                onClick={() => setPolicyText(presetPolicy)}
-                type="button"
-              >
-                reset
-              </button>
-            )}
-          </span>
-        )}
+      <div className="flex items-center border-b border-[var(--border-weak)] px-3 pt-3">
+        <span className="-mb-px border-b-2 border-[var(--accent)] px-0.5 pb-1.5 font-mono text-[11px] text-[var(--text-strong)]">
+          OpenAPPA Policy
+        </span>
       </div>
 
-      {pane === "tools" ? (
-        <div className="flex-1 overflow-y-auto bg-[var(--bg-weak)] px-3 py-2">
-          {catalog.map((system) => {
-            const on = systems.includes(system.id);
-            return (
-              <label
-                className="flex cursor-pointer items-start gap-2 rounded-md px-1 py-1.5 hover:bg-[var(--bg-weak-hover)]"
-                key={system.id}
-              >
-                <input
-                  checked={on}
-                  className="mt-0.5 accent-[var(--accent)]"
-                  onChange={() =>
-                    setSystems((prev) =>
-                      prev.includes(system.id) ? prev.filter((id) => id !== system.id) : [...prev, system.id],
-                    )
-                  }
-                  type="checkbox"
-                />
-                <span className="min-w-0">
-                  <span className="block text-[12px] text-[var(--text-strong)]">{system.label}</span>
-                  <span className="block text-[11px] leading-snug text-[var(--text-weak)]">{system.blurb}</span>
-                  <span className="mt-0.5 block truncate font-mono text-[10px] text-[var(--icon)]">
-                    {system.tools.join(" · ")}
-                  </span>
-                </span>
-              </label>
-            );
-          })}
-        </div>
-      ) : (
-        /* No padding here: the editor's own layers carry it, and padding
-               on this box would only push the caret layer off the text. The
-               short view is a reading of the same policy, never a second one
-               that could run — so it shows the text and refuses the caret. */
-        <PolicyEditor
-          className="min-h-[12rem] flex-1"
-          highlight={highlight}
-          onChange={setPolicyText}
-          readOnly={pane === "short"}
-          value={pane === "short" ? shortText : policyText}
-        />
-      )}
+      {/* No padding here: the editor's own layers carry it, and padding on this
+          box would only push the text layer off the glyphs. What the pane shows
+          is a reading of the running policy, never a second one that could
+          run. */}
+      <PolicyEditor className="min-h-[12rem] flex-1" highlight={highlight} value={shortText} />
       {policyStatus && (
         <p
           className="m-0 px-3 py-2 text-[11.5px] leading-relaxed"
@@ -1782,7 +1698,10 @@ export function ChatPlayground() {
                   /* Four choices and nothing else. A filled tile reads as a
                      control on sight — no index, no arrow, no outline needed
                      — so the sentence stays the only thing to read and the
-                     fill does the work of saying "press me". */
+                     fill does the work of saying "press me". Each scenario
+                     leads with the site's kicker: the mechanism in small caps,
+                     then the outcome it buys. Free form chat carries no
+                     mechanism, so it drops the fill and sits apart. */
                   <div className="flex h-full flex-col justify-center px-4 py-10">
                     {/* One line of welcome, then the choices. The run itself
                         is the explanation. */}
@@ -1793,6 +1712,7 @@ export function ChatPlayground() {
                       {[
                         ...STARTER_PROMPTS.map((starter) => ({
                           label: starter.outcome,
+                          note: starter.note,
                           run: () => send(starter.text),
                         })),
                         {
@@ -1814,14 +1734,37 @@ export function ChatPlayground() {
                             requestAnimationFrame(() => document.getElementById("chat-composer")?.focus());
                           },
                         },
-                      ].map((choice) => (
-                        <li className="m-0 p-0" key={choice.label}>
+                      ].map((choice: { label: string; note?: string; run: () => void }) => (
+                        // The last tile is the escape hatch, not a fourth
+                        // scenario: extra air above it, and no fill.
+                        <li className={`m-0 p-0 ${choice.note ? "" : "mt-2"}`} key={choice.label}>
                           <button
-                            className="w-full cursor-pointer rounded-xl bg-[var(--bg-weak)] px-5 py-4 text-left text-[15.5px] leading-snug text-balance text-[var(--text-strong)] transition-colors hover:bg-[var(--accent-bg)] hover:text-[var(--accent)]"
+                            className={
+                              choice.note
+                                ? "group w-full cursor-pointer rounded-xl bg-[var(--bg-weak)] px-5 py-4 text-left transition-colors hover:bg-[var(--accent-bg)]"
+                                : "group w-full cursor-pointer rounded-xl border border-[var(--border-weak)] px-5 py-3.5 text-left transition-colors hover:border-[var(--accent-border)] hover:bg-[var(--accent-bg)]"
+                            }
                             onClick={choice.run}
                             type="button"
                           >
-                            {choice.label}
+                            {/* The kicker names the part of the policy the run
+                                turns on; the sentence below is what that part
+                                buys. Small caps and letter-spacing keep the two
+                                from reading as one paragraph. */}
+                            {choice.note && (
+                              <span className="mb-1.5 block font-mono text-[10.5px] font-semibold tracking-[0.14em] text-[var(--icon)] uppercase transition-colors group-hover:text-[var(--accent)]">
+                                {choice.note}
+                              </span>
+                            )}
+                            <span
+                              className={`block text-[15.5px] leading-snug text-balance transition-colors ${
+                                choice.note
+                                  ? "text-[var(--text-strong)] group-hover:text-[var(--accent)]"
+                                  : "text-[var(--text-weak)] group-hover:text-[var(--accent)]"
+                              }`}
+                            >
+                              {choice.label}
+                            </span>
                           </button>
                         </li>
                       ))}
@@ -1835,13 +1778,10 @@ export function ChatPlayground() {
                           opens it sits in the composer, which this screen has
                           not shown yet — so the line that points at the policy
                           is also the way in. On desktop the pane is already
-                          open beside the chat, and this selects its tab. */}
+                          open beside the chat. */}
                       <button
                         className="m-0 flex cursor-pointer items-center gap-2 text-left text-[15px] font-semibold text-[var(--text-strong)] hover:text-[var(--accent)]"
-                        onClick={() => {
-                          setPane("short");
-                          setPanelOpen(true);
-                        }}
+                        onClick={() => setPanelOpen(true)}
                         type="button"
                       >
                         Take a look at the policy
@@ -1995,7 +1935,7 @@ export function ChatPlayground() {
                 style={chrome.barBtn}
                 type="button"
               >
-                Tools · policy
+                Policy
               </button>
             </div>
           )}
@@ -2024,7 +1964,7 @@ export function ChatPlayground() {
           <div aria-hidden className="absolute inset-0 bg-black/30" onClick={() => setPanelOpen(false)} />
           <div className="absolute top-0 right-0 flex h-full w-[88vw] max-w-[26rem] flex-col border-l border-[var(--border-weak)] bg-[var(--bg)] shadow-xl">
             <div className="flex items-center justify-between px-3 pt-3">
-              <span className="font-mono text-[11px] text-[var(--icon)]">tools & policy</span>
+              <span className="font-mono text-[11px] text-[var(--icon)]">policy</span>
               {/* Touch-sized: this sheet is mobile-only, so there is no
                   pointer case to keep small. */}
               <button
@@ -2040,44 +1980,6 @@ export function ChatPlayground() {
         </div>
       )}
 
-      {editorMax && (
-        <div className="fixed inset-0 z-50 flex flex-col bg-[var(--bg)] p-4 md:p-8">
-          <div className="flex items-center gap-3 pb-3">
-            <span className="font-mono text-sm text-[var(--text-strong)]">default.toml</span>
-            <p
-              className="m-0 min-w-0 flex-1 truncate text-right text-[11.5px] leading-relaxed"
-              style={{
-                color: policyStatus && !policyStatus.ok ? "var(--danger)" : "var(--icon)",
-              }}
-            >
-              {policyStatus?.text ?? ""}
-            </p>
-            {presetPolicy && policyText !== presetPolicy && (
-              <button
-                className="font-mono text-[11px] text-[var(--text-weak)] underline underline-offset-2 hover:text-[var(--text-strong)]"
-                onClick={() => setPolicyText(presetPolicy)}
-                type="button"
-              >
-                reset
-              </button>
-            )}
-            <button
-              className="rounded-md border border-[var(--border-weak)] px-2.5 py-1 font-mono text-[11px] text-[var(--text-weak)] hover:text-[var(--text-strong)]"
-              onClick={() => setEditorMax(false)}
-              type="button"
-            >
-              close · esc
-            </button>
-          </div>
-          <PolicyEditor
-            autoFocus
-            className="min-h-0 flex-1"
-            highlight={highlight}
-            onChange={setPolicyText}
-            value={policyText}
-          />
-        </div>
-      )}
     </div>
   );
 }

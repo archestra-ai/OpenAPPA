@@ -2,10 +2,11 @@
 
 import React, { useEffect, useRef } from "react";
 
-// A TOML editor without an editor library: a syntax-colored <pre> sits behind
-// a transparent-text <textarea>, kept aligned by sharing every metric that
-// affects layout and mirroring the scroll position. The caret and selection
-// belong to the real textarea, so typing behaves exactly like a plain field.
+// A TOML viewer without an editor library: a syntax-colored <pre> sits behind
+// a transparent-text read-only <textarea>, kept aligned by sharing every metric
+// that affects layout and mirroring the scroll position. The textarea is what
+// carries selection and keyboard scrolling, so the policy reads like text
+// rather than like a picture of text.
 
 type Token = { text: string; color?: string };
 
@@ -80,18 +81,11 @@ export function findBlock(policy: string, name: string): Highlight | null {
 
 export function PolicyEditor({
   value,
-  onChange,
-  autoFocus,
   className,
   highlight,
-  readOnly,
 }: {
   value: string;
-  onChange: (next: string) => void;
-  autoFocus?: boolean;
   className?: string;
-  /** A view of a policy rather than the one being edited: no caret, no edits. */
-  readOnly?: boolean;
   /** Lines the engine is currently acting on, marker-penned in the layer. */
   highlight?: Highlight | null;
 }) {
@@ -155,11 +149,7 @@ export function PolicyEditor({
           {"\n"}
         </pre>
         <textarea
-          autoFocus={autoFocus}
-          className={`${METRICS} relative block h-full w-full resize-none bg-transparent text-transparent outline-none ${
-            readOnly ? "caret-transparent" : "caret-[var(--text)]"
-          }`}
-          onChange={(event) => onChange(event.currentTarget.value)}
+          className={`${METRICS} relative block h-full w-full resize-none bg-transparent text-transparent caret-transparent outline-none`}
           onScroll={(event) => {
             const pre = preRef.current;
             if (pre) {
@@ -167,7 +157,7 @@ export function PolicyEditor({
               pre.scrollLeft = event.currentTarget.scrollLeft;
             }
           }}
-          readOnly={readOnly}
+          readOnly
           ref={textareaRef}
           spellCheck={false}
           value={value}
