@@ -1,14 +1,15 @@
 //! The immutable registry: the engine's static capability, built once and validated at load.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::authority::{Authority, Cast, CastResolution, Hint, Sanitizer, Transition};
-use crate::contract::{AudienceDelta, AudienceRequirement, RecipientSpec, ToolContract};
-use crate::label::{Audience, Dim, Dimension, Trust};
-use crate::names::{AuthorityName, CastName, MembershipResolverName, SanitizerName, TagName};
+use crate::authority::{Authority, Cast, CastResolution, DeclaredTransition, Hint, Sanitizer};
+use crate::contract::{AudienceDelta, AudienceRequirement, Delta, RecipientSpec, ToolContract};
+use crate::groups::{DeclaredAudience, ExpansionRefusal, Expansions, GroupExpansion, GroupResolution};
+use crate::label::{Audience, Dim, Dimension, ReaderId, Trust};
+use crate::names::{AuthorityName, CastName, GroupName, MembershipResolverName, SanitizerName, TagName};
 use crate::value::ToolName;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +127,8 @@ pub enum LoadError {
         "{context}: {reader:?} is not a literal reader ID — `public` names the whole audience, and the `@` mark is reserved for groups a membership resolver expands"
     )]
     NonLiteralReader { context: String, reader: String },
+    #[error("group {group} is written in a configuration that registers no membership resolver")]
+    GroupWithoutResolver { group: String },
     #[error(
         "deployment starting label: the {dimension:?} dimension is unestablished — an unknown starting dimension has no source value a cast could resolve"
     )]
@@ -224,11 +227,11 @@ fn worst_case_plan_alternatives(
     tools: &BTreeMap<ToolName, ToolContract>,
     authorities: &[Authority],
     sanitizers: &[Sanitizer],
+    literal: &Expansions,
 ) -> u128 {
     use crate::check::Gap;
     use crate::contract::{AudienceRequirement, HistoryRequirement};
     use crate::fact::EffectKind;
-    use crate::label::Audience;
     use crate::plan::covers_gap;
 
     let mut count: u128 = 1;
@@ -242,7 +245,7 @@ fn worst_case_plan_alternatives(
         multiply(
             authorities
                 .iter()
-                .filter(|authority| covers_gap(authority, &gap, &tool.tags))
+                .filter(|authority| covers_gap(authority, &gap, &tool.tags, literal))
                 .count(),
         );
     }
@@ -272,7 +275,7 @@ fn worst_case_plan_alternatives(
                 multiply(
                     authorities
                         .iter()
-                        .filter(|authority| covers_gap(authority, &gap, &tool.tags))
+                        .filter(|authority| covers_gap(authority, &gap, &tool.tags, literal))
                         .count(),
                 );
             }
@@ -289,18 +292,18 @@ fn worst_case_plan_alternatives(
         multiply(
             authorities
                 .iter()
-                .filter(|authority| covers_gap(authority, &gap, &tool.tags))
+                .filter(|authority| covers_gap(authority, &gap, &tool.tags, literal))
                 .count(),
         );
     }
-    let output = tool.output_label();
+    let output = tool.output_label(literal);
     let applicable = match tool.pending_cast_dim() {
         _ if !confined => 0,
         Some(_) => 0,
         None if matches!(
             tool.delta.as_ref().and_then(|delta| delta.audience.as_ref()),
             Some(AudienceDelta::Dynamic(_))
-        ) =>
+        ) || tool.delta.iter().flat_map(Delta::groups).next().is_some() =>
         {
             sanitizers
                 .iter()
@@ -311,7 +314,9 @@ fn worst_case_plan_alternatives(
         None => sanitizers
             .iter()
             .filter(|sanitizer| !sanitizer.name.is_attest_schema())
-            .filter(|sanitizer| sanitizer.derive_output(&output, &tool.tags).is_some())
+            .filter(|sanitizer| {
+                sanitizer.on.output && sanitizer.applies_to(&tool.tags) && sanitizer.transition.may_admit(&output)
+            })
             .count(),
     };
     multiply(applicable + 1);
@@ -325,12 +330,12 @@ fn worst_case_plan_alternatives(
             HistoryRequirement::NoPrior(_) => None,
         })
         .collect();
-    let has_cap = tool
-        .requires
-        .label
-        .audience
-        .iter()
-        .any(|requirement| matches!(requirement, AudienceRequirement::Cap(Audience::Restricted(_))));
+    let has_cap = tool.requires.label.audience.iter().any(|requirement| {
+        matches!(
+            requirement,
+            AudienceRequirement::Cap(DeclaredAudience::Restricted { .. })
+        )
+    });
     let redispatches = tools
         .values()
         .filter(|candidate| {
@@ -338,7 +343,7 @@ fn worst_case_plan_alternatives(
                 || (has_cap
                     && matches!(
                         candidate.delta.as_ref().and_then(|delta| delta.audience.as_ref()),
-                        Some(AudienceDelta::Static(Audience::Restricted(_)))
+                        Some(AudienceDelta::Static(DeclaredAudience::Restricted { .. }))
                     ))
         })
         .count() as u128;
@@ -397,6 +402,7 @@ pub struct Registry {
     sanitizers: BTreeMap<SanitizerName, Sanitizer>,
     casts: Vec<Cast>,
     membership: Option<MembershipResolverName>,
+    groups: Vec<GroupName>,
     profile: crate::profile::DeploymentProfile,
 }
 
@@ -416,7 +422,7 @@ impl Registry {
         for sanitizer in config.sanitizers {
             let context = || format!("sanitizer {}", sanitizer.name.as_str());
             if sanitizer.name.is_attest_schema() {
-                if matches!(sanitizer.transition, Transition::Audience { .. }) {
+                if matches!(sanitizer.transition, DeclaredTransition::Audience { .. }) {
                     return Err(LoadError::AttestSchemaAudienceMandate);
                 }
                 if !sanitizer.on.output {
@@ -427,16 +433,16 @@ impl Registry {
                 }
             }
             match &sanitizer.transition {
-                Transition::Trust { from_floor, to } => {
+                DeclaredTransition::Trust { from_floor, to } => {
                     check_rank(&config.trust_chain, Some(*from_floor), || format!("{} from", context()))?;
                     check_rank(&config.trust_chain, Some(*to), || format!("{} to", context()))?;
                     if sanitizer.on.input {
                         return Err(LoadError::InputSanitizerTrust(sanitizer.name.as_str().to_string()));
                     }
                 }
-                Transition::Audience { from_includes, to } => {
-                    check_readers(from_includes, || format!("{} from", context()))?;
-                    check_readers(to, || format!("{} to", context()))?;
+                DeclaredTransition::Audience { from_includes, to } => {
+                    check_declared_readers(from_includes, || format!("{} from", context()))?;
+                    check_declared_readers(to, || format!("{} to", context()))?;
                 }
             }
             check_hint(sanitizer.hint.as_ref(), context)?;
@@ -459,15 +465,15 @@ impl Registry {
                 format!("tool {} trust floor", tool.name.as_str())
             })?;
             if let Some(AudienceDelta::Static(audience)) = tool.delta.as_ref().and_then(|d| d.audience.as_ref()) {
-                check_readers(audience, || format!("tool {} delta", tool.name.as_str()))?;
+                check_declared_readers(audience, || format!("tool {} delta", tool.name.as_str()))?;
             }
             for requirement in &tool.requires.label.audience {
                 match requirement {
                     AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => {
-                        check_readers(recipients, || format!("tool {} includes", tool.name.as_str()))?;
+                        check_declared_readers(recipients, || format!("tool {} includes", tool.name.as_str()))?;
                     }
                     AudienceRequirement::Cap(cap) => {
-                        check_readers(cap, || format!("tool {} cap", tool.name.as_str()))?;
+                        check_declared_readers(cap, || format!("tool {} cap", tool.name.as_str()))?;
                     }
                     AudienceRequirement::Includes(RecipientSpec::Placeholder(_) | RecipientSpec::Dynamic(_)) => {}
                 }
@@ -492,7 +498,7 @@ impl Registry {
                 format!("authority {} trust ceiling", authority.name.as_str())
             })?;
             if let Some(ceiling) = &authority.mandate.reader_ceiling {
-                check_readers(ceiling, || {
+                check_declared_readers(ceiling, || {
                     format!("authority {} reader ceiling", authority.name.as_str())
                 })?;
             }
@@ -508,6 +514,31 @@ impl Registry {
             check_audience_bindings(tool)?;
         }
 
+        let mut groups: Vec<GroupName> = tools
+            .values()
+            .chain(provider_run.values())
+            .flat_map(ToolContract::groups)
+            .chain(
+                config
+                    .authorities
+                    .iter()
+                    .flat_map(|authority| authority.mandate.groups()),
+            )
+            .chain(sanitizers.values().flat_map(Sanitizer::groups))
+            .chain(config.casts.iter().flat_map(|cast| cast.resolution.groups()))
+            .cloned()
+            .collect();
+        groups.sort();
+        groups.dedup();
+        if config.membership.is_none()
+            && let Some(group) = groups.first()
+        {
+            return Err(LoadError::GroupWithoutResolver {
+                group: group.to_string(),
+            });
+        }
+        let literal = Expansions::empty_members(&groups);
+
         let sanitizer_list: Vec<Sanitizer> = sanitizers.values().cloned().collect();
         for tool in tools.values() {
             let count = worst_case_plan_alternatives(
@@ -516,6 +547,7 @@ impl Registry {
                 &tools,
                 &config.authorities,
                 &sanitizer_list,
+                &literal,
             );
             if count > planner_cap.0 {
                 return Err(LoadError::TooManyPlanAlternatives {
@@ -542,13 +574,13 @@ impl Registry {
                             format!("cast {} may_cast", cast.name.as_str())
                         })?;
                     }
-                    check_readers(&may_cast.audience, || format!("cast {} may_cast", cast.name.as_str()))?;
+                    check_declared_readers(&may_cast.audience, || format!("cast {} may_cast", cast.name.as_str()))?;
                 }
                 CastResolution::Constant(constant) => {
                     check_rank(&config.trust_chain, Some(constant.trust), || {
                         format!("cast {} constant", cast.name.as_str())
                     })?;
-                    check_readers(&constant.audience, || format!("cast {} constant", cast.name.as_str()))?;
+                    check_declared_readers(&constant.audience, || format!("cast {} constant", cast.name.as_str()))?;
                 }
             }
             if casts.iter().any(|earlier| earlier.name == cast.name) {
@@ -557,19 +589,26 @@ impl Registry {
             casts.push(cast);
         }
 
+        let writes_group = |tool: &ToolContract, cast: &Cast| {
+            tool.delta.iter().flat_map(Delta::groups).next().is_some() || cast.resolution.groups().next().is_some()
+        };
         for (i, cast) in casts.iter().enumerate() {
             let castable: Vec<&ToolContract> = tools
                 .values()
                 .filter(|tool| cast.scope.covers(&tool.tags))
-                .filter(|tool| crate::label::EstablishedLabel::from_label(&tool.output_label()).is_none())
+                .filter(|tool| crate::label::EstablishedLabel::from_label(&tool.output_label(&literal)).is_none())
                 .collect();
             if !cast.scope.is_unscoped() {
                 let usable = castable.iter().any(|tool| match &cast.resolution {
                     CastResolution::Constant(constant) => {
-                        cast.resolution.validate(&tool.output_label(), constant).is_ok()
+                        writes_group(tool, cast)
+                            || cast
+                                .resolution
+                                .validate(&tool.output_label(&literal), &constant.resolve(&literal), &literal)
+                                .is_ok()
                     }
                     CastResolution::Resolver { may_cast } => {
-                        matches!(tool.output_label().trust, Dim::Known(_)) || !may_cast.trust.is_empty()
+                        matches!(tool.output_label(&literal).trust, Dim::Known(_)) || !may_cast.trust.is_empty()
                     }
                 });
                 if !usable {
@@ -586,7 +625,11 @@ impl Registry {
                 earlier.scope.covers_scope(&cast.scope)
                     && castable.iter().all(|tool| {
                         !pins_audience_beside_pending_trust(tool)
-                            && earlier.resolution.validate(&tool.output_label(), constant).is_ok()
+                            && !writes_group(tool, earlier)
+                            && earlier
+                                .resolution
+                                .validate(&tool.output_label(&literal), &constant.resolve(&literal), &literal)
+                                .is_ok()
                     })
             });
             if let Some(earlier) = shadowing {
@@ -605,12 +648,36 @@ impl Registry {
             sanitizers,
             casts,
             membership: config.membership,
+            groups,
             profile,
         })
     }
 
     pub fn membership(&self) -> Option<&MembershipResolverName> {
         self.membership.as_ref()
+    }
+
+    /// Every group this policy's declarations write, in name order: the table records
+    /// index resolutions into ([`crate::groups::GroupIndex`]) and the set an event's expansions may name.
+    pub fn groups(&self) -> &[GroupName] {
+        &self.groups
+    }
+
+    /// An event's answers as one operation's expansions: each names a group this
+    /// policy writes, once.
+    pub(crate) fn expansions_from_event(&self, answers: &[GroupExpansion]) -> Result<Expansions, ExpansionRefusal> {
+        Expansions::from_event(&self.groups, answers)
+    }
+
+    pub(crate) fn expansions_from_resolutions(
+        &self,
+        resolutions: &[GroupResolution],
+    ) -> Result<Expansions, ExpansionRefusal> {
+        Expansions::from_resolutions(&self.groups, resolutions)
+    }
+
+    pub(crate) fn resolutions(&self, expansions: &Expansions) -> Vec<GroupResolution> {
+        expansions.resolutions(&self.groups)
     }
 
     pub fn profile(&self) -> &crate::profile::DeploymentProfile {
@@ -756,16 +823,25 @@ pub(crate) fn check_rank(
     }
 }
 
-/// Every reader ID a declaration names must be literal. `public` is a reserved
-/// audience *state* — [`Audience::Public`] carries it, so it is never a member of a restricted set —
-/// and the `@` mark names a group only a membership resolver may expand. The engine expands groups
-/// only where a placeholder argument spells one; a group written in a
-/// declaration has no read site that resolves it yet (`T26`), so refusing it here keeps it from
-/// reaching the algebra as an opaque atom that silently matches nobody.
+/// Every reader ID a label the algebra holds directly names must be literal:
+/// `public` is a reserved audience *state* — [`Audience::Public`] carries it, so it is never a
+/// member of a restricted set — and the `@` mark names a group only a membership resolver may
+/// expand. The deployment starting label is an [`Audience`] because no operation ever resolves it.
 pub(crate) fn check_readers(audience: &Audience, context: impl Fn() -> String) -> Result<(), LoadError> {
     let Audience::Restricted(readers) = audience else {
         return Ok(());
     };
+    check_literal(readers, context)
+}
+
+fn check_declared_readers(audience: &DeclaredAudience, context: impl Fn() -> String) -> Result<(), LoadError> {
+    let DeclaredAudience::Restricted { readers, .. } = audience else {
+        return Ok(());
+    };
+    check_literal(readers, context)
+}
+
+fn check_literal(readers: &BTreeSet<ReaderId>, context: impl Fn() -> String) -> Result<(), LoadError> {
     match readers.iter().find(|reader| !reader.is_literal()) {
         Some(reader) => Err(LoadError::NonLiteralReader {
             context: context(),
@@ -790,7 +866,7 @@ fn check_hint(hint: Option<&Hint>, context: impl Fn() -> String) -> Result<(), L
 mod tests {
     use super::*;
     use crate::authority::SanitizerPoints;
-    use crate::authority::{CastCeiling, Mandate, Scope};
+    use crate::authority::{CastCeiling, DeclaredLabel, Mandate, Scope};
     use crate::contract::{
         AudienceRequirement, Delta, DynamicAudienceBinding, HistoryRequirement, LabelRequirements, Requires,
     };
@@ -845,26 +921,27 @@ mod tests {
         let mut delta_tool = tool("emit");
         delta_tool.delta = Some(Delta {
             trust: None,
-            audience: Some(AudienceDelta::Static(named.clone())),
+            audience: Some(AudienceDelta::Static(DeclaredAudience::literal(named.clone()))),
         });
         delta.tools = vec![delta_tool];
 
         let mut includes = base();
         let mut includes_tool = tool("emit");
-        includes_tool.requires.label.audience =
-            vec![AudienceRequirement::Includes(RecipientSpec::Static(named.clone()))];
+        includes_tool.requires.label.audience = vec![AudienceRequirement::Includes(RecipientSpec::Static(
+            DeclaredAudience::literal(named.clone()),
+        ))];
         includes.tools = vec![includes_tool];
 
         let mut cap = base();
         let mut cap_tool = tool("emit");
-        cap_tool.requires.label.audience = vec![AudienceRequirement::Cap(named.clone())];
+        cap_tool.requires.label.audience = vec![AudienceRequirement::Cap(DeclaredAudience::literal(named.clone()))];
         cap.tools = vec![cap_tool];
 
         let mut ceiling = base();
         ceiling.authorities = vec![Authority {
             name: AuthorityName::new("officer"),
             mandate: Mandate {
-                reader_ceiling: Some(named.clone()),
+                reader_ceiling: Some(DeclaredAudience::literal(named.clone())),
                 ..Mandate::default()
             },
             scope: Scope::default(),
@@ -882,14 +959,14 @@ mod tests {
             hint: None,
         };
         let mut transition_from = base();
-        transition_from.sanitizers = vec![sanitizer(Transition::Audience {
-            from_includes: named.clone(),
-            to: literal.clone(),
+        transition_from.sanitizers = vec![sanitizer(DeclaredTransition::Audience {
+            from_includes: DeclaredAudience::literal(named.clone()),
+            to: DeclaredAudience::literal(literal.clone()),
         })];
         let mut transition_to = base();
-        transition_to.sanitizers = vec![sanitizer(Transition::Audience {
-            from_includes: literal,
-            to: named.clone(),
+        transition_to.sanitizers = vec![sanitizer(DeclaredTransition::Audience {
+            from_includes: DeclaredAudience::literal(literal),
+            to: DeclaredAudience::literal(named.clone()),
         })];
 
         let cast = |name, resolution| Cast {
@@ -903,14 +980,14 @@ mod tests {
             CastResolution::Resolver {
                 may_cast: CastCeiling {
                     trust: vec![Trust::new(0)],
-                    audience: named.clone(),
+                    audience: DeclaredAudience::literal(named.clone()),
                 },
             },
         )];
         let mut constant = base();
         constant.casts = vec![cast(
             "paranoid",
-            CastResolution::Constant(EstablishedLabel::new(Trust::new(0), named)),
+            CastResolution::Constant(DeclaredLabel::literal(EstablishedLabel::new(Trust::new(0), named))),
         )];
 
         vec![
@@ -947,11 +1024,13 @@ mod tests {
     fn one_reserved_member_spoils_an_otherwise_literal_set() {
         let mut cfg = base();
         let mut spoiled = tool("emit");
-        spoiled.requires.label.audience = vec![AudienceRequirement::Cap(Audience::restricted([
-            ReaderId::new("ap@corp.example"),
-            ReaderId::new("finance"),
-            ReaderId::new("public"),
-        ]))];
+        spoiled.requires.label.audience = vec![AudienceRequirement::Cap(DeclaredAudience::literal(
+            Audience::restricted([
+                ReaderId::new("ap@corp.example"),
+                ReaderId::new("finance"),
+                ReaderId::new("public"),
+            ]),
+        ))];
         cfg.tools = vec![spoiled];
         assert!(matches!(
             Registry::build_covered(cfg),
@@ -975,7 +1054,7 @@ mod tests {
         public_ceiling.authorities = vec![Authority {
             name: AuthorityName::new("officer"),
             mandate: Mandate {
-                reader_ceiling: Some(Audience::Public),
+                reader_ceiling: Some(DeclaredAudience::literal(Audience::Public)),
                 ..Mandate::default()
             },
             scope: Scope::default(),
@@ -985,7 +1064,9 @@ mod tests {
 
         let mut empty_cap = base();
         let mut cap_tool = tool("emit");
-        cap_tool.requires.label.audience = vec![AudienceRequirement::Cap(Audience::restricted([]))];
+        cap_tool.requires.label.audience = vec![AudienceRequirement::Cap(DeclaredAudience::literal(
+            Audience::restricted([]),
+        ))];
         empty_cap.tools = vec![cap_tool];
         assert!(Registry::build_covered(empty_cap).is_ok());
     }
@@ -1088,7 +1169,7 @@ mod tests {
     fn constant_cast(name: &str, label: EstablishedLabel, scope: Scope) -> Cast {
         Cast {
             name: CastName::new(name),
-            resolution: CastResolution::Constant(label),
+            resolution: CastResolution::Constant(DeclaredLabel::literal(label)),
             scope,
         }
     }
@@ -1097,7 +1178,10 @@ mod tests {
         Cast {
             name: CastName::new(name),
             resolution: CastResolution::Resolver {
-                may_cast: CastCeiling { trust, audience },
+                may_cast: CastCeiling {
+                    trust,
+                    audience: DeclaredAudience::literal(audience),
+                },
             },
             scope,
         }
@@ -1150,6 +1234,51 @@ mod tests {
         assert!(matches!(
             Registry::build_covered(cfg),
             Err(LoadError::ShadowedCast { cast, by }) if cast == "classifier" && by == "fallback"
+        ));
+    }
+
+    #[test]
+    fn a_group_writing_constant_neither_shadows_nor_reads_as_unreachable() {
+        let grouped = |trust: Trust| {
+            CastResolution::Constant(crate::authority::DeclaredLabel {
+                trust,
+                audience: DeclaredAudience::declared([], [GroupName::new("team")]).unwrap(),
+            })
+        };
+        let mut cfg = base();
+        cfg.membership = Some(MembershipResolverName::new("directory"));
+        cfg.tools = vec![origin("inbox", &[], pending_trust(internal()))];
+        cfg.casts = vec![
+            Cast {
+                name: CastName::new("fallback"),
+                resolution: grouped(Trust::new(0)),
+                scope: Scope::default(),
+            },
+            resolver_cast("classifier", vec![Trust::new(0)], Audience::Public, Scope::default()),
+        ];
+        let registry = Registry::build_covered(cfg).expect("a group-writing constant shadows nothing");
+        assert_eq!(registry.groups(), [GroupName::new("team")]);
+
+        let mut cfg = base();
+        cfg.membership = Some(MembershipResolverName::new("directory"));
+        cfg.tools = vec![origin("inbox", &["mail"], pending_trust(internal()))];
+        cfg.casts = vec![Cast {
+            name: CastName::new("mailroom"),
+            resolution: grouped(Trust::new(0)),
+            scope: scoped(&["mail"]),
+        }];
+        assert!(Registry::build_covered(cfg).is_ok());
+
+        let mut cfg = base();
+        cfg.tools = vec![origin("inbox", &[], pending_trust(internal()))];
+        cfg.casts = vec![Cast {
+            name: CastName::new("fallback"),
+            resolution: grouped(Trust::new(0)),
+            scope: Scope::default(),
+        }];
+        assert!(matches!(
+            Registry::build_covered(cfg),
+            Err(LoadError::GroupWithoutResolver { group }) if group == "@team"
         ));
     }
 
@@ -1282,7 +1411,7 @@ mod tests {
             resolution: CastResolution::Resolver {
                 may_cast: CastCeiling {
                     trust: vec![],
-                    audience: Audience::Public,
+                    audience: DeclaredAudience::literal(Audience::Public),
                 },
             },
             scope: Scope::default(),
@@ -1363,7 +1492,7 @@ mod tests {
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
-                    audience: vec![AudienceRequirement::Cap(Audience::Public)],
+                    audience: vec![AudienceRequirement::Cap(DeclaredAudience::literal(Audience::Public))],
                 },
                 ..Requires::default()
             },
@@ -1386,7 +1515,7 @@ mod tests {
             requires: Requires {
                 label: LabelRequirements {
                     trust_floor: None,
-                    audience: vec![AudienceRequirement::Cap(Audience::Public)],
+                    audience: vec![AudienceRequirement::Cap(DeclaredAudience::literal(Audience::Public))],
                 },
                 ..Requires::default()
             },
@@ -1517,8 +1646,10 @@ mod tests {
         let mut cfg = base();
         let mut emitter = tool("emit");
         emitter.requires.label.audience = vec![
-            AudienceRequirement::Includes(RecipientSpec::Static(Audience::restricted([ReaderId::new("finance")]))),
-            AudienceRequirement::Cap(Audience::Public),
+            AudienceRequirement::Includes(RecipientSpec::Static(DeclaredAudience::literal(Audience::restricted(
+                [ReaderId::new("finance")],
+            )))),
+            AudienceRequirement::Cap(DeclaredAudience::literal(Audience::Public)),
         ];
         cfg.tools = vec![emitter];
         assert!(Registry::build_covered(cfg).is_ok());
@@ -1578,7 +1709,10 @@ mod tests {
         let mut cfg = base();
         cfg.casts = vec![Cast {
             name: CastName::new("paranoid"),
-            resolution: CastResolution::Constant(EstablishedLabel::new(Trust::new(0), Audience::Public)),
+            resolution: CastResolution::Constant(DeclaredLabel::literal(EstablishedLabel::new(
+                Trust::new(0),
+                Audience::Public,
+            ))),
             scope: Scope::default(),
         }];
         assert!(Registry::build_covered(cfg).is_ok());
@@ -1628,9 +1762,9 @@ mod tests {
                 input: false,
                 output: true,
             },
-            transition: Transition::Audience {
-                from_includes: Audience::Public,
-                to: Audience::Public,
+            transition: DeclaredTransition::Audience {
+                from_includes: DeclaredAudience::literal(Audience::Public),
+                to: DeclaredAudience::literal(Audience::Public),
             },
             scope: Scope::default(),
             hint: None,
@@ -1671,7 +1805,7 @@ mod tests {
                 input: false,
                 output: true,
             },
-            transition: Transition::Trust {
+            transition: DeclaredTransition::Trust {
                 from_floor: Trust::new(0),
                 to: Trust::new(1),
             },
@@ -1714,9 +1848,9 @@ mod tests {
                 input: false,
                 output: true,
             },
-            transition: Transition::Audience {
-                from_includes: Audience::Public,
-                to: Audience::Public,
+            transition: DeclaredTransition::Audience {
+                from_includes: DeclaredAudience::literal(Audience::Public),
+                to: DeclaredAudience::literal(Audience::Public),
             },
             scope: Scope::default(),
             hint: None,
@@ -1758,21 +1892,23 @@ mod tests {
         target.requires = Requires {
             label: LabelRequirements {
                 trust_floor: None,
-                audience: vec![AudienceRequirement::Cap(Audience::restricted([ReaderId::new("a")]))],
+                audience: vec![AudienceRequirement::Cap(DeclaredAudience::literal(
+                    Audience::restricted([ReaderId::new("a")]),
+                ))],
             },
             ..Requires::default()
         };
         let mut tools = vec![target];
         for i in 0..narrowers {
             let mut narrower = tool(&format!("narrow{i}"));
-            narrower.delta.as_mut().unwrap().audience = Some(AudienceDelta::Static(Audience::restricted([
-                ReaderId::new("a"),
-                ReaderId::new("c"),
-            ])));
+            narrower.delta.as_mut().unwrap().audience = Some(AudienceDelta::Static(DeclaredAudience::literal(
+                Audience::restricted([ReaderId::new("a"), ReaderId::new("c")]),
+            )));
             tools.push(narrower);
         }
         let mut public = tool("public-delta");
-        public.delta.as_mut().unwrap().audience = Some(AudienceDelta::Static(Audience::Public));
+        public.delta.as_mut().unwrap().audience =
+            Some(AudienceDelta::Static(DeclaredAudience::literal(Audience::Public)));
         let mut dynamic = tool("dynamic-delta");
         dynamic.parameters = crate::params::test_string_argument_schema("to");
         dynamic.delta.as_mut().unwrap().audience = Some(AudienceDelta::Dynamic(DynamicAudienceBinding {
@@ -1808,7 +1944,8 @@ mod tests {
             Registry::build_covered_with_cap(cfg.clone(), cap),
             Err(LoadError::TooManyPlanAlternatives { count: 5, max: 4, .. })
         ));
-        cfg.tools[0].requires.label.audience = vec![AudienceRequirement::Cap(Audience::Public)];
+        cfg.tools[0].requires.label.audience =
+            vec![AudienceRequirement::Cap(DeclaredAudience::literal(Audience::Public))];
         assert!(Registry::build_covered_with_cap(cfg, cap).is_ok());
     }
 
@@ -1818,15 +1955,18 @@ mod tests {
         target.requires = Requires {
             label: LabelRequirements {
                 trust_floor: None,
-                audience: vec![AudienceRequirement::Cap(Audience::restricted([ReaderId::new("a")]))],
+                audience: vec![AudienceRequirement::Cap(DeclaredAudience::literal(
+                    Audience::restricted([ReaderId::new("a")]),
+                ))],
             },
             history: vec![HistoryRequirement::Prior(EffectKind::new("k"))],
             ..Requires::default()
         };
         let mut fixer = tool("fixer");
         fixer.emits = EffectSet::new([EffectKind::new("k")]).unwrap();
-        fixer.delta.as_mut().unwrap().audience =
-            Some(AudienceDelta::Static(Audience::restricted([ReaderId::new("a")])));
+        fixer.delta.as_mut().unwrap().audience = Some(AudienceDelta::Static(DeclaredAudience::literal(
+            Audience::restricted([ReaderId::new("a")]),
+        )));
         let mut cfg = base();
         cfg.tools = vec![target, fixer];
         assert!(Registry::build_covered_with_cap(cfg, PlannerCap::new(2).expect("nonzero")).is_ok());
@@ -1904,13 +2044,13 @@ mod tests {
             scope: Scope::default(),
             hint: None,
         };
-        let trust = Transition::Trust {
+        let trust = DeclaredTransition::Trust {
             from_floor: Trust::new(0),
             to: Trust::new(1),
         };
-        let audience = Transition::Audience {
-            from_includes: Audience::restricted([ReaderId::new("internal")]),
-            to: Audience::restricted([ReaderId::new("partner")]),
+        let audience = DeclaredTransition::Audience {
+            from_includes: DeclaredAudience::literal(Audience::restricted([ReaderId::new("internal")])),
+            to: DeclaredAudience::literal(Audience::restricted([ReaderId::new("partner")])),
         };
         let built = |sanitizer: Sanitizer| {
             let mut cfg = base();
@@ -1955,7 +2095,7 @@ mod tests {
             cfg.sanitizers = vec![sanitizer];
             Registry::build_covered(cfg).map(|_| ())
         };
-        let trust = Transition::Trust {
+        let trust = DeclaredTransition::Trust {
             from_floor: Trust::new(0),
             to: Trust::new(1),
         };
@@ -1963,9 +2103,9 @@ mod tests {
             input: false,
             output: true,
         };
-        let audience = Transition::Audience {
-            from_includes: Audience::restricted([ReaderId::new("internal")]),
-            to: Audience::restricted([ReaderId::new("partner")]),
+        let audience = DeclaredTransition::Audience {
+            from_includes: DeclaredAudience::literal(Audience::restricted([ReaderId::new("internal")])),
+            to: DeclaredAudience::literal(Audience::restricted([ReaderId::new("partner")])),
         };
         assert!(matches!(
             built(attest(output_only, audience, Scope::default())),
@@ -2005,9 +2145,9 @@ mod tests {
                 input: true,
                 output: false,
             },
-            transition: Transition::Audience {
-                from_includes: Audience::restricted([ReaderId::new("internal")]),
-                to: Audience::restricted([ReaderId::new("partner")]),
+            transition: DeclaredTransition::Audience {
+                from_includes: DeclaredAudience::literal(Audience::restricted([ReaderId::new("internal")])),
+                to: DeclaredAudience::literal(Audience::restricted([ReaderId::new("partner")])),
             },
             scope,
             hint: None,
@@ -2018,7 +2158,7 @@ mod tests {
         let mut target = tool("post");
         target.tags = vec![TagName::new("outbound")];
         target.requires.label.audience = vec![AudienceRequirement::Includes(RecipientSpec::Static(
-            Audience::restricted([ReaderId::new("partner")]),
+            DeclaredAudience::literal(Audience::restricted([ReaderId::new("partner")])),
         ))];
         let with = |sanitizers: Vec<Sanitizer>| {
             let mut cfg = base();
@@ -2046,8 +2186,9 @@ mod tests {
     #[test]
     fn sanitizer_chains_do_not_multiply_either_stage_bound() {
         let mut narrowing = tool("fetch");
-        narrowing.delta.as_mut().unwrap().audience =
-            Some(AudienceDelta::Static(Audience::restricted([ReaderId::new("a")])));
+        narrowing.delta.as_mut().unwrap().audience = Some(AudienceDelta::Static(DeclaredAudience::literal(
+            Audience::restricted([ReaderId::new("a")]),
+        )));
         let mut cfg = base();
         cfg.tools = vec![narrowing];
         cfg.sanitizers = (0..5).map(output_sanitizer).collect();

@@ -227,11 +227,3 @@ Mechanics:
   out of core (`appa-runtime-v2 -v`/`-vv` selects the level).
 - Public domain structs own their data; cloning small IDs/config is fine,
   cloning hot-path buffers is not.
-
-## Follow-ups
-
-- `T26` remainder: membership evidence at the config-written group read
-  sites (`cap`, `exactly`, `may_add`, sanitizer `to`, cast ceilings, static
-  `includes` — `LBL-14`). Load still refuses an `@group` there with or
-  without `[membership]`; only the `includes($arg)` placeholder slice is
-  wired (`docs/engine.md`, `T26` row).

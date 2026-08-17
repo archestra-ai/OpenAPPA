@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::candidate::CallStage;
 use crate::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec, ToolContract};
 use crate::fact::EffectKind;
+use crate::groups::Expansions;
 use crate::label::{Adequacy, Audience, Dimension, EstablishedLabel, PartialLabel, ReaderId, Trust};
 use crate::names::{AudienceArgument, DynamicResolverName, GroupName, MarkName};
 use crate::projection::Views;
@@ -75,10 +76,14 @@ pub(crate) struct StateEval {
 /// the bound narrowed by the delta's established dimensions, the unresolved sets untouched. An
 /// unannotated tool contributes identity here — like a pending-cast dimension, its Unknown
 /// contribution folds only at admission.
-pub(crate) fn committed_label(contract: &ToolContract, current: &PartialLabel) -> PartialLabel {
+pub(crate) fn committed_label(
+    contract: &ToolContract,
+    current: &PartialLabel,
+    expansions: &Expansions,
+) -> PartialLabel {
     let mut committed = current.clone();
     if let Some(delta) = &contract.delta {
-        committed.narrow_bound(&delta.established_narrowing());
+        committed.narrow_bound(&delta.established_narrowing(expansions));
     }
     committed
 }
@@ -87,8 +92,9 @@ pub(crate) fn committed_label_for_call(
     contract: &ToolContract,
     current: &PartialLabel,
     call: &ResolvedCall,
+    expansions: &Expansions,
 ) -> PartialLabel {
-    let mut committed = committed_label(contract, current);
+    let mut committed = committed_label(contract, current, expansions);
     if let Some(crate::contract::Delta {
         audience: Some(crate::contract::AudienceDelta::Dynamic(binding)),
         ..
@@ -103,7 +109,13 @@ pub(crate) fn committed_label_for_call(
 /// Evaluate one call against the branch views. Pure: a function of the contract, the views, and
 /// the resolved arguments. The block carries every slot at once: the evaluable gaps, the
 /// narrowing, and the consumed-Unknown dimensions named per value.
-pub(crate) fn evaluate(contract: &ToolContract, views: &Views, call: &ResolvedCall, stage: &CallStage) -> CheckOutcome {
+pub(crate) fn evaluate(
+    contract: &ToolContract,
+    views: &Views,
+    call: &ResolvedCall,
+    stage: &CallStage,
+    expansions: &Expansions,
+) -> CheckOutcome {
     let current = views.current_label();
     let eval = evaluate_state(
         contract,
@@ -112,6 +124,7 @@ pub(crate) fn evaluate(contract: &ToolContract, views: &Views, call: &ResolvedCa
         &|kind| views.has_reservation(kind),
         call,
         stage,
+        expansions,
     );
     if eval.requirement_gaps.is_empty() && eval.narrowing.is_none() && eval.consumed.is_empty() {
         return CheckOutcome::Allow;
@@ -139,9 +152,10 @@ pub(crate) fn evaluate_state(
     has_reserved: &impl Fn(&EffectKind) -> bool,
     call: &ResolvedCall,
     stage: &CallStage,
+    expansions: &Expansions,
 ) -> StateEval {
-    let committed = committed_label_for_call(contract, current, call);
-    let consumed = consumed_unknown(contract, &committed, call, stage);
+    let committed = committed_label_for_call(contract, current, call, expansions);
+    let consumed = consumed_unknown(contract, &committed, call, stage, expansions);
 
     let narrowing = (committed.bound() != current.bound()).then(|| Narrowing {
         from: current.bound().clone(),
@@ -149,7 +163,7 @@ pub(crate) fn evaluate_state(
     });
 
     let mut gaps = Vec::new();
-    label_gaps(contract, &committed, call, stage, &mut gaps);
+    label_gaps(contract, &committed, call, stage, expansions, &mut gaps);
     history_gaps(contract, has_committed, has_reserved, &mut gaps);
     for mark in &contract.requires.attention {
         gaps.push(Gap::Attention(mark.clone()));
@@ -173,6 +187,7 @@ fn consumed_unknown(
     committed: &PartialLabel,
     call: &ResolvedCall,
     stage: &CallStage,
+    expansions: &Expansions,
 ) -> Vec<Dimension> {
     let mut dims = Vec::new();
     if let Some(floor) = contract.requires.label.trust_floor
@@ -186,11 +201,11 @@ fn consumed_unknown(
         .audience
         .iter()
         .any(|requirement| match requirement {
-            AudienceRequirement::Includes(spec) => match resolve_recipients(spec, call) {
+            AudienceRequirement::Includes(spec) => match resolve_recipients(spec, call, expansions) {
                 Some(recipients) => released_covers(stage, committed, &recipients) == Adequacy::Unresolved,
                 None => !released_established(stage, committed),
             },
-            AudienceRequirement::Cap(cap) => committed.within_cap(cap) == Adequacy::Unresolved,
+            AudienceRequirement::Cap(cap) => committed.within_cap(&cap.resolve(expansions)) == Adequacy::Unresolved,
         });
     if audience_unresolved {
         dims.push(Dimension::Audience);
@@ -234,6 +249,7 @@ fn label_gaps(
     committed: &PartialLabel,
     call: &ResolvedCall,
     stage: &CallStage,
+    expansions: &Expansions,
     gaps: &mut Vec<Gap>,
 ) {
     if let Some(floor) = contract.requires.label.trust_floor
@@ -246,7 +262,7 @@ fn label_gaps(
     }
     for requirement in &contract.requires.label.audience {
         match requirement {
-            AudienceRequirement::Includes(spec) => match resolve_recipients(spec, call) {
+            AudienceRequirement::Includes(spec) => match resolve_recipients(spec, call, expansions) {
                 Some(recipients) => {
                     if released_covers(stage, committed, &recipients) == Adequacy::Fails {
                         gaps.push(Gap::Includes { recipients });
@@ -270,8 +286,9 @@ fn label_gaps(
                 },
             },
             AudienceRequirement::Cap(cap) => {
-                if committed.within_cap(cap) == Adequacy::Fails {
-                    gaps.push(Gap::Cap { cap: cap.clone() });
+                let cap = cap.resolve(expansions);
+                if committed.within_cap(&cap) == Adequacy::Fails {
+                    gaps.push(Gap::Cap { cap });
                 }
             }
         }
@@ -300,9 +317,9 @@ fn history_gaps(
     }
 }
 
-fn resolve_recipients(spec: &RecipientSpec, call: &ResolvedCall) -> Option<Audience> {
+fn resolve_recipients(spec: &RecipientSpec, call: &ResolvedCall, expansions: &Expansions) -> Option<Audience> {
     match spec {
-        RecipientSpec::Static(audience) => Some(audience.clone()),
+        RecipientSpec::Static(audience) => Some(audience.resolve(expansions)),
         RecipientSpec::Placeholder(key) => match placeholder_argument(key, call)? {
             AudienceArgument::Public => Some(Audience::Public),
             AudienceArgument::Reader(reader) => Some(Audience::restricted([reader])),
@@ -392,6 +409,28 @@ pub(crate) fn validate_memberships(contract: &ToolContract, call: &ResolvedCall)
     } else {
         Err(MembershipRefusal::Needed(missing))
     }
+}
+
+/// One operation reads one answer per group: a pin whose readers differ from the
+/// expansion the operation reads the same group under — a group a declaration also writes — is
+/// not evidence for this operation. Pins no read spells are [`validate_memberships`]'s.
+pub(crate) fn pins_agree(
+    contract: &ToolContract,
+    call: &ResolvedCall,
+    expansions: &Expansions,
+) -> Result<(), MembershipRefusal> {
+    let reads = group_reads(contract, call);
+    for membership in call.memberships() {
+        let disagrees = reads
+            .iter()
+            .find(|read| read.argument == membership.argument())
+            .and_then(|read| expansions.readers(&read.group))
+            .is_some_and(|readers| readers != membership.readers());
+        if disagrees {
+            return Err(MembershipRefusal::Foreign(membership.argument().to_string()));
+        }
+    }
+    Ok(())
 }
 
 fn unresolved_recipient(key: &str) -> Audience {

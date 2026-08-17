@@ -226,6 +226,8 @@ pub enum Fact {
         #[serde(default)]
         memberships: Vec<crate::contract::PinnedMembership>,
         #[serde(default)]
+        resolutions: Vec<crate::groups::GroupResolution>,
+        #[serde(default)]
         subject: Option<crate::basis::SubjectKey>,
     },
     DispatchSucceeded {
@@ -246,6 +248,8 @@ pub enum Fact {
         authority: AuthorityName,
         covers: Vec<Gap>,
         reviewed: AuthorityReview,
+        #[serde(default)]
+        resolutions: Vec<crate::groups::GroupResolution>,
     },
     Denial {
         trajectory: TrajectoryId,
@@ -268,6 +272,8 @@ pub enum Fact {
         value: ValueId,
         resolved: EstablishedLabel,
         cast: CastName,
+        #[serde(default)]
+        resolutions: Vec<crate::groups::GroupResolution>,
     },
     OutputCastApplied {
         trajectory: TrajectoryId,
@@ -275,6 +281,8 @@ pub enum Fact {
         cast: CastName,
         resolved: EstablishedLabel,
         raw_digest: RawResultDigest,
+        #[serde(default)]
+        resolutions: Vec<crate::groups::GroupResolution>,
     },
     OutputSanitizerBound {
         trajectory: TrajectoryId,
@@ -282,6 +290,8 @@ pub enum Fact {
         plan: PlanId,
         sanitizer: SanitizerName,
         contribution: EstablishedLabel,
+        #[serde(default)]
+        resolutions: Vec<crate::groups::GroupResolution>,
     },
     CandidateDerived {
         trajectory: TrajectoryId,
@@ -289,6 +299,8 @@ pub enum Fact {
         via: DerivedVia,
         derived: DerivedCandidate,
         lineage: SanitizerLineage,
+        #[serde(default)]
+        resolutions: Vec<crate::groups::GroupResolution>,
     },
     CandidateAccepted {
         trajectory: TrajectoryId,
@@ -301,6 +313,8 @@ pub enum Fact {
         id: ChildReturnId,
         value: LabeledValue,
         derivation: ReturnDerivation,
+        #[serde(default)]
+        resolutions: Vec<crate::groups::GroupResolution>,
     },
     ReturnSubmitted {
         trajectory: TrajectoryId,
@@ -311,6 +325,8 @@ pub enum Fact {
         digest: RawResultDigest,
         body: crate::value::ValueBody,
         policy: ReturnPolicy,
+        #[serde(default)]
+        resolutions: Vec<crate::groups::GroupResolution>,
     },
     ReturnRejected {
         trajectory: TrajectoryId,
@@ -318,6 +334,8 @@ pub enum Fact {
         fork: ForkId,
         digest: RawResultDigest,
         reason: ReturnRejection,
+        #[serde(default)]
+        resolutions: Vec<crate::groups::GroupResolution>,
     },
     /// One proposal batch was decided: the identity the runtime supplied and the
     /// policy content it was bound to. This is the decision boundary itself, so replay reads it
@@ -335,6 +353,8 @@ pub enum Fact {
         proposals: Vec<crate::value::ResolvedCall>,
         spawn: Option<crate::transition::SpawnMark>,
         released: Vec<DispatchId>,
+        #[serde(default)]
+        resolutions: Vec<crate::groups::GroupResolution>,
     },
     /// One executable plan of one surfaced block, bound to the identity the model will name to
     /// execute it.
@@ -356,6 +376,8 @@ pub enum Fact {
         subject: crate::basis::SubjectKey,
         plan: crate::plan::ExecutableRemedyPlan,
         basis: crate::basis::PolicyBasis,
+        #[serde(default)]
+        resolutions: Vec<crate::groups::GroupResolution>,
     },
     /// The agent selected this offer, and the engine prepared what its plan promised. Terminal: an offer is accepted once and never revives.
     ///
@@ -385,6 +407,8 @@ pub enum Fact {
         rulings: Vec<crate::execute::AuthorityEvidence>,
         sanitizer: Option<SanitizerName>,
         basis: crate::basis::PolicyBasis,
+        #[serde(default)]
+        resolutions: Vec<crate::groups::GroupResolution>,
     },
     CallApprovalConsumed {
         trajectory: TrajectoryId,

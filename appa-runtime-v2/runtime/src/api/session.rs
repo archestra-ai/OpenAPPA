@@ -2018,6 +2018,71 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
     }
 
     #[tokio::test]
+    async fn rewritten_group_resolutions_refuse_the_log() {
+        let directory = {
+            use axum::routing::post;
+            let app = axum::Router::new().route(
+                "/",
+                post(|| async { axum::Json(serde_json::json!({"version": 1, "readers": ["carol"]})) }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("a loopback stub binds");
+            let addr = listener.local_addr().expect("the stub has an address");
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("the stub serves");
+            });
+            format!("http://{addr}/")
+        };
+        let policy = r#"
+version = 1
+
+[policy.membership]
+name = "directory"
+
+[[policy.tool]]
+name = "read"
+delta = { audience = { exactly = ["@team"] } }
+"#;
+        let text = format!(
+            "[policy]\n{policy}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.membership]\nurl = \"{directory}\"\n"
+        );
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, text).expect("the fixture writes");
+        let config = Config::load(&path).expect("the fixture validates");
+        let runtime = Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let read = ProposedCall {
+            tool: "read".to_string(),
+            arguments: raw(serde_json::json!({})),
+        };
+        assert!(matches!(
+            session.on_tool_call(read.clone(), false).await,
+            Ok(ToolCallDecision::Deny { .. })
+        ));
+        let released: Vec<_> = runtime
+            .log_facts(&root())
+            .into_iter()
+            .skip_while(|fact| matches!(fact, appa_engine::fact::Fact::TrajectoryOpened { .. }))
+            .collect();
+        let persisted = serde_json::to_string(&released).expect("the batch serializes");
+        assert!(
+            persisted.contains("\"carol\""),
+            "the decision persists the readers it read"
+        );
+        let tampered = persisted.replace("\"readers\":[\"carol\"]", "\"readers\":[\"mallory\"]");
+        assert_ne!(tampered, persisted);
+        runtime
+            .store()
+            .corrupt_batch(&crate::engine::engine_id(&root()), 1, tampered.as_bytes());
+        assert!(matches!(
+            session.on_tool_call(read, false).await,
+            Err(EventError::UntrustedLog(_)),
+        ));
+    }
+
+    #[tokio::test]
     async fn an_unestablished_block_is_terminal_feedback() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)

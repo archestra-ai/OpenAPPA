@@ -6,6 +6,7 @@ use crate::authority::CastRefusal;
 use crate::candidate::{ConfinedFrom, DerivedCandidate, SanitizerLineage};
 use crate::check::Narrowing;
 use crate::fact::{CloseOutcome, EffectSet, Fact, ObservedResult};
+use crate::groups::Expansions;
 use crate::label::{EstablishedLabel, Label};
 use crate::names::{CastName, SanitizerName};
 use crate::projection::Views;
@@ -125,6 +126,7 @@ pub(crate) fn settles_now(views: &Views, dispatch: &DispatchId, residual: Option
 }
 
 /// The candidate a bound sanitizer's first derivation makes of one confined result.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn bound_candidate(
     registry: &Registry,
     views: &Views,
@@ -133,6 +135,7 @@ pub(crate) fn bound_candidate(
     sanitizer: &SanitizerName,
     raw_digest: RawResultDigest,
     body: ValueBody,
+    expansions: &Expansions,
 ) -> Result<(crate::authority::Transition, DerivedCandidate, SanitizerLineage), AdmitError> {
     if views.bound_sanitizer(dispatch) != Some(sanitizer) {
         return Err(AdmitError::SanitizerBindingMismatch);
@@ -140,14 +143,15 @@ pub(crate) fn bound_candidate(
     let registered = registry
         .sanitizer(sanitizer)
         .ok_or_else(|| AdmitError::UnknownTool(sanitizer.as_str().to_string()))?;
-    let raw_label = contract.output_label_for_resolutions(views.dynamic_resolutions(dispatch).unwrap_or_default());
+    let raw_label =
+        contract.output_label_for_resolutions(views.dynamic_resolutions(dispatch).unwrap_or_default(), expansions);
     let derived = registered
-        .derive_output(&raw_label, &contract.tags)
+        .derive_output(&raw_label, &contract.tags, expansions)
         .ok_or(AdmitError::SanitizerTransitionUnmet)?;
     let receiving = views.receiving_bound(dispatch).ok_or(AdmitError::NotOpen)?;
     let residual = confined_residual(receiving, &derived);
     Ok((
-        registered.transition.clone(),
+        registered.transition.resolve(expansions),
         DerivedCandidate::Result {
             dispatch: dispatch.clone(),
             source: raw_digest,
@@ -162,6 +166,7 @@ pub(crate) fn bound_candidate(
 }
 
 /// The candidate a validated pending-cast resolution makes of one confined result.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn cast_candidate(
     registry: &Registry,
     views: &Views,
@@ -170,9 +175,11 @@ pub(crate) fn cast_candidate(
     cast: &CastName,
     body: ValueBody,
     resolved: &EstablishedLabel,
+    expansions: &Expansions,
 ) -> Result<DerivedCandidate, AdmitError> {
-    let output_label = contract.output_label_for_resolutions(views.dynamic_resolutions(dispatch).unwrap_or_default());
-    validate_pending_cast(registry, contract, &output_label, cast, resolved)?;
+    let output_label =
+        contract.output_label_for_resolutions(views.dynamic_resolutions(dispatch).unwrap_or_default(), expansions);
+    validate_pending_cast(registry, contract, &output_label, cast, resolved, expansions)?;
     let receiving = views.receiving_bound(dispatch).ok_or(AdmitError::NotOpen)?;
     let label = resolved.clone().into_label();
     let residual = confined_residual(receiving, &label);
@@ -205,6 +212,7 @@ pub(crate) fn validate_pending_cast(
     output_label: &Label,
     cast: &CastName,
     resolved: &EstablishedLabel,
+    expansions: &Expansions,
 ) -> Result<(), AdmitError> {
     if contract.pending_cast_dim().is_none() {
         return Err(AdmitError::NotPendingCast);
@@ -217,7 +225,7 @@ pub(crate) fn validate_pending_cast(
     }
     registered
         .resolution
-        .validate(output_label, resolved)
+        .validate(output_label, resolved, expansions)
         .map_err(refusal_error)
 }
 
@@ -256,6 +264,7 @@ pub(crate) fn admit_result(
     dispatch: &DispatchId,
     call: &ResolvedCall,
     admission: ResultAdmission,
+    expansions: &Expansions,
 ) -> Result<Vec<Fact>, AdmitError> {
     let contract = registry
         .tool(call.tool())
@@ -292,7 +301,7 @@ pub(crate) fn admit_result(
 
     let trajectory = views.trajectory().clone();
     let output_label =
-        || contract.output_label_for_resolutions(views.dynamic_resolutions(dispatch).unwrap_or_default());
+        || contract.output_label_for_resolutions(views.dynamic_resolutions(dispatch).unwrap_or_default(), expansions);
     let close_success = || Fact::DispatchClosed {
         trajectory: trajectory.clone(),
         dispatch: dispatch.clone(),
@@ -337,7 +346,7 @@ pub(crate) fn admit_result(
             vec![close_success(), admit_value(output_label(), body)]
         }
         ResultAdmission::SuccessCast { body, cast, resolved } => {
-            let candidate = cast_candidate(registry, views, dispatch, contract, &cast, body, &resolved)?;
+            let candidate = cast_candidate(registry, views, dispatch, contract, &cast, body, &resolved, expansions)?;
             let DerivedCandidate::Result {
                 source,
                 value,
@@ -358,6 +367,7 @@ pub(crate) fn admit_result(
                     cast,
                     resolved,
                     raw_digest: source,
+                    resolutions: registry.resolutions(expansions),
                 },
                 admit_derived(value),
             ]
@@ -367,8 +377,9 @@ pub(crate) fn admit_result(
             sanitizer,
             raw_digest,
         } => {
-            let (transition, derived, lineage) =
-                bound_candidate(registry, views, dispatch, contract, &sanitizer, raw_digest, body)?;
+            let (transition, derived, lineage) = bound_candidate(
+                registry, views, dispatch, contract, &sanitizer, raw_digest, body, expansions,
+            )?;
             let DerivedCandidate::Result { value, residual, .. } = &derived else {
                 unreachable!("a bound output sanitizer derives a confined result")
             };
@@ -387,6 +398,7 @@ pub(crate) fn admit_result(
                     },
                     derived,
                     lineage,
+                    resolutions: registry.resolutions(expansions),
                 },
                 admit_derived(value),
             ]
@@ -420,6 +432,7 @@ pub(crate) fn admit_result(
                     cast: name.clone(),
                     resolved,
                     raw_digest: *source,
+                    resolutions: registry.resolutions(expansions),
                 });
             }
             facts.push(admit_derived(value.clone()));
@@ -447,6 +460,7 @@ pub(crate) fn admit_cast(
     views: &Views,
     value: ValueId,
     answer: CastAnswer,
+    expansions: &Expansions,
 ) -> Result<Vec<Fact>, CastError> {
     let cast = registry
         .cast(&answer.cast)
@@ -467,7 +481,7 @@ pub(crate) fn admit_cast(
         return Err(CastError::AlreadyEstablished);
     }
     cast.resolution
-        .validate(prior, &answer.resolved)
+        .validate(prior, &answer.resolved, expansions)
         .map_err(|refusal| match refusal {
             CastRefusal::NonLiteralReader => CastError::NonLiteralAnswer,
             CastRefusal::ConstantMismatch => CastError::ConstantMismatch,
@@ -480,6 +494,7 @@ pub(crate) fn admit_cast(
         value,
         resolved: answer.resolved,
         cast: answer.cast,
+        resolutions: registry.resolutions(expansions),
     };
     Ok(vec![fact])
 }
@@ -489,9 +504,12 @@ mod tests {
     const BODY: &str = "the result";
 
     use super::*;
-    use crate::authority::{Cast, CastCeiling, CastResolution, Sanitizer, SanitizerPoints, Scope, Transition};
+    use crate::authority::{
+        Cast, CastCeiling, CastResolution, DeclaredLabel, DeclaredTransition, Sanitizer, SanitizerPoints, Scope,
+    };
     use crate::contract::{AudienceDelta, Delta, DynamicAudienceBinding, PinnedDynamicResolution, ToolContract};
     use crate::fact::EffectKind;
+    use crate::groups::DeclaredAudience;
     use crate::label::{Audience, Dim, ReaderId, Trust};
     use crate::projection::Projection;
     use crate::registry::{RegistryConfig, TrustChain};
@@ -540,9 +558,9 @@ mod tests {
                 input: false,
                 output: true,
             },
-            transition: Transition::Audience {
-                from_includes: internal(),
-                to: Audience::Public,
+            transition: DeclaredTransition::Audience {
+                from_includes: DeclaredAudience::literal(internal()),
+                to: DeclaredAudience::literal(Audience::Public),
             },
             scope: Scope::default(),
             hint: None,
@@ -553,16 +571,16 @@ mod tests {
                 input: false,
                 output: true,
             },
-            transition: Transition::Audience {
-                from_includes: Audience::restricted([ReaderId::new("finance")]),
-                to: Audience::Public,
+            transition: DeclaredTransition::Audience {
+                from_includes: DeclaredAudience::literal(Audience::restricted([ReaderId::new("finance")])),
+                to: DeclaredAudience::literal(Audience::Public),
             },
             scope: Scope::default(),
             hint: None,
         };
         let const_cast = Cast {
             name: CastName::new("paranoid"),
-            resolution: CastResolution::Constant(EstablishedLabel::new(SUSPICIOUS, internal())),
+            resolution: CastResolution::Constant(DeclaredLabel::literal(EstablishedLabel::new(SUSPICIOUS, internal()))),
             scope: Scope::default(),
         };
         let resolver_cast = Cast {
@@ -570,7 +588,10 @@ mod tests {
             resolution: CastResolution::Resolver {
                 may_cast: CastCeiling {
                     trust: vec![SUSPICIOUS],
-                    audience: Audience::restricted([ReaderId::new("finance"), ReaderId::new("audit")]),
+                    audience: DeclaredAudience::literal(Audience::restricted([
+                        ReaderId::new("finance"),
+                        ReaderId::new("audit"),
+                    ])),
                 },
             },
             scope: Scope::default(),
@@ -640,6 +661,7 @@ mod tests {
             dynamic_resolutions: Vec::new(),
             memberships: Vec::new(),
             subject: None,
+            resolutions: vec![],
         };
         (record, dispatch)
     }
@@ -687,6 +709,7 @@ mod tests {
                 residual: Some(residual),
             },
             lineage: SanitizerLineage::default(),
+            resolutions: vec![],
         }
     }
 
@@ -704,6 +727,7 @@ mod tests {
                 &dispatch,
                 &call,
                 ResultAdmission::SuccessNoValue,
+                &Expansions::default()
             ),
             Err(AdmitError::ForeignDispatch)
         );
@@ -718,6 +742,7 @@ mod tests {
                     cast: CastName::new("classifier"),
                     resolved: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
                 },
+                &Expansions::default()
             ),
             Err(CastError::ForeignValue)
         );
@@ -730,6 +755,7 @@ mod tests {
                     cast: CastName::new("classifier"),
                     resolved: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
                 },
+                &Expansions::default()
             ),
             Err(CastError::UnknownValue)
         );
@@ -750,6 +776,7 @@ mod tests {
             ResultAdmission::SuccessRaw {
                 body: ValueBody::new("ticket #7"),
             },
+            &Expansions::default(),
         )
         .unwrap();
         assert!(matches!(
@@ -772,7 +799,15 @@ mod tests {
         let (log, dispatch) = open_log(&call);
         let p = views_of(&log);
         let t = traj();
-        let batch = admit_result(&reg, &p.view(&t), &dispatch, &call, ResultAdmission::Failure).unwrap();
+        let batch = admit_result(
+            &reg,
+            &p.view(&t),
+            &dispatch,
+            &call,
+            ResultAdmission::Failure,
+            &Expansions::default(),
+        )
+        .unwrap();
         assert_eq!(batch.len(), 1);
         assert!(matches!(
             &batch[0],
@@ -795,12 +830,26 @@ mod tests {
             crate::params::test_arguments(&json!({ "x": 1 })),
         );
         assert_eq!(
-            admit_result(&reg, &p.view(&t), &dispatch, &other, ResultAdmission::SuccessNoValue),
+            admit_result(
+                &reg,
+                &p.view(&t),
+                &dispatch,
+                &other,
+                ResultAdmission::SuccessNoValue,
+                &Expansions::default()
+            ),
             Err(AdmitError::DigestMismatch)
         );
         let empty = views_of(&[opened()]);
         assert_eq!(
-            admit_result(&reg, &empty.view(&t), &dispatch, &call, ResultAdmission::SuccessNoValue),
+            admit_result(
+                &reg,
+                &empty.view(&t),
+                &dispatch,
+                &call,
+                ResultAdmission::SuccessNoValue,
+                &Expansions::default()
+            ),
             Err(AdmitError::NotOpen)
         );
     }
@@ -844,14 +893,20 @@ mod tests {
         };
         let webby = Cast {
             name: CastName::new("webby"),
-            resolution: CastResolution::Constant(EstablishedLabel::new(SUSPICIOUS, Audience::Public)),
+            resolution: CastResolution::Constant(DeclaredLabel::literal(EstablishedLabel::new(
+                SUSPICIOUS,
+                Audience::Public,
+            ))),
             scope: Scope {
                 tags: vec![crate::names::TagName::new("web")],
             },
         };
         let fallback = Cast {
             name: CastName::new("fallback"),
-            resolution: CastResolution::Constant(EstablishedLabel::new(SUSPICIOUS, Audience::Public)),
+            resolution: CastResolution::Constant(DeclaredLabel::literal(EstablishedLabel::new(
+                SUSPICIOUS,
+                Audience::Public,
+            ))),
             scope: Scope::default(),
         };
         let reg = Registry::build_covered(RegistryConfig {
@@ -908,17 +963,56 @@ mod tests {
             cast: CastName::new(cast),
             resolved: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
         };
-        assert!(admit_cast(&reg, &p.view(&traj()), ValueId::new(0), answer("webby")).is_ok());
+        assert!(
+            admit_cast(
+                &reg,
+                &p.view(&traj()),
+                ValueId::new(0),
+                answer("webby"),
+                &Expansions::default()
+            )
+            .is_ok()
+        );
         assert_eq!(
-            admit_cast(&reg, &p.view(&traj()), ValueId::new(1), answer("webby")),
+            admit_cast(
+                &reg,
+                &p.view(&traj()),
+                ValueId::new(1),
+                answer("webby"),
+                &Expansions::default()
+            ),
             Err(CastError::OutOfScope)
         );
-        assert!(admit_cast(&reg, &p.view(&traj()), ValueId::new(1), answer("fallback")).is_ok());
+        assert!(
+            admit_cast(
+                &reg,
+                &p.view(&traj()),
+                ValueId::new(1),
+                answer("fallback"),
+                &Expansions::default()
+            )
+            .is_ok()
+        );
         assert_eq!(
-            admit_cast(&reg, &p.view(&traj()), ValueId::new(2), answer("webby")),
+            admit_cast(
+                &reg,
+                &p.view(&traj()),
+                ValueId::new(2),
+                answer("webby"),
+                &Expansions::default()
+            ),
             Err(CastError::OutOfScope)
         );
-        assert!(admit_cast(&reg, &p.view(&traj()), ValueId::new(2), answer("fallback")).is_ok());
+        assert!(
+            admit_cast(
+                &reg,
+                &p.view(&traj()),
+                ValueId::new(2),
+                answer("fallback"),
+                &Expansions::default()
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -935,6 +1029,7 @@ mod tests {
                 cast: CastName::new("classifier"),
                 resolved: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
             },
+            &Expansions::default(),
         )
         .unwrap();
         let mut next = log.clone();
@@ -959,7 +1054,8 @@ mod tests {
                 CastAnswer {
                     cast: CastName::new("classifier"),
                     resolved: EstablishedLabel::new(Trust::new(1), Audience::Public),
-                }
+                },
+                &Expansions::default()
             ),
             Err(CastError::CeilingExceeded)
         );
@@ -979,7 +1075,8 @@ mod tests {
                 CastAnswer {
                     cast: CastName::new("classifier"),
                     resolved: EstablishedLabel::new(SUSPICIOUS, Audience::restricted([ReaderId::new("finance")])),
-                }
+                },
+                &Expansions::default()
             ),
             Err(CastError::EstablishedMismatch)
         );
@@ -999,6 +1096,7 @@ mod tests {
                 cast: CastName::new("classifier"),
                 resolved: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
             },
+            &Expansions::default(),
         )
         .unwrap();
         log.extend(first);
@@ -1011,7 +1109,8 @@ mod tests {
                 CastAnswer {
                     cast: CastName::new("paranoid"),
                     resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
-                }
+                },
+                &Expansions::default()
             ),
             Err(CastError::AlreadyEstablished)
         );
@@ -1053,6 +1152,7 @@ mod tests {
                     cast: CastName::new("paranoid"),
                     resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
                 },
+                &Expansions::default()
             ),
             Err(AdmitError::NarrowingUnaccepted)
         );
@@ -1076,6 +1176,7 @@ mod tests {
                     cast: CastName::new("classifier"),
                     resolved: EstablishedLabel::new(SUSPICIOUS, audience),
                 },
+                &Expansions::default(),
             )
         };
         for malformed in [
@@ -1107,7 +1208,7 @@ mod tests {
             resolution: CastResolution::Resolver {
                 may_cast: CastCeiling {
                     trust: vec![SUSPICIOUS],
-                    audience: Audience::Public,
+                    audience: DeclaredAudience::literal(Audience::Public),
                 },
             },
             scope: Scope::default(),
@@ -1136,6 +1237,7 @@ mod tests {
                     cast: CastName::new("librarian"),
                     resolved: EstablishedLabel::new(Trust::new(u8::MAX), resolved),
                 },
+                &Expansions::default(),
             )
         };
         assert_eq!(
@@ -1169,6 +1271,7 @@ mod tests {
                     cast: CastName::new("paranoid"),
                     resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
                 },
+                &Expansions::default()
             ),
             Err(AdmitError::NarrowingUnaccepted)
         );
@@ -1198,6 +1301,7 @@ mod tests {
             dynamic_resolutions: vec![PinnedDynamicResolution::from_answer(binding, Some(internal()))],
             memberships: Vec::new(),
             subject: None,
+            resolutions: vec![],
         }];
         let projection = views_of(&log);
         let trajectory = traj();
@@ -1222,6 +1326,7 @@ mod tests {
                     cast: CastName::new("classifier"),
                     resolved: EstablishedLabel::new(SUSPICIOUS, Audience::restricted([ReaderId::new("finance")])),
                 },
+                &Expansions::default()
             ),
             Err(AdmitError::EstablishedMismatch)
         );
@@ -1236,6 +1341,7 @@ mod tests {
                     cast: CastName::new("paranoid"),
                     resolved: resolved.clone(),
                 },
+                &Expansions::default()
             ),
             Err(AdmitError::NarrowingUnaccepted)
         );
@@ -1249,6 +1355,7 @@ mod tests {
             &dispatch,
             &call,
             ResultAdmission::CandidateAccepted { offer: offer() },
+            &Expansions::default(),
         )
         .unwrap();
         match batch.last().unwrap() {
@@ -1275,6 +1382,7 @@ mod tests {
                 ResultAdmission::SuccessRaw {
                     body: ValueBody::new("raw bytes"),
                 },
+                &Expansions::default()
             ),
             Err(AdmitError::OutputPendingCast)
         );
@@ -1307,6 +1415,7 @@ mod tests {
                 cast: CastName::new("paranoid"),
                 resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
             },
+            &Expansions::default(),
         )
         .unwrap();
         assert!(matches!(
@@ -1344,6 +1453,7 @@ mod tests {
                     cast: CastName::new("paranoid"),
                     resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
                 },
+                &Expansions::default()
             ),
             Err(AdmitError::NarrowingUnaccepted)
         );
@@ -1373,6 +1483,7 @@ mod tests {
             &dispatch,
             &call,
             ResultAdmission::CandidateAccepted { offer: offer() },
+            &Expansions::default(),
         )
         .unwrap();
         assert!(matches!(
@@ -1420,6 +1531,7 @@ mod tests {
                 &dispatch,
                 &call,
                 ResultAdmission::CandidateAccepted { offer: offer() },
+                &Expansions::default()
             ),
             Err(AdmitError::NoCandidate)
         );
@@ -1440,7 +1552,8 @@ mod tests {
                 &p.view(&t),
                 &dispatch,
                 &call,
-                ResultAdmission::CandidateAdmissible
+                ResultAdmission::CandidateAdmissible,
+                &Expansions::default()
             ),
             Err(AdmitError::NoCandidate)
         );
@@ -1459,7 +1572,7 @@ mod tests {
         };
         let attempt = |adm: ResultAdmission| {
             let p = views_of(&log);
-            admit_result(&reg, &p.view(&t), &dispatch, &call, adm)
+            admit_result(&reg, &p.view(&t), &dispatch, &call, adm, &Expansions::default())
         };
         assert_eq!(
             attempt(admission(
@@ -1497,6 +1610,7 @@ mod tests {
                     cast: CastName::new("paranoid"),
                     resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
                 },
+                &Expansions::default()
             ),
             Err(AdmitError::NotPendingCast)
         );
@@ -1523,11 +1637,25 @@ mod tests {
         );
 
         assert_eq!(
-            admit_result(&reg, &p.view(&t), &dispatch, &call, ResultAdmission::Failure),
+            admit_result(
+                &reg,
+                &p.view(&t),
+                &dispatch,
+                &call,
+                ResultAdmission::Failure,
+                &Expansions::default()
+            ),
             Err(AdmitError::SuccessContradicted)
         );
         assert_eq!(
-            admit_result(&reg, &p.view(&t), &dispatch, &call, ResultAdmission::Indeterminate),
+            admit_result(
+                &reg,
+                &p.view(&t),
+                &dispatch,
+                &call,
+                ResultAdmission::Indeterminate,
+                &Expansions::default()
+            ),
             Err(AdmitError::SuccessContradicted)
         );
 
@@ -1541,6 +1669,7 @@ mod tests {
                 cast: CastName::new("paranoid"),
                 resolved: EstablishedLabel::new(SUSPICIOUS, internal()),
             },
+            &Expansions::default(),
         )
         .unwrap();
         assert!(batch.iter().any(|fact| matches!(
@@ -1576,7 +1705,14 @@ mod tests {
             Err(AdmitError::AlreadySucceeded)
         );
         assert_eq!(
-            admit_result(&reg, &p.view(&t), &dispatch, &call, ResultAdmission::Failure),
+            admit_result(
+                &reg,
+                &p.view(&t),
+                &dispatch,
+                &call,
+                ResultAdmission::Failure,
+                &Expansions::default()
+            ),
             Err(AdmitError::SuccessContradicted)
         );
 
@@ -1588,6 +1724,7 @@ mod tests {
             ResultAdmission::SuccessRaw {
                 body: ValueBody::new(BODY),
             },
+            &Expansions::default(),
         )
         .unwrap();
         assert!(batch.iter().any(|fact| matches!(
@@ -1620,8 +1757,10 @@ mod tests {
                 reg.tool(call.tool()).expect("the fixture registers the tool"),
                 &call,
                 &crate::names::SanitizerName::new("declassify"),
+                &Expansions::default(),
             )
             .expect("declassify applies to this output"),
+            resolutions: vec![],
         });
         let p = views_of(&log);
 
@@ -1634,6 +1773,7 @@ mod tests {
                 ResultAdmission::SuccessRaw {
                     body: ValueBody::new("ticket"),
                 },
+                &Expansions::default()
             ),
             Err(AdmitError::OutputSanitizerBound)
         );
@@ -1649,6 +1789,7 @@ mod tests {
                     sanitizer: crate::names::SanitizerName::new("finance-only"),
                     raw_digest: RawResultDigest::of(b"ticket"),
                 },
+                &Expansions::default()
             ),
             Err(AdmitError::SanitizerBindingMismatch)
         );
@@ -1668,6 +1809,7 @@ mod tests {
                     sanitizer: crate::names::SanitizerName::new("declassify"),
                     raw_digest: RawResultDigest::of(b"ticket"),
                 },
+                &Expansions::default()
             ),
             Err(AdmitError::ConfinedResidual)
         );
@@ -1689,6 +1831,7 @@ mod tests {
                 sanitizer: crate::names::SanitizerName::new("declassify"),
                 raw_digest: RawResultDigest::of(b"ticket"),
             },
+            &Expansions::default(),
         )
         .unwrap();
         assert!(batch.iter().any(|fact| matches!(
@@ -1733,6 +1876,7 @@ mod tests {
                     sanitizer: crate::names::SanitizerName::new("declassify"),
                     raw_digest: RawResultDigest::of(b"ticket"),
                 },
+                &Expansions::default()
             ),
             Err(AdmitError::SanitizerBindingMismatch)
         );

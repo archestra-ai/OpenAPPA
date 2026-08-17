@@ -7,7 +7,8 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use appa_engine::authority::{
-    Authority, Cast, CastResolution, Hint, Mandate, Sanitizer, SanitizerPoints, Scope, Transition,
+    Authority, Cast, CastResolution, DeclaredLabel, DeclaredTransition, Hint, Mandate, Sanitizer, SanitizerPoints,
+    Scope,
 };
 use appa_engine::contract::{
     AudienceDelta, AudienceRequirement, Delta, DynamicAudienceBinding, HistoryRequirement, LabelRequirements,
@@ -16,9 +17,11 @@ use appa_engine::contract::{
 use appa_engine::engine::Engine;
 use appa_engine::fact::ReturnPolicy;
 use appa_engine::fact::{EffectKind, EffectSet};
-use appa_engine::label::{Audience, Dim, EstablishedLabel, Label, ReaderId, Trust};
+use appa_engine::groups::DeclaredAudience;
+use appa_engine::label::{Audience, Dim, Label, ReaderId, Trust};
 use appa_engine::names::{
-    AuthorityName, CastName, DynamicResolverName, MarkName, MembershipResolverName, SanitizerName, SurfaceName, TagName,
+    AuthorityName, CastName, DynamicResolverName, GroupName, MarkName, MembershipResolverName, SanitizerName,
+    SurfaceName, TagName,
 };
 use appa_engine::params::ToolParameters;
 use appa_engine::profile::{
@@ -529,7 +532,7 @@ impl RawDelta {
                     reason: format!("expected {{ exactly = [...] }} or \"unknown\", found {token:?}"),
                 });
             }
-            Some(RawDeltaAudience::Exactly(a)) => Some(AudienceDelta::Static(parse_audience(
+            Some(RawDeltaAudience::Exactly(a)) => Some(AudienceDelta::Static(parse_declared_audience(
                 &a.exactly,
                 &format!("{ctx} delta audience"),
             )?)),
@@ -567,7 +570,7 @@ impl RawRequires {
                 }));
             }
             if let Some(cap) = a.cap {
-                audience.push(AudienceRequirement::Cap(parse_audience(
+                audience.push(AudienceRequirement::Cap(parse_declared_audience(
                     &cap,
                     &format!("{ctx} requires cap"),
                 )?));
@@ -679,7 +682,7 @@ impl RawMandate {
                 .transpose()?,
             reader_ceiling: self
                 .can_cover_readers
-                .map(|r| parse_audience(&r.may_add, &format!("{ctx} can_cover_readers")))
+                .map(|r| parse_declared_audience(&r.may_add, &format!("{ctx} can_cover_readers")))
                 .transpose()?,
             waivers: self.can_waive.into_iter().map(EffectKind::new).collect(),
             attends: self.attends.into_iter().map(MarkName::new).collect(),
@@ -745,13 +748,13 @@ struct RawSanitizerMandate {
 }
 
 impl RawSanitizerMandate {
-    fn convert(self, chain: &TrustChain, name: &str) -> Result<Transition, ConfigError> {
+    fn convert(self, chain: &TrustChain, name: &str) -> Result<DeclaredTransition, ConfigError> {
         match (self.audience, self.trust) {
-            (Some(audience), None) => Ok(Transition::Audience {
-                from_includes: parse_audience(&audience.from.includes, &format!("sanitizer {name} from"))?,
-                to: parse_audience(&audience.to.exactly, &format!("sanitizer {name} to"))?,
+            (Some(audience), None) => Ok(DeclaredTransition::Audience {
+                from_includes: parse_declared_audience(&audience.from.includes, &format!("sanitizer {name} from"))?,
+                to: parse_declared_audience(&audience.to.exactly, &format!("sanitizer {name} to"))?,
             }),
-            (None, Some(trust)) => Ok(Transition::Trust {
+            (None, Some(trust)) => Ok(DeclaredTransition::Trust {
                 from_floor: parse_trust(&trust.from, chain, &format!("sanitizer {name} from"))?,
                 to: parse_trust(&trust.to, chain, &format!("sanitizer {name} to"))?,
             }),
@@ -830,11 +833,11 @@ struct RawConstantLabel {
 }
 
 impl RawConstantLabel {
-    fn convert(self, chain: &TrustChain, ctx: &str) -> Result<EstablishedLabel, ConfigError> {
-        Ok(EstablishedLabel::new(
-            parse_trust(&self.trust, chain, ctx)?,
-            parse_audience(&self.audience.exactly, ctx)?,
-        ))
+    fn convert(self, chain: &TrustChain, ctx: &str) -> Result<DeclaredLabel, ConfigError> {
+        Ok(DeclaredLabel {
+            trust: parse_trust(&self.trust, chain, ctx)?,
+            audience: parse_declared_audience(&self.audience.exactly, ctx)?,
+        })
     }
 }
 
@@ -869,9 +872,24 @@ fn parse_trust(name: &str, chain: &TrustChain, context: &str) -> Result<Trust, C
 }
 
 fn parse_audience(list: &[String], context: &str) -> Result<Audience, ConfigError> {
+    match parse_declared_audience(list, context)? {
+        DeclaredAudience::Public => Ok(Audience::Public),
+        DeclaredAudience::Restricted { readers, groups } => match groups.into_iter().next() {
+            None => Ok(Audience::Restricted(readers)),
+            Some(group) => Err(ConfigError::BadAudience {
+                context: context.to_string(),
+                reason: format!(
+                    "{group} is a group mention: a label the algebra holds directly names literal readers only"
+                ),
+            }),
+        },
+    }
+}
+
+fn parse_declared_audience(list: &[String], context: &str) -> Result<DeclaredAudience, ConfigError> {
     if list.iter().any(|r| r == "public") {
         return if list.len() == 1 {
-            Ok(Audience::Public)
+            Ok(DeclaredAudience::Public)
         } else {
             Err(ConfigError::BadAudience {
                 context: context.to_string(),
@@ -891,15 +909,24 @@ fn parse_audience(list: &[String], context: &str) -> Result<Audience, ConfigErro
             reason: format!("argument placeholder {ph:?} is only valid in an `includes`"),
         });
     }
-    if let Some(group) = list.iter().find(|r| r.starts_with('@')) {
-        return Err(ConfigError::BadAudience {
-            context: context.to_string(),
-            reason: format!(
-                "{group:?} is a group mention: the `@` mark is reserved, and a group written in a declaration is not expanded in this build — only an `includes` placeholder argument names a group"
-            ),
-        });
+    let mut readers = Vec::new();
+    let mut groups = Vec::new();
+    for entry in list {
+        match entry.strip_prefix('@') {
+            Some("") => {
+                return Err(ConfigError::BadAudience {
+                    context: context.to_string(),
+                    reason: "`@` names no group".to_string(),
+                });
+            }
+            Some(group) => groups.push(GroupName::new(group)),
+            None => readers.push(ReaderId::new(entry)),
+        }
     }
-    Ok(Audience::restricted(list.iter().map(ReaderId::new)))
+    DeclaredAudience::declared(readers, groups).map_err(|error| ConfigError::BadAudience {
+        context: context.to_string(),
+        reason: error.to_string(),
+    })
 }
 
 fn parse_recipient_spec(list: &[String], context: &str) -> Result<RecipientSpec, ConfigError> {
@@ -914,7 +941,7 @@ fn parse_recipient_spec(list: &[String], context: &str) -> Result<RecipientSpec,
             reason: format!("placeholder {ph:?} must be the sole recipient"),
         });
     }
-    Ok(RecipientSpec::Static(parse_audience(list, context)?))
+    Ok(RecipientSpec::Static(parse_declared_audience(list, context)?))
 }
 
 fn parse_points(tokens: &[String], name: &str) -> Result<SanitizerPoints, ConfigError> {
@@ -1246,5 +1273,106 @@ confined_results = ["lookup"]
                 "additionalProperties": false
             })
         );
+    }
+
+    #[test]
+    fn a_group_written_in_a_declaration_registers_and_labels_refuse_it() {
+        let policy = r#"
+version = 1
+
+[membership]
+name = "directory"
+
+[[tool]]
+name = "read"
+delta = { audience = { exactly = ["auditor", "@team"] } }
+
+[[tool]]
+name = "send"
+requires = { audience = { cap = ["@team"], includes = ["@board"] } }
+delta = {}
+
+[[authority]]
+name = "officer"
+[authority.mandate]
+can_cover_readers = { may_add = ["@officers"] }
+
+[[sanitizer]]
+name = "declassify"
+on = ["tool_output"]
+[sanitizer.mandate]
+audience = { from = { includes = ["internal"] }, to = { exactly = ["@team"] } }
+
+[[cast]]
+name = "paranoid"
+constant = { trust = "suspicious", audience = { exactly = ["@team"] } }
+
+[deployment]
+dispatch = "enforced"
+confined_results = ["read", "send"]
+"#;
+        let config = Config::from_toml_str(policy).expect("group-writing declarations load");
+        let registry = config.registry();
+        assert_eq!(
+            registry.groups(),
+            [
+                GroupName::new("board"),
+                GroupName::new("officers"),
+                GroupName::new("team")
+            ]
+        );
+        let read = registry.tool(&ToolName::new("read")).expect("read registers");
+        assert_eq!(
+            read.delta.as_ref().and_then(|delta| delta.audience.as_ref()),
+            Some(&AudienceDelta::Static(
+                DeclaredAudience::declared([ReaderId::new("auditor")], [GroupName::new("team")]).unwrap()
+            ))
+        );
+        let officer = registry
+            .authority(&AuthorityName::new("officer"))
+            .expect("officer registers");
+        assert_eq!(
+            officer.mandate.reader_ceiling,
+            Some(DeclaredAudience::declared([], [GroupName::new("officers")]).unwrap())
+        );
+        assert!(matches!(
+            &registry.sanitizer(&SanitizerName::new("declassify")).expect("declassify registers").transition,
+            DeclaredTransition::Audience { to, .. } if to.groups().count() == 1
+        ));
+        assert!(matches!(
+            &registry.cast(&CastName::new("paranoid")).expect("paranoid registers").resolution,
+            CastResolution::Constant(constant) if constant.audience.groups().count() == 1
+        ));
+
+        let unregistered = policy.replace("[membership]\nname = \"directory\"\n", "");
+        assert!(matches!(
+            Config::from_toml_str(&unregistered),
+            Err(ConfigError::Registry(LoadError::GroupWithoutResolver { .. }))
+        ));
+
+        for (case, replacement) in [
+            ("bare @", "cap = [\"@\"]"),
+            ("public beside a group", "cap = [\"public\", \"@team\"]"),
+        ] {
+            let malformed = policy.replace("cap = [\"@team\"]", replacement);
+            assert!(
+                matches!(Config::from_toml_str(&malformed), Err(ConfigError::BadAudience { .. })),
+                "{case} loads"
+            );
+        }
+
+        let base = "version = 1\n[membership]\nname = \"directory\"\n[[tool]]\nname = \"t\"\ndelta = {}\n";
+        for site in [
+            "[deployment]\nstarting_label = { audience = { exactly = [\"@team\"] } }\n",
+            "[boundary]\naudience = { exactly = [\"@team\"] }\n",
+        ] {
+            assert!(
+                matches!(
+                    Config::from_toml_str(&format!("{base}{site}")),
+                    Err(ConfigError::BadAudience { .. })
+                ),
+                "{site} loads"
+            );
+        }
     }
 }

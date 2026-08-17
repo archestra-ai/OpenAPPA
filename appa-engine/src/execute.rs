@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::check::{Gap, UnestablishedFact};
+use crate::groups::Expansions;
 use crate::label::PartialLabel;
 use crate::names::AuthorityName;
 use crate::plan::covers_gap;
@@ -90,6 +91,7 @@ pub(crate) fn rulings_cover<'a>(
     contract: &crate::contract::ToolContract,
     block: &crate::check::RawBlock,
     rulings: impl Iterator<Item = (&'a AuthorityName, &'a [Gap])> + Clone,
+    expansions: &Expansions,
 ) -> Result<(), PlanError> {
     for (authority, covers) in rulings.clone() {
         let registered = registry
@@ -99,7 +101,7 @@ pub(crate) fn rulings_cover<'a>(
             if !block.requirement_gaps.contains(gap) {
                 return Err(PlanError::RulingClaimsAbsentGap(gap.clone()));
             }
-            if !covers_gap(registered, gap, &contract.tags) {
+            if !covers_gap(registered, gap, &contract.tags, expansions) {
                 return Err(PlanError::RulingExceedsMandate {
                     authority: authority.as_str().to_string(),
                 });
@@ -123,6 +125,7 @@ pub(crate) fn execute_remedy_plan(
     chosen: &plan::ExecutableRemedyPlan,
     call: &ResolvedCall,
     rulings: &[Ruling],
+    expansions: &Expansions,
 ) -> Result<Vec<Fact>, PlanError> {
     let contract = registry
         .tool(call.tool())
@@ -132,7 +135,7 @@ pub(crate) fn execute_remedy_plan(
         .validate(call.arguments())
         .map_err(PlanError::InvalidCall)?;
 
-    let block = match check::evaluate(contract, views, call, &CallStage::default()) {
+    let block = match check::evaluate(contract, views, call, &CallStage::default(), expansions) {
         CheckOutcome::Block(block) => block,
         CheckOutcome::Allow => return Err(PlanError::NotBlocked),
     };
@@ -147,6 +150,7 @@ pub(crate) fn execute_remedy_plan(
         &block,
         &CallStage::default(),
         plan::CallRole::Ordinary,
+        expansions,
     );
     if !planned
         .plans
@@ -178,7 +182,7 @@ pub(crate) fn execute_remedy_plan(
         }
     }
 
-    let (dispatch, dispatch_opened) = opened_dispatch(contract, views, call, None);
+    let (dispatch, dispatch_opened) = opened_dispatch(registry, contract, views, call, None, &Expansions::default());
 
     // Each ruling must be scoped to this exact dispatch.
     for ruling in rulings {
@@ -193,14 +197,15 @@ pub(crate) fn execute_remedy_plan(
         rulings
             .iter()
             .map(|ruling| (&ruling.authority, ruling.covers.as_slice())),
+        &Expansions::default(),
     )?;
 
     let trajectory = views.trajectory().clone();
 
     let mut facts = Vec::new();
-    let legacy_residual = chosen
-        .sanitizer()
-        .and_then(|name| crate::plan::predicted_residual(registry, contract, call, name, &views.current_label()));
+    let legacy_residual = chosen.sanitizer().and_then(|name| {
+        crate::plan::predicted_residual(registry, contract, call, name, &views.current_label(), expansions)
+    });
     if let Some(narrowing) = chosen.narrowing().cloned().or(legacy_residual) {
         facts.push(Fact::Acceptance {
             trajectory: trajectory.clone(),
@@ -221,6 +226,7 @@ pub(crate) fn execute_remedy_plan(
             authority: ruling.authority.clone(),
             covers: ruling.covers.clone(),
             reviewed: ruling.reviewed.clone(),
+            resolutions: vec![],
         });
     }
     if let Some(sanitizer) = chosen.sanitizer() {
@@ -229,8 +235,9 @@ pub(crate) fn execute_remedy_plan(
             dispatch: dispatch.clone(),
             plan,
             sanitizer: sanitizer.clone(),
-            contribution: crate::plan::bound_contribution(registry, contract, call, sanitizer)
+            contribution: crate::plan::bound_contribution(registry, contract, call, sanitizer, expansions)
                 .expect("the matched plan binds an output sanitizer enumeration found applicable"),
+            resolutions: vec![],
         });
     }
     facts.push(dispatch_opened);
@@ -244,6 +251,7 @@ mod tests {
     use crate::authority::{Authority, Mandate, Scope};
     use crate::contract::{Delta, LabelRequirements, Requires, ToolContract};
     use crate::fact::{EffectKind, EffectSet, Fact};
+    use crate::groups::DeclaredAudience;
     use crate::label::{Audience, Dim, EstablishedLabel, Label, ReaderId, Trust};
     use crate::names::{MarkName, SanitizerName};
     use crate::projection::Projection;
@@ -350,11 +358,17 @@ mod tests {
         let trajectory = traj();
         let views = projection.view(&trajectory);
         let chosen = offered_plan(registry, &views, call);
-        execute_remedy_plan(registry, &views, &chosen, call, rulings)
+        execute_remedy_plan(registry, &views, &chosen, call, rulings, &Expansions::default())
     }
 
     fn offered_plan(registry: &Registry, views: &Views, call: &ResolvedCall) -> plan::ExecutableRemedyPlan {
-        let planned = match check::evaluate(registry.tool(call.tool()).unwrap(), views, call, &CallStage::default()) {
+        let planned = match check::evaluate(
+            registry.tool(call.tool()).unwrap(),
+            views,
+            call,
+            &CallStage::default(),
+            &Expansions::default(),
+        ) {
             CheckOutcome::Block(block) => plan::plan(
                 registry,
                 views,
@@ -362,6 +376,7 @@ mod tests {
                 &block,
                 &CallStage::default(),
                 plan::CallRole::Ordinary,
+                &Expansions::default(),
             ),
             _ => {
                 return plan::ExecutableRemedyPlan {
@@ -447,6 +462,7 @@ mod tests {
                 dynamic_resolutions: vec![],
                 memberships: Vec::new(),
                 subject: None,
+                resolutions: vec![],
             },
         ];
         let guard_call = call("guard", json!({}));
@@ -567,6 +583,7 @@ mod tests {
                 dynamic_resolutions: Vec::new(),
                 memberships: Vec::new(),
                 subject: None,
+                resolutions: vec![],
             },
         ];
         let stale = Ruling {
@@ -607,7 +624,8 @@ mod tests {
                 &projection.view(&trajectory),
                 &fabricated,
                 &call("wire", json!({})),
-                std::slice::from_ref(&ruling)
+                std::slice::from_ref(&ruling),
+                &Expansions::default()
             ),
             Err(PlanError::UnknownPlan(999))
         );
@@ -861,7 +879,9 @@ mod tests {
                 label: LabelRequirements {
                     trust_floor: None,
                     audience: vec![crate::contract::AudienceRequirement::Includes(
-                        crate::contract::RecipientSpec::Static(Audience::restricted([ReaderId::new("partner")])),
+                        crate::contract::RecipientSpec::Static(DeclaredAudience::literal(Audience::restricted([
+                            ReaderId::new("partner"),
+                        ]))),
                     )],
                 },
                 ..Requires::default()
@@ -877,9 +897,12 @@ mod tests {
                     input: true,
                     output: false,
                 },
-                transition: crate::authority::Transition::Audience {
-                    from_includes: Audience::restricted([ReaderId::new("internal")]),
-                    to: Audience::restricted([ReaderId::new("internal"), ReaderId::new("partner")]),
+                transition: crate::authority::DeclaredTransition::Audience {
+                    from_includes: DeclaredAudience::literal(Audience::restricted([ReaderId::new("internal")])),
+                    to: DeclaredAudience::literal(Audience::restricted([
+                        ReaderId::new("internal"),
+                        ReaderId::new("partner"),
+                    ])),
                 },
                 scope: Scope::default(),
                 hint: None,
@@ -904,7 +927,7 @@ mod tests {
         let chosen = offered_plan(&registry, &views, &call);
         assert_eq!(chosen.hop(), Some(&SanitizerName::new("redact")));
         assert_eq!(
-            execute_remedy_plan(&registry, &views, &chosen, &call, &[]),
+            execute_remedy_plan(&registry, &views, &chosen, &call, &[], &Expansions::default()),
             Err(PlanError::GapUncovered(Gap::Includes {
                 recipients: Audience::restricted([ReaderId::new("partner")])
             }))
@@ -974,12 +997,27 @@ mod tests {
         let projection = Projection::build(&moved_log, 2);
         let views = projection.view(&trajectory);
         assert_eq!(
-            execute_remedy_plan(&registry, &views, &stale, &call("get", json!({})), &[]),
+            execute_remedy_plan(
+                &registry,
+                &views,
+                &stale,
+                &call("get", json!({})),
+                &[],
+                &Expansions::default()
+            ),
             Err(PlanError::UnknownPlan(0))
         );
 
         let live = offered_plan(&registry, &views, &call("get", json!({})));
-        let batch = execute_remedy_plan(&registry, &views, &live, &call("get", json!({})), &[]).unwrap();
+        let batch = execute_remedy_plan(
+            &registry,
+            &views,
+            &live,
+            &call("get", json!({})),
+            &[],
+            &Expansions::default(),
+        )
+        .unwrap();
         let live_narrowing = crate::check::Narrowing {
             from: established(
                 TRUSTED,

@@ -26,6 +26,12 @@ requires = { audience = { includes = ["$to"] } }
 effects = ["egress"]
 delta = {}
 
+[[policy.tool]]
+name = "send_capped"
+requires = { audience = { cap = ["alice", "@team"] } }
+effects = ["egress"]
+delta = {}
+
 [externals]
 timeout_ms = 1000
 max_body_bytes = 4096
@@ -276,4 +282,61 @@ fn a_registered_membership_resolver_must_be_bound() {
         Runtime::open(config, dir.path().join("appa.db"), None),
         Err(appa_runtime_v2::api::OpenError::UnboundExternal { .. })
     ));
+}
+
+fn send_capped() -> ProposedCall {
+    ProposedCall {
+        tool: "send_capped".to_string(),
+        arguments: raw(serde_json::json!({})),
+    }
+}
+
+#[tokio::test]
+async fn a_cap_written_with_a_group_is_read_per_act_from_the_directory() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, directory) = serve_directory().await;
+    let runtime = narrowed(&dir, &url).await;
+    let before = audit_len(&runtime);
+
+    directory.set(Answer::Readers(vec!["bob"]));
+    assert_eq!(
+        propose(&runtime, send_capped()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    let requests = directory.requests();
+    assert_eq!(requests.len(), 1, "one act, one consult per group");
+    assert_eq!(requests[0]["group"], "team");
+    ran(&runtime, send_capped()).await;
+
+    directory.set(Answer::Readers(vec!["carol"]));
+    let HookDecision::DenyCall { feedback } = propose(&runtime, send_capped()).await else {
+        panic!("the moved cap blocks");
+    };
+    assert!(
+        !feedback.contains("carol"),
+        "the model hears a directory member: {feedback}"
+    );
+    assert_eq!(directory.requests().len(), 2);
+
+    let undecided = audit_len(&runtime);
+    directory.set(Answer::Down);
+    assert!(matches!(
+        propose(&runtime, send_capped()).await,
+        HookDecision::DenyCall { .. }
+    ));
+    assert_eq!(audit_len(&runtime), undecided);
+    assert!(audit_len(&runtime) > before);
+
+    let audit = serde_json::to_string(&runtime.audit(&root()).expect("the audit reads")).expect("the audit serializes");
+    assert!(!audit.contains("\"@"), "the audit names a group: {audit}");
+    drop(runtime);
+
+    let config = Config::load(&dir.path().join("appa.toml")).expect("the fixture validates");
+    let reopened = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment reopens"));
+    directory.set(Answer::Readers(vec!["alice", "bob"]));
+    assert_eq!(
+        propose(&reopened, send_capped()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert_eq!(directory.requests().len(), 4);
 }

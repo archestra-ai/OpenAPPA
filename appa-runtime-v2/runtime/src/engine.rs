@@ -35,6 +35,7 @@
 //! restart forgets pending offers — the model hears "no longer stands" and
 //! re-proposes; durable engine-owned offers are `T21`.
 
+use std::collections::BTreeMap;
 #[cfg(test)]
 use std::sync::Mutex;
 
@@ -47,7 +48,9 @@ pub(crate) use appa_engine::engine::ForkStatus;
 use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
 use appa_engine::fact::{BoundaryKind, CloseOutcome, EffectSet, Fact, ReturnDerivation};
+use appa_engine::groups::GroupExpansion;
 use appa_engine::label::{Audience, Dim, Dimension, Label, PartialLabel, ReaderId, Trust};
+use appa_engine::names::GroupName;
 use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RequiredRuling};
 use appa_engine::profile::PolicyFileKey as EnginePolicyFileKey;
 use appa_engine::projection::Views;
@@ -899,17 +902,29 @@ impl RuntimeEngine {
             dynamic_resolutions: pins,
             memberships,
         };
-        let decision = if spawn {
-            match self.decide_proposal(view, trajectory, proposed.clone(), entropy, true) {
-                Ok(decision) => decision,
-                Err(TransitionError::SpawnUncontrolled) => self
-                    .decide_proposal(view, trajectory, proposed, entropy, false)
-                    .map_err(proposal_refusal)?,
-                Err(error) => return Err(proposal_refusal(error)),
+        let expansions = self.membership_evidence(evidence);
+        let decided = if spawn {
+            match self.decide_proposal(view, trajectory, proposed.clone(), entropy, true, &expansions) {
+                Ok(decision) => Ok(decision),
+                Err(TransitionError::SpawnUncontrolled) => {
+                    self.decide_proposal(view, trajectory, proposed, entropy, false, &expansions)
+                }
+                Err(error) => Err(error),
             }
         } else {
-            self.decide_proposal(view, trajectory, proposed, entropy, false)
-                .map_err(proposal_refusal)?
+            self.decide_proposal(view, trajectory, proposed, entropy, false, &expansions)
+        };
+        let decision = match decided {
+            Ok(decision) => decision,
+            Err(TransitionError::MembershipNeeded { needed }) => {
+                return match self.membership_consult(&expansions, needed)? {
+                    MembershipConsult::Requests(requests) => {
+                        Ok(EngineDecision::deliver(Next::ResolveExternal(requests)))
+                    }
+                    MembershipConsult::Unresolved(group) => Ok(deny(unresolved_group(&call.tool, &group))),
+                };
+            }
+            Err(error) => return Err(proposal_refusal(error)),
         };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
         let then = self.deliver_proposals(view, trajectory, decision.follow_up)?;
@@ -923,6 +938,7 @@ impl RuntimeEngine {
         proposed: CoreProposedCall,
         entropy: &OfferNonce,
         spawn: bool,
+        expansions: &MembershipEvidence,
     ) -> Result<CoreDecision, TransitionError> {
         let batch = ProposalBatch {
             id: batch_id(entropy),
@@ -931,6 +947,7 @@ impl RuntimeEngine {
             proposals: vec![proposed],
             spawn: spawn.then(|| SpawnMark::at(0)),
             offer_nonce: engine_nonce(entropy),
+            expansions: expansions.expansions(),
         };
         self.engine.handle(view, CoreEvent::Proposals(batch))
     }
@@ -1005,16 +1022,33 @@ impl RuntimeEngine {
         evidence: &[ExternalEvidence],
         entropy: &OfferNonce,
     ) -> Result<EngineDecision, EngineRefusal> {
+        let expansions = self.membership_evidence(evidence);
         let report = ToolReport {
             dispatch: dispatch.clone(),
             outcome: engine_outcome(outcome),
             evidence: sanitizer_evidence(evidence),
             offer_nonce: engine_nonce(entropy),
+            expansions: expansions.expansions(),
         };
-        let decision = self
-            .engine
-            .handle(view, CoreEvent::Outcome(report))
-            .map_err(outcome_refusal)?;
+        let decision = match self.engine.handle(view, CoreEvent::Outcome(report)) {
+            Ok(decision) => decision,
+            Err(TransitionError::MembershipNeeded { needed }) => {
+                return match self.membership_consult(&expansions, needed)? {
+                    MembershipConsult::Requests(requests) => {
+                        Ok(EngineDecision::deliver(Next::ResolveExternal(requests)))
+                    }
+                    MembershipConsult::Unresolved(group) => {
+                        Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
+                            feedback: format!(
+                                "[appa] membership of {group} could not be resolved; the result is withheld and may be retried"
+                            ),
+                            offers: Vec::new(),
+                        })))
+                    }
+                };
+            }
+            Err(error) => return Err(outcome_refusal(error)),
+        };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
         let then = match decision.follow_up {
             FollowUp::Outcome(OutcomeFollowUp::Closed { admitted }) => {
@@ -1104,14 +1138,26 @@ impl RuntimeEngine {
                 }
             }
         };
+        let expansions = self.membership_evidence(evidence);
         let execution = OfferExecution {
             trajectory: engine_id(trajectory),
             offer: engine_offer,
             outcome,
             offer_nonce: engine_nonce(entropy),
+            expansions: expansions.expansions(),
         };
         let decision = match self.engine.handle(view, CoreEvent::ExecuteOffer(execution)) {
             Ok(decision) => decision,
+            Err(TransitionError::MembershipNeeded { needed }) => {
+                return match self.membership_consult(&expansions, needed)? {
+                    MembershipConsult::Requests(requests) => {
+                        Ok(EngineDecision::deliver(Next::ResolveExternal(requests)))
+                    }
+                    MembershipConsult::Unresolved(group) => Ok(no_answer(format!(
+                        "[appa] membership of {group} could not be resolved; the offer stands and may be executed again"
+                    ))),
+                };
+            }
             // A sanitizer's derivation the engine cannot use — malformed, schema-invalid, or not
             // a strict improvement — lands no fact and opens no dispatch; the offer stands for a
             // later deliberate retry. The external's answer is not an
@@ -1286,17 +1332,34 @@ impl RuntimeEngine {
                 body: ValueBody::new(body),
             },
         };
+        let expansions = self.membership_evidence(evidence);
         let report = ChildReport {
             child: engine_id(child),
             fork,
             submission,
             evidence: sanitizer_evidence(evidence),
             offer_nonce: engine_nonce(entropy),
+            expansions: expansions.expansions(),
         };
-        let decision = self
-            .engine
-            .handle(view, CoreEvent::ChildReturn(report))
-            .map_err(child_refusal)?;
+        let decision = match self.engine.handle(view, CoreEvent::ChildReturn(report)) {
+            Ok(decision) => decision,
+            Err(TransitionError::MembershipNeeded { needed }) => {
+                return match self.membership_consult(&expansions, needed)? {
+                    MembershipConsult::Requests(requests) => {
+                        Ok(EngineDecision::deliver(Next::ResolveExternal(requests)))
+                    }
+                    MembershipConsult::Unresolved(group) => {
+                        Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
+                            feedback: format!(
+                                "[appa] membership of {group} could not be resolved; the return is withheld and may be retried"
+                            ),
+                            offers: Vec::new(),
+                        })))
+                    }
+                };
+            }
+            Err(error) => return Err(child_refusal(error)),
+        };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
         let then = match decision.follow_up {
             FollowUp::Child(ChildFollowUp::Merged { admitted }) => Next::PresentToModel(Presentation::Value {
@@ -1376,6 +1439,64 @@ impl RuntimeEngine {
         Ok(pins)
     }
 
+    fn membership_evidence(&self, evidence: &[ExternalEvidence]) -> MembershipEvidence {
+        let registry = self.engine.registry();
+        let mut gathered = MembershipEvidence::default();
+        let Some(resolver) = registry.membership() else {
+            return gathered;
+        };
+        for entry in evidence {
+            let ExternalEvidence::Membership {
+                resolver: named,
+                group,
+                readers,
+            } = entry
+            else {
+                continue;
+            };
+            let group = GroupName::new(group.clone());
+            if named != resolver.as_str()
+                || !registry.groups().contains(&group)
+                || gathered.answers.contains_key(&group)
+            {
+                continue;
+            }
+            let expansion = readers
+                .as_ref()
+                .and_then(|readers| GroupExpansion::new(group.clone(), readers.iter().map(ReaderId::new)).ok());
+            gathered.answers.insert(group, expansion);
+        }
+        gathered
+    }
+
+    fn membership_consult(
+        &self,
+        gathered: &MembershipEvidence,
+        needed: Vec<GroupName>,
+    ) -> Result<MembershipConsult, EngineRefusal> {
+        let Some(resolver) = self.engine.registry().membership() else {
+            // A policy that writes a group registers a resolver at load.
+            return Err(EngineRefusal::Invariant {
+                detail: "the engine reads a group under a policy that registers no membership resolver".to_string(),
+            });
+        };
+        if let Some(group) = needed
+            .iter()
+            .find(|group| matches!(gathered.answers.get(*group), Some(None)))
+        {
+            return Ok(MembershipConsult::Unresolved(group.clone()));
+        }
+        Ok(MembershipConsult::Requests(
+            needed
+                .into_iter()
+                .map(|group| ExternalRequest::Membership {
+                    resolver: resolver.as_str().to_string(),
+                    group: group.as_str().to_string(),
+                })
+                .collect(),
+        ))
+    }
+
     fn resolve_memberships(
         &self,
         call: &ProposedCall,
@@ -1448,7 +1569,7 @@ impl RuntimeEngine {
     }
 }
 
-fn unresolved_group(tool: &str, group: &appa_engine::names::GroupName) -> String {
+fn unresolved_group(tool: &str, group: &GroupName) -> String {
     format!(
         "[appa] {tool}: membership of {group} could not be resolved; the call was not checked — propose it again later"
     )
@@ -1469,6 +1590,22 @@ enum SanitizerAnswer {
 enum Resolution {
     Feedback(String),
     Consult(Vec<ExternalRequest>),
+}
+
+enum MembershipConsult {
+    Requests(Vec<ExternalRequest>),
+    Unresolved(GroupName),
+}
+
+#[derive(Debug, Default)]
+struct MembershipEvidence {
+    answers: BTreeMap<GroupName, Option<GroupExpansion>>,
+}
+
+impl MembershipEvidence {
+    fn expansions(&self) -> Vec<GroupExpansion> {
+        self.answers.values().flatten().cloned().collect()
+    }
 }
 
 fn deny(text: String) -> EngineDecision {
@@ -1926,7 +2063,8 @@ fn gap_text(gap: &appa_engine::check::Gap) -> String {
                 resolver.as_str()
             )
         }
-        Gap::Cap { cap } => format!("the committed readers exceed the cap {cap:?}"),
+        // The count only, as for `includes`: a cap may resolve a directory group.
+        Gap::Cap { cap } => format!("the committed readers exceed the cap of {}", audience_count(cap)),
         Gap::Prior(effect) => format!("requires a prior {} effect", effect.as_str()),
         Gap::NoPrior(effect) => format!("forbidden after a {} effect", effect.as_str()),
         Gap::Attention(mark) => format!("requires attention: {}", mark.as_str()),
@@ -2001,11 +2139,21 @@ fn narrowing_feedback(narrowing: &appa_engine::check::Narrowing, chain: &TrustCh
     if narrowing.from.audience != narrowing.to.audience {
         changes.push(format!(
             "allowed readers would narrow: {} -> {}",
-            terminal_safe(&audience_wire(&narrowing.from.audience)),
-            terminal_safe(&audience_wire(&narrowing.to.audience)),
+            audience_count(&narrowing.from.audience),
+            audience_count(&narrowing.to.audience),
         ));
     }
     changes
+}
+
+fn audience_count(audience: &Audience) -> String {
+    match audience {
+        Audience::Public => "public".to_string(),
+        Audience::Restricted(readers) => match readers.len() {
+            1 => "1 reader".to_string(),
+            count => format!("{count} readers"),
+        },
+    }
 }
 
 fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId) -> String {

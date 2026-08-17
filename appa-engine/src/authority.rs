@@ -4,8 +4,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::fact::EffectKind;
+use crate::groups::{DeclaredAudience, Expansions};
 use crate::label::{Adequacy, Audience, Dim, Dimension, EstablishedLabel, Label, ReaderId, Trust};
-use crate::names::{AuthorityName, CastName, MarkName, SanitizerName, TagName};
+use crate::names::{AuthorityName, CastName, GroupName, MarkName, SanitizerName, TagName};
 
 /// Operator prose on a registered authority or sanitizer: why this entry exists, in the
 /// deployer's own words. It travels with every remedy plan naming the entity, so an agent chooses
@@ -30,7 +31,9 @@ impl Hint {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mandate {
     pub trust_ceiling: Option<Trust>,
-    pub reader_ceiling: Option<Audience>,
+    /// Cover an unmet `includes` by vouching readers up to this set. A group written here
+    /// resolves at the operation that validates the mandate.
+    pub reader_ceiling: Option<DeclaredAudience>,
     pub waivers: Vec<EffectKind>,
     pub attends: Vec<MarkName>,
 }
@@ -41,6 +44,20 @@ impl Mandate {
             && self.reader_ceiling.is_none()
             && self.waivers.is_empty()
             && self.attends.is_empty()
+    }
+
+    pub fn groups(&self) -> impl Iterator<Item = &GroupName> {
+        self.reader_ceiling.iter().flat_map(DeclaredAudience::groups)
+    }
+
+    /// The groups a ruling covering `gaps` under this mandate reads: the
+    /// reader ceiling's, only where an `includes` gap is among them — no other gap consults it.
+    pub(crate) fn reads<'a>(&'a self, gaps: &[crate::check::Gap]) -> impl Iterator<Item = &'a GroupName> {
+        gaps.iter()
+            .any(|gap| matches!(gap, crate::check::Gap::Includes { .. }))
+            .then(|| self.groups())
+            .into_iter()
+            .flatten()
     }
 }
 
@@ -116,6 +133,70 @@ pub struct SanitizerPoints {
 /// resolver-implemented [`Cast`] does — so the declared `to` is the transition ceiling. The
 /// undeclared dimension is untouched: the derivation carries the raw value's label on it unchanged.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeclaredTransition {
+    Audience {
+        from_includes: DeclaredAudience,
+        to: DeclaredAudience,
+    },
+    Trust { from_floor: Trust, to: Trust },
+}
+
+impl DeclaredTransition {
+    pub fn dimension(&self) -> Dimension {
+        match self {
+            DeclaredTransition::Audience { .. } => Dimension::Audience,
+            DeclaredTransition::Trust { .. } => Dimension::Trust,
+        }
+    }
+
+    /// The groups this mandate writes: the application that reads it requires them
+    /// together, because `from` and `to` are one declaration.
+    pub fn groups(&self) -> impl Iterator<Item = &GroupName> {
+        match self {
+            DeclaredTransition::Audience { from_includes, to } => Some(from_includes.groups().chain(to.groups())),
+            DeclaredTransition::Trust { .. } => None,
+        }
+        .into_iter()
+        .flatten()
+    }
+
+    /// The transition as the operation reads it: every written group replaced by the operation's
+    /// answer. This literal form is what a derivation record persists.
+    pub(crate) fn resolve(&self, expansions: &Expansions) -> Transition {
+        match self {
+            DeclaredTransition::Audience { from_includes, to } => Transition::Audience {
+                from_includes: from_includes.resolve(expansions),
+                to: to.resolve(expansions),
+            },
+            DeclaredTransition::Trust { from_floor, to } => Transition::Trust {
+                from_floor: *from_floor,
+                to: *to,
+            },
+        }
+    }
+
+    /// Does some group answer make the declaration admit `raw`? Where it names no group this is
+    /// the exact `from` test; where it does, an answer only adds readers `raw` must include, so
+    /// the empty answer is the widest admission: `raw` must cover the literal readers alone. Load
+    /// lints that size the planner read this; no decision does.
+    pub(crate) fn may_admit(&self, raw: &Label) -> bool {
+        match self {
+            DeclaredTransition::Audience { from_includes, .. } => {
+                let widest = match from_includes {
+                    DeclaredAudience::Public => Audience::Public,
+                    DeclaredAudience::Restricted { readers, .. } => Audience::restricted(readers.iter().cloned()),
+                };
+                raw.audience.covers(&widest) == Adequacy::Holds
+            }
+            DeclaredTransition::Trust { from_floor, .. } => raw.trust.meets_floor(*from_floor) == Adequacy::Holds,
+        }
+    }
+}
+
+/// A sanitizer's transition as an operation applied it: the declared transition with
+/// every written group resolved to the operation's answer. Derivation records persist
+/// this literal form, so replay reads what was applied and never the directory.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Transition {
     Audience { from_includes: Audience, to: Audience },
     Trust { from_floor: Trust, to: Trust },
@@ -155,7 +236,7 @@ impl Transition {
 pub struct Sanitizer {
     pub name: SanitizerName,
     pub on: SanitizerPoints,
-    pub transition: Transition,
+    pub transition: DeclaredTransition,
     /// Where this sanitizer is offered: the called tool's tags for a result, the
     /// callee's for a `tool_input` substitution. Scope narrows where a component is offered; it
     /// never changes what the mandate claims. An unscoped sanitizer applies everywhere,
@@ -174,22 +255,43 @@ pub struct Sanitizer {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CastCeiling {
     pub trust: Vec<Trust>,
-    pub audience: Audience,
+    pub audience: DeclaredAudience,
 }
 
 impl CastCeiling {
-    fn admits_unresolved(&self, answer: &EstablishedLabel, dim: Dimension) -> bool {
+    fn admits_unresolved(&self, answer: &EstablishedLabel, dim: Dimension, expansions: &Expansions) -> bool {
         match dim {
             Dimension::Trust => self.trust.contains(&answer.trust),
-            Dimension::Audience => answer.audience.within(&self.audience),
+            Dimension::Audience => answer.audience.within(&self.audience.resolve(expansions)),
         }
+    }
+}
+
+/// A constant cast's declared complete label: a trust rank and a written audience whose
+/// groups resolve at the validation that reads it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclaredLabel {
+    pub trust: Trust,
+    pub audience: DeclaredAudience,
+}
+
+impl DeclaredLabel {
+    pub fn literal(label: EstablishedLabel) -> DeclaredLabel {
+        DeclaredLabel {
+            trust: label.trust,
+            audience: DeclaredAudience::literal(label.audience),
+        }
+    }
+
+    pub(crate) fn resolve(&self, expansions: &Expansions) -> EstablishedLabel {
+        EstablishedLabel::new(self.trust, self.audience.resolve(expansions))
     }
 }
 
 /// How a cast resolves — constant XOR resolver, never both (unrepresentable here by construction).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CastResolution {
-    Constant(EstablishedLabel),
+    Constant(DeclaredLabel),
     Resolver { may_cast: CastCeiling },
 }
 
@@ -210,7 +312,12 @@ impl CastResolution {
     /// or carry the declared constant, which admits only the constant label itself. A
     /// restricted resolved audience must hold literal reader IDs: never the reserved `public`
     /// spelling, never a group.
-    pub fn validate(&self, prior: &Label, answer: &EstablishedLabel) -> Result<(), CastRefusal> {
+    pub fn validate(
+        &self,
+        prior: &Label,
+        answer: &EstablishedLabel,
+        expansions: &Expansions,
+    ) -> Result<(), CastRefusal> {
         let literal_ids = match &answer.audience {
             Audience::Public => true,
             Audience::Restricted(readers) => readers.iter().all(ReaderId::is_literal),
@@ -219,7 +326,7 @@ impl CastResolution {
             return Err(CastRefusal::NonLiteralReader);
         }
         if let CastResolution::Constant(constant) = self
-            && answer != constant
+            && *answer != constant.resolve(expansions)
         {
             return Err(CastRefusal::ConstantMismatch);
         }
@@ -241,7 +348,7 @@ impl CastResolution {
                 continue;
             }
             if let CastResolution::Resolver { may_cast } = self
-                && !may_cast.admits_unresolved(answer, dim)
+                && !may_cast.admits_unresolved(answer, dim, expansions)
             {
                 return Err(CastRefusal::CeilingExceeded(dim));
             }
@@ -254,7 +361,7 @@ impl CastResolution {
     /// request against a resolution no answer can satisfy — a constant disagreeing with an
     /// established dimension, a resolver whose trust ceiling is empty while trust is unresolved —
     /// would redrive forever without reaching a capable cast registered after it.
-    pub(crate) fn can_establish(&self, prior: &crate::label::Label) -> bool {
+    pub(crate) fn can_establish(&self, prior: &crate::label::Label, expansions: &Expansions) -> bool {
         match self {
             CastResolution::Constant(constant) => {
                 let trust_agrees = match prior.trust {
@@ -262,13 +369,34 @@ impl CastResolution {
                     Dim::Unknown => true,
                 };
                 let audience_agrees = match &prior.audience {
-                    Dim::Known(audience) => *audience == constant.audience,
+                    Dim::Known(audience) => *audience == constant.audience.resolve(expansions),
                     Dim::Unknown => true,
                 };
                 trust_agrees && audience_agrees
             }
             CastResolution::Resolver { may_cast } => !matches!(prior.trust, Dim::Unknown) || !may_cast.trust.is_empty(),
         }
+    }
+
+    pub fn groups(&self) -> impl Iterator<Item = &GroupName> {
+        match self {
+            CastResolution::Constant(constant) => constant.audience.groups(),
+            CastResolution::Resolver { may_cast } => may_cast.audience.groups(),
+        }
+    }
+
+    /// The groups validating one answer for a source at `prior` reads: a
+    /// constant is read whole; a resolver's audience ceiling only where the source's audience is
+    /// unresolved — an established dimension constrains the answer, never the ceiling.
+    pub fn reads(&self, prior: &crate::label::Label) -> impl Iterator<Item = &GroupName> {
+        match self {
+            CastResolution::Constant(constant) => Some(constant.audience.groups()),
+            CastResolution::Resolver { may_cast } => {
+                matches!(prior.audience, Dim::Unknown).then(|| may_cast.audience.groups())
+            }
+        }
+        .into_iter()
+        .flatten()
     }
 }
 
@@ -290,17 +418,27 @@ impl Sanitizer {
     /// cover the tags of the contract the value originates from, and the source must
     /// satisfy its declared `from`. The one predicate live admission, the child crossing
     /// and the transition validator share, so none of them can drift from the others.
-    pub(crate) fn derive_output(&self, raw: &crate::label::Label, tags: &[TagName]) -> Option<crate::label::Label> {
+    pub(crate) fn derive_output(
+        &self,
+        raw: &crate::label::Label,
+        tags: &[TagName],
+        expansions: &Expansions,
+    ) -> Option<crate::label::Label> {
         (self.on.output && self.applies_to(tags)).then_some(())?;
-        self.derives(raw)
+        self.derives(raw, expansions)
     }
 
     /// The label this sanitizer's derivation of the call's argument bytes would carry, or `None`
     /// where it does not apply at tool input: registered for input, scope covering the
     /// callee, and the raw bytes satisfying its declared `from`.
-    pub(crate) fn derive_input(&self, raw: &crate::label::Label, tags: &[TagName]) -> Option<crate::label::Label> {
+    pub(crate) fn derive_input(
+        &self,
+        raw: &crate::label::Label,
+        tags: &[TagName],
+        expansions: &Expansions,
+    ) -> Option<crate::label::Label> {
         (self.on.input && self.applies_to(tags)).then_some(())?;
-        self.derives(raw)
+        self.derives(raw, expansions)
     }
 
     /// Does this sanitizer's jurisdiction reach a value originating from a contract carrying
@@ -309,8 +447,13 @@ impl Sanitizer {
         self.scope.covers(tags)
     }
 
-    fn derives(&self, raw: &crate::label::Label) -> Option<crate::label::Label> {
-        (self.transition.admits(raw) == crate::label::Adequacy::Holds).then(|| self.transition.derive(raw))
+    fn derives(&self, raw: &crate::label::Label, expansions: &Expansions) -> Option<crate::label::Label> {
+        let transition = self.transition.resolve(expansions);
+        (transition.admits(raw) == crate::label::Adequacy::Holds).then(|| transition.derive(raw))
+    }
+
+    pub fn groups(&self) -> impl Iterator<Item = &GroupName> {
+        self.transition.groups()
     }
 }
 
@@ -322,11 +465,24 @@ mod tests {
         Audience::restricted(ids.iter().copied().map(ReaderId::new))
     }
 
+    #[test]
+    fn a_grouped_from_may_admit_only_a_raw_covering_its_literal_readers() {
+        let transition = DeclaredTransition::Audience {
+            from_includes: DeclaredAudience::declared([ReaderId::new("alice")], [crate::names::GroupName::new("team")])
+                .expect("a literal reader and a group"),
+            to: DeclaredAudience::literal(Audience::Public),
+        };
+        let raw = |audience: Dim<Audience>| Label::new(Dim::Known(Trust::new(1)), audience);
+        assert!(transition.may_admit(&raw(Dim::Known(readers(&["alice", "carol"])))));
+        assert!(!transition.may_admit(&raw(Dim::Known(readers(&["bob"])))));
+        assert!(!transition.may_admit(&raw(Dim::Unknown)));
+    }
+
     fn resolver(trust: &[u8], cap: Audience) -> CastResolution {
         CastResolution::Resolver {
             may_cast: CastCeiling {
                 trust: trust.iter().copied().map(Trust::new).collect(),
-                audience: cap,
+                audience: DeclaredAudience::literal(cap),
             },
         }
     }
@@ -343,15 +499,27 @@ mod tests {
     fn an_audience_ceiling_is_a_cap_not_an_enumeration() {
         let cast = resolver(&[0], readers(&["finance", "audit"]));
         assert_eq!(
-            cast.validate(&both_unknown(), &answer(0, readers(&["finance"]))),
+            cast.validate(
+                &both_unknown(),
+                &answer(0, readers(&["finance"])),
+                &Expansions::default()
+            ),
             Ok(())
         );
         assert_eq!(
-            cast.validate(&both_unknown(), &answer(0, readers(&["finance", "audit"]))),
+            cast.validate(
+                &both_unknown(),
+                &answer(0, readers(&["finance", "audit"])),
+                &Expansions::default()
+            ),
             Ok(())
         );
         assert_eq!(
-            cast.validate(&both_unknown(), &answer(0, readers(&["finance", "stranger"]))),
+            cast.validate(
+                &both_unknown(),
+                &answer(0, readers(&["finance", "stranger"])),
+                &Expansions::default()
+            ),
             Err(CastRefusal::CeilingExceeded(Dimension::Audience))
         );
     }
@@ -359,11 +527,21 @@ mod tests {
     #[test]
     fn a_public_resolution_is_admitted_only_under_a_public_cap() {
         let wide = resolver(&[0], Audience::Public);
-        assert_eq!(wide.validate(&both_unknown(), &answer(0, Audience::Public)), Ok(()));
-        assert_eq!(wide.validate(&both_unknown(), &answer(0, readers(&["anyone"]))), Ok(()));
+        assert_eq!(
+            wide.validate(&both_unknown(), &answer(0, Audience::Public), &Expansions::default()),
+            Ok(())
+        );
+        assert_eq!(
+            wide.validate(
+                &both_unknown(),
+                &answer(0, readers(&["anyone"])),
+                &Expansions::default()
+            ),
+            Ok(())
+        );
         let narrow = resolver(&[0], readers(&["finance"]));
         assert_eq!(
-            narrow.validate(&both_unknown(), &answer(0, Audience::Public)),
+            narrow.validate(&both_unknown(), &answer(0, Audience::Public), &Expansions::default()),
             Err(CastRefusal::CeilingExceeded(Dimension::Audience))
         );
     }
@@ -373,12 +551,16 @@ mod tests {
         let wide = resolver(&[0], Audience::Public);
         for bad in [readers(&["@hr"]), readers(&["public"]), readers(&["ap@corp", "@hr"])] {
             assert_eq!(
-                wide.validate(&both_unknown(), &answer(0, bad)),
+                wide.validate(&both_unknown(), &answer(0, bad), &Expansions::default()),
                 Err(CastRefusal::NonLiteralReader)
             );
         }
         assert_eq!(
-            wide.validate(&both_unknown(), &answer(0, readers(&["ap@corp"]))),
+            wide.validate(
+                &both_unknown(),
+                &answer(0, readers(&["ap@corp"])),
+                &Expansions::default()
+            ),
             Ok(())
         );
     }
@@ -387,15 +569,27 @@ mod tests {
     fn both_ceilings_bound_the_answer_independently() {
         let cast = resolver(&[1], readers(&["finance"]));
         assert_eq!(
-            cast.validate(&both_unknown(), &answer(1, readers(&["finance"]))),
+            cast.validate(
+                &both_unknown(),
+                &answer(1, readers(&["finance"])),
+                &Expansions::default()
+            ),
             Ok(())
         );
         assert_eq!(
-            cast.validate(&both_unknown(), &answer(2, readers(&["finance"]))),
+            cast.validate(
+                &both_unknown(),
+                &answer(2, readers(&["finance"])),
+                &Expansions::default()
+            ),
             Err(CastRefusal::CeilingExceeded(Dimension::Trust))
         );
         assert_eq!(
-            cast.validate(&both_unknown(), &answer(1, readers(&["stranger"]))),
+            cast.validate(
+                &both_unknown(),
+                &answer(1, readers(&["stranger"])),
+                &Expansions::default()
+            ),
             Err(CastRefusal::CeilingExceeded(Dimension::Audience))
         );
     }
@@ -404,32 +598,48 @@ mod tests {
     fn an_established_dimension_must_match_exactly() {
         let cast = resolver(&[1], readers(&["finance"]));
         let trust_known = Label::new(Dim::Known(Trust::new(3)), Dim::Unknown);
-        assert_eq!(cast.validate(&trust_known, &answer(3, readers(&["finance"]))), Ok(()));
         assert_eq!(
-            cast.validate(&trust_known, &answer(1, readers(&["finance"]))),
+            cast.validate(&trust_known, &answer(3, readers(&["finance"])), &Expansions::default()),
+            Ok(())
+        );
+        assert_eq!(
+            cast.validate(&trust_known, &answer(1, readers(&["finance"])), &Expansions::default()),
             Err(CastRefusal::EstablishedMismatch(Dimension::Trust))
         );
         let audience_known = Label::new(Dim::Unknown, Dim::Known(Audience::Public));
-        assert_eq!(cast.validate(&audience_known, &answer(1, Audience::Public)), Ok(()));
         assert_eq!(
-            cast.validate(&audience_known, &answer(1, readers(&["finance"]))),
+            cast.validate(&audience_known, &answer(1, Audience::Public), &Expansions::default()),
+            Ok(())
+        );
+        assert_eq!(
+            cast.validate(
+                &audience_known,
+                &answer(1, readers(&["finance"])),
+                &Expansions::default()
+            ),
             Err(CastRefusal::EstablishedMismatch(Dimension::Audience))
         );
     }
 
     #[test]
     fn a_constant_admits_exactly_its_declared_label_where_it_agrees() {
-        let constant = CastResolution::Constant(answer(0, Audience::Public));
-        assert_eq!(constant.validate(&both_unknown(), &answer(0, Audience::Public)), Ok(()));
+        let constant = CastResolution::Constant(DeclaredLabel::literal(answer(0, Audience::Public)));
         assert_eq!(
-            constant.validate(&both_unknown(), &answer(1, Audience::Public)),
+            constant.validate(&both_unknown(), &answer(0, Audience::Public), &Expansions::default()),
+            Ok(())
+        );
+        assert_eq!(
+            constant.validate(&both_unknown(), &answer(1, Audience::Public), &Expansions::default()),
             Err(CastRefusal::ConstantMismatch)
         );
         let agreeing = Label::new(Dim::Known(Trust::new(0)), Dim::Unknown);
-        assert_eq!(constant.validate(&agreeing, &answer(0, Audience::Public)), Ok(()));
+        assert_eq!(
+            constant.validate(&agreeing, &answer(0, Audience::Public), &Expansions::default()),
+            Ok(())
+        );
         let disagreeing = Label::new(Dim::Known(Trust::new(2)), Dim::Unknown);
         assert_eq!(
-            constant.validate(&disagreeing, &answer(0, Audience::Public)),
+            constant.validate(&disagreeing, &answer(0, Audience::Public), &Expansions::default()),
             Err(CastRefusal::EstablishedMismatch(Dimension::Trust))
         );
     }

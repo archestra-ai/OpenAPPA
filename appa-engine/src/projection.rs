@@ -9,6 +9,7 @@ use crate::contract::PinnedDynamicResolution;
 use crate::fact::{
     BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ForkSnapshot, ObservedResult, ReturnPolicy,
 };
+use crate::groups::GroupResolution;
 use crate::label::{Dimension, EstablishedLabel, Label, PartialLabel};
 use crate::names::{AuthorityName, SanitizerName};
 use crate::value::{
@@ -73,6 +74,7 @@ pub(crate) struct DecidedBatch {
     /// position: a marked call's block is planned differently on every later read of it.
     pub(crate) spawn: Option<crate::transition::SpawnMark>,
     pub(crate) released: Vec<DispatchId>,
+    pub(crate) resolutions: Vec<GroupResolution>,
 }
 
 /// One offer the log has opened. Whether it is still *pending* is not stored: that is
@@ -88,6 +90,9 @@ pub(crate) struct RecordedOffer {
     pub(crate) subject: crate::basis::SubjectKey,
     pub(crate) plan: crate::plan::ExecutableRemedyPlan,
     pub(crate) basis: crate::basis::PolicyBasis,
+    /// The group resolutions the act that surfaced this offer consumed: its execution
+    /// starts from them.
+    pub(crate) resolutions: Vec<GroupResolution>,
     pub(crate) end: Option<OfferEnd>,
 }
 
@@ -119,6 +124,9 @@ pub(crate) struct PreparedApproval {
     pub(crate) rulings: Vec<crate::execute::AuthorityEvidence>,
     pub(crate) sanitizer: Option<crate::names::SanitizerName>,
     pub(crate) basis: crate::basis::PolicyBasis,
+    /// The group resolutions the approval was prepared under: its consumption releases
+    /// under them.
+    pub(crate) resolutions: Vec<GroupResolution>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -174,6 +182,7 @@ pub struct Projection {
     occurrences: BTreeMap<(TrajectoryId, CanonicalDigest), u32>,
     dispatch_calls: BTreeMap<DispatchId, ResolvedCall>,
     receiving_bounds: BTreeMap<DispatchId, EstablishedLabel>,
+    dispatch_resolutions: BTreeMap<DispatchId, Vec<GroupResolution>>,
     subject_dispatches: BTreeMap<crate::basis::SubjectKey, DispatchId>,
     observations: BTreeMap<DispatchId, ObservedResult>,
     boundaries: Vec<TrajectoryId>,
@@ -222,6 +231,7 @@ impl Projection {
             occurrences: BTreeMap::new(),
             dispatch_calls: BTreeMap::new(),
             receiving_bounds: BTreeMap::new(),
+            dispatch_resolutions: BTreeMap::new(),
             subject_dispatches: BTreeMap::new(),
             observations: BTreeMap::new(),
             boundaries: Vec::new(),
@@ -308,6 +318,7 @@ impl Projection {
             occurrences,
             dispatch_calls,
             receiving_bounds,
+            dispatch_resolutions,
             subject_dispatches,
             observations,
             boundaries,
@@ -352,6 +363,7 @@ impl Projection {
                     subject,
                     plan,
                     basis,
+                    resolutions,
                     ..
                 } => {
                     offers.insert(
@@ -363,6 +375,7 @@ impl Projection {
                             subject: subject.clone(),
                             plan: plan.clone(),
                             basis: *basis,
+                            resolutions: resolutions.clone(),
                             end: None,
                         },
                     );
@@ -392,6 +405,7 @@ impl Projection {
                     rulings,
                     sanitizer,
                     basis,
+                    resolutions,
                 } => {
                     approvals.insert(
                         *offer,
@@ -403,6 +417,7 @@ impl Projection {
                             rulings: rulings.clone(),
                             sanitizer: sanitizer.clone(),
                             basis: *basis,
+                            resolutions: resolutions.clone(),
                         },
                     );
                 }
@@ -412,6 +427,7 @@ impl Projection {
                     proposals,
                     spawn,
                     released,
+                    resolutions,
                 } => {
                     decided.insert(
                         batch.clone(),
@@ -421,6 +437,7 @@ impl Projection {
                             proposals: proposals.clone(),
                             spawn: *spawn,
                             released: released.clone(),
+                            resolutions: resolutions.clone(),
                         },
                     );
                 }
@@ -460,18 +477,20 @@ impl Projection {
                     arguments,
                     receiving,
                     proposed_effects,
-                    dynamic_resolutions: resolutions,
+                    dynamic_resolutions,
                     memberships,
                     subject,
+                    resolutions,
                     proposed_label: _,
                 } => {
                     dispatch_calls.insert(
                         dispatch.clone(),
                         ResolvedCall::new(tool.clone(), arguments.clone())
-                            .with_dynamic_resolutions(resolutions.clone())
+                            .with_dynamic_resolutions(dynamic_resolutions.clone())
                             .with_memberships(memberships.clone()),
                     );
                     receiving_bounds.insert(dispatch.clone(), receiving.clone());
+                    dispatch_resolutions.insert(dispatch.clone(), resolutions.clone());
                     if let Some(subject) = subject {
                         subject_dispatches.insert(subject.clone(), dispatch.clone());
                     }
@@ -1313,6 +1332,10 @@ impl Views<'_> {
         self.projection.receiving_bounds.get(dispatch)
     }
 
+    pub(crate) fn dispatch_resolutions(&self, dispatch: &DispatchId) -> Option<&[GroupResolution]> {
+        self.projection.dispatch_resolutions.get(dispatch).map(Vec::as_slice)
+    }
+
     /// The dispatch this subject's decision released, if one did. A repeat answers with
     /// the act its own position performed: two subjects rendering — or substituting to — the same
     /// call each open their own dispatch, and call equality alone cannot tell them apart.
@@ -1388,6 +1411,7 @@ mod tests {
                 value: ValueId::new(0),
                 resolved: resolved.clone(),
                 cast: crate::names::CastName::new("classifier"),
+                resolutions: vec![],
             },
         ];
         let direct = vec![
@@ -1470,6 +1494,7 @@ mod tests {
                 dynamic_resolutions: Vec::new(),
                 memberships: Vec::new(),
                 subject: None,
+                resolutions: vec![],
             },
             Fact::DispatchClosed {
                 trajectory: traj("a"),
@@ -1499,6 +1524,7 @@ mod tests {
                 dynamic_resolutions: Vec::new(),
                 memberships: Vec::new(),
                 subject: None,
+                resolutions: vec![],
             },
             Fact::DispatchClosed {
                 trajectory: traj("a"),
@@ -1527,6 +1553,7 @@ mod tests {
                 dynamic_resolutions: Vec::new(),
                 memberships: Vec::new(),
                 subject: None,
+                resolutions: vec![],
             },
             Fact::DispatchClosed {
                 trajectory: traj("a"),
@@ -1648,6 +1675,7 @@ mod tests {
                     id: ChildReturnId::new(traj("kid"), 0),
                     value: labeled(2, Audience::Public),
                     derivation: crate::fact::ReturnDerivation::Raw,
+                    resolutions: vec![],
                 },
                 Fact::ValueAdmitted {
                     trajectory: traj("root"),
@@ -1717,6 +1745,7 @@ mod tests {
                 digest: RawResultDigest::of(body.as_str().as_bytes()),
                 body: body.clone(),
                 policy: ReturnPolicy::Raw,
+                resolutions: vec![],
             },
             Fact::CandidateDerived {
                 trajectory: traj("root"),
@@ -1735,12 +1764,14 @@ mod tests {
                     residual: None,
                 },
                 lineage: crate::candidate::SanitizerLineage::default(),
+                resolutions: vec![],
             },
             Fact::CastApplied {
                 trajectory: traj("kid"),
                 value: ValueId::new(1),
                 resolved: EstablishedLabel::new(Trust::new(0), Audience::Public),
                 cast: crate::names::CastName::new("classifier"),
+                resolutions: vec![],
             },
             Fact::ChildReturn {
                 trajectory: traj("kid"),
@@ -1754,6 +1785,7 @@ mod tests {
                         to: Trust::new(2),
                     },
                 },
+                resolutions: vec![],
             },
             Fact::ValueAdmitted {
                 trajectory: traj("root"),
@@ -1818,6 +1850,7 @@ mod tests {
                 digest: source,
                 body: body.clone(),
                 policy: ReturnPolicy::Raw,
+                resolutions: vec![],
             },
             Fact::CandidateDerived {
                 trajectory: traj("root"),
@@ -1836,12 +1869,14 @@ mod tests {
                     residual: None,
                 },
                 lineage: crate::candidate::SanitizerLineage::default(),
+                resolutions: vec![],
             },
             Fact::CastApplied {
                 trajectory: traj("kid"),
                 value: ValueId::new(1),
                 resolved: EstablishedLabel::new(Trust::new(0), Audience::Public),
                 cast: crate::names::CastName::new("classifier"),
+                resolutions: vec![],
             },
             Fact::CandidateDerived {
                 trajectory: traj("root"),
@@ -1860,6 +1895,7 @@ mod tests {
                     residual: None,
                 },
                 lineage: crate::candidate::SanitizerLineage::default(),
+                resolutions: vec![],
             },
             Fact::ChildReturn {
                 trajectory: traj("kid"),
@@ -1873,6 +1909,7 @@ mod tests {
                         to: Trust::new(2),
                     },
                 },
+                resolutions: vec![],
             },
             Fact::ValueAdmitted {
                 trajectory: traj("root"),
@@ -1909,6 +1946,7 @@ mod tests {
                 dynamic_resolutions: Vec::new(),
                 memberships: Vec::new(),
                 subject: None,
+                resolutions: vec![],
             },
             Fact::ValueAdmitted {
                 trajectory: traj("a"),

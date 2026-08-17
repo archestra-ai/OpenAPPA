@@ -381,6 +381,8 @@ pub enum Provenance {
         batch: crate::transition::ProposalBatchId,
         position: u32,
         effects: crate::fact::EffectSet,
+        #[serde(default)]
+        resolutions: Vec<crate::groups::GroupResolution>,
     },
 }
 

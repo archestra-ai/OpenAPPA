@@ -595,10 +595,13 @@ pub(crate) fn covering_declaration(config: &RegistryConfig) -> ProfileDeclaratio
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::{Authority, Hint, Mandate, Sanitizer, SanitizerPoints, Scope, Transition};
+    use crate::authority::{
+        Authority, DeclaredLabel, DeclaredTransition, Hint, Mandate, Sanitizer, SanitizerPoints, Scope,
+    };
     use crate::contract::{AudienceDelta, Delta, DynamicAudienceBinding, LabelRequirements, Requires, ToolContract};
     use crate::engine::Engine;
     use crate::fact::EffectSet;
+    use crate::groups::DeclaredAudience;
     use crate::label::{Audience, ReaderId};
     use crate::names::{AuthorityName, DynamicResolverName, SanitizerName, TagName};
 
@@ -635,7 +638,7 @@ mod tests {
                 input: false,
                 output: true,
             },
-            transition: Transition::Trust {
+            transition: DeclaredTransition::Trust {
                 from_floor: Trust::new(0),
                 to: Trust::new(1),
             },
@@ -936,7 +939,9 @@ mod tests {
         let mut leak = tool("leak");
         leak.delta = Some(Delta {
             trust: None,
-            audience: Some(AudienceDelta::Static(Audience::restricted([ReaderId::new("internal")]))),
+            audience: Some(AudienceDelta::Static(DeclaredAudience::literal(Audience::restricted(
+                [ReaderId::new("internal")],
+            )))),
         });
         let mut cfg = config(vec![leak]);
         cfg.sanitizers = vec![Sanitizer {
@@ -945,9 +950,9 @@ mod tests {
                 input: false,
                 output: true,
             },
-            transition: Transition::Audience {
-                from_includes: Audience::restricted([ReaderId::new("internal")]),
-                to: Audience::Public,
+            transition: DeclaredTransition::Audience {
+                from_includes: DeclaredAudience::literal(Audience::restricted([ReaderId::new("internal")])),
+                to: DeclaredAudience::literal(Audience::Public),
             },
             scope: Scope::default(),
             hint: None,
@@ -1247,9 +1252,8 @@ mod tests {
         let mut cfg = config(vec![tool("fetch")]);
         cfg.casts = vec![crate::authority::Cast {
             name: crate::names::CastName::new("vouch"),
-            resolution: crate::authority::CastResolution::Constant(crate::label::EstablishedLabel::new(
-                Trust::new(1),
-                Audience::Public,
+            resolution: crate::authority::CastResolution::Constant(DeclaredLabel::literal(
+                crate::label::EstablishedLabel::new(Trust::new(1), Audience::Public),
             )),
             scope: Scope::default(),
         }];
@@ -1287,17 +1291,15 @@ mod tests {
         cfg.casts = vec![
             crate::authority::Cast {
                 name: crate::names::CastName::new("paranoid"),
-                resolution: crate::authority::CastResolution::Constant(crate::label::EstablishedLabel::new(
-                    Trust::new(0),
-                    Audience::Public,
+                resolution: crate::authority::CastResolution::Constant(DeclaredLabel::literal(
+                    crate::label::EstablishedLabel::new(Trust::new(0), Audience::Public),
                 )),
                 scope: Scope::default(),
             },
             crate::authority::Cast {
                 name: crate::names::CastName::new("yolo"),
-                resolution: crate::authority::CastResolution::Constant(crate::label::EstablishedLabel::new(
-                    Trust::new(1),
-                    Audience::Public,
+                resolution: crate::authority::CastResolution::Constant(DeclaredLabel::literal(
+                    crate::label::EstablishedLabel::new(Trust::new(1), Audience::Public),
                 )),
                 scope: Scope::default(),
             },

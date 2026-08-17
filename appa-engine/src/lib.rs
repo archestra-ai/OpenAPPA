@@ -26,6 +26,7 @@ pub mod contract;
 pub mod engine;
 pub mod execute;
 pub mod fact;
+pub mod groups;
 pub mod label;
 pub mod names;
 pub mod params;

@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::fact::{EffectKind, EffectSet};
+use crate::groups::{DeclaredAudience, Expansions};
 use crate::label::{Audience, Dim, Dimension, EstablishedLabel, Label, ReaderId, Trust};
 use crate::names::{DynamicResolverName, MarkName, TagName};
 use crate::value::ToolName;
@@ -33,9 +34,11 @@ pub struct DynamicAudienceBinding {
     pub argument: String,
 }
 
+/// The declared audience contribution: a written reader set — literal readers and groups an
+/// operation resolves when it reads them — a pending cast, or a dynamic binding.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AudienceDelta {
-    Static(Audience),
+    Static(DeclaredAudience),
     PendingCast,
     Dynamic(DynamicAudienceBinding),
 }
@@ -43,7 +46,7 @@ pub enum AudienceDelta {
 impl From<Dim<Audience>> for AudienceDelta {
     fn from(value: Dim<Audience>) -> Self {
         match value {
-            Dim::Known(audience) => Self::Static(audience),
+            Dim::Known(audience) => Self::Static(DeclaredAudience::literal(audience)),
             Dim::Unknown => Self::PendingCast,
         }
     }
@@ -156,12 +159,12 @@ impl Delta {
     /// The delta as a label — the output label a raw result carries. Absent dimensions fill with
     /// the fold identity, so they neither narrow the trajectory nor lower the value's own label; a
     /// pending-cast dimension stays [`Dim::Unknown`] (admission refuses a raw value until a cast
-    /// resolves it).
-    pub fn output_label(&self) -> Label {
+    /// resolves it). A written group reads as the operation resolved it.
+    pub fn output_label(&self, expansions: &Expansions) -> Label {
         Label::new(
             self.trust.clone().unwrap_or(Dim::Known(Trust::new(u8::MAX))),
             match &self.audience {
-                Some(AudienceDelta::Static(a)) => Dim::Known(a.clone()),
+                Some(AudienceDelta::Static(a)) => Dim::Known(a.resolve(expansions)),
                 Some(AudienceDelta::PendingCast | AudienceDelta::Dynamic(_)) => Dim::Unknown,
                 None => Dim::Known(Audience::Public),
             },
@@ -174,14 +177,14 @@ impl Delta {
     /// label, where every later call re-checks against it. (Sound because load validation
     /// refuses a contract that pairs a pending-cast dimension with a `requires` on that same
     /// dimension, so no check this projection feeds can depend on the unestablished state.)
-    pub fn established_narrowing(&self) -> EstablishedLabel {
+    pub fn established_narrowing(&self, expansions: &Expansions) -> EstablishedLabel {
         EstablishedLabel::new(
             match &self.trust {
                 Some(Dim::Known(t)) => *t,
                 Some(Dim::Unknown) | None => Trust::new(u8::MAX),
             },
             match &self.audience {
-                Some(AudienceDelta::Static(a)) => a.clone(),
+                Some(AudienceDelta::Static(a)) => a.resolve(expansions),
                 Some(AudienceDelta::PendingCast | AudienceDelta::Dynamic(_)) | None => Audience::Public,
             },
         )
@@ -198,13 +201,22 @@ impl Delta {
     pub fn is_none(&self) -> bool {
         self.trust.is_none() && self.audience.is_none()
     }
+
+    pub fn groups(&self) -> impl Iterator<Item = &crate::names::GroupName> {
+        match &self.audience {
+            Some(AudienceDelta::Static(audience)) => Some(audience.groups()),
+            _ => None,
+        }
+        .into_iter()
+        .flatten()
+    }
 }
 
 /// The recipients of an audience `includes` requirement — a static set, or a placeholder resolved
 /// from the call's arguments (`$recipient` → the value of argument `recipient`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecipientSpec {
-    Static(Audience),
+    Static(DeclaredAudience),
     Placeholder(String),
     Dynamic(DynamicAudienceBinding),
 }
@@ -212,7 +224,21 @@ pub enum RecipientSpec {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AudienceRequirement {
     Includes(RecipientSpec),
-    Cap(Audience),
+    Cap(DeclaredAudience),
+}
+
+impl AudienceRequirement {
+    /// The groups this requirement writes: a static recipient set's and a cap's. A
+    /// placeholder's group is the call's, pinned to it, and a dynamic form names none.
+    pub fn groups(&self) -> impl Iterator<Item = &crate::names::GroupName> {
+        match self {
+            AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => Some(recipients.groups()),
+            AudienceRequirement::Cap(cap) => Some(cap.groups()),
+            AudienceRequirement::Includes(RecipientSpec::Placeholder(_) | RecipientSpec::Dynamic(_)) => None,
+        }
+        .into_iter()
+        .flatten()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -255,18 +281,31 @@ pub struct ToolContract {
 
 impl ToolContract {
     /// The label a raw admitted result of this tool carries: the declared delta as a label, or —
-    /// unannotated — `Unknown` in both dimensions.
-    pub fn output_label(&self) -> Label {
+    /// unannotated — `Unknown` in both dimensions. A written group reads as the operation resolved
+    /// it.
+    pub fn output_label(&self, expansions: &Expansions) -> Label {
         match &self.delta {
-            Some(delta) => delta.output_label(),
+            Some(delta) => delta.output_label(expansions),
             None => Label::new(Dim::Unknown, Dim::Unknown),
         }
     }
 
+    /// The groups this contract's check reads: its delta's, its static recipients' and
+    /// its cap's. Required before the check runs; a placeholder's group rides the call instead.
+    pub fn groups(&self) -> impl Iterator<Item = &crate::names::GroupName> {
+        self.delta.iter().flat_map(Delta::groups).chain(
+            self.requires
+                .label
+                .audience
+                .iter()
+                .flat_map(AudienceRequirement::groups),
+        )
+    }
+
     /// The output label with a proposed call's dynamic audience answer pinned into it. A missing
     /// or failed answer leaves that dimension Unknown.
-    pub(crate) fn output_label_for_call(&self, call: &crate::value::ResolvedCall) -> Label {
-        let mut label = self.output_label();
+    pub(crate) fn output_label_for_call(&self, call: &crate::value::ResolvedCall, expansions: &Expansions) -> Label {
+        let mut label = self.output_label(expansions);
         if let Some(AudienceDelta::Dynamic(binding)) = self.delta.as_ref().and_then(|delta| delta.audience.as_ref()) {
             label.audience = call
                 .dynamic_resolution(binding)
@@ -280,8 +319,12 @@ impl ToolContract {
     /// The output label recovered from the dynamic answer persisted on a dispatch. Admission —
     /// and the runtime composing a whole-source pending-cast answer against it — uses
     /// this form, never the caller's in-memory resolution.
-    pub fn output_label_for_resolutions(&self, resolutions: &[PinnedDynamicResolution]) -> Label {
-        let mut label = self.output_label();
+    pub fn output_label_for_resolutions(
+        &self,
+        resolutions: &[PinnedDynamicResolution],
+        expansions: &Expansions,
+    ) -> Label {
+        let mut label = self.output_label(expansions);
         if let Some(AudienceDelta::Dynamic(binding)) = self.delta.as_ref().and_then(|delta| delta.audience.as_ref()) {
             let mut matching = resolutions.iter().filter(|resolution| resolution.binding() == binding);
             let answer = matching.next().and_then(PinnedDynamicResolution::audience);

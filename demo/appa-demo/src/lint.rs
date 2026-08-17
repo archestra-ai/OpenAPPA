@@ -63,9 +63,10 @@ pub fn check_policy(policy: &str, enabled: &BTreeSet<System>) -> Result<CheckedP
 mod tests {
     use super::*;
 
-    use appa_engine::authority::Transition;
+    use appa_engine::authority::DeclaredTransition;
     use appa_engine::contract::{AudienceDelta, AudienceRequirement, RecipientSpec};
-    use appa_engine::label::{Audience, ReaderId};
+    use appa_engine::groups::DeclaredAudience;
+    use appa_engine::label::ReaderId;
     use appa_engine::value::ToolName;
 
     fn systems(list: &str) -> BTreeSet<System> {
@@ -89,7 +90,7 @@ mod tests {
         assert!(matches!(
             invoices.delta.as_ref().and_then(|delta| delta.audience.as_ref()),
             Some(AudienceDelta::Static(audience))
-                if *audience == Audience::restricted([
+                if *audience == DeclaredAudience::restricted([
                     ReaderId::new("cfo@corp.example"),
                     ReaderId::new("ap-lead@corp.example"),
                 ])
@@ -110,12 +111,12 @@ mod tests {
         assert!(
             sanitizers
                 .iter()
-                .any(|sanitizer| matches!(sanitizer.transition, Transition::Audience { .. }))
+                .any(|sanitizer| matches!(sanitizer.transition, DeclaredTransition::Audience { .. }))
         );
         assert!(
             sanitizers
                 .iter()
-                .any(|sanitizer| matches!(sanitizer.transition, Transition::Trust { .. }))
+                .any(|sanitizer| matches!(sanitizer.transition, DeclaredTransition::Trust { .. }))
         );
     }
 

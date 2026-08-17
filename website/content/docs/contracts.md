@@ -32,7 +32,7 @@ A set declaration without an explicit operator causes a policy load error.
 
 ### Groups
 
-A reader list may name a **group**, written `@name`, and so may the actual argument an `includes($arg)` placeholder reads. The registered membership resolver turns the name into its literal reader set at the moment the engine first reads it for an operation — at the pre-dispatch check, at mandate or cast-ceiling validation, at sanitizer application. A name without the mark is a literal reader ID. A reader ID starting with `@` is a load error, as is a group mention in a policy with no `[membership]` registration.
+A reader list may name a **group**, written `@name`, and so may the actual argument an `includes($arg)` placeholder reads. The registered membership resolver turns the name into its literal reader set at the moment the engine first reads it for an operation — at the admission of an exposed provider-run result, at the pre-dispatch check, at mandate validation, at sanitizer application, at cast selection and the validation of a cast's answer. A name without the mark is a literal reader ID. A reader ID starting with `@` is a load error, as is a group mention in a policy with no `[membership]` registration.
 
 ```toml
 [membership]                    # one per deployment; every @group resolves here
@@ -44,7 +44,7 @@ requires = { audience = { cap = ["finance", "@auditors"] } }  # group in a cap
 delta    = {}
 ```
 
-Resolution is fresh per call, and pinned within one: the set resolved at a call's check is the set its admission folds. A member added to the directory reaches the next call without a policy reload; removal reaches only future resolutions — a set already resolved stands. `public` is reserved and never a group member; a directory answer containing it is malformed.
+Resolution is fresh per operation, and pinned within one: the set resolved at a call's check is the set its block, its plan offers, its release and its admission use, and a written list means its literal readers plus the current members of each group it names. A member added to the directory reaches the next check without a policy reload; removal reaches only future resolutions — a set already resolved stands. Records keep the resolved readers, never the group name. `public` is reserved and never a group member; a directory answer containing it is malformed.
 
 A resolver that produces no answer — a timeout, an error, malformed or oversized data — resumes nothing: the check does not complete and no engine fact is appended. An empty reader set is a successful answer. The endpoint accepts a versioned JSON POST request: `{version:1,resolver,group}`, with `group` the name without its `@` mark. It returns `{version:1,readers:[...]}`.
 
