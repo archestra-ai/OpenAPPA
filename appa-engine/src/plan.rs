@@ -1161,13 +1161,14 @@ mod tests {
             resolver: crate::names::DynamicResolverName::new("directory"),
             argument: "room".into(),
         };
-        let lookup = reader(
+        let mut lookup = reader(
             "lookup",
             Delta {
                 trust: None,
                 audience: Some(AudienceDelta::Dynamic(binding.clone())),
             },
         );
+        lookup.parameters = crate::params::test_string_argument_schema("room");
         let finance = Audience::restricted([ReaderId::new("finance")]);
         let registry = build(RegistryConfig {
             trust_chain: chain(),
@@ -1223,6 +1224,7 @@ mod tests {
             argument: "channel".into(),
         };
         let mut send = reader("send", Delta::NONE);
+        send.parameters = crate::params::test_string_argument_schema("channel");
         send.requires.label.audience = vec![AudienceRequirement::Includes(RecipientSpec::Dynamic(binding.clone()))];
         let registry = build(RegistryConfig {
             trust_chain: chain(),
@@ -1473,7 +1475,7 @@ mod tests {
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            parameters: crate::params::ToolParameters::open(),
+            parameters: crate::params::test_string_argument_schema("to"),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -1585,16 +1587,20 @@ mod tests {
             trust_chain: chain(),
             tools: vec![
                 send,
-                contract(
-                    "dynamic",
-                    Some(Delta {
-                        trust: None,
-                        audience: Some(AudienceDelta::Dynamic(DynamicAudienceBinding {
-                            resolver: crate::names::DynamicResolverName::new("acl"),
-                            argument: "to".into(),
-                        })),
-                    }),
-                ),
+                {
+                    let mut dynamic = contract(
+                        "dynamic",
+                        Some(Delta {
+                            trust: None,
+                            audience: Some(AudienceDelta::Dynamic(DynamicAudienceBinding {
+                                resolver: crate::names::DynamicResolverName::new("acl"),
+                                argument: "to".into(),
+                            })),
+                        }),
+                    );
+                    dynamic.parameters = crate::params::test_string_argument_schema("to");
+                    dynamic
+                },
                 contract(
                     "pending",
                     Some(Delta {
@@ -2725,7 +2731,7 @@ mod tests {
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            parameters: crate::params::ToolParameters::open(),
+            parameters: crate::params::test_string_argument_schema("to"),
             emits: EffectSet::new([EffectKind::new("email.sent")]).unwrap(),
             requires: Requires {
                 label: LabelRequirements {
@@ -3060,7 +3066,7 @@ mod tests {
                     name: name.clone(),
                     tags: vec![],
                     delta,
-                    parameters: crate::params::ToolParameters::open(),
+                    parameters: crate::params::test_string_argument_schema("to"),
                     emits: EffectSet::new(emits).expect("a btree_set draw is distinct"),
                     requires,
                 }

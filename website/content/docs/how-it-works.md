@@ -72,10 +72,11 @@ name  = "get_ticket_from_crm"
 delta = { audience = { exactly = ["internal"] } }   # "internal" is a single reader id
 
 [[tool]]
-name     = "send_email"                    # send_email(body, to: $recipient)
-requires = { audience = { includes = ["$recipient"] } }
-delta    = {}                              # annotated: the result carries nothing
-effects  = ["egress"]
+name       = "send_email"                  # send_email(body, recipient)
+parameters = { type = "object", properties = { recipient = { type = "string" }, body = { type = "string" } }, required = ["recipient", "body"] }
+requires   = { audience = { includes = ["$recipient"] } }   # $recipient reads the required string argument
+delta      = {}                            # annotated: the result carries nothing
+effects    = ["egress"]
 
 [[tool]]
 name     = "file_github_issue"

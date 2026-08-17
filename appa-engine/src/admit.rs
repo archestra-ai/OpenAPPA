@@ -597,7 +597,7 @@ mod tests {
                 trust: Some(Dim::Unknown),
                 audience: Some(AudienceDelta::Dynamic(dynamic_binding())),
             }),
-            parameters: crate::params::ToolParameters::open(),
+            parameters: crate::params::test_string_argument_schema("room"),
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
             requires: Default::default(),
         };

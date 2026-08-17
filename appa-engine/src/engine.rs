@@ -4079,7 +4079,7 @@ mod tests {
             name: ToolName::new("send_email"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            parameters: crate::params::ToolParameters::open(),
+            parameters: crate::params::test_string_argument_schema("to"),
             emits: EffectSet::new([EffectKind::new("egress")]).unwrap(),
             requires: Requires {
                 label: LabelRequirements {
@@ -9415,12 +9415,12 @@ mod tests {
     }
 
     #[test]
-    fn includes_missing_placeholder_fails_closed_on_public() {
+    fn includes_missing_placeholder_is_an_invalid_call_and_still_fails_closed_underneath() {
         let send = ToolContract {
             name: ToolName::new("send_email"),
             tags: vec![],
             delta: Some(Delta::NONE),
-            parameters: crate::params::ToolParameters::open(),
+            parameters: crate::params::test_string_argument_schema("to"),
             emits: EffectSet::default(),
             requires: Requires {
                 label: LabelRequirements {
@@ -9431,14 +9431,25 @@ mod tests {
             },
         };
         let e = engine(vec![send]);
+        let malformed = call("send_email", json!({}));
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
-        match check(&e, &log, &call("send_email", json!({}))) {
+        let p = Projection::build(&log, log.len() as u64);
+        assert!(matches!(
+            e.check(&p.view(&traj()), &malformed),
+            Err(EngineError::InvalidCall(_))
+        ));
+
+        let contract = e.registry.tool(&ToolName::new("send_email")).unwrap();
+        let evaluate = |log: &[Fact]| {
+            let p = Projection::build(log, log.len() as u64);
+            crate::check::evaluate(contract, &p.view(&traj()), &malformed, &CallStage::default())
+        };
+        match evaluate(&log) {
             CheckOutcome::Block(b) => assert!(matches!(b.requirement_gaps.as_slice(), [Gap::Includes { .. }])),
             other => panic!("expected includes gap on a malformed call, got {other:?}"),
         }
-
         let log = vec![user_value(Label::new(Dim::Known(TRUSTED), Dim::Unknown))];
-        match check(&e, &log, &call("send_email", json!({}))) {
+        match evaluate(&log) {
             CheckOutcome::Block(b) => {
                 assert!(b.requirement_gaps.is_empty(), "the sentinel gap must be masked");
                 assert_eq!(b.unestablished.len(), 1);
@@ -10638,6 +10649,7 @@ mod tests {
             argument: "room".to_string(),
         };
         let mut notify = plain_tool("notify");
+        notify.parameters = crate::params::test_string_argument_schema("room");
         notify.requires = Requires {
             label: LabelRequirements {
                 trust_floor: None,
@@ -10649,9 +10661,11 @@ mod tests {
         let internal = Audience::restricted([ReaderId::new("internal")]);
         let log = vec![user_value(known(TRUSTED, internal.clone()))];
         let pinned = |audience: &Audience| {
-            raw(&call("notify", json!({})).with_dynamic_resolutions(vec![
-                crate::contract::PinnedDynamicResolution::from_answer(binding.clone(), Some(audience.clone())),
-            ]))
+            raw(
+                &call("notify", json!({ "room": "lobby" })).with_dynamic_resolutions(vec![
+                    crate::contract::PinnedDynamicResolution::from_answer(binding.clone(), Some(audience.clone())),
+                ]),
+            )
         };
         let outsider = Audience::restricted([ReaderId::new("outsider")]);
         let proposals = || vec![pinned(&outsider), pinned(&internal)];

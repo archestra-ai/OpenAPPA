@@ -70,8 +70,6 @@ pub enum ConfigError {
     DuplicateDynamicResolver(String),
     #[error("tool {tool} dynamic binding names unregistered resolver {resolver}")]
     UnregisteredDynamicResolver { tool: String, resolver: String },
-    #[error("tool {tool} dynamic argument {argument} must be declared as a string in parameters")]
-    DynamicArgumentNotString { tool: String, argument: String },
     #[error("[limits] planner_cap is 0: a tool's worst case is at least one plan, so a zero cap refuses every tool")]
     ZeroPlannerCap,
     #[error("[deployment] {field}: expected one of {expected}, found {found:?}")]
@@ -144,12 +142,6 @@ impl Config {
                     return Err(ConfigError::UnregisteredDynamicResolver {
                         tool: tool.name.as_str().into(),
                         resolver: binding.resolver.as_str().into(),
-                    });
-                }
-                if !tool.parameters.declares_string_property(&binding.argument) {
-                    return Err(ConfigError::DynamicArgumentNotString {
-                        tool: tool.name.as_str().into(),
-                        argument: binding.argument.clone(),
                     });
                 }
             }
@@ -1053,21 +1045,65 @@ confined_results = ["lookup"]
     }
 
     #[test]
-    fn dynamic_bindings_require_a_registered_name_and_declared_string_argument() {
+    fn dynamic_bindings_require_a_registered_name() {
         let missing_name = DECLARATIONS.replace("[[dynamic_resolver]]\nname = \"crm-acl\"\n", "");
         assert!(matches!(
             Config::from_toml_str(&missing_name),
             Err(ConfigError::UnregisteredDynamicResolver { .. })
         ));
+    }
 
-        let wrong_type = DECLARATIONS.replace(
-            "customer_id = { type = \"string\" }",
-            "customer_id = { type = \"integer\" }",
-        );
-        assert!(matches!(
-            Config::from_toml_str(&wrong_type),
-            Err(ConfigError::DynamicArgumentNotString { .. })
-        ));
+    #[test]
+    fn every_audience_argument_binding_needs_a_required_top_level_string_in_parameters() {
+        use appa_engine::params::PropertyFault;
+        let refused = |policy: &str, expected: PropertyFault| match Config::from_toml_str(policy) {
+            Err(ConfigError::Registry(LoadError::AudienceBindingSchema { argument, fault, .. })) => {
+                assert_eq!(argument, "to");
+                assert_eq!(fault, expected, "policy:\n{policy}");
+            }
+            other => panic!("expected an audience-binding refusal with {expected:?}, got {other:?} for:\n{policy}"),
+        };
+        let bindings = [
+            "requires = { audience = { includes = [\"$to\"] } }\ndelta = {}",
+            "requires = { audience = { includes = { resolver = \"directory\", argument = \"to\" } } }\ndelta = {}",
+            "delta = { audience = { resolver = \"directory\", argument = \"to\" } }",
+        ];
+        let parameters = [
+            ("", PropertyFault::Undeclared),
+            (
+                "parameters = { type = \"object\", properties = { cc = { type = \"string\" } }, required = [\"cc\"] }",
+                PropertyFault::Undeclared,
+            ),
+            (
+                "parameters = { type = \"object\", properties = { envelope = { type = \"object\", properties = { to = { type = \"string\" } }, required = [\"to\"] } }, required = [\"envelope\"] }",
+                PropertyFault::Undeclared,
+            ),
+            (
+                "parameters = { type = \"object\", properties = { to = { type = \"string\" } } }",
+                PropertyFault::Optional,
+            ),
+            (
+                "parameters = { type = \"object\", properties = { to = { type = \"integer\" } }, required = [\"to\"] }",
+                PropertyFault::NotString,
+            ),
+        ];
+        let policy = |binding: &str, parameters: &str| {
+            format!(
+                "version = 1\n[[dynamic_resolver]]\nname = \"directory\"\n[[tool]]\nname = \"send\"\n{parameters}\n{binding}\n"
+            )
+        };
+        for binding in bindings {
+            for (parameters, expected) in parameters {
+                refused(&policy(binding, parameters), expected);
+            }
+            let ok = policy(
+                binding,
+                "parameters = { type = \"object\", properties = { to = { type = \"string\" }, body = { type = \"string\" } }, required = [\"to\"] }",
+            );
+            assert!(Config::from_toml_str(&ok).is_ok(), "must load:\n{ok}");
+        }
+        let static_recipients = "version = 1\n[[tool]]\nname = \"send\"\nrequires = { audience = { includes = [\"finance\"] } }\ndelta = {}\n";
+        assert!(Config::from_toml_str(static_recipients).is_ok());
     }
 
     #[test]

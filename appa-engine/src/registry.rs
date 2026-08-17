@@ -175,6 +175,14 @@ pub enum LoadError {
         tool: String,
         construct: crate::profile::ProviderRunConstruct,
     },
+    #[error(
+        "{context} binds audience argument {argument:?}, which {fault}: a placeholder or dynamic binding names a required top-level string property of the tool's `parameters`"
+    )]
+    AudienceBindingSchema {
+        context: String,
+        argument: String,
+        fault: crate::params::PropertyFault,
+    },
 }
 
 /// The planner cap: the most alternatives one current-stage plan menu may hold — per
@@ -490,6 +498,10 @@ impl Registry {
             }
         }
 
+        for tool in tools.values() {
+            check_audience_bindings(tool)?;
+        }
+
         let sanitizer_list: Vec<Sanitizer> = sanitizers.values().cloned().collect();
         for tool in tools.values() {
             let count = worst_case_plan_alternatives(
@@ -693,6 +705,29 @@ fn validate_pending_cast(tool: &ToolContract) -> Result<(), LoadError> {
         }
         _ => Ok(()),
     }
+}
+
+fn check_audience_bindings(tool: &ToolContract) -> Result<(), LoadError> {
+    let check = |argument: &str, site: &str| {
+        tool.parameters
+            .required_string_property(argument)
+            .map_err(|fault| LoadError::AudienceBindingSchema {
+                context: format!("tool {} {site}", tool.name.as_str()),
+                argument: argument.to_string(),
+                fault,
+            })
+    };
+    if let Some(AudienceDelta::Dynamic(binding)) = tool.delta.as_ref().and_then(|delta| delta.audience.as_ref()) {
+        check(&binding.argument, "delta")?;
+    }
+    for requirement in &tool.requires.label.audience {
+        match requirement {
+            AudienceRequirement::Includes(RecipientSpec::Placeholder(argument)) => check(argument, "includes")?,
+            AudienceRequirement::Includes(RecipientSpec::Dynamic(binding)) => check(&binding.argument, "includes")?,
+            AudienceRequirement::Includes(RecipientSpec::Static(_)) | AudienceRequirement::Cap(_) => {}
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn check_rank(
@@ -1126,7 +1161,7 @@ mod tests {
     #[test]
     fn a_dynamically_pinned_audience_defeats_constant_shadowing() {
         let mut cfg = base();
-        cfg.tools = vec![origin(
+        let mut feed = origin(
             "feed",
             &[],
             Delta {
@@ -1136,7 +1171,9 @@ mod tests {
                     argument: "room".into(),
                 })),
             },
-        )];
+        );
+        feed.parameters = crate::params::test_string_argument_schema("room");
+        cfg.tools = vec![feed];
         cfg.casts = vec![
             constant_cast(
                 "fallback",
@@ -1345,6 +1382,135 @@ mod tests {
         assert!(Registry::build_covered(cfg).is_ok());
     }
 
+    fn binding_sites(parameters: &crate::params::ToolParameters) -> Vec<(&'static str, RegistryConfig)> {
+        let binding = || DynamicAudienceBinding {
+            resolver: crate::names::DynamicResolverName::new("directory"),
+            argument: "to".into(),
+        };
+        let mut emitter = tool("emit");
+        emitter.parameters = parameters.clone();
+
+        let mut placeholder = emitter.clone();
+        placeholder.requires.label.audience =
+            vec![AudienceRequirement::Includes(RecipientSpec::Placeholder("to".into()))];
+        let mut dynamic_includes = emitter.clone();
+        dynamic_includes.requires.label.audience =
+            vec![AudienceRequirement::Includes(RecipientSpec::Dynamic(binding()))];
+        let mut dynamic_delta = emitter;
+        dynamic_delta.delta = Some(Delta {
+            trust: None,
+            audience: Some(AudienceDelta::Dynamic(binding())),
+        });
+
+        [
+            ("tool emit includes", placeholder),
+            ("tool emit includes", dynamic_includes),
+            ("tool emit delta", dynamic_delta),
+        ]
+        .into_iter()
+        .map(|(context, tool)| {
+            let mut cfg = base();
+            cfg.tools = vec![tool];
+            (context, cfg)
+        })
+        .collect()
+    }
+
+    #[test]
+    fn every_audience_argument_binding_names_a_required_top_level_string() {
+        use crate::params::{PropertyFault, ToolParameters};
+        let schema = |value: serde_json::Value| ToolParameters::compile(&value).unwrap();
+        let refused = [
+            (ToolParameters::open(), PropertyFault::Undeclared),
+            (
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": { "cc": { "type": "string" } },
+                    "required": ["cc"],
+                })),
+                PropertyFault::Undeclared,
+            ),
+            (
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "envelope": {
+                            "type": "object",
+                            "properties": { "to": { "type": "string" } },
+                            "required": ["to"],
+                        }
+                    },
+                    "required": ["envelope"],
+                })),
+                PropertyFault::Undeclared,
+            ),
+            (
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": { "to": { "type": "string" } },
+                })),
+                PropertyFault::Optional,
+            ),
+            (
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": { "to": { "type": "array", "items": { "type": "string" } } },
+                    "required": ["to"],
+                })),
+                PropertyFault::NotString,
+            ),
+        ];
+        for (parameters, expected) in refused {
+            for (expected_context, cfg) in binding_sites(&parameters) {
+                match Registry::build_covered(cfg) {
+                    Err(LoadError::AudienceBindingSchema {
+                        context,
+                        argument,
+                        fault,
+                    }) => {
+                        assert_eq!(context, expected_context);
+                        assert_eq!(argument, "to");
+                        assert_eq!(fault, expected, "at {expected_context}");
+                    }
+                    other => {
+                        panic!("{expected_context} under {parameters:?} must refuse with {expected:?}, got {other:?}")
+                    }
+                }
+            }
+        }
+
+        let accepted = [
+            schema(serde_json::json!({
+                "type": "object",
+                "properties": { "to": { "type": "string" }, "body": { "type": "string" } },
+                "required": ["to"],
+                "additionalProperties": true,
+            })),
+            schema(serde_json::json!({
+                "type": "object",
+                "properties": { "to": { "type": "string", "enum": ["ops", "dev"] } },
+                "required": ["to"],
+            })),
+        ];
+        for parameters in accepted {
+            for (context, cfg) in binding_sites(&parameters) {
+                assert!(
+                    Registry::build_covered(cfg).is_ok(),
+                    "{context} under {parameters:?} must load"
+                );
+            }
+        }
+
+        let mut cfg = base();
+        let mut emitter = tool("emit");
+        emitter.requires.label.audience = vec![
+            AudienceRequirement::Includes(RecipientSpec::Static(Audience::restricted([ReaderId::new("finance")]))),
+            AudienceRequirement::Cap(Audience::Public),
+        ];
+        cfg.tools = vec![emitter];
+        assert!(Registry::build_covered(cfg).is_ok());
+    }
+
     #[test]
     fn refuses_label_requirements_on_an_unannotated_tool() {
         use crate::contract::{LabelRequirements, Requires};
@@ -1438,6 +1604,7 @@ mod tests {
     #[test]
     fn the_alternative_bound_counts_every_sanitizer_for_a_dynamic_output() {
         let mut dynamic = tool("lookup");
+        dynamic.parameters = crate::params::test_string_argument_schema("customer");
         dynamic.delta.as_mut().unwrap().audience = Some(AudienceDelta::Dynamic(DynamicAudienceBinding {
             resolver: crate::names::DynamicResolverName::new("directory"),
             argument: "customer".into(),
@@ -1594,6 +1761,7 @@ mod tests {
         let mut public = tool("public-delta");
         public.delta.as_mut().unwrap().audience = Some(AudienceDelta::Static(Audience::Public));
         let mut dynamic = tool("dynamic-delta");
+        dynamic.parameters = crate::params::test_string_argument_schema("to");
         dynamic.delta.as_mut().unwrap().audience = Some(AudienceDelta::Dynamic(DynamicAudienceBinding {
             resolver: crate::names::DynamicResolverName::new("directory"),
             argument: "to".into(),

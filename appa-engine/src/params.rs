@@ -212,11 +212,29 @@ impl ToolParameters {
         validate_object(&self.root, arguments, "$")
     }
 
-    /// Whether a top-level property is declared with type `string` — the read the
-    /// dynamic-binding load lint needs (`CFG-24`; the `required` tightening is `T14`'s).
-    pub fn declares_string_property(&self, name: &str) -> bool {
-        matches!(self.root.properties.get(name), Some(SchemaNode::String { .. }))
+    /// Whether `name` is a required top-level string property — the shape an audience argument
+    /// binding must point at: a placeholder or dynamic binding reads that
+    /// argument, so the schema has to guarantee it is present and a string before any check.
+    pub(crate) fn required_string_property(&self, name: &str) -> Result<(), PropertyFault> {
+        match self.root.properties.get(name) {
+            None => Err(PropertyFault::Undeclared),
+            Some(SchemaNode::String { .. }) if self.root.required.iter().any(|required| required == name) => Ok(()),
+            Some(SchemaNode::String { .. }) => Err(PropertyFault::Optional),
+            Some(_) => Err(PropertyFault::NotString),
+        }
     }
+}
+
+/// Why a top-level property is not the required string an audience argument binding needs.
+/// Nesting does not count: only the root object's own properties are read.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum PropertyFault {
+    #[error("is not a top-level property of the tool's `parameters`")]
+    Undeclared,
+    #[error("is declared but not with `type = \"string\"`")]
+    NotString,
+    #[error("is a string but not listed in `required`")]
+    Optional,
 }
 
 impl Serialize for ToolParameters {
@@ -874,6 +892,19 @@ pub(crate) fn test_arguments(value: &Value) -> CanonicalArguments {
     CanonicalArguments::from_value(value, &ToolParameters::open()).expect("test arguments are dialect-valid")
 }
 
+/// Test fixture: the smallest schema an audience argument binding on `name` may point at — one
+/// required top-level string property.
+#[cfg(test)]
+pub(crate) fn test_string_argument_schema(name: &str) -> ToolParameters {
+    ToolParameters::compile(&serde_json::json!({
+        "type": "object",
+        "properties": { name: { "type": "string" } },
+        "required": [name],
+        "additionalProperties": true,
+    }))
+    .expect("the one-string-argument schema is dialect-valid")
+}
+
 fn scan(bytes: &[u8]) -> Result<(), ArgumentError> {
     if bytes.len() > MAX_ARGUMENT_BYTES {
         return Err(ArgumentError::TooLarge);
@@ -1487,6 +1518,44 @@ mod tests {
         assert_eq!(round, compiled);
         assert!(serde_json::from_value::<ToolParameters>(authored).is_err());
         assert!(serde_json::from_value::<ToolParameters>(json!({ "type": "string" })).is_err());
+    }
+
+    // --- the audience-binding read ------------------------------------------
+
+    #[test]
+    fn a_binding_target_is_a_required_top_level_string_and_nothing_else() {
+        let schema = compile(json!({
+            "type": "object",
+            "properties": {
+                "to": { "type": "string" },
+                "channel": { "type": "string", "enum": ["ops", "dev"] },
+                "kind": { "type": "string", "const": "email" },
+                "cc": { "type": "string" },
+                "count": { "type": "integer" },
+                "meta": {
+                    "type": "object",
+                    "properties": { "owner": { "type": "string" } },
+                    "required": ["owner"]
+                }
+            },
+            "required": ["to", "channel", "kind", "count", "meta"],
+            "additionalProperties": true,
+        }))
+        .unwrap();
+        assert_eq!(schema.required_string_property("to"), Ok(()));
+        assert_eq!(schema.required_string_property("channel"), Ok(()));
+        assert_eq!(schema.required_string_property("kind"), Ok(()));
+        assert_eq!(schema.required_string_property("cc"), Err(PropertyFault::Optional));
+        assert_eq!(schema.required_string_property("count"), Err(PropertyFault::NotString));
+        assert_eq!(schema.required_string_property("meta"), Err(PropertyFault::NotString));
+        // Nesting does not count: `owner` is required inside `meta`, not at the top level.
+        assert_eq!(schema.required_string_property("owner"), Err(PropertyFault::Undeclared));
+        assert_eq!(schema.required_string_property("bcc"), Err(PropertyFault::Undeclared));
+        // The omitted-`parameters` default declares nothing, so it can host no binding.
+        assert_eq!(
+            ToolParameters::open().required_string_property("to"),
+            Err(PropertyFault::Undeclared)
+        );
     }
 
     // --- the strict argument path ----------------------------------------------------------

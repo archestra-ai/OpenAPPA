@@ -121,8 +121,8 @@ attention = ["sre-signoff"]                            # Fresh per-call demand
 
 - **`delta` is strictly restrictive**: A tool's delta can only narrow the audience or lower trust. Within an annotated `delta`, an omitted dimension defaults to identity.
 - **Pending-cast deltas (`delta = { trust = "unknown" }`)**: Holds a label dimension pending resolution by a registered `[[cast]]` at admission. Declaring both `requires` and `unknown` delta on the same dimension is a load error.
-- **Dynamic argument placeholders (`$arg`)**: `requires.audience = { includes = ["$recipient"] }` evaluates `$recipient` against actual call arguments at runtime. Placeholders are valid only inside `includes`.
-- **Dynamic resolvers**: A `{ resolver = "name", argument = "arg" }` form maps a top-level string argument to literal readers. It is valid as an audience delta or as the value of `includes`.
+- **Dynamic argument placeholders (`$arg`)**: `requires.audience = { includes = ["$recipient"] }` evaluates `$recipient` against actual call arguments at runtime. Placeholders are valid only inside `includes`, and `recipient` must be a required top-level string property of the tool's `parameters` — an omitted `parameters`, an optional, non-string, or nested property is a load error. A call that omits the argument or passes a non-string fails schema validation as an `InvalidCall` before the check runs.
+- **Dynamic resolvers**: A `{ resolver = "name", argument = "arg" }` form maps a required top-level string argument to literal readers, under the same `parameters` rule. It is valid as an audience delta or as the value of `includes`.
 - **History checks (`requires.effects`)**: `has` verifies `prior(k)` against appended effects; `has_no` verifies `no_prior(k)` against appended effects plus unsettled reservations — emits reserved at release and not yet observed to succeed or fail.
 - **Attention demands (`requires.attention`)**: Forces fresh authority sign-off on *every* call, never satisfied by execution history.
 - **Dual-gate contracts**: When a contract defines both a restrictive `delta` and a `requires` check (e.g., `search_and_share`), the engine evaluates both gates.
