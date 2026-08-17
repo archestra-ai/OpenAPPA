@@ -1,15 +1,49 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 70 90" shape-rendering="crispEdges">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" shape-rendering="crispEdges">
   <style>
-    rect { fill: hsl(0, 5%, 12%); }
+    .body { fill: hsl(30, 8%, 12%); }
+    .dim  { fill: hsl(32, 3%, 54%); }
+    .bg   { fill: hsl(40, 25%, 99%); }
     @media (prefers-color-scheme: dark) {
-      rect { fill: hsl(0, 15%, 94%); }
+      .body { fill: hsl(40, 12%, 93%); }
+      .dim  { fill: hsl(33, 4%, 55%); }
+      .bg   { fill: hsl(30, 6%, 8%); }
     }
   </style>
-  <!-- pixel A, 5x7 grid -->
-  <rect x="20" y="10" width="30" height="10"/>
-  <rect x="10" y="20" width="10" height="20"/>
-  <rect x="50" y="20" width="10" height="20"/>
-  <rect x="10" y="40" width="50" height="10"/>
-  <rect x="10" y="50" width="10" height="30"/>
-  <rect x="50" y="50" width="10" height="30"/>
+  <g transform="translate(0, 1)">
+    <!-- Ears -->
+    <rect class="body" x="5" y="0" width="2" height="2"/>
+    <rect class="body" x="17" y="0" width="2" height="2"/>
+    <!-- Head -->
+    <rect class="body" x="4" y="2" width="16" height="1"/>
+    <rect class="body" x="3" y="3" width="18" height="3"/>
+    <rect class="body" x="3" y="6" width="3" height="3"/>
+    <rect class="body" x="9" y="6" width="6" height="3"/>
+    <rect class="body" x="18" y="6" width="3" height="3"/>
+    <!-- Eyes -->
+    <rect class="bg" x="6" y="6" width="3" height="3"/>
+    <rect class="bg" x="15" y="6" width="3" height="3"/>
+    <!-- Face & Muzzle -->
+    <rect class="body" x="3" y="9" width="18" height="1"/>
+    <rect class="body" x="3" y="10" width="7" height="2"/>
+    <rect class="body" x="14" y="10" width="7" height="2"/>
+    <rect class="dim" x="10" y="10" width="4" height="1"/>
+    <rect class="dim" x="10" y="11" width="1" height="1"/>
+    <rect class="bg" x="11" y="11" width="2" height="1"/>
+    <rect class="dim" x="13" y="11" width="1" height="1"/>
+    <rect class="body" x="3" y="12" width="18" height="1"/>
+    <!-- Torso -->
+    <rect class="body" x="4" y="13" width="16" height="1"/>
+    <rect class="body" x="1" y="14" width="22" height="1"/>
+    <rect class="body" x="0" y="15" width="24" height="5"/>
+    <!-- Legs -->
+    <rect class="body" x="0" y="20" width="5" height="1"/>
+    <rect class="body" x="7" y="20" width="4" height="1"/>
+    <rect class="body" x="13" y="20" width="4" height="1"/>
+    <rect class="body" x="19" y="20" width="5" height="1"/>
+    <!-- Paws -->
+    <rect class="dim" x="0" y="21" width="5" height="1"/>
+    <rect class="dim" x="7" y="21" width="4" height="1"/>
+    <rect class="dim" x="13" y="21" width="4" height="1"/>
+    <rect class="dim" x="19" y="21" width="5" height="1"/>
+  </g>
 </svg>
