@@ -1,4 +1,7 @@
 version: 2
+# Every ecosystem writes the `deps` type so its pull request titles pass the
+# title linter and land in the changelog's Dependencies section. Without this,
+# Dependabot infers `build(deps)` from the conventional-commit history.
 updates:
   - package-ecosystem: cargo
     directory: /
@@ -6,6 +9,9 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+    commit-message:
+      prefix: deps
+      prefix-development: deps
     groups:
       rust-dependencies:
         patterns:
@@ -20,6 +26,9 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+    commit-message:
+      prefix: deps
+      prefix-development: deps
 
   - package-ecosystem: github-actions
     directory: /
@@ -27,3 +36,5 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+    commit-message:
+      prefix: deps
