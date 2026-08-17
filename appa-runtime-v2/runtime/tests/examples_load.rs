@@ -61,3 +61,71 @@ fn every_bench_deployment_opens() {
         opens(path);
     }
 }
+
+#[tokio::test]
+async fn the_shipped_examples_control_context_and_refuse_background_subagents() {
+    use appa_runtime_api::{Actor, HookDecision, HookEvent, ProposedCall, TrajectoryId};
+
+    for path in toml_files(&repo_root().join("integrations/claude-code/examples")) {
+        let config = Config::load(&path).unwrap_or_else(|error| panic!("{} does not load: {error}", path.display()));
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config, dir.path().join("appa.db"), None)
+            .unwrap_or_else(|error| panic!("{} does not open: {error}", path.display()));
+        let cases = [
+            (
+                "Agent",
+                serde_json::json!({"prompt": "list files", "subagent_type": "Explore"}),
+                true,
+            ),
+            (
+                "Agent",
+                serde_json::json!({"prompt": "list files", "run_in_background": false}),
+                true,
+            ),
+            (
+                "Agent",
+                serde_json::json!({"prompt": "list files", "run_in_background": true}),
+                false,
+            ),
+            ("Task", serde_json::json!({"prompt": "list files"}), true),
+            (
+                "Task",
+                serde_json::json!({"prompt": "list files", "run_in_background": true}),
+                false,
+            ),
+        ];
+        for (index, (tool, arguments, releases)) in cases.into_iter().enumerate() {
+            let root = TrajectoryId(format!("cc:example-{index}"));
+            assert_eq!(
+                appa_runtime_v2::hooks::handle(&runtime, HookEvent::SessionStart { root: root.clone() }).await,
+                HookDecision::Ack,
+            );
+            let call = ProposedCall {
+                tool: tool.to_string(),
+                arguments: serde_json::value::to_raw_value(&arguments).expect("the arguments serialize"),
+            };
+            let decision = appa_runtime_v2::hooks::handle(
+                &runtime,
+                HookEvent::ToolCall {
+                    actor: Actor { root, child: None },
+                    call,
+                    spawn: true,
+                },
+            )
+            .await;
+            match (releases, decision) {
+                (true, HookDecision::AllowCall { spawn: Some(_) }) => {}
+                (false, HookDecision::DenyCall { .. }) => {}
+                (releases, decision) => panic!(
+                    "{}: {tool} {arguments} should {} but decided {decision:?}",
+                    path.display(),
+                    if releases {
+                        "release with a fork binding"
+                    } else {
+                        "be denied"
+                    },
+                ),
+            }
+        }
+    }
+}

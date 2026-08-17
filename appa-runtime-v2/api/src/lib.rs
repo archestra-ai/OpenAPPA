@@ -61,6 +61,13 @@ pub struct Actor {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SpawnBinding(pub String);
 
+/// How a starting child names the spawn that prepared its fork.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SpawnRef {
+    Binding(SpawnBinding),
+    InFlight,
+}
+
 /// One hook event in the runtime's vocabulary. The adapter maps each
 /// of its harness's hooks onto exactly one variant — or onto no event
 /// at all for hooks the deployment does not gate.
@@ -80,9 +87,8 @@ pub enum HookEvent {
     },
     ChildStart {
         root: TrajectoryId,
-        parent: TrajectoryId,
         child: TrajectoryId,
-        spawn: Option<SpawnBinding>,
+        spawn: SpawnRef,
     },
     ChildEnd {
         /// The root whose log this child's records land in. No
@@ -90,6 +96,13 @@ pub enum HookEvent {
         /// record, and a caller's claim about it would be a second answer.
         root: TrajectoryId,
         child: TrajectoryId,
+        value: Option<String>,
+    },
+    SpawnResult {
+        actor: Actor,
+        call: ProposedCall,
+        outcome: ToolOutcome,
+        child: Option<TrajectoryId>,
         value: Option<String>,
     },
 }
@@ -108,8 +121,8 @@ pub enum HookDecision {
     /// spelled it — a `return_sanitizer` produced it. A
     /// return that crosses unchanged answers `Ack`, so this variant
     /// names a substitution and never merely a crossing. A harness with
-    /// no way to substitute a finished child's return cannot enforce
-    /// it.
+    /// no way to substitute the return where the parent receives it
+    /// cannot enforce it.
     ChildReturn { value: String },
     Refuse { detail: String },
 }
@@ -124,12 +137,12 @@ pub enum ParseRefusal {
 }
 
 /// One harness adapter's whole surface: two plain functions. Parse the
-/// wire bytes into at most one event; render one decision into the
-/// harness's wire JSON. Plain `fn` pointers — no trait, no captured
-/// state — because an adapter that could hold state or reach the
-/// runtime would breach the boundary this crate declares.
+/// wire bytes into at most one event; render one decision, for the event
+/// it answers, into the harness's wire JSON. Plain `fn` pointers — no
+/// trait, no captured state — because an adapter that could hold state
+/// or reach the runtime would breach the boundary this crate declares.
 #[derive(Clone, Copy)]
 pub struct Codec {
     pub parse: fn(&[u8]) -> Result<Option<HookEvent>, ParseRefusal>,
-    pub render: fn(&HookDecision) -> serde_json::Value,
+    pub render: fn(&HookEvent, &HookDecision) -> serde_json::Value,
 }

@@ -5,14 +5,14 @@ use std::sync::Arc;
 
 use crate::elicit::Elicitation;
 use crate::engine::{
-    AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback, Next,
-    OfferNonce, OpenDispatch, Presentation, engine_id,
+    AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback, ForkStatus,
+    Next, OfferNonce, OpenDispatch, Presentation, engine_id,
 };
 use crate::external::{ConsultKind, ConsultOutcome, DynamicResolution};
 
 use super::{
-    ChildReturnDecision, EventError, ExactCall, Inner, OfferId, OutcomeBody, ProposedCall, RemedyDecision,
-    SpawnBinding, ToolCallDecision, ToolOutcome, ToolResultDecision, TrajectoryId,
+    ChildReturnDecision, EventError, ExactCall, Inner, OfferId, OutcomeBody, ProposedCall, RemedyDecision, SpawnRef,
+    SpawnResultDecision, ToolCallDecision, ToolOutcome, ToolResultDecision, TrajectoryId,
 };
 
 /// The runtime's own control tool, recognized by its exact
@@ -94,6 +94,44 @@ fn classify_report(
 enum Standing {
     Runs(OpenDispatch),
     Abandoned(OpenDispatch),
+}
+
+/// What a late child open did: bound the child now, or found the
+/// same pair already bound — the engine's own idempotent answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LateOpen {
+    Opened,
+    AlreadyOpen,
+}
+
+enum SpawnPlan {
+    Outcome,
+    Return(TrajectoryId),
+    Close(EventError),
+}
+
+fn outcome_decision(decision: EngineDecision) -> Result<ToolResultDecision, EventError> {
+    match decision.then {
+        Next::PresentToModel(Presentation::KeepOutput) => Ok(ToolResultDecision::Keep),
+        Next::PresentToModel(Presentation::ReplaceOutput { placeholder, .. }) => {
+            Ok(ToolResultDecision::Replace { placeholder })
+        }
+        // An admitted value delivered in place of the raw output.
+        Next::PresentToModel(Presentation::Value { value }) => Ok(ToolResultDecision::Replace { placeholder: value }),
+        Next::PresentToModel(Presentation::Blocked { feedback, .. }) => {
+            Ok(ToolResultDecision::Replace { placeholder: feedback })
+        }
+        _ => Err(EventError::UnexpectedDecision),
+    }
+}
+
+fn return_decision(decision: EngineDecision) -> Result<ChildReturnDecision, EventError> {
+    match decision.then {
+        Next::PresentToModel(Presentation::Value { value }) => Ok(ChildReturnDecision::Returned { value }),
+        Next::PresentToModel(Presentation::NoValue) => Ok(ChildReturnDecision::NoValue),
+        Next::PresentToModel(Presentation::Blocked { feedback, .. }) => Ok(ChildReturnDecision::Blocked { feedback }),
+        _ => Err(EventError::UnexpectedDecision),
+    }
 }
 
 const REPLAY_LIMIT: u32 = 8;
@@ -267,6 +305,38 @@ impl Session {
             return Ok(ToolResultDecision::Keep);
         }
         let o = self.cap_outcome(o);
+        outcome_decision(self.report_outcome(&call, &o).await?)
+    }
+
+    async fn report_outcome(&self, call: &ProposedCall, o: &ToolOutcome) -> Result<EngineDecision, EventError> {
+        self.drive_with_evidence(
+            |context, evidence| {
+                let open = context.open_dispatches();
+                let dispatch = match classify_report(call, || context.canonical_bytes(call), &open) {
+                    Ok(dispatch) => dispatch,
+                    Err(case) => return Err(self.refuse_report(case, call, &open)),
+                };
+                Ok(EngineEvent::ToolOutcome {
+                    dispatch,
+                    outcome: o.clone(),
+                    evidence,
+                    entropy: fresh_entropy(),
+                })
+            },
+            None,
+        )
+        .await
+    }
+
+    pub async fn on_spawn_result(
+        &mut self,
+        call: ProposedCall,
+        outcome: ToolOutcome,
+        child: Option<TrajectoryId>,
+        value: Option<String>,
+    ) -> Result<SpawnResultDecision, EventError> {
+        let outcome = self.cap_outcome(outcome);
+        let plan: std::sync::Mutex<Option<SpawnPlan>> = std::sync::Mutex::new(None);
         let decision = self
             .drive_with_evidence(
                 |context, evidence| {
@@ -275,30 +345,82 @@ impl Session {
                         Ok(dispatch) => dispatch,
                         Err(case) => return Err(self.refuse_report(case, &call, &open)),
                     };
-                    Ok(EngineEvent::ToolOutcome {
-                        dispatch,
-                        outcome: o.clone(),
-                        evidence,
-                        entropy: fresh_entropy(),
-                    })
+                    let fork = appa_engine::value::ForkId::of(&dispatch);
+                    let next = match context.fork_status(&fork) {
+                        _ if matches!(outcome, ToolOutcome::Indeterminate) => SpawnPlan::Outcome,
+                        ForkStatus::Unprepared => SpawnPlan::Outcome,
+                        ForkStatus::Bound(bound) => match &child {
+                            Some(child) if engine_id(child) == bound => SpawnPlan::Return(child.clone()),
+                            _ => SpawnPlan::Close(EventError::BindingMismatch),
+                        },
+                        ForkStatus::Prepared | ForkStatus::Failed | ForkStatus::ParentEnded => {
+                            SpawnPlan::Close(EventError::SpawnNotTaken)
+                        }
+                    };
+                    let event = match &next {
+                        SpawnPlan::Outcome => EngineEvent::ToolOutcome {
+                            dispatch,
+                            outcome: outcome.clone(),
+                            evidence,
+                            entropy: fresh_entropy(),
+                        },
+                        SpawnPlan::Return(child) => EngineEvent::ChildReturn {
+                            child: child.clone(),
+                            value: value.clone(),
+                            evidence,
+                            entropy: fresh_entropy(),
+                        },
+                        SpawnPlan::Close(refusal) => EngineEvent::ToolOutcome {
+                            dispatch,
+                            outcome: ToolOutcome::Failure {
+                                message: refusal.to_string(),
+                            },
+                            evidence,
+                            entropy: fresh_entropy(),
+                        },
+                    };
+                    *plan.lock().expect("the spawn plan mutex is never poisoned") = Some(next);
+                    Ok(event)
                 },
                 None,
             )
-            .await?;
+            .await;
+        let plan = plan.into_inner().expect("the spawn plan mutex is never poisoned");
+        let decision = match (&plan, decision) {
+            (_, Ok(decision)) => decision,
+            // Another message for an ended child: the return crossed nothing.
+            (Some(SpawnPlan::Return(_)), Err(EventError::TrajectoryEnded)) => {
+                return Err(self.close_spawn(&call, EventError::TrajectoryEnded).await);
+            }
+            (_, Err(error)) => return Err(error),
+        };
+        // The engine decided on an event this handler built from the view.
+        match plan.expect("the spawn result is typed before the engine decides") {
+            SpawnPlan::Outcome => outcome_decision(decision).map(SpawnResultDecision::Outcome),
+            SpawnPlan::Close(refusal) => Err(refusal),
+            SpawnPlan::Return(_) => {
+                let decision = return_decision(decision)?;
+                let close = match &decision {
+                    ChildReturnDecision::Returned { .. } | ChildReturnDecision::NoValue => ToolOutcome::Success {
+                        body: OutcomeBody::Unavailable,
+                    },
+                    ChildReturnDecision::Blocked { feedback } => ToolOutcome::Failure {
+                        message: feedback.clone(),
+                    },
+                };
+                self.report_outcome(&call, &close).await?;
+                Ok(SpawnResultDecision::Return(decision))
+            }
+        }
+    }
 
-        match decision.then {
-            Next::PresentToModel(Presentation::KeepOutput) => Ok(ToolResultDecision::Keep),
-            Next::PresentToModel(Presentation::ReplaceOutput { placeholder, .. }) => {
-                Ok(ToolResultDecision::Replace { placeholder })
-            }
-            // An admitted value delivered in place of the raw output.
-            Next::PresentToModel(Presentation::Value { value }) => {
-                Ok(ToolResultDecision::Replace { placeholder: value })
-            }
-            Next::PresentToModel(Presentation::Blocked { feedback, .. }) => {
-                Ok(ToolResultDecision::Replace { placeholder: feedback })
-            }
-            _ => Err(EventError::UnexpectedDecision),
+    async fn close_spawn(&self, call: &ProposedCall, refusal: EventError) -> EventError {
+        let close = ToolOutcome::Failure {
+            message: refusal.to_string(),
+        };
+        match self.report_outcome(call, &close).await {
+            Ok(_) => refusal,
+            Err(error) => error,
         }
     }
 
@@ -347,32 +469,54 @@ impl Session {
         }
     }
 
-    /// A child agent started. The harness echoes the [`SpawnBinding`] it
-    /// received when the parent's spawn call was released: the
-    /// binding names the exact prepared fork, and the engine's `BindFork`
-    /// opens the child before its first engine event. The child
-    /// exists exactly when the log's `ForkOpened` does.
-    pub fn on_child_start(&mut self, id: TrajectoryId, spawn: Option<SpawnBinding>) -> Result<Session, EventError> {
-        let Some(binding) = spawn else {
-            return Err(EventError::SpawnNotTaken);
-        };
-        let Some(fork) = crate::engine::parse_fork(&binding) else {
-            return Err(EventError::SpawnNotTaken);
-        };
-        if fork.dispatch().trajectory() != &engine_id(&self.trajectory) {
-            return Err(EventError::SpawnNotTaken);
-        }
+    /// A child agent started. `spawn` names the prepared fork the
+    /// child binds to: the [`super::SpawnBinding`] the parent's spawn release
+    /// handed the harness, or — for a harness whose start signal carries no
+    /// reference to the spawn call — the family's one spawn in flight. The
+    /// engine's `BindFork` opens the child before its first engine event; the
+    /// child exists exactly when the log's `ForkOpened` does.
+    pub fn on_child_start(&mut self, id: TrajectoryId, spawn: SpawnRef) -> Result<Session, EventError> {
+        self.bind_child(id, spawn).map(|(session, _)| session)
+    }
+
+    /// Open a child whose start hook never arrived, or has not arrived yet:
+    /// bind it to the family's one spawn in flight, as its start
+    /// would. Whether this opened the child or found it already open tells the
+    /// dispatcher whether the refused event was the missing start's, and is
+    /// worth running once more, or the child's own answer.
+    pub(crate) fn open_late(&mut self, child: TrajectoryId) -> Result<LateOpen, EventError> {
+        self.bind_child(child, SpawnRef::InFlight).map(|(_, opened)| opened)
+    }
+
+    fn bind_child(&mut self, id: TrajectoryId, spawn: SpawnRef) -> Result<(Session, LateOpen), EventError> {
         let child = id.clone();
         let opened = self.inner.log(&self.root)?;
         let policy = self.inner.resolve_policy(&opened)?;
-        let decision = self.drive(&policy, Some(opened), true, |_| {
-            Ok(EngineEvent::BindFork {
-                fork: fork.clone(),
-                child: child.clone(),
-            })
+        let decision = self.drive(&policy, Some(opened), true, |context| {
+            let fork = match &spawn {
+                SpawnRef::Binding(binding) => {
+                    let Some(fork) = crate::engine::parse_fork(binding) else {
+                        return Err(EventError::SpawnNotTaken);
+                    };
+                    fork
+                }
+                SpawnRef::InFlight => context.in_flight_fork(&child)?,
+            };
+            match context.fork_status(&fork) {
+                ForkStatus::Unprepared | ForkStatus::Failed | ForkStatus::ParentEnded => Err(EventError::SpawnNotTaken),
+                ForkStatus::Prepared | ForkStatus::Bound(_) => Ok(EngineEvent::BindFork {
+                    fork,
+                    child: child.clone(),
+                }),
+            }
         })?;
+        // The same pair again appends nothing: the child was already open.
+        let opened = match decision.append {
+            Some(_) => LateOpen::Opened,
+            None => LateOpen::AlreadyOpen,
+        };
         match decision.then {
-            Next::Done => Ok(Session::attach(Arc::clone(&self.inner), id, self.root.clone())),
+            Next::Done => Ok((Session::attach(Arc::clone(&self.inner), id, self.root.clone()), opened)),
             _ => Err(EventError::UnexpectedDecision),
         }
     }
@@ -627,6 +771,22 @@ impl Decided<'_> {
 
     fn offer_pursuer(&self, offer: &OfferId) -> Option<TrajectoryId> {
         self.session.inner.engine.offer_pursuer(self.view, offer)
+    }
+
+    fn fork_status(&self, fork: &appa_engine::value::ForkId) -> ForkStatus {
+        self.session.inner.engine.fork_status(self.policy, self.view, fork)
+    }
+
+    fn in_flight_fork(&self, child: &TrajectoryId) -> Result<appa_engine::value::ForkId, EventError> {
+        let engine = &self.session.inner.engine;
+        if let Some(fork) = engine.fork_of(self.policy, self.view, child) {
+            return Ok(fork);
+        }
+        match engine.forks_in_flight(self.policy, self.view).as_slice() {
+            [fork] => Ok(fork.clone()),
+            [] => Err(EventError::SpawnNotTaken),
+            _ => Err(EventError::SpawnAmbiguous),
+        }
     }
 }
 
@@ -1099,7 +1259,7 @@ mod tests {
 mod real_engine_tests {
     use super::super::{OpenError, OutcomeBody, Runtime, SessionError};
     use super::*;
-    use crate::api::{RemedyDecision, ToolCallDecision, ToolOutcome, ToolResultDecision};
+    use crate::api::{RemedyDecision, SpawnBinding, ToolCallDecision, ToolOutcome, ToolResultDecision};
     use crate::config::Config;
 
     fn config_with(policy: &str, authority_url: Option<&str>) -> Config {
@@ -1149,7 +1309,7 @@ context_control = true
             panic!("a context-controlled spawn releases a fork binding");
         };
         session
-            .on_child_start(child, Some(binding))
+            .on_child_start(child, SpawnRef::Binding(binding))
             .expect("the fork binds and the child opens")
     }
 
@@ -3253,5 +3413,521 @@ context_control = true
             "a dirty child never moves the root fold",
         );
         assert!(runtime.status(&child_id).is_none(), "the status read is root-only");
+    }
+
+    fn child(name: &str) -> TrajectoryId {
+        TrajectoryId(format!("cc:{name}"))
+    }
+
+    fn fork_opened_count(runtime: &Runtime) -> usize {
+        runtime
+            .log_facts(&root())
+            .iter()
+            .filter(|fact| matches!(fact, appa_engine::fact::Fact::ForkOpened { .. }))
+            .count()
+    }
+
+    fn dispatch_open(runtime: &Runtime, trajectory: &TrajectoryId) -> bool {
+        !runtime.open_dispatches(&root(), trajectory).is_empty()
+    }
+
+    fn opened(runtime: &Runtime, trajectory: &TrajectoryId) -> bool {
+        runtime.names_trajectory(&root(), trajectory)
+    }
+
+    async fn release_spawn(session: &mut Session, spawn: ProposedCall) -> SpawnBinding {
+        match session.on_tool_call(spawn, true).await.expect("the spawn is decided") {
+            ToolCallDecision::Allow { spawn: Some(binding) } => binding,
+            other => panic!("a context-controlled spawn releases a fork binding, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_child_start_repeats_as_the_same_act_and_refuses_any_other_pairing() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let binding = release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
+        let mut first = session
+            .on_child_start(child("c1"), SpawnRef::Binding(binding.clone()))
+            .expect("the fork binds and the child opens");
+        let after_open = runtime.log_basis(&root());
+        assert_eq!(fork_opened_count(&runtime), 1);
+
+        session
+            .on_child_start(child("c1"), SpawnRef::Binding(binding.clone()))
+            .expect("the same binding again is the same act");
+        session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .expect("the same child named as the spawn in flight is the same act");
+        assert_eq!(
+            runtime.log_basis(&root()),
+            after_open,
+            "a repeated start appends nothing"
+        );
+        assert_eq!(fork_opened_count(&runtime), 1);
+
+        let error = session
+            .on_child_start(child("c2"), SpawnRef::Binding(binding.clone()))
+            .err()
+            .expect("a bound fork takes no second child");
+        assert!(matches!(error, EventError::BindingMismatch), "got {error:?}");
+        assert!(!error.is_operational());
+        assert!(!opened(&runtime, &child("c2")), "the refused start opens no trajectory");
+
+        let inner = release_spawn(&mut first, fetch(serde_json::json!({"a": 2}))).await;
+        let error = session
+            .on_child_start(child("c1"), SpawnRef::Binding(inner))
+            .err()
+            .expect("a bound child takes no second fork");
+        assert!(matches!(error, EventError::BindingMismatch), "got {error:?}");
+
+        for elsewhere in ["cc:root", "cc:elsewhere"] {
+            let error = session
+                .on_child_start(
+                    child("c3"),
+                    SpawnRef::Binding(crate::api::testing::spawn_binding(elsewhere)),
+                )
+                .err()
+                .expect("an unprepared fork opens no child");
+            assert!(matches!(error, EventError::SpawnNotTaken), "got {error:?}");
+            assert!(!error.is_operational());
+        }
+        assert!(!opened(&runtime, &child("c3")));
+
+        assert_eq!(fork_opened_count(&runtime), 1, "no refusal bound anything");
+        assert!(
+            dispatch_open(&runtime, &root()),
+            "the spawn dispatch stays open through every refusal"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_concurrent_identical_starts_open_one_child() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let binding = release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
+
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let starters: Vec<_> = (0..2)
+                .map(|_| {
+                    let mut handle = runtime.session(&root(), &root()).expect("the root reopens");
+                    let binding = binding.clone();
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        handle.on_child_start(child("c1"), SpawnRef::Binding(binding))
+                    })
+                })
+                .collect();
+            for starter in starters {
+                starter
+                    .join()
+                    .expect("the starter thread joins")
+                    .expect("both identical starts pass");
+            }
+        });
+        assert_eq!(fork_opened_count(&runtime), 1, "one binding landed");
+        assert!(opened(&runtime, &child("c1")));
+    }
+
+    #[tokio::test]
+    async fn a_start_naming_no_spawn_binds_the_one_fork_in_flight() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+
+        let error = session
+            .on_child_start(child("c0"), SpawnRef::InFlight)
+            .err()
+            .expect("no spawn in flight opens no child");
+        assert!(matches!(error, EventError::SpawnNotTaken), "got {error:?}");
+        assert!(!opened(&runtime, &child("c0")), "the refused start opens no trajectory");
+
+        let binding = release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
+        session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .expect("the one spawn in flight binds");
+        assert!(opened(&runtime, &child("c1")));
+        session
+            .on_child_start(child("c1"), SpawnRef::Binding(binding))
+            .expect("the echoed binding names the fork the in-flight start bound");
+        assert_eq!(fork_opened_count(&runtime), 1);
+
+        let error = session
+            .on_child_start(child("c2"), SpawnRef::InFlight)
+            .err()
+            .expect("a bound fork is not in flight");
+        assert!(matches!(error, EventError::SpawnNotTaken), "got {error:?}");
+    }
+
+    #[tokio::test]
+    async fn two_forks_in_flight_bind_nothing() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
+        let mut first = session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .expect("the child opens");
+        session
+            .on_tool_result(
+                fetch(serde_json::json!({"a": 1})),
+                ToolOutcome::Success {
+                    body: OutcomeBody::Unavailable,
+                },
+            )
+            .await
+            .expect("the spawn dispatch closes");
+
+        release_spawn(&mut first, fetch(serde_json::json!({"a": 2}))).await;
+        release_spawn(&mut session, fetch(serde_json::json!({"a": 3}))).await;
+        let error = session
+            .on_child_start(child("c2"), SpawnRef::InFlight)
+            .err()
+            .expect("two forks in flight: none is picked");
+        assert!(matches!(error, EventError::SpawnAmbiguous), "got {error:?}");
+        assert!(!error.is_operational());
+        assert!(!opened(&runtime, &child("c2")), "no child opened");
+        assert_eq!(fork_opened_count(&runtime), 1);
+    }
+
+    #[tokio::test]
+    async fn a_fork_whose_parent_ended_is_unbindable_and_not_in_flight() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
+        let mut first = session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .expect("the child opens");
+        let orphaned = release_spawn(&mut first, fetch(serde_json::json!({"a": 2}))).await;
+        first
+            .on_child_end(Some("done early".to_string()))
+            .await
+            .expect("the child's end crosses");
+        assert!(
+            dispatch_open(&runtime, &child("c1")),
+            "the nested spawn dispatch stays open"
+        );
+
+        let error = session
+            .on_child_start(child("orphan"), SpawnRef::Binding(orphaned))
+            .err()
+            .expect("an ended parent's fork binds nothing");
+        assert!(matches!(error, EventError::SpawnNotTaken), "got {error:?}");
+        assert!(!error.is_operational());
+        assert!(!opened(&runtime, &child("orphan")));
+
+        session
+            .on_spawn_result(
+                fetch(serde_json::json!({"a": 1})),
+                agent_response(),
+                Some(child("c1")),
+                Some("done early".to_string()),
+            )
+            .await
+            .expect("the ended child's message replays and the spawn closes");
+        release_spawn(&mut session, fetch(serde_json::json!({"a": 3}))).await;
+        session
+            .on_child_start(child("c2"), SpawnRef::InFlight)
+            .expect("the one live fork in flight binds");
+        assert!(opened(&runtime, &child("c2")));
+    }
+
+    fn agent_response() -> ToolOutcome {
+        ToolOutcome::Success {
+            body: OutcomeBody::Available(
+                r#"{"agentId":"c1","content":[{"type":"text","text":"all done"}]}"#.to_string(),
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_spawn_result_naming_the_bound_child_crosses_its_return_and_closes_the_spawn() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
+        session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .expect("the child opens");
+
+        let decision = session
+            .on_spawn_result(
+                fetch(serde_json::json!({"a": 1})),
+                agent_response(),
+                Some(child("c1")),
+                Some("all done".to_string()),
+            )
+            .await
+            .expect("the return crosses");
+        assert_eq!(
+            decision,
+            SpawnResultDecision::Return(ChildReturnDecision::Returned {
+                value: "all done".to_string()
+            }),
+        );
+        assert!(
+            matches!(runtime.live(&root(), &child("c1")), Err(SessionError::Ended)),
+            "the child ended at its return",
+        );
+        assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
+        session
+            .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
+            .await
+            .expect("the parent proposes again");
+    }
+
+    #[tokio::test]
+    async fn an_indeterminate_spawn_result_closes_the_spawn_and_leaves_the_child_live() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
+        session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .expect("the child opens");
+
+        let decision = session
+            .on_spawn_result(
+                fetch(serde_json::json!({"a": 1})),
+                ToolOutcome::Indeterminate,
+                None,
+                None,
+            )
+            .await
+            .expect("an indeterminate result is an ordinary close");
+        assert_eq!(decision, SpawnResultDecision::Outcome(ToolResultDecision::Keep));
+        assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
+        assert!(runtime.live(&root(), &child("c1")).is_ok(), "the child stays live");
+    }
+
+    #[tokio::test]
+    async fn a_spawn_result_for_an_ended_child_replays_the_same_message_and_refuses_another() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
+        let mut first = session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .expect("the child opens");
+        first
+            .on_child_end(Some("all done".to_string()))
+            .await
+            .expect("the child's own end crosses");
+        assert!(dispatch_open(&runtime, &root()), "the spawn dispatch is still open");
+        let before = runtime.log_facts(&root()).len();
+
+        let decision = session
+            .on_spawn_result(
+                fetch(serde_json::json!({"a": 1})),
+                agent_response(),
+                Some(child("c1")),
+                Some("all done".to_string()),
+            )
+            .await
+            .expect("the same message replays");
+        assert_eq!(
+            decision,
+            SpawnResultDecision::Return(ChildReturnDecision::Returned {
+                value: "all done".to_string()
+            }),
+        );
+        assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
+        let facts = runtime.log_facts(&root());
+        assert!(
+            facts[before..]
+                .iter()
+                .all(|fact| !matches!(fact, appa_engine::fact::Fact::ChildReturn { .. })),
+            "the replayed return crossed nothing twice",
+        );
+
+        release_spawn(&mut session, fetch(serde_json::json!({"a": 3}))).await;
+        let mut second = session
+            .on_child_start(child("c2"), SpawnRef::InFlight)
+            .expect("a second child opens");
+        second
+            .on_child_end(Some("the first message".to_string()))
+            .await
+            .expect("the child's own end crosses");
+        let error = session
+            .on_spawn_result(
+                fetch(serde_json::json!({"a": 3})),
+                agent_response(),
+                Some(child("c2")),
+                Some("a second message".to_string()),
+            )
+            .await
+            .expect_err("a second return for an ended child crosses nothing");
+        assert!(matches!(error, EventError::TrajectoryEnded), "got {error:?}");
+        assert!(!error.is_operational());
+        assert!(
+            !dispatch_open(&runtime, &root()),
+            "the spawn dispatch closed as a failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_spawn_result_naming_another_child_crosses_nothing_and_closes_the_spawn() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
+        session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .expect("the child opens");
+
+        let error = session
+            .on_spawn_result(
+                fetch(serde_json::json!({"a": 1})),
+                agent_response(),
+                Some(child("intruder")),
+                Some("all done".to_string()),
+            )
+            .await
+            .expect_err("another child's message does not cross");
+        assert!(matches!(error, EventError::BindingMismatch), "got {error:?}");
+        assert!(!error.is_operational());
+        assert!(
+            !dispatch_open(&runtime, &root()),
+            "the spawn dispatch closed as a failure"
+        );
+        assert!(
+            runtime.live(&root(), &child("c1")).is_ok(),
+            "the bound child stays live"
+        );
+        assert!(
+            !opened(&runtime, &child("intruder")),
+            "the named child was never opened"
+        );
+
+        release_spawn(&mut session, fetch(serde_json::json!({"a": 2}))).await;
+        session
+            .on_child_start(child("c2"), SpawnRef::InFlight)
+            .expect("a second child opens");
+        let error = session
+            .on_spawn_result(fetch(serde_json::json!({"a": 2})), agent_response(), None, None)
+            .await
+            .expect_err("a result naming no child crosses nothing");
+        assert!(matches!(error, EventError::BindingMismatch), "got {error:?}");
+        assert!(!dispatch_open(&runtime, &root()));
+    }
+
+    #[tokio::test]
+    async fn a_spawn_result_before_any_child_bound_closes_the_spawn_unbindable() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let binding = release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
+
+        let error = session
+            .on_spawn_result(
+                fetch(serde_json::json!({"a": 1})),
+                agent_response(),
+                Some(child("c1")),
+                None,
+            )
+            .await
+            .expect_err("no child bound: nothing crosses");
+        assert!(matches!(error, EventError::SpawnNotTaken), "got {error:?}");
+        assert!(!error.is_operational());
+        assert!(
+            !dispatch_open(&runtime, &root()),
+            "the spawn dispatch closed as a failure"
+        );
+
+        let error = session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .err()
+            .expect("nothing is in flight");
+        assert!(matches!(error, EventError::SpawnNotTaken), "got {error:?}");
+        let error = session
+            .on_child_start(child("c1"), SpawnRef::Binding(binding))
+            .err()
+            .expect("the failed spawn's fork is unbindable");
+        assert!(matches!(error, EventError::SpawnNotTaken), "got {error:?}");
+        assert!(!opened(&runtime, &child("c1")), "no child opened");
+    }
+
+    #[tokio::test]
+    async fn a_spawn_result_on_an_unforked_call_is_an_ordinary_outcome() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        session
+            .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
+            .await
+            .expect("the ordinary call releases");
+        let decision = session
+            .on_spawn_result(
+                fetch(serde_json::json!({"a": 1})),
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("data".to_string()),
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("the ordinary result is admitted");
+        assert_eq!(decision, SpawnResultDecision::Outcome(ToolResultDecision::Keep));
+        assert!(!dispatch_open(&runtime, &root()));
+
+        let error = session
+            .on_spawn_result(fetch(serde_json::json!({"a": 1})), agent_response(), None, None)
+            .await
+            .expect_err("no open dispatch takes the result");
+        assert!(matches!(error, EventError::UnknownDispatch), "got {error:?}");
+    }
+
+    #[tokio::test]
+    async fn a_withheld_return_closes_the_spawn_as_a_failure() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let url = stub(serde_json::json!(42)).await;
+        let runtime = Runtime::open(sanitized_config(Some(&url)), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        release_spawn(&mut session, fetch(serde_json::json!({}))).await;
+        session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .expect("the child opens");
+
+        let decision = session
+            .on_spawn_result(
+                fetch(serde_json::json!({})),
+                agent_response(),
+                Some(child("c1")),
+                Some("raw with pii".to_string()),
+            )
+            .await
+            .expect("the withheld return is delivered");
+        assert!(
+            matches!(
+                decision,
+                SpawnResultDecision::Return(ChildReturnDecision::Blocked { .. })
+            ),
+            "got {decision:?}",
+        );
+        assert!(
+            !dispatch_open(&runtime, &root()),
+            "the spawn dispatch closed as a failure"
+        );
+        session
+            .on_tool_call(fetch(serde_json::json!({})), false)
+            .await
+            .expect("the parent proposes again");
     }
 }

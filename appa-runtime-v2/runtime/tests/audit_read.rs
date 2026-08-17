@@ -1,7 +1,9 @@
 
 use std::sync::Arc;
 
-use appa_runtime_api::{Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
+use appa_runtime_api::{
+    Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, SpawnRef, ToolOutcome, TrajectoryId,
+};
 use appa_runtime_v2::api::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, OfferId, RemedyOutcome, Runtime};
 use appa_runtime_v2::{config::Config, hooks};
 
@@ -127,9 +129,8 @@ async fn open_child(runtime: &Arc<Runtime>, spawn: ProposedCall) -> HookDecision
         runtime,
         HookEvent::ChildStart {
             root: root(),
-            parent: root(),
             child: child(),
-            spawn: Some(binding),
+            spawn: SpawnRef::Binding(binding),
         },
     )
     .await

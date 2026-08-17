@@ -36,8 +36,15 @@ version = 1
 
 # --- tools whose results stay inside the session's trust boundary ---
 
+# Starting a subagent is this harness's spawn: the deployment controls the
+# child's context (`[policy.deployment]` below), so the subagent runs as a
+# child trajectory and its final message is checked where the parent
+# receives it. A background subagent (`run_in_background = true`) reports
+# its result outside the parent's tool result, where nothing can be
+# checked, so the call is refused as invalid.
 [[policy.tool]]
 name = "Agent"
+parameters = { type = "object", additionalProperties = true, properties = { run_in_background = { type = "boolean", const = false } } }
 delta = {}
 
 [[policy.tool]]
@@ -160,8 +167,10 @@ delta = {}
 name = "SlashCommand"
 delta = {}
 
+# `Task` is the earlier name of `Agent`: the same spawn, the same contract.
 [[policy.tool]]
 name = "Task"
+parameters = { type = "object", additionalProperties = true, properties = { run_in_background = { type = "boolean", const = false } } }
 delta = {}
 
 [[policy.tool]]
@@ -263,6 +272,13 @@ delta = { trust = "suspicious" }
 name = "mcp__github__issue_write"
 delta = { trust = "suspicious" }
 requires = { attention = ["operator-signoff"] }
+
+# The deployment controls what a subagent starts from: the harness gives
+# every subagent exactly the prompt the parent's spawn call carried, and
+# nothing else of the parent's context. That is what lets the runtime
+# check the subagent's return as a branch of the parent.
+[policy.deployment]
+context_control = true
 
 # --- the human authority ---
 

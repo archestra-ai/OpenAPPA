@@ -1,11 +1,11 @@
 //! The hook dispatcher: one typed `HookEvent` in, one `HookDecision`
 //! out.
 
-use appa_runtime_api::{Actor, Codec, HookDecision, HookEvent, ParseRefusal};
+use appa_runtime_api::{Actor, Codec, HookDecision, HookEvent, ParseRefusal, TrajectoryId};
 
 use crate::api::{
-    ChildReturnDecision, EventError, Runtime, Session, SessionError, ToolCallDecision, ToolResultDecision,
-    is_control_tool,
+    ChildReturnDecision, EventError, LateOpen, Runtime, Session, SessionError, SpawnResultDecision, ToolCallDecision,
+    ToolResultDecision, is_control_tool,
 };
 
 /// One hook call, wire to wire: parse through the codec, dispatch,
@@ -19,12 +19,12 @@ pub async fn answer(runtime: &Runtime, codec: &Codec, body: &[u8]) -> (u16, serd
         Err(ParseRefusal::Unreadable { detail }) => return (400, serde_json::json!({ "error": detail })),
         Err(ParseRefusal::Malformed { detail }) => return (409, serde_json::json!({ "error": detail })),
     };
-    let decision = handle(runtime, event).await;
+    let decision = handle(runtime, event.clone()).await;
     let status = match decision {
         HookDecision::Refuse { .. } => 409,
         _ => 200,
     };
-    (status, (codec.render)(&decision))
+    (status, (codec.render)(&event, &decision))
 }
 
 /// Dispatch one typed event to its session and fold the outcome into
@@ -40,11 +40,12 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             Err(error) => refuse(error.to_string()),
         },
         HookEvent::Prompt { actor, text } => {
-            let mut session = match event_session(runtime, &actor) {
-                Ok(session) => session,
-                Err(error) => return fold(error, block),
-            };
-            match session.on_prompt(text) {
+            match on_actor(runtime, &actor, |mut session| {
+                let text = text.clone();
+                async move { session.on_prompt(text) }
+            })
+            .await
+            {
                 Ok(()) => HookDecision::Ack,
                 Err(error) => fold(error, block),
             }
@@ -54,11 +55,12 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
                 tracing::debug!(trajectory = %actor.root.0, "control tool passes unchecked");
                 return HookDecision::PassControl;
             }
-            let mut session = match event_session(runtime, &actor) {
-                Ok(session) => session,
-                Err(error) => return fold(error, deny),
-            };
-            match session.on_tool_call(call, spawn).await {
+            match on_actor(runtime, &actor, |mut session| {
+                let call = call.clone();
+                async move { session.on_tool_call(call, spawn).await }
+            })
+            .await
+            {
                 Ok(ToolCallDecision::Allow { spawn }) => HookDecision::AllowCall { spawn },
                 Ok(ToolCallDecision::Control) => HookDecision::PassControl,
                 Ok(ToolCallDecision::Deny { feedback }) => HookDecision::DenyCall { feedback },
@@ -70,27 +72,41 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
                 tracing::debug!(trajectory = %actor.root.0, "control tool outcome absorbed");
                 return HookDecision::Ack;
             }
-            let mut session = match event_session(runtime, &actor) {
-                Ok(session) => session,
-                Err(error) => return fold(error, block),
-            };
-            match session.on_tool_result(call, outcome).await {
-                Ok(ToolResultDecision::Keep) => HookDecision::Ack,
-                Ok(ToolResultDecision::Replace { placeholder }) => HookDecision::ReplaceOutput { output: placeholder },
+            match on_actor(runtime, &actor, |mut session| {
+                let (call, outcome) = (call.clone(), outcome.clone());
+                async move { session.on_tool_result(call, outcome).await }
+            })
+            .await
+            {
+                Ok(decision) => outcome_decision(decision),
                 Err(error) => fold(error, block),
             }
         }
-        HookEvent::ChildStart {
-            root,
-            parent,
+        HookEvent::SpawnResult {
+            actor,
+            call,
+            outcome,
             child,
-            spawn,
+            value,
         } => {
-            let mut parent = match session_for(runtime, &root, &parent) {
+            let said = value.clone();
+            match on_actor(runtime, &actor, |mut session| {
+                let (call, outcome, child, value) = (call.clone(), outcome.clone(), child.clone(), value.clone());
+                async move { session.on_spawn_result(call, outcome, child, value).await }
+            })
+            .await
+            {
+                Ok(SpawnResultDecision::Return(decision)) => return_decision(said, decision),
+                Ok(SpawnResultDecision::Outcome(decision)) => outcome_decision(decision),
+                Err(error) => fold(error, block),
+            }
+        }
+        HookEvent::ChildStart { root, child, spawn } => {
+            let mut root = match open_or_reopen(runtime, &root) {
                 Ok(session) => session,
                 Err(error) => return refuse(error.to_string()),
             };
-            match parent.on_child_start(child, spawn) {
+            match root.on_child_start(child, spawn) {
                 Ok(_) => HookDecision::Ack,
                 Err(error) => refuse(error.to_string()),
             }
@@ -100,20 +116,34 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             child,
             value,
         } => {
-            let mut child = match child_session(runtime, &root, &child) {
-                Ok(session) => session,
-                Err(error) => return fold(error, block),
-            };
             let said = value.clone();
-            match child.on_child_end(value).await {
-                Ok(ChildReturnDecision::Returned { value }) if said.as_deref() != Some(value.as_str()) => {
-                    HookDecision::ChildReturn { value }
-                }
-                Ok(ChildReturnDecision::Returned { .. }) | Ok(ChildReturnDecision::NoValue) => HookDecision::Ack,
-                Ok(ChildReturnDecision::Blocked { feedback }) => block(feedback),
+            match on_child(runtime, &root, &child, |mut session| {
+                let value = value.clone();
+                async move { session.on_child_end(value).await }
+            })
+            .await
+            {
+                Ok(decision) => return_decision(said, decision),
                 Err(error) => fold(error, block),
             }
         }
+    }
+}
+
+fn outcome_decision(decision: ToolResultDecision) -> HookDecision {
+    match decision {
+        ToolResultDecision::Keep => HookDecision::Ack,
+        ToolResultDecision::Replace { placeholder } => HookDecision::ReplaceOutput { output: placeholder },
+    }
+}
+
+fn return_decision(said: Option<String>, decision: ChildReturnDecision) -> HookDecision {
+    match decision {
+        ChildReturnDecision::Returned { value } if said.as_deref() != Some(value.as_str()) => {
+            HookDecision::ChildReturn { value }
+        }
+        ChildReturnDecision::Returned { .. } | ChildReturnDecision::NoValue => HookDecision::Ack,
+        ChildReturnDecision::Blocked { feedback } => block(feedback),
     }
 }
 
@@ -129,31 +159,35 @@ fn open_or_reopen(runtime: &Runtime, root: &appa_runtime_api::TrajectoryId) -> R
     }
 }
 
-fn session_for(
-    runtime: &Runtime,
-    root: &appa_runtime_api::TrajectoryId,
-    trajectory: &appa_runtime_api::TrajectoryId,
-) -> Result<Session, SessionError> {
-    if root == trajectory {
-        return open_or_reopen(runtime, root);
-    }
-    open_or_reopen(runtime, root)?;
-    runtime.session(root, trajectory)
-}
-
-fn child_session(
-    runtime: &Runtime,
-    root: &appa_runtime_api::TrajectoryId,
-    child: &appa_runtime_api::TrajectoryId,
-) -> Result<Session, EventError> {
-    open_or_reopen(runtime, root).map_err(EventError::from)?;
-    runtime.session(root, child).map_err(EventError::from)
-}
-
-fn event_session(runtime: &Runtime, actor: &Actor) -> Result<Session, EventError> {
+async fn on_actor<T, Run>(runtime: &Runtime, actor: &Actor, event: impl Fn(Session) -> Run) -> Result<T, EventError>
+where
+    Run: Future<Output = Result<T, EventError>>,
+{
     match &actor.child {
-        Some(child) => child_session(runtime, &actor.root, child),
-        None => open_or_reopen(runtime, &actor.root).map_err(EventError::from),
+        Some(child) => on_child(runtime, &actor.root, child, event).await,
+        None => event(open_or_reopen(runtime, &actor.root)?).await,
+    }
+}
+
+async fn on_child<T, Run>(
+    runtime: &Runtime,
+    root: &TrajectoryId,
+    child: &TrajectoryId,
+    event: impl Fn(Session) -> Run,
+) -> Result<T, EventError>
+where
+    Run: Future<Output = Result<T, EventError>>,
+{
+    let mut root_session = open_or_reopen(runtime, root)?;
+    match event(runtime.session(root, child)?).await {
+        Err(EventError::SpawnNotTaken) => match root_session.open_late(child.clone())? {
+            LateOpen::Opened => {
+                tracing::debug!(root = %root.0, child = %child.0, "a child event arrived before its start: opened the child late");
+                event(runtime.session(root, child)?).await
+            }
+            LateOpen::AlreadyOpen => Err(EventError::SpawnNotTaken),
+        },
+        outcome => outcome,
     }
 }
 
@@ -180,6 +214,8 @@ fn refuse(detail: String) -> HookDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use appa_runtime_api::SpawnRef;
+
     use crate::api::{Runtime, testing};
     use crate::config::Config;
 
@@ -252,26 +288,10 @@ mod tests {
         let runtime = open_real_runtime(&dir);
         for event in fixtures() {
             let name = event["hook_event_name"].as_str().expect("each fixture names its hook");
-            let subagent = event.get("agent_id").and_then(|id| id.as_str()).is_some();
             let control = event["tool_name"] == CONTROL_TOOL_FIXTURE_NAME;
 
             let body = serde_json::to_vec(&event).expect("the fixture re-serializes");
             let (status, answer) = call_hook(&runtime, &body).await;
-
-            if subagent {
-                match name {
-                    "SubagentStart" => assert_eq!(status, 409, "the uncorrelated subagent start refuses"),
-                    "PreToolUse" => {
-                        assert_eq!(status, 200);
-                        assert_eq!(
-                            answer["hookSpecificOutput"]["permissionDecision"], "deny",
-                            "the uncorrelated subagent's tool is denied",
-                        );
-                    }
-                    other => assert_eq!(status, 200, "the subagent {other} is a decision, not a fault: {answer}"),
-                }
-                continue;
-            }
 
             assert_eq!(status, 200, "hook {name} refused: {answer}");
             match name {
@@ -555,9 +575,8 @@ mod tests {
                 &runtime,
                 HookEvent::ChildStart {
                     root: root.clone(),
-                    parent: root.clone(),
                     child: child.clone(),
-                    spawn: Some(binding),
+                    spawn: SpawnRef::Binding(binding),
                 },
             )
             .await,
@@ -598,6 +617,128 @@ mod tests {
             matches!(decision, HookDecision::Block { .. }),
             "an uncorrelated child blocks; only an operational failure refuses. Got {decision:?}",
         );
+    }
+
+    #[tokio::test]
+    async fn a_spawn_result_on_an_unforked_call_answers_as_an_ordinary_outcome() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_real_runtime(&dir);
+        let root = appa_runtime_api::TrajectoryId("cc:s1".to_string());
+        let call = || crate::api::ProposedCall {
+            tool: "Agent".to_string(),
+            arguments: crate::api::raw(serde_json::json!({"prompt": "list files"})),
+        };
+        let result = || HookEvent::SpawnResult {
+            actor: Actor {
+                root: root.clone(),
+                child: None,
+            },
+            call: call(),
+            outcome: appa_runtime_api::ToolOutcome::Success {
+                body: appa_runtime_api::OutcomeBody::Available(r#"{"agentId":"a1"}"#.to_string()),
+            },
+            child: Some(appa_runtime_api::TrajectoryId("cc:s1:a1".to_string())),
+            value: Some("one file".to_string()),
+        };
+
+        let decision = handle(&runtime, result()).await;
+        assert!(matches!(decision, HookDecision::Block { .. }), "got {decision:?}");
+
+        let released = handle(
+            &runtime,
+            HookEvent::ToolCall {
+                actor: Actor {
+                    root: root.clone(),
+                    child: None,
+                },
+                call: call(),
+                spawn: false,
+            },
+        )
+        .await;
+        assert_eq!(released, HookDecision::AllowCall { spawn: None });
+        assert_eq!(handle(&runtime, result()).await, HookDecision::Ack);
+    }
+
+    #[tokio::test]
+    async fn a_child_event_before_its_start_opens_the_child_to_the_one_spawn_in_flight() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_real_runtime(&dir);
+        let root = appa_runtime_api::TrajectoryId("cc:s1".to_string());
+        let child = appa_runtime_api::TrajectoryId("cc:s1:a1".to_string());
+        let released = handle(
+            &runtime,
+            HookEvent::ToolCall {
+                actor: Actor {
+                    root: root.clone(),
+                    child: None,
+                },
+                call: crate::api::ProposedCall {
+                    tool: "Task".to_string(),
+                    arguments: crate::api::raw(serde_json::json!({"prompt": "look it up"})),
+                },
+                spawn: true,
+            },
+        )
+        .await;
+        assert!(
+            matches!(released, HookDecision::AllowCall { spawn: Some(_) }),
+            "got {released:?}"
+        );
+
+        let decision = handle(
+            &runtime,
+            HookEvent::ToolCall {
+                actor: Actor {
+                    root: root.clone(),
+                    child: Some(child.clone()),
+                },
+                call: crate::api::ProposedCall {
+                    tool: "Bash".to_string(),
+                    arguments: crate::api::raw(serde_json::json!({"command": "ls"})),
+                },
+                spawn: false,
+            },
+        )
+        .await;
+        assert_eq!(decision, HookDecision::AllowCall { spawn: None });
+        let forked = runtime
+            .audit(&root)
+            .expect("the audit reads")
+            .into_iter()
+            .filter(|entry| matches!(entry.event, crate::api::AuditEvent::Forked { .. }))
+            .count();
+        assert_eq!(forked, 1, "the late open bound the one spawn in flight");
+
+        assert_eq!(
+            handle(
+                &runtime,
+                HookEvent::ChildStart {
+                    root: root.clone(),
+                    child: child.clone(),
+                    spawn: SpawnRef::InFlight,
+                },
+            )
+            .await,
+            HookDecision::Ack,
+        );
+
+        let denied = handle(
+            &runtime,
+            HookEvent::ToolCall {
+                actor: Actor {
+                    root: root.clone(),
+                    child: Some(appa_runtime_api::TrajectoryId("cc:s1:a2".to_string())),
+                },
+                call: crate::api::ProposedCall {
+                    tool: "Bash".to_string(),
+                    arguments: crate::api::raw(serde_json::json!({"command": "ls"})),
+                },
+                spawn: false,
+            },
+        )
+        .await;
+        assert!(matches!(denied, HookDecision::DenyCall { .. }), "got {denied:?}");
     }
 
     #[tokio::test]

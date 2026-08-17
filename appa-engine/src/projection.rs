@@ -762,6 +762,14 @@ impl Projection {
         self.bound.get(fork)
     }
 
+    pub(crate) fn prepared_forks(&self) -> impl Iterator<Item = &ForkId> {
+        self.prepared.keys()
+    }
+
+    pub(crate) fn is_dispatch_open(&self, dispatch: &DispatchId) -> bool {
+        self.open.contains(dispatch)
+    }
+
     /// Which trajectory surfaced this offer. Family-wide, because the caller that
     /// needs it has only the offer's identity.
     pub(crate) fn offer_trajectory(&self, offer: &crate::value::OfferId) -> Option<&TrajectoryId> {

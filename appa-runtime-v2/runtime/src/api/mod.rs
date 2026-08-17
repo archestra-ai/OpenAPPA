@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub use crate::engine::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, TrajectoryStatus};
-pub use appa_runtime_api::{OutcomeBody, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
-pub(crate) use session::{Session, is_control_tool};
+pub use appa_runtime_api::{OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId};
+pub(crate) use session::{LateOpen, Session, is_control_tool};
 
 use crate::config::Config;
 use crate::elicit::Elicitation;
@@ -109,6 +109,16 @@ pub(crate) enum ChildReturnDecision {
     Blocked { feedback: String },
 }
 
+/// What a spawn call's result produced: the child's return, when
+/// this call branched and the child the harness names is the one bound to
+/// its fork; or an ordinary tool result, when the deployment did not
+/// branch on this call.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SpawnResultDecision {
+    Return(ChildReturnDecision),
+    Outcome(ToolResultDecision),
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum OpenError {
     #[error("configuration refused: {0}")]
@@ -167,6 +177,10 @@ pub(crate) enum EventError {
     NotAChild,
     #[error("the spawn did not take: no prepared fork to open this child")]
     SpawnNotTaken,
+    #[error("the family has more than one spawn in flight; the child cannot be tied to one")]
+    SpawnAmbiguous,
+    #[error("the fork and the child are already bound elsewhere")]
+    BindingMismatch,
     #[error("the family log stayed contended after {attempts} replays")]
     Contended { attempts: u32 },
     #[error("the engine returned a follow-up this event cannot deliver")]
@@ -205,7 +219,9 @@ impl EventError {
             | EventError::OutcomeMismatch
             | EventError::UnknownOffer
             | EventError::NotAChild
-            | EventError::SpawnNotTaken => false,
+            | EventError::SpawnNotTaken
+            | EventError::SpawnAmbiguous
+            | EventError::BindingMismatch => false,
         }
     }
 }
@@ -230,6 +246,7 @@ impl From<EngineRefusal> for EventError {
             EngineRefusal::Ended => EventError::TrajectoryEnded,
             EngineRefusal::DispatchClosed => EventError::UnknownDispatch,
             EngineRefusal::UnknownOffer => EventError::UnknownOffer,
+            EngineRefusal::Unbindable => EventError::BindingMismatch,
         }
     }
 }
@@ -546,6 +563,20 @@ impl Runtime {
         self.inner.engine.open_dispatches(&view, trajectory)
     }
 
+    /// Does the root's log name this trajectory, for the tests that
+    /// assert on whether a child opened.
+    #[cfg(test)]
+    pub(crate) fn names_trajectory(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> bool {
+        let log = self.inner.log(root).expect("the log reads");
+        let policy = self.inner.resolve_policy(&log).expect("the opening policy resolves");
+        let view = self
+            .inner
+            .engine
+            .rebuild_view(&policy, &log, trajectory)
+            .expect("the log rebuilds");
+        self.inner.engine.names_trajectory(&view, trajectory)
+    }
+
     /// The substituted call a trajectory has standing, for the tests
     /// that assert on it: the open dispatch no proposal released.
     #[cfg(test)]
@@ -799,6 +830,11 @@ pub(crate) mod testing {
             .resolve_call(appa_engine::value::ToolName::new("Bash"), br#"{"command":"ls"}"#)
             .expect("the fixture call resolves through the engine");
         appa_engine::value::DispatchId::new(appa_engine::value::TrajectoryId::new(label), call.digest(), 0)
+    }
+
+    pub(crate) fn spawn_binding(label: &str) -> super::SpawnBinding {
+        let fork = appa_engine::value::ForkId::of(&engine_dispatch(label));
+        super::SpawnBinding(serde_json::to_string(&fork).expect("a fork id serializes"))
     }
 
     fn wire_dispatch(label: &str) -> DispatchId {

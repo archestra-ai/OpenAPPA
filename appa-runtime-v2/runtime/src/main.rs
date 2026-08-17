@@ -60,31 +60,46 @@ impl Adapter {
             Adapter::ClaudeCode => appa_adapter_claude_code::codec(),
         }
     }
+}
 
-    fn substitutes_child_returns(self) -> bool {
-        match self {
-            Adapter::ClaudeCode => false,
+fn refuse_unobservable_returns(adapter: Adapter, policy: &toml::Value) -> Result<(), String> {
+    match adapter {
+        Adapter::ClaudeCode => {
+            let controls_context = policy
+                .get("deployment")
+                .and_then(|deployment| deployment.get("context_control"))
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(false);
+            if !controls_context {
+                return Ok(());
+            }
+            let tools = policy
+                .get("tool")
+                .and_then(toml::Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            for tool in tools {
+                let Some(name) = tool.get("name").and_then(toml::Value::as_str) else {
+                    continue;
+                };
+                if (name == "Agent" || name == "Task") && !pins_foreground(tool) {
+                    return Err(format!(
+                        "this deployment controls the subagent's context, and its `{name}` tool does not pin                          `run_in_background` to `false` (`parameters.properties.run_in_background.const = false`):                          a background subagent returns where no hook can check it. Pin the argument, as the                          shipped examples do."
+                    ));
+                }
+            }
+            Ok(())
         }
     }
 }
 
-fn refuse_unenforceable(adapter: Adapter, policy: &toml::Value) -> Result<(), String> {
-    if binds_return_sanitizer(policy) && !adapter.substitutes_child_returns() {
-        return Err(
-            "this policy binds a child return_sanitizer, and the selected harness cannot substitute \
-             a finished child's return — it would cross as the child spelled it. Serve a harness \
-             that can, or drop the binding."
-                .to_string(),
-        );
-    }
-    Ok(())
-}
-
-fn binds_return_sanitizer(policy: &toml::Value) -> bool {
-    policy
-        .get("child")
-        .and_then(|child| child.get("return_sanitizer"))
-        .is_some()
+fn pins_foreground(tool: &toml::Value) -> bool {
+    tool.get("parameters")
+        .and_then(|parameters| parameters.get("properties"))
+        .and_then(|properties| properties.get("run_in_background"))
+        .and_then(|argument| argument.get("const"))
+        .and_then(toml::Value::as_bool)
+        == Some(false)
 }
 
 fn log_level(verbose: u8) -> &'static str {
@@ -152,7 +167,7 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if let Err(refusal) = refuse_unenforceable(args.adapter, config.policy_file().value()) {
+    if let Err(refusal) = refuse_unobservable_returns(args.adapter, config.policy_file().value()) {
         eprintln!("appa-runtime-v2: {refusal}");
         return ExitCode::FAILURE;
     }
@@ -205,40 +220,38 @@ mod tests {
     }
 
     #[test]
+    fn a_context_controlling_deployment_must_pin_its_subagents_to_the_foreground() {
+        let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../integrations/claude-code/examples");
+        for name in ["claude-code.appa.toml", "claude-code-hitl.appa.toml"] {
+            let path = examples.join(name);
+            let config = Config::load(&path).unwrap_or_else(|error| panic!("{name} does not load: {error}"));
+            let policy = config.policy_file().value();
+            assert!(
+                refuse_unobservable_returns(Adapter::ClaudeCode, policy).is_ok(),
+                "{name}"
+            );
+            let mut unpinned = policy.clone();
+            for tool in unpinned["tool"].as_array_mut().expect("the tools table") {
+                if tool["name"].as_str() == Some("Task") {
+                    tool.as_table_mut().expect("a tool table").remove("parameters");
+                }
+            }
+            assert!(
+                refuse_unobservable_returns(Adapter::ClaudeCode, &unpinned).is_err(),
+                "{name}"
+            );
+            unpinned["deployment"]["context_control"] = toml::Value::Boolean(false);
+            assert!(
+                refuse_unobservable_returns(Adapter::ClaudeCode, &unpinned).is_ok(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn verbosity_selects_the_level() {
         assert_eq!(log_level(0), "info");
         assert_eq!(log_level(1), "debug");
         assert_eq!(log_level(2), "trace");
-    }
-
-    #[test]
-    fn a_bound_return_sanitizer_refuses_a_harness_that_cannot_substitute() {
-        let bound = r#"
-version = 1
-
-[[tool]]
-name = "read_hr"
-delta = { audience = { exactly = ["hr"] } }
-
-[[sanitizer]]
-name = "redact-email"
-on = ["tool_output"]
-mandate = { audience = { from = { includes = ["hr"] }, to = { exactly = ["public"] } } }
-
-[child]
-return_sanitizer = "redact-email"
-
-[deployment]
-context_control = true
-confined_child_return = true
-"#;
-        appa_policy::Config::from_toml_str(bound).expect("the fixture is a policy the dialect accepts");
-        let bound: toml::Value = toml::from_str(bound).expect("the fixture parses");
-        assert!(binds_return_sanitizer(&bound));
-        assert!(refuse_unenforceable(Adapter::ClaudeCode, &bound).is_err());
-
-        let unbound: toml::Value = toml::from_str("version = 1\n").expect("the fixture parses");
-        assert!(!binds_return_sanitizer(&unbound));
-        assert!(refuse_unenforceable(Adapter::ClaudeCode, &unbound).is_ok());
     }
 }

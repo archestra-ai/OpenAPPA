@@ -13,7 +13,10 @@ session event — prompt, tool call, tool result, subagent start and
 finish. Each hook posts the event to the runtime process and blocks the
 action unless the process answers yes. The hooks fail closed: while the
 process is down, every action in a gated session is blocked — silence
-never means yes.
+never means yes. A subagent started with the `Agent` tool runs as a
+child of the session: its own tool calls are gated, and its final
+message is checked — and rewritten or withheld — where the parent
+receives it, in the `Agent` tool's result.
 
 ## What is here
 
@@ -25,7 +28,8 @@ never means yes.
   `claude plugin marketplace add` points at this directory.
 - `examples/claude-code.appa.toml` — a complete starting policy: every
   built-in Claude Code tool released with the neutral annotation, web
-  tool results marked suspicious.
+  tool results marked suspicious, subagents run as children of the
+  session and background subagents refused.
 - `examples/claude-code-hitl.appa.toml` — the same plus GitHub MCP
   tools, with issue writes requiring a human sign-off served over MCP
   elicitation.

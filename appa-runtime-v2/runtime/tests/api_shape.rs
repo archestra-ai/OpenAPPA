@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use appa_runtime_api::{
-    Actor, Codec, HookDecision, HookEvent, OutcomeBody, ParseRefusal, ProposedCall, SpawnBinding, ToolOutcome,
-    TrajectoryId,
+    Actor, Codec, HookDecision, HookEvent, OutcomeBody, ParseRefusal, ProposedCall, SpawnBinding, SpawnRef,
+    ToolOutcome, TrajectoryId,
 };
 use appa_runtime_v2::api::{
     AuditEvent, AuditLabel, DispatchOutcome, OfferId, OpenError, RemedyOutcome, Runtime, TrajectoryStatus,
@@ -56,21 +56,32 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
         } => {
             let _: ToolOutcome = outcome;
         }
-        HookEvent::ChildStart {
-            root: _,
-            parent,
-            child,
-            spawn,
-        } => {
-            let _: TrajectoryId = parent;
+        HookEvent::ChildStart { root, child, spawn } => {
+            let _: TrajectoryId = root;
             let _: TrajectoryId = child;
-            let _: Option<SpawnBinding> = spawn;
+            match spawn {
+                SpawnRef::Binding(binding) => {
+                    let _: SpawnBinding = binding;
+                }
+                SpawnRef::InFlight => {}
+            }
         }
         HookEvent::ChildEnd {
             root: _,
             child: _,
             value,
         } => {
+            let _: Option<String> = value;
+        }
+        HookEvent::SpawnResult {
+            actor: _,
+            call: _,
+            outcome,
+            child,
+            value,
+        } => {
+            let _: ToolOutcome = outcome;
+            let _: Option<TrajectoryId> = child;
             let _: Option<String> = value;
         }
     }
@@ -188,7 +199,7 @@ async fn the_declared_remedy_entry(runtime: &Runtime, offer: OfferId) {
 fn the_declared_codec() {
     let codec: Codec = appa_adapter_claude_code::codec();
     let _: fn(&[u8]) -> Result<Option<HookEvent>, ParseRefusal> = codec.parse;
-    let _: fn(&HookDecision) -> serde_json::Value = codec.render;
+    let _: fn(&HookEvent, &HookDecision) -> serde_json::Value = codec.render;
 }
 
 #[test]

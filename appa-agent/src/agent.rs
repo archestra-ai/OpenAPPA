@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use appa_runtime_api::{
-    Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId,
+    Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
 };
 use appa_runtime_v2::api::{OfferId, RemedyOutcome, Runtime};
 use appa_runtime_v2::hooks;
@@ -417,9 +417,8 @@ impl Run<'_> {
         let child = TrajectoryId(format!("{}:c{}", self.root.0, self.budget.forks()));
         let event = HookEvent::ChildStart {
             root: self.root.clone(),
-            parent: frame.id.clone(),
             child: child.clone(),
-            spawn: Some(binding),
+            spawn: SpawnRef::Binding(binding),
         };
         self.expect_ack(event).await?;
         Ok(Answered::Spawned { child, call, errand })

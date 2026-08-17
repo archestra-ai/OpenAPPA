@@ -74,6 +74,15 @@ pub enum OpeningTransitionRefusal {
     VectorMismatch,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ForkStatus {
+    Unprepared,
+    Prepared,
+    Bound(TrajectoryId),
+    Failed,
+    ParentEnded,
+}
+
 /// The pure decision core, owning its static capability: the immutable registry (which carries
 /// the validated deployment profile), the deployment's immutable child-return binding, and the
 /// policy identity the durable opening binds.
@@ -312,6 +321,48 @@ impl Engine {
     /// The fork one child was bound to, or `None` for a trajectory that never forked.
     pub fn fork_of(&self, view: &EngineView, child: &TrajectoryId) -> Option<crate::value::ForkId> {
         view.views(child).fork_of(child).cloned()
+    }
+
+    /// Where one fork stands: never prepared, prepared and open for binding,
+    /// bound to a child, or unbindable because its spawn failed or its parent ended before any
+    /// child bound.
+    pub fn fork_status(&self, view: &EngineView, fork: &ForkId) -> ForkStatus {
+        let projection = view.projection();
+        let Some(prepared) = projection.prepared_fork(fork) else {
+            return ForkStatus::Unprepared;
+        };
+        if let Some(child) = projection.bound_child(fork) {
+            return ForkStatus::Bound(child.clone());
+        }
+        let parent = projection.view(&prepared.parent);
+        if parent.dispatch_failed(fork.dispatch()) {
+            return ForkStatus::Failed;
+        }
+        if parent.has_ended(&prepared.parent) {
+            return ForkStatus::ParentEnded;
+        }
+        ForkStatus::Prepared
+    }
+
+    /// The family's forks in flight: prepared, bound to no child yet, their
+    /// spawn dispatch still open, and their parent still live — the spawns whose child the host
+    /// may still name. A fork whose parent ended with the spawn dispatch open can
+    /// never bind, so it is not in flight, and it does not stand in the way of a later
+    /// spawn.
+    pub fn forks_in_flight(&self, view: &EngineView) -> Vec<ForkId> {
+        let projection = view.projection();
+        projection
+            .prepared_forks()
+            .filter(|fork| projection.bound_child(fork).is_none() && projection.is_dispatch_open(fork.dispatch()))
+            .filter(|fork| {
+                let parent = &projection
+                    .prepared_fork(fork)
+                    .expect("prepared_forks enumerates only prepared forks")
+                    .parent;
+                !projection.view(parent).has_ended(parent)
+            })
+            .cloned()
+            .collect()
     }
 
     fn decide_binding(&self, view: &EngineView, binding: &ForkBinding) -> Result<EngineDecision, TransitionError> {

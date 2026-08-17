@@ -8,6 +8,7 @@ use appa_engine::check::UnestablishedFact;
 use appa_engine::contract::{
     AudienceRequirement, DynamicAudienceBinding, PinnedDynamicResolution, RecipientSpec, ToolContract,
 };
+pub(crate) use appa_engine::engine::ForkStatus;
 use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
 use appa_engine::fact::{BoundaryKind, CloseOutcome, EffectSet, Fact, ReturnDerivation};
@@ -212,6 +213,8 @@ pub enum EngineRefusal {
     DispatchClosed,
     #[error("the offer is not one this family carries")]
     UnknownOffer,
+    #[error("the fork and the child are already bound elsewhere")]
+    Unbindable,
 }
 
 /// The engine's derived working picture of one family log, scoped to the
@@ -563,6 +566,31 @@ impl EngineSeam {
                 audience: String::new(),
             }),
         }
+    }
+
+    /// Where one fork stands in the rebuilt view: a
+    /// projection read on the real compiled engine in both modes,
+    /// because what it reads is the log itself. The runtime uses it to find
+    /// the family's forks still open for binding, and the child a spawn's fork
+    /// was bound to when that spawn's result arrives.
+    pub fn fork_status(&self, policy: &PolicyEngine<'_>, view: &EngineView, fork: &ForkId) -> ForkStatus {
+        policy.engine().engine.fork_status(&view.view, fork)
+    }
+
+    /// The family's forks in flight: prepared, bound to
+    /// no child, their spawn dispatch still open. A projection read
+    /// on the real compiled engine in both modes; the runtime binds a child
+    /// start that names no spawn to the one fork here.
+    pub fn forks_in_flight(&self, policy: &PolicyEngine<'_>, view: &EngineView) -> Vec<ForkId> {
+        policy.engine().engine.forks_in_flight(&view.view)
+    }
+
+    /// The fork one child was bound to, or `None` for a trajectory
+    /// the family never forked. A projection read on the real
+    /// compiled engine in both modes, for a child start the harness delivers
+    /// again: it names the fork it already bound.
+    pub fn fork_of(&self, policy: &PolicyEngine<'_>, view: &EngineView, child: &TrajectoryId) -> Option<ForkId> {
+        policy.engine().engine.fork_of(&view.view, &engine_id(child))
     }
 
     /// Render the family's recorded decisions from its persisted log. Like
@@ -1613,8 +1641,11 @@ fn offer_refusal(error: TransitionError) -> EngineRefusal {
 }
 
 fn bind_refusal(error: TransitionError) -> EngineRefusal {
-    EngineRefusal::Invariant {
-        detail: format!("binding a fork: {error}"),
+    match error {
+        TransitionError::UnbindableFork | TransitionError::ChildAlreadyUsed => EngineRefusal::Unbindable,
+        error => EngineRefusal::Invariant {
+            detail: format!("binding a fork: {error}"),
+        },
     }
 }
 
