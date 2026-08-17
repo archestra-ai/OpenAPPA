@@ -11,7 +11,14 @@ policy the deployment cannot honor refuses to start. Every decision is
 persisted as engine facts in the SQLite log, and a reopened database
 re-validates its persisted log before it is trusted.
 
-## Quickstart
+## Install a release
+
+The [Claude Code integration guide](../integrations/claude-code/README.md)
+provides verified installers for Linux, macOS, and Windows. The
+installers configure login startup and preserve an existing policy and
+database during updates.
+
+## Development quickstart
 
 ### 1. Build
 

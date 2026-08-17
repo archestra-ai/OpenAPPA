@@ -11,6 +11,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use axum::extract::State;
+use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::routing::{get, post};
 use clap::Parser;
 
@@ -58,6 +59,9 @@ struct Args {
 
     #[arg(short, action = clap::ArgAction::Count)]
     verbose: u8,
+
+    #[arg(long, env = "APPA_INSTANCE_ID", hide = true)]
+    instance_id: Option<String>,
 }
 
 fn require_loopback(addr: &SocketAddr) -> Result<(), String> {
@@ -137,6 +141,7 @@ struct AppState {
     codec: Codec,
     config: PathBuf,
     adapter: Adapter,
+    instance_id: Option<HeaderValue>,
 }
 
 async fn hook(
@@ -148,8 +153,26 @@ async fn hook(
     (status, axum::Json(body))
 }
 
-async fn health() -> &'static str {
-    "ok"
+fn instance_id_header(value: Option<&str>) -> Result<Option<HeaderValue>, &'static str> {
+    match value {
+        Some(value) if value.is_empty() || value.len() > 128 => Err("must contain 1 to 128 bytes"),
+        Some(value) => HeaderValue::try_from(value)
+            .map(Some)
+            .map_err(|_| "is not a valid HTTP header value"),
+        None => Ok(None),
+    }
+}
+
+fn health_headers(instance_id: Option<HeaderValue>) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if let Some(instance_id) = instance_id {
+        headers.insert(HeaderName::from_static("x-appa-instance-id"), instance_id);
+    }
+    headers
+}
+
+async fn health(State(state): State<AppState>) -> (HeaderMap, &'static str) {
+    (health_headers(state.instance_id), "ok")
 }
 
 async fn reload(State(state): State<AppState>) -> Result<axum::Json<Reloaded>, (axum::http::StatusCode, String)> {
@@ -197,6 +220,13 @@ async fn main() -> ExitCode {
         eprintln!("appa-runtime-v2: {refusal}");
         return ExitCode::FAILURE;
     }
+    let instance_id = match instance_id_header(args.instance_id.as_deref()) {
+        Ok(instance_id) => instance_id,
+        Err(refusal) => {
+            eprintln!("appa-runtime-v2: --instance-id {refusal}");
+            return ExitCode::FAILURE;
+        }
+    };
     match ensure_default_config(&args.config) {
         Ok(true) => tracing::info!(path = %args.config.display(), "created default configuration"),
         Ok(false) => {}
@@ -229,6 +259,7 @@ async fn main() -> ExitCode {
         codec: args.adapter.codec(),
         config: args.config,
         adapter: args.adapter,
+        instance_id,
     };
     let app = axum::Router::new()
         .route("/health", get(health))
@@ -321,5 +352,19 @@ mod tests {
         assert_eq!(log_level(0), "info");
         assert_eq!(log_level(1), "debug");
         assert_eq!(log_level(2), "trace");
+    }
+
+    #[test]
+    fn health_echoes_only_a_valid_installer_instance_id() {
+        let instance_id = instance_id_header(Some("installer-123"))
+            .expect("valid instance id")
+            .expect("present instance id");
+        let headers = health_headers(Some(instance_id));
+        assert_eq!(headers["x-appa-instance-id"], "installer-123");
+
+        assert!(health_headers(None).get("x-appa-instance-id").is_none());
+        assert!(instance_id_header(Some("")).is_err());
+        assert!(instance_id_header(Some("invalid\r\nheader")).is_err());
+        assert!(instance_id_header(Some(&"x".repeat(129))).is_err());
     }
 }

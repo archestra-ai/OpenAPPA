@@ -4,6 +4,7 @@
   "changelog-type": "default",
   "pull-request-footer": "",
   "include-v-in-tag": true,
+  "separate-pull-requests": true,
   "changelog-sections": [
     {
       "section": "Features",
@@ -36,9 +37,24 @@
       "hidden": true
     },
     {
+      "section": "Code Refactoring",
+      "type": "refactor",
+      "hidden": false
+    },
+    {
+      "section": "Reverts",
+      "type": "revert",
+      "hidden": false
+    },
+    {
       "section": "Tests",
       "type": "test",
       "hidden": true
+    },
+    {
+      "section": "Miscellaneous Chores",
+      "type": "chore",
+      "hidden": false
     },
     {
       "section": "Other",

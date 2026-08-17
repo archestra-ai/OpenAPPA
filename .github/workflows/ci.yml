@@ -13,6 +13,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  installer-checks:
+    name: Installer Checks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-15
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check Unix installer syntax
+        if: runner.os != 'Windows'
+        run: sh -n install.sh .github/scripts/test-install.sh
+
+      - name: Lint Unix installer
+        if: runner.os == 'Linux'
+        run: shellcheck install.sh .github/scripts/test-install.sh
+
+      - name: Test Unix installer
+        if: runner.os != 'Windows'
+        run: sh .github/scripts/test-install.sh
+
+      - name: Test Windows installer
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: .github/scripts/test-install.ps1
+
   rust-checks:
     name: Rust Checks
     runs-on: ubuntu-latest

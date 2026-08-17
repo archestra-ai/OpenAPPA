@@ -1,0 +1,43 @@
+name: PR Title Linter
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+  merge_group:
+
+permissions: {}
+
+concurrency:
+  group: "pr-title-linter-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  lint-pr-title:
+    name: PR Title Linter
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # Required to check out the commitlint configuration.
+      pull-requests: read # Required to read the pull request title.
+    steps:
+      - name: Pass for merge queue
+        if: ${{ github.event_name == 'merge_group' }}
+        run: echo "PR title was already linted before entering the merge queue."
+
+      - name: Checkout project
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Lint PR title
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: grafana/shared-workflows/actions/lint-pr-title@70c40e5b6522c854a55334124545261cae3d4c73 # v1.2.4
+        with:
+          config-path: "${{ github.workspace }}/.github/commitlint.config.js"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

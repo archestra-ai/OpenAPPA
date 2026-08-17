@@ -33,7 +33,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-latest
+          - runner: ubuntu-22.04
             os: Linux
             arch: amd64
             target: x86_64-unknown-linux-gnu
@@ -92,6 +92,7 @@ jobs:
 
       - name: Build binary
         env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
           TARGET: ${{ matrix.target }}
         run: cargo build --release --locked --package appa-runtime-v2 --target "$TARGET"
 
@@ -105,6 +106,24 @@ jobs:
           actual_version=$("./target/${TARGET}/release/${EXECUTABLE}" --version)
           test "$actual_version" = "appa-runtime-v2 ${EXPECTED_VERSION}"
 
+      - name: Verify Linux glibc baseline
+        if: runner.os == 'Linux'
+        env:
+          EXECUTABLE: ${{ matrix.executable }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          max_glibc=$(readelf --version-info "target/${TARGET}/release/${EXECUTABLE}" \
+            | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' \
+            | sed 's/^GLIBC_//' \
+            | sort -Vu \
+            | tail -n 1)
+          test -n "$max_glibc"
+          highest=$(printf '%s\n' "$max_glibc" 2.34 | sort -V | tail -n 1)
+          if [ "$highest" != 2.34 ]; then
+            echo "::error::Linux binary requires glibc ${max_glibc}; maximum supported baseline is 2.34"
+            exit 1
+          fi
+
       - name: Stage package
         env:
           ASSET: ${{ matrix.asset }}
@@ -113,8 +132,10 @@ jobs:
         run: |
           mkdir -p "dist/${ASSET}"
           cp "target/${TARGET}/release/${EXECUTABLE}" "dist/${ASSET}/${EXECUTABLE}"
+          cp -R integrations/claude-code "dist/${ASSET}/claude-code"
           if [[ "$RUNNER_OS" != "Windows" ]]; then
             chmod 755 "dist/${ASSET}/${EXECUTABLE}"
+            chmod 755 "dist/${ASSET}/claude-code/plugin/statusline.sh"
           fi
 
       - name: Package Unix archive
@@ -152,6 +173,13 @@ jobs:
             if health="$(curl --fail --silent --max-time 1 http://127.0.0.1:8787/health 2>/dev/null)"; then
               test "$health" = "ok"
               test -s appa.toml
+              test -f claude-code/.claude-plugin/marketplace.json
+              test -f claude-code/plugin/.claude-plugin/plugin.json
+              test -f claude-code/plugin/.mcp.json
+              test -f claude-code/plugin/hooks/hooks.json
+              test -f claude-code/plugin/hooks/session-context.md
+              test -f claude-code/plugin/skills/appa-tool-sync/SKILL.md
+              test -x claude-code/plugin/statusline.sh
               exit 0
             fi
             kill -0 "$runtime_pid" 2>/dev/null || break
@@ -201,6 +229,24 @@ jobs:
             }
             if (-not (Test-Path (Join-Path $package "appa.toml"))) {
               throw "Extracted runtime did not create appa.toml"
+            }
+            if (-not (Test-Path (Join-Path $package "claude-code/.claude-plugin/marketplace.json"))) {
+              throw "Extracted package does not contain the Claude Code marketplace"
+            }
+            if (-not (Test-Path (Join-Path $package "claude-code/plugin/hooks/hooks.json"))) {
+              throw "Extracted package does not contain the Claude Code plugin"
+            }
+            if (-not (Test-Path (Join-Path $package "claude-code/plugin/.claude-plugin/plugin.json"))) {
+              throw "Extracted package does not contain the Claude Code plugin manifest"
+            }
+            if (-not (Test-Path (Join-Path $package "claude-code/plugin/.mcp.json"))) {
+              throw "Extracted package does not contain the Claude Code MCP configuration"
+            }
+            if (-not (Test-Path (Join-Path $package "claude-code/plugin/hooks/session-context.md"))) {
+              throw "Extracted package does not contain the Claude Code session context"
+            }
+            if (-not (Test-Path (Join-Path $package "claude-code/plugin/skills/appa-tool-sync/SKILL.md"))) {
+              throw "Extracted package does not contain the Claude Code tool-sync skill"
             }
           } finally {
             $process.Refresh()
