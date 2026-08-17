@@ -21,8 +21,7 @@ Environment overrides:
   APPA_DATA_DIR        Database and Claude plugin directory
   APPA_REPOSITORY      GitHub repository (default: archestra-ai/OpenAPPA)
   APPA_DOWNLOAD_BASE   Complete release-asset base URL
-  APPA_SKIP_SERVICE    Set to 1 to skip the startup service and health check
-  APPA_SKIP_LINGER     Set to 1 to keep the Linux service at login scope only
+  APPA_SKIP_SERVICE    Set to 1 to skip login startup and health verification
 EOF
 }
 
@@ -41,13 +40,10 @@ esac
 repository=${APPA_REPOSITORY:-archestra-ai/OpenAPPA}
 install_dir=${APPA_INSTALL_DIR:-"$HOME/.local/bin"}
 skip_service=${APPA_SKIP_SERVICE:-0}
-skip_linger=${APPA_SKIP_LINGER:-0}
 service_name=appa-runtime-v2.service
 launchd_label=ai.archestra.appa-runtime-v2
 [ "$skip_service" = 0 ] || [ "$skip_service" = 1 ] ||
   die "APPA_SKIP_SERVICE must be 0 or 1"
-[ "$skip_linger" = 0 ] || [ "$skip_linger" = 1 ] ||
-  die "APPA_SKIP_LINGER must be 0 or 1"
 
 case "$(uname -s)" in
   Linux)
@@ -494,6 +490,7 @@ configure_service() {
       cat >"$unit" <<EOF
 [Unit]
 Description=OpenAPPA flow runtime
+After=network-online.target
 
 [Service]
 Type=simple
@@ -571,25 +568,6 @@ EOF
       launchctl kickstart -k "$domain/$launchd_label"
       ;;
   esac
-}
-
-# A systemd user manager stops at the owner's last logout and starts at the
-# next login. Lingering keeps it alive, so the service starts at boot and
-# survives logout. The install still succeeds when the system refuses.
-linger=login
-enable_linger() {
-  if [ "$skip_service" = 1 ] || [ "$skip_linger" = 1 ] || [ "$platform" != linux ]; then
-    return
-  fi
-  command -v loginctl >/dev/null 2>&1 || return
-  user_name=$(id -un)
-  if loginctl show-user "$user_name" 2>/dev/null | grep -q '^Linger=yes$'; then
-    linger=boot
-    return
-  fi
-  if loginctl enable-linger "$user_name" >/dev/null 2>&1; then
-    linger=boot
-  fi
 }
 
 wait_for_runtime() {
@@ -691,7 +669,6 @@ if ! (configure_service && wait_for_runtime); then
   rollback_install
   exit 1
 fi
-enable_linger
 rm -f "$binary_old"
 rm -rf "$plugin_old"
 
@@ -704,19 +681,8 @@ printf 'Policy: %s\n' "$config_file"
 printf 'Database: %s\n' "$db_file"
 printf 'Claude plugin: %s\n' "$plugin_dir/plugin"
 if [ "$skip_service" = 1 ]; then
-  printf 'Startup skipped. Start manually:\n  "%s" --config "%s" --db "%s"\n' \
+  printf 'Login startup skipped. Start manually:\n  "%s" --config "%s" --db "%s"\n' \
     "$binary" "$config_file" "$db_file"
-elif [ "$platform" = linux ]; then
-  printf 'Startup: systemd user service %s, running in the background.\n' "$service_name"
-  if [ "$linger" = boot ]; then
-    printf 'The service starts at boot and keeps running after logout.\n'
-  else
-    printf 'The service starts at each login. It stops at your last logout.\n'
-    printf 'For boot startup, run: sudo loginctl enable-linger %s\n' "$(id -un)"
-  fi
-else
-  printf 'Startup: LaunchAgent %s, running in the background.\n' "$launchd_label"
-  printf 'The service starts at each login.\n'
 fi
 if command -v claude >/dev/null 2>&1; then
   printf 'Claude Code detected.\n'
