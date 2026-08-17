@@ -1,5 +1,5 @@
 {
-  "description": "Every hook posts its event to the appa-runtime-v2 process and prints the runtime's answer. curl --fail-with-body exits non-zero on a non-2xx answer and on a connection failure; plain curl exits 0 on server errors and would fail open. The trailing exit 2 makes every failure the blocking hook outcome: no answer from the runtime blocks the action. The 120-second deadline outlasts the runtime's own evidence round trips; a hook that still times out blocks, never passes.",
+  "description": "Every hook posts its event to the appa-runtime-v2 process and prints the runtime's answer. curl --fail-with-body exits non-zero on a non-2xx answer and on a connection failure; plain curl exits 0 on server errors and would fail open. The trailing exit 2 makes every failure the blocking hook outcome: no answer from the runtime blocks the action. The 120-second deadline outlasts the runtime's own evidence round trips; a hook that still times out blocks, never passes. SessionStart additionally prints session-context.md into the context: guidance for the model on how to act in a gated session. It is advice, not enforcement, so its failure does not block.",
   "hooks": {
     "SessionStart": [
       {
@@ -7,6 +7,10 @@
           {
             "type": "command",
             "command": "curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2"
+          },
+          {
+            "type": "command",
+            "command": "cat \"${CLAUDE_PLUGIN_ROOT}/hooks/session-context.md\""
           }
         ]
       }
