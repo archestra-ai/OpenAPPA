@@ -580,9 +580,14 @@ if [ "$skip_service" = 1 ]; then
     "$binary" "$config_file" "$db_file"
 fi
 if command -v claude >/dev/null 2>&1; then
-  printf 'Claude Code detected. Gate one session:\n  claude --plugin-dir "%s"\n' "$plugin_dir/plugin"
+  printf 'Claude Code detected.\n'
 else
-  printf 'Claude Code not found. After installing it, gate one session with:\n'
-  printf '  claude --plugin-dir "%s"\n' "$plugin_dir/plugin"
+  printf 'Claude Code not found. Install it before configuring a gated session.\n'
 fi
-printf 'Only sessions started with that --plugin-dir are gated.\n'
+printf 'Ask an ungated Claude Code session to configure OpenAPPA with:\n'
+printf '  settings overlay: %s/.claude/appa-session-settings.json\n' "$HOME"
+printf '  statusline: %s/statusline.sh\n' "$plugin_dir/plugin"
+printf '  plugin: %s\n' "$plugin_dir/plugin"
+printf 'Add a clappa alias that passes both --settings and --plugin-dir.\n'
+printf 'Only clappa sessions are gated. They block while the runtime service is down.\n'
+printf 'Start clappa and run /appa-tool-sync to declare installed MCP tools.\n'

@@ -5,6 +5,12 @@ hooks send every event to it, and the `execute_remedy_plan` MCP server
 lets the model pursue an offered remedy. Hooks fail closed — while the
 process is down, every action in a gated session is blocked.
 
+Release installers select platform hooks. Linux and macOS use the bundled
+POSIX commands. Native Windows uses `hooks/hook.ps1` to block failed prompt,
+tool-call, and successful tool-result admission. `statusline.sh` and
+`statusline.ps1` provide matching status displays without changing Claude's
+settings automatically.
+
 On session start the hooks also print `hooks/session-context.md` into
 the model's context: short guidance on how to act in a gated session
 (blocks are decisions, run a clear remedy plan without asking, explain

@@ -21,17 +21,61 @@ function Get-EnvironmentValue {
 }
 
 function Invoke-AppaTaskStop {
-    $task = Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue
+    param([string]$Name = $script:TaskName)
+
+    $task = Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
     if ($null -ne $task) {
-        Stop-ScheduledTask -TaskName $script:TaskName -ErrorAction Stop
+        Stop-ScheduledTask -TaskName $Name -ErrorAction Stop
+        $stopped = $false
         for ($attempt = 0; $attempt -lt 20; $attempt++) {
-            if ((Get-ScheduledTask -TaskName $script:TaskName).State -ne "Running") {
-                return
+            if ((Get-ScheduledTask -TaskName $Name).State -ne "Running") {
+                $stopped = $true
+                break
             }
             Start-Sleep -Milliseconds 100
         }
-        throw "Could not stop the installed Scheduled Task"
+        if (-not $stopped) {
+            throw "Could not stop the installed Scheduled Task"
+        }
     }
+    Stop-AppaRuntimeProcess
+}
+
+function Stop-AppaRuntimeProcess {
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
+
+    $runtimePids = @()
+    $runtimePid = 0
+    if ((Test-Path -LiteralPath $script:PidFile -PathType Leaf) -and
+        [int]::TryParse((Get-Content -LiteralPath $script:PidFile -Raw).Trim(), [ref]$runtimePid)) {
+        $pidProcess = Get-Process -Id $runtimePid -ErrorAction SilentlyContinue
+        if ($null -ne $pidProcess -and $pidProcess.Path -ieq $script:Binary) {
+            $runtimePids += $runtimePid
+        }
+    }
+    if ($runtimePids.Count -eq 0) {
+        $runtimePids = @(Get-CimInstance Win32_Process -Filter "Name = 'appa-runtime-v2.exe'" |
+            Where-Object { $_.ExecutablePath -ieq $script:Binary } |
+            Select-Object -ExpandProperty ProcessId)
+    }
+    foreach ($processId in $runtimePids) {
+        $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+        if ($null -ne $process -and $process.Path -ieq $script:Binary -and
+            $PSCmdlet.ShouldProcess("runtime process $processId", "Stop")) {
+            Stop-Process -Id $processId -Force -ErrorAction Stop
+            for ($attempt = 0; $attempt -lt 50; $attempt++) {
+                if ($null -eq (Get-Process -Id $processId -ErrorAction SilentlyContinue)) {
+                    break
+                }
+                Start-Sleep -Milliseconds 100
+            }
+            if ($null -ne (Get-Process -Id $processId -ErrorAction SilentlyContinue)) {
+                throw "Could not stop installed runtime process $processId"
+            }
+        }
+    }
+    Remove-Item -LiteralPath $script:PidFile -Force -ErrorAction SilentlyContinue
 }
 
 function Test-AppaPortInUse {
@@ -61,11 +105,18 @@ if ($skipServiceValue -notin @("0", "1")) {
     throw "APPA_SKIP_SERVICE must be 0 or 1"
 }
 $skipService = $skipServiceValue -eq "1"
-$script:TaskName = "appa-runtime-v2"
-$binary = Join-Path $installDir "appa-runtime-v2.exe"
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$script:CurrentUser = $identity.Name
+$script:CurrentSid = $identity.User.Value
+$script:TaskName = "appa-runtime-v2-$($script:CurrentSid)"
+$script:LegacyTaskName = "appa-runtime-v2"
+$script:Binary = Join-Path $installDir "appa-runtime-v2.exe"
+$binary = $script:Binary
 $configFile = Join-Path $configDir "appa.toml"
 $dbFile = Join-Path $dataDir "appa.db"
 $pluginDir = Join-Path $dataDir "claude-code"
+$launcher = Join-Path $dataDir "appa-runtime-v2.vbs"
+$script:PidFile = Join-Path $dataDir "appa-runtime-v2.pid"
 $instanceId = [Guid]::NewGuid().ToString("N")
 foreach ($directory in @($installDir, $configDir, $dataDir)) {
     $isDriveAbsolute = $directory -match '^[A-Za-z]:[\\/]'
@@ -76,9 +127,17 @@ foreach ($directory in @($installDir, $configDir, $dataDir)) {
 }
 
 if ($Uninstall) {
-    Invoke-AppaTaskStop
-    if ($null -ne (Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue)) {
-        Unregister-ScheduledTask -TaskName $script:TaskName -Confirm:$false -ErrorAction Stop
+    foreach ($taskName in @($script:TaskName, $script:LegacyTaskName)) {
+        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($null -eq $task) {
+            continue
+        }
+        $isOwned = $task.Principal.UserId -in @($script:CurrentUser, $script:CurrentSid)
+        if ($taskName -eq $script:LegacyTaskName -and -not $isOwned) {
+            continue
+        }
+        Invoke-AppaTaskStop -Name $taskName
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
     }
     if (Test-Path -LiteralPath $binary) {
         Remove-Item -LiteralPath $binary -Force -ErrorAction Stop
@@ -86,8 +145,13 @@ if ($Uninstall) {
     if (Test-Path -LiteralPath $pluginDir) {
         Remove-Item -LiteralPath $pluginDir -Recurse -Force -ErrorAction Stop
     }
+    if (Test-Path -LiteralPath $launcher) {
+        Remove-Item -LiteralPath $launcher -Force -ErrorAction Stop
+    }
+    Remove-Item -LiteralPath $script:PidFile -Force -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $binary) { throw "Could not remove $binary" }
     if (Test-Path -LiteralPath $pluginDir) { throw "Could not remove $pluginDir" }
+    if (Test-Path -LiteralPath $launcher) { throw "Could not remove $launcher" }
     Write-Output "Removed appa-runtime-v2 and Claude Code integration files."
     Write-Output "Preserved policy: $configFile"
     Write-Output "Preserved database: $dbFile"
@@ -147,6 +211,11 @@ $pluginInstalled = $false
 $oldTaskXml = $null
 $oldTaskWasRunning = $false
 $taskTouched = $false
+$legacyTaskXml = $null
+$legacyTaskWasRunning = $false
+$legacyTaskTouched = $false
+$oldLauncher = $null
+$launcherTouched = $false
 try {
     $script:UseGh = $false
     if (-not $downloadBaseOverride -and $null -ne (Get-Command gh -ErrorAction SilentlyContinue)) {
@@ -232,6 +301,15 @@ try {
     if (-not (Test-Path -LiteralPath (Join-Path $sourcePlugin "plugin\statusline.sh") -PathType Leaf)) {
         throw "$archive does not contain the Claude Code statusline"
     }
+    if (-not (Test-Path -LiteralPath (Join-Path $sourcePlugin "plugin\statusline.ps1") -PathType Leaf)) {
+        throw "$archive does not contain the Windows Claude Code statusline"
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $sourcePlugin "plugin\hooks\hooks.windows.json") -PathType Leaf)) {
+        throw "$archive does not contain the Windows Claude Code hooks"
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $sourcePlugin "plugin\hooks\hook.ps1") -PathType Leaf)) {
+        throw "$archive does not contain the Windows Claude Code hook adapter"
+    }
 
     $reportedVersion = (& $sourceBinary --version | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $reportedVersion -ne "appa-runtime-v2 $version") {
@@ -241,10 +319,22 @@ try {
     $supportsInstanceId = $LASTEXITCODE -eq 0
 
     if (-not $skipService) {
+        $legacyTask = Get-ScheduledTask -TaskName $script:LegacyTaskName -ErrorAction SilentlyContinue
+        if ($null -ne $legacyTask -and
+            $legacyTask.Principal.UserId -in @($script:CurrentUser, $script:CurrentSid)) {
+            $legacyTaskXml = Export-ScheduledTask -TaskName $script:LegacyTaskName
+            $legacyTaskWasRunning = $legacyTask.State -eq "Running"
+            $legacyTaskTouched = $true
+            Invoke-AppaTaskStop -Name $script:LegacyTaskName
+            Unregister-ScheduledTask -TaskName $script:LegacyTaskName -Confirm:$false -ErrorAction Stop
+        }
         $oldTask = Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue
         if ($null -ne $oldTask) {
             $oldTaskXml = Export-ScheduledTask -TaskName $script:TaskName
             $oldTaskWasRunning = $oldTask.State -eq "Running"
+        }
+        if (Test-Path -LiteralPath $launcher) {
+            $oldLauncher = Get-Content -LiteralPath $launcher -Raw
         }
         $taskTouched = $true
         Invoke-AppaTaskStop
@@ -265,6 +355,23 @@ try {
 
     Remove-Item -LiteralPath $pluginNew, $pluginOld -Recurse -Force -ErrorAction SilentlyContinue
     Copy-Item -LiteralPath $sourcePlugin -Destination $pluginNew -Recurse
+    Copy-Item -LiteralPath (Join-Path $pluginNew "plugin\hooks\hooks.windows.json") `
+        -Destination (Join-Path $pluginNew "plugin\hooks\hooks.json") -Force
+    $hookConfigPath = Join-Path $pluginNew "plugin\hooks\hooks.json"
+    $hookConfig = Get-Content -LiteralPath $hookConfigPath -Raw | ConvertFrom-Json
+    $powershellPath = (Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe").Replace('\', '/')
+    foreach ($event in $hookConfig.hooks.PSObject.Properties) {
+        foreach ($group in $event.Value) {
+            foreach ($handler in $group.hooks) {
+                if ($handler.type -eq "command" -and $handler.command -eq "powershell.exe") {
+                    $handler.command = $powershellPath
+                }
+            }
+        }
+    }
+    $hookJson = $hookConfig | ConvertTo-Json -Depth 10
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText($hookConfigPath, $hookJson, $utf8NoBom)
     if (Test-Path -LiteralPath $pluginDir) {
         Move-Item -LiteralPath $pluginDir -Destination $pluginOld
         $hadPlugin = $true
@@ -274,11 +381,36 @@ try {
 
     if (-not $skipService) {
         $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-        $arguments = "--config `"$configFile`" --db `"$dbFile`""
+        $runtimeCommand = "`"$binary`" --config `"$configFile`" --db `"$dbFile`""
         if ($supportsInstanceId) {
-            $arguments += " --instance-id `"$instanceId`""
+            $runtimeCommand += " --instance-id `"$instanceId`""
         }
-        $action = New-ScheduledTaskAction -Execute $binary -Argument $arguments -WorkingDirectory $dataDir
+        $vbsCommand = $runtimeCommand.Replace('"', '""')
+        $vbsPidFile = $script:PidFile.Replace('"', '""')
+        $launcherContent = @"
+Option Explicit
+Dim startupConfig, processConfig, processId, result, fileSystem, pidHandle, processes
+Set startupConfig = GetObject("winmgmts:{impersonationLevel=impersonate}!\\.\root\cimv2:Win32_ProcessStartup").SpawnInstance_
+startupConfig.ShowWindow = 0
+Set processConfig = GetObject("winmgmts:{impersonationLevel=impersonate}!\\.\root\cimv2:Win32_Process")
+result = processConfig.Create("$vbsCommand", Null, startupConfig, processId)
+If result <> 0 Then WScript.Quit result
+Set fileSystem = CreateObject("Scripting.FileSystemObject")
+Set pidHandle = fileSystem.CreateTextFile("$vbsPidFile", True)
+pidHandle.Write CStr(processId)
+pidHandle.Close
+Do
+  WScript.Sleep 1000
+  Set processes = GetObject("winmgmts:{impersonationLevel=impersonate}!\\.\root\cimv2").ExecQuery("SELECT ProcessId FROM Win32_Process WHERE ProcessId = " & processId)
+Loop While processes.Count > 0
+If fileSystem.FileExists("$vbsPidFile") Then fileSystem.DeleteFile "$vbsPidFile", True
+WScript.Quit 1
+"@
+        Set-Content -LiteralPath $launcher -Value $launcherContent -Encoding Unicode
+        $launcherTouched = $true
+        $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
+        $taskArguments = "//B //NoLogo `"$launcher`""
+        $action = New-ScheduledTaskAction -Execute $wscript -Argument $taskArguments -WorkingDirectory $dataDir
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
         $principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Limited
         $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew `
@@ -318,17 +450,34 @@ try {
     Write-Output "Runtime: $binary"
     Write-Output "Policy: $configFile"
     Write-Output "Database: $dbFile"
-    Write-Output "Claude plugin: $(Join-Path $pluginDir 'plugin')"
+    $installedPlugin = Join-Path $pluginDir "plugin"
+    $statusline = Join-Path $installedPlugin "statusline.ps1"
+    Write-Output "Claude plugin: $installedPlugin"
     if ($skipService) {
         Write-Output "Login startup skipped. Start manually:"
         Write-Output "  `"$binary`" --config `"$configFile`" --db `"$dbFile`""
     }
     if ($null -ne (Get-Command claude -ErrorAction SilentlyContinue)) {
-        Write-Output "Claude Code detected, but OpenAPPA hooks require a POSIX shell."
+        Write-Output "Claude Code detected. Native Windows hooks are installed."
     } else {
         Write-Output "Claude Code not found."
     }
-    Write-Output "For Claude Code gating on Windows, install OpenAPPA inside WSL."
+    $settingsFile = Join-Path $HOME ".claude\appa-session-settings.json"
+    $statuslinePath = $statusline.Replace('\', '/')
+    $statuslineCommand = "`"$powershellPath`" -NoProfile -ExecutionPolicy Bypass -File `"$statuslinePath`""
+    Write-Output "Create $settingsFile with:"
+    Write-Output (@{
+        statusLine = @{
+            type = "command"
+            command = $statuslineCommand
+        }
+    } | ConvertTo-Json -Depth 3)
+    $profileSettings = $settingsFile.Replace("'", "''")
+    $profilePlugin = $installedPlugin.Replace("'", "''")
+    Write-Output "Add this function to your PowerShell profile:"
+    Write-Output "  function clappa { claude --settings '$profileSettings' --plugin-dir '$profilePlugin' @args }"
+    Write-Output "Only clappa sessions are gated. They block while the runtime task is down."
+    Write-Output "Start clappa and run /appa-tool-sync to declare installed MCP tools."
 } catch {
     $installFailure = $_
     try {
@@ -353,10 +502,23 @@ try {
         if ($hadBinary -and (Test-Path -LiteralPath $binaryOld)) {
             Move-Item -LiteralPath $binaryOld -Destination $binary
         }
+        if ($launcherTouched) {
+            if ($null -eq $oldLauncher) {
+                Remove-Item -LiteralPath $launcher -Force -ErrorAction SilentlyContinue
+            } else {
+                Set-Content -LiteralPath $launcher -Value $oldLauncher -Encoding Unicode
+            }
+        }
         if ($taskTouched -and $null -ne $oldTaskXml) {
             Register-ScheduledTask -TaskName $script:TaskName -Xml $oldTaskXml -Force | Out-Null
             if ($oldTaskWasRunning) {
                 Start-ScheduledTask -TaskName $script:TaskName
+            }
+        }
+        if ($legacyTaskTouched -and $null -ne $legacyTaskXml) {
+            Register-ScheduledTask -TaskName $script:LegacyTaskName -Xml $legacyTaskXml -Force | Out-Null
+            if ($legacyTaskWasRunning) {
+                Start-ScheduledTask -TaskName $script:LegacyTaskName
             }
         }
     } catch {

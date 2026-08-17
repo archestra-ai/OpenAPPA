@@ -81,7 +81,7 @@ fi
 grep -F "permits HTTP only for an exact loopback host" "$tmp_dir/url.stderr" >/dev/null ||
   die "non-loopback plaintext URL did not produce the expected refusal"
 
-output=$(sh "$repository_root/install.sh")
+output=$(sh <"$repository_root/install.sh")
 printf '%s\n' "$output" | grep -F "Installed appa-runtime-v2 $version." >/dev/null ||
   die "installer did not report installed version"
 installed_binary=$APPA_INSTALL_DIR/appa-runtime-v2
@@ -110,7 +110,7 @@ grep -F "checksum mismatch for $archive" "$tmp_dir/tampered.stderr" >/dev/null |
 [ "$($installed_binary --version)" = "appa-runtime-v2 $version" ] ||
   die "failed update changed installed runtime"
 
-sh "$repository_root/install.sh" --uninstall >/dev/null
+sh -s -- --uninstall <"$repository_root/install.sh" >/dev/null
 [ ! -e "$installed_binary" ] || die "runtime survived uninstall"
 [ ! -e "$installed_plugin" ] || die "plugin survived uninstall"
 [ "$(cat "$APPA_CONFIG_DIR/appa.toml")" = "policy survives update" ] ||

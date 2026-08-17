@@ -7,6 +7,7 @@ $tempDir = Join-Path ([IO.Path]::GetTempPath()) "appa-installer-test-$([Guid]::N
 $releaseDir = Join-Path $tempDir "release"
 $packageDir = Join-Path $tempDir "package"
 $server = $null
+$taskName = "appa-runtime-v2-$([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)"
 
 try {
     New-Item -ItemType Directory -Path $releaseDir | Out-Null
@@ -30,12 +31,44 @@ try {
     $sourceBinary = Join-Path $packageDir "appa-runtime-v2.exe"
     $source = @"
 using System;
+using System.IO;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
 public static class Program {
     public static int Main(string[] args) {
-        if (args.Length == 1 && args[0] == "--version") {
+        if (Array.IndexOf(args, "--version") >= 0) {
             Console.WriteLine("appa-runtime-v2 $version");
+            return 0;
         }
-        return 0;
+        var instanceId = "";
+        for (var index = 0; index + 1 < args.Length; index++) {
+            if (args[index] == "--instance-id") {
+                instanceId = args[index + 1];
+            }
+        }
+        var listener = new TcpListener(IPAddress.Loopback, 8787);
+        listener.Start();
+        while (true) {
+            using (var client = listener.AcceptTcpClient())
+            using (var stream = client.GetStream())
+            using (var reader = new StreamReader(stream, Encoding.ASCII, false, 1024, true)) {
+                var requestLine = reader.ReadLine() ?? "";
+                string header;
+                do { header = reader.ReadLine(); } while (!String.IsNullOrEmpty(header));
+                var path = requestLine.Split(' ')[1];
+                var body = path.StartsWith("/status")
+                    ? "{\"trust\":\"high\",\"audience\":\"private\"}"
+                    : path == "/health" ? "ok" : "{}";
+                var bytes = Encoding.UTF8.GetBytes(body);
+                var response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" +
+                    "Content-Length: " + bytes.Length + "\r\n" +
+                    "X-Appa-Instance-Id: " + instanceId + "\r\nConnection: close\r\n\r\n";
+                var responseBytes = Encoding.ASCII.GetBytes(response);
+                stream.Write(responseBytes, 0, responseBytes.Length);
+                stream.Write(bytes, 0, bytes.Length);
+            }
+        }
     }
 }
 "@
@@ -43,10 +76,16 @@ public static class Program {
     "{}" | Set-Content -LiteralPath (Join-Path $packageDir "claude-code\.claude-plugin\marketplace.json")
     "{}" | Set-Content -LiteralPath (Join-Path $packageDir "claude-code\plugin\.claude-plugin\plugin.json")
     "{}" | Set-Content -LiteralPath (Join-Path $packageDir "claude-code\plugin\.mcp.json")
-    "{}" | Set-Content -LiteralPath (Join-Path $packageDir "claude-code\plugin\hooks\hooks.json")
+    '{"platform":"posix"}' | Set-Content -LiteralPath (Join-Path $packageDir "claude-code\plugin\hooks\hooks.json")
+    Copy-Item -LiteralPath (Join-Path $repositoryRoot "integrations\claude-code\plugin\hooks\hooks.windows.json") `
+        -Destination (Join-Path $packageDir "claude-code\plugin\hooks\hooks.windows.json")
+    Copy-Item -LiteralPath (Join-Path $repositoryRoot "integrations\claude-code\plugin\hooks\hook.ps1") `
+        -Destination (Join-Path $packageDir "claude-code\plugin\hooks\hook.ps1")
     "session context" | Set-Content -LiteralPath (Join-Path $packageDir "claude-code\plugin\hooks\session-context.md")
     "tool sync" | Set-Content -LiteralPath (Join-Path $packageDir "claude-code\plugin\skills\appa-tool-sync\SKILL.md")
     "#!/bin/sh`nexit 0" | Set-Content -LiteralPath (Join-Path $packageDir "claude-code\plugin\statusline.sh")
+    Copy-Item -LiteralPath (Join-Path $repositoryRoot "integrations\claude-code\plugin\statusline.ps1") `
+        -Destination (Join-Path $packageDir "claude-code\plugin\statusline.ps1")
 
     $archivePath = Join-Path $releaseDir $archive
     Compress-Archive -Path (Join-Path $packageDir "*") -DestinationPath $archivePath
@@ -70,11 +109,11 @@ public static class Program {
         }
     }
 
-    $env:APPA_INSTALL_DIR = Join-Path $tempDir "install\bin"
-    $env:APPA_CONFIG_DIR = Join-Path $tempDir "install\config"
-    $env:APPA_DATA_DIR = Join-Path $tempDir "install\data"
+    $env:APPA_INSTALL_DIR = Join-Path $tempDir "install files\bin"
+    $env:APPA_CONFIG_DIR = Join-Path $tempDir "install files\config"
+    $env:APPA_DATA_DIR = Join-Path $tempDir "install files\data"
     $env:APPA_DOWNLOAD_BASE = "http://127.0.0.1:$port"
-    $env:APPA_SKIP_SERVICE = "1"
+    $env:APPA_SKIP_SERVICE = "0"
 
     $validInstallDir = $env:APPA_INSTALL_DIR
     $env:APPA_INSTALL_DIR = "C:relative"
@@ -98,7 +137,19 @@ public static class Program {
         $env:APPA_DOWNLOAD_BASE = $validDownloadBase
     }
 
-    $output = (& $installer | Out-String)
+    $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $legacyAction = New-ScheduledTaskAction -Execute $env:ComSpec -Argument "/c exit 0"
+    $legacyTrigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
+    $legacyPrincipal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Limited
+    Register-ScheduledTask -TaskName "appa-runtime-v2" -Action $legacyAction -Trigger $legacyTrigger `
+        -Principal $legacyPrincipal -Force | Out-Null
+
+    $escapedInstaller = $installer.Replace("'", "''")
+    $output = (& powershell.exe -NoProfile -Command `
+        "Get-Content -LiteralPath '$escapedInstaller' -Raw | Invoke-Expression" | Out-String)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Streamed installer invocation failed"
+    }
     if (-not $output.Contains("Installed appa-runtime-v2 $version.")) {
         throw "Installer did not report installed version"
     }
@@ -117,6 +168,24 @@ public static class Program {
     if (-not (Test-Path -LiteralPath (Join-Path $installedPlugin "plugin\hooks\hooks.json"))) {
         throw "Plugin was not installed"
     }
+    $installedHookConfig = Get-Content -LiteralPath `
+        (Join-Path $installedPlugin "plugin\hooks\hooks.json") -Raw | ConvertFrom-Json
+    $hookConfigBytes = [IO.File]::ReadAllBytes((Join-Path $installedPlugin "plugin\hooks\hooks.json"))
+    if ($hookConfigBytes.Length -ge 3 -and $hookConfigBytes[0] -eq 0xEF -and
+        $hookConfigBytes[1] -eq 0xBB -and $hookConfigBytes[2] -eq 0xBF) {
+        throw "Installed hook configuration has a UTF-8 BOM"
+    }
+    $hookCommand = $installedHookConfig.hooks.PreToolUse[0].hooks[0].command
+    if (-not [IO.Path]::IsPathRooted($hookCommand) -or
+        [IO.Path]::GetFileName($hookCommand) -notmatch '^(powershell|pwsh)\.exe$') {
+        throw "Windows hook configuration was not selected"
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $installedPlugin "plugin\hooks\hook.ps1"))) {
+        throw "Windows hook adapter was not installed"
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $installedPlugin "plugin\statusline.ps1"))) {
+        throw "Windows statusline was not installed"
+    }
     if (-not (Test-Path -LiteralPath (Join-Path $installedPlugin "plugin\hooks\session-context.md"))) {
         throw "Session context was not installed"
     }
@@ -126,6 +195,63 @@ public static class Program {
     if ((& $installedBinary --version | Out-String).Trim() -ne "appa-runtime-v2 $version") {
         throw "Installed version is wrong"
     }
+    $installedTask = Get-ScheduledTask -TaskName $taskName
+    if ($null -ne (Get-ScheduledTask -TaskName "appa-runtime-v2" -ErrorAction SilentlyContinue)) {
+        throw "Legacy machine-global Scheduled Task was not migrated"
+    }
+    $taskAction = $installedTask.Actions[0]
+    if ($taskAction.Execute -notmatch 'wscript\.exe$' -or
+        $taskAction.Arguments -notlike '*appa-runtime-v2.vbs*') {
+        throw "Scheduled Task does not run the runtime through the windowless launcher"
+    }
+    if ($installedTask.Triggers[0].CimClass.CimClassName -ne "MSFT_TaskLogonTrigger") {
+        throw "Scheduled Task does not start at user login"
+    }
+    if ($installedTask.Principal.UserId -ne [Security.Principal.WindowsIdentity]::GetCurrent().Name) {
+        throw "Scheduled Task is not scoped to the current user principal"
+    }
+    $launcher = Join-Path $env:APPA_DATA_DIR "appa-runtime-v2.vbs"
+    $launcherContent = Get-Content -LiteralPath $launcher -Raw
+    if ($launcherContent -notmatch 'startupConfig\.ShowWindow = 0' -or
+        $launcherContent -notmatch 'processConfig\.Create') {
+        throw "Runtime launcher does not create a hidden process"
+    }
+    $pidFile = Join-Path $env:APPA_DATA_DIR "appa-runtime-v2.pid"
+    if (-not (Test-Path -LiteralPath $pidFile -PathType Leaf)) {
+        throw "Runtime launcher did not record the child process"
+    }
+    $env:APPA_RUNTIME_URL = "http://127.0.0.1:8787"
+    $hookScript = Join-Path $installedPlugin "plugin\hooks\hook.ps1"
+    $hookOutput = ('{"hook_event_name":"PreToolUse"}' |
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -File $hookScript | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $hookOutput -ne "{}") {
+        throw "Windows hook adapter did not relay the runtime response"
+    }
+    '{"hook_event_name":"PreToolUse"}' |
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -File $hookScript -SessionContext 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Windows session context hook failed"
+    }
+    $statuslineScript = Join-Path $installedPlugin "plugin\statusline.ps1"
+    $statuslineOutput = ('{"session_id":"fixture"}' |
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -File $statuslineScript | Out-String)
+    if (-not $statuslineOutput.Contains("trust:high  audience:private")) {
+        throw "Windows statusline did not render runtime status"
+    }
+    $env:APPA_RUNTIME_URL = "http://127.0.0.1:1"
+    '{"hook_event_name":"PreToolUse"}' |
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -File $hookScript 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 2) {
+        throw "Windows hook adapter did not fail closed while the runtime was down"
+    }
+    $postToolOutput = ('{"hook_event_name":"PostToolUse"}' |
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -File $hookScript 2>$null | Out-String).Trim() |
+        ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0 -or $postToolOutput.decision -ne "block" -or
+        -not $postToolOutput.hookSpecificOutput.updatedToolOutput) {
+        throw "Windows hook adapter did not block a tool result while the runtime was down"
+    }
+    $env:APPA_RUNTIME_URL = "http://127.0.0.1:8787"
 
     "policy survives update" | Set-Content -LiteralPath (Join-Path $env:APPA_CONFIG_DIR "appa.toml")
     "database survives update" | Set-Content -LiteralPath (Join-Path $env:APPA_DATA_DIR "appa.db")
@@ -153,9 +279,11 @@ public static class Program {
         throw "Failed update changed installed runtime"
     }
 
-    & $installer -Uninstall | Out-Null
+    & ([scriptblock]::Create((Get-Content -LiteralPath $installer -Raw))) -Uninstall | Out-Null
     if (Test-Path -LiteralPath $installedBinary) { throw "Runtime survived uninstall" }
     if (Test-Path -LiteralPath $installedPlugin) { throw "Plugin survived uninstall" }
+    if (Test-Path -LiteralPath $launcher) { throw "Runtime launcher survived uninstall" }
+    if (Test-Path -LiteralPath $pidFile) { throw "Runtime PID file survived uninstall" }
     if ((Get-Content -LiteralPath (Join-Path $env:APPA_CONFIG_DIR "appa.toml") -Raw).Trim() -ne "policy survives update") {
         throw "Uninstall removed policy"
     }
@@ -165,6 +293,12 @@ public static class Program {
 
     Write-Output "Windows installer tests passed."
 } finally {
+    foreach ($cleanupTask in @($taskName, "appa-runtime-v2")) {
+        if ($null -ne (Get-ScheduledTask -TaskName $cleanupTask -ErrorAction SilentlyContinue)) {
+            Stop-ScheduledTask -TaskName $cleanupTask -ErrorAction SilentlyContinue
+            Unregister-ScheduledTask -TaskName $cleanupTask -Confirm:$false -ErrorAction SilentlyContinue
+        }
+    }
     if ($null -ne $server -and -not $server.HasExited) {
         Stop-Process -Id $server.Id -Force
     }

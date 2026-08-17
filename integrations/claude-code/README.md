@@ -24,7 +24,7 @@ receives it, in the `Agent` tool's result.
   MCP server (`.mcp.json`), the `appa-tool-sync` skill (declares
   installed MCP tools in the running runtime's policy and marks which
   of them read private data or send data outward), and
-  `statusline.sh`.
+  `statusline.sh` plus `statusline.ps1`.
 - `.claude-plugin/marketplace.json` — the marketplace manifest;
   `claude plugin marketplace add` points at this directory.
 - `examples/claude-code.appa.toml` — a complete starting policy: every
@@ -44,23 +44,21 @@ runtime to start at login.
 
 ### Linux and macOS
 
-Download the installer from the latest release, inspect it, then run it:
+Install the latest release with one command. The same command selects the
+correct x86-64 or ARM64 archive:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSLO \
-  https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.sh
-sh install.sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.sh | sh
 ```
 
 Linux binaries require glibc 2.34 or newer. Alpine and other musl-only
 systems are not supported by these release assets.
 
-For a private repository, use an authenticated GitHub CLI. The
+For an access-controlled repository, use an authenticated GitHub CLI. The
 installer also uses this authentication for its release downloads:
 
 ```sh
-gh release download --repo archestra-ai/OpenAPPA --pattern install.sh --clobber
-sh install.sh
+gh release download --repo archestra-ai/OpenAPPA --pattern install.sh --output - | sh
 ```
 
 Linux uses a systemd user service. macOS uses a LaunchAgent. If the
@@ -68,29 +66,28 @@ login service cannot run in the current environment, install without it
 and start the printed command yourself:
 
 ```sh
-APPA_SKIP_SERVICE=1 sh install.sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.sh | APPA_SKIP_SERVICE=1 sh
 ```
 
 ### Windows
 
-The PowerShell installer installs the native Windows runtime and
-creates a current-user Scheduled Task:
+The PowerShell installer selects the x86-64 or ARM64 native Windows runtime
+and creates a current-user Scheduled Task:
 
 ```powershell
-Invoke-WebRequest `
-  https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.ps1 `
-  -OutFile install.ps1
-powershell -ExecutionPolicy Bypass -File .\install.ps1
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.ps1 | iex
 ```
 
-Use `gh release download --repo archestra-ai/OpenAPPA --pattern
-install.ps1 --clobber` before the second command for a private
-repository.
+For an access-controlled repository, use an authenticated GitHub CLI:
 
-The released Claude Code hooks call POSIX tools such as `curl` and
-`cat`. Native Windows runtime installation does not make those hooks
-Windows-compatible. Install OpenAPPA inside WSL to gate Claude Code on
-Windows.
+```powershell
+gh release download --repo archestra-ai/OpenAPPA --pattern install.ps1 --output - | iex
+```
+
+The Windows installer replaces the POSIX hook commands with a native
+PowerShell adapter. The adapter blocks prompt and tool authorization failures
+and blocks a successful tool result when the runtime cannot admit it. It also
+installs a PowerShell statusline.
 
 ### Installed files
 
@@ -111,46 +108,52 @@ when uninstalling.
 
 ## Gate a Claude Code session
 
-The installer prints the installed plugin path. Start Claude Code with
-that plugin directory. For Linux with default paths:
+The installer prints the installed plugin path. Keep normal `claude` sessions
+ungated and define a separate `clappa` command. For Linux, add this line to
+your shell configuration:
 
 ```sh
-claude --plugin-dir "$HOME/.local/share/appa/claude-code/plugin"
+alias clappa='claude --settings "$HOME/.claude/appa-session-settings.json" --plugin-dir "$HOME/.local/share/appa/claude-code/plugin"'
 ```
 
-For macOS with default paths:
+For macOS:
 
 ```sh
-claude --plugin-dir "$HOME/Library/Application Support/appa/claude-code/plugin"
+alias clappa='claude --settings "$HOME/.claude/appa-session-settings.json" --plugin-dir "$HOME/Library/Application Support/appa/claude-code/plugin"'
 ```
 
-Only sessions started with this flag are gated. A shell alias keeps the
-choice explicit. For example, Linux users can add this line to their
-shell configuration:
+For native Windows, add this function to your PowerShell profile. The
+installer prints the same command with exact paths when overrides are used:
+
+```powershell
+function clappa { claude --settings "$HOME/.claude/appa-session-settings.json" --plugin-dir "$env:LOCALAPPDATA/appa/claude-code/plugin" @args }
+```
+
+Only sessions started with `clappa` are gated. Check the runtime first:
 
 ```sh
-alias clappa='claude --plugin-dir "$HOME/.local/share/appa/claude-code/plugin"'
+curl -sS -m 2 http://127.0.0.1:8787/health
 ```
 
-Check the runtime before starting a gated session:
+The command must print `ok`. A gated session blocks every action while the
+runtime is unavailable. Installers run the process in the background and
+start it at each user login through systemd, launchd, or Windows Task
+Scheduler.
 
-```sh
-curl -fsS http://127.0.0.1:8787/health
-```
-
-The command must print `ok`. A gated session blocks every action while
-the runtime is unavailable. After startup, run `/appa-tool-sync` in the
-gated session. The plugin skill inventories installed MCP tools and
-proposes their policy entries for review.
-
-The default policy names Claude Code's built-in tools. APPA blocks an
-MCP tool until the policy names it.
+The default policy names only Claude Code's built-in tools. APPA blocks every
+installed MCP tool until the policy names it. Start `clappa` and run
+`/appa-tool-sync`. The skill exists only in gated sessions. It inventories MCP
+servers, proposes one policy entry per tool, and marks which tools read data
+that must stay in the session or send data outward. It asks once about servers
+it cannot judge. You review the complete proposal before it writes anything.
 
 For development from a source checkout, use the same `--plugin-dir`
-form with `integrations/claude-code/plugin`. Start the runtime with:
+form with `integrations/claude-code/plugin`. Copy the default policy before
+editing it, then keep the runtime running in the background:
 
 ```sh
-cargo run --bin appa-runtime-v2 -- --config appa.toml --db appa.db
+cp integrations/claude-code/examples/claude-code.appa.toml appa.toml
+nohup cargo run --bin appa-runtime-v2 -- --config appa.toml --db appa.db >appa-runtime.log 2>&1 &
 ```
 
 If the process listens on a port other than 8787, set
@@ -162,11 +165,11 @@ environment; the hooks and the MCP server both follow it.
 Run the same installer with its uninstall option:
 
 ```sh
-sh install.sh --uninstall
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.sh | sh -s -- --uninstall
 ```
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; & ([scriptblock]::Create((irm https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.ps1))) -Uninstall
 ```
 
 Uninstall stops and removes login startup. It removes the runtime and
@@ -181,9 +184,9 @@ uninstall from a plain terminal or ungated Claude Code session.
 Claude Code reads `statusLine` only from your own settings — a plugin
 cannot set it. The script shows the APPA pixel mascot plus the
 session's current Trust and Audience, read from the process's
-`GET /status`. It needs `jq` and `curl` and fails open: runtime down,
-session not gated, or tools missing all print the mascot alone, never
-a blocked action.
+`GET /status`. Both platform scripts fail open: runtime down, session
+not gated, or malformed input prints the mascot alone, never a blocked
+action. The POSIX script also needs `jq` and `curl`.
 
 To set it without delegating to Claude, write this to the overlay file
 the alias loads (`~/.claude/appa-session-settings.json`). Point it at
@@ -193,7 +196,19 @@ the installed plugin or a source checkout:
 {
   "statusLine": {
     "type": "command",
-    "command": "/path/to/OpenAPPA/integrations/claude-code/plugin/statusline.sh"
+    "command": "/home/you/.local/share/appa/claude-code/plugin/statusline.sh"
+  }
+}
+```
+
+On native Windows, use the installed PowerShell script and forward slashes in
+its absolute path. The installer prints the exact JSON for your installation:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "\"C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File \"C:/Users/you/AppData/Local/appa/claude-code/plugin/statusline.ps1\""
   }
 }
 ```
@@ -204,9 +219,9 @@ name. Merge the same block into `~/.claude/settings.json` instead if
 you want the mascot in every session; it fails open, so ungated
 sessions just show the mascot alone.
 
-To keep an existing statusline (for example claude-powerline) and add
-the APPA rows beneath it, run both and tee stdin. Pin the exact version
-you vetted — `@latest` would fetch and run new third-party code on
+On POSIX systems, keep an existing statusline such as claude-powerline and add
+the APPA rows beneath it by running both and teeing stdin. Pin the exact
+version you vetted. `@latest` would fetch and run new third-party code on
 every statusline refresh:
 
 ```json

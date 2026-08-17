@@ -245,6 +245,15 @@ jobs:
             if (-not (Test-Path (Join-Path $package "claude-code/plugin/hooks/session-context.md"))) {
               throw "Extracted package does not contain the Claude Code session context"
             }
+            if (-not (Test-Path (Join-Path $package "claude-code/plugin/hooks/hooks.windows.json"))) {
+              throw "Extracted package does not contain the Windows Claude Code hooks"
+            }
+            if (-not (Test-Path (Join-Path $package "claude-code/plugin/hooks/hook.ps1"))) {
+              throw "Extracted package does not contain the Windows Claude Code hook adapter"
+            }
+            if (-not (Test-Path (Join-Path $package "claude-code/plugin/statusline.ps1"))) {
+              throw "Extracted package does not contain the Windows Claude Code statusline"
+            }
             if (-not (Test-Path (Join-Path $package "claude-code/plugin/skills/appa-tool-sync/SKILL.md"))) {
               throw "Extracted package does not contain the Claude Code tool-sync skill"
             }
