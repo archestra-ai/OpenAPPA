@@ -564,8 +564,11 @@ WScript.Quit 1
     $statusline = Join-Path $installedPlugin "statusline.ps1"
     Write-Output "Claude plugin: $installedPlugin"
     if ($skipService) {
-        Write-Output "Login startup skipped. Start manually:"
+        Write-Output "Startup skipped. Start manually:"
         Write-Output "  `"$binary`" --config `"$configFile`" --db `"$dbFile`""
+    } else {
+        Write-Output "Startup: Scheduled Task $($script:TaskName), running in the background."
+        Write-Output "The task starts at each login. It runs without a console window."
     }
     if ($null -ne (Get-Command claude -ErrorAction SilentlyContinue)) {
         Write-Output "Claude Code detected. Native Windows hooks are installed."

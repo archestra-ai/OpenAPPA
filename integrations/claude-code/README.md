@@ -39,8 +39,10 @@ receives it, in the `Agent` tool's result.
 
 Release installers select the binary for the current operating system
 and architecture. They verify its SHA-256 checksum before installation.
-They also install the matching Claude Code plugin and configure the
-runtime to start at login.
+They also install the matching Claude Code plugin and register the
+runtime with the system startup manager. The runtime then runs as a
+background service under that manager: it holds no terminal, it needs no
+shell, and the manager restarts it when it fails.
 
 An installer never replaces an installation it did not just create. When
 the runtime is already installed, it prints the installed version beside
@@ -65,9 +67,18 @@ If you download `install.sh` first, run `sh install.sh`. HTTP downloads do
 not preserve its executable bit, so `./install.sh` can report
 `permission denied`.
 
-Linux uses a systemd user service. macOS uses a LaunchAgent. If the
-login service cannot run in the current environment, install without it
-and start the printed command yourself:
+Linux uses a systemd user service, enabled into `default.target`. The
+installer also asks `logind` to keep your user manager alive, so the
+service starts at boot and survives logout. Set `APPA_SKIP_LINGER=1` to
+keep it at login scope instead. When the system refuses the request, the
+installer prints the `loginctl enable-linger` command to run with `sudo`.
+
+macOS uses a LaunchAgent with `RunAtLoad`. It starts at each login. A
+per-user LaunchAgent has no boot-time equivalent; the runtime owns
+per-user state, so the installer does not create a system LaunchDaemon.
+
+If the startup service cannot run in the current environment, install
+without it and start the printed command yourself:
 
 ```sh
 curl -fsSL https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.sh | APPA_SKIP_SERVICE=1 sh
@@ -76,7 +87,9 @@ curl -fsSL https://github.com/archestra-ai/OpenAPPA/releases/latest/download/ins
 ### Windows
 
 The PowerShell installer selects the x86-64 or ARM64 native Windows runtime
-and creates a current-user Scheduled Task:
+and creates a current-user Scheduled Task that starts at logon. The task
+starts the runtime through a windowless launcher, so it runs with no
+console window and no shell:
 
 ```powershell
 irm https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.ps1 | iex
@@ -105,7 +118,9 @@ replace the policy or database.
 Set `APPA_VERSION` to install one release instead of the latest release.
 Set `APPA_INSTALL_DIR`, `APPA_CONFIG_DIR`, or `APPA_DATA_DIR` before
 running an installer to change these locations. Use the same overrides
-when uninstalling.
+when uninstalling. Set `APPA_SKIP_SERVICE=1` to install without the
+startup service, or `APPA_SKIP_LINGER=1` to keep the Linux service at
+login scope.
 
 ## Gate a Claude Code session
 
@@ -137,9 +152,10 @@ curl -sS -m 2 http://127.0.0.1:8787/health
 ```
 
 The command must print `ok`. A gated session blocks every action while the
-runtime is unavailable. Installers run the process in the background and
-start it at each user login through systemd, launchd, or Windows Task
-Scheduler.
+runtime is unavailable. Installers register the runtime with systemd,
+launchd, or Windows Task Scheduler. That manager starts it in the
+background — at boot on Linux with lingering enabled, and at each login
+otherwise.
 
 The default policy names only Claude Code's built-in tools. APPA blocks every
 installed MCP tool until the policy names it. Start `clappa` and run
@@ -190,9 +206,12 @@ curl -fsSL https://github.com/archestra-ai/OpenAPPA/releases/latest/download/ins
 & ([scriptblock]::Create((irm https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.ps1))) -Uninstall
 ```
 
-Uninstall stops and removes login startup. It removes the runtime and
-installed plugin files. It preserves the policy and database. Remove a
-`clappa` alias or statusline overlay separately if you created one.
+Uninstall stops the service and removes its startup registration. It
+removes the runtime and installed plugin files. It preserves the policy
+and database. On Linux it leaves lingering enabled, because other user
+services can depend on it; run `loginctl disable-linger` to undo it.
+Remove a `clappa` alias or statusline overlay separately if you created
+one.
 
 If a gated session is blocked because the runtime is not running, run
 uninstall from a plain terminal or ungated Claude Code session.

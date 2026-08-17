@@ -153,6 +153,9 @@ public static class Program {
     if (-not $output.Contains("Installed appa-runtime-v2 $version.")) {
         throw "Installer did not report installed version"
     }
+    if (-not $output.Contains("running in the background")) {
+        throw "Installer did not report background startup"
+    }
     $installedBinary = Join-Path $env:APPA_INSTALL_DIR "appa-runtime-v2.exe"
     $installedPlugin = Join-Path $env:APPA_DATA_DIR "claude-code"
     if (-not (Test-Path -LiteralPath $installedBinary -PathType Leaf)) { throw "Runtime was not installed" }

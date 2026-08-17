@@ -60,6 +60,7 @@ fi
 checksum=${checksum%% *}
 printf '%s  %s\n' "$checksum" "$archive" >"$release_dir/SHA256SUMS"
 
+real_home=$HOME
 export HOME="$tmp_dir/home"
 export APPA_INSTALL_DIR="$tmp_dir/install/bin"
 export APPA_CONFIG_DIR="$tmp_dir/install/config"
@@ -146,4 +147,172 @@ sh -s -- --uninstall <"$repository_root/install.sh" >/dev/null
 [ "$(cat "$APPA_DATA_DIR/appa.db")" = "database survives update" ] ||
   die "uninstall removed database"
 
+# Startup registration. The phases above skip the service so they can run
+# anywhere; this one installs the real login service, so it needs the
+# platform supervisor and it writes into the tester's own home directory.
+service_name=appa-runtime-v2.service
+launchd_label=ai.archestra.appa-runtime-v2
+export HOME="$real_home"
+unit=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$service_name
+plist=$HOME/Library/LaunchAgents/$launchd_label.plist
+
+skip_service_test() {
+  printf 'Skipped the startup registration test: %s\n' "$*"
+  printf 'Unix installer tests passed.\n'
+  exit 0
+}
+
+command -v python3 >/dev/null 2>&1 || skip_service_test "python3 is missing"
+case "$target_os" in
+  unknown-linux-gnu)
+    if ! command -v systemctl >/dev/null 2>&1; then
+      skip_service_test "systemctl is missing"
+    fi
+    if ! systemctl --user show-environment >/dev/null 2>&1; then
+      skip_service_test "no systemd user manager"
+    fi
+    [ ! -e "$unit" ] || skip_service_test "$unit already exists"
+    ;;
+  apple-darwin)
+    if ! command -v launchctl >/dev/null 2>&1; then
+      skip_service_test "launchctl is missing"
+    fi
+    if ! launchctl print "gui/$(id -u)" >/dev/null 2>&1; then
+      skip_service_test "no launchd GUI domain"
+    fi
+    [ ! -e "$plist" ] || skip_service_test "$plist already exists"
+    ;;
+esac
+if curl --silent --max-time 1 http://127.0.0.1:8787/health >/dev/null 2>&1; then
+  skip_service_test "port 8787 is in use"
+fi
+
+service_release=$tmp_dir/service-release
+service_package=$tmp_dir/service-package
+mkdir -p "$service_release" "$service_package/claude-code/.claude-plugin" \
+  "$service_package/claude-code/plugin/.claude-plugin" \
+  "$service_package/claude-code/plugin/hooks" \
+  "$service_package/claude-code/plugin/skills/appa-tool-sync"
+cp -R "$package_dir/claude-code/." "$service_package/claude-code/"
+cat >"$service_package/appa-runtime-v2" <<EOF
+#!/usr/bin/env python3
+"""A stub runtime: it reports its version and serves the health endpoint."""
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+arguments = sys.argv[1:]
+if "--version" in arguments:
+    print("appa-runtime-v2 $version")
+    raise SystemExit(0)
+
+instance_id = ""
+for position, argument in enumerate(arguments):
+    if argument == "--instance-id" and position + 1 < len(arguments):
+        instance_id = arguments[position + 1]
+
+class Health(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b"ok" if self.path == "/health" else b"{}"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Appa-Instance-Id", instance_id)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *arguments):
+        pass
+
+HTTPServer(("127.0.0.1", 8787), Health).serve_forever()
+EOF
+chmod 755 "$service_package/appa-runtime-v2"
+tar -C "$service_package" -czf "$service_release/$archive" .
+printf '%s\n' "$version" >"$service_release/version.txt"
+if command -v sha256sum >/dev/null 2>&1; then
+  service_checksum=$(sha256sum "$service_release/$archive")
+else
+  service_checksum=$(shasum -a 256 "$service_release/$archive")
+fi
+service_checksum=${service_checksum%% *}
+printf '%s  %s\n' "$service_checksum" "$archive" >"$service_release/SHA256SUMS"
+
+export APPA_DOWNLOAD_BASE="file://$service_release"
+export APPA_INSTALL_DIR="$tmp_dir/service/bin"
+export APPA_CONFIG_DIR="$tmp_dir/service/config"
+export APPA_DATA_DIR="$tmp_dir/service/data"
+export APPA_SKIP_SERVICE=0
+linger_before=no
+if loginctl show-user "$(id -un)" 2>/dev/null | grep -q '^Linger=yes$'; then
+  linger_before=yes
+fi
+remove_service() {
+  APPA_SKIP_SERVICE=0 sh "$repository_root/install.sh" --uninstall >/dev/null 2>&1 || true
+  if [ "$linger_before" = no ]; then
+    loginctl disable-linger "$(id -un)" >/dev/null 2>&1 || true
+  fi
+  cleanup
+}
+trap remove_service 0 1 2 15
+
+service_output=$(sh "$repository_root/install.sh")
+printf '%s\n' "$service_output" | grep -F "running in the background" >/dev/null ||
+  die "installer did not report background startup"
+
+curl --silent --max-time 2 http://127.0.0.1:8787/health | grep -q '^ok$' ||
+  die "runtime is not serving http://127.0.0.1:8787/health"
+service_pid=$(pgrep -f "$APPA_INSTALL_DIR/appa-runtime-v2" | head -n 1)
+[ -n "$service_pid" ] || die "no runtime process runs from $APPA_INSTALL_DIR"
+service_tty=$(ps -o tty= -p "$service_pid" | tr -d ' ')
+case "$service_tty" in
+  '?'|'??'|'') ;;
+  *) die "runtime holds the controlling terminal $service_tty" ;;
+esac
+service_parent=$(ps -o ppid= -p "$service_pid" | tr -d ' ')
+service_parent_command=$(ps -o comm= -p "$service_parent" | tr -d ' ')
+
+case "$target_os" in
+  unknown-linux-gnu)
+    [ -f "$unit" ] || die "systemd user unit was not installed"
+    systemctl --user is-enabled --quiet "$service_name" ||
+      die "systemd user service is not enabled for startup"
+    systemctl --user is-active --quiet "$service_name" ||
+      die "systemd user service is not running"
+    if grep -q network-online "$unit"; then
+      die "user unit orders itself after a target the user manager does not have"
+    fi
+    case "$service_parent_command" in
+      *systemd*) ;;
+      *) die "runtime runs under $service_parent_command, not the systemd user manager" ;;
+    esac
+    if printf '%s\n' "$service_output" | grep -F "starts at boot" >/dev/null; then
+      loginctl show-user "$(id -un)" 2>/dev/null | grep -q '^Linger=yes$' ||
+        die "installer reported boot startup without lingering enabled"
+    else
+      printf '%s\n' "$service_output" | grep -F "loginctl enable-linger" >/dev/null ||
+        die "installer neither enabled lingering nor named the command that does"
+    fi
+    ;;
+  apple-darwin)
+    [ -f "$plist" ] || die "LaunchAgent was not installed"
+    grep -F RunAtLoad "$plist" >/dev/null || die "LaunchAgent does not start at login"
+    launchctl print "gui/$(id -u)/$launchd_label" 2>/dev/null |
+      grep -q 'state = running' || die "LaunchAgent is not running"
+    case "$service_parent_command" in
+      launchd|*/launchd) ;;
+      *) die "runtime runs under $service_parent_command, not launchd" ;;
+    esac
+    ;;
+esac
+
+sh "$repository_root/install.sh" --uninstall >/dev/null
+[ ! -e "$unit" ] || die "systemd user unit survived uninstall"
+[ ! -e "$plist" ] || die "LaunchAgent survived uninstall"
+if curl --silent --max-time 2 http://127.0.0.1:8787/health >/dev/null 2>&1; then
+  die "runtime kept serving after uninstall"
+fi
+if [ "$linger_before" = no ]; then
+  loginctl disable-linger "$(id -un)" >/dev/null 2>&1 || true
+fi
+trap cleanup 0 1 2 15
+
+printf 'Startup registration test passed on %s.\n' "$target_os"
 printf 'Unix installer tests passed.\n'
