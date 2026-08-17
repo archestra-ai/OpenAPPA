@@ -36,7 +36,10 @@ fn ensure_default_config(path: &Path) -> io::Result<bool> {
 }
 
 #[derive(Parser)]
-#[command(name = "appa-runtime-v2")]
+#[command(
+    name = "appa-runtime-v2",
+    version = include_str!("../../../version.txt").trim()
+)]
 struct Args {
     #[arg(long, env = "APPA_CONFIG", default_value = "appa.toml")]
     config: PathBuf,

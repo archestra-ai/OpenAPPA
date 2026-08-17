@@ -1,6 +1,17 @@
 name: Build appa-runtime-v2 binaries
 
 on:
+  workflow_call:
+    inputs:
+      source_ref:
+        description: Branch, tag, or commit SHA to build
+        required: true
+        type: string
+      expected_version:
+        description: Version the built binary must report
+        required: false
+        default: ""
+        type: string
   workflow_dispatch:
     inputs:
       source_ref:
@@ -83,6 +94,16 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: cargo build --release --locked --package appa-runtime-v2 --target "$TARGET"
+
+      - name: Verify release version
+        if: inputs.expected_version != ''
+        env:
+          EXECUTABLE: ${{ matrix.executable }}
+          EXPECTED_VERSION: ${{ inputs.expected_version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          actual_version=$("./target/${TARGET}/release/${EXECUTABLE}" --version)
+          test "$actual_version" = "appa-runtime-v2 ${EXPECTED_VERSION}"
 
       - name: Stage package
         env:

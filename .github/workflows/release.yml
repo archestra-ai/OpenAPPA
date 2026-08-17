@@ -1,0 +1,97 @@
+name: Release OpenAPPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release-openappa-main
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Create release PR or draft release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # Required to create release tags and draft release metadata.
+      issues: write # Required to apply Release Please labels.
+      pull-requests: write # Required to create and update the release approval PR.
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Run Release Please
+        id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ github.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          target-branch: main
+
+  build-binaries:
+    name: Build release binaries
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    needs: release-please
+    permissions:
+      contents: read # Required by the reusable workflow to check out the release tag.
+    uses: ./.github/workflows/build-appa-runtime-binaries.yml
+    with:
+      source_ref: ${{ needs.release-please.outputs.tag_name }}
+      expected_version: ${{ needs.release-please.outputs.version }}
+
+  publish-release:
+    name: Publish GitHub release
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    needs:
+      - release-please
+      - build-binaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read # Required to download archives from the reusable build jobs.
+      contents: write # Required to upload assets and publish the draft release.
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          pattern: appa-runtime-v2-*
+          merge-multiple: true
+
+      - name: Verify release assets and write checksums
+        working-directory: dist
+        env:
+          EXPECTED_VERSION: ${{ needs.release-please.outputs.version }}
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          test "$TAG_NAME" = "v${EXPECTED_VERSION}"
+          shopt -s nullglob
+          archives=(appa-runtime-v2-*.tar.gz appa-runtime-v2-*.zip)
+          if [ "${#archives[@]}" -ne 6 ]; then
+            echo "::error::expected 6 release archives, found ${#archives[@]}"
+            exit 1
+          fi
+          sha256sum "${archives[@]}" > SHA256SUMS
+
+      - name: Upload release assets
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+        run: gh release upload "$TAG_NAME" dist/* --clobber
+
+      - name: Publish release
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          is_draft=$(gh release view "$TAG_NAME" --json isDraft --jq '.isDraft')
+          test "$is_draft" = "true"
+          gh release edit "$TAG_NAME" --draft=false
