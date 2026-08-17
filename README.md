@@ -4,9 +4,9 @@
 
 ```sh
 gh auth login && gh auth setup-git   # while the repo is private
-claude plugin marketplace add archestra-ai/OpenAPPA
-claude plugin install appa-runtime@appa
-claude "set up APPA"
+claude plugin marketplace add archestra-ai/OpenAPPA &&
+  claude plugin install appa-runtime@appa &&
+  claude "set up APPA"
 ```
 
 `clappa` starts a gated session; plain `claude` stays ungated.
@@ -27,7 +27,7 @@ APPA again; it installs the latest release.
 ```sh
 claude plugin uninstall appa-runtime
 claude plugin marketplace remove appa
-rm ~/.local/bin/appa-runtime-v2
+rm ~/.local/bin/appa-runtime-v2 ~/.local/bin/clappa
 
 # optional — also remove the policy, database, and alias:
 rm -rf ~/.config/appa ~/.local/share/appa      # Linux

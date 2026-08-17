@@ -9,6 +9,13 @@ When the user asks for the setup, install the runtime:
 3. Verify before anything runs: the archive's SHA-256 must equal its line in `SHA256SUMS` (`shasum -a 256` or `sha256sum`). On a mismatch, stop and tell the user; do not install.
 4. Extract the archive and check the binary: `./appa-runtime-v2 --version` must print exactly `appa-runtime-v2 <contents of version.txt>`.
 5. Install the binary to the install target named at the top of this context, mode 755, creating the directory when needed. That exact path is where the gate's hooks look for it; do not choose a different location. Do not start it: gated sessions start it on demand.
-6. Add the gate alias to the user's shell configuration unless it is already there: append `alias clappa='APPA_GATE=1 claude'` to `~/.zshrc`, `~/.bashrc`, or the file matching their shell (on Windows, the matching `clappa` function to the PowerShell profile). Then tell the user to reload their shell and start a gated session with `clappa`.
+6. Create the `clappa` command as an executable, not an alias, so it works in every open terminal with no shell reload: write `clappa` into the same directory as the runtime binary, mode 755, containing:
+
+   ```sh
+   #!/bin/sh
+   exec env APPA_GATE=1 claude "$@"
+   ```
+
+   Only if that directory is not on the user's `PATH`, fall back to appending `alias clappa='APPA_GATE=1 claude'` to the file matching their shell and tell them to reload it. On Windows, add the matching `clappa` function to the PowerShell profile. Finish by telling the user to start a gated session with `clappa`.
 
 If `gh` is missing or unauthenticated, tell the user to install the GitHub CLI and run `gh auth login` first, then ask again.

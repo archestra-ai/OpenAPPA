@@ -80,14 +80,18 @@ instructions follow them.
 
 The plugin is present in every session but inert until a session
 opts in with `APPA_GATE=1`. Keep normal `claude` sessions ungated and
-define a separate `clappa` command. For Linux and macOS, add this line
-to your shell configuration:
+use a separate `clappa` command for gated ones. The setup task creates
+it as an executable beside the runtime binary — a PATH command works in
+every open terminal with no shell reload, unlike an alias:
 
 ```sh
-alias clappa='APPA_GATE=1 claude'
+#!/bin/sh
+exec env APPA_GATE=1 claude "$@"
 ```
 
-For native Windows, add this function to your PowerShell profile:
+When that directory is not on your `PATH`, use the alias form instead
+and reload your shell: `alias clappa='APPA_GATE=1 claude'`. For native
+Windows, add this function to your PowerShell profile:
 
 ```powershell
 function clappa { $env:APPA_GATE = "1"; try { claude @args } finally { Remove-Item Env:APPA_GATE -ErrorAction SilentlyContinue } }
