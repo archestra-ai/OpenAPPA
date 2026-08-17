@@ -548,6 +548,36 @@ pub(crate) fn covering_profile(config: &RegistryConfig) -> DeploymentProfile {
     DeploymentProfile::declare(covering_declaration(config)).expect("the covering test profile validates")
 }
 
+/// A synthetic opening record for a raw-fold test fixture: `trajectory` opens as a
+/// root at `starting_label` under a no-coverage profile. It carries no engine's identity, so it
+/// belongs only in logs the transition validator never judges — `Projection::build` fixtures. A
+/// validated log opens through `Engine::open_trajectory` instead.
+#[cfg(test)]
+pub(crate) fn opening_at(trajectory: crate::value::TrajectoryId, starting_label: Label) -> crate::fact::Fact {
+    let chain = TrustChain::new(vec!["a".to_string(), "b".to_string()]);
+    let config = RegistryConfig {
+        trust_chain: chain.clone(),
+        tools: Vec::new(),
+        authorities: Vec::new(),
+        sanitizers: Vec::new(),
+        casts: Vec::new(),
+        membership: None,
+    };
+    let profile = DeploymentProfile::declare(ProfileDeclaration {
+        starting_label,
+        ..ProfileDeclaration::no_coverage(&chain)
+    })
+    .expect("an established starting label declares");
+    crate::fact::Fact::TrajectoryOpened {
+        trajectory,
+        dialect: PolicyDialectVersion::new(1),
+        policy_digest: PolicyIdentityV1::of(&config, &ReturnPolicy::Raw, &profile),
+        profile,
+        policy_file_key: PolicyFileKey::of(b"fixture"),
+        open_vectors: Vec::new(),
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn covering_declaration(config: &RegistryConfig) -> ProfileDeclaration {
     ProfileDeclaration {
@@ -926,14 +956,10 @@ mod tests {
     }
 
     fn public_trajectory_log() -> Vec<crate::fact::Fact> {
-        vec![crate::fact::Fact::ValueAdmitted {
-            trajectory: crate::value::TrajectoryId::new("t"),
-            value: crate::value::LabeledValue::new(
-                crate::value::ValueBody::new("body"),
-                Label::new(Dim::Known(Trust::new(1)), Dim::Known(Audience::Public)),
-            ),
-            provenance: crate::value::Provenance::UserInput,
-        }]
+        vec![opening_at(
+            crate::value::TrajectoryId::new("t"),
+            Label::new(Dim::Known(Trust::new(1)), Dim::Known(Audience::Public)),
+        )]
     }
 
     #[test]
@@ -1006,6 +1032,10 @@ mod tests {
                 trajectory: child.clone(),
                 fork,
             });
+            let read = crate::value::ResolvedCall::new(
+                ToolName::new("leak"),
+                crate::params::test_arguments(&serde_json::json!({})),
+            );
             log.push(crate::fact::Fact::ValueAdmitted {
                 trajectory: child.clone(),
                 value: crate::value::LabeledValue::new(
@@ -1015,9 +1045,11 @@ mod tests {
                         Dim::Known(Audience::restricted([ReaderId::new("internal")])),
                     ),
                 ),
-                provenance: crate::value::Provenance::UserInput,
+                provenance: crate::value::Provenance::ToolResult {
+                    dispatch: crate::value::DispatchId::new(child.clone(), read.digest(), 0),
+                },
             });
-            let projection = Projection::build(&log, 3);
+            let projection = Projection::build(&log, 4);
             match engine.check_child_return(&projection.view(&parent), &child).unwrap() {
                 ReturnCheck::Block(ReturnBlock { plans, .. }) => plans,
                 other => panic!("expected a narrowing return block, got {other:?}"),

@@ -364,12 +364,57 @@ mod tests {
         Audience::restricted([ReaderId::new("internal")])
     }
 
-    fn admit(trajectory: TrajectoryId, label: Label) -> Fact {
-        Fact::ValueAdmitted {
+    fn opened(trajectory: TrajectoryId, label: Label) -> Fact {
+        crate::profile::opening_at(trajectory, label)
+    }
+
+    fn read_tool() -> crate::contract::ToolContract {
+        crate::contract::ToolContract {
+            name: ToolName::new("read"),
+            tags: vec![],
+            delta: Some(crate::contract::Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
+            emits: EffectSet::default(),
+            requires: crate::contract::Requires::default(),
+        }
+    }
+
+    fn admit(log: &mut Vec<Fact>, trajectory: TrajectoryId, label: Label) {
+        let call = ResolvedCall::new(ToolName::new("read"), crate::params::test_arguments(&json!({})));
+        let occurrence = log
+            .iter()
+            .filter(|fact| {
+                matches!(
+                    fact,
+                    Fact::DispatchOpened { trajectory: on, tool, .. } if on == &trajectory && tool == call.tool()
+                )
+            })
+            .count() as u32;
+        let dispatch = DispatchId::new(trajectory.clone(), call.digest(), occurrence);
+        log.push(Fact::DispatchOpened {
+            trajectory: trajectory.clone(),
+            dispatch: dispatch.clone(),
+            tool: call.tool().clone(),
+            arguments: call.canonical_arguments().clone(),
+            proposed_label: EstablishedLabel::top(),
+            receiving: EstablishedLabel::top(),
+            proposed_effects: EffectSet::default(),
+            dynamic_resolutions: Vec::new(),
+            memberships: Vec::new(),
+            subject: None,
+        });
+        log.push(Fact::DispatchClosed {
+            trajectory: trajectory.clone(),
+            dispatch: dispatch.clone(),
+            outcome: CloseOutcome::Success {
+                effects: EffectSet::default(),
+            },
+        });
+        log.push(Fact::ValueAdmitted {
             trajectory,
             value: LabeledValue::new(ValueBody::new("body"), label),
-            provenance: Provenance::UserInput,
-        }
+            provenance: Provenance::ToolResult { dispatch },
+        });
     }
 
     fn registry() -> Registry {
@@ -429,7 +474,7 @@ mod tests {
     }
 
     fn forked_bound(parent_label: Label, policy: ReturnPolicy) -> Vec<Fact> {
-        let mut log = vec![admit(parent(), parent_label)];
+        let mut log = vec![opened(parent(), parent_label)];
         let seed = fork_records(&log, &parent(), &child(), policy);
         log.extend(seed);
         log
@@ -488,7 +533,7 @@ mod tests {
     #[test]
     fn a_narrowing_raw_return_cannot_merge_silently() {
         let mut log = forked(known(TRUSTED, Audience::Public));
-        log.push(admit(child(), known(SUSPICIOUS, internal())));
+        admit(&mut log, child(), known(SUSPICIOUS, internal()));
         let projection = build(&log);
         assert_eq!(
             submit_child_return(&registry(), &projection.view(&parent()), &child(), raw("secret")),
@@ -586,14 +631,14 @@ mod tests {
         let log = forked(known(SUSPICIOUS, internal()));
         assert_eq!(check(&registry(), &log), ReturnCheck::Allow);
         let mut log = forked(known(SUSPICIOUS, internal()));
-        log.push(admit(child(), known(TRUSTED, internal())));
+        admit(&mut log, child(), known(TRUSTED, internal()));
         assert_eq!(check(&registry(), &log), ReturnCheck::Allow);
     }
 
     #[test]
     fn a_narrowing_raw_return_is_blocked_with_accept_always_offered() {
         let mut log = forked(known(TRUSTED, Audience::Public));
-        log.push(admit(child(), known(SUSPICIOUS, internal())));
+        admit(&mut log, child(), known(SUSPICIOUS, internal()));
         match check(&registry(), &log) {
             ReturnCheck::Block(ReturnBlock { narrowing, plans }) => {
                 assert_eq!(narrowing.from, established(TRUSTED, Audience::Public));
@@ -622,7 +667,7 @@ mod tests {
     #[test]
     fn an_audience_only_narrowing_offers_the_clearing_sanitizer_standalone() {
         let mut log = forked(known(SUSPICIOUS, Audience::Public));
-        log.push(admit(child(), known(SUSPICIOUS, internal())));
+        admit(&mut log, child(), known(SUSPICIOUS, internal()));
         match check(&menu_registry(), &log) {
             ReturnCheck::Block(ReturnBlock { plans, .. }) => {
                 assert_eq!(
@@ -652,7 +697,7 @@ mod tests {
             known(TRUSTED, internal()),
         ] {
             let mut log = forked(parent);
-            log.push(admit(child(), known(SUSPICIOUS, internal())));
+            admit(&mut log, child(), known(SUSPICIOUS, internal()));
             match check(&menu_registry(), &log) {
                 ReturnCheck::Block(ReturnBlock { plans, .. }) => {
                     assert!(!plans.is_empty(), "acceptance is always offered");
@@ -666,7 +711,7 @@ mod tests {
     #[test]
     fn a_worse_or_equal_relabel_is_never_offered() {
         let mut log = forked(known(TRUSTED, internal()));
-        log.push(admit(child(), known(SUSPICIOUS, internal())));
+        admit(&mut log, child(), known(SUSPICIOUS, internal()));
         match check(&menu_registry(), &log) {
             ReturnCheck::Block(ReturnBlock { plans, .. }) => {
                 assert_eq!(
@@ -684,10 +729,11 @@ mod tests {
     #[test]
     fn an_inapplicable_sanitizer_is_not_offered() {
         let mut log = forked(known(SUSPICIOUS, Audience::Public));
-        log.push(admit(
+        admit(
+            &mut log,
             child(),
             known(SUSPICIOUS, Audience::restricted([ReaderId::new("finance")])),
-        ));
+        );
         match check(&registry(), &log) {
             ReturnCheck::Block(ReturnBlock { plans, .. }) => {
                 assert!(matches!(plans.as_slice(), [ReturnPlan::Accept(_)]))
@@ -699,17 +745,14 @@ mod tests {
     #[test]
     fn an_unknown_dimension_crosses_as_identity_not_a_block() {
         let mut log = forked(known(TRUSTED, Audience::Public));
-        log.push(Fact::ValueAdmitted {
-            trajectory: child(),
-            value: LabeledValue::new(
-                ValueBody::new("body"),
-                Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
-            ),
-            provenance: Provenance::UserInput,
-        });
-        let unknown_value = ValueId::new(1);
+        admit(
+            &mut log,
+            child(),
+            Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
+        );
+        let unknown_value = ValueId::new(0);
         assert_eq!(check(&cast_registry(), &log), ReturnCheck::Allow);
-        assert_eq!(resolve(&log, &parent(), 1), Err(CastError::ForeignValue));
+        assert_eq!(resolve(&log, &parent(), 0), Err(CastError::ForeignValue));
 
         let projection = build(&log);
         let ret = submit_child_return(&cast_registry(), &projection.view(&parent()), &child(), raw("found")).unwrap();
@@ -723,7 +766,7 @@ mod tests {
         );
         assert!(parent_label.is_established(Dimension::Audience));
 
-        let batch = resolve(&log, &parent(), 1).expect("a merge-carried identity is in reach");
+        let batch = resolve(&log, &parent(), 0).expect("a merge-carried identity is in reach");
         log.extend(batch);
         let projection = build(&log);
         assert_eq!(
@@ -739,16 +782,8 @@ mod tests {
     #[test]
     fn a_crossing_carries_each_unresolved_dimension_it_rode_in_with() {
         let mut log = forked(known(TRUSTED, Audience::Public));
-        log.push(Fact::ValueAdmitted {
-            trajectory: child(),
-            value: LabeledValue::new(ValueBody::new("body"), Label::new(Dim::Unknown, Dim::Unknown)),
-            provenance: Provenance::UserInput,
-        });
-        log.push(Fact::ValueAdmitted {
-            trajectory: parent(),
-            value: LabeledValue::new(ValueBody::new("body"), Label::new(Dim::Known(TRUSTED), Dim::Unknown)),
-            provenance: Provenance::UserInput,
-        });
+        admit(&mut log, child(), Label::new(Dim::Unknown, Dim::Unknown));
+        admit(&mut log, parent(), Label::new(Dim::Known(TRUSTED), Dim::Unknown));
         assert_eq!(check(&registry(), &log), ReturnCheck::Allow);
         let projection = build(&log);
         let ret = submit_child_return(&registry(), &projection.view(&parent()), &child(), raw("found")).unwrap();
@@ -756,24 +791,20 @@ mod tests {
         let label = build(&log).view(&parent()).current_label();
         assert_eq!(
             label.unresolved(Dimension::Trust).collect::<Vec<_>>(),
-            vec![ValueId::new(1)]
+            vec![ValueId::new(0)]
         );
         assert_eq!(
             label.unresolved(Dimension::Audience).collect::<Vec<_>>(),
-            vec![ValueId::new(1), ValueId::new(2)]
+            vec![ValueId::new(0), ValueId::new(1)]
         );
     }
 
     #[test]
     fn absorption_activates_only_at_the_merge() {
         let mut log = forked(known(TRUSTED, Audience::Public));
-        log.push(admit(child(), known(SUSPICIOUS, Audience::Public)));
-        log.push(Fact::ValueAdmitted {
-            trajectory: child(),
-            value: LabeledValue::new(ValueBody::new("body"), Label::new(Dim::Known(SUSPICIOUS), Dim::Unknown)),
-            provenance: Provenance::UserInput,
-        });
-        let unknown_value = ValueId::new(2);
+        admit(&mut log, child(), known(SUSPICIOUS, Audience::Public));
+        admit(&mut log, child(), Label::new(Dim::Known(SUSPICIOUS), Dim::Unknown));
+        let unknown_value = ValueId::new(1);
         let blocked = check(&registry(), &log);
         let narrowing = match &blocked {
             ReturnCheck::Block(ReturnBlock { narrowing, plans }) => {
@@ -788,7 +819,7 @@ mod tests {
                 .current_label()
                 .is_established(Dimension::Audience)
         );
-        assert_eq!(resolve(&log, &parent(), 2), Err(CastError::ForeignValue));
+        assert_eq!(resolve(&log, &parent(), 1), Err(CastError::ForeignValue));
 
         let batch = execute(
             &registry(),
@@ -841,7 +872,7 @@ mod tests {
         };
         Registry::build_covered(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![],
+            tools: vec![read_tool()],
             authorities: vec![],
             sanitizers: vec![declassify],
             casts: vec![Cast {
@@ -858,7 +889,7 @@ mod tests {
         admit_cast(
             registry,
             &build(log).view(actor),
-            ValueId::new(1),
+            ValueId::new(0),
             CastAnswer {
                 cast: CastName::new("classify"),
                 resolved: established(SUSPICIOUS, internal()),
@@ -868,11 +899,7 @@ mod tests {
 
     fn masked_crossing(registry: &Registry) -> Vec<Fact> {
         let mut log = forked_bound(known(TRUSTED, Audience::Public), sanitized_policy());
-        log.push(Fact::ValueAdmitted {
-            trajectory: child(),
-            value: LabeledValue::new(ValueBody::new("body"), Label::new(Dim::Unknown, Dim::Known(internal()))),
-            provenance: Provenance::UserInput,
-        });
+        admit(&mut log, child(), Label::new(Dim::Unknown, Dim::Known(internal())));
         let projection = build(&log);
         let ret = submit_child_return(
             registry,
@@ -896,7 +923,7 @@ mod tests {
         assert_eq!(parent_label.bound(), &established(TRUSTED, Audience::Public));
         assert_eq!(
             parent_label.unresolved(Dimension::Trust).collect::<Vec<_>>(),
-            vec![ValueId::new(1)]
+            vec![ValueId::new(0)]
         );
 
         let batch = classify(&registry, &log, &parent()).expect("the parent resolves the merge-carried identity");
@@ -915,11 +942,7 @@ mod tests {
     #[test]
     fn a_sanitized_crossing_with_an_unresolved_transitioned_dimension_is_refused() {
         let mut log = forked_bound(known(TRUSTED, internal()), sanitized_policy());
-        log.push(Fact::ValueAdmitted {
-            trajectory: child(),
-            value: LabeledValue::new(ValueBody::new("body"), Label::new(Dim::Known(TRUSTED), Dim::Unknown)),
-            provenance: Provenance::UserInput,
-        });
+        admit(&mut log, child(), Label::new(Dim::Known(TRUSTED), Dim::Unknown));
         let projection = build(&log);
         assert_eq!(
             submit_child_return(
@@ -949,7 +972,7 @@ mod tests {
         let snapshot = snapshot_of(&log, &sibling);
         assert_eq!(snapshot.seed(), &seeded);
         assert!(
-            !snapshot.inherited().contains(&ValueId::new(1)),
+            !snapshot.inherited().contains(&ValueId::new(0)),
             "an absorbed identity seeds the pin but never joins the inherited set"
         );
 
@@ -969,11 +992,7 @@ mod tests {
     #[test]
     fn a_known_return_merges_into_an_unknown_parent() {
         let mut log = forked(known(TRUSTED, Audience::Public));
-        log.push(Fact::ValueAdmitted {
-            trajectory: parent(),
-            value: LabeledValue::new(ValueBody::new("body"), Label::new(Dim::Known(TRUSTED), Dim::Unknown)),
-            provenance: Provenance::UserInput,
-        });
+        admit(&mut log, parent(), Label::new(Dim::Known(TRUSTED), Dim::Unknown));
         assert_eq!(check(&registry(), &log), ReturnCheck::Allow);
 
         let projection = build(&log);
@@ -995,7 +1014,7 @@ mod tests {
 
     #[test]
     fn a_return_check_for_a_non_child_is_refused() {
-        let log = vec![admit(parent(), known(TRUSTED, Audience::Public))];
+        let log = vec![opened(parent(), known(TRUSTED, Audience::Public))];
         let projection = build(&log);
         assert_eq!(
             check_child_return(&registry(), &projection.view(&parent()), &TrajectoryId::new("stranger")),
@@ -1005,7 +1024,7 @@ mod tests {
 
     fn blocked_family() -> Vec<Fact> {
         let mut log = forked(known(TRUSTED, Audience::Public));
-        log.push(admit(child(), known(SUSPICIOUS, internal())));
+        admit(&mut log, child(), known(SUSPICIOUS, internal()));
         log
     }
 
@@ -1124,7 +1143,7 @@ mod tests {
     #[test]
     fn executing_a_standalone_sanitize_needs_no_acceptance() {
         let mut log = forked(known(SUSPICIOUS, Audience::Public));
-        log.push(admit(child(), known(SUSPICIOUS, internal())));
+        admit(&mut log, child(), known(SUSPICIOUS, internal()));
         let batch = execute(
             &registry(),
             &log,
@@ -1206,7 +1225,7 @@ mod tests {
     fn a_moved_family_refuses_the_offer_by_value_not_by_identity() {
         let log = blocked_family();
         let mut converged = log.clone();
-        converged.push(admit(parent(), known(SUSPICIOUS, internal())));
+        admit(&mut converged, parent(), known(SUSPICIOUS, internal()));
         assert_eq!(
             execute(
                 &registry(),
@@ -1528,7 +1547,7 @@ mod tests {
     fn cast_registry() -> Registry {
         Registry::build_covered(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![],
+            tools: vec![read_tool()],
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![Cast {
@@ -1541,8 +1560,14 @@ mod tests {
         .unwrap()
     }
 
-    fn unknown_source(trajectory: TrajectoryId) -> Fact {
-        admit(trajectory, Label::new(Dim::Unknown, Dim::Known(Audience::Public)))
+    fn unknown_source(log: &mut Vec<Fact>, trajectory: TrajectoryId) {
+        admit(log, trajectory, Label::new(Dim::Unknown, Dim::Known(Audience::Public)));
+    }
+
+    fn opened_unknown_parent() -> Vec<Fact> {
+        let mut log = vec![opened(parent(), known(TRUSTED, Audience::Public))];
+        unknown_source(&mut log, parent());
+        log
     }
 
     fn fork_under(log: &mut Vec<Fact>, parent: &TrajectoryId, child: &TrajectoryId) {
@@ -1593,7 +1618,7 @@ mod tests {
 
     #[test]
     fn a_fork_at_an_unresolved_parent_carries_the_source_and_shares_its_resolution() {
-        let mut log = vec![unknown_source(parent())];
+        let mut log = opened_unknown_parent();
         fork_under(&mut log, &parent(), &child());
 
         let projection = build(&log);
@@ -1624,7 +1649,7 @@ mod tests {
     #[test]
     fn a_childs_resolution_of_an_inherited_source_reaches_the_parent_and_its_siblings() {
         let sibling = TrajectoryId::new("sibling");
-        let mut log = vec![unknown_source(parent())];
+        let mut log = opened_unknown_parent();
         fork_under(&mut log, &parent(), &child());
         fork_under(&mut log, &parent(), &sibling);
 
@@ -1644,11 +1669,11 @@ mod tests {
     #[test]
     fn a_branch_may_not_resolve_a_sibling_or_post_fork_value() {
         let sibling = TrajectoryId::new("sibling");
-        let mut log = vec![unknown_source(parent())];
+        let mut log = opened_unknown_parent();
         fork_under(&mut log, &parent(), &child());
         fork_under(&mut log, &parent(), &sibling);
-        log.push(unknown_source(parent()));
-        log.push(unknown_source(child()));
+        unknown_source(&mut log, parent());
+        unknown_source(&mut log, child());
 
         assert_eq!(resolve(&log, &child(), 1), Err(CastError::ForeignValue));
         assert_eq!(resolve(&log, &sibling, 2), Err(CastError::ForeignValue));
@@ -1665,9 +1690,9 @@ mod tests {
     #[test]
     fn a_nested_fork_flattens_its_inherited_set() {
         let grandchild = TrajectoryId::new("grandchild");
-        let mut log = vec![unknown_source(parent())];
+        let mut log = opened_unknown_parent();
         fork_under(&mut log, &parent(), &child());
-        log.push(unknown_source(child()));
+        unknown_source(&mut log, child());
         fork_under(&mut log, &child(), &grandchild);
 
         let snapshot = snapshot_of(&log, &grandchild);
@@ -1685,7 +1710,7 @@ mod tests {
 
     #[test]
     fn competing_first_answers_admit_exactly_one() {
-        let mut log = vec![unknown_source(parent())];
+        let mut log = opened_unknown_parent();
         fork_under(&mut log, &parent(), &child());
         let by_child = resolve(&log, &child(), 0).unwrap();
         resolve(&log, &parent(), 0).unwrap();

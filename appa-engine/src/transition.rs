@@ -7,12 +7,13 @@ use serde::{Deserialize, Serialize};
 use crate::candidate::{CallStage, ConfinedFrom, DerivedCandidate, DerivedVia, SanitizerLineage};
 use crate::check::{CheckOutcome, Gap, Narrowing, RawBlock};
 use crate::contract::ToolContract;
+use crate::engine::Engine;
 use crate::execute::AuthorityEvidence;
 use crate::fact::{BoundaryKind, CloseOutcome, EffectSet, Fact, ReturnDerivation, ReturnPolicy};
 use crate::label::{EstablishedLabel, Label};
 use crate::names::{AuthorityName, SanitizerName};
 use crate::plan::PlannedBlock;
-use crate::profile::PolicyIdentityV1;
+use crate::profile::{DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentityV1};
 use crate::projection::{Projection, Views};
 use crate::registry::Registry;
 use crate::value::{
@@ -385,6 +386,8 @@ pub enum TransitionError {
     Call(#[from] crate::engine::EngineError),
     #[error("the view was built under another policy identity")]
     ForeignView,
+    #[error("the event names a trajectory this family has not opened")]
+    UnopenedTrajectory,
     #[error("the decision does not pass the transition validator: {0}")]
     Invalid(#[from] TransitionRefusal),
     #[error("the proposals name groups without pinned membership expansions")]
@@ -550,11 +553,13 @@ impl EngineView {
         &self.projection
     }
 
-    /// The validated views of one trajectory in this family, for the reads an outer layer makes
-    /// beside `handle` — which branch has ended, which dispatches it has open, what its current
-    /// label renders as. `handle` itself needs no such accessor: an event names its own subject.
-    pub fn views<'a>(&'a self, trajectory: &'a TrajectoryId) -> crate::projection::Views<'a> {
-        self.projection.view(trajectory)
+    /// The validated views of one trajectory in this family, for the runtime's reads. `None` for a
+    /// trajectory this family never opened — a root without its opening record, a child no fork
+    /// bound — so a host-supplied id cannot read a fold nothing seeded.
+    pub fn views<'a>(&'a self, trajectory: &'a TrajectoryId) -> Option<crate::projection::Views<'a>> {
+        self.projection
+            .is_opened(trajectory)
+            .then(|| self.projection.view(trajectory))
     }
 
     /// Which trajectory surfaced this offer, anywhere in the family.
@@ -609,12 +614,36 @@ impl EngineView {
     }
 }
 
+/// Why a family log's durable opening record cannot be trusted: the validator refuses
+/// an opening that is duplicated, names another root, or is inconsistent with the policy this
+/// engine was opened under. A log that does not begin with an opening at all is refused as
+/// [`TransitionRefusal::Unopened`].
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum OpeningTransitionRefusal {
+    #[error("the family log carries more than one TrajectoryOpened record")]
+    Duplicate,
+    #[error("the opening record names trajectory {found}, not the root being replayed")]
+    WrongTrajectory { found: String },
+    #[error("the opening record carries policy dialect version {found}, which this engine does not support")]
+    UnsupportedDialect { found: u32 },
+    #[error("the opening record's policy digest does not match the supplied policy")]
+    DigestMismatch,
+    #[error("the opening record's declaration does not match the supplied policy's validated profile")]
+    ProfileMismatch,
+    #[error("the opening record's open vectors are not the set derived from its declaration")]
+    VectorMismatch,
+}
+
 /// Why the transition validator refused a record. One vocabulary for both directions: a
 /// candidate batch the engine has just built and a persisted log being replayed pass the same
 /// rules, so a refusal always says the same thing — this record cannot follow the ones before it.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TransitionRefusal {
-    #[error("a record names a trajectory outside this family")]
+    #[error("the family log does not open with its TrajectoryOpened record")]
+    Unopened,
+    #[error("the family log's opening record cannot be trusted: {0}")]
+    Opening(#[from] OpeningTransitionRefusal),
+    #[error("a record names a trajectory this family has not opened")]
     ForeignTrajectory,
     #[error("dispatched call names unregistered tool {0}")]
     UnknownTool(String),
@@ -810,10 +839,9 @@ struct Remedy {
 /// [`Projection::fold`] — the same fold a held view advances by, so validation and projection can
 /// never describe different logs.
 pub(crate) struct Sequence<'a> {
-    registry: &'a Registry,
-    child_return: &'a ReturnPolicy,
+    engine: &'a Engine,
+    family: TrajectoryId,
     projection: Projection,
-    members: BTreeSet<TrajectoryId>,
     pending: std::collections::VecDeque<PendingRelease>,
     remedies: BTreeMap<DispatchId, Remedy>,
     derived: BTreeMap<DispatchId, Derived>,
@@ -890,17 +918,13 @@ enum Crossing {
 }
 
 impl<'a> Sequence<'a> {
-    pub(crate) fn empty(
-        registry: &'a Registry,
-        child_return: &'a ReturnPolicy,
-        family: &TrajectoryId,
-        revision: u64,
-    ) -> Sequence<'a> {
+    /// A validator over an empty log of `family` at `revision`. Nothing is a member yet: the
+    /// family's opening record is what admits the root.
+    pub(crate) fn empty(engine: &'a Engine, family: &TrajectoryId, revision: u64) -> Sequence<'a> {
         Sequence {
-            registry,
-            child_return,
+            engine,
+            family: family.clone(),
             projection: Projection::empty(revision),
-            members: BTreeSet::from([family.clone()]),
             pending: std::collections::VecDeque::new(),
             remedies: BTreeMap::new(),
             derived: BTreeMap::new(),
@@ -922,17 +946,11 @@ impl<'a> Sequence<'a> {
     /// A validator standing where `view` stands, for admitting the candidate records of one
     /// decision. The view's own records passed these rules already, so the state is resumed
     /// rather than re-judged.
-    pub(crate) fn resuming(registry: &'a Registry, child_return: &'a ReturnPolicy, view: &EngineView) -> Sequence<'a> {
+    pub(crate) fn resuming(engine: &'a Engine, view: &EngineView) -> Sequence<'a> {
         Sequence {
-            registry,
-            child_return,
+            engine,
+            family: view.family().clone(),
             projection: view.projection().clone(),
-            members: view
-                .projection()
-                .trajectories()
-                .chain(std::iter::once(view.family()))
-                .cloned()
-                .collect(),
             pending: std::collections::VecDeque::new(),
             remedies: BTreeMap::new(),
             derived: BTreeMap::new(),
@@ -1002,6 +1020,7 @@ impl<'a> Sequence<'a> {
         }
         let implied = self.implied_advance(fact);
         match fact {
+            // Judged in full by `member`, which admits it only as the family's first record.
             Fact::TrajectoryOpened { .. } => {}
             Fact::BasisAdvanced { act, advance, .. } => self.declare(act, advance)?,
             Fact::OfferOpened {
@@ -1069,7 +1088,8 @@ impl<'a> Sequence<'a> {
                 }
                 self.opened(trajectory, dispatch, &call, subject.as_ref(), released)?;
                 let contract = self
-                    .registry
+                    .engine
+                    .registry()
                     .tool(tool)
                     .ok_or_else(|| TransitionRefusal::UnknownTool(tool.as_str().to_string()))?;
                 if crate::check::validate_memberships(contract, &call).is_err() {
@@ -1162,7 +1182,7 @@ impl<'a> Sequence<'a> {
                 reviewed,
             } => {
                 self.pending_dispatch(trajectory, dispatch)?;
-                if self.registry.authority(authority).is_none() {
+                if self.engine.registry().authority(authority).is_none() {
                     return Err(TransitionRefusal::UnknownAuthority(authority.as_str().to_string()));
                 }
                 let remedy = self.remedies.entry(dispatch.clone()).or_default();
@@ -1189,7 +1209,7 @@ impl<'a> Sequence<'a> {
                 contribution,
             } => {
                 self.pending_dispatch(trajectory, dispatch)?;
-                if self.registry.sanitizer(sanitizer).is_none_or(|s| !s.on.output) {
+                if self.engine.registry().sanitizer(sanitizer).is_none_or(|s| !s.on.output) {
                     return Err(TransitionRefusal::UnknownSanitizer(sanitizer.as_str().to_string()));
                 }
                 let remedy = self.remedies.entry(dispatch.clone()).or_default();
@@ -1211,7 +1231,7 @@ impl<'a> Sequence<'a> {
                         return Err(TransitionRefusal::UnbackedDenial);
                     }
                 }
-                if self.registry.authority(authority).is_none() {
+                if self.engine.registry().authority(authority).is_none() {
                     return Err(TransitionRefusal::UnknownAuthority(authority.as_str().to_string()));
                 }
             }
@@ -1267,7 +1287,7 @@ impl<'a> Sequence<'a> {
                 if released == Obligation::Free {
                     return Err(TransitionRefusal::UnbackedDecision);
                 }
-                if !self.registry.profile().context_control() {
+                if !self.engine.registry().profile().context_control() {
                     return Err(TransitionRefusal::ContextUncontrolled);
                 }
                 let views = self.projection.view(trajectory);
@@ -1280,7 +1300,7 @@ impl<'a> Sequence<'a> {
                 if views.has_ended(trajectory) {
                     return Err(TransitionRefusal::BranchEnded);
                 }
-                if return_policy != self.child_return {
+                if return_policy != self.engine.child_return() {
                     return Err(TransitionRefusal::ForkReturnPolicyMismatch);
                 }
                 if &views.freeze_basis() != snapshot {
@@ -1304,7 +1324,7 @@ impl<'a> Sequence<'a> {
                 if self.projection.bound_child(fork).is_some() {
                     return Err(TransitionRefusal::ForkAlreadyBound);
                 }
-                if trajectory == &preparation.parent || views.is_active(trajectory) {
+                if self.projection.is_opened(trajectory) {
                     return Err(TransitionRefusal::ChildActiveBeforeFork);
                 }
                 if views.has_ended(&preparation.parent) {
@@ -1415,7 +1435,8 @@ impl<'a> Sequence<'a> {
                     return Err(TransitionRefusal::UnbackedOffer);
                 }
                 let contract = self
-                    .registry
+                    .engine
+                    .registry()
                     .tool(candidate.tool())
                     .ok_or_else(|| TransitionRefusal::UnknownTool(candidate.tool().as_str().to_string()))?;
                 let stage = views.call_stage(subject);
@@ -1423,7 +1444,7 @@ impl<'a> Sequence<'a> {
                     return Err(TransitionRefusal::UnbackedOffer);
                 };
                 Ok(crate::plan::plan(
-                    self.registry,
+                    self.engine.registry(),
                     views,
                     &candidate,
                     &block,
@@ -1459,7 +1480,7 @@ impl<'a> Sequence<'a> {
                 let lineage = views.lineage(subject);
                 let contract = self.dispatch_contract(trajectory, dispatch)?;
                 Ok(crate::plan::confined_stage(
-                    self.registry,
+                    self.engine.registry(),
                     contract,
                     receiving,
                     &value.label,
@@ -1512,7 +1533,7 @@ impl<'a> Sequence<'a> {
                 };
                 let lineage = views.lineage(subject);
                 match crate::plan::return_stage(
-                    self.registry,
+                    self.engine.registry(),
                     views,
                     child,
                     &fold,
@@ -1619,7 +1640,8 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::UnbackedApproval);
         }
         let contract = self
-            .registry
+            .engine
+            .registry()
             .tool(call.tool())
             .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
         let live = views.current_label();
@@ -1643,7 +1665,7 @@ impl<'a> Sequence<'a> {
         if self.declared.as_ref().is_some_and(|open| !open.owed.is_empty()) {
             return Err(TransitionRefusal::UnbackedAdvance);
         }
-        if advance.flows.iter().any(|flow| !self.members.contains(flow)) {
+        if advance.flows.iter().any(|flow| !self.projection.is_opened(flow)) {
             return Err(TransitionRefusal::ForeignTrajectory);
         }
         self.declared = Some(Declaration {
@@ -1760,16 +1782,11 @@ impl<'a> Sequence<'a> {
     /// What a candidate batch will move, derived by walking it exactly as [`Sequence::admit`]
     /// will. The decision declares this before appending the batch, so the declaration and the
     /// rule that checks it are one derivation and cannot drift.
-    pub(crate) fn advance_of(
-        registry: &'a Registry,
-        child_return: &'a ReturnPolicy,
-        view: &EngineView,
-        facts: &[Fact],
-    ) -> crate::basis::BasisAdvance {
+    pub(crate) fn advance_of(engine: &'a Engine, view: &EngineView, facts: &[Fact]) -> crate::basis::BasisAdvance {
         if facts.is_empty() {
             return crate::basis::BasisAdvance::default();
         }
-        let mut sequence = Sequence::resuming(registry, child_return, view);
+        let mut sequence = Sequence::resuming(engine, view);
         let mut total = crate::basis::BasisAdvance::default();
         for fact in facts {
             total.absorb(&sequence.implied_advance(fact));
@@ -1811,8 +1828,8 @@ impl<'a> Sequence<'a> {
             Fact::CastApplied { value, .. } => {
                 let mut advance = BasisAdvance::family();
                 advance.flows.extend(
-                    self.members
-                        .iter()
+                    self.projection
+                        .trajectories()
                         .filter(|member| self.projection.view(member).may_resolve(*value))
                         .cloned(),
                 );
@@ -1872,7 +1889,7 @@ impl<'a> Sequence<'a> {
         {
             return true;
         }
-        match self.registry.tool(tool) {
+        match self.engine.registry().tool(tool) {
             Some(contract) => contract.delta.as_ref().is_none_or(|delta| !delta.is_none()),
             None => true,
         }
@@ -1881,6 +1898,9 @@ impl<'a> Sequence<'a> {
     /// The validated projection, once every record has been admitted. A claim left standing —
     /// a release with no opening, a ruling with no dispatch — means the log stops mid-act.
     pub(crate) fn finish(mut self) -> Result<Projection, TransitionRefusal> {
+        if !self.projection.is_opened(&self.family) {
+            return Err(TransitionRefusal::Unopened);
+        }
         // A log that stops mid-menu.
         settled(self.menu.take())?;
         if !self.pending.is_empty() {
@@ -1963,26 +1983,70 @@ impl<'a> Sequence<'a> {
         }
     }
 
-    fn member(&mut self, fact: &Fact) -> Result<(), TransitionRefusal> {
+    /// The strict judgment of the durable opening: the family's first record, naming
+    /// the family, at a dialect this engine reads, carrying this policy's digest, its validated
+    /// declaration byte for byte — which subsumes re-running the coverage matrix over it — and
+    /// the open vectors that declaration derives. `policy_file_key` is deliberately not judged
+    /// here: it names a stored file this engine never sees, and the outer layer re-hashes the
+    /// file it loaded against the record on every event.
+    fn root_opened(
+        &self,
+        trajectory: &TrajectoryId,
+        dialect: PolicyDialectVersion,
+        profile: &DeploymentProfile,
+        policy_digest: &PolicyIdentityV1,
+        open_vectors: &[OpenVector],
+    ) -> Result<(), OpeningTransitionRefusal> {
+        if self.projection.is_opened(&self.family) {
+            return Err(OpeningTransitionRefusal::Duplicate);
+        }
+        if trajectory != &self.family {
+            return Err(OpeningTransitionRefusal::WrongTrajectory {
+                found: trajectory.as_str().to_string(),
+            });
+        }
+        if dialect != self.engine.dialect() {
+            return Err(OpeningTransitionRefusal::UnsupportedDialect { found: dialect.value() });
+        }
+        if policy_digest != &self.engine.identity() {
+            return Err(OpeningTransitionRefusal::DigestMismatch);
+        }
+        if profile != self.engine.registry().profile() {
+            return Err(OpeningTransitionRefusal::ProfileMismatch);
+        }
+        if open_vectors != self.engine.open_vectors() {
+            return Err(OpeningTransitionRefusal::VectorMismatch);
+        }
+        Ok(())
+    }
+
+    fn member(&self, fact: &Fact) -> Result<(), TransitionRefusal> {
         let trajectory = fact.trajectory();
-        let opens_from = match fact {
-            Fact::ForkOpened { fork, .. } => Some(
-                self.projection
+        if let Fact::TrajectoryOpened {
+            trajectory,
+            dialect,
+            profile,
+            policy_digest,
+            open_vectors,
+            ..
+        } = fact
+        {
+            return Ok(self.root_opened(trajectory, *dialect, profile, policy_digest, open_vectors)?);
+        }
+        if !self.projection.is_opened(&self.family) {
+            return Err(TransitionRefusal::Unopened);
+        }
+        let hangs_from = match fact {
+            Fact::ForkOpened { fork, .. } => {
+                &self
+                    .projection
                     .prepared_fork(fork)
                     .ok_or(TransitionRefusal::UnknownFork)?
                     .parent
-                    .clone(),
-            ),
-            _ => None,
-        };
-        if let Some(parent) = opens_from {
-            if !self.members.contains(&parent) {
-                return Err(TransitionRefusal::ForeignTrajectory);
             }
-            self.members.insert(trajectory.clone());
-            return Ok(());
-        }
-        if self.members.contains(trajectory) {
+            _ => trajectory,
+        };
+        if self.projection.is_opened(hangs_from) {
             Ok(())
         } else {
             Err(TransitionRefusal::ForeignTrajectory)
@@ -2002,7 +2066,7 @@ impl<'a> Sequence<'a> {
             if mark.index() >= proposals.len() {
                 return Err(TransitionRefusal::SpawnMarkOutOfRange);
             }
-            if !self.registry.profile().context_control() {
+            if !self.engine.registry().profile().context_control() {
                 return Err(TransitionRefusal::ContextUncontrolled);
             }
         }
@@ -2027,7 +2091,8 @@ impl<'a> Sequence<'a> {
         }
         for call in proposals {
             let contract = self
-                .registry
+                .engine
+                .registry()
                 .tool(call.tool())
                 .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
             if crate::check::validate_memberships(contract, call).is_err() {
@@ -2036,8 +2101,8 @@ impl<'a> Sequence<'a> {
         }
         let mut working = std::borrow::Cow::Borrowed(&self.projection);
         let composed = crate::engine::compose_batch(
-            self.registry,
-            self.child_return,
+            self.engine.registry(),
+            self.engine.child_return(),
             &mut working,
             crate::engine::ComposingBatch { trajectory, id: batch },
             proposals,
@@ -2103,7 +2168,8 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::DispatchReopened);
         }
         let contract = self
-            .registry
+            .engine
+            .registry()
             .tool(call.tool())
             .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
         contract
@@ -2157,7 +2223,7 @@ impl<'a> Sequence<'a> {
                     contribution: approval
                         .sanitizer
                         .as_ref()
-                        .and_then(|name| crate::plan::bound_contribution(self.registry, contract, call, name)),
+                        .and_then(|name| crate::plan::bound_contribution(self.engine.registry(), contract, call, name)),
                 };
                 if remedy.is_none_or(|landed| landed != expected) {
                     return Err(TransitionRefusal::UnbackedApproval);
@@ -2183,7 +2249,7 @@ impl<'a> Sequence<'a> {
                     {
                         return Err(TransitionRefusal::RulingOutsideMandate);
                     }
-                    admits_block(self.registry, contract, call, &live, &block, &remedy)
+                    admits_block(self.engine.registry(), contract, call, &live, &block, &remedy)
                 }
                 None => Err(TransitionRefusal::UnreleasedDispatch),
             },
@@ -2197,7 +2263,6 @@ impl<'a> Sequence<'a> {
         provenance: &Provenance,
     ) -> Result<(), TransitionRefusal> {
         match provenance {
-            Provenance::UserInput => Ok(()),
             Provenance::ProviderRun {
                 tool,
                 batch,
@@ -2205,7 +2270,8 @@ impl<'a> Sequence<'a> {
                 effects,
             } => {
                 let contract = self
-                    .registry
+                    .engine
+                    .registry()
                     .provider_run_contract(tool)
                     .ok_or_else(|| TransitionRefusal::NotProviderRun(tool.as_str().to_string()))?;
                 let views = self.projection.view(trajectory);
@@ -2361,10 +2427,15 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::RepeatResolution);
         }
         let registered = self
-            .registry
+            .engine
+            .registry()
             .cast(cast)
             .ok_or_else(|| TransitionRefusal::UnknownCast(cast.as_str().to_string()))?;
-        if !registered.scope.reaches(self.registry, &views, value).unwrap_or(false) {
+        if !registered
+            .scope
+            .reaches(self.engine.registry(), &views, value)
+            .unwrap_or(false)
+        {
             return Err(TransitionRefusal::OutOfScopeResolution);
         }
         registered
@@ -2415,7 +2486,7 @@ impl<'a> Sequence<'a> {
             (ReturnPolicy::Raw, ReturnDerivation::Sanitized { sanitizer, .. }) => match &pending {
                 Some(pending) => self.consumed_candidate(&views, id, pending, value, sanitizer, derivation)?,
                 None => {
-                    let offered = match crate::branch::check_child_return(self.registry, &views, child) {
+                    let offered = match crate::branch::check_child_return(self.engine.registry(), &views, child) {
                         Ok(crate::branch::ReturnCheck::Block(block)) => block.plans,
                         _ => return Err(TransitionRefusal::ReturnPolicyMismatch),
                     };
@@ -2474,7 +2545,8 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::ReturnRecordMismatch);
         }
         let registered = self
-            .registry
+            .engine
+            .registry()
             .sanitizer(sanitizer)
             .ok_or_else(|| TransitionRefusal::UnknownSanitizer(sanitizer.as_str().to_string()))?;
         if &registered.transition != transition {
@@ -2493,7 +2565,8 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::ReturnPolicyMismatch);
         };
         let registered = self
-            .registry
+            .engine
+            .registry()
             .sanitizer(sanitizer)
             .ok_or_else(|| TransitionRefusal::UnknownSanitizer(sanitizer.as_str().to_string()))?;
         if !fold.is_established(registered.transition.dimension()) {
@@ -2535,7 +2608,7 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::ReturnRecordMismatch);
         }
         // The recorded policy is the deployment's binding, like the fork records before it.
-        if policy != self.child_return {
+        if policy != self.engine.child_return() {
             return Err(TransitionRefusal::ForkReturnPolicyMismatch);
         }
         // A shaped fork's submission is the canonical text its stored shape admits.
@@ -2558,7 +2631,8 @@ impl<'a> Sequence<'a> {
             }
             ReturnPolicy::Sanitized(name) => {
                 let registered = self
-                    .registry
+                    .engine
+                    .registry()
                     .sanitizer(name)
                     .ok_or_else(|| TransitionRefusal::UnknownSanitizer(name.as_str().to_string()))?;
                 if !fold.is_established(registered.transition.dimension())
@@ -2604,14 +2678,16 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::ReturnRecordMismatch);
         };
         let registered = self
-            .registry
+            .engine
+            .registry()
             .sanitizer(name)
             .ok_or_else(|| TransitionRefusal::UnknownSanitizer(name.as_str().to_string()))?;
         let fold = views.branch_label(child);
         let dim = registered.transition.dimension();
         let derives = match reason {
             crate::fact::ReturnRejection::ConsumedDimensionUnresolvable => {
-                !fold.is_established(dim) && crate::plan::resolvable_source(self.registry, &views, &fold, dim).is_none()
+                !fold.is_established(dim)
+                    && crate::plan::resolvable_source(self.engine.registry(), &views, &fold, dim).is_none()
             }
             crate::fact::ReturnRejection::MandateUnmet => {
                 fold.is_established(dim)
@@ -2689,7 +2765,7 @@ impl<'a> Sequence<'a> {
             return Ok(());
         }
         let raw = self.output_label(trajectory, dispatch, contract);
-        crate::admit::validate_pending_cast(self.registry, contract, &raw, cast, resolved)
+        crate::admit::validate_pending_cast(self.engine.registry(), contract, &raw, cast, resolved)
             .map_err(|_| TransitionRefusal::InadmissibleResolution)?;
         self.derived
             .insert(dispatch.clone(), Derived::Cast(resolved.clone(), *raw_digest));
@@ -2732,7 +2808,8 @@ impl<'a> Sequence<'a> {
         let tool = views
             .dispatch_tool(dispatch)
             .ok_or(TransitionRefusal::UnknownDispatch)?;
-        self.registry
+        self.engine
+            .registry()
             .tool(tool)
             .ok_or_else(|| TransitionRefusal::UnknownTool(tool.as_str().to_string()))
     }
@@ -2762,7 +2839,8 @@ impl<'a> Sequence<'a> {
             DerivedVia::Cast { name } => return self.cast_candidate(trajectory, subject, name, derived, lineage),
         };
         let registered = self
-            .registry
+            .engine
+            .registry()
             .sanitizer(sanitizer)
             .ok_or_else(|| TransitionRefusal::UnknownSanitizer(sanitizer.as_str().to_string()))?;
         if &registered.transition != transition {
@@ -2906,7 +2984,7 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::ForgedLabel);
         };
         let raw = self.output_label(trajectory, dispatch, contract);
-        crate::admit::validate_pending_cast(self.registry, contract, &raw, cast, &resolved)
+        crate::admit::validate_pending_cast(self.engine.registry(), contract, &raw, cast, &resolved)
             .map_err(|_| TransitionRefusal::InadmissibleResolution)?;
         let views = self.projection.view(trajectory);
         let receiving = views
@@ -3039,7 +3117,8 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::ForgedLabel);
         }
         let registered = self
-            .registry
+            .engine
+            .registry()
             .sanitizer(sanitizer)
             .ok_or_else(|| TransitionRefusal::UnknownSanitizer(sanitizer.as_str().to_string()))?;
         let views = self.projection.view(trajectory);
@@ -3061,7 +3140,8 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::SanitizerUnapplicable);
         }
         let contract = self
-            .registry
+            .engine
+            .registry()
             .tool(predecessor.tool())
             .ok_or_else(|| TransitionRefusal::UnknownTool(predecessor.tool().as_str().to_string()))?;
         contract
@@ -3388,85 +3468,136 @@ fn admits_block(
 mod tests {
     use super::*;
     use crate::label::{Audience, Dim, PartialLabel, Trust};
-    use crate::value::{LabeledValue, ValueBody};
+    use crate::profile::PolicyFileKey;
+    use crate::value::{LabeledValue, OfferNonce, ToolName, ValueBody, ValueId};
 
     fn traj() -> TrajectoryId {
         TrajectoryId::new("t")
     }
 
-    fn admit(trust: u8) -> Fact {
-        Fact::ValueAdmitted {
-            trajectory: traj(),
-            value: LabeledValue::new(
-                ValueBody::new("body"),
-                Label::new(Dim::Known(Trust::new(trust)), Dim::Known(Audience::Public)),
-            ),
-            provenance: Provenance::UserInput,
+    fn note_tool() -> ToolContract {
+        ToolContract {
+            name: ToolName::new("note"),
+            tags: vec![],
+            delta: Some(crate::contract::Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
+            emits: EffectSet::default(),
+            requires: crate::contract::Requires::default(),
         }
     }
 
-    fn engine() -> crate::engine::Engine {
+    fn engine() -> Engine {
         let config = crate::registry::RegistryConfig {
             trust_chain: crate::registry::TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![],
+            tools: vec![note_tool()],
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
             membership: None,
         };
         let profile = crate::profile::covering_declaration(&config);
-        crate::engine::Engine::open(crate::profile::DeploymentPolicy {
+        Engine::open(crate::profile::DeploymentPolicy {
             registry: config,
             planner_cap: crate::registry::PlannerCap::default(),
-            dialect: crate::profile::PolicyDialectVersion::new(1),
+            dialect: PolicyDialectVersion::new(1),
             child_return: ReturnPolicy::Raw,
             profile,
         })
         .expect("the test policy opens")
     }
 
+    fn starting() -> PartialLabel {
+        PartialLabel::established(EstablishedLabel::new(Trust::new(1), Audience::Public))
+    }
+
+    fn opening(engine: &Engine, family: &TrajectoryId) -> Fact {
+        engine
+            .open_trajectory(family, PolicyFileKey::of(b"policy"))
+            .expect("the opening validates against the empty log")
+            .into_unsealed()
+            .remove(0)
+    }
+
+    fn nonce() -> OfferNonce {
+        OfferNonce::new([7u8; 32])
+    }
+
     #[test]
     fn advancing_a_view_matches_rebuilding_it_from_the_records() {
         let engine = engine();
-        let first = vec![admit(3)];
+        let first = vec![opening(&engine, &traj())];
         let mut held = engine.view(&traj(), first.clone(), 1).expect("the log validates");
-        let batch = engine.seal(&held, vec![admit(1)]).expect("the candidate validates");
-        held.advance(&batch).unwrap();
 
-        let whole = [first, batch.facts().to_vec()].concat();
-        let rebuilt = engine.view(&traj(), whole, 2).expect("the log validates");
+        let call = engine
+            .resolve_call(ToolName::new("note"), b"{}")
+            .expect("the call resolves");
+        let decision = engine
+            .handle(
+                &held,
+                EngineEvent::Proposals(ProposalBatch {
+                    id: ProposalBatchId::new("b1"),
+                    trajectory: traj(),
+                    provider_results: Vec::new(),
+                    proposals: vec![ProposedCall {
+                        tool: call.tool().clone(),
+                        arguments: call.canonical_arguments().canonical_bytes().to_vec(),
+                        dynamic_resolutions: Vec::new(),
+                        memberships: Vec::new(),
+                    }],
+                    spawn: None,
+                    offer_nonce: nonce(),
+                }),
+            )
+            .expect("the batch decides");
+        let dispatch = match &decision.follow_up {
+            FollowUp::Proposals { released, .. } => released[0].dispatch.clone(),
+            other => panic!("expected a release, got {other:?}"),
+        };
+        let released = decision.append.expect("a release appends");
+        held.advance(&released).unwrap();
+        let closed = engine
+            .handle(
+                &held,
+                EngineEvent::Outcome(ToolReport {
+                    dispatch: dispatch.clone(),
+                    outcome: ToolOutcome::Success {
+                        body: OutcomeBody::Available(ValueBody::new("the note")),
+                    },
+                    evidence: Vec::new(),
+                    offer_nonce: nonce(),
+                }),
+            )
+            .expect("the outcome closes the dispatch")
+            .append
+            .expect("the close appends");
+        held.advance(&closed).unwrap();
+
+        let whole = [first, released.facts().to_vec(), closed.facts().to_vec()].concat();
+        let rebuilt = engine.view(&traj(), whole, 3).expect("the log validates");
 
         assert_eq!(held.revision(), rebuilt.revision());
-        assert_eq!(
-            held.projection().view(&traj()).current_label(),
-            rebuilt.projection().view(&traj()).current_label()
-        );
-        assert_eq!(
-            held.projection().view(&traj()).current_label(),
-            PartialLabel::established(EstablishedLabel::new(Trust::new(1), Audience::Public))
-        );
+        assert_eq!(held.projection(), rebuilt.projection());
+        let family = traj();
+        let views = held.projection().view(&family);
+        assert!(!views.is_open(&dispatch));
+        assert!(matches!(
+            views.value_provenance(ValueId::new(0)),
+            Some(Provenance::ToolResult { dispatch: produced }) if produced == &dispatch
+        ));
+        assert_eq!(views.current_label(), starting());
 
-        assert_eq!(held.advance(&batch), Err(ViewMismatch::Stale { view: 2, batch: 1 }));
+        assert_eq!(held.advance(&closed), Err(ViewMismatch::Stale { view: 3, batch: 2 }));
     }
 
     #[test]
     fn a_view_takes_no_batch_from_another_family_or_policy() {
         let engine = engine();
-        let mut view = engine.view(&traj(), vec![admit(3)], 1).expect("the log validates");
+        let mut view = engine
+            .view(&traj(), vec![opening(&engine, &traj())], 1)
+            .expect("the log validates");
         let other_family = TrajectoryId::new("other");
         let elsewhere = engine
-            .view(
-                &other_family,
-                vec![Fact::ValueAdmitted {
-                    trajectory: TrajectoryId::new("other"),
-                    value: LabeledValue::new(
-                        ValueBody::new("body"),
-                        Label::new(Dim::Known(Trust::new(3)), Dim::Known(Audience::Public)),
-                    ),
-                    provenance: Provenance::UserInput,
-                }],
-                1,
-            )
+            .view(&other_family, vec![opening(&engine, &other_family)], 1)
             .expect("the log validates");
         let foreign = engine.seal(&elsewhere, vec![]).expect("the candidate validates");
         assert_eq!(view.advance(&foreign), Err(ViewMismatch::ForeignFamily));
@@ -3474,7 +3605,7 @@ mod tests {
         let other_policy = ValidatedFactBatch::seal(
             vec![],
             1,
-            crate::profile::PolicyIdentityV1::of(
+            PolicyIdentityV1::of(
                 &crate::registry::RegistryConfig {
                     trust_chain: crate::registry::TrustChain::new(vec!["suspicious".into()]),
                     tools: vec![],
@@ -3489,5 +3620,43 @@ mod tests {
             traj(),
         );
         assert_eq!(view.advance(&other_policy), Err(ViewMismatch::ForeignPolicy));
+    }
+
+    #[test]
+    fn a_record_on_an_unopened_trajectory_is_refused() {
+        let engine = engine();
+        let turn_end = |trajectory: TrajectoryId| Fact::Boundary {
+            trajectory,
+            kind: BoundaryKind::TurnEnd,
+        };
+        assert_eq!(
+            engine.view(&traj(), vec![turn_end(traj())], 1).err(),
+            Some(TransitionRefusal::Unopened)
+        );
+        assert_eq!(engine.view(&traj(), vec![], 0).err(), Some(TransitionRefusal::Unopened));
+        let stranger = TrajectoryId::new("stranger");
+        let on_stranger = Fact::ValueAdmitted {
+            trajectory: stranger.clone(),
+            value: LabeledValue::new(
+                ValueBody::new("body"),
+                Label::new(Dim::Known(Trust::new(1)), Dim::Known(Audience::Public)),
+            ),
+            provenance: Provenance::ChildReturn {
+                child: TrajectoryId::new("kid"),
+                id: crate::value::ChildReturnId::new(TrajectoryId::new("kid"), 0),
+            },
+        };
+        assert_eq!(
+            engine
+                .view(&traj(), vec![opening(&engine, &traj()), on_stranger], 2)
+                .err(),
+            Some(TransitionRefusal::ForeignTrajectory)
+        );
+        assert_eq!(
+            engine
+                .view(&traj(), vec![opening(&engine, &traj()), turn_end(stranger)], 2)
+                .err(),
+            Some(TransitionRefusal::ForeignTrajectory)
+        );
     }
 }

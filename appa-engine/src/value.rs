@@ -370,9 +370,10 @@ impl ChildReturnId {
 
 /// How a value entered the trajectory — recorded for audit and branch attribution. The label's
 /// numeric fold does not depend on this; provenance answers *where from*, the label *what it is*.
+/// These are the admitted values, and only these: a user turn or other principal
+/// context is outside engine policy and admits nothing, so it has no provenance here.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Provenance {
-    UserInput,
     ToolResult { dispatch: DispatchId },
     ChildReturn { child: TrajectoryId, id: ChildReturnId },
     ProviderRun {

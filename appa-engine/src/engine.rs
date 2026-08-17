@@ -50,30 +50,6 @@ pub enum EngineError {
     BranchEnded,
 }
 
-/// Why a family log's durable opening record cannot be trusted on cold replay: the
-/// strict verifier refuses a log whose opening is missing, displaced, duplicated, foreign, or
-/// inconsistent with the supplied policy. Distinct from [`TransitionRefusal`], the per-dispatch payload
-/// choke point — the complete transition validator is `T31`.
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum OpeningTransitionRefusal {
-    #[error("the family log carries no TrajectoryOpened record")]
-    Missing,
-    #[error("the TrajectoryOpened record is not the family's first record")]
-    NotFirst,
-    #[error("the family log carries more than one TrajectoryOpened record")]
-    Duplicate,
-    #[error("the opening record names trajectory {found}, not the root being replayed")]
-    WrongTrajectory { found: String },
-    #[error("the opening record carries policy dialect version {found}, which this engine does not support")]
-    UnsupportedDialect { found: u32 },
-    #[error("the opening record's policy digest does not match the supplied policy")]
-    DigestMismatch,
-    #[error("the opening record's declaration does not match the supplied policy's validated profile")]
-    ProfileMismatch,
-    #[error("the opening record's open vectors are not the set derived from its declaration")]
-    VectorMismatch,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ForkStatus {
     Unprepared,
@@ -146,6 +122,11 @@ impl Engine {
         profile::derive_open_vectors(self.profile(), tools)
     }
 
+    /// The policy dialect version this engine reads, which every opening it judges must carry.
+    pub(crate) fn dialect(&self) -> PolicyDialectVersion {
+        self.dialect
+    }
+
     /// Build the working view over a persisted family log: every record passes the one
     /// transition validator before anything reads it, so no caller decides against an untrusted
     /// stream. On cache loss the runtime rebuilds through this same call.
@@ -165,13 +146,13 @@ impl Engine {
     pub(crate) fn validate_replay(&self, facts: &[Fact]) -> Result<(), TransitionRefusal> {
         let family = match facts.first() {
             Some(fact) => fact.trajectory().clone(),
-            None => return Ok(()),
+            None => return Err(TransitionRefusal::Unopened),
         };
         self.replay(&family, facts, facts.len() as u64).map(|_| ())
     }
 
     fn replay(&self, family: &TrajectoryId, records: &[Fact], revision: u64) -> Result<Projection, TransitionRefusal> {
-        let mut sequence = Sequence::empty(&self.registry, &self.child_return, family, revision);
+        let mut sequence = Sequence::empty(self, family, revision);
         for fact in records {
             sequence.admit(fact)?;
         }
@@ -181,7 +162,7 @@ impl Engine {
     /// Seal a candidate batch: the facts an engine operation just built pass the same validator a
     /// persisted log does, so the sealed batch is one no replay of it can refuse.
     pub(crate) fn seal(&self, view: &EngineView, facts: Vec<Fact>) -> Result<ValidatedFactBatch, TransitionRefusal> {
-        let mut sequence = Sequence::resuming(&self.registry, &self.child_return, view);
+        let mut sequence = Sequence::resuming(self, view);
         for fact in &facts {
             sequence.admit(fact)?;
         }
@@ -226,6 +207,15 @@ impl Engine {
     pub fn handle(&self, view: &EngineView, event: EngineEvent) -> Result<EngineDecision, TransitionError> {
         if view.policy() != self.identity {
             return Err(TransitionError::ForeignView);
+        }
+        let acting = match &event {
+            EngineEvent::Proposals(batch) => Some(&batch.trajectory),
+            EngineEvent::ExecuteOffer(execution) => Some(&execution.trajectory),
+            EngineEvent::ChildReturn(report) => Some(&report.child),
+            EngineEvent::Outcome(_) | EngineEvent::BindFork(_) => None,
+        };
+        if acting.is_some_and(|trajectory| !view.projection().is_opened(trajectory)) {
+            return Err(TransitionError::UnopenedTrajectory);
         }
         match event {
             EngineEvent::Proposals(batch) => self.decide_proposals(view, &batch),
@@ -320,7 +310,7 @@ impl Engine {
 
     /// The fork one child was bound to, or `None` for a trajectory that never forked.
     pub fn fork_of(&self, view: &EngineView, child: &TrajectoryId) -> Option<crate::value::ForkId> {
-        view.views(child).fork_of(child).cloned()
+        view.views(child)?.fork_of(child).cloned()
     }
 
     /// Where one fork stands: never prepared, prepared and open for binding,
@@ -385,7 +375,7 @@ impl Engine {
                 Err(TransitionError::UnbindableFork)
             };
         }
-        if binding.child == parent || views.is_active(&binding.child) {
+        if view.projection().is_opened(&binding.child) {
             return Err(TransitionError::ChildAlreadyUsed);
         }
         // A recorded spawn failure makes the preparation unbindable: no child ran.
@@ -862,7 +852,7 @@ impl Engine {
             .dispatch_call(fork.dispatch())
             .ok_or(TransitionError::UnknownDispatch)?
             .digest();
-        let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
+        let advance = Sequence::advance_of(self, view, &facts);
         let (_, offers, opened) = self.open_offers(views, &act, &advance, &nonce, &subject, &call, &stage);
         facts.extend(opened);
         let batch = self.declaring(act, advance, facts);
@@ -1464,7 +1454,7 @@ impl Engine {
             .clone();
         let contract = self.dispatch_contract(views, dispatch)?;
         let stage = plan::confined_stage(&self.registry, contract, &receiving, &value.label, &residual, &lineage);
-        let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
+        let advance = Sequence::advance_of(self, view, &facts);
         let (_, offers, opened) = self.open_offers(views, &act, &advance, &nonce, &subject, dispatch.digest(), &stage);
         facts.extend(opened);
         let batch = self.declaring(act, advance, facts);
@@ -1637,7 +1627,7 @@ impl Engine {
         for fact in &facts {
             working.to_mut().fold(fact);
         }
-        let admissions = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
+        let admissions = Sequence::advance_of(self, view, &facts);
         let composed = compose_batch(
             &self.registry,
             &self.child_return,
@@ -1681,7 +1671,7 @@ impl Engine {
         // What this decision moves, derived before the offers that have to record where it lands.
         // The declaration prepended below re-derives it over the whole batch; an offer record
         // moves nothing, so the two agree by construction.
-        let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
+        let advance = Sequence::advance_of(self, view, &facts);
         let final_views = working.view(&batch.trajectory);
         let mut blocked = Vec::new();
         for (position, call) in composed
@@ -1762,7 +1752,7 @@ impl Engine {
         if facts.is_empty() {
             return Ok(None);
         }
-        let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
+        let advance = Sequence::advance_of(self, view, &facts);
         let batch = self.declaring(crate::basis::DecidedAct::Proposals(id.clone()), advance, facts);
         Ok(Some(self.seal(view, batch)?))
     }
@@ -2112,7 +2102,7 @@ impl Engine {
             .unwrap_or_else(|error| unreachable!("the confined stage admits what the log already proved: {error}"));
         facts.extend(admitted);
         let value = crossed(&facts);
-        let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
+        let advance = Sequence::advance_of(self, view, &facts);
         let batch = self.declaring(crate::basis::DecidedAct::Offer(execution.offer), advance, facts);
         Ok(EngineDecision {
             append: Some(self.seal(view, batch)?),
@@ -2209,7 +2199,7 @@ impl Engine {
             .unwrap_or_else(|error| unreachable!("the confined stage admits what this act just derived: {error}"));
         facts.extend(admitted);
         let value = crossed(&facts);
-        let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
+        let advance = Sequence::advance_of(self, view, &facts);
         let batch = self.declaring(crate::basis::DecidedAct::Offer(execution.offer), advance, facts);
         Ok(EngineDecision {
             append: Some(self.seal(view, batch)?),
@@ -2377,7 +2367,7 @@ impl Engine {
             derivation,
             Some(residual),
         ));
-        let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
+        let advance = Sequence::advance_of(self, view, &facts);
         let batch = self.declaring(crate::basis::DecidedAct::Offer(execution.offer), advance, facts);
         Ok(EngineDecision {
             append: Some(self.seal(view, batch)?),
@@ -2461,7 +2451,7 @@ impl Engine {
                 },
                 None,
             ));
-            let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
+            let advance = Sequence::advance_of(self, view, &facts);
             let batch = self.declaring(crate::basis::DecidedAct::Offer(execution.offer), advance, facts);
             return Ok(EngineDecision {
                 append: Some(self.seal(view, batch)?),
@@ -2589,7 +2579,7 @@ impl Engine {
             derived,
             lineage,
         });
-        let staged = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
+        let staged = Sequence::advance_of(self, view, &facts);
         let act = crate::basis::DecidedAct::Offer(execution.offer);
         let follow_up = match after {
             CheckOutcome::Allow => {
@@ -2618,7 +2608,7 @@ impl Engine {
                 OfferFollowUp::Substituted { block: Box::new(block) }
             }
         };
-        let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
+        let advance = Sequence::advance_of(self, view, &facts);
         let batch = self.declaring(act, advance, facts);
         Ok(EngineDecision {
             append: Some(self.seal(view, batch)?),
@@ -2915,7 +2905,7 @@ impl Engine {
             &recorded.subject,
             execution.offer,
         ));
-        let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
+        let advance = Sequence::advance_of(self, view, &facts);
         let subject = crate::basis::SubjectKey::Approval(execution.offer);
         facts.push(Fact::CallApproved {
             trajectory: trajectory.clone(),
@@ -2984,7 +2974,7 @@ impl Engine {
             after.fold(fact);
         }
         let after = after.view(trajectory);
-        let advance = Sequence::advance_of(&self.registry, &self.child_return, view, &facts);
+        let advance = Sequence::advance_of(self, view, &facts);
         let (block, opened) = self.surface_call_block(
             &after,
             &crate::basis::DecidedAct::Offer(execution.offer),
@@ -3023,58 +3013,6 @@ impl Engine {
                 open_vectors: self.open_vectors(),
             }],
         )
-    }
-
-    /// The strict cold-replay verifier of the durable opening: exactly one
-    /// `TrajectoryOpened`, first in the family log, naming the replayed root, at a supported
-    /// dialect, carrying the supplied policy's digest, declaration, and derived vectors. The
-    /// recorded declaration must equal this engine's validated profile byte for byte — which
-    /// subsumes re-running the coverage matrix over it — and the recorded vectors must rederive
-    /// from it exactly.
-    pub fn verify_opening(&self, facts: &[Fact], trajectory: &TrajectoryId) -> Result<(), OpeningTransitionRefusal> {
-        let mut openings = facts.iter().enumerate().filter_map(|(index, fact)| match fact {
-            // `policy_file_key` is deliberately not re-derived here: it names a stored file
-            // this engine never sees. The outer layer re-hashes the file it loaded against
-            // this record on every event, which is the check the engine cannot make.
-            Fact::TrajectoryOpened {
-                trajectory,
-                dialect,
-                profile,
-                policy_digest,
-                open_vectors,
-                ..
-            } => Some((index, trajectory, dialect, profile, policy_digest, open_vectors)),
-            _ => None,
-        });
-        let Some((index, recorded_trajectory, dialect, recorded_profile, policy_digest, open_vectors)) =
-            openings.next()
-        else {
-            return Err(OpeningTransitionRefusal::Missing);
-        };
-        if openings.next().is_some() {
-            return Err(OpeningTransitionRefusal::Duplicate);
-        }
-        if index != 0 {
-            return Err(OpeningTransitionRefusal::NotFirst);
-        }
-        if recorded_trajectory != trajectory {
-            return Err(OpeningTransitionRefusal::WrongTrajectory {
-                found: recorded_trajectory.as_str().to_string(),
-            });
-        }
-        if *dialect != self.dialect {
-            return Err(OpeningTransitionRefusal::UnsupportedDialect { found: dialect.value() });
-        }
-        if policy_digest != &self.identity {
-            return Err(OpeningTransitionRefusal::DigestMismatch);
-        }
-        if recorded_profile != self.profile() {
-            return Err(OpeningTransitionRefusal::ProfileMismatch);
-        }
-        if open_vectors != &self.open_vectors() {
-            return Err(OpeningTransitionRefusal::VectorMismatch);
-        }
-        Ok(())
     }
 
     /// Convert untrusted provider bytes into the only call representation accepted by this
@@ -3308,7 +3246,7 @@ fn settled_outcome(views: &Views, dispatch: &DispatchId) -> SettledOutcome {
 }
 
 fn advance_of(engine: &Engine, view: &EngineView, facts: &[Fact]) -> crate::basis::BasisAdvance {
-    Sequence::advance_of(&engine.registry, &engine.child_return, view, facts)
+    Sequence::advance_of(engine, view, facts)
 }
 
 fn approved_release(
@@ -3613,15 +3551,190 @@ mod tests {
     }
 
     fn engine(tools: Vec<ToolContract>) -> Engine {
-        let cfg = RegistryConfig {
+        open_engine(test_config(tools))
+    }
+
+    fn engine_at(tools: Vec<ToolContract>, starting: Label) -> Engine {
+        open_engine_at(test_config(tools), starting)
+    }
+
+    fn test_config(tools: Vec<ToolContract>) -> RegistryConfig {
+        RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools,
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
             membership: None,
+        }
+    }
+
+    fn opened(e: &Engine) -> Fact {
+        opened_root(e, &traj())
+    }
+
+    fn opened_root(e: &Engine, trajectory: &TrajectoryId) -> Fact {
+        e.open_trajectory(trajectory, crate::profile::PolicyFileKey::of(b"policy"))
+            .expect("the engine opens its own root")
+            .into_unsealed()
+            .remove(0)
+    }
+
+    fn read_tool(name: &str, delta: Option<Delta>) -> ToolContract {
+        ToolContract {
+            name: ToolName::new(name),
+            tags: vec![],
+            delta,
+            parameters: crate::params::ToolParameters::open(),
+            emits: EffectSet::default(),
+            requires: Requires::default(),
+        }
+    }
+
+    fn suspicious_read() -> ToolContract {
+        read_tool(
+            "read_suspicious",
+            Some(Delta {
+                trust: Some(Dim::Known(SUSPICIOUS)),
+                audience: None,
+            }),
+        )
+    }
+
+    fn internal_read() -> ToolContract {
+        read_tool(
+            "read_internal",
+            Some(Delta {
+                trust: None,
+                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
+            }),
+        )
+    }
+
+    fn stray_admission(trajectory: &TrajectoryId, label: Label) -> Fact {
+        Fact::ValueAdmitted {
+            trajectory: trajectory.clone(),
+            value: LabeledValue::new(ValueBody::new("stray"), label),
+            provenance: Provenance::ToolResult {
+                dispatch: DispatchId::new(trajectory.clone(), call("stray", json!({})).digest(), 0),
+            },
+        }
+    }
+
+    fn suspicious_internal_read() -> ToolContract {
+        read_tool(
+            "read_suspicious_internal",
+            Some(Delta {
+                trust: Some(Dim::Known(SUSPICIOUS)),
+                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
+            }),
+        )
+    }
+
+    fn unknown_read() -> ToolContract {
+        read_tool("read_unknown", None)
+    }
+
+    fn dynamic_read(trust: Option<Trust>) -> ToolContract {
+        ToolContract {
+            parameters: crate::params::test_string_argument_schema("who"),
+            ..read_tool(
+                "read_dynamic",
+                Some(Delta {
+                    trust: trust.map(Dim::Known),
+                    audience: Some(crate::contract::AudienceDelta::Dynamic(
+                        crate::contract::DynamicAudienceBinding {
+                            resolver: crate::names::DynamicResolverName::new("acl"),
+                            argument: "who".to_string(),
+                        },
+                    )),
+                }),
+            )
+        }
+    }
+
+    fn reads(e: &Engine, log: &mut Vec<Fact>, trajectory: &TrajectoryId, tool: &str) -> crate::value::DispatchId {
+        let call = call(tool, json!({ "who": "someone" }));
+        let id = format!("read-{tool}-{}", log.len());
+        let decision = e
+            .handle(
+                &viewing(e, log),
+                batch_on(trajectory, &id, Vec::new(), vec![raw(&call)], None),
+            )
+            .expect("a registered read decides");
+        let dispatch = match answered(&decision) {
+            ([release], []) => {
+                let dispatch = release.dispatch.clone();
+                log.extend(appended_facts(decision));
+                dispatch
+            }
+            ([], [block]) => {
+                let accepting = block
+                    .block
+                    .plans
+                    .iter()
+                    .filter_map(crate::plan::RemedyPlan::executable)
+                    .find(|plan| plan.narrowing().is_some() && plan.sanitizer().is_none() && plan.required.is_empty())
+                    .expect("a narrowing read offers its acceptance")
+                    .id;
+                let offer = block
+                    .offers
+                    .iter()
+                    .find_map(|(offer, plan)| (*plan == accepting).then_some(*offer))
+                    .expect("the acceptance plan is offered");
+                log.extend(appended_facts(decision));
+                let approved = e
+                    .handle(
+                        &viewing(e, log),
+                        EngineEvent::ExecuteOffer(OfferExecution {
+                            trajectory: trajectory.clone(),
+                            offer,
+                            outcome: OfferOutcome::Approved(Vec::new()),
+                            offer_nonce: nonce(),
+                        }),
+                    )
+                    .expect("the acceptance approves the read");
+                assert!(matches!(
+                    approved.follow_up,
+                    FollowUp::Offer(OfferFollowUp::Approved { .. })
+                ));
+                log.extend(appended_facts(approved));
+                let released = e
+                    .handle(
+                        &viewing(e, log),
+                        batch_on(
+                            trajectory,
+                            &format!("{id}-approved"),
+                            Vec::new(),
+                            vec![raw(&call)],
+                            None,
+                        ),
+                    )
+                    .expect("the approved read releases");
+                let dispatch = match answered(&released) {
+                    ([release], []) => release.dispatch.clone(),
+                    other => panic!("the approved read releases, got {other:?}"),
+                };
+                log.extend(appended_facts(released));
+                dispatch
+            }
+            other => panic!("one read decides one way, got {other:?}"),
         };
-        open_engine(cfg)
+        let admitted = e
+            .handle(
+                &viewing(e, log),
+                EngineEvent::Outcome(ToolReport {
+                    dispatch: dispatch.clone(),
+                    outcome: ToolOutcome::Success {
+                        body: OutcomeBody::Available(ValueBody::new("read")),
+                    },
+                    evidence: Vec::new(),
+                    offer_nonce: nonce(),
+                }),
+            )
+            .expect("the raw result admits");
+        log.extend(appended_facts(admitted));
+        dispatch
     }
 
     fn forked_child(e: &Engine, log: &[Fact], child: &TrajectoryId) -> Vec<Fact> {
@@ -3684,11 +3797,23 @@ mod tests {
         open_engine_returning(cfg, ReturnPolicy::Raw)
     }
 
-    fn open_engine_returning(mut cfg: RegistryConfig, child_return: ReturnPolicy) -> Engine {
+    fn open_engine_at(cfg: RegistryConfig, starting: Label) -> Engine {
+        open_engine_returning_at(cfg, ReturnPolicy::Raw, starting)
+    }
+
+    fn open_engine_returning(cfg: RegistryConfig, child_return: ReturnPolicy) -> Engine {
+        let starting = crate::profile::neutral_starting_label(&cfg.trust_chain);
+        open_engine_returning_at(cfg, child_return, starting)
+    }
+
+    fn open_engine_returning_at(mut cfg: RegistryConfig, child_return: ReturnPolicy, starting: Label) -> Engine {
         if !cfg.tools.iter().any(|tool| tool.name.as_str() == "spawn") {
             cfg.tools.push(plain_tool("spawn"));
         }
-        let profile = crate::profile::covering_declaration(&cfg);
+        let profile = crate::profile::ProfileDeclaration {
+            starting_label: starting,
+            ..crate::profile::covering_declaration(&cfg)
+        };
         Engine::open(DeploymentPolicy {
             registry: cfg,
             planner_cap: crate::registry::PlannerCap::default(),
@@ -3697,14 +3822,6 @@ mod tests {
             profile,
         })
         .unwrap()
-    }
-
-    fn user_value(label: Label) -> Fact {
-        Fact::ValueAdmitted {
-            trajectory: traj(),
-            value: LabeledValue::new(ValueBody::new("body"), label),
-            provenance: Provenance::UserInput,
-        }
     }
 
     fn known(trust: Trust, audience: Audience) -> Label {
@@ -3768,7 +3885,7 @@ mod tests {
             emits: EffectSet::new(emits.map(EffectKind::new)).unwrap(),
             requires: Requires::default(),
         };
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![crate::profile::opening_at(traj(), known(TRUSTED, Audience::Public))];
         let p = Projection::build(&log, 1);
         let open = |contract: ToolContract| {
             engine(vec![contract])
@@ -3788,7 +3905,7 @@ mod tests {
     #[test]
     fn clean_call_allows() {
         let e = engine(vec![crm_tool()]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         match check(&e, &log, &call("get_ticket", json!({}))) {
             CheckOutcome::Block(b) => {
                 assert!(b.narrowing.is_some());
@@ -3800,9 +3917,9 @@ mod tests {
 
     #[test]
     fn the_boundary_releases_an_allowed_proposal_with_its_dispatch() {
-        let e = engine(vec![crm_tool()]);
         let internal = Audience::restricted([ReaderId::new("internal")]);
-        let records = vec![user_value(known(TRUSTED, internal))];
+        let e = engine_at(vec![crm_tool()], known(TRUSTED, internal));
+        let records = vec![opened(&e)];
         let view = e.view(&traj(), records, 1).unwrap();
         let call = call("get_ticket", json!({}));
 
@@ -3862,9 +3979,9 @@ mod tests {
 
     #[test]
     fn a_repeated_batch_identity_returns_its_recorded_decision_and_a_reused_one_is_refused() {
-        let e = engine(vec![crm_tool()]);
         let internal = Audience::restricted([ReaderId::new("internal")]);
-        let records = vec![user_value(known(TRUSTED, internal))];
+        let e = engine_at(vec![crm_tool()], known(TRUSTED, internal));
+        let records = vec![opened(&e)];
         let view = e.view(&traj(), records.clone(), 1).unwrap();
         let batch = |proposals: Vec<ResolvedCall>| {
             EngineEvent::Proposals(ProposalBatch {
@@ -3905,16 +4022,7 @@ mod tests {
             spawn: None,
             released,
         };
-        let allowed = |records: Vec<Fact>| {
-            [
-                vec![user_value(known(
-                    TRUSTED,
-                    Audience::restricted([ReaderId::new("internal")]),
-                ))],
-                records,
-            ]
-            .concat()
-        };
+        let allowed = |records: Vec<Fact>| [vec![opened(&e)], records].concat();
         assert_eq!(
             e.validate_replay(&allowed(vec![decision(vec![]), decision(vec![])])),
             Err(TransitionRefusal::MisdecidedBatch)
@@ -3993,7 +4101,7 @@ mod tests {
     fn a_decision_cannot_record_a_release_the_check_refuses() {
         let e = engine(vec![crm_tool()]);
         let call = call("get_ticket", json!({}));
-        let public = user_value(known(TRUSTED, Audience::Public));
+        let public = opened(&e);
         let dispatch = DispatchId::new(traj(), call.digest(), 0);
         let forged = vec![
             public,
@@ -4027,8 +4135,8 @@ mod tests {
 
     #[test]
     fn a_repeat_of_a_block_that_has_lifted_reports_a_spent_identity() {
-        let e = engine(vec![crm_tool()]);
-        let public = vec![user_value(known(TRUSTED, Audience::Public))];
+        let e = engine(vec![crm_tool(), internal_read()]);
+        let public = vec![opened(&e)];
         let call = call("get_ticket", json!({}));
         let event = EngineEvent::Proposals(ProposalBatch {
             id: crate::transition::ProposalBatchId::new("b1"),
@@ -4043,8 +4151,8 @@ mod tests {
         let decision = e.handle(&view, event.clone()).unwrap();
         let decided = decision.append.expect("the block records its decision").into_unsealed();
 
-        let internal = Audience::restricted([ReaderId::new("internal")]);
-        let later = [public, decided, vec![user_value(known(TRUSTED, internal))]].concat();
+        let mut later = [public, decided].concat();
+        reads(&e, &mut later, &traj(), "read_internal");
         let revision = later.len() as u64;
         let after = e.view(&traj(), later, revision).unwrap();
 
@@ -4064,7 +4172,7 @@ mod tests {
     #[test]
     fn the_boundary_plans_a_blocked_proposal_and_opens_nothing() {
         let e = engine(vec![crm_tool(), plain_tool("send")]);
-        let records = vec![user_value(known(TRUSTED, Audience::Public))];
+        let records = vec![opened(&e)];
         let view = e.view(&traj(), records, 1).unwrap();
         let call = call("get_ticket", json!({}));
 
@@ -4109,9 +4217,9 @@ mod tests {
 
     #[test]
     fn repeat_at_same_label_is_not_a_narrowing() {
-        let e = engine(vec![crm_tool()]);
         let internal = Audience::restricted([ReaderId::new("internal")]);
-        let log = vec![user_value(known(TRUSTED, internal))];
+        let e = engine_at(vec![crm_tool()], known(TRUSTED, internal));
+        let log = vec![opened(&e)];
         assert_eq!(check(&e, &log, &call("get_ticket", json!({}))), CheckOutcome::Allow);
     }
 
@@ -4129,15 +4237,15 @@ mod tests {
             requires: Requires::default(),
         };
         let e = engine(vec![scan]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         assert_eq!(check(&e, &log, &call("scan_inbox", json!({}))), CheckOutcome::Allow);
     }
 
     #[test]
     fn trust_floor_gap_when_suspicious() {
-        let e = engine(vec![crm_tool()]);
         let internal = Audience::restricted([ReaderId::new("internal")]);
-        let log = vec![user_value(known(SUSPICIOUS, internal))];
+        let e = engine_at(vec![crm_tool()], known(SUSPICIOUS, internal));
+        let log = vec![opened(&e)];
         match check(&e, &log, &call("get_ticket", json!({}))) {
             CheckOutcome::Block(b) => assert!(b.requirement_gaps.contains(&Gap::TrustFloor {
                 required: TRUSTED,
@@ -4163,9 +4271,9 @@ mod tests {
                 ..Requires::default()
             },
         };
-        let e = engine(vec![send]);
         let internal = Audience::restricted([ReaderId::new("auditor")]);
-        let log = vec![user_value(known(TRUSTED, internal))];
+        let e = engine_at(vec![send], known(TRUSTED, internal));
+        let log = vec![opened(&e)];
         assert_eq!(
             check(&e, &log, &call("send_email", json!({ "to": "auditor" }))),
             CheckOutcome::Allow
@@ -4196,7 +4304,7 @@ mod tests {
             },
         };
         let e = engine(vec![del]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         match check(&e, &log, &call("delete_db", json!({}))) {
             CheckOutcome::Block(b) => {
                 assert!(b.requirement_gaps.contains(&Gap::Prior(EffectKind::new("backup.done"))))
@@ -4225,9 +4333,9 @@ mod tests {
                 ..Requires::default()
             },
         };
-        let e = engine(vec![share]);
         let both = Audience::restricted([ReaderId::new("a"), ReaderId::new("b")]);
-        let log = vec![user_value(known(TRUSTED, both.clone()))];
+        let e = engine_at(vec![share], known(TRUSTED, both.clone()));
+        let log = vec![opened(&e)];
         match check(&e, &log, &call("share", json!({}))) {
             CheckOutcome::Block(block) => {
                 assert_eq!(block.requirement_gaps, vec![Gap::Includes { recipients: b_reader }]);
@@ -4264,7 +4372,7 @@ mod tests {
             },
         };
         let e = engine(vec![risky]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         match check(&e, &log, &call("risky", json!({}))) {
             CheckOutcome::Block(block) => {
                 assert_eq!(
@@ -4300,9 +4408,9 @@ mod tests {
                 ..Requires::default()
             },
         };
-        let e = engine(vec![scoped]);
         let both = Audience::restricted([ReaderId::new("a"), ReaderId::new("b")]);
-        let log = vec![user_value(known(TRUSTED, both))];
+        let e = engine_at(vec![scoped], known(TRUSTED, both));
+        let log = vec![opened(&e)];
         match check(&e, &log, &call("scoped", json!({}))) {
             CheckOutcome::Block(block) => {
                 assert!(block.requirement_gaps.is_empty(), "narrowing into the cap is not a gap");
@@ -4365,10 +4473,10 @@ mod tests {
 
     #[test]
     fn a_rewritten_admitted_label_is_refused_at_every_provenance() {
-        let e = engine(vec![crm_tool()]);
         let internal = Audience::restricted([ReaderId::new("internal")]);
+        let e = engine_at(vec![crm_tool()], known(TRUSTED, internal.clone()));
         let call = call("get_ticket", json!({}));
-        let mut log = vec![user_value(known(TRUSTED, internal.clone()))];
+        let mut log = vec![opened(&e)];
         let dispatch = open(&e, &mut log, &call);
         close(
             &e,
@@ -4404,7 +4512,8 @@ mod tests {
         assert_eq!(widened(admitted), Ok(()));
 
         let child = TrajectoryId::new("child");
-        let mut branched = vec![user_value(known(SUSPICIOUS, internal.clone()))];
+        let e = engine_at(vec![crm_tool()], known(SUSPICIOUS, internal.clone()));
+        let mut branched = vec![opened(&e)];
         branched.extend(forked_child(&e, &branched.clone(), &child));
         let crossing = e
             .submit_child_return(
@@ -4454,10 +4563,10 @@ mod tests {
 
     #[test]
     fn a_reported_outcome_closes_once_and_repeats_answer_from_the_record() {
-        let e = engine(vec![crm_tool()]);
         let internal = Audience::restricted([ReaderId::new("internal")]);
+        let e = engine_at(vec![crm_tool()], known(TRUSTED, internal));
         let call = call("get_ticket", json!({}));
-        let records = vec![user_value(known(TRUSTED, internal))];
+        let records = vec![opened(&e)];
         let view = e.view(&traj(), records.clone(), 1).unwrap();
         let decision = e
             .handle(
@@ -4591,7 +4700,7 @@ mod tests {
             membership: None,
         });
         let call = call("fetch", json!({}));
-        let mut log = vec![user_value(known(Trust::new(2), Audience::Public))];
+        let mut log = vec![opened(&e)];
         let projection = Projection::build(&log, log.len() as u64);
         let trajectory = traj();
         let views = projection.view(&trajectory);
@@ -4676,7 +4785,7 @@ mod tests {
             membership: None,
         });
         let call = call("fetch", json!({}));
-        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let mut log = vec![opened(&e)];
         let projection = Projection::build(&log, log.len() as u64);
         let trajectory = traj();
         let views = projection.view(&trajectory);
@@ -4902,7 +5011,7 @@ mod tests {
 
     fn staged_candidate(e: &Engine) -> (Vec<Fact>, DispatchId, ValueBody, EngineDecision) {
         let call = call("fetch", json!({}));
-        let mut log = vec![user_value(known(Trust::new(2), Audience::Public))];
+        let mut log = vec![opened(e)];
         let blocked = proposed(e, &log, "b1", nonce(), call.clone()).expect("the batch decides");
         let bound = opened_offers(&appended_facts(blocked))
             .into_iter()
@@ -5068,9 +5177,9 @@ mod tests {
             "a candidate crosses at a cost the agent accepted, never one the log asserts"
         );
 
-        let e = substituting_engine();
+        let e = substituting_engine(TRUSTED);
         let proposal = call("post", json!({ "body": "ssn 123" }));
-        let log = internal_log(TRUSTED);
+        let log = internal_log(&e);
         let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
         let offers = opened_offers(&facts);
         let log = [log, facts].concat();
@@ -5118,9 +5227,9 @@ mod tests {
             Ok(OfferConsult::Replay(OfferOutcome::Approved(Vec::new()))),
         );
 
-        let e = substituting_engine();
+        let e = substituting_engine(TRUSTED);
         let proposal = call("post", json!({ "body": "ssn 123" }));
-        let log = internal_log(TRUSTED);
+        let log = internal_log(&e);
         let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
         let input_hop = opened_offers(&facts)[0].0;
         let log = [log, facts].concat();
@@ -5327,7 +5436,7 @@ mod tests {
         ));
     }
 
-    fn substituting_engine() -> Engine {
+    fn substituting_engine(trust: Trust) -> Engine {
         let partner = Audience::restricted([ReaderId::new("partner")]);
         let post = |name: &str, tags: Vec<crate::names::TagName>| ToolContract {
             name: ToolName::new(name),
@@ -5348,48 +5457,48 @@ mod tests {
                 ..Requires::default()
             },
         };
-        open_engine(RegistryConfig {
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![
-                post("post", vec![crate::names::TagName::new("outbound")]),
-                post("post_untagged", vec![]),
-                open_tool("ping"),
-            ],
-            authorities: vec![crate::authority::Authority {
-                name: AuthorityName::new("officer"),
-                mandate: crate::authority::Mandate {
-                    trust_ceiling: Some(TRUSTED),
-                    reader_ceiling: Some(partner),
-                    ..crate::authority::Mandate::default()
-                },
-                scope: crate::authority::Scope::default(),
-                hint: None,
-            }],
-            sanitizers: vec![crate::authority::Sanitizer {
-                name: crate::names::SanitizerName::new("redact"),
-                on: crate::authority::SanitizerPoints {
-                    input: true,
-                    output: false,
-                },
-                transition: crate::authority::Transition::Audience {
-                    from_includes: Audience::restricted([ReaderId::new("internal")]),
-                    to: Audience::restricted([ReaderId::new("internal"), ReaderId::new("partner")]),
-                },
-                scope: crate::authority::Scope {
-                    tags: vec![crate::names::TagName::new("outbound")],
-                },
-                hint: None,
-            }],
-            casts: vec![],
-            membership: None,
-        })
+        open_engine_at(
+            RegistryConfig {
+                trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+                tools: vec![
+                    post("post", vec![crate::names::TagName::new("outbound")]),
+                    post("post_untagged", vec![]),
+                    open_tool("ping"),
+                ],
+                authorities: vec![crate::authority::Authority {
+                    name: AuthorityName::new("officer"),
+                    mandate: crate::authority::Mandate {
+                        trust_ceiling: Some(TRUSTED),
+                        reader_ceiling: Some(partner),
+                        ..crate::authority::Mandate::default()
+                    },
+                    scope: crate::authority::Scope::default(),
+                    hint: None,
+                }],
+                sanitizers: vec![crate::authority::Sanitizer {
+                    name: crate::names::SanitizerName::new("redact"),
+                    on: crate::authority::SanitizerPoints {
+                        input: true,
+                        output: false,
+                    },
+                    transition: crate::authority::Transition::Audience {
+                        from_includes: Audience::restricted([ReaderId::new("internal")]),
+                        to: Audience::restricted([ReaderId::new("internal"), ReaderId::new("partner")]),
+                    },
+                    scope: crate::authority::Scope {
+                        tags: vec![crate::names::TagName::new("outbound")],
+                    },
+                    hint: None,
+                }],
+                casts: vec![],
+                membership: None,
+            },
+            known(trust, Audience::restricted([ReaderId::new("internal")])),
+        )
     }
 
-    fn internal_log(trust: Trust) -> Vec<Fact> {
-        vec![user_value(known(
-            trust,
-            Audience::restricted([ReaderId::new("internal")]),
-        ))]
+    fn internal_log(e: &Engine) -> Vec<Fact> {
+        vec![opened(e)]
     }
 
     fn substitution(call: &ResolvedCall, replacement: &str) -> OfferOutcome {
@@ -5404,8 +5513,8 @@ mod tests {
 
     #[test]
     fn an_input_hop_is_offered_before_the_ruling_that_covers_the_same_gap() {
-        let e = substituting_engine();
-        let log = internal_log(TRUSTED);
+        let e = substituting_engine(TRUSTED);
+        let log = internal_log(&e);
         let plans = |tool: &str| {
             opened_offers(&appended_facts(
                 proposed(&e, &log, "b1", nonce(), call(tool, json!({ "body": "ssn 123" }))).expect("the batch decides"),
@@ -5435,8 +5544,8 @@ mod tests {
 
     #[test]
     fn a_marked_spawn_is_offered_no_input_hop_while_its_identical_sibling_is() {
-        let e = substituting_engine();
-        let log = internal_log(TRUSTED);
+        let e = substituting_engine(TRUSTED);
+        let log = internal_log(&e);
         let post = call("post", json!({ "body": "ssn 123" }));
         let batch = || {
             batch_on(
@@ -5496,9 +5605,9 @@ mod tests {
 
     #[test]
     fn a_substitution_that_clears_the_last_gap_dispatches_in_the_hops_own_batch() {
-        let e = substituting_engine();
+        let e = substituting_engine(TRUSTED);
         let proposal = call("post", json!({ "body": "ssn 123" }));
-        let log = internal_log(TRUSTED);
+        let log = internal_log(&e);
         let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
         let offers = opened_offers(&facts);
         let log = [log, facts].concat();
@@ -5566,9 +5675,9 @@ mod tests {
 
     #[test]
     fn a_forged_answer_neither_persists_on_a_candidate_nor_releases_one() {
-        let e = substituting_engine();
+        let e = substituting_engine(TRUSTED);
         let proposal = call("post", json!({ "body": "ssn 123" }));
-        let log = internal_log(TRUSTED);
+        let log = internal_log(&e);
         let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
         let offers = opened_offers(&facts);
         let log = [log, facts].concat();
@@ -5622,9 +5731,9 @@ mod tests {
 
     #[test]
     fn a_repeat_of_a_hop_names_the_dispatch_that_hop_opened() {
-        let e = substituting_engine();
+        let e = substituting_engine(TRUSTED);
         let proposal = call("post", json!({ "body": "ssn 123" }));
-        let log = internal_log(TRUSTED);
+        let log = internal_log(&e);
 
         let hop_of = |log: &Vec<Fact>, batch: &str| {
             let facts = appended_facts(proposed(&e, log, batch, nonce(), proposal.clone()).expect("the batch decides"));
@@ -5669,7 +5778,7 @@ mod tests {
     #[test]
     fn an_opening_names_the_position_the_decision_released_it_for() {
         let e = engine(vec![plain_tool("ping")]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         let ping = call("ping", json!({}));
         let decided = e
             .handle(
@@ -5716,9 +5825,9 @@ mod tests {
 
     #[test]
     fn a_substitution_that_leaves_a_gap_re_plans_over_the_derived_call() {
-        let e = substituting_engine();
+        let e = substituting_engine(SUSPICIOUS);
         let proposal = call("post", json!({ "body": "ssn 123" }));
-        let log = internal_log(SUSPICIOUS);
+        let log = internal_log(&e);
         let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
         let hop = opened_offers(&facts)[0].0;
         let log = [log, facts].concat();
@@ -5784,9 +5893,9 @@ mod tests {
 
     #[test]
     fn a_replacement_the_engine_cannot_bind_leaves_the_hop_unspent() {
-        let e = substituting_engine();
+        let e = substituting_engine(TRUSTED);
         let proposal = call("post", json!({ "body": "ssn 123" }));
-        let log = internal_log(TRUSTED);
+        let log = internal_log(&e);
         let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
         let hop = opened_offers(&facts)[0].0;
         let log = [log, facts].concat();
@@ -5829,9 +5938,9 @@ mod tests {
 
     #[test]
     fn a_hop_goes_stale_with_its_basis_and_a_spent_one_answers_from_the_record() {
-        let e = substituting_engine();
+        let e = substituting_engine(TRUSTED);
         let proposal = call("post", json!({ "body": "ssn 123" }));
-        let log = internal_log(TRUSTED);
+        let log = internal_log(&e);
         let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
         let hop = opened_offers(&facts)[0].0;
         let log = [log, facts].concat();
@@ -5891,10 +6000,10 @@ mod tests {
 
     #[test]
     fn a_child_return_ends_the_branch_once_and_a_repeat_answers_from_the_record() {
-        let e = engine(vec![]);
-        let child = TrajectoryId::new("child");
         let internal = Audience::restricted([ReaderId::new("internal")]);
-        let mut log = vec![user_value(known(SUSPICIOUS, internal.clone()))];
+        let e = engine_at(vec![], known(SUSPICIOUS, internal.clone()));
+        let child = TrajectoryId::new("child");
+        let mut log = vec![opened(&e)];
         log.extend(forked_child(&e, &log.clone(), &child));
         let view = e.view(&traj(), log.clone(), log.len() as u64).unwrap();
 
@@ -5943,7 +6052,7 @@ mod tests {
                     offer_nonce: nonce(),
                 })
             ),
-            Err(crate::transition::TransitionError::NotForked)
+            Err(crate::transition::TransitionError::UnopenedTrajectory)
         );
     }
 
@@ -5951,7 +6060,7 @@ mod tests {
     fn a_marked_spawn_prepares_its_fork_and_the_child_binds_to_it() {
         let e = engine(vec![plain_tool("spawn")]);
         let call = call("spawn", json!({}));
-        let records = vec![user_value(known(TRUSTED, Audience::Public))];
+        let records = vec![opened(&e)];
         let view = e.view(&traj(), records.clone(), 1).unwrap();
         let batch = |spawn: Option<crate::transition::SpawnMark>| {
             EngineEvent::Proposals(ProposalBatch {
@@ -5999,8 +6108,9 @@ mod tests {
         assert!(matches!(opened.as_slice(), [Fact::ForkOpened { .. }]));
 
         let after = e.view(&traj(), [log.clone(), opened].concat(), 3).unwrap();
-        assert_eq!(after.views(&child).current_label(), partial(TRUSTED, Audience::Public));
-        assert_eq!(after.views(&child).parent_of(&child), Some(&traj()));
+        let child_views = after.views(&child).expect("the bound child is opened");
+        assert_eq!(child_views.current_label(), partial(TRUSTED, Audience::Public));
+        assert_eq!(child_views.parent_of(&child), Some(&traj()));
 
         let repeat = e.handle(&after, bind(fork.clone(), child.clone())).unwrap();
         assert_eq!(repeat.append, None);
@@ -6062,7 +6172,7 @@ mod tests {
     fn fork_of_answers_the_same_advanced_or_rebuilt_and_a_refused_bind_leaves_it() {
         let e = engine(vec![plain_tool("spawn")]);
         let call = call("spawn", json!({}));
-        let records = vec![user_value(known(TRUSTED, Audience::Public))];
+        let records = vec![opened(&e)];
         let mut held = e.view(&traj(), records.clone(), 1).unwrap();
         let child = TrajectoryId::new("child");
 
@@ -6122,7 +6232,7 @@ mod tests {
     fn a_fork_preparation_replays_only_as_its_marked_release() {
         let e = engine(vec![plain_tool("spawn")]);
         let call = call("spawn", json!({}));
-        let records = vec![user_value(known(TRUSTED, Audience::Public))];
+        let records = vec![opened(&e)];
         let view = e.view(&traj(), records.clone(), 1).unwrap();
         let marked = e
             .handle(
@@ -6153,7 +6263,7 @@ mod tests {
             vec![
                 batch[0].clone(),
                 batch[1].clone(),
-                user_value(known(SUSPICIOUS, Audience::Public)),
+                stray_admission(&traj(), known(SUSPICIOUS, Audience::Public)),
                 batch[2].clone(),
             ],
         ]
@@ -6181,9 +6291,7 @@ mod tests {
             profile: declaration,
         })
         .expect("an uncontrolled deployment opens");
-        let view = e
-            .view(&traj(), vec![user_value(known(TRUSTED, Audience::Public))], 1)
-            .unwrap();
+        let view = e.view(&traj(), vec![opened(&e)], 1).unwrap();
         assert_eq!(
             e.handle(
                 &view,
@@ -6206,7 +6314,7 @@ mod tests {
             None => json!({}),
         };
         let call = call("spawn", args);
-        let records = vec![user_value(known(TRUSTED, Audience::Public))];
+        let records = vec![opened(e)];
         let view = e.view(&traj(), records.clone(), 1).unwrap();
         let decision = e
             .handle(
@@ -6352,9 +6460,7 @@ mod tests {
             "required": ["note"],
         });
         let call = call("spawn", json!({ "return_schema": free }));
-        let view = e
-            .view(&traj(), vec![user_value(known(TRUSTED, Audience::Public))], 1)
-            .unwrap();
+        let view = e.view(&traj(), vec![opened(&e)], 1).unwrap();
         let batch = |id: &str, spawn: Option<crate::transition::SpawnMark>| {
             EngineEvent::Proposals(ProposalBatch {
                 id: crate::transition::ProposalBatchId::new(id),
@@ -6461,16 +6567,11 @@ mod tests {
 
     #[test]
     fn a_merge_that_restricts_the_parent_replays_only_with_its_acceptance() {
-        let e = engine(vec![]);
+        let e = engine(vec![suspicious_internal_read()]);
         let child = TrajectoryId::new("child");
-        let internal = Audience::restricted([ReaderId::new("internal")]);
-        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let mut log = vec![opened(&e)];
         log.extend(forked_child(&e, &log.clone(), &child));
-        log.push(Fact::ValueAdmitted {
-            trajectory: child.clone(),
-            value: LabeledValue::new(ValueBody::new("read"), known(SUSPICIOUS, internal)),
-            provenance: Provenance::UserInput,
-        });
+        reads(&e, &mut log, &child, "read_suspicious_internal");
 
         let projection = Projection::build(&log, log.len() as u64);
         let trajectory = traj();
@@ -6562,7 +6663,7 @@ mod tests {
     #[test]
     fn a_neutral_release_advances_no_basis_component() {
         let e = engine(vec![neutral_tool()]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         let before = basis_of(&e, &log);
         let facts = appended_facts(decide(&e, &log, "b1", &call("read_note", json!({}))));
         assert!(!facts.iter().any(|fact| matches!(fact, Fact::BasisAdvanced { .. })));
@@ -6572,18 +6673,18 @@ mod tests {
     #[test]
     fn a_release_advances_the_components_its_contract_can_move() {
         let effects = engine(vec![emitting_tool()]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&effects)];
         let before = basis_of(&effects, &log);
         let facts = appended_facts(decide(&effects, &log, "b1", &call("send_note", json!({}))));
         let after = basis_of(&effects, &[log.clone(), facts].concat());
         assert_eq!(after.family, before.family.next());
         assert_eq!(after.flow, before.flow, "a `delta = {{}}` result restricts nothing");
 
-        let restricting = engine(vec![crm_tool()]);
-        let internal = vec![user_value(known(
-            TRUSTED,
-            Audience::restricted([ReaderId::new("internal")]),
-        ))];
+        let restricting = engine_at(
+            vec![crm_tool()],
+            known(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
+        );
+        let internal = vec![opened(&restricting)];
         let before = basis_of(&restricting, &internal);
         let facts = appended_facts(decide(&restricting, &internal, "b1", &call("get_ticket", json!({}))));
         let after = basis_of(&restricting, &[internal, facts].concat());
@@ -6594,7 +6695,7 @@ mod tests {
     #[test]
     fn a_blocked_proposal_leaves_every_basis_component_where_it_was() {
         let e = engine(vec![crm_tool()]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         let before = basis_of(&e, &log);
         let facts = appended_facts(decide(&e, &log, "b1", &call("get_ticket", json!({}))));
         assert!(
@@ -6608,7 +6709,7 @@ mod tests {
     #[test]
     fn a_declaration_that_disagrees_with_its_records_is_refused() {
         let e = engine(vec![emitting_tool()]);
-        let opening = vec![user_value(known(TRUSTED, Audience::Public))];
+        let opening = vec![opened(&e)];
         let batch = appended_facts(decide(&e, &opening, "b1", &call("send_note", json!({}))));
         let log = [opening.clone(), batch.clone()].concat();
         assert_eq!(e.validate_replay(&log), Ok(()));
@@ -6682,7 +6783,7 @@ mod tests {
             scope: crate::authority::Scope::default(),
             hint: None,
         };
-        open_engine(RegistryConfig {
+        let cfg = RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: vec![ToolContract {
                 name: ToolName::new("wire"),
@@ -6702,7 +6803,8 @@ mod tests {
             sanitizers: vec![],
             casts: vec![],
             membership: None,
-        })
+        };
+        open_engine_at(cfg, known(SUSPICIOUS, Audience::Public))
     }
 
     fn opened_offers(facts: &[Fact]) -> Vec<(crate::value::OfferId, plan::ExecutableRemedyPlan)> {
@@ -6776,7 +6878,7 @@ mod tests {
     #[test]
     fn one_call_carries_one_current_approval() {
         let e = engine(vec![crm_tool()]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         let first = appended_facts(blocked_batch(&e, &log, "b1", nonce()));
         let one = opened_offers(&first)[0].0;
         let log = [log, first].concat();
@@ -6798,7 +6900,7 @@ mod tests {
     #[test]
     fn a_denial_inside_an_offer_execution_is_held_to_that_offer() {
         let e = two_officer_engine();
-        let opening = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let opening = vec![opened(&e)];
         let decision = proposed(&e, &opening, "b1", nonce(), call("wire", json!({}))).expect("the batch decides");
         let opened = appended_facts(decision);
         let offers = opened_offers(&opened);
@@ -6826,7 +6928,7 @@ mod tests {
     #[test]
     fn a_release_that_declares_no_advance_cannot_spend_its_approval() {
         let e = engine(vec![crm_tool()]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         let opened = appended_facts(blocked_batch(&e, &log, "b1", nonce()));
         let offer = opened_offers(&opened)[0].0;
         let log = [log, opened].concat();
@@ -6870,7 +6972,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         let opened = appended_facts(blocked_batch(&e, &log, "b1", nonce()));
         let (offer, plan) = opened_offers(&opened)
             .into_iter()
@@ -6908,7 +7010,7 @@ mod tests {
     #[test]
     fn a_sibling_offer_is_held_to_the_same_menu_as_the_offer_that_derived_it() {
         let e = two_officer_engine();
-        let opening = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let opening = vec![opened(&e)];
         let batch =
             appended_facts(proposed(&e, &opening, "b1", nonce(), call("wire", json!({}))).expect("the batch decides"));
         assert_eq!(e.validate_replay(&[opening.clone(), batch.clone()].concat()), Ok(()));
@@ -6954,7 +7056,7 @@ mod tests {
     #[test]
     fn a_surfacing_offers_its_whole_menu_exactly_once_under_one_block() {
         let e = two_officer_engine();
-        let opening = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let opening = vec![opened(&e)];
         let batch =
             appended_facts(proposed(&e, &opening, "b1", nonce(), call("wire", json!({}))).expect("the batch decides"));
         let offers: Vec<usize> = batch
@@ -7038,7 +7140,7 @@ mod tests {
     #[test]
     fn sibling_blocks_of_one_batch_are_each_held_to_their_own_menu() {
         let e = two_officer_engine();
-        let opening = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let opening = vec![opened(&e)];
         let view = e.view(&traj(), opening.clone(), 1).expect("the log replays");
         let batch = appended_facts(
             e.handle(
@@ -7088,7 +7190,7 @@ mod tests {
     #[test]
     fn a_fully_denied_block_re_plans_to_an_empty_menu_that_replays() {
         let e = two_officer_engine();
-        let mut log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let mut log = vec![opened(&e)];
         let opened =
             appended_facts(proposed(&e, &log, "b1", nonce(), call("wire", json!({}))).expect("the batch decides"));
         log.extend(opened.clone());
@@ -7114,7 +7216,7 @@ mod tests {
     #[test]
     fn evidence_gathered_for_one_offer_cannot_approve_another() {
         let e = two_officer_engine();
-        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let log = vec![opened(&e)];
         let first = appended_facts(
             proposed(&e, &log, "b1", nonce(), call("wire", json!({ "to": "alice" }))).expect("the batch decides"),
         );
@@ -7181,7 +7283,7 @@ mod tests {
     #[test]
     fn a_repeat_returns_the_recorded_outcome_of_a_dispatch_that_already_ran() {
         let e = engine(vec![open_tool("note")]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         let note = call("note", json!({}));
         let release = proposed(&e, &log, "b1", nonce(), note.clone()).expect("the note releases");
         let dispatch = match &release.follow_up {
@@ -7231,7 +7333,7 @@ mod tests {
     #[test]
     fn a_matching_proposal_consumes_its_approval_and_opens_the_dispatch() {
         let e = engine(vec![crm_tool()]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         let opened = appended_facts(blocked_batch(&e, &log, "b1", nonce()));
         let (offer, plan) = opened_offers(&opened)[0].clone();
         let log = [log, opened].concat();
@@ -7275,7 +7377,7 @@ mod tests {
     #[test]
     fn an_approval_releases_once() {
         let e = engine(vec![crm_tool()]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         let opened = appended_facts(blocked_batch(&e, &log, "b1", nonce()));
         let offer = opened_offers(&opened)[0].0;
         let log = [log, opened].concat();
@@ -7317,7 +7419,7 @@ mod tests {
         };
 
         let e = engine(vec![crm_tool(), neutral_tool()]);
-        let log = prepared(&e, vec![user_value(known(TRUSTED, Audience::Public))]);
+        let log = prepared(&e, vec![opened(&e)]);
         let neutral = appended_facts(
             proposed(&e, &log, "b2", nonce(), call("read_note", json!({}))).expect("the neutral call releases"),
         );
@@ -7327,7 +7429,7 @@ mod tests {
         );
 
         let e = engine(vec![crm_tool(), strict_tool("send")]);
-        let log = prepared(&e, vec![user_value(known(TRUSTED, Audience::Public))]);
+        let log = prepared(&e, vec![opened(&e)]);
         let elsewhere = appended_facts(
             proposed(&e, &log, "b2", nonce(), call("get_ticket", json!({ "id": "other" })))
                 .expect("the other proposal decides"),
@@ -7335,7 +7437,7 @@ mod tests {
         assert!(releases(&e, &[log, elsewhere].concat(), "b3"), "a block stales nothing");
 
         let e = engine(vec![crm_tool(), open_tool("note")]);
-        let log = prepared(&e, vec![user_value(known(TRUSTED, Audience::Public))]);
+        let log = prepared(&e, vec![opened(&e)]);
         let restricting =
             appended_facts(proposed(&e, &log, "b2", nonce(), call("note", json!({}))).expect("the note releases"));
         assert!(
@@ -7347,7 +7449,7 @@ mod tests {
     #[test]
     fn a_later_basis_change_does_not_revoke_an_open_dispatch() {
         let e = engine(vec![crm_tool(), open_tool("note")]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         let opened = appended_facts(blocked_batch(&e, &log, "b1", nonce()));
         let offer = opened_offers(&opened)[0].0;
         let log = [log, opened].concat();
@@ -7383,7 +7485,7 @@ mod tests {
     #[test]
     fn a_forged_release_cannot_depart_from_the_approval_it_spends() {
         let e = engine(vec![crm_tool()]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         let opened = appended_facts(blocked_batch(&e, &log, "b1", nonce()));
         let offer = opened_offers(&opened)[0].0;
         let log = [log, opened].concat();
@@ -7418,7 +7520,7 @@ mod tests {
     #[test]
     fn an_executed_offer_prepares_its_call_and_releases_nothing() {
         let e = engine(vec![crm_tool()]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         let decision = blocked_batch(&e, &log, "b1", nonce());
         let opened = appended_facts(decision);
         let (offer, plan) = opened_offers(&opened)[0].clone();
@@ -7465,7 +7567,7 @@ mod tests {
     #[test]
     fn accepting_one_offer_ends_every_sibling_on_its_candidate() {
         let e = two_officer_engine();
-        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let log = vec![opened(&e)];
         let wire = call("wire", json!({}));
         let decision = proposed(&e, &log, "b1", nonce(), wire.clone()).expect("the batch decides");
         let opened = appended_facts(decision);
@@ -7498,7 +7600,7 @@ mod tests {
     #[test]
     fn a_repeated_selection_answers_from_the_record() {
         let e = engine(vec![crm_tool()]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         let decision = blocked_batch(&e, &log, "b1", nonce());
         let opened = appended_facts(decision);
         let offer = opened_offers(&opened)[0].0;
@@ -7526,7 +7628,7 @@ mod tests {
     #[test]
     fn an_offer_whose_basis_moved_is_refused() {
         let e = engine(vec![crm_tool(), open_tool("note")]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         let decision = blocked_batch(&e, &log, "b1", nonce());
         let opened = appended_facts(decision);
         let offer = opened_offers(&opened)[0].0;
@@ -7543,7 +7645,7 @@ mod tests {
     #[test]
     fn a_denial_ends_the_plans_that_named_the_authority_and_re_offers_the_rest() {
         let e = two_officer_engine();
-        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let log = vec![opened(&e)];
         let wire = call("wire", json!({}));
         let decision = proposed(&e, &log, "b1", nonce(), wire.clone()).expect("the batch decides");
         let opened = appended_facts(decision);
@@ -7600,7 +7702,7 @@ mod tests {
     #[test]
     fn a_denial_by_an_unassigned_authority_is_refused() {
         let e = two_officer_engine();
-        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let log = vec![opened(&e)];
         let decision = proposed(&e, &log, "b1", nonce(), call("wire", json!({}))).expect("the batch decides");
         let opened = appended_facts(decision);
         let offers = opened_offers(&opened);
@@ -7615,7 +7717,7 @@ mod tests {
     #[test]
     fn an_incomplete_or_misreviewed_evidence_set_is_refused() {
         let e = two_officer_engine();
-        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let log = vec![opened(&e)];
         let decision = proposed(&e, &log, "b1", nonce(), call("wire", json!({}))).expect("the batch decides");
         let opened = appended_facts(decision);
         let (offer, plan) = opened_offers(&opened)[0].clone();
@@ -7646,7 +7748,7 @@ mod tests {
     #[test]
     fn an_unknown_or_foreign_offer_is_refused() {
         let e = engine(vec![crm_tool()]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         let decision = blocked_batch(&e, &log, "b1", nonce());
         let opened = appended_facts(decision);
         let offer = opened_offers(&opened)[0].0;
@@ -7667,12 +7769,14 @@ mod tests {
             execute_offer(&e, &log, unknown, OfferOutcome::Approved(Vec::new())),
             Err(TransitionError::UnknownOffer)
         );
+        let elsewhere = TrajectoryId::new("elsewhere");
+        let log = [log.clone(), forked_child(&e, &log, &elsewhere)].concat();
         let view = e.view(&traj(), log.clone(), log.len() as u64).expect("the log replays");
         assert_eq!(
             e.handle(
                 &view,
                 EngineEvent::ExecuteOffer(OfferExecution {
-                    trajectory: TrajectoryId::new("elsewhere"),
+                    trajectory: elsewhere,
                     offer,
                     outcome: OfferOutcome::Approved(Vec::new()),
                     offer_nonce: nonce(),
@@ -7685,7 +7789,7 @@ mod tests {
     #[test]
     fn a_forged_approval_record_is_refused() {
         let e = engine(vec![crm_tool()]);
-        let opening = vec![user_value(known(TRUSTED, Audience::Public))];
+        let opening = vec![opened(&e)];
         let decision = blocked_batch(&e, &opening, "b1", nonce());
         let opened = appended_facts(decision);
         let offer = opened_offers(&opened)[0].0;
@@ -7742,7 +7846,7 @@ mod tests {
     #[test]
     fn an_acceptance_whose_batch_prepares_no_approval_is_refused() {
         let e = two_officer_engine();
-        let opening = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let opening = vec![opened(&e)];
         let wire = call("wire", json!({}));
         let opened = appended_facts(proposed(&e, &opening, "b1", nonce(), wire.clone()).expect("the batch decides"));
         let offers = opened_offers(&opened);
@@ -7780,7 +7884,7 @@ mod tests {
         );
 
         let mut deferred = approval.clone();
-        deferred.insert(position, user_value(known(TRUSTED, Audience::Public)));
+        deferred.insert(position, stray_admission(&traj(), known(TRUSTED, Audience::Public)));
         assert_eq!(
             e.validate_replay(&[opening.clone(), deferred].concat()),
             Err(TransitionRefusal::UndischargedAcceptance)
@@ -7803,7 +7907,7 @@ mod tests {
     #[test]
     fn the_approval_window_admits_no_ending_from_before_the_offer_it_approves() {
         let e = two_officer_engine();
-        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let log = vec![opened(&e)];
         let wire = call("wire", json!({}));
         let opened = appended_facts(proposed(&e, &log, "b1", nonce(), wire).expect("the batch decides"));
         let offers = opened_offers(&opened);
@@ -7852,7 +7956,7 @@ mod tests {
     #[test]
     fn a_repeat_of_an_unapproved_acceptance_answers_a_refusal() {
         let e = engine(vec![crm_tool()]);
-        let opening = vec![user_value(known(TRUSTED, Audience::Public))];
+        let opening = vec![opened(&e)];
         let opened = appended_facts(blocked_batch(&e, &opening, "b1", nonce()));
         let offer = opened_offers(&opened)[0].0;
         let approval = appended_facts(
@@ -7899,7 +8003,7 @@ mod tests {
     #[test]
     fn a_block_binds_one_durable_offer_to_each_of_its_plans() {
         let e = engine(vec![crm_tool()]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         let decision = blocked_batch(&e, &log, "b1", nonce());
         let offers = offers_of(&decision);
         assert!(!offers.is_empty());
@@ -7937,7 +8041,7 @@ mod tests {
     #[test]
     fn a_repeated_block_answers_with_the_offers_it_already_opened() {
         let e = engine(vec![crm_tool()]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         let first = blocked_batch(&e, &log, "b1", nonce());
         let opened = offers_of(&first);
         let log = [log, appended_facts(first)].concat();
@@ -7950,7 +8054,7 @@ mod tests {
     #[test]
     fn a_forged_offer_record_is_refused() {
         let e = engine(vec![crm_tool()]);
-        let opening = vec![user_value(known(TRUSTED, Audience::Public))];
+        let opening = vec![opened(&e)];
         let batch = appended_facts(blocked_batch(&e, &opening, "b1", nonce()));
         assert_eq!(e.validate_replay(&[opening.clone(), batch.clone()].concat()), Ok(()));
 
@@ -7985,10 +8089,10 @@ mod tests {
 
     #[test]
     fn a_release_replays_only_as_the_records_its_decision_obliged() {
-        let e = engine(vec![crm_tool()]);
         let internal = Audience::restricted([ReaderId::new("internal")]);
+        let e = engine_at(vec![crm_tool()], known(TRUSTED, internal));
         let call = call("get_ticket", json!({}));
-        let records = vec![user_value(known(TRUSTED, internal))];
+        let records = vec![opened(&e)];
         let view = e.view(&traj(), records.clone(), 1).unwrap();
         let decision = e
             .handle(
@@ -8012,7 +8116,7 @@ mod tests {
             vec![
                 batch[0].clone(),
                 batch[1].clone(),
-                user_value(known(SUSPICIOUS, Audience::Public)),
+                stray_admission(&traj(), known(SUSPICIOUS, Audience::Public)),
                 batch[2].clone(),
             ],
         ]
@@ -8064,10 +8168,10 @@ mod tests {
 
     #[test]
     fn a_crossing_replays_only_with_its_admission_and_its_merge() {
-        let e = engine(vec![]);
         let child = TrajectoryId::new("child");
         let internal = Audience::restricted([ReaderId::new("internal")]);
-        let mut log = vec![user_value(known(SUSPICIOUS, internal.clone()))];
+        let e = engine_at(vec![], known(SUSPICIOUS, internal.clone()));
+        let mut log = vec![opened(&e)];
         log.extend(forked_child(&e, &log.clone(), &child));
         let projection = Projection::build(&log, log.len() as u64);
         let trajectory = traj();
@@ -8100,10 +8204,10 @@ mod tests {
 
     #[test]
     fn a_result_replays_only_for_a_successful_close() {
-        let e = engine(vec![crm_tool()]);
         let internal = Audience::restricted([ReaderId::new("internal")]);
+        let e = engine_at(vec![crm_tool()], known(TRUSTED, internal));
         let call = call("get_ticket", json!({}));
-        let mut log = vec![user_value(known(TRUSTED, internal))];
+        let mut log = vec![opened(&e)];
         let dispatch = open(&e, &mut log, &call);
         let admitted = Fact::ValueAdmitted {
             trajectory: traj(),
@@ -8148,10 +8252,10 @@ mod tests {
 
     #[test]
     fn an_ended_branch_releases_nothing_more() {
-        let e = engine(vec![crm_tool()]);
         let child = TrajectoryId::new("child");
         let internal = Audience::restricted([ReaderId::new("internal")]);
-        let mut log = vec![user_value(known(TRUSTED, internal))];
+        let e = engine_at(vec![crm_tool()], known(TRUSTED, internal));
+        let mut log = vec![opened(&e)];
         log.extend(forked_child(&e, &log.clone(), &child));
         let ended = e
             .submit_void_return(&Projection::build(&log, log.len() as u64).view(&traj()), &child)
@@ -8174,7 +8278,7 @@ mod tests {
             ),
             Err(crate::transition::TransitionError::BranchEnded)
         );
-        let ended_views = view.views(&child);
+        let ended_views = view.views(&child).expect("the ended child stays opened");
         assert_eq!(e.open_dispatch(&ended_views, &call), Err(EngineError::BranchEnded));
         assert_eq!(
             e.execute_remedy_plan(
@@ -8210,10 +8314,10 @@ mod tests {
 
     #[test]
     fn an_admission_after_a_checkpoint_carries_the_bytes_it_observed() {
-        let e = engine(vec![crm_tool()]);
         let internal = Audience::restricted([ReaderId::new("internal")]);
+        let e = engine_at(vec![crm_tool()], known(TRUSTED, internal));
         let call = call("get_ticket", json!({}));
-        let mut log = vec![user_value(known(TRUSTED, internal))];
+        let mut log = vec![opened(&e)];
         let dispatch = open(&e, &mut log, &call);
         let body = ValueBody::new("the ticket");
         let checkpoint = e
@@ -8275,9 +8379,9 @@ mod tests {
             membership: None,
         };
         let call = call("get_ticket", json!({}));
-        let records = vec![user_value(known(TRUSTED, Audience::Public))];
 
         let confining = open_engine(config.clone());
+        let records = vec![opened(&confining)];
         let projection = Projection::build(&records, 1);
         let trajectory = traj();
         let views = projection.view(&trajectory);
@@ -8301,7 +8405,7 @@ mod tests {
         let released = confining
             .execute_remedy_plan(&views, &sanitize, &call, &[])
             .expect("the sanitize plan executes");
-        let log = [records.clone(), released].concat();
+        let log = [records.clone(), released.clone()].concat();
         assert_eq!(confining.validate_replay(&log), Ok(()));
 
         let mut declaration = crate::profile::covering_declaration(&config);
@@ -8315,7 +8419,7 @@ mod tests {
         })
         .expect("an unconfined deployment opens");
         assert_eq!(
-            unconfined.validate_replay(&log),
+            unconfined.validate_replay(&[vec![opened(&unconfined)], released].concat()),
             Err(TransitionRefusal::UnreleasedDispatch)
         );
     }
@@ -8354,6 +8458,7 @@ mod tests {
                 pending_cast_tool("scan_inbox", "mail"),
                 pending_cast_tool("browse", "web"),
                 open_tool("ping"),
+                suspicious_read(),
             ],
             authorities: vec![],
             sanitizers: vec![crate::authority::Sanitizer {
@@ -8411,7 +8516,7 @@ mod tests {
         crate::value::RawResultDigest,
     ) {
         let call = call("scan_inbox", json!({}));
-        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let mut log = vec![opened(e)];
         let released = proposed(e, &log, "b1", nonce(), call).expect("the open call releases");
         let dispatch = match &released.follow_up {
             FollowUp::Proposals { released, .. } => released[0].dispatch.clone(),
@@ -8434,7 +8539,7 @@ mod tests {
     fn a_pending_cast_report_asks_for_the_applicable_casts_and_stays_repeatable() {
         let e = cast_engine();
         let call = call("scan_inbox", json!({}));
-        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let mut log = vec![opened(&e)];
         let released = proposed(&e, &log, "b1", nonce(), call).expect("the open call releases");
         let dispatch = match &released.follow_up {
             FollowUp::Proposals { released, .. } => released[0].dispatch.clone(),
@@ -8797,7 +8902,8 @@ mod tests {
     fn a_resolution_is_measured_against_the_pinned_bound_not_the_live_fold() {
         let e = cast_engine();
         let (log, dispatch, raw, source) = resolving_dispatch(&e);
-        let log = [log, vec![user_value(known(SUSPICIOUS, Audience::Public))]].concat();
+        let mut log = log;
+        reads(&e, &mut log, &traj(), "read_suspicious");
         let crossed = e
             .handle(
                 &replayed(&e, &log),
@@ -8977,23 +9083,16 @@ mod tests {
         };
         let e = open_engine(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![],
+            tools: vec![internal_read()],
             authorities: vec![],
             sanitizers: vec![declassify],
             casts: vec![],
             membership: None,
         });
         let child = TrajectoryId::new("child");
-        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let mut log = vec![opened(&e)];
         log.extend(forked_child(&e, &log.clone(), &child));
-        log.push(Fact::ValueAdmitted {
-            trajectory: child.clone(),
-            value: LabeledValue::new(
-                ValueBody::new("read"),
-                known(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
-            ),
-            provenance: Provenance::UserInput,
-        });
+        reads(&e, &mut log, &child, "read_internal");
 
         let projection = Projection::build(&log, log.len() as u64);
         let trajectory = traj();
@@ -9031,7 +9130,7 @@ mod tests {
     #[test]
     fn an_open_dispatch_reserves_its_emits_for_no_prior_only() {
         let e = engine(reservation_tools());
-        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let mut log = vec![opened(&e)];
         assert_eq!(check(&e, &log, &call("guard", json!({}))), CheckOutcome::Allow);
         let send = call("send", json!({}));
         let dispatch = open(&e, &mut log, &send);
@@ -9068,7 +9167,7 @@ mod tests {
     #[test]
     fn a_failed_dispatch_evaporates_its_reservation() {
         let e = engine(reservation_tools());
-        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let mut log = vec![opened(&e)];
         let send = call("send", json!({}));
         let dispatch = open(&e, &mut log, &send);
         close(&e, &mut log, &dispatch, &send, crate::admit::ResultAdmission::Failure);
@@ -9084,7 +9183,7 @@ mod tests {
     #[test]
     fn an_indeterminate_close_keeps_the_reservation() {
         let e = engine(reservation_tools());
-        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let mut log = vec![opened(&e)];
         let send = call("send", json!({}));
         let dispatch = open(&e, &mut log, &send);
         close(
@@ -9113,7 +9212,7 @@ mod tests {
     #[test]
     fn two_reservations_of_one_kind_settle_independently() {
         let e = engine(reservation_tools());
-        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let mut log = vec![opened(&e)];
         let send = call("send", json!({}));
         let first = open(&e, &mut log, &send);
         let second = open(&e, &mut log, &send);
@@ -9143,7 +9242,7 @@ mod tests {
             },
         };
         let e = engine(vec![selfguard]);
-        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let mut log = vec![opened(&e)];
         let c = call("selfguard", json!({}));
         assert_eq!(check(&e, &log, &c), CheckOutcome::Allow);
         let _dispatch = open(&e, &mut log, &c);
@@ -9174,7 +9273,7 @@ mod tests {
             history_guarded("wants_read", HistoryRequirement::Prior(EffectKind::new("read"))),
         ];
         let e = engine(tools);
-        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let mut log = vec![opened(&e)];
         let scan_call = call("scan", json!({}));
         let dispatch = open(&e, &mut log, &scan_call);
         assert!(matches!(
@@ -9213,7 +9312,7 @@ mod tests {
             },
         };
         let e = engine(vec![tool]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         match check(&e, &log, &call("wire", json!({}))) {
             CheckOutcome::Block(b) => {
                 assert!(b.requirement_gaps.contains(&Gap::Attention(MarkName::new("signoff"))))
@@ -9224,14 +9323,18 @@ mod tests {
 
     #[test]
     fn unknown_label_is_unestablished_not_a_gap() {
-        let e = engine(vec![crm_tool()]);
-        let log = vec![user_value(Label::new(Dim::Unknown, Dim::Known(Audience::Public)))];
+        let e = engine(vec![crm_tool(), unknown_read()]);
+        let mut log = vec![opened(&e)];
+        reads(&e, &mut log, &traj(), "read_unknown");
         match check(&e, &log, &call("get_ticket", json!({}))) {
             CheckOutcome::Block(b) => {
                 assert!(b.requirement_gaps.is_empty());
                 assert!(b.narrowing.is_some(), "the audience narrowing reports alongside");
                 assert_eq!(b.unestablished.len(), 1);
-                assert_eq!(b.unestablished[0].dimensions, BTreeSet::from([Dimension::Trust]));
+                assert_eq!(
+                    b.unestablished[0].dimensions,
+                    BTreeSet::from([Dimension::Trust, Dimension::Audience])
+                );
             }
             other => panic!("expected an unestablished block, got {other:?}"),
         }
@@ -9257,14 +9360,18 @@ mod tests {
                 ..Requires::default()
             },
         };
-        let e = engine(vec![vault]);
-        let log = vec![user_value(Label::new(Dim::Unknown, Dim::Known(Audience::Public)))];
+        let e = engine(vec![vault, unknown_read()]);
+        let mut log = vec![opened(&e)];
+        reads(&e, &mut log, &traj(), "read_unknown");
         match check(&e, &log, &call("vault", json!({}))) {
             CheckOutcome::Block(b) => {
                 assert_eq!(b.requirement_gaps, vec![Gap::Attention(MarkName::new("signoff"))]);
                 assert!(b.narrowing.is_some());
                 assert_eq!(b.unestablished.len(), 1);
-                assert_eq!(b.unestablished[0].dimensions, BTreeSet::from([Dimension::Trust]));
+                assert_eq!(
+                    b.unestablished[0].dimensions,
+                    BTreeSet::from([Dimension::Trust, Dimension::Audience])
+                );
             }
             other => panic!("expected a three-slot block, got {other:?}"),
         }
@@ -9291,8 +9398,9 @@ mod tests {
                 ..Requires::default()
             },
         };
-        let e = engine(vec![vault]);
-        let log = vec![user_value(Label::new(Dim::Known(SUSPICIOUS), Dim::Unknown))];
+        let e = engine(vec![vault, dynamic_read(Some(SUSPICIOUS))]);
+        let mut log = vec![opened(&e)];
+        reads(&e, &mut log, &traj(), "read_dynamic");
         match check(&e, &log, &call("vault", json!({}))) {
             CheckOutcome::Block(b) => {
                 assert_eq!(
@@ -9323,7 +9431,7 @@ mod tests {
         };
         let cfg = RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![],
+            tools: vec![unknown_read(), plain_tool("note")],
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![classifier],
@@ -9336,64 +9444,75 @@ mod tests {
             resolved,
             cast: crate::names::CastName::new(cast),
         };
-        let unknown_source = user_value(Label::new(Dim::Unknown, Dim::Known(Audience::Public)));
+        let mut unknown_source = vec![opened(&e)];
+        reads(&e, &mut unknown_source, &traj(), "read_unknown");
         let good = cast_fact(0, established(SUSPICIOUS, Audience::Public), "classifier");
 
-        assert_eq!(e.validate_replay(&[unknown_source.clone(), good.clone()]), Ok(()));
         assert_eq!(
-            e.validate_replay(std::slice::from_ref(&good)),
+            e.validate_replay(&[unknown_source.clone(), vec![good.clone()]].concat()),
+            Ok(())
+        );
+        assert_eq!(
+            e.validate_replay(&[opened(&e), good.clone()]),
             Err(TransitionRefusal::CastBeforeSource)
         );
         assert_eq!(
-            e.validate_replay(&[unknown_source.clone(), good.clone(), good.clone()]),
+            e.validate_replay(&[unknown_source.clone(), vec![good.clone(), good.clone()]].concat()),
             Err(TransitionRefusal::RepeatResolution)
         );
+        let mut established_source = vec![opened(&e)];
+        reads(&e, &mut established_source, &traj(), "note");
         assert_eq!(
-            e.validate_replay(&[user_value(known(TRUSTED, Audience::Public)), good.clone()]),
+            e.validate_replay(&[established_source, vec![good.clone()]].concat()),
             Err(TransitionRefusal::RepeatResolution)
         );
         assert!(matches!(
-            e.validate_replay(&[
-                unknown_source.clone(),
-                cast_fact(0, established(SUSPICIOUS, Audience::Public), "bogus")
-            ]),
+            e.validate_replay(
+                &[
+                    unknown_source.clone(),
+                    vec![cast_fact(0, established(SUSPICIOUS, Audience::Public), "bogus")]
+                ]
+                .concat()
+            ),
             Err(TransitionRefusal::UnknownCast(name)) if name == "bogus"
         ));
         let sibling = TrajectoryId::new("sibling");
-        let sibling_resolves = [
-            forked_child(&e, &[], &sibling),
-            vec![
-                unknown_source.clone(),
-                Fact::CastApplied {
-                    trajectory: sibling.clone(),
-                    value: crate::value::ValueId::new(0),
-                    resolved: established(SUSPICIOUS, Audience::Public),
-                    cast: crate::names::CastName::new("classifier"),
-                },
-            ],
-        ]
-        .concat();
+        let mut sibling_resolves = vec![opened(&e)];
+        sibling_resolves.extend(forked_child(&e, &sibling_resolves.clone(), &sibling));
+        reads(&e, &mut sibling_resolves, &traj(), "read_unknown");
+        sibling_resolves.push(Fact::CastApplied {
+            trajectory: sibling.clone(),
+            value: crate::value::ValueId::new(0),
+            resolved: established(SUSPICIOUS, Audience::Public),
+            cast: crate::names::CastName::new("classifier"),
+        });
         assert_eq!(
             e.validate_replay(&sibling_resolves),
             Err(TransitionRefusal::ForeignResolution)
         );
         assert_eq!(
-            e.validate_replay(&[
-                unknown_source.clone(),
-                Fact::CastApplied {
-                    trajectory: TrajectoryId::new("stranger"),
-                    value: crate::value::ValueId::new(0),
-                    resolved: established(SUSPICIOUS, Audience::Public),
-                    cast: crate::names::CastName::new("classifier"),
-                }
-            ]),
+            e.validate_replay(
+                &[
+                    unknown_source.clone(),
+                    vec![Fact::CastApplied {
+                        trajectory: TrajectoryId::new("stranger"),
+                        value: crate::value::ValueId::new(0),
+                        resolved: established(SUSPICIOUS, Audience::Public),
+                        cast: crate::names::CastName::new("classifier"),
+                    }]
+                ]
+                .concat()
+            ),
             Err(TransitionRefusal::ForeignTrajectory)
         );
         assert_eq!(
-            e.validate_replay(&[
-                unknown_source,
-                cast_fact(0, established(TRUSTED, Audience::Public), "classifier")
-            ]),
+            e.validate_replay(
+                &[
+                    unknown_source,
+                    vec![cast_fact(0, established(TRUSTED, Audience::Public), "classifier")]
+                ]
+                .concat()
+            ),
             Err(TransitionRefusal::InadmissibleResolution)
         );
     }
@@ -9412,15 +9531,15 @@ mod tests {
         };
         let e = open_engine(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![plain_tool("spawn")],
+            tools: vec![plain_tool("spawn"), unknown_read()],
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![classifier],
             membership: None,
         });
         let child = TrajectoryId::new("child");
-        let unknown_source = user_value(Label::new(Dim::Unknown, Dim::Known(Audience::Public)));
-        let base = vec![unknown_source.clone()];
+        let mut base = vec![opened(&e)];
+        reads(&e, &mut base, &traj(), "read_unknown");
         let basis_after = |log: &[Fact]| Projection::build(log, log.len() as u64).view(&traj()).freeze_basis();
         let resolve = |trajectory: TrajectoryId, value: u64| Fact::CastApplied {
             trajectory,
@@ -9447,7 +9566,7 @@ mod tests {
                 _ => None,
             })
             .expect("the release prepared a fork");
-        *snapshot = basis_after(&[]);
+        *snapshot = basis_after(&[opened(&e)]);
         assert_eq!(e.validate_replay(&dropped), Err(TransitionRefusal::ForkBasisMismatch));
 
         let fork = seeded
@@ -9479,18 +9598,11 @@ mod tests {
 
     #[test]
     fn replay_holds_a_later_fork_to_the_absorbed_basis() {
-        let e = engine(vec![plain_tool("spawn")]);
+        let e = engine(vec![plain_tool("spawn"), unknown_read()]);
         let child = TrajectoryId::new("child");
-        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let mut log = vec![opened(&e)];
         log.extend(forked_child(&e, &log.clone(), &child));
-        log.push(Fact::ValueAdmitted {
-            trajectory: child.clone(),
-            value: LabeledValue::new(
-                ValueBody::new("read"),
-                Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
-            ),
-            provenance: Provenance::UserInput,
-        });
+        reads(&e, &mut log, &child, "read_unknown");
         let crossing = e
             .submit_child_return(
                 &Projection::build(&log, log.len() as u64).view(&traj()),
@@ -9519,10 +9631,7 @@ mod tests {
             "the seed pin carries the absorbed unresolved identity"
         );
 
-        let sources = [
-            (crate::value::ValueId::new(0), known(TRUSTED, Audience::Public)),
-            (crate::value::ValueId::new(2), known(TRUSTED, Audience::Public)),
-        ];
+        let sources = [(crate::value::ValueId::new(1), known(TRUSTED, Audience::Public))];
         let snapshot = log
             .iter_mut()
             .rev()
@@ -9532,7 +9641,7 @@ mod tests {
             })
             .expect("the sibling fork preparation position");
         *snapshot = crate::fact::ForkSnapshot::freeze(
-            EstablishedLabel::top(),
+            established(TRUSTED, Audience::Public),
             sources.iter().map(|(id, label)| (*id, label)),
             std::iter::empty(),
         );
@@ -9561,23 +9670,23 @@ mod tests {
         };
         let cfg = RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![fetch],
+            tools: vec![fetch, unknown_read()],
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![webby],
             membership: None,
         };
         let e = open_engine(cfg);
+        let mut uncovered = vec![opened(&e)];
+        reads(&e, &mut uncovered, &traj(), "read_unknown");
+        uncovered.push(Fact::CastApplied {
+            trajectory: traj(),
+            value: crate::value::ValueId::new(0),
+            resolved: established(SUSPICIOUS, Audience::Public),
+            cast: crate::names::CastName::new("webby"),
+        });
         assert_eq!(
-            e.validate_replay(&[
-                user_value(Label::new(Dim::Unknown, Dim::Known(Audience::Public))),
-                Fact::CastApplied {
-                    trajectory: traj(),
-                    value: crate::value::ValueId::new(0),
-                    resolved: established(SUSPICIOUS, Audience::Public),
-                    cast: crate::names::CastName::new("webby"),
-                }
-            ]),
+            e.validate_replay(&uncovered),
             Err(TransitionRefusal::OutOfScopeResolution)
         );
         let fetch_call = crate::value::ResolvedCall::new(
@@ -9587,15 +9696,16 @@ mod tests {
         let dispatch = DispatchId::new(traj(), fetch_call.digest(), 0);
         let sibling = TrajectoryId::new("sibling");
         let foreign_dispatch = [
-            forked_child(&e, &[], &sibling),
+            vec![opened(&e)],
+            forked_child(&e, &[opened(&e)], &sibling),
             vec![
                 Fact::DispatchOpened {
                     trajectory: traj(),
                     dispatch: dispatch.clone(),
                     tool: fetch_call.tool().clone(),
                     arguments: fetch_call.canonical_arguments().clone(),
-                    proposed_label: EstablishedLabel::top(),
-                    receiving: EstablishedLabel::top(),
+                    proposed_label: established(TRUSTED, Audience::Public),
+                    receiving: established(TRUSTED, Audience::Public),
                     proposed_effects: crate::fact::EffectSet::default(),
                     dynamic_resolutions: Vec::new(),
                     memberships: Vec::new(),
@@ -9623,16 +9733,19 @@ mod tests {
             Err(TransitionRefusal::ForeignDispatch)
         );
         assert_eq!(
-            e.validate_replay(&[Fact::ValueAdmitted {
-                trajectory: traj(),
-                value: crate::value::LabeledValue::new(
-                    crate::value::ValueBody::new("page"),
-                    Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
-                ),
-                provenance: crate::value::Provenance::ToolResult {
-                    dispatch: DispatchId::new(traj(), fetch_call.digest(), 7),
-                },
-            }]),
+            e.validate_replay(&[
+                opened(&e),
+                Fact::ValueAdmitted {
+                    trajectory: traj(),
+                    value: crate::value::LabeledValue::new(
+                        crate::value::ValueBody::new("page"),
+                        Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
+                    ),
+                    provenance: crate::value::Provenance::ToolResult {
+                        dispatch: DispatchId::new(traj(), fetch_call.digest(), 7),
+                    },
+                }
+            ]),
             Err(TransitionRefusal::UnknownDispatch)
         );
     }
@@ -9651,7 +9764,7 @@ mod tests {
     #[test]
     fn an_unannotated_tool_dispatches_and_its_result_admits_unknown() {
         let e = engine(vec![unannotated_tool("probe")]);
-        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let mut log = vec![opened(&e)];
         let proposed = call("probe", json!({}));
         assert_eq!(check(&e, &log, &proposed), CheckOutcome::Allow);
 
@@ -9677,14 +9790,15 @@ mod tests {
         assert_eq!(current.bound(), &EstablishedLabel::new(TRUSTED, Audience::Public));
         assert!(!current.is_established(Dimension::Trust));
         assert!(!current.is_established(Dimension::Audience));
-        assert!(current.unresolved(Dimension::Trust).any(|id| id == ValueId::new(1)));
-        assert!(current.unresolved(Dimension::Audience).any(|id| id == ValueId::new(1)));
+        assert!(current.unresolved(Dimension::Trust).any(|id| id == ValueId::new(0)));
+        assert!(current.unresolved(Dimension::Audience).any(|id| id == ValueId::new(0)));
     }
 
     #[test]
     fn an_unknown_trajectory_blocks_only_requirement_consuming_calls() {
         let e = engine(vec![unannotated_tool("noop"), crm_tool()]);
-        let log = vec![user_value(Label::new(Dim::Unknown, Dim::Unknown))];
+        let mut log = vec![opened(&e)];
+        reads(&e, &mut log, &traj(), "noop");
         assert_eq!(check(&e, &log, &call("noop", json!({}))), CheckOutcome::Allow);
         match check(&e, &log, &call("get_ticket", json!({}))) {
             CheckOutcome::Block(b) => {
@@ -9704,7 +9818,7 @@ mod tests {
     #[test]
     fn unknown_tool_errors() {
         let e = engine(vec![]);
-        let p = Projection::build(&[], 0);
+        let p = Projection::build(&[opened(&e)], 1);
         let t = traj();
         assert!(matches!(
             e.check(&p.view(&t), &call("ghost", json!({}))),
@@ -9714,9 +9828,9 @@ mod tests {
 
     #[test]
     fn open_dispatch_refuses_a_blocked_call() {
-        let e = engine(vec![crm_tool()]);
         let internal = Audience::restricted([ReaderId::new("internal")]);
-        let log = vec![user_value(known(SUSPICIOUS, internal))];
+        let e = engine_at(vec![crm_tool()], known(SUSPICIOUS, internal));
+        let log = vec![opened(&e)];
         let p = Projection::build(&log, log.len() as u64);
         let t = traj();
         assert_eq!(
@@ -9741,9 +9855,9 @@ mod tests {
                 ..Requires::default()
             },
         };
-        let e = engine(vec![send]);
+        let e = engine(vec![send, dynamic_read(None)]);
         let malformed = call("send_email", json!({}));
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         let p = Projection::build(&log, log.len() as u64);
         assert!(matches!(
             e.check(&p.view(&traj()), &malformed),
@@ -9759,7 +9873,8 @@ mod tests {
             CheckOutcome::Block(b) => assert!(matches!(b.requirement_gaps.as_slice(), [Gap::Includes { .. }])),
             other => panic!("expected includes gap on a malformed call, got {other:?}"),
         }
-        let log = vec![user_value(Label::new(Dim::Known(TRUSTED), Dim::Unknown))];
+        let mut log = log;
+        reads(&e, &mut log, &traj(), "read_dynamic");
         match evaluate(&log) {
             CheckOutcome::Block(b) => {
                 assert!(b.requirement_gaps.is_empty(), "the sentinel gap must be masked");
@@ -9806,8 +9921,8 @@ mod tests {
             casts: vec![],
             membership: None,
         };
-        let e = open_engine(cfg);
-        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let e = open_engine_at(cfg, known(SUSPICIOUS, Audience::Public));
+        let log = vec![opened(&e)];
         let p = Projection::build(&log, log.len() as u64);
         let t = traj();
         let wire_call = call("wire", json!({}));
@@ -9848,7 +9963,7 @@ mod tests {
     #[test]
     fn schema_invalid_arguments_are_an_invalid_call_at_every_fresh_entry_point() {
         let e = engine(vec![strict_tool("send")]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         let p = Projection::build(&log, 1);
         let t = traj();
         let views = p.view(&t);
@@ -9905,37 +10020,42 @@ mod tests {
     #[test]
     fn replay_refuses_a_corrupt_dispatched_call() {
         let e = engine(vec![strict_tool("send")]);
-        let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let mut log = vec![opened(&e)];
         let good = call("send", json!({ "to": "hr" }));
         let p = Projection::build(&log, 1);
         let batch = e.open_dispatch(&p.view(&traj()), &good).unwrap();
         log.extend(batch);
         assert_eq!(e.validate_replay(&log), Ok(()));
 
-        let opened = |tool: &str, payload: serde_json::Value, minted_from: &ResolvedCall| Fact::DispatchOpened {
-            trajectory: traj(),
-            dispatch: DispatchId::new(traj(), minted_from.digest(), 0),
-            tool: ToolName::new(tool),
-            arguments: crate::params::test_arguments(&payload),
-            proposed_label: established(TRUSTED, Audience::Public),
-            receiving: established(TRUSTED, Audience::Public),
-            proposed_effects: EffectSet::default(),
-            dynamic_resolutions: vec![],
-            memberships: Vec::new(),
-            subject: None,
+        let dispatched = |tool: &str, payload: serde_json::Value, minted_from: &ResolvedCall| {
+            vec![
+                opened(&e),
+                Fact::DispatchOpened {
+                    trajectory: traj(),
+                    dispatch: DispatchId::new(traj(), minted_from.digest(), 0),
+                    tool: ToolName::new(tool),
+                    arguments: crate::params::test_arguments(&payload),
+                    proposed_label: established(TRUSTED, Audience::Public),
+                    receiving: established(TRUSTED, Audience::Public),
+                    proposed_effects: EffectSet::default(),
+                    dynamic_resolutions: vec![],
+                    memberships: Vec::new(),
+                    subject: None,
+                },
+            ]
         };
         let ghost_call = call("ghost", json!({}));
         assert!(matches!(
-            e.validate_replay(&[opened("ghost", json!({}), &ghost_call)]),
+            e.validate_replay(&dispatched("ghost", json!({}), &ghost_call)),
             Err(TransitionRefusal::UnknownTool(name)) if name == "ghost"
         ));
         let smuggled = call("send", json!({ "bogus": 1 }));
         assert!(matches!(
-            e.validate_replay(&[opened("send", json!({ "bogus": 1 }), &smuggled)]),
+            e.validate_replay(&dispatched("send", json!({ "bogus": 1 }), &smuggled)),
             Err(TransitionRefusal::InvalidPayload(_))
         ));
         assert!(matches!(
-            e.validate_replay(&[opened("send", json!({ "to": "hr" }), &smuggled)]),
+            e.validate_replay(&dispatched("send", json!({ "to": "hr" }), &smuggled)),
             Err(TransitionRefusal::DigestMismatch)
         ));
     }
@@ -9963,8 +10083,9 @@ mod tests {
             casts: vec![],
             membership: None,
         };
-        let e = open_engine(cfg);
-        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let e = open_engine_at(cfg, known(SUSPICIOUS, Audience::Public));
+
+        let log = vec![opened(&e)];
         let p = Projection::build(&log, 1);
         let t = traj();
         let views = p.view(&t);
@@ -9994,9 +10115,9 @@ mod tests {
 
     #[test]
     fn open_dispatch_records_proposed_label_and_effects() {
-        let e = engine(vec![crm_tool()]);
         let internal = Audience::restricted([ReaderId::new("internal")]);
-        let log = vec![user_value(known(TRUSTED, internal.clone()))];
+        let e = engine_at(vec![crm_tool()], known(TRUSTED, internal.clone()));
+        let log = vec![opened(&e)];
         let p = Projection::build(&log, log.len() as u64);
         let t = traj();
         let batch = e.open_dispatch(&p.view(&t), &call("get_ticket", json!({}))).unwrap();
@@ -10048,7 +10169,7 @@ mod tests {
     #[test]
     fn a_proposal_naming_a_provider_run_tool_is_malformed_at_every_fresh_entry_point() {
         let e = engine_with_provider_run(vec![plain_tool("search")], &["search"]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         let p = Projection::build(&log, 1);
         let t = traj();
         let views = p.view(&t);
@@ -10094,7 +10215,7 @@ mod tests {
         };
         let mut emitter = plain_tool("emit");
         emitter.emits = EffectSet::new([EffectKind::new("k")]).unwrap();
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![crate::profile::opening_at(traj(), known(TRUSTED, Audience::Public))];
         let offered_tools = |e: &Engine| -> Vec<String> {
             let p = Projection::build(&log, 1);
             let t = traj();
@@ -10155,37 +10276,41 @@ mod tests {
 
     #[test]
     fn cold_replay_verifies_the_opening_strictly() {
+        use crate::transition::OpeningTransitionRefusal;
         let e = engine_with_provider_run(vec![plain_tool("send"), plain_tool("search")], &["search"]);
         let t = traj();
-        let opening = e
-            .open_trajectory(&t, crate::profile::PolicyFileKey::of(b"the policy file"))
-            .expect("the opening seals")
-            .into_unsealed()
-            .remove(0);
-        let admitted = user_value(known(TRUSTED, Audience::Public));
+        let opening = opened_root(&e, &t);
+        let mut valid = vec![opening.clone()];
+        reads(&e, &mut valid, &t, "send");
+        let admitted = valid[1].clone();
+        let replay =
+            |family: &TrajectoryId, facts: Vec<Fact>| e.view(family, facts.clone(), facts.len() as u64).map(|_| ());
 
-        assert_eq!(e.verify_opening(&[opening.clone(), admitted.clone()], &t), Ok(()));
+        assert_eq!(replay(&t, valid.clone()), Ok(()));
+        assert_eq!(replay(&t, vec![admitted.clone()]), Err(TransitionRefusal::Unopened));
         assert_eq!(
-            e.verify_opening(std::slice::from_ref(&admitted), &t),
-            Err(OpeningTransitionRefusal::Missing)
+            replay(&t, vec![admitted.clone(), opening.clone()]),
+            Err(TransitionRefusal::Unopened)
         );
         assert_eq!(
-            e.verify_opening(&[admitted.clone(), opening.clone()], &t),
-            Err(OpeningTransitionRefusal::NotFirst)
+            replay(&t, vec![opening.clone(), opening.clone()]),
+            Err(TransitionRefusal::Opening(OpeningTransitionRefusal::Duplicate))
         );
         assert_eq!(
-            e.verify_opening(&[opening.clone(), opening.clone()], &t),
-            Err(OpeningTransitionRefusal::Duplicate)
+            replay(&t, [valid.clone(), vec![opening.clone()]].concat()),
+            Err(TransitionRefusal::Opening(OpeningTransitionRefusal::Duplicate))
         );
         assert_eq!(
-            e.verify_opening(std::slice::from_ref(&opening), &TrajectoryId::new("other")),
-            Err(OpeningTransitionRefusal::WrongTrajectory { found: "t".to_string() })
+            replay(&TrajectoryId::new("other"), vec![opening.clone()]),
+            Err(TransitionRefusal::Opening(OpeningTransitionRefusal::WrongTrajectory {
+                found: "t".to_string()
+            }))
         );
 
         let mutated = |mutate: &dyn Fn(&mut Fact)| {
             let mut fact = opening.clone();
             mutate(&mut fact);
-            e.verify_opening(&[fact], &t)
+            replay(&t, vec![fact])
         };
         assert_eq!(
             mutated(&|fact| {
@@ -10193,7 +10318,9 @@ mod tests {
                     *dialect = PolicyDialectVersion::new(9);
                 }
             }),
-            Err(OpeningTransitionRefusal::UnsupportedDialect { found: 9 })
+            Err(TransitionRefusal::Opening(
+                OpeningTransitionRefusal::UnsupportedDialect { found: 9 }
+            ))
         );
         assert_eq!(
             mutated(&|fact| {
@@ -10202,7 +10329,7 @@ mod tests {
                     *policy_digest = other.identity();
                 }
             }),
-            Err(OpeningTransitionRefusal::DigestMismatch)
+            Err(TransitionRefusal::Opening(OpeningTransitionRefusal::DigestMismatch))
         );
         assert_eq!(
             mutated(&|fact| {
@@ -10211,7 +10338,7 @@ mod tests {
                     *profile = other.profile().clone();
                 }
             }),
-            Err(OpeningTransitionRefusal::ProfileMismatch)
+            Err(TransitionRefusal::Opening(OpeningTransitionRefusal::ProfileMismatch))
         );
         assert_eq!(
             mutated(&|fact| {
@@ -10219,7 +10346,7 @@ mod tests {
                     open_vectors.clear();
                 }
             }),
-            Err(OpeningTransitionRefusal::VectorMismatch)
+            Err(TransitionRefusal::Opening(OpeningTransitionRefusal::VectorMismatch))
         );
     }
 
@@ -10254,9 +10381,7 @@ mod tests {
             profile: crate::profile::covering_declaration(&cfg),
         })
         .unwrap();
-        let view = e
-            .view(&traj(), vec![user_value(known(TRUSTED, Audience::Public))], 1)
-            .unwrap();
+        let view = e.view(&traj(), vec![opened(&e)], 1).unwrap();
         let decision = e
             .handle(
                 &view,
@@ -10284,22 +10409,83 @@ mod tests {
     }
 
     #[test]
-    fn an_opening_record_is_inert_in_projection_and_replay_validation() {
-        let e = engine(vec![plain_tool("send")]);
+    fn a_root_folds_from_its_openings_starting_label() {
+        let internal = Audience::restricted([ReaderId::new("internal")]);
+        let e = engine_at(vec![plain_tool("send")], known(SUSPICIOUS, internal.clone()));
         let t = traj();
-        let opening = e
-            .open_trajectory(&t, crate::profile::PolicyFileKey::of(b"the policy file"))
-            .expect("the opening seals")
-            .into_unsealed()
-            .remove(0);
-        let admitted = user_value(known(SUSPICIOUS, Audience::Public));
-        let with = [opening.clone(), admitted.clone()];
-        let without = [admitted];
-        let p_with = Projection::build(&with, 2);
-        let p_without = Projection::build(&without, 1);
-        assert_eq!(p_with.view(&t).current_label(), p_without.view(&t).current_label());
-        assert_eq!(p_with.view(&t).boundary_count(), p_without.view(&t).boundary_count());
-        assert_eq!(e.validate_replay(&with), Ok(()));
+        let starting = partial(SUSPICIOUS, internal.clone());
+
+        let replayed = e.view(&t, vec![opened(&e)], 1).expect("the opened root replays");
+        assert_eq!(
+            replayed.views(&t).expect("the root is opened").current_label(),
+            starting
+        );
+        assert_eq!(Projection::build(&[opened(&e)], 1).view(&t).current_label(), starting);
+        let mut advanced = EngineView::validated(Projection::empty(0), e.identity(), t.clone());
+        advanced
+            .advance(
+                &e.open_trajectory(&t, crate::profile::PolicyFileKey::of(b"policy"))
+                    .expect("the opening seals"),
+            )
+            .expect("the sealed opening advances the empty view");
+        assert_eq!(
+            advanced.views(&t).expect("the root is opened").current_label(),
+            starting
+        );
+
+        let send = call("send", json!({}));
+        let released = e
+            .handle(&replayed, batch("b1", Vec::new(), vec![raw(&send)]))
+            .expect("a neutral send releases");
+        let dispatch = match &released.follow_up {
+            FollowUp::Proposals { released, .. } => released[0].dispatch.clone(),
+            other => panic!("the send releases, got {other:?}"),
+        };
+        let mut log = [vec![opened(&e)], appended_facts(released)].concat();
+        let closed = e
+            .handle(
+                &viewing(&e, &log),
+                EngineEvent::Outcome(ToolReport {
+                    dispatch,
+                    outcome: ToolOutcome::Success {
+                        body: OutcomeBody::Available(ValueBody::new("sent")),
+                    },
+                    evidence: Vec::new(),
+                    offer_nonce: nonce(),
+                }),
+            )
+            .expect("the result admits");
+        log.extend(appended_facts(closed));
+        let after = viewing(&e, &log);
+        let views = after.views(&t).expect("the root is opened");
+        assert_eq!(
+            views.value_label(ValueId::new(0)),
+            Some(&known(Trust::new(u8::MAX), Audience::Public))
+        );
+        assert_eq!(views.current_label(), starting);
+    }
+
+    #[test]
+    fn an_unopened_trajectory_has_no_views_and_takes_no_event() {
+        let e = engine(vec![plain_tool("send")]);
+        let unopened = TrajectoryId::new("child");
+        let view = viewing(&e, &[opened(&e)]);
+        assert!(view.views(&traj()).is_some());
+        assert!(view.views(&unopened).is_none());
+        assert_eq!(
+            e.handle(
+                &view,
+                batch_on(&unopened, "b1", Vec::new(), vec![raw(&call("send", json!({})))], None),
+            ),
+            Err(TransitionError::UnopenedTrajectory)
+        );
+        assert_eq!(
+            e.validate_replay(&[
+                opened(&e),
+                stray_admission(&unopened, known(SUSPICIOUS, Audience::Public))
+            ]),
+            Err(TransitionRefusal::ForeignTrajectory)
+        );
     }
 
     fn raw_call(tool: &str, arguments: &[u8]) -> crate::transition::ProposedCall {
@@ -10384,14 +10570,14 @@ mod tests {
         )
     }
 
-    fn opening_log() -> Vec<Fact> {
-        vec![user_value(known(TRUSTED, Audience::Public))]
+    fn opening_log(e: &Engine) -> Vec<Fact> {
+        vec![opened(e)]
     }
 
     #[test]
     fn an_exposed_provider_run_result_is_history_for_every_sibling() {
         let e = batch_engine();
-        let log = opening_log();
+        let log = opening_log(&e);
         let decision = e
             .handle(
                 &viewing(&e, &log),
@@ -10444,7 +10630,7 @@ mod tests {
     #[test]
     fn a_provider_run_result_the_response_hides_establishes_no_effect() {
         let e = batch_engine();
-        let log = opening_log();
+        let log = opening_log(&e);
         let decision = e
             .handle(
                 &viewing(&e, &log),
@@ -10470,7 +10656,7 @@ mod tests {
     #[test]
     fn a_malformed_sibling_mediates_none_of_them_and_the_admissions_stand() {
         let e = batch_engine();
-        let log = opening_log();
+        let log = opening_log(&e);
         for (position, malformed) in [
             (1, raw_call("nowhere", b"{}")),
             (1, raw_call("seen", b"{}")),
@@ -10507,7 +10693,7 @@ mod tests {
     #[test]
     fn a_retry_of_a_malformed_batch_admits_its_results_once_and_then_decides() {
         let e = batch_engine();
-        let log = opening_log();
+        let log = opening_log(&e);
         let malformed = || {
             batch(
                 "b1",
@@ -10545,7 +10731,7 @@ mod tests {
     #[test]
     fn a_batch_identity_is_bound_to_its_exposed_results_and_their_trajectory() {
         let e = batch_engine();
-        let log = opening_log();
+        let log = opening_log(&e);
         let first = e
             .handle(
                 &viewing(&e, &log),
@@ -10574,10 +10760,12 @@ mod tests {
         );
         assert_eq!(dropped.unwrap_err(), TransitionError::BatchIdentityConflict);
 
+        let other = TrajectoryId::new("other");
+        let with_other = [log.clone(), forked_child(&e, &log, &other)].concat();
         let elsewhere = e.handle(
-            &viewing(&e, &log),
+            &viewing(&e, &with_other),
             batch_on(
-                &TrajectoryId::new("other"),
+                &other,
                 "b1",
                 vec![exposed("seen", "the provider ran it")],
                 vec![raw(&call("quiet", json!({})))],
@@ -10618,7 +10806,7 @@ mod tests {
     #[test]
     fn an_exposed_result_of_a_tool_this_deployment_releases_is_refused() {
         let e = batch_engine();
-        let log = opening_log();
+        let log = opening_log(&e);
         for (tool, expected) in [
             ("quiet", EngineError::NotProviderRun("quiet".to_string())),
             ("nowhere", EngineError::UnknownTool("nowhere".to_string())),
@@ -10645,7 +10833,7 @@ mod tests {
             }],
             &["quiet", "loud"],
         );
-        let log = opening_log();
+        let log = opening_log(&e);
         let declared = |tool: &str| {
             let decision = e
                 .handle(
@@ -10670,7 +10858,7 @@ mod tests {
     #[test]
     fn an_admission_only_batch_decides_and_an_empty_one_is_no_event() {
         let e = batch_engine();
-        let log = opening_log();
+        let log = opening_log(&e);
         let decision = e
             .handle(
                 &viewing(&e, &log),
@@ -10699,7 +10887,7 @@ mod tests {
     #[test]
     fn a_siblings_release_is_state_for_the_siblings_after_it() {
         let e = batch_engine();
-        let log = opening_log();
+        let log = opening_log(&e);
         let decision = e
             .handle(
                 &viewing(&e, &log),
@@ -10747,8 +10935,9 @@ mod tests {
         };
         let mut emit = plain_tool("emit");
         emit.emits = EffectSet::new([EffectKind::new("k")]).unwrap();
-        let e = engine(vec![strict, emit]);
-        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let e = engine_at(vec![strict, emit], known(SUSPICIOUS, Audience::Public));
+
+        let log = vec![opened(&e)];
         let decision = e
             .handle(
                 &viewing(&e, &log),
@@ -10786,7 +10975,7 @@ mod tests {
             ..Requires::default()
         };
         let e = engine(vec![plain_tool("quiet"), spawn]);
-        let log = opening_log();
+        let log = opening_log(&e);
         let decision = e
             .handle(
                 &viewing(&e, &log),
@@ -10832,7 +11021,7 @@ mod tests {
     #[test]
     fn an_approval_is_spent_only_by_a_singleton_batch() {
         let e = engine(vec![crm_tool(), neutral_tool()]);
-        let log = opening_log();
+        let log = opening_log(&e);
         let opened = appended_facts(blocked_batch(&e, &log, "b1", nonce()));
         let offer = opened_offers(&opened)[0].0;
         let log = [log, opened].concat();
@@ -10874,7 +11063,7 @@ mod tests {
     #[test]
     fn an_exposed_admission_stales_the_approval_its_own_batch_would_spend() {
         let e = engine_with_provider_run(vec![crm_tool(), plain_tool("seen")], &["seen"]);
-        let log = opening_log();
+        let log = opening_log(&e);
         let opened = appended_facts(blocked_batch(&e, &log, "b1", nonce()));
         let offer = opened_offers(&opened)[0].0;
         let log = [log, opened].concat();
@@ -10932,7 +11121,7 @@ mod tests {
     #[test]
     fn a_repeat_of_a_multi_sibling_batch_answers_each_position_from_the_record() {
         let e = batch_engine();
-        let log = opening_log();
+        let log = opening_log(&e);
         let proposals = || {
             vec![
                 raw(&call("quiet", json!({}))),
@@ -10974,9 +11163,9 @@ mod tests {
             },
             ..Requires::default()
         };
-        let e = engine(vec![notify]);
         let internal = Audience::restricted([ReaderId::new("internal")]);
-        let log = vec![user_value(known(TRUSTED, internal.clone()))];
+        let e = engine_at(vec![notify], known(TRUSTED, internal.clone()));
+        let log = vec![opened(&e)];
         let pinned = |audience: &Audience| {
             raw(
                 &call("notify", json!({ "room": "lobby" })).with_dynamic_resolutions(vec![
@@ -11013,7 +11202,7 @@ mod tests {
         assert_eq!(blocked[0].call.dynamic_resolution(&binding), Some(&outsider));
     }
 
-    fn membership_engine(authorities: Vec<crate::authority::Authority>) -> Engine {
+    fn membership_engine(authorities: Vec<crate::authority::Authority>, starting: Label) -> Engine {
         let mut send = plain_tool("send");
         send.parameters = crate::params::test_string_argument_schema("to");
         send.requires = Requires {
@@ -11023,14 +11212,17 @@ mod tests {
             },
             ..Requires::default()
         };
-        open_engine(RegistryConfig {
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![send],
-            authorities,
-            sanitizers: vec![],
-            casts: vec![],
-            membership: Some(crate::names::MembershipResolverName::new("directory")),
-        })
+        open_engine_at(
+            RegistryConfig {
+                trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+                tools: vec![send],
+                authorities,
+                sanitizers: vec![],
+                casts: vec![],
+                membership: Some(crate::names::MembershipResolverName::new("directory")),
+            },
+            starting,
+        )
     }
 
     fn pinned_send(to: &str, memberships: Vec<crate::contract::PinnedMembership>) -> crate::transition::ProposedCall {
@@ -11044,11 +11236,8 @@ mod tests {
 
     #[test]
     fn a_public_placeholder_argument_is_the_public_audience() {
-        let e = membership_engine(vec![]);
-        let restricted = vec![user_value(known(
-            TRUSTED,
-            Audience::restricted([ReaderId::new("auditor")]),
-        ))];
+        let e = membership_engine(vec![], known(TRUSTED, Audience::restricted([ReaderId::new("auditor")])));
+        let restricted = vec![opened(&e)];
         let decision = e
             .handle(
                 &viewing(&e, &restricted),
@@ -11068,7 +11257,8 @@ mod tests {
             "no authority holds a reader ceiling, so nothing covers a Public recipient"
         );
 
-        let public = vec![user_value(known(TRUSTED, Audience::Public))];
+        let e = membership_engine(vec![], known(TRUSTED, Audience::Public));
+        let public = vec![opened(&e)];
         let decision = e
             .handle(
                 &viewing(&e, &public),
@@ -11078,17 +11268,6 @@ mod tests {
         let (released, blocked) = answered(&decision);
         assert_eq!(tool_names(released), ["send"]);
         assert!(blocked.is_empty());
-        let literal = vec![user_value(known(
-            TRUSTED,
-            Audience::restricted([ReaderId::new("public")]),
-        ))];
-        let decision = e
-            .handle(
-                &viewing(&e, &literal),
-                batch("b3", Vec::new(), vec![pinned_send("public", vec![])]),
-            )
-            .expect("the batch decides");
-        assert!(answered(&decision).0.is_empty());
     }
 
     #[test]
@@ -11102,11 +11281,11 @@ mod tests {
             scope: crate::authority::Scope::default(),
             hint: None,
         };
-        let e = membership_engine(vec![officer]);
-        let restricted = vec![user_value(known(
-            TRUSTED,
-            Audience::restricted([ReaderId::new("auditor")]),
-        ))];
+        let e = membership_engine(
+            vec![officer],
+            known(TRUSTED, Audience::restricted([ReaderId::new("auditor")])),
+        );
+        let restricted = vec![opened(&e)];
         let decision = e
             .handle(
                 &viewing(&e, &restricted),
@@ -11119,11 +11298,14 @@ mod tests {
 
     #[test]
     fn a_group_placeholder_reads_its_pinned_expansion() {
-        let e = membership_engine(vec![]);
-        let log = vec![user_value(known(
-            TRUSTED,
-            Audience::restricted([ReaderId::new("alice"), ReaderId::new("bob")]),
-        ))];
+        let e = membership_engine(
+            vec![],
+            known(
+                TRUSTED,
+                Audience::restricted([ReaderId::new("alice"), ReaderId::new("bob")]),
+            ),
+        );
+        let log = vec![opened(&e)];
         let covered = pinned_send("@team", vec![expansion("to", &["alice"])]);
         let uncovered = pinned_send("@team", vec![expansion("to", &["alice", "carol"])]);
         let empty = pinned_send("@nobody", vec![expansion("to", &[])]);
@@ -11160,8 +11342,8 @@ mod tests {
 
     #[test]
     fn an_unpinned_group_refuses_the_batch_with_no_fact() {
-        let e = membership_engine(vec![]);
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let e = membership_engine(vec![], known(TRUSTED, Audience::Public));
+        let log = vec![opened(&e)];
         let needed = e.handle(
             &viewing(&e, &log),
             batch("b1", Vec::new(), vec![pinned_send("@team", vec![])]),
@@ -11189,7 +11371,7 @@ mod tests {
         }]);
         assert!(matches!(
             unregistered.handle(
-                &viewing(&unregistered, &log),
+                &viewing(&unregistered, &[opened(&unregistered)]),
                 batch("b1", Vec::new(), vec![pinned_send("@team", vec![])])
             ),
             Err(TransitionError::MembershipNeeded { .. })
@@ -11216,11 +11398,8 @@ mod tests {
 
     #[test]
     fn membership_pins_are_batch_payload() {
-        let e = membership_engine(vec![]);
-        let log = vec![user_value(known(
-            TRUSTED,
-            Audience::restricted([ReaderId::new("alice")]),
-        ))];
+        let e = membership_engine(vec![], known(TRUSTED, Audience::restricted([ReaderId::new("alice")])));
+        let log = vec![opened(&e)];
         let first = e
             .handle(
                 &viewing(&e, &log),
@@ -11260,11 +11439,8 @@ mod tests {
 
     #[test]
     fn replay_refuses_tampered_membership_pins() {
-        let e = membership_engine(vec![]);
-        let records = vec![user_value(known(
-            TRUSTED,
-            Audience::restricted([ReaderId::new("alice")]),
-        ))];
+        let e = membership_engine(vec![], known(TRUSTED, Audience::restricted([ReaderId::new("alice")])));
+        let records = vec![opened(&e)];
         let decision = e
             .handle(
                 &viewing(&e, &records),
@@ -11331,9 +11507,9 @@ mod tests {
             scope: crate::authority::Scope::default(),
             hint: None,
         };
-        let e = membership_engine(vec![officer]);
         let alice = Audience::restricted([ReaderId::new("alice")]);
-        let opening = vec![user_value(known(TRUSTED, alice.clone()))];
+        let e = membership_engine(vec![officer], known(TRUSTED, alice.clone()));
+        let opening = vec![opened(&e)];
         let blocked = appended_facts(
             e.handle(
                 &viewing(&e, &opening),
@@ -11382,7 +11558,7 @@ mod tests {
     #[test]
     fn replay_refuses_a_provider_admission_no_act_declared() {
         let e = batch_engine();
-        let log = opening_log();
+        let log = opening_log(&e);
         let decided = appended_facts(
             e.handle(
                 &viewing(&e, &log),
@@ -11442,7 +11618,7 @@ mod tests {
     #[test]
     fn replay_refuses_one_batchs_admissions_split_across_two_decisions() {
         let e = batch_engine();
-        let log = opening_log();
+        let log = opening_log(&e);
         let decided = appended_facts(
             e.handle(
                 &viewing(&e, &log),
@@ -11471,7 +11647,7 @@ mod tests {
     #[test]
     fn replay_refuses_a_decision_whose_own_declaration_is_missing() {
         let e = batch_engine();
-        let opening = opening_log();
+        let opening = opening_log(&e);
         let decide = |log: &[Fact], id: &str| {
             appended_facts(
                 e.handle(
@@ -11498,7 +11674,7 @@ mod tests {
     #[test]
     fn a_decision_releases_exactly_what_the_ordered_composition_allows() {
         let e = batch_engine();
-        let log = opening_log();
+        let log = opening_log(&e);
         let decided = appended_facts(
             e.handle(
                 &viewing(&e, &log),
@@ -11547,7 +11723,7 @@ mod tests {
     #[test]
     fn replay_refuses_a_rewritten_provider_admission() {
         let e = batch_engine();
-        let log = opening_log();
+        let log = opening_log(&e);
         let decided = appended_facts(
             e.handle(
                 &viewing(&e, &log),
@@ -11629,7 +11805,7 @@ mod tests {
     #[test]
     fn a_batch_admits_every_result_it_exposed() {
         let e = batch_engine();
-        let log = opening_log();
+        let log = opening_log(&e);
         let decision = e
             .handle(
                 &viewing(&e, &log),
@@ -11687,7 +11863,13 @@ mod tests {
     ) -> RegistryConfig {
         RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![plain_tool("spawn"), open_tool("fetch")],
+            tools: vec![
+                plain_tool("spawn"),
+                open_tool("fetch"),
+                suspicious_read(),
+                internal_read(),
+                suspicious_internal_read(),
+            ],
             authorities: vec![],
             sanitizers,
             casts,
@@ -11731,14 +11913,6 @@ mod tests {
         }
     }
 
-    fn child_read(child: &TrajectoryId, label: Label) -> Fact {
-        Fact::ValueAdmitted {
-            trajectory: child.clone(),
-            value: LabeledValue::new(ValueBody::new("read"), label),
-            provenance: Provenance::UserInput,
-        }
-    }
-
     fn with_unresolved_fetch(e: &Engine, log: Vec<Fact>, child: &TrajectoryId) -> Vec<Fact> {
         let fetch = call("fetch", json!({}));
         let released = e
@@ -11747,8 +11921,8 @@ mod tests {
                 batch_on(child, "bf", Vec::new(), vec![raw(&fetch)], None),
             )
             .expect("the child's fetch releases");
-        let opened = [log, appended_facts(released)].concat();
-        let dispatch = opened
+        let released = appended_facts(released);
+        let dispatch = released
             .iter()
             .find_map(|fact| match fact {
                 Fact::DispatchOpened {
@@ -11757,6 +11931,7 @@ mod tests {
                 _ => None,
             })
             .expect("the release opens the dispatch");
+        let opened = [log, released].concat();
         let admitted = e
             .handle(
                 &viewing(e, &opened),
@@ -11809,11 +11984,11 @@ mod tests {
 
     #[test]
     fn a_narrowing_fork_return_transfers_custody_and_opens_the_parents_stage() {
-        let e = engine(vec![plain_tool("spawn")]);
+        let e = engine(vec![plain_tool("spawn"), suspicious_read(), suspicious_internal_read()]);
         let child = TrajectoryId::new("child");
         let internal = Audience::restricted([ReaderId::new("internal")]);
         let mut log = spawn_family(&e, None, &child);
-        log.push(child_read(&child, known(SUSPICIOUS, internal.clone())));
+        reads(&e, &mut log, &child, "read_suspicious_internal");
         let body = ValueBody::new("what I found");
 
         let decision = e
@@ -11832,7 +12007,8 @@ mod tests {
         );
         assert_eq!(stage.offers.len(), 1);
 
-        let ended = [log.clone(), appended_facts(decision)].concat();
+        let appended = appended_facts(decision);
+        let ended = [log.clone(), appended.clone()].concat();
         assert_eq!(e.validate_replay(&ended), Ok(()));
         let submitted = ended
             .iter()
@@ -11857,8 +12033,9 @@ mod tests {
         assert_eq!(*digest, &RawResultDigest::of(body.as_str().as_bytes()));
         assert_eq!(*stored, &body);
         assert_eq!(*policy, &ReturnPolicy::Raw);
+        assert!(appended.iter().any(|fact| matches!(fact, Fact::OfferOpened { .. })));
         assert!(
-            ended
+            appended
                 .iter()
                 .all(|fact| !matches!(fact, Fact::OfferOpened { trajectory, .. } if trajectory != &traj()))
         );
@@ -11903,11 +12080,11 @@ mod tests {
 
     #[test]
     fn the_parents_acceptance_crosses_the_submitted_return() {
-        let e = engine(vec![plain_tool("spawn")]);
+        let e = engine(vec![plain_tool("spawn"), suspicious_read(), suspicious_internal_read()]);
         let child = TrajectoryId::new("child");
         let internal = Audience::restricted([ReaderId::new("internal")]);
         let mut log = spawn_family(&e, None, &child);
-        log.push(child_read(&child, known(SUSPICIOUS, internal.clone())));
+        reads(&e, &mut log, &child, "read_suspicious_internal");
         let body = ValueBody::new("what I found");
         let decision = e
             .handle(
@@ -11973,9 +12150,8 @@ mod tests {
         };
         let e = open_engine(returning_registry(vec![scoped], vec![classifier_cast()]));
         let child = TrajectoryId::new("child");
-        let internal = Audience::restricted([ReaderId::new("internal")]);
         let mut log = spawn_family(&e, None, &child);
-        log.push(child_read(&child, known(SUSPICIOUS, internal)));
+        reads(&e, &mut log, &child, "read_suspicious_internal");
         let log = with_unresolved_fetch(&e, log, &child);
         let body = ValueBody::new("what I found");
         let decision = e
@@ -12009,9 +12185,8 @@ mod tests {
         };
         let e = open_engine(returning_registry(vec![unreachable_from], vec![classifier_cast()]));
         let child = TrajectoryId::new("child");
-        let internal = Audience::restricted([ReaderId::new("internal")]);
         let mut log = spawn_family(&e, None, &child);
-        log.push(child_read(&child, known(SUSPICIOUS, internal)));
+        reads(&e, &mut log, &child, "read_suspicious_internal");
         let log = with_unresolved_fetch(&e, log, &child);
         let body = ValueBody::new("what I found");
         let decision = e
@@ -12033,11 +12208,11 @@ mod tests {
 
     #[test]
     fn an_acceptance_crosses_after_the_parents_own_fold_moved() {
-        let e = engine(vec![plain_tool("spawn")]);
+        let e = engine(vec![plain_tool("spawn"), suspicious_read(), suspicious_internal_read()]);
         let child = TrajectoryId::new("child");
         let internal = Audience::restricted([ReaderId::new("internal")]);
         let mut log = spawn_family(&e, None, &child);
-        log.push(child_read(&child, known(SUSPICIOUS, internal.clone())));
+        reads(&e, &mut log, &child, "read_suspicious_internal");
         let body = ValueBody::new("what I found");
         let decision = e
             .handle(
@@ -12047,10 +12222,30 @@ mod tests {
             .expect("the submission transfers custody");
         let stage = pending_stage_of(&decision).clone();
         let mut ended = [log, appended_facts(decision)].concat();
-        ended.push(child_read(&traj(), known(SUSPICIOUS, Audience::Public)));
+        reads(&e, &mut ended, &traj(), "read_suspicious");
+        let stale = return_offer(&ended, false);
+        assert_eq!(
+            execute_offer(&e, &ended, stale, OfferOutcome::Approved(vec![])),
+            Err(TransitionError::StaleOffer)
+        );
+        let redriven = e
+            .handle(
+                &viewing(&e, &ended),
+                EngineEvent::ChildReturn(ChildReport {
+                    child: child.clone(),
+                    fork: fork_in(&ended, &child),
+                    submission: ChildSubmission::Value { body: body.clone() },
+                    evidence: Vec::new(),
+                    offer_nonce: crate::value::OfferNonce::new([9u8; 32]),
+                }),
+            )
+            .expect("the re-drive plans the stage again under fresh entropy");
+        let restage = pending_stage_of(&redriven).clone();
+        assert_eq!(restage.residual, stage.residual);
+        assert_ne!(restage.offers[0].0, stale);
+        let ended = [ended, appended_facts(redriven)].concat();
 
-        let accept = return_offer(&ended, false);
-        let crossed = execute_offer(&e, &ended, accept, OfferOutcome::Approved(vec![]))
+        let crossed = execute_offer(&e, &ended, restage.offers[0].0, OfferOutcome::Approved(vec![]))
             .expect("the acceptance crosses the pinned residual over the moved fold");
         let crossing = appended_facts(crossed);
         assert!(crossing.iter().any(|fact| matches!(
@@ -12070,9 +12265,8 @@ mod tests {
     fn a_resolution_stales_a_return_stage_and_the_redrive_replans_it() {
         let e = open_engine(returning_registry(vec![], vec![classifier_cast()]));
         let child = TrajectoryId::new("child");
-        let internal = Audience::restricted([ReaderId::new("internal")]);
         let mut log = spawn_family(&e, None, &child);
-        log.push(child_read(&child, known(SUSPICIOUS, internal.clone())));
+        reads(&e, &mut log, &child, "read_suspicious_internal");
         let log = with_unresolved_fetch(&e, log, &child);
         let body = ValueBody::new("what I found");
         let decision = e
@@ -12093,7 +12287,7 @@ mod tests {
                     submission: ChildSubmission::Value { body: body.clone() },
                     evidence: vec![Evidence::Cast {
                         cast: crate::names::CastName::new("classifier"),
-                        value: ValueId::new(2),
+                        value: ValueId::new(1),
                         resolved: established(SUSPICIOUS, Audience::Public),
                     }],
                     offer_nonce: crate::value::OfferNonce::new([9u8; 32]),
@@ -12135,7 +12329,7 @@ mod tests {
         let child = TrajectoryId::new("child");
         let internal = Audience::restricted([ReaderId::new("internal")]);
         let mut log = spawn_family(&e, None, &child);
-        log.push(child_read(&child, known(SUSPICIOUS, internal.clone())));
+        reads(&e, &mut log, &child, "read_suspicious_internal");
         let body = ValueBody::new("what I found");
         let decision = e
             .handle(
@@ -12236,7 +12430,7 @@ mod tests {
         let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")], vec![]));
         let child = TrajectoryId::new("child");
         let mut log = spawn_family(&e, None, &child);
-        log.push(child_read(&child, known(SUSPICIOUS, Audience::Public)));
+        reads(&e, &mut log, &child, "read_suspicious");
         let body = ValueBody::new("what I found");
         let decision = e
             .handle(
@@ -12287,7 +12481,7 @@ mod tests {
         );
         let child = TrajectoryId::new("child");
         let mut log = spawn_family(&e, None, &child);
-        log.push(child_read(&child, known(SUSPICIOUS, Audience::Public)));
+        reads(&e, &mut log, &child, "read_suspicious");
         let body = ValueBody::new("what I found");
         let raw_digest = RawResultDigest::of(body.as_str().as_bytes());
 
@@ -12379,7 +12573,7 @@ mod tests {
         let child = TrajectoryId::new("child");
         let internal = Audience::restricted([ReaderId::new("internal")]);
         let mut log = spawn_family(&e, None, &child);
-        log.push(child_read(&child, known(SUSPICIOUS, internal.clone())));
+        reads(&e, &mut log, &child, "read_suspicious_internal");
         let body = ValueBody::new("what I found");
         let decision = e
             .handle(
@@ -12449,7 +12643,7 @@ mod tests {
         );
         let child = TrajectoryId::new("child");
         let mut log = spawn_family(&e, None, &child);
-        log.push(child_read(&child, known(SUSPICIOUS, Audience::Public)));
+        reads(&e, &mut log, &child, "read_suspicious");
         let body = ValueBody::new("what I found");
 
         let decision = e
@@ -12548,14 +12742,14 @@ mod tests {
             asked.follow_up,
             FollowUp::Child(ChildFollowUp::Resolve(EvidenceRequest::Cast {
                 cast: crate::names::CastName::new("classifier"),
-                value: ValueId::new(1),
+                value: ValueId::new(0),
                 body: ValueBody::new("page"),
             }))
         );
 
         let answer = Evidence::Cast {
             cast: crate::names::CastName::new("classifier"),
-            value: ValueId::new(1),
+            value: ValueId::new(0),
             resolved: established(SUSPICIOUS, Audience::Public),
         };
         let resolved = e
@@ -12591,10 +12785,7 @@ mod tests {
             ReturnPolicy::Sanitized(SanitizerName::new("quarantine")),
         );
         let mut log = spawn_family(&e, None, &child);
-        log.push(child_read(
-            &child,
-            Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
-        ));
+        reads(&e, &mut log, &child, "fetch");
         let rejected = e
             .handle(
                 &viewing(&e, &log),
@@ -12610,9 +12801,9 @@ mod tests {
         assert_eq!(e.validate_replay(&[log, appended_facts(rejected)].concat()), Ok(()));
 
         let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")], vec![]));
-        let internal = Audience::restricted([ReaderId::new("internal")]);
         let mut log = spawn_family(&e, None, &child);
-        log.push(child_read(&child, Label::new(Dim::Unknown, Dim::Known(internal))));
+        reads(&e, &mut log, &child, "fetch");
+        reads(&e, &mut log, &child, "read_internal");
         let staged = e
             .handle(
                 &viewing(&e, &log),
@@ -12625,11 +12816,10 @@ mod tests {
 
     #[test]
     fn return_custody_records_replay_only_as_produced() {
-        let e = engine(vec![plain_tool("spawn")]);
+        let e = engine(vec![plain_tool("spawn"), suspicious_read(), suspicious_internal_read()]);
         let child = TrajectoryId::new("child");
-        let internal = Audience::restricted([ReaderId::new("internal")]);
         let mut log = spawn_family(&e, None, &child);
-        log.push(child_read(&child, known(SUSPICIOUS, internal.clone())));
+        reads(&e, &mut log, &child, "read_suspicious_internal");
         let body = ValueBody::new("what I found");
         let decision = e
             .handle(
@@ -12712,9 +12902,8 @@ mod tests {
             ReturnPolicy::Sanitized(SanitizerName::new("quarantine")),
         );
         let child = TrajectoryId::new("child");
-        let internal = Audience::restricted([ReaderId::new("internal")]);
         let mut log = spawn_family(&e, None, &child);
-        log.push(child_read(&child, known(SUSPICIOUS, internal.clone())));
+        reads(&e, &mut log, &child, "read_suspicious_internal");
         let body = ValueBody::new("what I found");
         let decision = e
             .handle(
@@ -12770,10 +12959,10 @@ mod tests {
 
     #[test]
     fn a_conforming_shaped_crossing_retains_the_child_label() {
-        let e = engine(vec![plain_tool("spawn")]);
+        let e = engine(vec![plain_tool("spawn"), suspicious_read(), suspicious_internal_read()]);
         let child = TrajectoryId::new("child");
         let mut log = spawn_family(&e, Some(&verdict_schema()), &child);
-        log.push(child_read(&child, known(SUSPICIOUS, Audience::Public)));
+        reads(&e, &mut log, &child, "read_suspicious");
         let body = ValueBody::new(r#"{"verdict":"allow"}"#);
         let decision = e
             .handle(
@@ -12811,7 +13000,7 @@ mod tests {
         let e = open_engine(returning_registry(vec![lifting_sanitizer("attest-schema")], vec![]));
         let child = TrajectoryId::new("child");
         let mut log = spawn_family(&e, None, &child);
-        log.push(child_read(&child, known(SUSPICIOUS, Audience::Public)));
+        reads(&e, &mut log, &child, "read_suspicious");
         let decision = e
             .handle(
                 &viewing(&e, &log),
@@ -12831,9 +13020,8 @@ mod tests {
     fn a_shaped_fork_without_attest_follows_the_ordinary_lifecycle() {
         let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")], vec![]));
         let child = TrajectoryId::new("child");
-        let internal = Audience::restricted([ReaderId::new("internal")]);
         let mut log = spawn_family(&e, Some(&verdict_schema()), &child);
-        log.push(child_read(&child, known(SUSPICIOUS, internal)));
+        reads(&e, &mut log, &child, "read_suspicious_internal");
         let decision = e
             .handle(
                 &viewing(&e, &log),
@@ -12855,7 +13043,7 @@ mod tests {
         let child = TrajectoryId::new("child");
         let internal = Audience::restricted([ReaderId::new("internal")]);
         let mut log = spawn_family(&e, Some(&verdict_schema()), &child);
-        log.push(child_read(&child, known(SUSPICIOUS, internal.clone())));
+        reads(&e, &mut log, &child, "read_suspicious_internal");
         let body = ValueBody::new(r#"{"verdict":"allow"}"#);
         let raw_digest = RawResultDigest::of(body.as_str().as_bytes());
         let decision = e
@@ -12981,7 +13169,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(&e)];
         let blocked = proposed(&e, &log, "b1", nonce(), call("fetch", json!({}))).expect("the batch decides");
         let offered: Vec<_> = opened_offers(&appended_facts(blocked))
             .into_iter()
@@ -13006,17 +13194,20 @@ mod tests {
             scope: crate::authority::Scope::default(),
             hint: None,
         };
-        let e = open_engine(RegistryConfig {
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into(), "gold".into()]),
-            tools: vec![plain_tool("spawn")],
-            authorities: vec![],
-            sanitizers: vec![attest],
-            casts: vec![],
-            membership: None,
-        });
+        let e = open_engine_at(
+            RegistryConfig {
+                trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into(), "gold".into()]),
+                tools: vec![plain_tool("spawn"), suspicious_read()],
+                authorities: vec![],
+                sanitizers: vec![attest],
+                casts: vec![],
+                membership: None,
+            },
+            known(TRUSTED, Audience::Public),
+        );
         let child = TrajectoryId::new("child");
         let mut log = spawn_family(&e, Some(&verdict_schema()), &child);
-        log.push(child_read(&child, known(SUSPICIOUS, Audience::Public)));
+        reads(&e, &mut log, &child, "read_suspicious");
         let decision = e
             .handle(
                 &viewing(&e, &log),
@@ -13040,7 +13231,7 @@ mod tests {
         );
         let child = TrajectoryId::new("child");
         let mut log = spawn_family(&e, Some(&verdict_schema()), &child);
-        log.push(child_read(&child, known(SUSPICIOUS, Audience::Public)));
+        reads(&e, &mut log, &child, "read_suspicious");
         let body = ValueBody::new(r#"{"verdict":"allow"}"#);
         let decision = e
             .handle(
@@ -13081,7 +13272,7 @@ mod tests {
         );
         let child = TrajectoryId::new("child");
         let mut log = spawn_family(&e, Some(&verdict_schema()), &child);
-        log.push(child_read(&child, known(SUSPICIOUS, Audience::Public)));
+        reads(&e, &mut log, &child, "read_suspicious");
         let body = ValueBody::new(r#"{"verdict":"maybe"}"#);
         let decision = e
             .handle(
@@ -13165,7 +13356,7 @@ mod tests {
         );
         let child = TrajectoryId::new("child");
         let mut log = spawn_family(&e, None, &child);
-        log.push(child_read(&child, known(SUSPICIOUS, Audience::Public)));
+        reads(&e, &mut log, &child, "read_suspicious");
         let log = with_unresolved_fetch(&e, log, &child);
         let asked = e
             .handle(
@@ -13194,7 +13385,7 @@ mod tests {
         );
         let child = TrajectoryId::new("child");
         let mut log = spawn_family(&e, None, &child);
-        log.push(child_read(&child, known(SUSPICIOUS, Audience::Public)));
+        reads(&e, &mut log, &child, "read_suspicious");
         let decision = e
             .handle(
                 &viewing(&e, &log),

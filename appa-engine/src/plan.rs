@@ -914,11 +914,18 @@ mod tests {
         Registry::build_covered(config).unwrap()
     }
 
-    fn user_value(label: Label) -> Fact {
+    fn opened(label: Label) -> Fact {
+        crate::profile::opening_at(traj(), label)
+    }
+
+    fn admitted(label: Label) -> Fact {
+        let seed = ResolvedCall::new(ToolName::new("seed"), crate::params::test_arguments(&json!({})));
         Fact::ValueAdmitted {
             trajectory: traj(),
             value: LabeledValue::new(ValueBody::new("body"), label),
-            provenance: Provenance::UserInput,
+            provenance: Provenance::ToolResult {
+                dispatch: crate::value::DispatchId::new(traj(), seed.digest(), 0),
+            },
         }
     }
 
@@ -982,7 +989,10 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(Label::new(Dim::Unknown, Dim::Known(Audience::Public)))];
+        let log = vec![
+            opened(known(TRUSTED, Audience::Public)),
+            admitted(Label::new(Dim::Unknown, Dim::Known(Audience::Public))),
+        ];
 
         let planned = plan_of(&registry, &log, &call("gate", json!({})));
         assert!(planned.plans.is_empty(), "an unestablished-only block offers nothing");
@@ -1050,7 +1060,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(Label::new(Dim::Known(TRUSTED), Dim::Known(internal)))];
+        let log = vec![opened(Label::new(Dim::Known(TRUSTED), Dim::Known(internal)))];
 
         let planned = plan_of(&registry, &log, &call("wipe", json!({})));
         assert!(
@@ -1153,7 +1163,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(known(TRUSTED, Audience::Public))];
 
         let planned = plan_of(&registry, &log, &call("crm", json!({})));
         assert_eq!(sanitize_offers(&planned), ["declassify".to_string()]);
@@ -1213,7 +1223,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(known(TRUSTED, Audience::Public))];
         let call = call("lookup", json!({ "room": "internal" }))
             .with_dynamic_resolutions(vec![PinnedDynamicResolution::from_answer(binding, Some(internal()))]);
 
@@ -1255,7 +1265,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(known(TRUSTED, Audience::Public))];
         let unresolved = call("send", json!({ "channel": "support" }))
             .with_dynamic_resolutions(vec![PinnedDynamicResolution::from_answer(binding.clone(), None)]);
         let planned = plan_of(&registry, &log, &unresolved);
@@ -1316,7 +1326,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("publish", json!({})));
 
         let executables: Vec<_> = planned.plans.iter().filter_map(RemedyPlan::executable).collect();
@@ -1386,7 +1396,7 @@ mod tests {
                 to: TRUSTED,
             },
         );
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(known(TRUSTED, Audience::Public))];
 
         let expected = vec![redispatch("backup", vec![Gap::Prior(EffectKind::new("backup.done"))])];
         let without = build(RegistryConfig {
@@ -1478,7 +1488,10 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(Label::new(Dim::Unknown, Dim::Known(Audience::Public)))];
+        let log = vec![
+            opened(known(TRUSTED, Audience::Public)),
+            admitted(Label::new(Dim::Unknown, Dim::Known(Audience::Public))),
+        ];
 
         let planned = plan_of(&registry, &log, &call("wipe", json!({})));
         assert!(planned.plans.iter().any(|plan| matches!(
@@ -1528,7 +1541,10 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(Label::new(Dim::Known(TRUSTED), Dim::Unknown))];
+        let log = vec![
+            opened(known(TRUSTED, Audience::Public)),
+            admitted(Label::new(Dim::Known(TRUSTED), Dim::Unknown)),
+        ];
         let planned = plan_of(&registry, &log, &call("send", json!({})));
         assert!(
             planned.plans.is_empty(),
@@ -1577,7 +1593,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("send", json!({})));
 
         assert_eq!(
@@ -1644,7 +1660,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("send", json!({})));
         assert!(planned.plans.is_empty());
         assert!(!planned.is_curable());
@@ -1690,7 +1706,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("send", json!({})));
         assert_eq!(
             planned.plans,
@@ -1738,7 +1754,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let log = vec![opened(known(SUSPICIOUS, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         assert!(planned.is_curable());
         assert_eq!(
@@ -1790,7 +1806,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let log = vec![opened(known(SUSPICIOUS, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         let floor = Gap::TrustFloor {
             required: TRUSTED,
@@ -1870,7 +1886,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let log = vec![opened(known(SUSPICIOUS, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         assert_eq!(assigned(&planned), vec![vec!["officer"], vec!["executive"]]);
         assert_eq!(exec(&planned.plans[0]).id, PlanId::new(0));
@@ -1919,10 +1935,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(
-            TRUSTED,
-            Audience::restricted([ReaderId::new("intern")]),
-        ))];
+        let log = vec![opened(known(TRUSTED, Audience::restricted([ReaderId::new("intern")])))];
         let planned = plan_of(&registry, &log, &call("send", json!({})));
         assert_eq!(assigned(&planned), vec![vec!["exact"], vec!["wide"], vec!["global"]]);
     }
@@ -1961,7 +1974,7 @@ mod tests {
             membership: None,
         });
         let log = vec![
-            user_value(known(TRUSTED, Audience::Public)),
+            opened(known(TRUSTED, Audience::Public)),
             committed_effect(EffectKind::new("spend")),
         ];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
@@ -2016,7 +2029,7 @@ mod tests {
             membership: None,
         });
         let log = vec![
-            user_value(known(TRUSTED, Audience::Public)),
+            opened(known(TRUSTED, Audience::Public)),
             open_reservation("send", &["email.sent"]),
         ];
         let planned = plan_of(&registry, &log, &call("guard", json!({})));
@@ -2057,14 +2070,14 @@ mod tests {
             membership: None,
         });
         let expected = vec![redispatch("backup", vec![Gap::Prior(EffectKind::new("backup.done"))])];
-        let clear = vec![user_value(known(TRUSTED, Audience::Public))];
+        let clear = vec![opened(known(TRUSTED, Audience::Public))];
         assert_eq!(
             plan_of(&registry, &clear, &call("delete_db", json!({}))).plans,
             expected
         );
 
         let reserved = vec![
-            user_value(known(TRUSTED, Audience::Public)),
+            opened(known(TRUSTED, Audience::Public)),
             open_reservation("locker", &["lock"]),
         ];
         assert_eq!(
@@ -2117,10 +2130,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(
-            TRUSTED,
-            Audience::restricted([ReaderId::new("intern")]),
-        ))];
+        let log = vec![opened(known(TRUSTED, Audience::restricted([ReaderId::new("intern")])))];
         let planned = plan_of(&registry, &log, &call("send", json!({})));
         assert_eq!(assigned(&planned), vec![vec!["legal"], vec!["audit"]]);
     }
@@ -2164,7 +2174,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(
+        let log = vec![opened(known(
             SUSPICIOUS,
             Audience::restricted([ReaderId::new("intern")]),
         ))];
@@ -2224,7 +2234,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let log = vec![opened(known(SUSPICIOUS, Audience::Public))];
         let call = call("wire", json!({}));
         assert_eq!(
             assigned(&plan_of(&plain, &log, &call)),
@@ -2278,15 +2288,12 @@ mod tests {
     fn a_denied_authority_is_excluded_and_the_surviving_sibling_keeps_its_id() {
         let registry = two_officer_registry();
         let wire = call("wire", json!({"amount": 5}));
-        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let log = vec![opened(known(SUSPICIOUS, Audience::Public))];
         let offered = plan_of(&registry, &log, &wire);
         assert_eq!(assigned(&offered), vec![vec!["officer-a"], vec!["officer-b"]]);
         let sibling = exec(&offered.plans[1]).clone();
 
-        let log = vec![
-            user_value(known(SUSPICIOUS, Audience::Public)),
-            denial(&wire, "officer-a"),
-        ];
+        let log = vec![opened(known(SUSPICIOUS, Audience::Public)), denial(&wire, "officer-a")];
         let filtered = plan_of(&registry, &log, &wire);
         assert_eq!(assigned(&filtered), vec![vec!["officer-b"]]);
         assert_eq!(exec(&filtered.plans[0]), &sibling);
@@ -2298,7 +2305,7 @@ mod tests {
         let registry = two_officer_registry();
         let denied_call = call("wire", json!({"amount": 5}));
         let log = vec![
-            user_value(known(SUSPICIOUS, Audience::Public)),
+            opened(known(SUSPICIOUS, Audience::Public)),
             denial(&denied_call, "officer-a"),
         ];
         assert_eq!(
@@ -2315,13 +2322,10 @@ mod tests {
     fn a_stale_offer_naming_a_denied_authority_is_refused_at_execution() {
         let registry = two_officer_registry();
         let wire = call("wire", json!({"amount": 5}));
-        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let log = vec![opened(known(SUSPICIOUS, Audience::Public))];
         let stale = exec(&plan_of(&registry, &log, &wire).plans[0]).clone();
 
-        let log = vec![
-            user_value(known(SUSPICIOUS, Audience::Public)),
-            denial(&wire, "officer-a"),
-        ];
+        let log = vec![opened(known(SUSPICIOUS, Audience::Public)), denial(&wire, "officer-a")];
         let projection = Projection::build(&log, log.len() as u64);
         let trajectory = traj();
         let views = projection.view(&trajectory);
@@ -2363,10 +2367,7 @@ mod tests {
             membership: None,
         });
         let wire = call("wire", json!({}));
-        let log = vec![
-            user_value(known(SUSPICIOUS, Audience::Public)),
-            denial(&wire, "officer"),
-        ];
+        let log = vec![opened(known(SUSPICIOUS, Audience::Public)), denial(&wire, "officer")];
         let planned = plan_of(&registry, &log, &wire);
         assert!(planned.plans.is_empty());
         assert!(!planned.is_curable());
@@ -2416,13 +2417,10 @@ mod tests {
         });
         let send = call("send", json!({}));
         let expected = vec![redispatch("emitter", vec![Gap::Prior(EffectKind::new("receipt"))])];
-        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let log = vec![opened(known(SUSPICIOUS, Audience::Public))];
         assert_eq!(plan_of(&registry, &log, &send).plans, expected);
 
-        let log = vec![
-            user_value(known(SUSPICIOUS, Audience::Public)),
-            denial(&send, "officer"),
-        ];
+        let log = vec![opened(known(SUSPICIOUS, Audience::Public)), denial(&send, "officer")];
         assert_eq!(plan_of(&registry, &log, &send).plans, expected);
     }
 
@@ -2473,7 +2471,7 @@ mod tests {
         let send = call("send", json!({}));
         let null_rendering = ResolvedCall::new(ToolName::new("emitter"), crate::params::test_arguments(&json!({})));
         let log = vec![
-            user_value(known(SUSPICIOUS, Audience::Public)),
+            opened(known(SUSPICIOUS, Audience::Public)),
             denial(&null_rendering, "gate"),
         ];
         let planned = plan_of(&registry, &log, &send);
@@ -2513,7 +2511,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         assert_eq!(planned.plans.len(), 2);
         for plan in &planned.plans {
@@ -2560,7 +2558,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let log = vec![opened(known(SUSPICIOUS, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         assert_eq!(planned.plans.len(), 1);
         assert_eq!(exec(&planned.plans[0]).required.len(), 1);
@@ -2595,7 +2593,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let log = vec![opened(known(SUSPICIOUS, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         assert!(!planned.is_curable());
         assert!(planned.plans.is_empty());
@@ -2623,7 +2621,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("get", json!({})));
         assert!(planned.is_curable());
         assert_eq!(
@@ -2664,7 +2662,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("delete_db", json!({})));
         assert!(planned.is_curable());
         assert!(matches!(
@@ -2702,7 +2700,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("delete_db", json!({})));
         assert!(planned.is_curable());
         let curative: Vec<&ToolName> = planned
@@ -2756,7 +2754,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(
+        let log = vec![opened(known(
             TRUSTED,
             Audience::restricted([ReaderId::new("internal")]),
         ))];
@@ -2802,7 +2800,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("archive", json!({})));
         assert!(planned.is_curable());
         assert!(matches!(
@@ -2832,7 +2830,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("delete_db", json!({})));
         assert!(!planned.is_curable());
     }
@@ -2869,7 +2867,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         assert_eq!(
             exec(&planned.plans[0]).steps,
@@ -2907,7 +2905,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         assert!(!planned.is_curable());
     }
@@ -2944,7 +2942,7 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("a", json!({})));
         assert_eq!(
             planned.plans,
@@ -3248,7 +3246,7 @@ mod tests {
                 unestablished: Vec::new(),
             };
 
-            let mut log = vec![user_value(state.label.clone().into_label())];
+            let mut log = vec![opened(state.label.clone().into_label())];
             for kind in &state.effects {
                 log.push(committed_effect(kind.clone()));
             }
@@ -3336,7 +3334,7 @@ mod tests {
                 narrowing: eval.narrowing,
                 unestablished: Vec::new(),
             };
-            let mut log = vec![user_value(state.label.clone().into_label())];
+            let mut log = vec![opened(state.label.clone().into_label())];
             for kind in &state.effects {
                 log.push(committed_effect(kind.clone()));
             }
@@ -3476,7 +3474,7 @@ mod tests {
                 unestablished: Vec::new(),
             };
 
-            let mut log = vec![user_value(state.label.clone().into_label())];
+            let mut log = vec![opened(state.label.clone().into_label())];
             for kind in &state.effects {
                 log.push(committed_effect(kind.clone()));
             }

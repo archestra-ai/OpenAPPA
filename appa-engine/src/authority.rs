@@ -60,8 +60,8 @@ impl Scope {
     /// The routing gate every cast consumer shares — planning, admission, and the
     /// transition validator — so none of them can drift: does this scope reach `value`? A tool
     /// result routes by its originating contract's tags, a provider-run result by its own
-    /// contract's, and a user turn or child return originates from no tool, so only
-    /// an unscoped component reaches it. `None` names a missing routing record; the caller
+    /// contract's, and a child return originates from no tool, so only an unscoped
+    /// component reaches it. `None` names a missing routing record; the caller
     /// decides whether that skips the source, breaks a proven invariant, or refuses the record.
     pub(crate) fn reaches(
         &self,
@@ -77,7 +77,7 @@ impl Scope {
             crate::value::Provenance::ProviderRun { tool, .. } => {
                 self.covers(&registry.provider_run_contract(tool)?.tags)
             }
-            crate::value::Provenance::UserInput | crate::value::Provenance::ChildReturn { .. } => self.is_unscoped(),
+            crate::value::Provenance::ChildReturn { .. } => self.is_unscoped(),
         })
     }
 

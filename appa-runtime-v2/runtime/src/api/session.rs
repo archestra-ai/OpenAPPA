@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::elicit::Elicitation;
 use crate::engine::{
     AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback, ForkStatus,
-    Next, OfferNonce, OpenDispatch, Presentation, engine_id,
+    Liveness, Next, OfferNonce, OpenDispatch, Presentation, engine_id,
 };
 use crate::external::{ConsultKind, ConsultOutcome, ReadersResolution};
 
@@ -233,11 +233,10 @@ impl Session {
             .engine
             .rebuild_view(&policy, &log)
             .map_err(EventError::from)?;
-        if self.inner.engine.has_ended(&view, &self.trajectory) {
-            return Err(EventError::TrajectoryEnded);
-        }
-        if self.trajectory != self.root && !self.inner.engine.names_trajectory(&view, &self.trajectory) {
-            return Err(EventError::SpawnNotTaken);
+        match self.inner.engine.liveness(&view, &self.trajectory) {
+            Liveness::Ended => return Err(EventError::TrajectoryEnded),
+            Liveness::Unopened => return Err(EventError::SpawnNotTaken),
+            Liveness::Live => {}
         }
         let Some(open) = self.inner.engine.substituted_release(&view, &self.trajectory) else {
             return Ok(None);
@@ -626,12 +625,12 @@ impl Session {
                 policy,
                 view: &view,
             };
-            if entering && self.inner.engine.has_ended(&view, &self.trajectory) {
-                return Err(EventError::TrajectoryEnded);
-            }
-            if entering && self.trajectory != self.root && !self.inner.engine.names_trajectory(&view, &self.trajectory)
-            {
-                return Err(EventError::SpawnNotTaken);
+            if entering {
+                match self.inner.engine.liveness(&view, &self.trajectory) {
+                    Liveness::Ended => return Err(EventError::TrajectoryEnded),
+                    Liveness::Unopened => return Err(EventError::SpawnNotTaken),
+                    Liveness::Live => {}
+                }
             }
             let event = event(&context)?;
             if let EngineEvent::ChildReturn { child, .. } = &event
@@ -1419,8 +1418,9 @@ confined_results = ["fetch"]
     }
 
     #[test]
-    fn a_non_neutral_starting_label_refuses_open() {
+    fn a_non_neutral_starting_label_seeds_the_root_and_survives_a_restart() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let db = dir.path().join("appa.db");
         let policy = r#"
 version = 1
 [[policy.tool]]
@@ -1428,9 +1428,26 @@ name = "fetch"
 [policy.deployment]
 starting_label = { trust = "suspicious" }
 "#;
+        let runtime = Runtime::open(config_with(policy, None), db.clone(), None).expect("the deployment opens");
+        runtime.create_session(root()).expect("a fresh id opens");
+        let live = runtime.status(&root()).expect("a fresh root answers");
+        assert_eq!((live.trust.as_str(), live.audience.as_str()), ("suspicious", "public"));
+        drop(runtime);
+        let reopened = Runtime::open(config_with(policy, None), db, None).expect("the deployment reopens");
+        let restarted = reopened.status(&root()).expect("the persisted root answers");
+        assert_eq!((restarted.trust, restarted.audience), (live.trust, live.audience));
+    }
+
+    #[test]
+    fn liveness_of_an_unopened_child_is_unknown() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        runtime.create_session(root()).expect("a fresh id opens");
+        assert!(runtime.live(&root(), &root()).is_ok());
         assert!(matches!(
-            Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None),
-            Err(OpenError::UnsupportedPolicy(_)),
+            runtime.live(&root(), &TrajectoryId("cc:never-bound".to_string())),
+            Err(SessionError::Unknown),
         ));
     }
 

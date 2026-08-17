@@ -385,15 +385,7 @@ async fn a_child_bound_attest_schema_return_crosses_in_engine() {
         child: child(),
         value: Some(r#"{"verdict":"allow"}"#.to_string()),
     };
-    let stopped = hooks::handle(&runtime, end).await;
-    let accept = all_offers(&feedback_of(&stopped))
-        .into_iter()
-        .next()
-        .expect("the stop surfaces the acceptance of the attested value");
-    assert!(matches!(
-        runtime.execute_remedy(accept).await,
-        RemedyOutcome::Returned { .. }
-    ));
+    assert_eq!(hooks::handle(&runtime, end).await, HookDecision::Ack);
 
     let entries = runtime.audit(&root()).expect("the audit reads");
     assert!(

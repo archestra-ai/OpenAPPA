@@ -111,7 +111,7 @@ url = "https://pii.corp/redact"
 builtin = "hitl"                           # ask a person
 ```
 
-The trajectory begins at `{public, trusted}` unless pre-existing context or user input introduces restricted labels. When the agent calls `get_ticket_from_crm()`, OpenAPPA intercepts the dispatch before execution. The engine offers three operational paths, and the block names all of them:
+The trajectory begins at the deployment's starting label — `{public, trusted}` unless the `[deployment]` table declares otherwise — recorded once on the opening record; user input and other principal context admit nothing to the fold. When the agent calls `get_ticket_from_crm()`, OpenAPPA intercepts the dispatch before execution. The engine offers three operational paths, and the block names all of them:
 
 | Execution Path | Trajectory Label Impact | Downstream Dispatch Impact |
 |---|---|---|

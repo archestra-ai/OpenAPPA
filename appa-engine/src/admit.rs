@@ -515,6 +515,13 @@ mod tests {
         TrajectoryId::new("t")
     }
 
+    fn opened() -> Fact {
+        crate::profile::opening_at(
+            traj(),
+            Label::new(Dim::Known(Trust::new(1)), Dim::Known(Audience::Public)),
+        )
+    }
+
     fn registry() -> Registry {
         let get = ToolContract {
             name: ToolName::new("get_ticket"),
@@ -620,9 +627,9 @@ mod tests {
         ResolvedCall::new(ToolName::new("get_ticket"), crate::params::test_arguments(&json!({})))
     }
 
-    fn open_log(call: &ResolvedCall) -> (Vec<Fact>, DispatchId) {
+    fn dispatch_opened(call: &ResolvedCall) -> (Fact, DispatchId) {
         let dispatch = DispatchId::new(traj(), call.digest(), 0);
-        let log = vec![Fact::DispatchOpened {
+        let record = Fact::DispatchOpened {
             trajectory: traj(),
             dispatch: dispatch.clone(),
             tool: call.tool().clone(),
@@ -633,8 +640,13 @@ mod tests {
             dynamic_resolutions: Vec::new(),
             memberships: Vec::new(),
             subject: None,
-        }];
-        (log, dispatch)
+        };
+        (record, dispatch)
+    }
+
+    fn open_log(call: &ResolvedCall) -> (Vec<Fact>, DispatchId) {
+        let (dispatch_record, dispatch) = dispatch_opened(call);
+        (vec![opened(), dispatch_record], dispatch)
     }
 
     fn views_of(log: &[Fact]) -> Projection {
@@ -786,7 +798,7 @@ mod tests {
             admit_result(&reg, &p.view(&t), &dispatch, &other, ResultAdmission::SuccessNoValue),
             Err(AdmitError::DigestMismatch)
         );
-        let empty = views_of(&[]);
+        let empty = views_of(&[opened()]);
         assert_eq!(
             admit_result(&reg, &empty.view(&t), &dispatch, &call, ResultAdmission::SuccessNoValue),
             Err(AdmitError::NotOpen)
@@ -794,14 +806,16 @@ mod tests {
     }
 
     fn unknown_value_log() -> Vec<Fact> {
-        vec![Fact::ValueAdmitted {
+        let (mut log, dispatch) = open_log(&scan_call());
+        log.push(Fact::ValueAdmitted {
             trajectory: traj(),
             value: LabeledValue::new(
                 ValueBody::new("body"),
                 Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
             ),
-            provenance: Provenance::UserInput,
-        }]
+            provenance: Provenance::ToolResult { dispatch },
+        });
+        log
     }
 
     #[test]
@@ -809,6 +823,17 @@ mod tests {
         let fetch = ToolContract {
             name: ToolName::new("fetch"),
             tags: vec![crate::names::TagName::new("web")],
+            delta: Some(Delta {
+                trust: Some(Dim::Unknown),
+                audience: Some(Dim::Known(Audience::Public).into()),
+            }),
+            parameters: crate::params::ToolParameters::open(),
+            emits: EffectSet::default(),
+            requires: Default::default(),
+        };
+        let note = ToolContract {
+            name: ToolName::new("note"),
+            tags: vec![],
             delta: Some(Delta {
                 trust: Some(Dim::Unknown),
                 audience: Some(Dim::Known(Audience::Public).into()),
@@ -831,35 +856,30 @@ mod tests {
         };
         let reg = Registry::build_covered(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![fetch],
+            tools: vec![fetch, note],
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![webby, fallback],
             membership: None,
         })
         .unwrap();
-        let call = ResolvedCall::new(ToolName::new("fetch"), crate::params::test_arguments(&json!({})));
-        let dispatch = DispatchId::new(traj(), call.digest(), 0);
+        let fetch_call = ResolvedCall::new(ToolName::new("fetch"), crate::params::test_arguments(&json!({})));
+        let note_call = ResolvedCall::new(ToolName::new("note"), crate::params::test_arguments(&json!({})));
+        let (fetch_opened, fetch_dispatch) = dispatch_opened(&fetch_call);
+        let (note_opened, note_dispatch) = dispatch_opened(&note_call);
         let log = vec![
-            Fact::DispatchOpened {
-                trajectory: traj(),
-                dispatch: dispatch.clone(),
-                tool: call.tool().clone(),
-                arguments: call.canonical_arguments().clone(),
-                proposed_label: EstablishedLabel::top(),
-                receiving: EstablishedLabel::top(),
-                proposed_effects: EffectSet::default(),
-                dynamic_resolutions: Vec::new(),
-                memberships: Vec::new(),
-                subject: None,
-            },
+            opened(),
+            fetch_opened,
+            note_opened,
             Fact::ValueAdmitted {
                 trajectory: traj(),
                 value: LabeledValue::new(
                     ValueBody::new("page"),
                     Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
                 ),
-                provenance: Provenance::ToolResult { dispatch },
+                provenance: Provenance::ToolResult {
+                    dispatch: fetch_dispatch,
+                },
             },
             Fact::ValueAdmitted {
                 trajectory: traj(),
@@ -867,7 +887,9 @@ mod tests {
                     ValueBody::new("note"),
                     Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
                 ),
-                provenance: Provenance::UserInput,
+                provenance: Provenance::ToolResult {
+                    dispatch: note_dispatch,
+                },
             },
             Fact::ValueAdmitted {
                 trajectory: traj(),
@@ -1013,7 +1035,10 @@ mod tests {
                     Dim::Known(Audience::restricted([ReaderId::new("finance")])),
                 ),
             ),
-            provenance: Provenance::UserInput,
+            provenance: Provenance::ChildReturn {
+                child: TrajectoryId::new("child"),
+                id: crate::value::ChildReturnId::new(TrajectoryId::new("child"), 0),
+            },
         });
         let p = views_of(&log);
         let t = traj();
@@ -1257,17 +1282,7 @@ mod tests {
 
     fn narrowed_open_log(call: &ResolvedCall) -> (Vec<Fact>, DispatchId) {
         let (mut log, dispatch) = open_log(call);
-        log.insert(
-            0,
-            Fact::ValueAdmitted {
-                trajectory: traj(),
-                value: LabeledValue::new(
-                    ValueBody::new("prior suspicious internal read"),
-                    Label::new(Dim::Known(SUSPICIOUS), Dim::Known(internal())),
-                ),
-                provenance: Provenance::UserInput,
-            },
-        );
+        log[0] = crate::profile::opening_at(traj(), Label::new(Dim::Known(SUSPICIOUS), Dim::Known(internal())));
         let Fact::DispatchOpened { receiving, .. } = &mut log[1] else {
             unreachable!("open_log holds exactly one DispatchOpened")
         };

@@ -17,7 +17,7 @@ pub(crate) use session::{LateOpen, Session, is_control_tool};
 
 use crate::config::Config;
 use crate::elicit::Elicitation;
-use crate::engine::{EngineRefusal, EngineSeam, PolicyEngine, RuntimeEngine};
+use crate::engine::{EngineRefusal, EngineSeam, Liveness, PolicyEngine, RuntimeEngine};
 use crate::external::ExternalServices;
 use appa_eventlog::{Backend, Log, LogStore};
 
@@ -423,10 +423,11 @@ impl Runtime {
             .engine
             .rebuild_view(&policy, &log)
             .map_err(|refusal| SessionError::Storage(refusal.to_string()))?;
-        if self.inner.engine.has_ended(&view, trajectory) {
-            return Err(SessionError::Ended);
+        match self.inner.engine.liveness(&view, trajectory) {
+            Liveness::Unopened => Err(SessionError::Unknown),
+            Liveness::Ended => Err(SessionError::Ended),
+            Liveness::Live => Ok(()),
         }
-        Ok(())
     }
 
     pub fn status(&self, id: &TrajectoryId) -> Option<TrajectoryStatus> {
@@ -569,7 +570,7 @@ impl Runtime {
         let log = self.inner.log(root).expect("the log reads");
         let policy = self.inner.resolve_policy(&log).expect("the opening policy resolves");
         let view = self.inner.engine.rebuild_view(&policy, &log).expect("the log rebuilds");
-        self.inner.engine.names_trajectory(&view, trajectory)
+        self.inner.engine.liveness(&view, trajectory) != Liveness::Unopened
     }
 
     /// The substituted call a trajectory has standing, for the tests
@@ -672,11 +673,6 @@ impl Drop for OfferClaim {
 
 fn validate_deployment(policy: &appa_policy::Config, config: &Config) -> Result<(), OpenError> {
     let profile = policy.engine().profile();
-    if profile.starting_label() != &appa_engine::profile::neutral_starting_label(policy.registry().trust_chain()) {
-        return Err(OpenError::UnsupportedPolicy(
-            "[deployment] starting_label — the root fold is not yet initialized from the opening record (T17/T40), so a non-neutral starting label would silently not apply".to_string(),
-        ));
-    }
     if profile.binding() == appa_engine::profile::BindingMode::Token {
         return Err(OpenError::UnsupportedPolicy(
             "[deployment] binding = \"token\" — this runtime binds trajectories by harness session ids"

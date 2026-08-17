@@ -201,7 +201,7 @@ pub struct Projection {
     /// `D×F` entries. Denials are rare governance events and the planner consults one trajectory
     /// at a time, so the flat copy stays the boring choice over an ancestry-cutoff walk.
     denials: BTreeMap<TrajectoryId, BTreeMap<CanonicalDigest, BTreeSet<AuthorityName>>>,
-    active: BTreeSet<TrajectoryId>,
+    opening: Option<(TrajectoryId, EstablishedLabel)>,
     decided: BTreeMap<crate::transition::ProposalBatchId, DecidedBatch>,
     admissions: BTreeMap<crate::transition::ProposalBatchId, Vec<ValueId>>,
     offers: BTreeMap<crate::value::OfferId, RecordedOffer>,
@@ -237,7 +237,7 @@ impl Projection {
             accepted: BTreeMap::new(),
             candidates: BTreeMap::new(),
             denials: BTreeMap::new(),
-            active: BTreeSet::new(),
+            opening: None,
             decided: BTreeMap::new(),
             admissions: BTreeMap::new(),
             offers: BTreeMap::new(),
@@ -323,7 +323,7 @@ impl Projection {
             accepted,
             candidates,
             denials,
-            active,
+            opening,
             decided,
             admissions,
             offers,
@@ -331,9 +331,18 @@ impl Projection {
             versions,
         } = self;
         {
-            active.insert(fact.trajectory().clone());
             match fact {
-                Fact::TrajectoryOpened { .. } => {}
+                Fact::TrajectoryOpened {
+                    trajectory, profile, ..
+                } => {
+                    let starting = EstablishedLabel::from_label(profile.starting_label())
+                        .expect("a validated deployment profile's starting label is established");
+                    assert!(
+                        opening.is_none(),
+                        "the validator admits one opening per family log, as its first record"
+                    );
+                    *opening = Some((trajectory.clone(), starting));
+                }
                 Fact::BasisAdvanced { advance, .. } => versions.advance(advance),
                 Fact::OfferOpened {
                     trajectory,
@@ -437,7 +446,7 @@ impl Projection {
                         provenance: provenance.clone(),
                         body: match provenance {
                             Provenance::ToolResult { .. } | Provenance::ProviderRun { .. } => Some(value.body.clone()),
-                            Provenance::UserInput | Provenance::ChildReturn { .. } => None,
+                            Provenance::ChildReturn { .. } => None,
                         },
                     });
                     if let Provenance::ToolResult { dispatch } = provenance {
@@ -684,9 +693,32 @@ impl Projection {
             .map(|id| (*id, self.value_label(*id).unwrap_or(&MISSING_SOURCE)))
     }
 
-    fn base_of(&self, trajectory: &TrajectoryId) -> EstablishedLabel {
-        self.snapshot_of(trajectory)
-            .map_or_else(EstablishedLabel::top, |snapshot| snapshot.base().clone())
+    fn base_of(&self, trajectory: &TrajectoryId) -> Option<EstablishedLabel> {
+        match self.snapshot_of(trajectory) {
+            Some(snapshot) => Some(snapshot.base().clone()),
+            None => self.root_opening(trajectory).cloned(),
+        }
+    }
+
+    fn opened_base(&self, trajectory: &TrajectoryId) -> EstablishedLabel {
+        self.base_of(trajectory)
+            .expect("a fold is read only for a trajectory its opening record or its fork opened")
+    }
+
+    fn root_opening(&self, trajectory: &TrajectoryId) -> Option<&EstablishedLabel> {
+        match &self.opening {
+            Some((root, starting)) if root == trajectory => Some(starting),
+            _ => None,
+        }
+    }
+
+    /// Was this trajectory opened — the root by its `TrajectoryOpened` record, a child by its
+    /// `ForkOpened` binding? Nothing else names a trajectory the validator admits a
+    /// record on, so opened and named coincide: a fork may open only a child the log has never
+    /// opened, since a trajectory opened before the fork was decided under no parent restriction
+    /// at all, and the fork cannot retract that afterwards.
+    pub(crate) fn is_opened(&self, trajectory: &TrajectoryId) -> bool {
+        self.root_opening(trajectory).is_some() || self.fork_of.contains_key(trajectory)
     }
 
     fn absorbed_sources<'a>(&'a self, trajectory: &TrajectoryId) -> impl Iterator<Item = (ValueId, Label)> + 'a {
@@ -704,7 +736,7 @@ impl Projection {
     }
 
     fn fold_for(&self, trajectory: &TrajectoryId) -> PartialLabel {
-        let mut fold = PartialLabel::from_basis(self.base_of(trajectory), self.basis_sources(trajectory));
+        let mut fold = PartialLabel::from_basis(self.opened_base(trajectory), self.basis_sources(trajectory));
         for (id, masked) in self.absorbed_sources(trajectory) {
             fold.fold_value(id, &masked);
         }
@@ -713,16 +745,16 @@ impl Projection {
 
     fn freeze_basis(&self, trajectory: &TrajectoryId) -> ForkSnapshot {
         ForkSnapshot::freeze(
-            self.base_of(trajectory),
+            self.opened_base(trajectory),
             self.basis_sources(trajectory),
             self.absorbed_sources(trajectory),
         )
     }
 
-    /// Every trajectory the log names — the family membership the transition validator carries
+    /// Every trajectory the log opened — the family membership the transition validator carries
     /// forward when it resumes from a validated view.
     pub(crate) fn trajectories(&self) -> impl Iterator<Item = &TrajectoryId> {
-        self.active.iter()
+        self.opening.iter().map(|(root, _)| root).chain(self.fork_of.keys())
     }
 
     /// The exposed provider-run results one batch identity admitted, in order: the
@@ -753,7 +785,7 @@ impl Projection {
             .iter()
             .filter_map(|value| match &value.provenance {
                 Provenance::ToolResult { dispatch } => Some(dispatch.clone()),
-                Provenance::UserInput | Provenance::ChildReturn { .. } | Provenance::ProviderRun { .. } => None,
+                Provenance::ChildReturn { .. } | Provenance::ProviderRun { .. } => None,
             })
             .collect()
     }
@@ -1018,14 +1050,6 @@ impl Views<'_> {
         self.basis_for(subject).advanced_by(advance, self.trajectory, subject)
     }
 
-    /// Does the log name this trajectory at all, whatever the record? A fork may
-    /// open only a child the log has never used, so this is the gate an outer layer asks
-    /// before it binds one: activity recorded before the fork was decided under no parent
-    /// restriction at all, and the fork cannot retract it afterwards.
-    pub fn is_active(&self, trajectory: &TrajectoryId) -> bool {
-        self.projection.active.contains(trajectory)
-    }
-
     /// The snapshot a fork of this branch freezes — the parent-side basis the spawn
     /// release pins.
     pub(crate) fn freeze_basis(&self) -> ForkSnapshot {
@@ -1041,8 +1065,8 @@ impl Views<'_> {
         self.projection.fold_for(self.trajectory)
     }
 
-    /// The branch-local fold of an arbitrary trajectory in the family — used to validate that a
-    /// child's returned value does not raise trust above what the child legitimately holds.
+    /// The branch-local fold of another opened trajectory in the family — used to validate that
+    /// a child's returned value does not raise trust above what the child legitimately holds.
     pub(crate) fn branch_label(&self, trajectory: &TrajectoryId) -> PartialLabel {
         self.projection.fold_for(trajectory)
     }
@@ -1334,11 +1358,19 @@ mod tests {
         )
     }
 
+    fn base() -> EstablishedLabel {
+        EstablishedLabel::new(Trust::new(3), Audience::Public)
+    }
+
+    fn opened(t: &str) -> Fact {
+        crate::profile::opening_at(traj(t), base().into_label())
+    }
+
     fn admit(t: &str, value: LabeledValue) -> Fact {
         Fact::ValueAdmitted {
             trajectory: traj(t),
             value,
-            provenance: Provenance::UserInput,
+            provenance: Provenance::ToolResult { dispatch: dispatch(t) },
         }
     }
 
@@ -1346,6 +1378,7 @@ mod tests {
     fn a_cast_fact_rebuilds_the_same_fold_as_a_resolved_admission() {
         let resolved = EstablishedLabel::new(Trust::new(0), Audience::restricted([ReaderId::new("internal")]));
         let via_cast = vec![
+            opened("t"),
             admit(
                 "t",
                 LabeledValue::new(ValueBody::new("body"), Label::new(Dim::Unknown, Dim::Unknown)),
@@ -1357,17 +1390,20 @@ mod tests {
                 cast: crate::names::CastName::new("classifier"),
             },
         ];
-        let direct = vec![admit(
-            "t",
-            LabeledValue::new(ValueBody::new("body"), resolved.clone().into_label()),
-        )];
+        let direct = vec![
+            opened("t"),
+            admit(
+                "t",
+                LabeledValue::new(ValueBody::new("body"), resolved.clone().into_label()),
+            ),
+        ];
 
-        let cast_fold = Projection::build(&via_cast, 2).view(&traj("t")).current_label();
-        let direct_fold = Projection::build(&direct, 1).view(&traj("t")).current_label();
+        let cast_fold = Projection::build(&via_cast, 3).view(&traj("t")).current_label();
+        let direct_fold = Projection::build(&direct, 2).view(&traj("t")).current_label();
         assert_eq!(cast_fold, direct_fold);
         assert!(cast_fold.is_fully_established());
         assert_eq!(cast_fold.bound(), &resolved);
-        let p = Projection::build(&via_cast, 2);
+        let p = Projection::build(&via_cast, 3);
         assert_eq!(
             p.view(&traj("t")).value_label(ValueId::new(0)),
             Some(&resolved.into_label())
@@ -1403,10 +1439,10 @@ mod tests {
     #[test]
     fn label_fold_is_branch_local() {
         let internal = Audience::restricted([ReaderId::new("emp")]);
-        let log = vec![
-            admit("a", labeled(1, internal.clone())),
-            admit("b", labeled(3, Audience::Public)),
-        ];
+        let mut log = vec![opened("a")];
+        log.extend(fork_pair("a", "b", ForkSnapshot::freeze(base(), [], [])));
+        log.push(admit("a", labeled(1, internal.clone())));
+        log.push(admit("b", labeled(3, Audience::Public)));
         let p = build(&log);
         assert_eq!(
             p.view(&traj("a")).current_label(),
@@ -1416,10 +1452,7 @@ mod tests {
             p.view(&traj("b")).current_label(),
             PartialLabel::established(EstablishedLabel::new(Trust::new(3), Audience::Public))
         );
-        assert_eq!(
-            p.view(&traj("c")).current_label(),
-            PartialLabel::established(EstablishedLabel::top())
-        );
+        assert!(!p.is_opened(&traj("c")));
     }
 
     #[test]
@@ -1548,11 +1581,11 @@ mod tests {
             fork_pair(
                 parent,
                 child,
-                ForkSnapshot::freeze(EstablishedLabel::top(), std::iter::empty(), std::iter::empty()),
+                ForkSnapshot::freeze(base(), std::iter::empty(), std::iter::empty()),
             )
         };
         let log = [
-            vec![denial("root", "early")],
+            vec![opened("root"), denial("root", "early")],
             fork("child", "root"),
             vec![denial("root", "late")],
             fork("grandchild", "child"),
@@ -1581,6 +1614,7 @@ mod tests {
     #[test]
     fn cold_replay_is_deterministic() {
         let log = vec![
+            opened("a"),
             admit("a", labeled(2, Audience::Public)),
             Fact::Boundary {
                 trajectory: traj("a"),
@@ -1591,12 +1625,12 @@ mod tests {
         assert_eq!(build(&log).view(&traj("a")).boundary_count(), 1);
 
         let crossing = [
-            vec![admit("root", labeled(2, Audience::Public))],
+            vec![opened("root"), admit("root", labeled(2, Audience::Public))],
             fork_pair(
                 "root",
                 "kid",
                 ForkSnapshot::freeze(
-                    EstablishedLabel::top(),
+                    base(),
                     [(ValueId::new(0), &labeled(2, Audience::Public).label)],
                     std::iter::empty(),
                 ),
@@ -1653,12 +1687,13 @@ mod tests {
             Label::new(Dim::Known(Trust::new(2)), Dim::Known(Audience::Public)),
         );
         let log = vec![
+            opened("root"),
             admit("root", labeled(2, Audience::Public)),
             Fact::ForkPrepared {
                 trajectory: traj("root"),
                 fork: ForkId::of(&dispatch("root")),
                 snapshot: ForkSnapshot::freeze(
-                    EstablishedLabel::top(),
+                    base(),
                     [(ValueId::new(0), &labeled(2, Audience::Public).label)],
                     std::iter::empty(),
                 ),
@@ -1678,9 +1713,7 @@ mod tests {
                 id: id.clone(),
                 fork: ForkId::of(&dispatch("root")),
                 parent: traj("root"),
-                label: ForkSnapshot::freeze(EstablishedLabel::top(), std::iter::empty(), std::iter::empty())
-                    .seed()
-                    .clone(),
+                label: PartialLabel::established(base()),
                 digest: RawResultDigest::of(body.as_str().as_bytes()),
                 body: body.clone(),
                 policy: ReturnPolicy::Raw,
@@ -1752,12 +1785,13 @@ mod tests {
         );
         let source = RawResultDigest::of(body.as_str().as_bytes());
         let log = vec![
+            opened("root"),
             admit("root", labeled(2, Audience::Public)),
             Fact::ForkPrepared {
                 trajectory: traj("root"),
                 fork: ForkId::of(&dispatch("root")),
                 snapshot: ForkSnapshot::freeze(
-                    EstablishedLabel::top(),
+                    base(),
                     [(ValueId::new(0), &labeled(2, Audience::Public).label)],
                     std::iter::empty(),
                 ),
@@ -1780,9 +1814,7 @@ mod tests {
                 id: id.clone(),
                 fork: ForkId::of(&dispatch("root")),
                 parent: traj("root"),
-                label: ForkSnapshot::freeze(EstablishedLabel::top(), std::iter::empty(), std::iter::empty())
-                    .seed()
-                    .clone(),
+                label: PartialLabel::established(base()),
                 digest: source,
                 body: body.clone(),
                 policy: ReturnPolicy::Raw,
@@ -1865,6 +1897,7 @@ mod tests {
     #[test]
     fn a_tool_results_provenance_resolves_to_its_producing_tool() {
         let log = vec![
+            opened("a"),
             Fact::DispatchOpened {
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
@@ -1884,7 +1917,14 @@ mod tests {
                     dispatch: dispatch("a"),
                 },
             },
-            admit("a", labeled(1, Audience::Public)),
+            Fact::ValueAdmitted {
+                trajectory: traj("a"),
+                value: labeled(1, Audience::Public),
+                provenance: Provenance::ChildReturn {
+                    child: traj("kid"),
+                    id: ChildReturnId::new(traj("kid"), 0),
+                },
+            },
         ];
         let p = build(&log);
         let a = traj("a");
@@ -1898,7 +1938,7 @@ mod tests {
         );
         assert!(matches!(
             view.value_provenance(ValueId::new(1)),
-            Some(Provenance::UserInput)
+            Some(Provenance::ChildReturn { .. })
         ));
         assert!(view.dispatch_tool(&dispatch("b")).is_none());
     }

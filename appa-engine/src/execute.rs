@@ -261,11 +261,18 @@ mod tests {
         crate::registry::TrustChain::new(vec!["suspicious".into(), "trusted".into()])
     }
 
-    fn user_value(label: Label) -> Fact {
+    fn opened(label: Label) -> Fact {
+        crate::profile::opening_at(traj(), label)
+    }
+
+    fn admitted(label: Label) -> Fact {
+        let seed = ResolvedCall::new(ToolName::new("seed"), crate::params::test_arguments(&json!({})));
         Fact::ValueAdmitted {
             trajectory: traj(),
             value: LabeledValue::new(ValueBody::new("body"), label),
-            provenance: Provenance::UserInput,
+            provenance: Provenance::ToolResult {
+                dispatch: crate::value::DispatchId::new(traj(), seed.digest(), 0),
+            },
         }
     }
 
@@ -380,7 +387,7 @@ mod tests {
     #[test]
     fn ruling_admits_the_blocked_dispatch_atomically() {
         let registry = registry();
-        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let log = vec![opened(known(SUSPICIOUS, Audience::Public))];
         let ruling = Ruling {
             dispatch: wire_dispatch(),
             authority: AuthorityName::new("officer"),
@@ -428,7 +435,7 @@ mod tests {
         .unwrap();
         let seed = call("send", json!({}));
         let log = vec![
-            user_value(known(TRUSTED, Audience::Public)),
+            opened(known(TRUSTED, Audience::Public)),
             Fact::DispatchOpened {
                 trajectory: traj(),
                 dispatch: DispatchId::new(traj(), seed.digest(), 0),
@@ -494,13 +501,13 @@ mod tests {
         })
         .unwrap();
         let log = vec![
-            user_value(known(SUSPICIOUS, Audience::Public)),
-            user_value(Label::new(Dim::Unknown, Dim::Known(Audience::Public))),
+            opened(known(SUSPICIOUS, Audience::Public)),
+            admitted(Label::new(Dim::Unknown, Dim::Known(Audience::Public))),
         ];
         let vault_call = call("vault", json!({}));
         let mut reviewed_label = partial(SUSPICIOUS, Audience::Public);
         reviewed_label.fold_value(
-            crate::value::ValueId::new(1),
+            crate::value::ValueId::new(0),
             &Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
         );
         let ruling = Ruling {
@@ -517,7 +524,7 @@ mod tests {
                 assert_eq!(
                     facts,
                     vec![UnestablishedFact {
-                        value: crate::value::ValueId::new(1),
+                        value: crate::value::ValueId::new(0),
                         dimensions: std::collections::BTreeSet::from([crate::label::Dimension::Trust]),
                     }]
                 );
@@ -529,7 +536,7 @@ mod tests {
     #[test]
     fn ruling_approved_for_another_call_is_rejected() {
         let registry = registry();
-        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let log = vec![opened(known(SUSPICIOUS, Audience::Public))];
         let ruling = Ruling {
             dispatch: DispatchId::new(traj(), call("wire", json!({ "to": "elsewhere" })).digest(), 0),
             authority: AuthorityName::new("officer"),
@@ -548,7 +555,7 @@ mod tests {
         let wire = call("wire", json!({}));
         let prior = DispatchId::new(traj(), wire.digest(), 0);
         let log = vec![
-            user_value(known(SUSPICIOUS, Audience::Public)),
+            opened(known(SUSPICIOUS, Audience::Public)),
             Fact::DispatchOpened {
                 trajectory: traj(),
                 dispatch: prior,
@@ -577,7 +584,7 @@ mod tests {
     #[test]
     fn plan_id_not_offered_is_rejected() {
         let registry = registry();
-        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let log = vec![opened(known(SUSPICIOUS, Audience::Public))];
         let ruling = Ruling {
             dispatch: wire_dispatch(),
             authority: AuthorityName::new("officer"),
@@ -609,7 +616,7 @@ mod tests {
     #[test]
     fn uncovered_gap_is_rejected() {
         let registry = registry();
-        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let log = vec![opened(known(SUSPICIOUS, Audience::Public))];
         assert!(matches!(
             run(&registry, &log, &call("wire", json!({})), &[]),
             Err(PlanError::RulingAssignmentMismatch)
@@ -619,7 +626,7 @@ mod tests {
     #[test]
     fn ruling_gathered_for_a_different_call_does_not_transfer() {
         let registry = registry();
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(known(TRUSTED, Audience::Public))];
         let ruling = Ruling {
             dispatch: wire_dispatch(),
             authority: AuthorityName::new("officer"),
@@ -675,7 +682,7 @@ mod tests {
             membership: None,
         })
         .unwrap();
-        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let log = vec![opened(known(SUSPICIOUS, Audience::Public))];
         let ruling = Ruling {
             dispatch: wire_dispatch(),
             authority: AuthorityName::new("attester"),
@@ -728,7 +735,7 @@ mod tests {
             membership: None,
         })
         .unwrap();
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(known(TRUSTED, Audience::Public))];
         let review = AuthorityReview {
             tool: ToolName::new("wire"),
             trajectory_label: partial(TRUSTED, Audience::Public),
@@ -762,7 +769,7 @@ mod tests {
     #[test]
     fn a_false_review_is_refused() {
         let registry = registry();
-        let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
+        let log = vec![opened(known(SUSPICIOUS, Audience::Public))];
         let with_review = |reviewed: AuthorityReview| Ruling {
             dispatch: wire_dispatch(),
             authority: AuthorityName::new("officer"),
@@ -821,7 +828,7 @@ mod tests {
             membership: None,
         })
         .unwrap();
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(known(TRUSTED, Audience::Public))];
         let post_call = call("post", json!({}));
         let ruling = Ruling {
             dispatch: DispatchId::new(traj(), post_call.digest(), 0),
@@ -886,7 +893,7 @@ mod tests {
     #[test]
     fn the_composed_operation_refuses_an_input_hop_instead_of_releasing_it() {
         let registry = substituting_registry();
-        let log = vec![user_value(known(
+        let log = vec![opened(known(
             TRUSTED,
             Audience::restricted([ReaderId::new("internal")]),
         ))];
@@ -930,7 +937,7 @@ mod tests {
     #[test]
     fn narrowing_records_an_acceptance() {
         let registry = narrowing_registry();
-        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let log = vec![opened(known(TRUSTED, Audience::Public))];
         let batch = run(&registry, &log, &call("get", json!({})), &[]).unwrap();
         let offered = crate::check::Narrowing {
             from: established(TRUSTED, Audience::Public),
@@ -947,7 +954,7 @@ mod tests {
     fn a_stale_acceptance_for_a_moved_narrowing_is_refused() {
         let registry = narrowing_registry();
         let trajectory = traj();
-        let offered_log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let offered_log = vec![opened(known(TRUSTED, Audience::Public))];
         let projection = Projection::build(&offered_log, 1);
         let stale = offered_plan(&registry, &projection.view(&trajectory), &call("get", json!({})));
         assert!(
@@ -958,8 +965,8 @@ mod tests {
         );
 
         let moved_log = vec![
-            user_value(known(TRUSTED, Audience::Public)),
-            user_value(known(
+            opened(known(TRUSTED, Audience::Public)),
+            admitted(known(
                 TRUSTED,
                 Audience::restricted([ReaderId::new("internal"), ReaderId::new("extra")]),
             )),

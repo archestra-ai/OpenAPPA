@@ -62,7 +62,7 @@ use appa_engine::transition::{
     Evidence, EvidenceRequest, FollowUp, ForkBinding, OfferConsult, OfferExecution, OfferFollowUp, OfferOutcome,
     OutcomeBody as CoreOutcomeBody, OutcomeFollowUp, PendingReturnStage, ProposalBatch, ProposalBatchId,
     ProposedCall as CoreProposedCall, Released, SpawnMark, ToolOutcome as CoreToolOutcome, ToolReport, TransitionError,
-    ValidatedFactBatch,
+    TransitionRefusal, ValidatedFactBatch,
 };
 use appa_engine::value::TrajectoryId as EngineTrajectoryId;
 use appa_engine::value::{
@@ -335,6 +335,15 @@ pub struct Opened {
     pub policy_identity: String,
 }
 
+/// Where a trajectory stands in its family's log, as [`RuntimeEngine::liveness`]
+/// reads it: never opened, still taking events, or ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Liveness {
+    Unopened,
+    Live,
+    Ended,
+}
+
 /// One dispatch a trajectory has open, as the runtime matches outcomes against
 /// it. The identity is the engine's own: it is read from the
 /// log and handed straight back to the engine, crossing no adapter and no
@@ -446,26 +455,24 @@ impl EngineSeam {
         }
     }
 
-    /// Has this branch ended its errand? The one replay-derived
+    /// Where this trajectory stands in the log:
+    /// never opened — the root by its opening record, a child by its fork
+    /// binding — still taking events, or ended. The one replay-derived
     /// answer; the runtime keeps no flag of its own.
-    pub fn has_ended(&self, view: &EngineView, trajectory: &TrajectoryId) -> bool {
+    pub fn liveness(&self, view: &EngineView, trajectory: &TrajectoryId) -> Liveness {
         let id = engine_id(trajectory);
-        view.views(&id).has_ended(&id)
+        match view.views(&id) {
+            None => Liveness::Unopened,
+            Some(views) if views.has_ended(&id) => Liveness::Ended,
+            Some(_) => Liveness::Live,
+        }
     }
 
     pub fn parent_of(&self, view: &EngineView, child: &TrajectoryId) -> Option<TrajectoryId> {
         let child = engine_id(child);
-        view.views(&child)
+        view.views(&child)?
             .parent_of(&child)
             .map(|parent| TrajectoryId(parent.as_str().to_string()))
-    }
-
-    /// Does this log already name the trajectory? A fork
-    /// may only open a child the log has never used, whatever the record that
-    /// used it.
-    pub fn names_trajectory(&self, view: &EngineView, trajectory: &TrajectoryId) -> bool {
-        let id = engine_id(trajectory);
-        view.views(&id).is_active(&id)
     }
 
     /// Would applying this batch leave the trajectory with more than one
@@ -474,6 +481,7 @@ impl EngineSeam {
         let owner = engine_id(trajectory);
         let mut open: std::collections::BTreeSet<_> = view
             .views(&owner)
+            .expect("the drive refuses an unopened trajectory before any dispatch bookkeeping")
             .open_dispatches()
             .map(|(dispatch, _)| dispatch.clone())
             .collect();
@@ -495,7 +503,7 @@ impl EngineSeam {
     pub fn offer_pursuer(&self, view: &EngineView, offer: &OfferId) -> Option<TrajectoryId> {
         let (_, engine_offer) = parse_offer(offer)?;
         let surfaced = view.offer_trajectory(&engine_offer)?.clone();
-        let views = view.views(&surfaced);
+        let views = view.views(&surfaced)?;
         let pursuer = if views.has_ended(&surfaced) {
             views.parent_of(&surfaced).cloned().unwrap_or(surfaced)
         } else {
@@ -509,7 +517,11 @@ impl EngineSeam {
     /// persisted once, on the opening record, so this is where a live call is
     /// read back — the runtime keeps no row of its own.
     pub fn open_dispatches(&self, view: &EngineView, trajectory: &TrajectoryId) -> Vec<OpenDispatch> {
-        view.views(&engine_id(trajectory))
+        let owner = engine_id(trajectory);
+        let Some(views) = view.views(&owner) else {
+            return Vec::new();
+        };
+        views
             .open_dispatches()
             .map(|(dispatch, call)| OpenDispatch {
                 id: dispatch.clone(),
@@ -527,7 +539,7 @@ impl EngineSeam {
     /// refuse the next proposal as a second call in flight.
     pub fn substituted_release(&self, view: &EngineView, trajectory: &TrajectoryId) -> Option<OpenDispatch> {
         let owner = engine_id(trajectory);
-        let views = view.views(&owner);
+        let views = view.views(&owner)?;
         views
             .open_dispatches()
             .find(|(dispatch, _)| !views.released_by_proposal(dispatch))
@@ -653,14 +665,14 @@ impl RuntimeEngine {
 
     fn validated(&self, facts: Vec<Fact>, family: &TrajectoryId, revision: u64) -> Result<EngineView, EngineRefusal> {
         self.engine
-            .verify_opening(&facts, &engine_id(family))
-            .map_err(|error| EngineRefusal::OpeningMismatch {
-                detail: error.to_string(),
-            })?;
-        self.engine
             .view(&engine_id(family), facts, revision)
-            .map_err(|error| EngineRefusal::UntrustedLog {
-                detail: error.to_string(),
+            .map_err(|error| match error {
+                TransitionRefusal::Unopened | TransitionRefusal::Opening(_) => EngineRefusal::OpeningMismatch {
+                    detail: error.to_string(),
+                },
+                error => EngineRefusal::UntrustedLog {
+                    detail: error.to_string(),
+                },
             })
     }
 
@@ -673,7 +685,7 @@ impl RuntimeEngine {
     }
 
     fn trajectory_status(&self, view: &EngineView, trajectory: &TrajectoryId) -> Option<TrajectoryStatus> {
-        let current = view.views(&engine_id(trajectory)).current_label();
+        let current = view.views(&engine_id(trajectory))?.current_label();
         let label = self.render_label(&as_label(&current))?;
         Some(TrajectoryStatus {
             trajectory: terminal_safe(&trajectory.0),
@@ -992,7 +1004,10 @@ impl RuntimeEngine {
 
     fn block_delivery(&self, view: &EngineView, trajectory: &TrajectoryId, block: &CoreBlocked) -> Feedback {
         let owner = engine_id(trajectory);
-        let (text, offers) = self.rendered_block(view.family(), &view.views(&owner), block);
+        let views = view
+            .views(&owner)
+            .expect("a block is delivered for the opened trajectory whose proposal the engine decided");
+        let (text, offers) = self.rendered_block(view.family(), &views, block);
         Feedback { text, offers }
     }
 
@@ -1060,7 +1075,11 @@ impl RuntimeEngine {
             ));
         };
         let owner = engine_id(trajectory);
-        let views = view.views(&owner);
+        let Some(views) = view.views(&owner) else {
+            return Err(EngineRefusal::Invariant {
+                detail: "executing an offer for a trajectory the log has not opened".to_string(),
+            });
+        };
         let outcome = match self
             .engine
             .offer_consults(view, &owner, &engine_offer)
@@ -1953,7 +1972,6 @@ fn unestablished_source(views: &Views, value: ValueId) -> String {
         Some(Provenance::ToolResult { dispatch }) => views
             .dispatch_tool(dispatch)
             .map(|tool| format!("the result of {}", tool.as_str())),
-        Some(Provenance::UserInput) => Some("your prompt".to_string()),
         Some(Provenance::ChildReturn { .. }) => Some("a subagent's return".to_string()),
         Some(Provenance::ProviderRun { tool, .. }) => Some(format!("the provider's {} result", tool.as_str())),
         None => None,
