@@ -163,6 +163,8 @@ pub(crate) enum EventError {
     SubstitutionAbandoned { tool: String },
     #[error("the trajectory has ended")]
     TrajectoryEnded,
+    #[error("the child has a call still open; report its outcome before the child ends")]
+    ChildDispatchOpen,
     #[error("no trajectory with this id exists")]
     UnknownTrajectory,
     #[error("a trajectory with this id already exists")]
@@ -213,6 +215,7 @@ impl EventError {
             EventError::CallOutstanding
             | EventError::SubstitutionAbandoned { .. }
             | EventError::TrajectoryEnded
+            | EventError::ChildDispatchOpen
             | EventError::UnknownTrajectory
             | EventError::TrajectoryExists
             | EventError::UnknownDispatch

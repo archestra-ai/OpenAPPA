@@ -388,9 +388,11 @@ impl Session {
         let plan = plan.into_inner().expect("the spawn plan mutex is never poisoned");
         let decision = match (&plan, decision) {
             (_, Ok(decision)) => decision,
-            // Another message for an ended child: the return crossed nothing.
-            (Some(SpawnPlan::Return(_)), Err(EventError::TrajectoryEnded)) => {
-                return Err(self.close_spawn(&call, EventError::TrajectoryEnded).await);
+            (
+                Some(SpawnPlan::Return(_)),
+                Err(refusal @ (EventError::TrajectoryEnded | EventError::ChildDispatchOpen)),
+            ) => {
+                return Err(self.close_spawn(&call, refusal).await);
             }
             (_, Err(error)) => return Err(error),
         };
@@ -524,7 +526,9 @@ impl Session {
     /// The child finished. Its final message is its only return
     /// channel and is checked before it may cross to the parent;
     /// `None` returns no value. The return names the
-    /// fork that opened the child, recovered from the log.
+    /// fork that opened the child, recovered from the log. A child
+    /// with a call still open does not end: the end is refused, and the same
+    /// end crosses once the call's outcome is reported (`ChildDispatchOpen`).
     pub async fn on_child_end(&mut self, value: Option<String>) -> Result<ChildReturnDecision, EventError> {
         let child = self.trajectory.clone();
         let decision = self
@@ -634,6 +638,11 @@ impl Session {
                 return Err(EventError::SpawnNotTaken);
             }
             let event = event(&context)?;
+            if let EngineEvent::ChildReturn { child, .. } = &event
+                && !self.inner.engine.open_dispatches(&view, child).is_empty()
+            {
+                return Err(EventError::ChildDispatchOpen);
+            }
             let decision = self
                 .inner
                 .engine
@@ -2479,6 +2488,33 @@ name = "approver"
 attends = ["irreversible"]
 "#;
 
+    const SUBSTITUTED_SEND_FORKING: &str = r#"
+version = 1
+
+[[policy.tool]]
+name = "read_hr"
+delta = { audience = { exactly = ["hr"] } }
+
+[[policy.tool]]
+name = "send"
+parameters = { type = "object", properties = { body = { type = "string" } }, required = ["body"] }
+requires = { audience = { includes = ["public"] } }
+delta = {}
+
+[[policy.tool]]
+name = "fetch"
+parameters = { type = "object", properties = { a = { type = "integer" } } }
+
+[[policy.sanitizer]]
+name = "redactor"
+on = ["tool_input"]
+[policy.sanitizer.mandate]
+audience = { from = { includes = ["hr"] }, to = { exactly = ["public"] } }
+
+[policy.deployment]
+context_control = true
+"#;
+
     fn substituting_config(policy: &str, authority_url: Option<&str>) -> Config {
         let binding = match authority_url {
             Some(url) => format!("[externals.authorities.approver]\nurl = \"{url}\"\n"),
@@ -2505,6 +2541,10 @@ attends = ["irreversible"]
     const REDACTED_BODY: &str = "mail [redacted-email] today";
 
     async fn narrowed_and_blocked(runtime: &Runtime, session: &mut Session) -> OfferId {
+        narrowed_and_blocked_on(runtime, session, &root()).await
+    }
+
+    async fn narrowed_and_blocked_on(runtime: &Runtime, session: &mut Session, trajectory: &TrajectoryId) -> OfferId {
         let read = ProposedCall {
             tool: "read_hr".to_string(),
             arguments: raw(serde_json::json!({})),
@@ -2513,7 +2553,7 @@ attends = ["irreversible"]
             session.on_tool_call(read.clone(), false).await,
             Ok(ToolCallDecision::Deny { .. }),
         ));
-        let accept = surfaced_offer(runtime);
+        let accept = surfaced_offer_for(runtime, &root(), trajectory);
         assert!(matches!(
             session.on_remedy(accept, None).await,
             Ok(RemedyDecision::Authorized { .. }),
@@ -2538,7 +2578,10 @@ attends = ["irreversible"]
             session.on_tool_call(send(RAW_BODY), false).await,
             Ok(ToolCallDecision::Deny { .. }),
         ));
-        last_offer(runtime)
+        runtime
+            .minted_offers(&root(), trajectory)
+            .pop()
+            .expect("the block surfaced an offer")
     }
 
     fn standing_release(runtime: &Runtime) -> Option<crate::engine::OpenDispatch> {
@@ -3610,13 +3653,19 @@ context_control = true
             .expect("the child opens");
         let orphaned = release_spawn(&mut first, fetch(serde_json::json!({"a": 2}))).await;
         first
+            .on_spawn_result(
+                fetch(serde_json::json!({"a": 2})),
+                ToolOutcome::Indeterminate,
+                None,
+                None,
+            )
+            .await
+            .expect("the nested spawn dispatch closes, its fork still prepared");
+        assert!(!dispatch_open(&runtime, &child("c1")));
+        first
             .on_child_end(Some("done early".to_string()))
             .await
             .expect("the child's end crosses");
-        assert!(
-            dispatch_open(&runtime, &child("c1")),
-            "the nested spawn dispatch stays open"
-        );
 
         let error = session
             .on_child_start(child("orphan"), SpawnRef::Binding(orphaned))
@@ -3927,6 +3976,149 @@ context_control = true
         );
         session
             .on_tool_call(fetch(serde_json::json!({})), false)
+            .await
+            .expect("the parent proposes again");
+    }
+
+    #[tokio::test]
+    async fn a_child_with_a_running_call_does_not_end_until_its_outcome_is_reported() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut child_session = open_child(&mut session, fetch(serde_json::json!({"a": 1})), child("c1")).await;
+        child_session
+            .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
+            .await
+            .expect("the child's call releases");
+        let before = runtime.log_basis(&root());
+
+        for value in [Some("done".to_string()), None] {
+            let error = child_session
+                .on_child_end(value)
+                .await
+                .expect_err("a child with a call open does not end");
+            assert!(matches!(error, EventError::ChildDispatchOpen), "got {error:?}");
+            assert!(!error.is_operational());
+        }
+        assert_eq!(runtime.log_basis(&root()), before, "the refusal appended nothing");
+        assert!(dispatch_open(&runtime, &child("c1")), "the child's dispatch stays open");
+        assert!(runtime.live(&root(), &child("c1")).is_ok(), "the child stays live");
+
+        child_session
+            .on_tool_result(
+                fetch(serde_json::json!({"a": 2})),
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("fetched".to_string()),
+                },
+            )
+            .await
+            .expect("the outcome closes the dispatch");
+        child_session
+            .on_child_end(Some("done".to_string()))
+            .await
+            .expect("with nothing in flight the same end crosses");
+        assert!(matches!(runtime.live(&root(), &child("c1")), Err(SessionError::Ended)));
+    }
+
+    #[tokio::test]
+    async fn a_child_with_an_untaken_substituted_release_does_not_end() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(
+            substituting_config(SUBSTITUTED_SEND_FORKING, None),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut child_session = open_child(&mut session, fetch(serde_json::json!({"a": 1})), child("c1")).await;
+        let hop = narrowed_and_blocked_on(&runtime, &mut child_session, &child("c1")).await;
+        assert!(matches!(
+            child_session.on_remedy(hop, None).await,
+            Ok(RemedyDecision::Substituted { .. }),
+        ));
+        assert!(
+            runtime.substituted_release(&root(), &child("c1")).is_some(),
+            "the child has a substituted release standing"
+        );
+
+        let error = child_session
+            .on_child_end(Some("done".to_string()))
+            .await
+            .expect_err("a child with a substituted release standing does not end");
+        assert!(matches!(error, EventError::ChildDispatchOpen), "got {error:?}");
+        assert!(runtime.live(&root(), &child("c1")).is_ok(), "the child stays live");
+
+        assert_eq!(
+            child_session
+                .on_tool_call(send(REDACTED_BODY), false)
+                .await
+                .expect("the substituted call is handed over"),
+            ToolCallDecision::Allow { spawn: None },
+        );
+        child_session
+            .on_tool_result(
+                send(REDACTED_BODY),
+                ToolOutcome::Success {
+                    body: OutcomeBody::Unavailable,
+                },
+            )
+            .await
+            .expect("the substituted call's outcome closes its dispatch");
+        assert!(
+            child_session.on_child_end(Some("done".to_string())).await.is_ok(),
+            "with the release settled the child ends"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_spawn_result_for_a_child_with_a_call_open_crosses_nothing_and_closes_the_spawn() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
+        let mut first = session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .expect("the child opens");
+        first
+            .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
+            .await
+            .expect("the child's call releases");
+
+        let error = session
+            .on_spawn_result(
+                fetch(serde_json::json!({"a": 1})),
+                agent_response(),
+                Some(child("c1")),
+                Some("all done".to_string()),
+            )
+            .await
+            .expect_err("the return does not cross");
+        assert!(matches!(error, EventError::ChildDispatchOpen), "got {error:?}");
+        assert!(!error.is_operational());
+        assert!(
+            runtime
+                .log_facts(&root())
+                .iter()
+                .all(|fact| !matches!(fact, appa_engine::fact::Fact::ChildReturn { .. })),
+            "nothing crossed",
+        );
+        assert!(
+            runtime.log_facts(&root()).iter().any(|fact| matches!(
+                fact,
+                appa_engine::fact::Fact::DispatchClosed {
+                    outcome: appa_engine::fact::CloseOutcome::Failure,
+                    ..
+                }
+            )),
+            "the spawn dispatch closed as a failure",
+        );
+        assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
+        assert!(dispatch_open(&runtime, &child("c1")), "the child's dispatch stays open");
+        assert!(runtime.live(&root(), &child("c1")).is_ok(), "the child stays live");
+        session
+            .on_tool_call(fetch(serde_json::json!({"a": 3})), false)
             .await
             .expect("the parent proposes again");
     }
