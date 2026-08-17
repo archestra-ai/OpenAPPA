@@ -14,10 +14,10 @@
 //! would have to be an engine-typed helper on the harness library, which is
 //! the one thing the runtime's API boundary keeps out.
 
-use appa_agent::wire::WireTool;
 use appa_engine::contract::{AudienceDelta, ToolContract};
 use appa_engine::label::Dim;
 use appa_engine::registry::TrustChain;
+use appa_example_agent::wire::WireTool;
 use appa_policy::Config;
 
 pub fn advertised(config: &Config) -> Vec<WireTool> {

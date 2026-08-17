@@ -11,9 +11,9 @@
 //! The mapping is lossy on purpose: audit detail the chat does not render
 //! (cast records, per-value provenance) stays in the log.
 
-use appa_agent::{Record, Recorded};
 use appa_engine::label::{Audience, Dim, Label};
 use appa_engine::registry::TrustChain;
+use appa_example_agent::{Record, Recorded};
 use appa_runtime_v2::api::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome};
 use serde::Serialize;
 

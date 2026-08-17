@@ -3,8 +3,8 @@ mod harness;
 
 use std::sync::Arc;
 
-use appa_agent::wire::WireMessage;
-use appa_agent::{
+use appa_example_agent::wire::WireMessage;
+use appa_example_agent::{
     Agent, ArgumentKey, Limits, OpenAiCompatible, OpenAiConfig, Outcome, SpawnTool, ToolCatalogue, ToolName, ToolShim,
     TranscriptHead,
 };
@@ -28,7 +28,7 @@ async fn agent(runtime: appa_runtime_v2::api::Runtime, provider: &Provider, host
         Arc::new(runtime),
         OpenAiCompatible::with_http_client(
             OpenAiConfig::new(endpoint, "fixture/model", "test-key"),
-            appa_agent::HttpClient::loopback(),
+            appa_example_agent::HttpClient::loopback(),
         ),
         ToolShim::new(shim),
         ToolCatalogue::new(tools.iter().map(|name| tool(name)).collect()),
@@ -706,7 +706,7 @@ async fn a_second_turn_continues_where_the_first_one_left_the_trajectory() {
         &["read_hr", "send_email"],
     )
     .await;
-    let mut transcript = appa_agent::Transcript::default();
+    let mut transcript = appa_example_agent::Transcript::default();
     let first = agent
         .turn(root(), &mut transcript, "Who is Alice?", Default::default())
         .await;
@@ -742,7 +742,7 @@ async fn a_stopped_turn_leaves_its_transcript_behind() {
             max_inference_rounds: 1,
             ..Limits::default()
         });
-    let mut transcript = appa_agent::Transcript::default();
+    let mut transcript = appa_example_agent::Transcript::default();
     let outcome = agent
         .turn(root(), &mut transcript, "Who is Alice?", Default::default())
         .await;
@@ -790,19 +790,19 @@ async fn an_observer_receives_every_record_typed() {
     let proposed = records
         .iter()
         .find_map(|record| match record {
-            appa_agent::Record::Proposes { call, tool, .. } => Some((call.clone(), tool.clone())),
+            appa_example_agent::Record::Proposes { call, tool, .. } => Some((call.clone(), tool.clone())),
             _ => None,
         })
         .unwrap_or_else(|| panic!("the proposal is recorded. Recorded: {records:?}"));
     assert_eq!(
         proposed,
-        (appa_agent::CallId("call_0".to_string()), "read_hr".to_string())
+        (appa_example_agent::CallId("call_0".to_string()), "read_hr".to_string())
     );
 
     let blocked = records
         .iter()
         .find_map(|record| match record {
-            appa_agent::Record::Blocked { call, feedback, .. } => Some((call.clone(), feedback.clone())),
+            appa_example_agent::Record::Blocked { call, feedback, .. } => Some((call.clone(), feedback.clone())),
             _ => None,
         })
         .unwrap_or_else(|| panic!("the block is recorded. Recorded: {records:?}"));
@@ -813,7 +813,7 @@ async fn an_observer_receives_every_record_typed() {
         "in the same words the model was given",
     );
     assert!(
-        records.contains(&appa_agent::Record::Answers {
+        records.contains(&appa_example_agent::Record::Answers {
             text: "I could not read it.".to_string()
         }),
         "and the run's answer closes the record. Recorded: {records:?}",

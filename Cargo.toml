@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
-    "appa-agent",
+    "appa-example-agent",
     "appa-agent-python",
     "appa-builtin",
     "appa-engine",
@@ -12,13 +12,11 @@ members = [
     "appa-runtime-v2/runtime",
     "appa-runtime-v2/runtime/tests/fixtures/module-bad",
     "appa-runtime-v2/runtime/tests/fixtures/module-good",
-    "demo/appa-demo",
-    "demo/corporate-agent",
+    "website-chat-playground",
 ]
 # Its own workspace, and no APPA dependency at all: the mock internal systems
 # the corporate demo talks to over MCP. It pins an older `rmcp` than the
 # runtime does, and keeps its own lockfile and its own per-manifest gate.
-exclude = ["demo/corp-systems"]
 
 [workspace.package]
 edition = "2024"

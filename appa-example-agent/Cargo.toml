@@ -1,5 +1,5 @@
 [package]
-name = "appa-agent"
+name = "appa-example-agent"
 version = "0.0.0"
 edition.workspace = true
 publish = false

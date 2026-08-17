@@ -6,13 +6,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use appa_agent::Endpoint;
-use appa_demo::api::{AppState, router};
-use appa_demo::session::Sessions;
+use appa_example_agent::Endpoint;
 use clap::Parser;
+use website_chat_playground::api::{AppState, router};
+use website_chat_playground::session::Sessions;
 
 #[derive(Parser)]
-#[command(about = "The openappa.com chat-playground service: sessions over the appa-agent loop, tools in-process")]
+#[command(
+    about = "The openappa.com chat-playground service: sessions over the appa-example-agent loop, tools in-process"
+)]
 struct Args {
     #[arg(long, default_value = "127.0.0.1:8787")]
     listen: SocketAddr,

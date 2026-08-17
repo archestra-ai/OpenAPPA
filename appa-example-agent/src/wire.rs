@@ -72,8 +72,7 @@ impl WireMessage {
 
 /// A tool call the model proposed. `arguments` is a JSON **string**,
 /// the OpenAI convention — and the artifact the engine judges, so it
-/// travels to the runtime as the provider spelled it (`RUL-3`,
-/// `CFG-25`).
+/// travels to the runtime as the provider spelled it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireToolCall {
     pub id: String,

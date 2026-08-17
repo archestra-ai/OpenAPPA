@@ -4,15 +4,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use appa_agent::Endpoint;
-use appa_demo::api::{AppState, router};
-use appa_demo::session::Sessions;
-use appa_demo::systems::System;
+use appa_example_agent::Endpoint;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, Response, StatusCode, header};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
+use website_chat_playground::api::{AppState, router};
+use website_chat_playground::session::Sessions;
+use website_chat_playground::systems::System;
 
 const PRESET: &str = include_str!("../policies/default.toml");
 const MODEL: &str = "openai/gpt-4o";

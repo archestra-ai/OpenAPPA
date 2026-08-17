@@ -6,8 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use appa_agent::wire::{WireMessage, WireTool};
-use appa_agent::{Endpoint, HttpClient, OpenAiCompatible, OpenAiConfig, ToolCatalogue, Transcript, TranscriptHead};
+use appa_example_agent::wire::{WireMessage, WireTool};
+use appa_example_agent::{
+    Endpoint, HttpClient, OpenAiCompatible, OpenAiConfig, ToolCatalogue, Transcript, TranscriptHead,
+};
 use appa_runtime_v2::api::{OpenError, Runtime, TrajectoryId};
 use appa_runtime_v2::config::{Config, ConfigError};
 

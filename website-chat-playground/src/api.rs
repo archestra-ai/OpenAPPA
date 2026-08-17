@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use appa_agent::{Agent, Limits, Outcome, Recorded, ToolShim};
+use appa_example_agent::{Agent, Limits, Outcome, Recorded, ToolShim};
 use axum::Json;
 use axum::Router;
 use axum::extract::{Path, Request, State};

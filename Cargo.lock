@@ -87,24 +87,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "appa-agent"
-version = "0.0.0"
-dependencies = [
- "appa-runtime-api",
- "appa-runtime-v2",
- "axum",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "appa-agent-python"
 version = "0.1.0"
 dependencies = [
@@ -126,30 +108,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
-]
-
-[[package]]
-name = "appa-demo"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "appa-agent",
- "appa-engine",
- "appa-policy",
- "appa-runtime-v2",
- "axum",
- "clap",
- "getrandom 0.3.4",
- "http-body-util",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "toml",
- "tower",
 ]
 
 [[package]]
@@ -175,6 +133,24 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "appa-example-agent"
+version = "0.0.0"
+dependencies = [
+ "appa-runtime-api",
+ "appa-runtime-v2",
+ "axum",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -480,8 +456,8 @@ name = "corporate-agent-demo"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "appa-agent",
  "appa-engine",
+ "appa-example-agent",
  "appa-policy",
  "appa-runtime-v2",
  "axum",
@@ -2543,6 +2519,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
 dependencies = [
  "rustls-pki-types",
+]
+
+[[package]]
+name = "website-chat-playground"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "appa-engine",
+ "appa-example-agent",
+ "appa-policy",
+ "appa-runtime-v2",
+ "axum",
+ "clap",
+ "getrandom 0.3.4",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "toml",
+ "tower",
 ]
 
 [[package]]

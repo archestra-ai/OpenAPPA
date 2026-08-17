@@ -8,7 +8,7 @@ fn contracts() -> Vec<PathBuf> {
         .parent()
         .expect("appa-policy sits one level below the repo root");
     let mut found = Vec::new();
-    for dir in [root.join("harness-taubench/src/appa_taubench/contracts")] {
+    for dir in [root.join("bench/taubench/src/appa_taubench/contracts")] {
         for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
             let path = entry.expect("dir entry").path();
             if path.extension().is_some_and(|ext| ext == "toml") {

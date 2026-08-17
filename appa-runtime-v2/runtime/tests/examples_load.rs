@@ -46,8 +46,8 @@ fn every_shipped_example_opens() {
 #[test]
 fn every_bench_deployment_opens() {
     let root = repo_root();
-    let mut deployments = toml_files(&root.join("bench-corp/policies"));
-    for entry in std::fs::read_dir(root.join("bench-corp/scenarios")).expect("bench-corp/scenarios") {
+    let mut deployments = toml_files(&root.join("bench/corp/policies"));
+    for entry in std::fs::read_dir(root.join("bench/corp/scenarios")).expect("bench/corp/scenarios") {
         let policy_dir = entry.expect("the directory entry is readable").path().join("policy");
         if policy_dir.is_dir() {
             deployments.extend(toml_files(&policy_dir));

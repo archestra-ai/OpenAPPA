@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use appa_agent::Endpoint;
-use appa_agent::wire::{ChatCompletionRequest, WireMessage};
+use appa_example_agent::Endpoint;
+use appa_example_agent::wire::{ChatCompletionRequest, WireMessage};
 
 const DERIVE_TIMEOUT: Duration = Duration::from_secs(30);
 

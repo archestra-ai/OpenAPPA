@@ -25,8 +25,8 @@ outdated.
 - Use the `appa` prefix for new OpenAPPA-owned crates, binaries, environment
   variables, and protocol identifiers. Existing unprefixed names are
   deliberate, not violations: core's internal module names (`engine`, `plan`,
-  `turn`, …), `DOJO_MODEL`, the demo-owned `notify-mcp`, the reserved
-  `assistant.response` sink. Never introduce new `baton`-named
+  `turn`, …) and the reserved `assistant.response` sink. Never introduce new
+  `baton`-named
   identifiers: `baton` was the earlier name and can happen only in stale spots.
 - "Engine", "Trajectory", "Value", "Label", "Dimension", "Authority",
   "Transformer", "Remedy plan" are defined terms — use them as the glossary in

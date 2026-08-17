@@ -1,15 +1,15 @@
 [package]
-name = "appa-demo"
+name = "website-chat-playground"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "The chat-playground service: multi-turn sessions over the appa-agent loop, corp tools in-process, one SSE stream per turn"
+description = "The chat-playground service: multi-turn sessions over the appa-example-agent loop, corp tools in-process, one SSE stream per turn"
 
 [dependencies]
-appa-runtime-v2 = { path = "../../appa-runtime-v2/runtime" }
-appa-policy = { path = "../../appa-policy" }
-appa-engine = { path = "../../appa-engine" }
-appa-agent = { path = "../../appa-agent" }
+appa-runtime-v2 = { path = "../appa-runtime-v2/runtime" }
+appa-policy = { path = "../appa-policy" }
+appa-engine = { path = "../appa-engine" }
+appa-example-agent = { path = "../appa-example-agent" }
 axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
 tokio-util = "0.7"

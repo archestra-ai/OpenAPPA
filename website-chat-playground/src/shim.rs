@@ -345,7 +345,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("github")).unwrap();
         World {
             derivations: Arc::new(Derivations::new(
-                appa_agent::Endpoint::new("http://127.0.0.1:1/v1"),
+                appa_example_agent::Endpoint::new("http://127.0.0.1:1/v1"),
                 String::new(),
                 Default::default(),
             )),

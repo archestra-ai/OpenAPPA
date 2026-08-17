@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use appa_demo::session::{CreateError, Sessions};
-use appa_demo::systems::System;
+use website_chat_playground::session::{CreateError, Sessions};
+use website_chat_playground::systems::System;
 
 const MODEL: &str = "openai/gpt-4o";
 const PRESET: &str = include_str!("../policies/default.toml");
@@ -14,7 +14,7 @@ fn sessions(dir: &tempfile::TempDir, ttl: Duration) -> Sessions {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("world"),
         dir.path().join("sessions"),
         ttl,
-        appa_agent::Endpoint::new("http://127.0.0.1:1/v1"),
+        appa_example_agent::Endpoint::new("http://127.0.0.1:1/v1"),
     )
 }
 

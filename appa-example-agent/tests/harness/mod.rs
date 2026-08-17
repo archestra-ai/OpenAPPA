@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use appa_agent::wire::{WireMessage, WireTool, WireToolCall};
+use appa_example_agent::wire::{WireMessage, WireTool, WireToolCall};
 use appa_runtime_v2::api::Runtime;
 use appa_runtime_v2::config::Config;
 
@@ -220,7 +220,7 @@ fn call_of(id: &str, tool: &str, arguments: &str) -> WireToolCall {
     WireToolCall {
         id: id.to_string(),
         kind: "function".to_string(),
-        function: appa_agent::wire::WireFunctionCall {
+        function: appa_example_agent::wire::WireFunctionCall {
             name: tool.to_string(),
             arguments: arguments.to_string(),
         },

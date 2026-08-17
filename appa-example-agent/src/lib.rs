@@ -1,4 +1,4 @@
-//! `appa-agent` — a protoagent on runtime-v2.
+//! `appa-example-agent` — a protoagent on runtime-v2.
 //!
 //! The runtime does not run a loop and does not want one: the harness
 //! owns inference, tool execution and the transcript, and the runtime
@@ -14,9 +14,9 @@
 //!
 //! ```no_run
 //! # use std::sync::Arc;
-//! # use appa_agent::{Agent, ToolCatalogue, ToolShim, OpenAiCompatible};
+//! # use appa_example_agent::{Agent, ToolCatalogue, ToolShim, OpenAiCompatible};
 //! # use appa_runtime_v2::api::{Runtime, TrajectoryId};
-//! # async fn example(runtime: Arc<Runtime>, tools: Vec<appa_agent::wire::WireTool>) {
+//! # async fn example(runtime: Arc<Runtime>, tools: Vec<appa_example_agent::wire::WireTool>) {
 //! let agent = Agent::new(
 //!     runtime,
 //!     OpenAiCompatible::openrouter("some/model", "sk-..."),
