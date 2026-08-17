@@ -254,20 +254,77 @@ impl From<EngineRefusal> for EventError {
     }
 }
 
+/// Everything one policy file settles: the file itself, the engine
+/// compiled from it, and the implementations its `[externals]` bind.
+/// A reload replaces the whole value; no field ever changes alone.
+pub(crate) struct Deployment {
+    config: Config,
+    resident: RuntimeEngine,
+    externals: ExternalServices,
+}
+
+impl Deployment {
+    fn load(config: Config, modules: &crate::builtins::ModuleRegistry) -> Result<Deployment, OpenError> {
+        let policy = compile_policy(&config)?;
+        validate_deployment(&policy, &config)?;
+        let externals = ExternalServices::new(config.externals.clone(), modules)
+            .map_err(|error| OpenError::Modules(error.to_string()))?;
+        Ok(Deployment {
+            config,
+            resident: RuntimeEngine::new(policy.engine().clone()),
+            externals,
+        })
+    }
+
+    fn resident(&self) -> PolicyEngine<'_> {
+        PolicyEngine::Resident(&self.resident)
+    }
+
+    fn root_opening(&self, trajectory: &TrajectoryId) -> Vec<appa_engine::fact::Fact> {
+        self.resident
+            .root_opening(trajectory, self.config.policy_file().bytes())
+    }
+}
+
+/// What a reload installed. The key identifies the exact file bytes;
+/// the identity is what a root's opening record names.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Reloaded {
+    pub policy_key: String,
+    pub policy_identity: String,
+    /// `false` when the new file's bytes are the ones already serving:
+    /// the reload still ran every gate, and swapped an equal deployment.
+    pub changed: bool,
+}
+
 pub struct Runtime {
     inner: Arc<Inner>,
 }
 
 struct Inner {
+    deployment: std::sync::RwLock<Arc<Deployment>>,
+    retired: std::sync::Mutex<std::collections::BTreeMap<String, Arc<RuntimeEngine>>>,
     store: LogStore,
     engine: EngineSeam,
-    externals: ExternalServices,
-    config: Config,
+    modules: crate::builtins::ModuleRegistry,
     executing: std::sync::Mutex<std::collections::BTreeSet<String>>,
 }
 
 impl Inner {
-    pub(super) fn resolve_policy(&self, log: &Log) -> Result<PolicyEngine<'_>, EventError> {
+    fn deployment(&self) -> Arc<Deployment> {
+        Arc::clone(
+            &self
+                .deployment
+                .read()
+                .expect("the deployment lock is never poisoned: no panic runs while it is held"),
+        )
+    }
+
+    pub(super) fn resolve_policy<'a>(
+        &self,
+        deployment: &'a Deployment,
+        log: &Log,
+    ) -> Result<PolicyEngine<'a>, EventError> {
         let opened = self.engine.opened_under(log).ok_or_else(|| {
             EventError::PolicyUnavailable(format!(
                 "the log of {} does not open with its opening record",
@@ -280,12 +337,12 @@ impl Inner {
                 opened.policy_file_key
             )));
         }
-        let policy = if crate::engine::policy_file_key(self.config.policy_file().bytes()) == opened.policy_file_key {
-            self.engine.resident()
-        } else {
-            let compiled = compile_stored_policy(log.policy_file()).map_err(EventError::PolicyUnavailable)?;
-            PolicyEngine::Stored(RuntimeEngine::new(compiled.engine().clone()))
-        };
+        let policy =
+            if crate::engine::policy_file_key(deployment.config.policy_file().bytes()) == opened.policy_file_key {
+                deployment.resident()
+            } else {
+                PolicyEngine::Retired(self.retired_engine(&opened.policy_file_key, log.policy_file())?)
+            };
         if policy.identity_hex() != opened.policy_identity {
             return Err(EventError::PolicyUnavailable(format!(
                 "the stored policy file compiles to a different identity than the opening of {}",
@@ -293,6 +350,24 @@ impl Inner {
             )));
         }
         Ok(policy)
+    }
+
+    fn retired_engine(&self, key: &str, bytes: &[u8]) -> Result<Arc<RuntimeEngine>, EventError> {
+        if let Some(engine) = self
+            .retired
+            .lock()
+            .expect("the retired-engine mutex is never poisoned: no panic runs while it is held")
+            .get(key)
+        {
+            return Ok(Arc::clone(engine));
+        }
+        let compiled = compile_stored_policy(bytes).map_err(EventError::PolicyUnavailable)?;
+        let engine = Arc::new(RuntimeEngine::new(compiled.engine().clone()));
+        self.retired
+            .lock()
+            .expect("the retired-engine mutex is never poisoned: no panic runs while it is held")
+            .insert(key.to_string(), Arc::clone(&engine));
+        Ok(engine)
     }
 
     pub(super) fn log(&self, root: &TrajectoryId) -> Result<Log, EventError> {
@@ -316,26 +391,19 @@ impl Runtime {
     /// a policy this deployment cannot honor is refused before
     /// anything opens.
     pub fn open(config: Config, db: PathBuf, modules: Option<PathBuf>) -> Result<Runtime, OpenError> {
-        let policy = compile_policy(&config)?;
-        validate_deployment(&policy, &config)?;
-        let seam = EngineSeam::real(RuntimeEngine::new(policy.engine().clone()));
-        Runtime::with_engine(config, db, modules, seam)
+        Runtime::with_engine(config, db, modules, EngineSeam::Real)
     }
 
     /// The tests' entry: the same runtime with decisions from the
-    /// enqueued queue and no modules directory. The policy still
-    /// compiles for real — opening records and the replay gates run on
-    /// the compiled engine even here — but the deployment lints are
-    /// skipped, so a fixture needs no `[externals]` bindings.
+    /// enqueued queue and no modules directory. Every gate `open` runs
+    /// runs here too — only the decisions are fake.
     #[cfg(test)]
     pub(crate) fn open_with_engine(
         config: Config,
         db: PathBuf,
         seam: crate::engine::TestSeam,
     ) -> Result<Runtime, OpenError> {
-        let policy = compile_policy(&config)?;
-        let seam = EngineSeam::test(RuntimeEngine::new(policy.engine().clone()), seam);
-        Runtime::with_engine(config, db, None, seam)
+        Runtime::with_engine(config, db, None, EngineSeam::Test(seam))
     }
 
     fn with_engine(
@@ -344,10 +412,9 @@ impl Runtime {
         modules: Option<PathBuf>,
         engine: EngineSeam,
     ) -> Result<Runtime, OpenError> {
-        let registry =
+        let modules =
             crate::builtins::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
-        let externals = ExternalServices::new(config.externals.clone(), registry)
-            .map_err(|error| OpenError::Modules(error.to_string()))?;
+        let deployment = Deployment::load(config, &modules)?;
         let store = LogStore::open(Backend::Sqlite { path: db }).map_err(|error| match error {
             appa_eventlog::OpenError::Damaged { path, detail } => OpenError::Damaged(format!("{path}: {detail}")),
             error @ appa_eventlog::OpenError::ForeignSchema { .. } => OpenError::Damaged(error.to_string()),
@@ -355,12 +422,45 @@ impl Runtime {
         })?;
         Ok(Runtime {
             inner: Arc::new(Inner {
+                deployment: std::sync::RwLock::new(Arc::new(deployment)),
+                retired: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 store,
                 engine,
-                externals,
-                config,
+                modules,
                 executing: std::sync::Mutex::new(std::collections::BTreeSet::new()),
             }),
+        })
+    }
+
+    /// Replace the serving deployment with the one this configuration
+    /// declares, without stopping the process (`docs/runtime.md`,
+    /// reloading a policy). The caller reads the file; the runtime never
+    /// learns where a configuration came from, so an embedding host
+    /// reloads a composed policy the same way.
+    pub fn reload(&self, config: Config) -> Result<Reloaded, OpenError> {
+        let deployment = Deployment::load(config, &self.inner.modules)?;
+        let identity = deployment.resident().identity_hex();
+        let deployment = Arc::new(deployment);
+        let previous = {
+            let mut serving = self
+                .inner
+                .deployment
+                .write()
+                .expect("the deployment lock is never poisoned: no panic runs while it is held");
+            std::mem::replace(&mut *serving, Arc::clone(&deployment))
+        };
+        let key = crate::engine::policy_file_key(deployment.config.policy_file().bytes());
+        let changed = crate::engine::policy_file_key(previous.config.policy_file().bytes()) != key;
+        tracing::info!(
+            policy_key = %key,
+            policy_identity = %identity,
+            changed,
+            "reloaded the serving deployment"
+        );
+        Ok(Reloaded {
+            policy_key: key,
+            policy_identity: identity,
+            changed,
         })
     }
 
@@ -370,20 +470,18 @@ impl Runtime {
     /// record and stores the policy file it names, so the root is bound
     /// to that file durably or is not opened at all.
     pub(crate) fn create_session(&self, id: TrajectoryId) -> Result<Session, SessionError> {
-        let opening = self
-            .inner
-            .engine
-            .root_opening(&id, self.inner.config.policy_file().bytes());
+        let deployment = self.inner.deployment();
+        let opening = deployment.root_opening(&id);
         let root = self
             .inner
             .store
-            .create_root(opening, self.inner.config.policy_file().bytes())
+            .create_root(opening, deployment.config.policy_file().bytes())
             .map_err(|error| match error {
                 appa_eventlog::CreateError::AlreadyExists { .. } => SessionError::AlreadyExists,
                 error => SessionError::Storage(error.to_string()),
             })?;
         let root = TrajectoryId(root.as_str().to_string());
-        Ok(Session::attach(Arc::clone(&self.inner), root.clone(), root))
+        Ok(Session::attach(Arc::clone(&self.inner), deployment, root.clone(), root))
     }
 
     /// Reopens a persisted trajectory. There is no stored view: the next
@@ -399,6 +497,7 @@ impl Runtime {
         }
         Ok(Session::attach(
             Arc::clone(&self.inner),
+            self.inner.deployment(),
             trajectory.clone(),
             root.clone(),
         ))
@@ -414,9 +513,10 @@ impl Runtime {
             Err(EventError::UnknownTrajectory) => return Err(SessionError::Unknown),
             Err(error) => return Err(SessionError::Storage(error.to_string())),
         };
+        let deployment = self.inner.deployment();
         let policy = self
             .inner
-            .resolve_policy(&log)
+            .resolve_policy(&deployment, &log)
             .map_err(|error| SessionError::Storage(error.to_string()))?;
         let view = self
             .inner
@@ -431,7 +531,8 @@ impl Runtime {
     }
 
     pub fn status(&self, id: &TrajectoryId) -> Option<TrajectoryStatus> {
-        let (policy, log) = self.root_log(id, "status")?;
+        let deployment = self.inner.deployment();
+        let (policy, log) = self.root_log(&deployment, id, "status")?;
         let view = match self.inner.engine.rebuild_view(&policy, &log) {
             Ok(view) => view,
             Err(refusal) => {
@@ -448,7 +549,8 @@ impl Runtime {
     /// expires no offer, and it answers for an ended
     /// trajectory because an audit is read after the run.
     pub fn audit(&self, id: &TrajectoryId) -> Option<Vec<AuditEntry>> {
-        let (policy, log) = self.root_log(id, "audit")?;
+        let deployment = self.inner.deployment();
+        let (policy, log) = self.root_log(&deployment, id, "audit")?;
         match self.inner.engine.audit(&policy, &log) {
             Ok(entries) => entries,
             Err(refusal) => {
@@ -458,7 +560,12 @@ impl Runtime {
         }
     }
 
-    fn root_log(&self, id: &TrajectoryId, read: &str) -> Option<(PolicyEngine<'_>, Log)> {
+    fn root_log<'a>(
+        &self,
+        deployment: &'a Deployment,
+        id: &TrajectoryId,
+        read: &str,
+    ) -> Option<(PolicyEngine<'a>, Log)> {
         let log = match self.inner.log(id) {
             Ok(log) => log,
             Err(error) => {
@@ -466,7 +573,7 @@ impl Runtime {
                 return None;
             }
         };
-        match self.inner.resolve_policy(&log) {
+        match self.inner.resolve_policy(deployment, &log) {
             Ok(policy) => Some((policy, log)),
             Err(error) => {
                 tracing::warn!(trajectory = %id.0, read, %error, "read refused: the opening policy is unavailable");
@@ -518,7 +625,8 @@ impl Runtime {
     fn offer_owner(&self, offer: &OfferId) -> Option<(TrajectoryId, TrajectoryId)> {
         let root = crate::engine::offer_root(offer)?;
         let log = self.inner.log(&root).ok()?;
-        let policy = self.inner.resolve_policy(&log).ok()?;
+        let deployment = self.inner.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log).ok()?;
         let view = self.inner.engine.rebuild_view(&policy, &log).ok()?;
         let trajectory = self.inner.engine.offer_pursuer(&view, offer)?;
         Some((root, trajectory))
@@ -558,7 +666,11 @@ impl Runtime {
         trajectory: &TrajectoryId,
     ) -> Vec<crate::engine::OpenDispatch> {
         let log = self.inner.log(root).expect("the log reads");
-        let policy = self.inner.resolve_policy(&log).expect("the opening policy resolves");
+        let deployment = self.inner.deployment();
+        let policy = self
+            .inner
+            .resolve_policy(&deployment, &log)
+            .expect("the opening policy resolves");
         let view = self.inner.engine.rebuild_view(&policy, &log).expect("the log rebuilds");
         self.inner.engine.open_dispatches(&view, trajectory)
     }
@@ -568,7 +680,11 @@ impl Runtime {
     #[cfg(test)]
     pub(crate) fn names_trajectory(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> bool {
         let log = self.inner.log(root).expect("the log reads");
-        let policy = self.inner.resolve_policy(&log).expect("the opening policy resolves");
+        let deployment = self.inner.deployment();
+        let policy = self
+            .inner
+            .resolve_policy(&deployment, &log)
+            .expect("the opening policy resolves");
         let view = self.inner.engine.rebuild_view(&policy, &log).expect("the log rebuilds");
         self.inner.engine.liveness(&view, trajectory) != Liveness::Unopened
     }
@@ -582,7 +698,11 @@ impl Runtime {
         trajectory: &TrajectoryId,
     ) -> Option<crate::engine::OpenDispatch> {
         let log = self.inner.log(root).expect("the log reads");
-        let policy = self.inner.resolve_policy(&log).expect("the opening policy resolves");
+        let deployment = self.inner.deployment();
+        let policy = self
+            .inner
+            .resolve_policy(&deployment, &log)
+            .expect("the opening policy resolves");
         let view = self.inner.engine.rebuild_view(&policy, &log).expect("the log rebuilds");
         self.inner.engine.substituted_release(&view, trajectory)
     }
@@ -593,7 +713,11 @@ impl Runtime {
     #[cfg(test)]
     pub(crate) fn branch_status(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> Option<TrajectoryStatus> {
         let log = self.inner.log(root).expect("the log reads");
-        let policy = self.inner.resolve_policy(&log).expect("the policy resolves");
+        let deployment = self.inner.deployment();
+        let policy = self
+            .inner
+            .resolve_policy(&deployment, &log)
+            .expect("the policy resolves");
         let view = self.inner.engine.rebuild_view(&policy, &log).expect("the log rebuilds");
         self.inner.engine.trajectory_status(&policy, &view, trajectory)
     }
@@ -608,7 +732,11 @@ impl Runtime {
         event: crate::engine::EngineEvent,
     ) -> EventError {
         let log = self.inner.log(root).expect("the log reads");
-        let policy = self.inner.resolve_policy(&log).expect("the policy resolves");
+        let deployment = self.inner.deployment();
+        let policy = self
+            .inner
+            .resolve_policy(&deployment, &log)
+            .expect("the policy resolves");
         let view = self.inner.engine.rebuild_view(&policy, &log).expect("the log rebuilds");
         EventError::from(
             self.inner
@@ -622,7 +750,7 @@ impl Runtime {
     /// file relative to it.
     #[cfg(test)]
     pub(crate) fn config_bytes(&self) -> Vec<u8> {
-        self.inner.config.policy_file().bytes().to_vec()
+        self.inner.deployment().config.policy_file().bytes().to_vec()
     }
 
     #[cfg(test)]
@@ -650,7 +778,7 @@ impl Runtime {
     /// `[externals] timeout_ms`, which bounds a machine consult: a
     /// person reads the arguments and thinks.
     pub(crate) fn review_timeout(&self) -> std::time::Duration {
-        self.inner.config.externals.review_timeout
+        self.inner.deployment().config.externals.review_timeout
     }
 }
 

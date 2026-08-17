@@ -13,7 +13,7 @@ use axum::routing::{get, post};
 use clap::Parser;
 
 use appa_runtime_api::Codec;
-use appa_runtime_v2::api::Runtime;
+use appa_runtime_v2::api::{Reloaded, Runtime};
 use appa_runtime_v2::config::Config;
 use appa_runtime_v2::{hooks, mcp};
 
@@ -114,6 +114,8 @@ fn log_level(verbose: u8) -> &'static str {
 struct AppState {
     runtime: Arc<Runtime>,
     codec: Codec,
+    config: PathBuf,
+    adapter: Adapter,
 }
 
 async fn hook(
@@ -127,6 +129,20 @@ async fn hook(
 
 async fn health() -> &'static str {
     "ok"
+}
+
+async fn reload(State(state): State<AppState>) -> Result<axum::Json<Reloaded>, (axum::http::StatusCode, String)> {
+    let config = Config::load(&state.config)
+        .map_err(|error| (axum::http::StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
+    refuse_unobservable_returns(state.adapter, config.policy_file().value())
+        .map_err(|refusal| (axum::http::StatusCode::UNPROCESSABLE_ENTITY, refusal))?;
+    match state.runtime.reload(config) {
+        Ok(reloaded) => Ok(axum::Json(reloaded)),
+        Err(refusal) => {
+            tracing::warn!(%refusal, "the reload was refused; the running deployment keeps serving");
+            Err((axum::http::StatusCode::UNPROCESSABLE_ENTITY, refusal.to_string()))
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -182,11 +198,14 @@ async fn main() -> ExitCode {
     let state = AppState {
         runtime: Arc::clone(&runtime),
         codec: args.adapter.codec(),
+        config: args.config,
+        adapter: args.adapter,
     };
     let app = axum::Router::new()
         .route("/health", get(health))
         .route("/status", get(status))
         .route("/hook", post(hook))
+        .route("/reload", post(reload))
         .nest_service("/mcp", mcp::service(runtime))
         .with_state(state);
 
@@ -197,7 +216,7 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    tracing::info!(listen = %args.listen, "appa-runtime-v2 serving /hook, /mcp, /status, and /health");
+    tracing::info!(listen = %args.listen, "appa-runtime-v2 serving /hook, /mcp, /status, /reload, and /health");
     match axum::serve(listener, app).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

@@ -11,8 +11,8 @@ use crate::engine::{
 use crate::external::{ConsultKind, ConsultOutcome, ReadersResolution};
 
 use super::{
-    ChildReturnDecision, EventError, ExactCall, Inner, OfferId, OutcomeBody, ProposedCall, RemedyDecision, SpawnRef,
-    SpawnResultDecision, ToolCallDecision, ToolOutcome, ToolResultDecision, TrajectoryId,
+    ChildReturnDecision, Deployment, EventError, ExactCall, Inner, OfferId, OutcomeBody, ProposedCall, RemedyDecision,
+    SpawnRef, SpawnResultDecision, ToolCallDecision, ToolOutcome, ToolResultDecision, TrajectoryId,
 };
 
 /// The runtime's own control tool, recognized by its exact
@@ -144,15 +144,28 @@ fn fresh_entropy() -> OfferNonce {
 
 /// One per trajectory (root or child). The adapter drives it; it never
 /// renders, and the adapter never stores.
+///
+/// The dispatcher builds one per hook event and drops it when the event
+/// ends; nothing caches a session across events. That is what makes the
+/// deployment snapshot below an event-scoped read rather than a
+/// trajectory-scoped one, and a dispatcher that started caching sessions
+/// would have to take the snapshot per event instead.
 pub struct Session {
+    deployment: Arc<Deployment>,
     inner: Arc<Inner>,
     trajectory: TrajectoryId,
     root: TrajectoryId,
 }
 
 impl Session {
-    pub(super) fn attach(inner: Arc<Inner>, trajectory: TrajectoryId, root: TrajectoryId) -> Session {
+    pub(super) fn attach(
+        inner: Arc<Inner>,
+        deployment: Arc<Deployment>,
+        trajectory: TrajectoryId,
+        root: TrajectoryId,
+    ) -> Session {
         Session {
+            deployment,
             inner,
             trajectory,
             root,
@@ -227,7 +240,7 @@ impl Session {
 
     fn substituted_release(&self, call: &ProposedCall) -> Result<Option<Standing>, EventError> {
         let log = self.inner.log(&self.root)?;
-        let policy = self.inner.resolve_policy(&log)?;
+        let policy = self.inner.resolve_policy(&self.deployment, &log)?;
         let view = self
             .inner
             .engine
@@ -492,7 +505,7 @@ impl Session {
     fn bind_child(&mut self, id: TrajectoryId, spawn: SpawnRef) -> Result<(Session, LateOpen), EventError> {
         let child = id.clone();
         let opened = self.inner.log(&self.root)?;
-        let policy = self.inner.resolve_policy(&opened)?;
+        let policy = self.inner.resolve_policy(&self.deployment, &opened)?;
         let decision = self.drive(&policy, Some(opened), true, |context| {
             let fork = match &spawn {
                 SpawnRef::Binding(binding) => {
@@ -517,7 +530,16 @@ impl Session {
             None => LateOpen::AlreadyOpen,
         };
         match decision.then {
-            Next::Done => Ok((Session::attach(Arc::clone(&self.inner), id, self.root.clone()), opened)),
+            // The child rides the parent event's snapshot, not a fresh one.
+            Next::Done => Ok((
+                Session::attach(
+                    Arc::clone(&self.inner),
+                    Arc::clone(&self.deployment),
+                    id,
+                    self.root.clone(),
+                ),
+                opened,
+            )),
             _ => Err(EventError::UnexpectedDecision),
         }
     }
@@ -561,7 +583,7 @@ impl Session {
         match outcome {
             ToolOutcome::Success {
                 body: OutcomeBody::Available(body),
-            } if body.len() > self.inner.config.externals.max_body_bytes => ToolOutcome::Success {
+            } if body.len() > self.deployment.config.externals.max_body_bytes => ToolOutcome::Success {
                 body: OutcomeBody::Unavailable,
             },
             other => other,
@@ -586,7 +608,7 @@ impl Session {
         elicitation: Option<&Elicitation>,
     ) -> Result<EngineDecision, EventError> {
         let opened = self.inner.log(&self.root)?;
-        let policy = self.inner.resolve_policy(&opened)?;
+        let policy = self.inner.resolve_policy(&self.deployment, &opened)?;
         let mut opened = Some(opened);
         let mut evidence: Vec<ExternalEvidence> = Vec::new();
         for _ in 0..EVIDENCE_LIMIT {
@@ -678,7 +700,7 @@ impl Session {
                 review,
             } => {
                 let outcome = self
-                    .inner
+                    .deployment
                     .externals
                     .consult(ConsultKind::Authority, authority, payload, elicitation)
                     .await;
@@ -699,7 +721,7 @@ impl Session {
             } => {
                 let payload = serde_json::json!({ "body": body.as_str() });
                 let outcome = self
-                    .inner
+                    .deployment
                     .externals
                     .consult(ConsultKind::Sanitizer, sanitizer, &payload, None)
                     .await;
@@ -721,7 +743,7 @@ impl Session {
                 value,
             } => {
                 let readers = match self
-                    .inner
+                    .deployment
                     .externals
                     .resolve_dynamic(resolver, tool, argument, value)
                     .await
@@ -737,7 +759,7 @@ impl Session {
             }
             // The membership resolver wire is the declared external contract verbatim.
             ExternalRequest::Membership { resolver, group } => {
-                let readers = match self.inner.externals.resolve_membership(resolver, group).await {
+                let readers = match self.deployment.externals.resolve_membership(resolver, group).await {
                     ReadersResolution::Resolved { readers } => Some(readers),
                     ReadersResolution::Unresolved(_) => None,
                 };

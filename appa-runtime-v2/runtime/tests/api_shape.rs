@@ -7,7 +7,7 @@ use appa_runtime_api::{
     ToolOutcome, TrajectoryId,
 };
 use appa_runtime_v2::api::{
-    AuditEvent, AuditLabel, DispatchOutcome, OfferId, OpenError, RemedyOutcome, Runtime, TrajectoryStatus,
+    AuditEvent, AuditLabel, DispatchOutcome, OfferId, OpenError, Reloaded, RemedyOutcome, Runtime, TrajectoryStatus,
 };
 use appa_runtime_v2::config::Config;
 use appa_runtime_v2::hooks;
@@ -25,6 +25,15 @@ fn the_reexported_vocabulary(
 fn the_declared_runtime(config: Config, db: PathBuf, modules: Option<PathBuf>) {
     let opened: Result<Runtime, OpenError> = Runtime::open(config, db, modules);
     drop(opened);
+}
+
+fn the_declared_reload(runtime: &Runtime, config: Config) {
+    let reloaded: Result<Reloaded, OpenError> = runtime.reload(config);
+    if let Ok(reloaded) = reloaded {
+        let _: String = reloaded.policy_key;
+        let _: String = reloaded.policy_identity;
+        let _: bool = reloaded.changed;
+    }
 }
 
 async fn the_declared_dispatcher(runtime: &Runtime, codec: &Codec, event: HookEvent, body: &[u8]) {

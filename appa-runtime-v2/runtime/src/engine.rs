@@ -355,21 +355,21 @@ pub struct OpenDispatch {
     pub bytes: Vec<u8>,
 }
 
-/// The engine deciding one family's events: the resident engine when the
-/// root's stored policy file is the current one, or an engine compiled
-/// from the root's stored bytes. Per-event and disposable —
-/// never a registry of resident engines.
-#[expect(clippy::large_enum_variant)]
+/// The engine deciding one family's events: the engine of the
+/// deployment now serving when the root's stored policy file is that
+/// deployment's, or the engine compiled from the root's own stored
+/// bytes. Resolved per event and borrowed for it; the
+/// process keeps at most one engine per distinct policy file.
 pub enum PolicyEngine<'a> {
     Resident(&'a RuntimeEngine),
-    Stored(RuntimeEngine),
+    Retired(std::sync::Arc<RuntimeEngine>),
 }
 
 impl PolicyEngine<'_> {
     fn engine(&self) -> &RuntimeEngine {
         match self {
             PolicyEngine::Resident(engine) => engine,
-            PolicyEngine::Stored(engine) => engine,
+            PolicyEngine::Retired(engine) => engine,
         }
     }
 
@@ -380,55 +380,19 @@ impl PolicyEngine<'_> {
     }
 }
 
-enum Decider {
+/// The one engine boundary the session drives: who decides,
+/// and nothing else. The deciding engine arrives per call as a
+/// [`PolicyEngine`], because a family decides under the policy its root
+/// opened with, which a configuration reload does not change.
+/// The runtime holds no offer state — offers are the
+/// engine's durable facts, routed by id.
+pub enum EngineSeam {
     Real,
     #[cfg(test)]
     Test(TestSeam),
 }
 
-/// The one engine boundary the session drives: the resident
-/// engine compiled at open and the decider. The runtime holds no offer
-/// state — offers are the engine's durable facts, routed by id.
-pub struct EngineSeam {
-    resident: RuntimeEngine,
-    decider: Decider,
-}
-
 impl EngineSeam {
-    pub fn real(resident: RuntimeEngine) -> EngineSeam {
-        EngineSeam {
-            resident,
-            decider: Decider::Real,
-        }
-    }
-
-    /// The tests' seam: decisions come from the enqueued queue; the real
-    /// compiled engine still opens trajectories and gates replays.
-    #[cfg(test)]
-    pub fn test(resident: RuntimeEngine, seam: TestSeam) -> EngineSeam {
-        EngineSeam {
-            resident,
-            decider: Decider::Test(seam),
-        }
-    }
-
-    pub fn resident(&self) -> PolicyEngine<'_> {
-        PolicyEngine::Resident(&self.resident)
-    }
-
-    /// The opening of a fresh root under the resident policy: the engine's
-    /// opening batch bound to the exact bytes of the policy file the root opens
-    /// under. It takes the bytes, not a key, because the key on the
-    /// opening record is the engine's own type and is derived here — at the one
-    /// boundary that names the engine crate.
-    pub fn root_opening(&self, trajectory: &TrajectoryId, policy_file: &[u8]) -> Vec<Fact> {
-        self.resident
-            .engine
-            .open_trajectory(&engine_id(trajectory), EnginePolicyFileKey::of(policy_file))
-            .expect("the engine's own opening batch validates against the empty log")
-            .into_unsealed()
-    }
-
     /// Refuse one root's log before it is trusted, including the
     /// opening gate: the log's first record must be this root's opening under
     /// exactly the deciding engine's policy. The root is the log's own, so a
@@ -557,10 +521,10 @@ impl EngineSeam {
         trajectory: &TrajectoryId,
         event: EngineEvent,
     ) -> Result<EngineDecision, EngineRefusal> {
-        match &self.decider {
-            Decider::Real => policy.engine().handle(view, trajectory, event),
+        match self {
+            EngineSeam::Real => policy.engine().handle(view, trajectory, event),
             #[cfg(test)]
-            Decider::Test(seam) => Ok(seam.next(event)),
+            EngineSeam::Test(seam) => Ok(seam.next(event)),
         }
     }
 
@@ -569,26 +533,26 @@ impl EngineSeam {
     /// unknown tool or schema-invalid arguments never match a dispatched
     /// call, whose bytes the engine validated.
     pub fn canonical_bytes(&self, policy: &PolicyEngine<'_>, call: &ProposedCall) -> Option<Vec<u8>> {
-        match &self.decider {
-            Decider::Real => policy.engine().canonical_bytes(call),
+        match self {
+            EngineSeam::Real => policy.engine().canonical_bytes(call),
             #[cfg(test)]
-            Decider::Test(_) => serde_json::to_vec(call).ok(),
+            EngineSeam::Test(_) => serde_json::to_vec(call).ok(),
         }
     }
 
     #[cfg(test)]
     pub fn enqueue(&self, decision: EngineDecision) {
-        match &self.decider {
-            Decider::Test(seam) => seam.enqueue(decision),
-            Decider::Real => panic!("only the test seam takes enqueued decisions"),
+        match self {
+            EngineSeam::Test(seam) => seam.enqueue(decision),
+            EngineSeam::Real => panic!("only the test seam takes enqueued decisions"),
         }
     }
 
     #[cfg(test)]
     pub fn seen(&self) -> Vec<EngineEvent> {
-        match &self.decider {
-            Decider::Test(seam) => seam.seen(),
-            Decider::Real => panic!("only the test seam records seen events"),
+        match self {
+            EngineSeam::Test(seam) => seam.seen(),
+            EngineSeam::Real => panic!("only the test seam records seen events"),
         }
     }
 
@@ -601,10 +565,10 @@ impl EngineSeam {
         view: &EngineView,
         trajectory: &TrajectoryId,
     ) -> Option<TrajectoryStatus> {
-        match &self.decider {
-            Decider::Real => policy.engine().trajectory_status(view, trajectory),
+        match self {
+            EngineSeam::Real => policy.engine().trajectory_status(view, trajectory),
             #[cfg(test)]
-            Decider::Test(_) => Some(TrajectoryStatus {
+            EngineSeam::Test(_) => Some(TrajectoryStatus {
                 trajectory: String::new(),
                 trust: String::new(),
                 audience: String::new(),
@@ -656,6 +620,18 @@ pub struct RuntimeEngine {
 impl RuntimeEngine {
     pub fn new(engine: Engine) -> RuntimeEngine {
         RuntimeEngine { engine }
+    }
+
+    /// The opening of a fresh root: this engine's opening batch bound to the
+    /// exact bytes of the policy file the root opens under. It takes
+    /// the bytes, not a key, because the key on the opening record is the
+    /// engine's own type and is derived here — at the one boundary that names
+    /// the engine crate.
+    pub fn root_opening(&self, trajectory: &TrajectoryId, policy_file: &[u8]) -> Vec<Fact> {
+        self.engine
+            .open_trajectory(&engine_id(trajectory), EnginePolicyFileKey::of(policy_file))
+            .expect("the engine's own opening batch validates against the empty log")
+            .into_unsealed()
     }
 
     fn rebuild_view(&self, log: &Log) -> Result<EngineView, EngineRefusal> {

@@ -133,8 +133,10 @@ impl ExternalServices {
     /// Resolves every configured `builtin` reference against the stock
     /// implementations and the loaded modules. An unknown reference is
     /// a refusal: a deployment never opens with a dangling
-    /// implementation name.
-    pub fn new(config: Externals, registry: ModuleRegistry) -> Result<ExternalServices, ModulesError> {
+    /// implementation name. The registry is borrowed, not consumed: it
+    /// loads once at open and outlives every deployment a configuration
+    /// reload installs.
+    pub fn new(config: Externals, registry: &ModuleRegistry) -> Result<ExternalServices, ModulesError> {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(config.timeout)
@@ -477,7 +479,7 @@ mod tests {
     }
 
     fn services_over(config: Externals) -> ExternalServices {
-        ExternalServices::new(config, ModuleRegistry::empty()).expect("no builtin references are configured")
+        ExternalServices::new(config, &ModuleRegistry::empty()).expect("no builtin references are configured")
     }
 
     fn services(dynamic_url: Option<String>, timeout_ms: u64, cap: usize) -> ExternalServices {
@@ -821,7 +823,7 @@ mod tests {
         config
             .authorities
             .insert("auto".to_string(), Implementation::Builtin("no-such".to_string()));
-        match ExternalServices::new(config, ModuleRegistry::empty()) {
+        match ExternalServices::new(config, &ModuleRegistry::empty()) {
             Err(ModulesError::UnknownBuiltin { section, name, builtin }) => {
                 assert_eq!(
                     (section, name.as_str(), builtin.as_str()),
@@ -840,7 +842,7 @@ mod tests {
             .sanitizers
             .insert("pii".to_string(), Implementation::Builtin("approve".to_string()));
         assert!(matches!(
-            ExternalServices::new(config, ModuleRegistry::empty()),
+            ExternalServices::new(config, &ModuleRegistry::empty()),
             Err(ModulesError::UnknownBuiltin {
                 section: "sanitizers",
                 ..
@@ -906,7 +908,7 @@ mod tests {
         config
             .authorities
             .insert("auto".to_string(), Implementation::Builtin(implementation.to_string()));
-        let services = ExternalServices::new(config, registry).expect("the module reference resolves");
+        let services = ExternalServices::new(config, &registry).expect("the module reference resolves");
         (services, dir)
     }
 

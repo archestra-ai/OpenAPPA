@@ -255,6 +255,92 @@ fn a_changed_policy_keeps_old_roots_on_their_opening_policy() {
 }
 
 #[test]
+fn the_reload_route_installs_an_edited_policy_without_a_restart() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let config = write_config(dir.path(), CONFIG);
+    let db = dir.path().join("appa.db");
+    let port = free_port();
+    let mut server = start(&config, &db, port);
+    wait_for_health(&mut server);
+    let reload = format!("{}/reload", server.url);
+
+    post_hook(
+        &server,
+        r#"{"hook_event_name":"SessionStart","session_id":"old-1","source":"startup"}"#,
+    )
+    .expect("SessionStart answers");
+    let allow = post_hook(
+        &server,
+        r#"{"hook_event_name":"PreToolUse","session_id":"old-1","tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"t1"}"#,
+    )
+    .expect("PreToolUse answers");
+    assert!(allow.contains("\"permissionDecision\":\"allow\""));
+    post_hook(
+        &server,
+        r#"{"hook_event_name":"PostToolUse","session_id":"old-1","tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"t1","tool_response":{"stdout":"readme.txt"}}"#,
+    )
+    .expect("PostToolUse answers");
+
+    write_config(dir.path(), &CONFIG.replace("version = 1", "version = 1\nbogus_key = 1"));
+    assert!(
+        http(&reload, "POST", None).is_none(),
+        "a file the dialect refuses must not install",
+    );
+    let still_allows = post_hook(
+        &server,
+        r#"{"hook_event_name":"PreToolUse","session_id":"old-1","tool_name":"Bash","tool_input":{"command":"pwd"},"tool_use_id":"t2"}"#,
+    )
+    .expect("the gate still answers after a refused reload");
+    assert!(
+        still_allows.contains("\"permissionDecision\":\"allow\""),
+        "a refused reload changes nothing: {still_allows}",
+    );
+    post_hook(
+        &server,
+        r#"{"hook_event_name":"PostToolUse","session_id":"old-1","tool_name":"Bash","tool_input":{"command":"pwd"},"tool_use_id":"t2","tool_response":{"stdout":"/"}}"#,
+    )
+    .expect("PostToolUse answers");
+
+    write_config(dir.path(), &CONFIG.replace("name = \"Bash\"", "name = \"Read\""));
+    let installed = http(&reload, "POST", None).expect("the edited file installs");
+    assert!(
+        installed.contains("\"changed\":true"),
+        "the answer names what is serving now: {installed}",
+    );
+
+    let old_allows = post_hook(
+        &server,
+        r#"{"hook_event_name":"PreToolUse","session_id":"old-1","tool_name":"Bash","tool_input":{"command":"id"},"tool_use_id":"t3"}"#,
+    )
+    .expect("the old root answers");
+    assert!(
+        old_allows.contains("\"permissionDecision\":\"allow\""),
+        "the old root keeps the policy it opened with: {old_allows}",
+    );
+
+    post_hook(
+        &server,
+        r#"{"hook_event_name":"SessionStart","session_id":"new-1","source":"startup"}"#,
+    )
+    .expect("the new SessionStart answers");
+    let new_denies = post_hook(
+        &server,
+        r#"{"hook_event_name":"PreToolUse","session_id":"new-1","tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"t4"}"#,
+    )
+    .expect("the new root answers");
+    assert!(
+        new_denies.contains("\"permissionDecision\":\"deny\""),
+        "the new root follows the installed policy: {new_denies}",
+    );
+
+    let unchanged = http(&reload, "POST", None).expect("the unchanged file reloads");
+    assert!(
+        unchanged.contains("\"changed\":false"),
+        "an unchanged file reports no change: {unchanged}",
+    );
+}
+
+#[test]
 fn a_damaged_database_refuses_to_serve() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let config = write_config(dir.path(), CONFIG);
