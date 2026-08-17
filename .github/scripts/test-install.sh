@@ -95,14 +95,42 @@ installed_plugin=$APPA_DATA_DIR/claude-code
 [ -f "$installed_plugin/plugin/skills/appa-tool-sync/SKILL.md" ] || die "tool-sync skill was not installed"
 [ "$($installed_binary --version)" = "appa-runtime-v2 $version" ] || die "installed version is wrong"
 
+output=$(sh "$repository_root/install.sh")
+printf '%s\n' "$output" | grep -F "appa-runtime-v2 $version is already installed." >/dev/null ||
+  die "second run did not report the installation as unchanged"
+printf '%s\n' "$output" | grep -F "Installed: $version" >/dev/null ||
+  die "second run did not report the installed version"
+printf '%s\n' "$output" | grep -F "Release: $version" >/dev/null ||
+  die "second run did not report the release version"
+printf '%s\n' "$output" | grep -F -- "--upgrade" >/dev/null ||
+  die "second run did not name the upgrade option"
+if printf '%s\n' "$output" | grep -F "Installed appa-runtime-v2" >/dev/null; then
+  die "second run reinstalled instead of reporting"
+fi
+
+printf '9.8.8\n' >"$release_dir/version.txt"
+output=$(sh "$repository_root/install.sh")
+printf '%s\n' "$output" | grep -F "A newer appa-runtime-v2 release is available." >/dev/null ||
+  die "an older installation was not reported as upgradable"
+printf '%s\n' "$output" | grep -F "Release: 9.8.8" >/dev/null ||
+  die "upgradable report did not name the release version"
+
+printf '9.8.6\n' >"$release_dir/version.txt"
+output=$(sh "$repository_root/install.sh")
+printf '%s\n' "$output" | grep -F "The installed appa-runtime-v2 is newer than this release." >/dev/null ||
+  die "a newer installation was not reported as newer"
+printf '%s\n' "$output" | grep -F "Installed: $version" >/dev/null ||
+  die "newer-installation report did not name the installed version"
+printf '%s\n' "$version" >"$release_dir/version.txt"
+
 printf 'policy survives update\n' >"$APPA_CONFIG_DIR/appa.toml"
 printf 'database survives update\n' >"$APPA_DATA_DIR/appa.db"
-sh "$repository_root/install.sh" >/dev/null
+sh -s -- --upgrade <"$repository_root/install.sh" >/dev/null
 [ "$(cat "$APPA_CONFIG_DIR/appa.toml")" = "policy survives update" ] || die "policy was replaced"
 [ "$(cat "$APPA_DATA_DIR/appa.db")" = "database survives update" ] || die "database was replaced"
 
 printf 'tampered\n' >>"$release_dir/$archive"
-if sh "$repository_root/install.sh" >"$tmp_dir/tampered.stdout" 2>"$tmp_dir/tampered.stderr"; then
+if sh -s -- --upgrade <"$repository_root/install.sh" >"$tmp_dir/tampered.stdout" 2>"$tmp_dir/tampered.stderr"; then
   die "tampered archive was accepted"
 fi
 grep -F "checksum mismatch for $archive" "$tmp_dir/tampered.stderr" >/dev/null ||

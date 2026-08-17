@@ -24,11 +24,39 @@ verifies its checksum, and installs the runtime with its Claude Code plugin and
 statusline. Linux requires glibc 2.34 or newer. To read a script before you run
 it, replace `| sh` with `| less`, or `| iex` with `| more`.
 
+Running an installer again changes nothing. It prints the installed version
+beside the released one and exits.
+
+## Upgrade
+
+The same script upgrades, with `--upgrade`. It replaces the runtime and the
+plugin, and keeps your policy and database.
+
+```sh
+curl -fsSL https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.sh | sh -s -- --upgrade
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.ps1))) -Upgrade
+```
+
+## Uninstall
+
+```sh
+curl -fsSL https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.sh | sh -s -- --uninstall
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.ps1))) -Uninstall
+```
+
+Uninstall removes the runtime and the installed plugin files, and keeps your
+policy and database.
+
 Only Claude Code sessions started with the installed plugin are gated. A gated
 session blocks while the runtime is down. See the
 [integration guide](integrations/claude-code/README.md) for installed paths,
-version pinning, uninstall commands, and the `/appa-tool-sync` policy setup
-flow.
+version pinning, and the `/appa-tool-sync` policy setup flow.
 
 ## Documentation
 

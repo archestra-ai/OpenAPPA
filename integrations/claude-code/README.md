@@ -42,6 +42,13 @@ and architecture. They verify its SHA-256 checksum before installation.
 They also install the matching Claude Code plugin and configure the
 runtime to start at login.
 
+An installer never replaces an installation it did not just create. When
+the runtime is already installed, it prints the installed version beside
+the released one, names the option that replaces it, and exits without a
+change. Pass `--upgrade` on Linux and macOS, or `-Upgrade` on Windows, to
+install the release over what is there. Both forms keep the policy and the
+database.
+
 ### Linux and macOS
 
 Install the latest release with one command. The same command selects the
@@ -92,8 +99,8 @@ installs a PowerShell statusline.
 | Windows | `%LOCALAPPDATA%\appa\bin\appa-runtime-v2.exe` | `%APPDATA%\appa\appa.toml` | `%LOCALAPPDATA%\appa\` |
 
 The runtime creates the starting policy only when the policy path does
-not exist. Re-running an installer updates the runtime and plugin. It
-does not replace the policy or database.
+not exist. An upgrade replaces the runtime and plugin. It does not
+replace the policy or database.
 
 Set `APPA_VERSION` to install one release instead of the latest release.
 Set `APPA_INSTALL_DIR`, `APPA_CONFIG_DIR`, or `APPA_DATA_DIR` before
@@ -153,6 +160,23 @@ nohup cargo run --bin appa-runtime-v2 -- --config appa.toml --db appa.db >appa-r
 If the process listens on a port other than 8787, set
 `APPA_RUNTIME_URL=http://127.0.0.1:<port>` in the session's
 environment; the hooks and the MCP server both follow it.
+
+## Upgrade
+
+Run the same installer with its upgrade option:
+
+```sh
+curl -fsSL https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.sh | sh -s -- --upgrade
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/archestra-ai/OpenAPPA/releases/latest/download/install.ps1))) -Upgrade
+```
+
+Upgrade installs the release over the installed runtime and plugin, in
+either direction: it also installs an older release over a newer one. Set
+`APPA_VERSION` to choose the release. A failed upgrade restores the
+runtime, the plugin, and the login startup that were there before it.
 
 ## Uninstall
 

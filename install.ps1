@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    [switch]$Upgrade
 )
 
 Set-StrictMode -Version Latest
@@ -18,6 +19,64 @@ function Get-EnvironmentValue {
         return $Default
     }
     return $value
+}
+
+# Returns older, same or newer for how $Left orders against $Right.
+function Compare-AppaText {
+    param([string]$Left, [string]$Right)
+
+    if ($Left -ceq $Right) { return "same" }
+    if ([string]::CompareOrdinal($Left, $Right) -lt 0) { return "older" }
+    return "newer"
+}
+
+# Returns older, same or newer for one pair of version fields. Two numeric
+# fields compare numerically. Any other pair compares as text.
+function Compare-AppaField {
+    param([string]$Left, [string]$Right)
+
+    if ($Left -match '^[0-9]+$' -and $Right -match '^[0-9]+$') {
+        $leftNumber = [uint64]$Left
+        $rightNumber = [uint64]$Right
+        if ($leftNumber -lt $rightNumber) { return "older" }
+        if ($leftNumber -gt $rightNumber) { return "newer" }
+        return "same"
+    }
+    return Compare-AppaText -Left $Left -Right $Right
+}
+
+# Returns older, same or newer for how $Left orders against $Right. The text
+# before the first hyphen decides first: it compares field by dotted field, and
+# a field absent from one side counts as 0. On equal fields a version carrying a
+# prerelease suffix orders before one without it, and two suffixes compare as
+# text.
+function Compare-AppaVersion {
+    param(
+        [Parameter(Mandatory = $true)][string]$Left,
+        [Parameter(Mandatory = $true)][string]$Right
+    )
+
+    $leftHyphen = $Left.IndexOf("-")
+    $rightHyphen = $Right.IndexOf("-")
+    $leftCore = if ($leftHyphen -ge 0) { $Left.Substring(0, $leftHyphen) } else { $Left }
+    $rightCore = if ($rightHyphen -ge 0) { $Right.Substring(0, $rightHyphen) } else { $Right }
+    $leftSuffix = if ($leftHyphen -ge 0) { $Left.Substring($leftHyphen) } else { "" }
+    $rightSuffix = if ($rightHyphen -ge 0) { $Right.Substring($rightHyphen) } else { "" }
+
+    $leftFields = $leftCore.Split(".")
+    $rightFields = $rightCore.Split(".")
+    $fieldCount = [Math]::Max($leftFields.Count, $rightFields.Count)
+    for ($index = 0; $index -lt $fieldCount; $index++) {
+        $leftField = if ($index -lt $leftFields.Count -and $leftFields[$index]) { $leftFields[$index] } else { "0" }
+        $rightField = if ($index -lt $rightFields.Count -and $rightFields[$index]) { $rightFields[$index] } else { "0" }
+        $fieldOrder = Compare-AppaField -Left $leftField -Right $rightField
+        if ($fieldOrder -ne "same") { return $fieldOrder }
+    }
+
+    if ($leftSuffix -ceq $rightSuffix) { return "same" }
+    if (-not $leftSuffix) { return "newer" }
+    if (-not $rightSuffix) { return "older" }
+    return Compare-AppaText -Left $leftSuffix -Right $rightSuffix
 }
 
 function Test-AppaTaskOwnedByCurrentUser {
@@ -274,6 +333,39 @@ try {
         throw "Requested $requestedVersion but release reports $version"
     }
 
+    $installedVersion = ""
+    if (Test-Path -LiteralPath $binary -PathType Leaf) {
+        $installedReport = ""
+        try {
+            $installedReport = (& $binary --version 2>$null | Out-String).Trim()
+        } catch {
+            $installedReport = ""
+        }
+        if ($installedReport -match '^appa-runtime-v2 (.+)$') {
+            $installedVersion = $Matches[1]
+        }
+    }
+    $upgradeCommand = "& ([scriptblock]::Create((irm " +
+        "https://github.com/$repository/releases/latest/download/install.ps1))) -Upgrade"
+
+    if (-not $Upgrade -and (Test-Path -LiteralPath $binary)) {
+        if (-not $installedVersion) {
+            Write-Output "appa-runtime-v2 is installed, but it does not report a version."
+        } else {
+            switch (Compare-AppaVersion -Left $installedVersion -Right $version) {
+                "same" { Write-Output "appa-runtime-v2 $installedVersion is already installed." }
+                "newer" { Write-Output "The installed appa-runtime-v2 is newer than this release." }
+                "older" { Write-Output "A newer appa-runtime-v2 release is available." }
+            }
+        }
+        Write-Output "Installed: $(if ($installedVersion) { $installedVersion } else { 'unknown' })"
+        Write-Output "Release: $version"
+        Write-Output "Runtime: $binary"
+        Write-Output "Nothing changed. Install the release over it with:"
+        Write-Output "  $upgradeCommand"
+        return
+    }
+
     $checksumsPath = Get-ReleaseAsset -Name "SHA256SUMS"
     $archivePath = Get-ReleaseAsset -Name $archive
     $escapedArchive = [Regex]::Escape($archive)
@@ -461,6 +553,9 @@ WScript.Quit 1
     Remove-Item -LiteralPath $binaryOld -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $pluginOld -Recurse -Force -ErrorAction SilentlyContinue
 
+    if ($installedVersion -and $installedVersion -ne $version) {
+        Write-Output "Replaced appa-runtime-v2 $installedVersion."
+    }
     Write-Output "Installed appa-runtime-v2 $version."
     Write-Output "Runtime: $binary"
     Write-Output "Policy: $configFile"

@@ -268,9 +268,42 @@ public static class Program {
     }
     $env:APPA_RUNTIME_URL = "http://127.0.0.1:8787"
 
+    $secondRun = (& $installer | Out-String)
+    if (-not $secondRun.Contains("appa-runtime-v2 $version is already installed.")) {
+        throw "Second run did not report the installation as unchanged"
+    }
+    if (-not $secondRun.Contains("Installed: $version") -or -not $secondRun.Contains("Release: $version")) {
+        throw "Second run did not report both versions"
+    }
+    if (-not $secondRun.Contains("-Upgrade")) {
+        throw "Second run did not name the upgrade option"
+    }
+    if ($secondRun.Contains("Installed appa-runtime-v2")) {
+        throw "Second run reinstalled instead of reporting"
+    }
+
+    "9.8.8" | Set-Content -LiteralPath (Join-Path $releaseDir "version.txt")
+    $olderRun = (& $installer | Out-String)
+    if (-not $olderRun.Contains("A newer appa-runtime-v2 release is available.")) {
+        throw "An older installation was not reported as upgradable"
+    }
+    if (-not $olderRun.Contains("Release: 9.8.8")) {
+        throw "Upgradable report did not name the release version"
+    }
+
+    "9.8.6" | Set-Content -LiteralPath (Join-Path $releaseDir "version.txt")
+    $newerRun = (& $installer | Out-String)
+    if (-not $newerRun.Contains("The installed appa-runtime-v2 is newer than this release.")) {
+        throw "A newer installation was not reported as newer"
+    }
+    if (-not $newerRun.Contains("Installed: $version")) {
+        throw "Newer-installation report did not name the installed version"
+    }
+    $version | Set-Content -LiteralPath (Join-Path $releaseDir "version.txt")
+
     "policy survives update" | Set-Content -LiteralPath (Join-Path $env:APPA_CONFIG_DIR "appa.toml")
     "database survives update" | Set-Content -LiteralPath (Join-Path $env:APPA_DATA_DIR "appa.db")
-    & $installer | Out-Null
+    & $installer -Upgrade | Out-Null
     if ((Get-Content -LiteralPath (Join-Path $env:APPA_CONFIG_DIR "appa.toml") -Raw).Trim() -ne "policy survives update") {
         throw "Policy was replaced"
     }
@@ -281,7 +314,7 @@ public static class Program {
     Add-Content -LiteralPath $archivePath -Value "tampered"
     $rejected = $false
     try {
-        & $installer | Out-Null
+        & $installer -Upgrade | Out-Null
     } catch {
         if ($_.Exception.Message -like "Checksum mismatch for *") {
             $rejected = $true

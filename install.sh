@@ -8,7 +8,11 @@ die() {
 
 usage() {
   cat <<'EOF'
-Usage: sh install.sh [--uninstall]
+Usage: sh install.sh [--upgrade | --uninstall]
+
+With no option the installer refuses to touch an existing installation. It
+reports the installed version beside the release version and exits. Pass
+--upgrade to replace the installed runtime with the release.
 
 Environment overrides:
   APPA_VERSION         Release version to install, without or with a leading v
@@ -21,9 +25,12 @@ Environment overrides:
 EOF
 }
 
+uninstall=0
+upgrade=0
 case "${1:-}" in
-  '') uninstall=0 ;;
+  '') ;;
   --uninstall) uninstall=1 ;;
+  --upgrade) upgrade=1 ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
 esac
@@ -201,6 +208,101 @@ if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z
 fi
 if [ -n "$requested_version" ] && [ "$version" != "$requested_version" ]; then
   die "requested $requested_version but release reports $version"
+fi
+
+# Prints older, same or newer for how the first text orders against the second.
+compare_text() {
+  if [ "$1" = "$2" ]; then
+    printf 'same\n'
+  elif [ "$(printf '%s\n%s\n' "$1" "$2" | LC_ALL=C sort | head -n 1)" = "$1" ]; then
+    printf 'older\n'
+  else
+    printf 'newer\n'
+  fi
+}
+
+# Prints older, same or newer for one pair of version fields. Two numeric
+# fields compare numerically. Any other pair compares as text.
+compare_fields() {
+  case "$1$2" in
+    *[!0-9]*)
+      compare_text "$1" "$2"
+      return
+      ;;
+  esac
+  if [ "$1" -lt "$2" ]; then
+    printf 'older\n'
+  elif [ "$1" -gt "$2" ]; then
+    printf 'newer\n'
+  else
+    printf 'same\n'
+  fi
+}
+
+# Prints older, same or newer for how the first version orders against the
+# second. The text before the first hyphen decides first: it compares field by
+# dotted field, and a field absent from one side counts as 0. On equal fields a
+# version carrying a prerelease suffix orders before one without it, and two
+# suffixes compare as text.
+compare_versions() {
+  left_core=${1%%-*}
+  left_suffix=${1#"$left_core"}
+  right_core=${2%%-*}
+  right_suffix=${2#"$right_core"}
+
+  while [ -n "$left_core" ] || [ -n "$right_core" ]; do
+    left_field=${left_core%%.*}
+    right_field=${right_core%%.*}
+    case "$left_core" in
+      *.*) left_core=${left_core#*.} ;;
+      *) left_core= ;;
+    esac
+    case "$right_core" in
+      *.*) right_core=${right_core#*.} ;;
+      *) right_core= ;;
+    esac
+    field_order=$(compare_fields "${left_field:-0}" "${right_field:-0}")
+    if [ "$field_order" != same ]; then
+      printf '%s\n' "$field_order"
+      return
+    fi
+  done
+
+  if [ "$left_suffix" = "$right_suffix" ]; then
+    printf 'same\n'
+  elif [ -z "$left_suffix" ]; then
+    printf 'newer\n'
+  elif [ -z "$right_suffix" ]; then
+    printf 'older\n'
+  else
+    compare_text "$left_suffix" "$right_suffix"
+  fi
+}
+
+installed_version=
+if [ -f "$binary" ] && installed_report=$("$binary" --version 2>/dev/null); then
+  case "$installed_report" in
+    'appa-runtime-v2 '*) installed_version=${installed_report#appa-runtime-v2 } ;;
+  esac
+fi
+
+upgrade_command="curl -fsSL https://github.com/$repository/releases/latest/download/install.sh | sh -s -- --upgrade"
+
+if [ "$upgrade" = 0 ] && [ -e "$binary" ]; then
+  if [ -z "$installed_version" ]; then
+    printf 'appa-runtime-v2 is installed, but it does not report a version.\n'
+  else
+    case "$(compare_versions "$installed_version" "$version")" in
+      same) printf 'appa-runtime-v2 %s is already installed.\n' "$installed_version" ;;
+      newer) printf 'The installed appa-runtime-v2 is newer than this release.\n' ;;
+      older) printf 'A newer appa-runtime-v2 release is available.\n' ;;
+    esac
+  fi
+  printf 'Installed: %s\n' "${installed_version:-unknown}"
+  printf 'Release: %s\n' "$version"
+  printf 'Runtime: %s\n' "$binary"
+  printf 'Nothing changed. Install the release over it with:\n  %s\n' "$upgrade_command"
+  exit 0
 fi
 
 download_asset SHA256SUMS "$tmp_dir/SHA256SUMS"
@@ -570,6 +672,9 @@ fi
 rm -f "$binary_old"
 rm -rf "$plugin_old"
 
+if [ -n "$installed_version" ] && [ "$installed_version" != "$version" ]; then
+  printf 'Replaced appa-runtime-v2 %s.\n' "$installed_version"
+fi
 printf 'Installed appa-runtime-v2 %s.\n' "$version"
 printf 'Runtime: %s\n' "$binary"
 printf 'Policy: %s\n' "$config_file"
