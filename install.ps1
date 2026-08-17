@@ -20,6 +20,22 @@ function Get-EnvironmentValue {
     return $value
 }
 
+function Test-AppaTaskOwnedByCurrentUser {
+    param([object]$Task)
+
+    $userId = [string]$Task.Principal.UserId
+    if ($userId -ieq $script:CurrentUser -or $userId -eq $script:CurrentSid) {
+        return $true
+    }
+    try {
+        $account = New-Object System.Security.Principal.NTAccount -ArgumentList $userId
+        $sid = $account.Translate([Security.Principal.SecurityIdentifier])
+        return $sid.Value -eq $script:CurrentSid
+    } catch {
+        return $false
+    }
+}
+
 function Invoke-AppaTaskStop {
     param([string]$Name = $script:TaskName)
 
@@ -132,7 +148,7 @@ if ($Uninstall) {
         if ($null -eq $task) {
             continue
         }
-        $isOwned = $task.Principal.UserId -in @($script:CurrentUser, $script:CurrentSid)
+        $isOwned = Test-AppaTaskOwnedByCurrentUser -Task $task
         if ($taskName -eq $script:LegacyTaskName -and -not $isOwned) {
             continue
         }
@@ -320,8 +336,7 @@ try {
 
     if (-not $skipService) {
         $legacyTask = Get-ScheduledTask -TaskName $script:LegacyTaskName -ErrorAction SilentlyContinue
-        if ($null -ne $legacyTask -and
-            $legacyTask.Principal.UserId -in @($script:CurrentUser, $script:CurrentSid)) {
+        if ($null -ne $legacyTask -and (Test-AppaTaskOwnedByCurrentUser -Task $legacyTask)) {
             $legacyTaskXml = Export-ScheduledTask -TaskName $script:LegacyTaskName
             $legacyTaskWasRunning = $legacyTask.State -eq "Running"
             $legacyTaskTouched = $true

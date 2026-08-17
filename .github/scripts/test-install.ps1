@@ -207,7 +207,14 @@ public static class Program {
     if ($installedTask.Triggers[0].CimClass.CimClassName -ne "MSFT_TaskLogonTrigger") {
         throw "Scheduled Task does not start at user login"
     }
-    if ($installedTask.Principal.UserId -ne [Security.Principal.WindowsIdentity]::GetCurrent().Name) {
+    $taskUserId = [string]$installedTask.Principal.UserId
+    if ($taskUserId -match '^S-\d-') {
+        $taskSid = $taskUserId
+    } else {
+        $taskAccount = New-Object System.Security.Principal.NTAccount -ArgumentList $taskUserId
+        $taskSid = $taskAccount.Translate([Security.Principal.SecurityIdentifier]).Value
+    }
+    if ($taskSid -ne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) {
         throw "Scheduled Task is not scoped to the current user principal"
     }
     $launcher = Join-Path $env:APPA_DATA_DIR "appa-runtime-v2.vbs"
@@ -239,9 +246,17 @@ public static class Program {
         throw "Windows statusline did not render runtime status"
     }
     $env:APPA_RUNTIME_URL = "http://127.0.0.1:1"
-    '{"hook_event_name":"PreToolUse"}' |
-        powershell.exe -NoProfile -ExecutionPolicy Bypass -File $hookScript 2>$null | Out-Null
-    if ($LASTEXITCODE -ne 2) {
+    $savedErrorActionPreference = $ErrorActionPreference
+    $hookExitCode = -1
+    try {
+        $ErrorActionPreference = "Continue"
+        '{"hook_event_name":"PreToolUse"}' |
+            powershell.exe -NoProfile -ExecutionPolicy Bypass -File $hookScript 2>$null | Out-Null
+        $hookExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+    }
+    if ($hookExitCode -ne 2) {
         throw "Windows hook adapter did not fail closed while the runtime was down"
     }
     $postToolOutput = ('{"hook_event_name":"PostToolUse"}' |
