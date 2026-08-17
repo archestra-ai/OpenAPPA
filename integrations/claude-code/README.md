@@ -110,9 +110,6 @@ survives the uninstall.
    can be deleted too if I say so. Never delete or offer to delete the
    policy config the process was started with (--config, e.g.
    appa.toml) — the policy and its edits outlive the integration.
-
-Changes take effect in new sessions; this one keeps its hooks until it
-ends.
 ```
 
 If a gated session is blocked because the runtime is not running, start
