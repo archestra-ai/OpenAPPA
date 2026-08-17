@@ -1,4 +1,39 @@
 //! The engine boundary: the one module that speaks to `appa-engine`.
+//!
+//! [`EngineSeam::rebuild_view`] turns the store's opaque batch rows back into
+//! typed facts and refuses the log before it is trusted: the log opens under
+//! this root's own policy, and
+//! [`appa_engine::engine::Engine::view`] then admits every record through the
+//! engine's one sequential transition validator, so a log whose records could
+//! not have followed one another never reaches a decision. Because
+//! this runtime stores no view and rebuilds from the durable log on every
+//! event, that decode step is the store-reopen trust
+//! gate. [`EngineSeam::handle`] then translates one runtime event onto
+//! [`appa_engine::engine::Engine::handle`], the engine's one mutation
+//! boundary, and translates its typed follow-up back into a delivery. It
+//! returns one decision: an optional fact batch to append under
+//! compare-and-swap plus the follow-up the session delivers. The
+//! vocabulary here is delivery adaptation, not policy: every
+//! admissibility judgment is the engine's.
+//!
+//! Beside `handle` the seam makes projection reads — which branch has ended,
+//! which dispatches it has open, what its label renders as. They gate nothing
+//! and append nothing. One of them is not a read at all:
+//! [`EngineSeam::opens_a_second_dispatch`] is this deployment's own host
+//! policy, which the engine deliberately does not enforce.
+//!
+//! External evidence is typed before it reaches an engine input:
+//! an authority verdict, a sanitizer derivation, a dynamic-resolver reader
+//! set. A missing or malformed answer stays runtime-side and fails closed
+//! — no no-answer variant ever enters an engine operation.
+//!
+//! Offers are engine-derived remedies the runtime routes by an unguessable id.
+//! The id→trajectory routing is durable (the store's `offers`
+//! table); the offered payload lives only in this process. Execution never
+//! trusts the cache: the plan is re-derived from the live views and matched
+//! by value, so a stale offer declines instead of executing. A
+//! restart forgets pending offers — the model hears "no longer stands" and
+//! re-proposes; durable engine-owned offers are `T21`.
 
 #[cfg(test)]
 use std::sync::Mutex;
@@ -18,12 +53,16 @@ use appa_engine::profile::PolicyFileKey as EnginePolicyFileKey;
 use appa_engine::projection::Views;
 use appa_engine::registry::TrustChain;
 use appa_engine::transition::Blocked as CoreBlocked;
+/// The engine's own validated view is the runtime's too: the runtime adds no
+/// wrapper, because everything it would carry beside the log is already on
+/// the event or passed with the read.
+pub(crate) use appa_engine::transition::EngineView;
 use appa_engine::transition::{
     ChildFollowUp, ChildReport, ChildSubmission, Confined, EngineDecision as CoreDecision, EngineEvent as CoreEvent,
-    EngineView as ValidatedView, Evidence, EvidenceRequest, FollowUp, ForkBinding, OfferConsult, OfferExecution,
-    OfferFollowUp, OfferOutcome, OutcomeBody as CoreOutcomeBody, OutcomeFollowUp, PendingReturnStage, ProposalBatch,
-    ProposalBatchId, ProposedCall as CoreProposedCall, Released, SpawnMark, ToolOutcome as CoreToolOutcome, ToolReport,
-    TransitionError, ValidatedFactBatch,
+    Evidence, EvidenceRequest, FollowUp, ForkBinding, OfferConsult, OfferExecution, OfferFollowUp, OfferOutcome,
+    OutcomeBody as CoreOutcomeBody, OutcomeFollowUp, PendingReturnStage, ProposalBatch, ProposalBatchId,
+    ProposedCall as CoreProposedCall, Released, SpawnMark, ToolOutcome as CoreToolOutcome, ToolReport, TransitionError,
+    ValidatedFactBatch,
 };
 use appa_engine::value::TrajectoryId as EngineTrajectoryId;
 use appa_engine::value::{
@@ -223,16 +262,6 @@ pub enum EngineRefusal {
     Unbindable,
 }
 
-/// The engine's derived working picture of one family log, scoped to the
-/// trajectory the event belongs to. Opaque and disposable: rebuilt
-/// per event, never stored. The engine's own view is boxed because it carries
-/// the whole validated projection.
-#[derive(Debug)]
-pub struct EngineView {
-    view: Box<ValidatedView>,
-    trajectory: TrajectoryId,
-}
-
 /// One trajectory's current label rendered for a display surface — the
 /// statusline. Chain names and reader ids as plain strings: no label type
 /// leaves the engine boundary. A projection of the log;
@@ -395,13 +424,8 @@ impl EngineSeam {
     /// opening gate: the log's first record must be this root's opening under
     /// exactly the deciding engine's policy. The root is the log's own, so a
     /// view cannot be built against a log it does not describe.
-    pub fn rebuild_view(
-        &self,
-        policy: &PolicyEngine<'_>,
-        log: &Log,
-        trajectory: &TrajectoryId,
-    ) -> Result<EngineView, EngineRefusal> {
-        policy.engine().rebuild_view(log, trajectory)
+    pub fn rebuild_view(&self, policy: &PolicyEngine<'_>, log: &Log) -> Result<EngineView, EngineRefusal> {
+        policy.engine().rebuild_view(log)
     }
 
     /// What a root's opening record binds it to: the policy file it
@@ -425,15 +449,13 @@ impl EngineSeam {
     /// Has this branch ended its errand? The one replay-derived
     /// answer; the runtime keeps no flag of its own.
     pub fn has_ended(&self, view: &EngineView, trajectory: &TrajectoryId) -> bool {
-        view.view
-            .views(&engine_id(trajectory))
-            .has_ended(&engine_id(trajectory))
+        let id = engine_id(trajectory);
+        view.views(&id).has_ended(&id)
     }
 
     pub fn parent_of(&self, view: &EngineView, child: &TrajectoryId) -> Option<TrajectoryId> {
         let child = engine_id(child);
-        view.view
-            .views(&child)
+        view.views(&child)
             .parent_of(&child)
             .map(|parent| TrajectoryId(parent.as_str().to_string()))
     }
@@ -443,7 +465,7 @@ impl EngineSeam {
     /// used it.
     pub fn names_trajectory(&self, view: &EngineView, trajectory: &TrajectoryId) -> bool {
         let id = engine_id(trajectory);
-        view.view.views(&id).is_active(&id)
+        view.views(&id).is_active(&id)
     }
 
     /// Would applying this batch leave the trajectory with more than one
@@ -451,7 +473,6 @@ impl EngineSeam {
     pub fn opens_a_second_dispatch(&self, view: &EngineView, trajectory: &TrajectoryId, facts: &[Fact]) -> bool {
         let owner = engine_id(trajectory);
         let mut open: std::collections::BTreeSet<_> = view
-            .view
             .views(&owner)
             .open_dispatches()
             .map(|(dispatch, _)| dispatch.clone())
@@ -473,8 +494,8 @@ impl EngineSeam {
     /// Which trajectory pursues this offer.
     pub fn offer_pursuer(&self, view: &EngineView, offer: &OfferId) -> Option<TrajectoryId> {
         let (_, engine_offer) = parse_offer(offer)?;
-        let surfaced = view.view.offer_trajectory(&engine_offer)?.clone();
-        let views = view.view.views(&surfaced);
+        let surfaced = view.offer_trajectory(&engine_offer)?.clone();
+        let views = view.views(&surfaced);
         let pursuer = if views.has_ended(&surfaced) {
             views.parent_of(&surfaced).cloned().unwrap_or(surfaced)
         } else {
@@ -488,8 +509,7 @@ impl EngineSeam {
     /// persisted once, on the opening record, so this is where a live call is
     /// read back — the runtime keeps no row of its own.
     pub fn open_dispatches(&self, view: &EngineView, trajectory: &TrajectoryId) -> Vec<OpenDispatch> {
-        view.view
-            .views(&engine_id(trajectory))
+        view.views(&engine_id(trajectory))
             .open_dispatches()
             .map(|(dispatch, call)| OpenDispatch {
                 id: dispatch.clone(),
@@ -507,7 +527,7 @@ impl EngineSeam {
     /// refuse the next proposal as a second call in flight.
     pub fn substituted_release(&self, view: &EngineView, trajectory: &TrajectoryId) -> Option<OpenDispatch> {
         let owner = engine_id(trajectory);
-        let views = view.view.views(&owner);
+        let views = view.views(&owner);
         views
             .open_dispatches()
             .find(|(dispatch, _)| !views.released_by_proposal(dispatch))
@@ -522,10 +542,11 @@ impl EngineSeam {
         &self,
         policy: &PolicyEngine<'_>,
         view: &EngineView,
+        trajectory: &TrajectoryId,
         event: EngineEvent,
     ) -> Result<EngineDecision, EngineRefusal> {
         match &self.decider {
-            Decider::Real => policy.engine().handle(view, event),
+            Decider::Real => policy.engine().handle(view, trajectory, event),
             #[cfg(test)]
             Decider::Test(seam) => Ok(seam.next(event)),
         }
@@ -562,9 +583,14 @@ impl EngineSeam {
     /// Render one trajectory's current label from the rebuilt view, for the
     /// statusline. A projection read: no engine event, no fact, nothing
     /// gated.
-    pub fn trajectory_status(&self, policy: &PolicyEngine<'_>, view: &EngineView) -> Option<TrajectoryStatus> {
+    pub fn trajectory_status(
+        &self,
+        policy: &PolicyEngine<'_>,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+    ) -> Option<TrajectoryStatus> {
         match &self.decider {
-            Decider::Real => policy.engine().trajectory_status(view),
+            Decider::Real => policy.engine().trajectory_status(view, trajectory),
             #[cfg(test)]
             Decider::Test(_) => Some(TrajectoryStatus {
                 trajectory: String::new(),
@@ -580,7 +606,7 @@ impl EngineSeam {
     /// the family's forks still open for binding, and the child a spawn's fork
     /// was bound to when that spawn's result arrives.
     pub fn fork_status(&self, policy: &PolicyEngine<'_>, view: &EngineView, fork: &ForkId) -> ForkStatus {
-        policy.engine().engine.fork_status(&view.view, fork)
+        policy.engine().engine.fork_status(view, fork)
     }
 
     /// The family's forks in flight: prepared, bound to
@@ -588,7 +614,7 @@ impl EngineSeam {
     /// on the real compiled engine in both modes; the runtime binds a child
     /// start that names no spawn to the one fork here.
     pub fn forks_in_flight(&self, policy: &PolicyEngine<'_>, view: &EngineView) -> Vec<ForkId> {
-        policy.engine().engine.forks_in_flight(&view.view)
+        policy.engine().engine.forks_in_flight(view)
     }
 
     /// The fork one child was bound to, or `None` for a trajectory
@@ -596,7 +622,7 @@ impl EngineSeam {
     /// compiled engine in both modes, for a child start the harness delivers
     /// again: it names the fork it already bound.
     pub fn fork_of(&self, policy: &PolicyEngine<'_>, view: &EngineView, child: &TrajectoryId) -> Option<ForkId> {
-        policy.engine().engine.fork_of(&view.view, &engine_id(child))
+        policy.engine().engine.fork_of(view, &engine_id(child))
     }
 
     /// Render the family's recorded decisions from its persisted log. Like
@@ -620,21 +646,12 @@ impl RuntimeEngine {
         RuntimeEngine { engine }
     }
 
-    fn rebuild_view(&self, log: &Log, trajectory: &TrajectoryId) -> Result<EngineView, EngineRefusal> {
+    fn rebuild_view(&self, log: &Log) -> Result<EngineView, EngineRefusal> {
         let root = TrajectoryId(log.root().as_str().to_string());
-        let view = self.validated(log.facts().to_vec(), &root, log.basis())?;
-        Ok(EngineView {
-            view: Box::new(view),
-            trajectory: trajectory.clone(),
-        })
+        self.validated(log.facts().to_vec(), &root, log.basis())
     }
 
-    fn validated(
-        &self,
-        facts: Vec<Fact>,
-        family: &TrajectoryId,
-        revision: u64,
-    ) -> Result<ValidatedView, EngineRefusal> {
+    fn validated(&self, facts: Vec<Fact>, family: &TrajectoryId, revision: u64) -> Result<EngineView, EngineRefusal> {
         self.engine
             .verify_opening(&facts, &engine_id(family))
             .map_err(|error| EngineRefusal::OpeningMismatch {
@@ -655,8 +672,7 @@ impl RuntimeEngine {
         Some(resolved.canonical_arguments().canonical_bytes().to_vec())
     }
 
-    fn trajectory_status(&self, view: &EngineView) -> Option<TrajectoryStatus> {
-        let EngineView { view, trajectory, .. } = view;
+    fn trajectory_status(&self, view: &EngineView, trajectory: &TrajectoryId) -> Option<TrajectoryStatus> {
         let current = view.views(&engine_id(trajectory)).current_label();
         let label = self.render_label(&as_label(&current))?;
         Some(TrajectoryStatus {
@@ -827,8 +843,12 @@ impl RuntimeEngine {
         Some(Some(event))
     }
 
-    fn handle(&self, view: &EngineView, event: EngineEvent) -> Result<EngineDecision, EngineRefusal> {
-        let EngineView { view, trajectory, .. } = view;
+    fn handle(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        event: EngineEvent,
+    ) -> Result<EngineDecision, EngineRefusal> {
         match event {
             EngineEvent::ModelResponse {
                 call,
@@ -860,7 +880,7 @@ impl RuntimeEngine {
 
     fn model_response(
         &self,
-        view: &ValidatedView,
+        view: &EngineView,
         trajectory: &TrajectoryId,
         call: &ProposedCall,
         evidence: &[ExternalEvidence],
@@ -910,7 +930,7 @@ impl RuntimeEngine {
 
     fn decide_proposal(
         &self,
-        view: &ValidatedView,
+        view: &EngineView,
         trajectory: &TrajectoryId,
         proposed: CoreProposedCall,
         entropy: &OfferNonce,
@@ -929,7 +949,7 @@ impl RuntimeEngine {
 
     fn deliver_proposals(
         &self,
-        view: &ValidatedView,
+        view: &EngineView,
         trajectory: &TrajectoryId,
         follow_up: FollowUp,
     ) -> Result<Next, EngineRefusal> {
@@ -970,7 +990,7 @@ impl RuntimeEngine {
         }
     }
 
-    fn block_delivery(&self, view: &ValidatedView, trajectory: &TrajectoryId, block: &CoreBlocked) -> Feedback {
+    fn block_delivery(&self, view: &EngineView, trajectory: &TrajectoryId, block: &CoreBlocked) -> Feedback {
         let owner = engine_id(trajectory);
         let (text, offers) = self.rendered_block(view.family(), &view.views(&owner), block);
         Feedback { text, offers }
@@ -988,7 +1008,7 @@ impl RuntimeEngine {
 
     fn tool_outcome(
         &self,
-        view: &ValidatedView,
+        view: &EngineView,
         dispatch: &EngineDispatchId,
         outcome: &ToolOutcome,
         evidence: &[ExternalEvidence],
@@ -1028,7 +1048,7 @@ impl RuntimeEngine {
 
     fn execute_offer(
         &self,
-        view: &ValidatedView,
+        view: &EngineView,
         trajectory: &TrajectoryId,
         offer: &OfferId,
         evidence: &[ExternalEvidence],
@@ -1227,7 +1247,7 @@ impl RuntimeEngine {
 
     fn bind_fork(
         &self,
-        view: &ValidatedView,
+        view: &EngineView,
         fork: &ForkId,
         child: &TrajectoryId,
     ) -> Result<EngineDecision, EngineRefusal> {
@@ -1253,7 +1273,7 @@ impl RuntimeEngine {
 
     fn child_return(
         &self,
-        view: &ValidatedView,
+        view: &EngineView,
         child: &TrajectoryId,
         value: Option<String>,
         evidence: &[ExternalEvidence],

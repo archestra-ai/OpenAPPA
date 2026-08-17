@@ -528,7 +528,7 @@ pub enum ViewMismatch {
 /// The engine's derived working picture of one family log: the validated records and
 /// the projection built from them. Opaque and disposable — the runtime stores it for the next
 /// event, but every constructor and mutator here belongs to the engine.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct EngineView {
     projection: Projection,
     policy: PolicyIdentityV1,
@@ -550,9 +550,9 @@ impl EngineView {
         &self.projection
     }
 
-    /// The validated views of one trajectory in this family, for the composed operations a runtime
-    /// still drives. It exists for the window in which those operations are public: `handle` needs
-    /// no such accessor, and the cutover removes both together.
+    /// The validated views of one trajectory in this family, for the reads an outer layer makes
+    /// beside `handle` — which branch has ended, which dispatches it has open, what its current
+    /// label renders as. `handle` itself needs no such accessor: an event names its own subject.
     pub fn views<'a>(&'a self, trajectory: &'a TrajectoryId) -> crate::projection::Views<'a> {
         self.projection.view(trajectory)
     }

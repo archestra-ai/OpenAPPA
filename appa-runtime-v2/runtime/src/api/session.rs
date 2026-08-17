@@ -231,7 +231,7 @@ impl Session {
         let view = self
             .inner
             .engine
-            .rebuild_view(&policy, &log, &self.trajectory)
+            .rebuild_view(&policy, &log)
             .map_err(EventError::from)?;
         if self.inner.engine.has_ended(&view, &self.trajectory) {
             return Err(EventError::TrajectoryEnded);
@@ -620,11 +620,7 @@ impl Session {
                 Some(log) => log,
                 None => self.inner.log(&self.root)?,
             };
-            let view = self
-                .inner
-                .engine
-                .rebuild_view(policy, &log, &self.trajectory)
-                .map_err(EventError::from)?;
+            let view = self.inner.engine.rebuild_view(policy, &log).map_err(EventError::from)?;
             let context = Decided {
                 session: self,
                 policy,
@@ -646,7 +642,7 @@ impl Session {
             let decision = self
                 .inner
                 .engine
-                .handle(policy, &view, event)
+                .handle(policy, &view, &self.trajectory, event)
                 .map_err(EventError::from)?;
 
             let Some(facts) = decision.append.as_ref() else {

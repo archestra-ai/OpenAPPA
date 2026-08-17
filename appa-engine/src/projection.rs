@@ -655,11 +655,11 @@ impl Projection {
         }
     }
 
-    pub fn revision(&self) -> u64 {
+    pub(crate) fn revision(&self) -> u64 {
         self.revision
     }
 
-    pub fn value_label(&self, id: ValueId) -> Option<&Label> {
+    pub(crate) fn value_label(&self, id: ValueId) -> Option<&Label> {
         usize::try_from(id.index())
             .ok()
             .and_then(|i| self.values.get(i))
@@ -782,7 +782,7 @@ impl Projection {
         self.offers.get(offer).map(|recorded| &recorded.trajectory)
     }
 
-    pub fn view<'a>(&'a self, trajectory: &'a TrajectoryId) -> Views<'a> {
+    pub(crate) fn view<'a>(&'a self, trajectory: &'a TrajectoryId) -> Views<'a> {
         Views {
             projection: self,
             trajectory,
@@ -798,21 +798,18 @@ pub struct Views<'a> {
 impl Views<'_> {
     /// The dynamic answers a dispatch pinned, read off the canonical call the opening
     /// recorded — the one representation the validator held that record to.
-    pub fn dynamic_resolutions(&self, dispatch: &DispatchId) -> Option<&[PinnedDynamicResolution]> {
+    pub(crate) fn dynamic_resolutions(&self, dispatch: &DispatchId) -> Option<&[PinnedDynamicResolution]> {
         self.projection
             .dispatch_calls
             .get(dispatch)
             .map(ResolvedCall::dynamic_resolutions)
     }
-    pub fn revision(&self) -> u64 {
-        self.projection.revision
-    }
 
-    pub fn trajectory(&self) -> &TrajectoryId {
+    pub(crate) fn trajectory(&self) -> &TrajectoryId {
         self.trajectory
     }
 
-    pub fn value_label(&self, id: ValueId) -> Option<&Label> {
+    pub(crate) fn value_label(&self, id: ValueId) -> Option<&Label> {
         self.projection.value_label(id)
     }
 
@@ -1046,7 +1043,7 @@ impl Views<'_> {
 
     /// The branch-local fold of an arbitrary trajectory in the family — used to validate that a
     /// child's returned value does not raise trust above what the child legitimately holds.
-    pub fn branch_label(&self, trajectory: &TrajectoryId) -> PartialLabel {
+    pub(crate) fn branch_label(&self, trajectory: &TrajectoryId) -> PartialLabel {
         self.projection.fold_for(trajectory)
     }
 
@@ -1060,7 +1057,7 @@ impl Views<'_> {
 
     /// The child's immutable fork return policy — the binding every `submit_result` crossing is
     /// derived from. `None` for a trajectory that was never forked.
-    pub fn return_policy_of(&self, child: &TrajectoryId) -> Option<&ReturnPolicy> {
+    pub(crate) fn return_policy_of(&self, child: &TrajectoryId) -> Option<&ReturnPolicy> {
         self.projection
             .fork_of
             .get(child)
@@ -1070,7 +1067,7 @@ impl Views<'_> {
 
     /// The structured-return shape the child's fork froze: every non-void submission
     /// validates against exactly this stored form. `None` for an unshaped or unforked child.
-    pub fn return_shape_of(&self, child: &TrajectoryId) -> Option<&crate::shape::ReturnShape> {
+    pub(crate) fn return_shape_of(&self, child: &TrajectoryId) -> Option<&crate::shape::ReturnShape> {
         self.projection
             .fork_of
             .get(child)
@@ -1078,7 +1075,7 @@ impl Views<'_> {
             .and_then(|prepared| prepared.shape.as_ref())
     }
 
-    pub fn child_return(&self, id: &ChildReturnId) -> Option<&LabeledValue> {
+    pub(crate) fn child_return(&self, id: &ChildReturnId) -> Option<&LabeledValue> {
         self.projection
             .child_returns
             .iter()
@@ -1088,7 +1085,7 @@ impl Views<'_> {
 
     /// How many values `child` has already returned. Nonzero refuses a further return (a child
     /// returns at most once); the count also mints the crossing's occurrence.
-    pub fn returns_by(&self, child: &TrajectoryId) -> u32 {
+    pub(crate) fn returns_by(&self, child: &TrajectoryId) -> u32 {
         self.projection
             .child_returns
             .iter()
@@ -1146,7 +1143,7 @@ impl Views<'_> {
 
     /// How many dispatches of this digest this branch has already opened — the occurrence of the
     /// next one (a repeat identical call is a new dispatch, not a re-issue).
-    pub fn dispatch_count(&self, digest: &CanonicalDigest) -> u32 {
+    pub(crate) fn dispatch_count(&self, digest: &CanonicalDigest) -> u32 {
         self.projection
             .occurrences
             .get(&(self.trajectory.clone(), *digest))
@@ -1154,14 +1151,14 @@ impl Views<'_> {
             .unwrap_or(0)
     }
 
-    pub fn has_effect(&self, kind: &EffectKind) -> bool {
+    pub(crate) fn has_effect(&self, kind: &EffectKind) -> bool {
         self.projection.effects.iter().any(|e| e == kind)
     }
 
     /// Does an unsettled reservation anywhere in the family contain a matching emit? `no_prior(k)`
     /// additionally fails on this; `prior(k)` never reads it — both
     /// directions fail closed.
-    pub fn has_reservation(&self, kind: &EffectKind) -> bool {
+    pub(crate) fn has_reservation(&self, kind: &EffectKind) -> bool {
         self.projection
             .reservations
             .values()
@@ -1194,7 +1191,7 @@ impl Views<'_> {
             .any(|batch| batch.released.contains(dispatch))
     }
 
-    pub fn is_open(&self, dispatch: &DispatchId) -> bool {
+    pub(crate) fn is_open(&self, dispatch: &DispatchId) -> bool {
         self.projection.open.contains(dispatch)
     }
 
@@ -1209,14 +1206,14 @@ impl Views<'_> {
     /// Has this still-open dispatch's success checkpoint already committed its effects? Gates the
     /// close (success-family only, no duplicate effects) and the runtime's once-only checkpoint.
     /// Derived: a checkpoint is exactly a recorded observation on a dispatch that is still open.
-    pub fn is_succeeded(&self, dispatch: &DispatchId) -> bool {
+    pub(crate) fn is_succeeded(&self, dispatch: &DispatchId) -> bool {
         self.is_open(dispatch) && self.projection.observations.contains_key(dispatch)
     }
 
     /// The output sanitizer an executed sanitize plan bound to this dispatch, if any.
     /// While one stands, admission takes only that sanitizer's derivation and refuses the raw
     /// result; the runtime also reads it to know which backend to call.
-    pub fn bound_sanitizer(&self, dispatch: &DispatchId) -> Option<&SanitizerName> {
+    pub(crate) fn bound_sanitizer(&self, dispatch: &DispatchId) -> Option<&SanitizerName> {
         self.projection.bound_sanitizers.get(dispatch)
     }
 
@@ -1299,7 +1296,10 @@ impl Views<'_> {
         self.projection.subject_dispatches.get(subject)
     }
 
-    pub fn boundary_count(&self) -> usize {
+    /// How many boundaries this trajectory has recorded. Punctuation is counted for the tests
+    /// that pin it; no decision reads it.
+    #[cfg(test)]
+    pub(crate) fn boundary_count(&self) -> usize {
         self.projection
             .boundaries
             .iter()

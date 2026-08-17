@@ -421,7 +421,7 @@ impl Runtime {
         let view = self
             .inner
             .engine
-            .rebuild_view(&policy, &log, trajectory)
+            .rebuild_view(&policy, &log)
             .map_err(|refusal| SessionError::Storage(refusal.to_string()))?;
         if self.inner.engine.has_ended(&view, trajectory) {
             return Err(SessionError::Ended);
@@ -431,14 +431,14 @@ impl Runtime {
 
     pub fn status(&self, id: &TrajectoryId) -> Option<TrajectoryStatus> {
         let (policy, log) = self.root_log(id, "status")?;
-        let view = match self.inner.engine.rebuild_view(&policy, &log, id) {
+        let view = match self.inner.engine.rebuild_view(&policy, &log) {
             Ok(view) => view,
             Err(refusal) => {
                 tracing::warn!(trajectory = %id.0, %refusal, "status read refused the persisted log");
                 return None;
             }
         };
-        self.inner.engine.trajectory_status(&policy, &view)
+        self.inner.engine.trajectory_status(&policy, &view, id)
     }
 
     /// Every decision this family's log recorded, in log order.
@@ -518,7 +518,7 @@ impl Runtime {
         let root = crate::engine::offer_root(offer)?;
         let log = self.inner.log(&root).ok()?;
         let policy = self.inner.resolve_policy(&log).ok()?;
-        let view = self.inner.engine.rebuild_view(&policy, &log, &root).ok()?;
+        let view = self.inner.engine.rebuild_view(&policy, &log).ok()?;
         let trajectory = self.inner.engine.offer_pursuer(&view, offer)?;
         Some((root, trajectory))
     }
@@ -558,11 +558,7 @@ impl Runtime {
     ) -> Vec<crate::engine::OpenDispatch> {
         let log = self.inner.log(root).expect("the log reads");
         let policy = self.inner.resolve_policy(&log).expect("the opening policy resolves");
-        let view = self
-            .inner
-            .engine
-            .rebuild_view(&policy, &log, trajectory)
-            .expect("the log rebuilds");
+        let view = self.inner.engine.rebuild_view(&policy, &log).expect("the log rebuilds");
         self.inner.engine.open_dispatches(&view, trajectory)
     }
 
@@ -572,11 +568,7 @@ impl Runtime {
     pub(crate) fn names_trajectory(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> bool {
         let log = self.inner.log(root).expect("the log reads");
         let policy = self.inner.resolve_policy(&log).expect("the opening policy resolves");
-        let view = self
-            .inner
-            .engine
-            .rebuild_view(&policy, &log, trajectory)
-            .expect("the log rebuilds");
+        let view = self.inner.engine.rebuild_view(&policy, &log).expect("the log rebuilds");
         self.inner.engine.names_trajectory(&view, trajectory)
     }
 
@@ -590,11 +582,7 @@ impl Runtime {
     ) -> Option<crate::engine::OpenDispatch> {
         let log = self.inner.log(root).expect("the log reads");
         let policy = self.inner.resolve_policy(&log).expect("the opening policy resolves");
-        let view = self
-            .inner
-            .engine
-            .rebuild_view(&policy, &log, trajectory)
-            .expect("the log rebuilds");
+        let view = self.inner.engine.rebuild_view(&policy, &log).expect("the log rebuilds");
         self.inner.engine.substituted_release(&view, trajectory)
     }
 
@@ -605,12 +593,8 @@ impl Runtime {
     pub(crate) fn branch_status(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> Option<TrajectoryStatus> {
         let log = self.inner.log(root).expect("the log reads");
         let policy = self.inner.resolve_policy(&log).expect("the policy resolves");
-        let view = self
-            .inner
-            .engine
-            .rebuild_view(&policy, &log, trajectory)
-            .expect("the log rebuilds");
-        self.inner.engine.trajectory_status(&policy, &view)
+        let view = self.inner.engine.rebuild_view(&policy, &log).expect("the log rebuilds");
+        self.inner.engine.trajectory_status(&policy, &view, trajectory)
     }
 
     /// Drive one event straight at the engine and take its refusal, for the
@@ -624,15 +608,11 @@ impl Runtime {
     ) -> EventError {
         let log = self.inner.log(root).expect("the log reads");
         let policy = self.inner.resolve_policy(&log).expect("the policy resolves");
-        let view = self
-            .inner
-            .engine
-            .rebuild_view(&policy, &log, trajectory)
-            .expect("the log rebuilds");
+        let view = self.inner.engine.rebuild_view(&policy, &log).expect("the log rebuilds");
         EventError::from(
             self.inner
                 .engine
-                .handle(&policy, &view, event)
+                .handle(&policy, &view, trajectory, event)
                 .expect_err("the moved subject refuses the event"),
         )
     }
