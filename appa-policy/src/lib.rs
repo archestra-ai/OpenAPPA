@@ -17,7 +17,9 @@ use appa_engine::engine::Engine;
 use appa_engine::fact::ReturnPolicy;
 use appa_engine::fact::{EffectKind, EffectSet};
 use appa_engine::label::{Audience, Dim, EstablishedLabel, Label, ReaderId, Trust};
-use appa_engine::names::{AuthorityName, CastName, DynamicResolverName, MarkName, SanitizerName, SurfaceName, TagName};
+use appa_engine::names::{
+    AuthorityName, CastName, DynamicResolverName, MarkName, MembershipResolverName, SanitizerName, SurfaceName, TagName,
+};
 use appa_engine::params::ToolParameters;
 use appa_engine::profile::{
     BindingMode, DeploymentPolicy, ExecutorClass, PolicyDialectVersion, ProfileDeclaration, SurfaceMode,
@@ -132,6 +134,18 @@ impl Config {
                 return Err(ConfigError::DuplicateDynamicResolver(name.as_str().to_string()));
             }
         }
+        let membership = match raw.membership {
+            Some(membership) => {
+                if membership.url.is_some() || membership.builtin.is_some() {
+                    return Err(ConfigError::ForbiddenInlineBinding {
+                        kind: "membership resolver",
+                        name: membership.name,
+                    });
+                }
+                Some(MembershipResolverName::new(membership.name))
+            }
+            None => None,
+        };
         let mut tools = Vec::new();
         for t in raw.tool {
             tools.push(t.convert(&trust_chain)?);
@@ -211,6 +225,7 @@ impl Config {
             authorities,
             sanitizers,
             casts,
+            membership,
         };
         let engine = Engine::open(DeploymentPolicy {
             registry: registry_config.clone(),
@@ -262,6 +277,7 @@ struct RawConfig {
     cast: Vec<RawCast>,
     #[serde(default)]
     dynamic_resolver: Vec<RawDynamicResolver>,
+    membership: Option<RawMembership>,
     child: Option<RawChild>,
     limits: Option<RawLimits>,
     deployment: Option<RawDeployment>,
@@ -374,6 +390,14 @@ struct RawLimits {
 struct RawDynamicResolver {
     name: String,
     resolver: Option<toml::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMembership {
+    name: String,
+    url: Option<toml::Value>,
+    builtin: Option<toml::Value>,
 }
 
 #[derive(Deserialize)]
@@ -871,7 +895,7 @@ fn parse_audience(list: &[String], context: &str) -> Result<Audience, ConfigErro
         return Err(ConfigError::BadAudience {
             context: context.to_string(),
             reason: format!(
-                "{group:?} is a group mention: the `@` mark is reserved, and this configuration registers no membership resolver"
+                "{group:?} is a group mention: the `@` mark is reserved, and a group written in a declaration is not expanded in this build — only an `includes` placeholder argument names a group"
             ),
         });
     }
@@ -984,6 +1008,10 @@ confined_results = ["lookup"]
                 "cast",
                 "version = 1\n[[cast]]\nname = \"c\"\nresolver = { url = \"https://cast.invalid\", may_cast = { trust = [\"trusted\"] } }\n",
             ),
+            (
+                "membership resolver",
+                "version = 1\n[membership]\nname = \"directory\"\nurl = \"https://directory.invalid\"\n",
+            ),
         ];
         for (kind, policy) in cases {
             assert!(
@@ -1042,6 +1070,17 @@ confined_results = ["lookup"]
             ),
             Err(ConfigError::NoSanitizerPoint { name }) if name == "redact"
         ));
+    }
+
+    #[test]
+    fn a_membership_table_registers_the_resolver_by_name() {
+        let with = Config::from_toml_str("version = 1\n[membership]\nname = \"directory\"\n").unwrap();
+        assert_eq!(
+            with.registry_config().membership,
+            Some(MembershipResolverName::new("directory"))
+        );
+        let without = Config::from_toml_str("version = 1\n").unwrap();
+        assert_eq!(without.registry_config().membership, None);
     }
 
     #[test]

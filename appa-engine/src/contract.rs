@@ -1,5 +1,7 @@
 //! Tool contracts: what a call commits (`delta`, `emits`) and what it requires (`requires`).
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::fact::{EffectKind, EffectSet};
@@ -86,6 +88,62 @@ impl<'de> Deserialize<'de> for PinnedDynamicResolution {
 
         let wire = WireResolution::deserialize(deserializer)?;
         Ok(PinnedDynamicResolution::from_answer(wire.binding, wire.audience))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PinnedMembership {
+    argument: String,
+    readers: BTreeSet<ReaderId>,
+}
+
+/// A membership answer that is not evidence: it named the reserved `public` state or an
+/// unexpanded group as a reader.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("membership answer for argument {argument} names a non-literal reader {reader:?}")]
+pub struct MalformedMembership {
+    pub argument: String,
+    pub reader: String,
+}
+
+impl PinnedMembership {
+    pub fn new(
+        argument: impl Into<String>,
+        readers: impl IntoIterator<Item = ReaderId>,
+    ) -> Result<Self, MalformedMembership> {
+        let argument = argument.into();
+        let readers: BTreeSet<ReaderId> = readers.into_iter().collect();
+        match readers.iter().find(|reader| !reader.is_literal()) {
+            Some(reader) => Err(MalformedMembership {
+                argument,
+                reader: reader.as_str().to_string(),
+            }),
+            None => Ok(PinnedMembership { argument, readers }),
+        }
+    }
+
+    pub fn argument(&self) -> &str {
+        &self.argument
+    }
+
+    pub fn readers(&self) -> &BTreeSet<ReaderId> {
+        &self.readers
+    }
+}
+
+impl<'de> Deserialize<'de> for PinnedMembership {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            argument: String,
+            readers: BTreeSet<ReaderId>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        PinnedMembership::new(wire.argument, wire.readers).map_err(serde::de::Error::custom)
     }
 }
 
@@ -275,5 +333,24 @@ mod tests {
         assert_eq!(pinned(empty.clone()), Some(empty), "no readers is a valid answer");
         let email = Audience::restricted([ReaderId::new("ap@corp.example")]);
         assert_eq!(pinned(email.clone()), Some(email), "`@` mid-ID is an ordinary reader");
+    }
+
+    #[test]
+    fn a_membership_answer_pins_only_literal_reader_sets() {
+        let pin = |readers: &[&str]| PinnedMembership::new("to", readers.iter().map(|reader| ReaderId::new(*reader)));
+        assert!(pin(&["public"]).is_err());
+        assert!(pin(&["@hr"]).is_err());
+        assert!(
+            pin(&["finance", "@hr"]).is_err(),
+            "one group member spoils the whole answer"
+        );
+        assert!(pin(&[]).unwrap().readers().is_empty(), "no readers is a valid answer");
+        assert_eq!(
+            pin(&["ap@corp.example"]).unwrap().readers().len(),
+            1,
+            "`@` mid-ID is a reader"
+        );
+        let wire = serde_json::json!({ "argument": "to", "readers": ["public"] });
+        assert!(serde_json::from_value::<PinnedMembership>(wire).is_err());
     }
 }

@@ -45,7 +45,7 @@ const TERMS = {
   suspicious:
     "Data from an unvetted source, like external web content. Once ingested, the run stays suspicious.",
   public:
-    "The reserved unrestricted audience state, not a reader ID: no audience restriction applies. An agent with public reach can send data to any outbound destination. Never a group member.",
+    "The reserved unrestricted audience state, not a reader ID: no audience restriction applies. An agent with public reach can send data to any outbound destination. As a placeholder argument it names the Public audience, which only a Public trajectory includes. Never a group member.",
   "@name":
     "A group: a directory-held reader set. The membership resolver turns the name into literal reader IDs when the engine reads it; the algebra never stores the name.",
   "@auditors":

@@ -392,6 +392,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![declassify],
             casts: vec![],
+            membership: None,
         })
         .unwrap()
     }
@@ -570,6 +571,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![declassify, to_finance, input_only],
             casts: vec![],
+            membership: None,
         })
         .unwrap()
     }
@@ -847,6 +849,7 @@ mod tests {
                 resolution: CastResolution::Constant(established(SUSPICIOUS, internal())),
                 scope: Scope::default(),
             }],
+            membership: None,
         })
         .unwrap()
     }
@@ -1508,6 +1511,7 @@ mod tests {
             receiving: EstablishedLabel::top(),
             proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
             dynamic_resolutions: Vec::new(),
+            memberships: Vec::new(),
             subject: None,
         });
         log.push(Fact::DispatchClosed {
@@ -1532,6 +1536,7 @@ mod tests {
                 resolution: CastResolution::Constant(established(SUSPICIOUS, Audience::Public)),
                 scope: Scope::default(),
             }],
+            membership: None,
         })
         .unwrap()
     }
@@ -1704,6 +1709,7 @@ mod tests {
             receiving: EstablishedLabel::top(),
             proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
             dynamic_resolutions: Vec::new(),
+            memberships: Vec::new(),
             subject: None,
         });
         let projection = build(&log);

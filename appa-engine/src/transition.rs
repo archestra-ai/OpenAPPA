@@ -70,6 +70,9 @@ pub struct ProposedCall {
     /// They are payload, not decoration: the same tool and arguments under
     /// different resolved recipients is a different act.
     pub dynamic_resolutions: Vec<crate::contract::PinnedDynamicResolution>,
+    /// The membership expansions the runtime resolved for this call's `@group` placeholder
+    /// arguments. Payload on the same terms as the dynamic answers.
+    pub memberships: Vec<crate::contract::PinnedMembership>,
 }
 
 /// One provider-run result the response exposed: the tool the provider ran inside the
@@ -384,6 +387,10 @@ pub enum TransitionError {
     ForeignView,
     #[error("the decision does not pass the transition validator: {0}")]
     Invalid(#[from] TransitionRefusal),
+    #[error("the proposals name groups without pinned membership expansions")]
+    MembershipNeeded { needed: Vec<crate::check::GroupRead> },
+    #[error("membership pin for argument {argument} is not one this call reads")]
+    ForeignMembership { argument: String },
     #[error(transparent)]
     Plan(#[from] crate::execute::PlanError),
     #[error("no offer of this family carries that identity")]
@@ -643,6 +650,8 @@ pub enum TransitionRefusal {
     SplitAdmission,
     #[error("an admitted value does not carry the label its source derives")]
     ForgedLabel,
+    #[error("a call carries membership expansions other than the ones its placeholders spell")]
+    ForgedMembership,
     #[error("a second value is admitted for one dispatch or child return")]
     RepeatAdmission,
     #[error("cast record names a value not admitted earlier in the log")]
@@ -1046,18 +1055,26 @@ impl<'a> Sequence<'a> {
                 receiving,
                 proposed_effects,
                 dynamic_resolutions,
+                memberships,
                 subject,
             } => {
                 let call = ResolvedCall::new(tool.clone(), arguments.clone())
-                    .with_dynamic_resolutions(dynamic_resolutions.clone());
+                    .with_dynamic_resolutions(dynamic_resolutions.clone())
+                    .with_memberships(memberships.clone());
                 if call.dynamic_resolutions() != dynamic_resolutions.as_slice() {
                     return Err(TransitionRefusal::ForgedLabel);
+                }
+                if call.memberships() != memberships.as_slice() {
+                    return Err(TransitionRefusal::ForgedMembership);
                 }
                 self.opened(trajectory, dispatch, &call, subject.as_ref(), released)?;
                 let contract = self
                     .registry
                     .tool(tool)
                     .ok_or_else(|| TransitionRefusal::UnknownTool(tool.as_str().to_string()))?;
+                if crate::check::validate_memberships(contract, &call).is_err() {
+                    return Err(TransitionRefusal::ForgedMembership);
+                }
                 if proposed_effects != &contract.emits {
                     return Err(TransitionRefusal::EffectsMismatch);
                 }
@@ -1587,7 +1604,8 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::ApprovalRepeated);
         }
         let offered = &recorded.plan;
-        if call.digest() != recorded.call
+        if subject_call(&views, &recorded.subject).as_ref() != Some(call)
+            || call.digest() != recorded.call
             || plan != &offered.id
             || acceptance.as_ref() != offered.narrowing()
             || sanitizer.as_ref() != offered.sanitizer()
@@ -1914,12 +1932,14 @@ impl<'a> Sequence<'a> {
                     tool,
                     arguments,
                     dynamic_resolutions,
+                    memberships,
                     subject,
                     ..
                 },
             ) if dispatch == &next.dispatch => {
                 let opened = ResolvedCall::new(tool.clone(), arguments.clone())
-                    .with_dynamic_resolutions(dynamic_resolutions.clone());
+                    .with_dynamic_resolutions(dynamic_resolutions.clone())
+                    .with_memberships(memberships.clone());
                 if opened != next.call || subject.as_ref() != Some(&next.subject) {
                     return Err(TransitionRefusal::UnbackedDecision);
                 }
@@ -2004,6 +2024,15 @@ impl<'a> Sequence<'a> {
             .is_some_and(|(admitted, ..)| admitted != trajectory)
         {
             return Err(TransitionRefusal::ForeignAdmission);
+        }
+        for call in proposals {
+            let contract = self
+                .registry
+                .tool(call.tool())
+                .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
+            if crate::check::validate_memberships(contract, call).is_err() {
+                return Err(TransitionRefusal::ForgedMembership);
+            }
         }
         let mut working = std::borrow::Cow::Borrowed(&self.projection);
         let composed = crate::engine::compose_batch(
@@ -3383,6 +3412,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         };
         let profile = crate::profile::covering_declaration(&config);
         crate::engine::Engine::open(crate::profile::DeploymentPolicy {
@@ -3451,6 +3481,7 @@ mod tests {
                     authorities: vec![],
                     sanitizers: vec![],
                     casts: vec![],
+                    membership: None,
                 },
                 &ReturnPolicy::Raw,
                 engine.profile(),

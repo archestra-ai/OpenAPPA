@@ -8,7 +8,7 @@ use thiserror::Error;
 use crate::authority::{Authority, Cast, CastResolution, Hint, Sanitizer, Transition};
 use crate::contract::{AudienceDelta, AudienceRequirement, RecipientSpec, ToolContract};
 use crate::label::{Audience, Dim, Dimension, Trust};
-use crate::names::{AuthorityName, CastName, SanitizerName, TagName};
+use crate::names::{AuthorityName, CastName, MembershipResolverName, SanitizerName, TagName};
 use crate::value::ToolName;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +73,11 @@ pub struct RegistryConfig {
     pub authorities: Vec<Authority>,
     pub sanitizers: Vec<Sanitizer>,
     pub casts: Vec<Cast>,
+    /// The deployment's one membership resolver, registered by name. Every
+    /// `@group` a placeholder argument names resolves through it; without one, such an argument
+    /// names a reader set nothing can expand.
+    #[serde(default)]
+    pub membership: Option<MembershipResolverName>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -391,6 +396,7 @@ pub struct Registry {
     authorities: Vec<Authority>,
     sanitizers: BTreeMap<SanitizerName, Sanitizer>,
     casts: Vec<Cast>,
+    membership: Option<MembershipResolverName>,
     profile: crate::profile::DeploymentProfile,
 }
 
@@ -598,8 +604,13 @@ impl Registry {
             authorities: config.authorities,
             sanitizers,
             casts,
+            membership: config.membership,
             profile,
         })
+    }
+
+    pub fn membership(&self) -> Option<&MembershipResolverName> {
+        self.membership.as_ref()
     }
 
     pub fn profile(&self) -> &crate::profile::DeploymentProfile {
@@ -747,8 +758,9 @@ pub(crate) fn check_rank(
 
 /// Every reader ID a declaration names must be literal. `public` is a reserved
 /// audience *state* — [`Audience::Public`] carries it, so it is never a member of a restricted set —
-/// and the `@` mark names a group only a membership resolver may expand. This surface registers no
-/// membership resolver, so a group mention could never resolve; refusing it here keeps it from
+/// and the `@` mark names a group only a membership resolver may expand. The engine expands groups
+/// only where a placeholder argument spells one; a group written in a
+/// declaration has no read site that resolves it yet (`T26`), so refusing it here keeps it from
 /// reaching the algebra as an opaque atom that silently matches nobody.
 pub(crate) fn check_readers(audience: &Audience, context: impl Fn() -> String) -> Result<(), LoadError> {
     let Audience::Restricted(readers) = audience else {
@@ -798,6 +810,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         }
     }
 

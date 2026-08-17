@@ -607,6 +607,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![out_san, finance_san],
             casts: vec![resolver_cast, const_cast],
+            membership: None,
         })
         .unwrap()
     }
@@ -630,6 +631,7 @@ mod tests {
             receiving: EstablishedLabel::top(),
             proposed_effects: EffectSet::new([EffectKind::new("read")]).unwrap(),
             dynamic_resolutions: Vec::new(),
+            memberships: Vec::new(),
             subject: None,
         }];
         (log, dispatch)
@@ -833,6 +835,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![webby, fallback],
+            membership: None,
         })
         .unwrap();
         let call = ResolvedCall::new(ToolName::new("fetch"), crate::params::test_arguments(&json!({})));
@@ -847,6 +850,7 @@ mod tests {
                 receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::default(),
                 dynamic_resolutions: Vec::new(),
+                memberships: Vec::new(),
                 subject: None,
             },
             Fact::ValueAdmitted {
@@ -1089,6 +1093,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![librarian],
+            membership: None,
         })
         .unwrap();
         let call = ResolvedCall::new(ToolName::new("fetch_page"), crate::params::test_arguments(&json!({})));
@@ -1166,6 +1171,7 @@ mod tests {
             receiving: EstablishedLabel::top(),
             proposed_effects: EffectSet::new([EffectKind::new("read")]).unwrap(),
             dynamic_resolutions: vec![PinnedDynamicResolution::from_answer(binding, Some(internal()))],
+            memberships: Vec::new(),
             subject: None,
         }];
         let projection = views_of(&log);

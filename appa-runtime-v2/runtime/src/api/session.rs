@@ -8,7 +8,7 @@ use crate::engine::{
     AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback, ForkStatus,
     Next, OfferNonce, OpenDispatch, Presentation, engine_id,
 };
-use crate::external::{ConsultKind, ConsultOutcome, DynamicResolution};
+use crate::external::{ConsultKind, ConsultOutcome, ReadersResolution};
 
 use super::{
     ChildReturnDecision, EventError, ExactCall, Inner, OfferId, OutcomeBody, ProposedCall, RemedyDecision, SpawnRef,
@@ -731,12 +731,24 @@ impl Session {
                     .resolve_dynamic(resolver, tool, argument, value)
                     .await
                 {
-                    DynamicResolution::Resolved { readers } => Some(readers),
-                    DynamicResolution::Unresolved(_) => None,
+                    ReadersResolution::Resolved { readers } => Some(readers),
+                    ReadersResolution::Unresolved(_) => None,
                 };
                 ExternalEvidence::Dynamic {
                     resolver: resolver.clone(),
                     argument: argument.clone(),
+                    readers,
+                }
+            }
+            // The membership resolver wire is the declared external contract verbatim.
+            ExternalRequest::Membership { resolver, group } => {
+                let readers = match self.inner.externals.resolve_membership(resolver, group).await {
+                    ReadersResolution::Resolved { readers } => Some(readers),
+                    ReadersResolution::Unresolved(_) => None,
+                };
+                ExternalEvidence::Membership {
+                    resolver: resolver.clone(),
+                    group: group.clone(),
                     readers,
                 }
             }
@@ -3047,6 +3059,7 @@ confined_child_return = true
             authorities: std::collections::BTreeMap::new(),
             sanitizers: std::collections::BTreeMap::new(),
             dynamic: None,
+            membership: None,
         }
     }
 

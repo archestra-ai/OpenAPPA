@@ -778,6 +778,14 @@ fn validate_deployment(policy: &appa_policy::Config, config: &Config) -> Result<
             name: resolver,
         });
     }
+    if let Some(resolver) = &rc.membership
+        && config.externals.membership.is_none()
+    {
+        return Err(OpenError::UnboundExternal {
+            kind: "membership resolver",
+            name: resolver.as_str().to_string(),
+        });
+    }
     Ok(())
 }
 

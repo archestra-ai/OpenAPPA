@@ -311,6 +311,7 @@ mod tests {
             authorities: vec![officer],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         })
         .unwrap()
     }
@@ -422,6 +423,7 @@ mod tests {
             authorities: vec![keeper],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         })
         .unwrap();
         let seed = call("send", json!({}));
@@ -436,6 +438,7 @@ mod tests {
                 receiving: established(TRUSTED, Audience::Public),
                 proposed_effects: EffectSet::new([EffectKind::new("email.sent")]).unwrap(),
                 dynamic_resolutions: vec![],
+                memberships: Vec::new(),
                 subject: None,
             },
         ];
@@ -487,6 +490,7 @@ mod tests {
             authorities: vec![steward],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         })
         .unwrap();
         let log = vec![
@@ -554,6 +558,7 @@ mod tests {
                 receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::default(),
                 dynamic_resolutions: Vec::new(),
+                memberships: Vec::new(),
                 subject: None,
             },
         ];
@@ -667,6 +672,7 @@ mod tests {
             authorities: vec![officer, attends_only],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         })
         .unwrap();
         let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
@@ -719,6 +725,7 @@ mod tests {
             authorities: vec![a1, a2],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         })
         .unwrap();
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
@@ -811,6 +818,7 @@ mod tests {
             authorities: vec![steward],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         })
         .unwrap();
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
@@ -870,6 +878,7 @@ mod tests {
                 hint: None,
             }],
             casts: vec![],
+            membership: None,
         })
         .unwrap()
     }
@@ -913,6 +922,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         })
         .unwrap()
     }

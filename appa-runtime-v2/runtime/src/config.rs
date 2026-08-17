@@ -38,9 +38,9 @@ impl PolicyFile {
     }
 }
 
-/// The registered externals: authorities, sanitizers, and
-/// the dynamic resolver. Every HTTP call carries an explicit timeout
-/// and byte cap and fails closed.
+/// The registered externals: authorities, sanitizers, the
+/// dynamic resolver, and the membership resolver. Every HTTP call
+/// carries an explicit timeout and byte cap and fails closed.
 #[derive(Debug, Clone)]
 pub struct Externals {
     pub timeout: Duration,
@@ -55,12 +55,14 @@ pub struct Externals {
     pub authorities: BTreeMap<String, Implementation>,
     pub sanitizers: BTreeMap<String, Implementation>,
     pub dynamic: Option<Endpoint>,
+    /// The membership resolver the policy's `[membership]` registers.
+    pub membership: Option<Endpoint>,
 }
 
 /// How a registered authority or sanitizer is implemented — `builtin`
 /// or `resolver`, a closed choice per entry. Only these two
-/// kinds have builtin implementations; the dynamic resolver stays
-/// HTTP-only.
+/// kinds have builtin implementations; the dynamic and membership
+/// resolvers stay HTTP-only.
 #[derive(Debug, Clone)]
 pub enum Implementation {
     Resolver(Endpoint),
@@ -170,6 +172,7 @@ struct RawExternals {
     #[serde(default)]
     sanitizers: BTreeMap<String, RawImplementation>,
     dynamic: Option<RawImplementation>,
+    membership: Option<RawImplementation>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -240,6 +243,14 @@ impl Config {
                     .map(|endpoint| {
                         let raw = endpoint_only("dynamic", "dynamic", endpoint)?;
                         resolve_endpoint("dynamic", "dynamic".to_string(), raw, &lookup)
+                    })
+                    .transpose()?,
+                membership: raw
+                    .externals
+                    .membership
+                    .map(|endpoint| {
+                        let raw = endpoint_only("membership", "membership", endpoint)?;
+                        resolve_endpoint("membership", "membership".to_string(), raw, &lookup)
                     })
                     .transpose()?,
             },
@@ -506,6 +517,14 @@ mod tests {
 
         let text = format!("{MINIMAL}\n[externals.dynamic]\nbuiltin = \"approve\"\n");
         assert!(matches!(parse(&text), Err(ConfigError::BuiltinNotAllowed { .. })));
+        let text = format!("{MINIMAL}\n[externals.membership]\nbuiltin = \"approve\"\n");
+        assert!(matches!(parse(&text), Err(ConfigError::BuiltinNotAllowed { .. })));
+        let text = format!("{MINIMAL}\n[externals.membership]\nurl = \"https://directory.internal\"\n");
+        let config = parse(&text).expect("a membership endpoint validates");
+        assert_eq!(
+            config.externals.membership.map(|endpoint| endpoint.url),
+            Some("https://directory.internal".to_string())
+        );
     }
 
     #[test]

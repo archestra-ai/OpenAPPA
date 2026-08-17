@@ -111,6 +111,7 @@ pub const TOOLS_PATH: &str = "/tools";
 pub const AUTHORITY_PATH: &str = "/authority";
 pub const SANITIZER_PATH: &str = "/sanitizer";
 pub const DYNAMIC_RESOLVER_PATH: &str = "/dynamic-resolver";
+pub const MEMBERSHIP_PATH: &str = "/membership";
 
 const CONSULT_TIMEOUT: Duration = Duration::from_secs(300);
 const REVIEW_WINDOW: Duration = Duration::from_secs(365 * 24 * 60 * 60);
@@ -158,6 +159,10 @@ pub fn externals_for(policy: &appa_policy::Config, base: &str) -> Externals {
             .collect(),
         dynamic: Some(Endpoint {
             url: format!("{base}{DYNAMIC_RESOLVER_PATH}"),
+            token: None,
+        }),
+        membership: Some(Endpoint {
+            url: format!("{base}{MEMBERSHIP_PATH}"),
             token: None,
         }),
     }

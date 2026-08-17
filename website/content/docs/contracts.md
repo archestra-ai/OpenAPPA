@@ -32,10 +32,11 @@ A set declaration without an explicit operator causes a policy load error.
 
 ### Groups
 
-A reader list may name a **group**, written `@name`. The registered membership resolver turns the name into its literal reader set at the moment the engine first reads it for an operation — at the pre-dispatch check, at mandate or cast-ceiling validation, at sanitizer application. A name without the mark is a literal reader ID. A reader ID starting with `@` is a load error, as is a group mention in a policy with no `[membership]` registration.
+A reader list may name a **group**, written `@name`, and so may the actual argument an `includes($arg)` placeholder reads. The registered membership resolver turns the name into its literal reader set at the moment the engine first reads it for an operation — at the pre-dispatch check, at mandate or cast-ceiling validation, at sanitizer application. A name without the mark is a literal reader ID. A reader ID starting with `@` is a load error, as is a group mention in a policy with no `[membership]` registration.
 
 ```toml
 [membership]                    # one per deployment; every @group resolves here
+name = "corp-directory"         # registration only; the deployment binds the endpoint
 
 [[tool]]
 name     = "post_audit_note"
@@ -44,6 +45,8 @@ delta    = {}
 ```
 
 Resolution is fresh per call, and pinned within one: the set resolved at a call's check is the set its admission folds. A member added to the directory reaches the next call without a policy reload; removal reaches only future resolutions — a set already resolved stands. `public` is reserved and never a group member; a directory answer containing it is malformed.
+
+A resolver that produces no answer — a timeout, an error, malformed or oversized data — resumes nothing: the check does not complete and no engine fact is appended. An empty reader set is a successful answer. The endpoint accepts a versioned JSON POST request: `{version:1,resolver,group}`, with `group` the name without its `@` mark. It returns `{version:1,readers:[...]}`.
 
 ### Dynamic resolvers
 
@@ -89,7 +92,7 @@ A tool contract is typically four lines long. Use this checklist during policy r
 | **`delta` Accuracy** | Tool reads sensitive customer data but declares `delta = {}` or omits `delta`. | Declare explicit restriction, e.g. `delta = { audience = { exactly = ["support"] } }`. | Undermines downstream checks; over-restricting is safe (costs reach, doesn't leak). |
 | **Unannotated Tools** | Omitting `delta` while declaring `requires`. | Use `delta = {}` if output carries no labels, or separate unannotated tools. | Loader refuses `requires` on unannotated tools; unannotated output enters as `Unknown`. |
 | **`effects` Completeness** | Mutation or deployment tool omits `effects`. | Declare all side effects, e.g., `effects = ["migration.applied", "mutation"]`. | Under-declared effects pass `no_prior` checks silently without triggering history constraints. |
-| **Dynamic Recipients** | Static readers when an ACL depends on an argument. | Use a placeholder for a literal recipient, or a dynamic resolver for an argument-derived reader set. | Static readers can ignore the proposed argument; dynamic resolution pins the ACL answer. |
+| **Dynamic Recipients** | Static readers when an ACL depends on an argument. | Use a placeholder for a recipient the call names — a literal reader, `public`, or an `@group` — or a dynamic resolver for an argument-derived reader set. | Static readers can ignore the proposed argument; placeholder groups and dynamic resolution pin their answer to the call. |
 | **Combined Read & Release** | Single tool `share_doc(doc, recipient)` fetching and releasing in one step. | Split into `fetch_doc` (read) and `grant_doc_access` (release). | Combined tools force authorities to approve releases before content is fetched. |
 | **Authority Mandates** | Overly permissive mandates like `can_cover_readers = { may_add = ["public"] }`. | Restrict authority `mandate` and `scope.tags` to the minimum necessary desk. | Authorities cannot exceed mandates, but overly broad mandates weaken review gates. |
 | **Auto-Approval Wiring** | `builtin = "approve"` behind a wide mandate — an automated yes across everything the mandate covers. | Keep auto-approval mandates narrow; reserve wide mandates for `hitl` or a reviewed resolver. | Mandate powers do not depend on the implementation behind them: the open gate is legitimate, deliberate, and visible in review. |
@@ -121,7 +124,7 @@ attention = ["sre-signoff"]                            # Fresh per-call demand
 
 - **`delta` is strictly restrictive**: A tool's delta can only narrow the audience or lower trust. Within an annotated `delta`, an omitted dimension defaults to identity.
 - **Pending-cast deltas (`delta = { trust = "unknown" }`)**: Holds a label dimension pending resolution by a registered `[[cast]]` at admission. Declaring both `requires` and `unknown` delta on the same dimension is a load error.
-- **Dynamic argument placeholders (`$arg`)**: `requires.audience = { includes = ["$recipient"] }` evaluates `$recipient` against actual call arguments at runtime. Placeholders are valid only inside `includes`, and `recipient` must be a required top-level string property of the tool's `parameters` — an omitted `parameters`, an optional, non-string, or nested property is a load error. A call that omits the argument or passes a non-string fails schema validation as an `InvalidCall` before the check runs.
+- **Dynamic argument placeholders (`$arg`)**: `requires.audience = { includes = ["$recipient"] }` evaluates `$recipient` against the actual call argument at runtime, as one audience expression: an ordinary string is one literal reader ID, `public` is the Public audience — only a Public trajectory includes it — and `@name` is a group the membership resolver expands, pinned to that proposed call. Placeholders are valid only inside `includes`, and `recipient` must be a required top-level string property of the tool's `parameters` — an omitted `parameters`, an optional, non-string, or nested property is a load error. A call that omits the argument or passes a non-string fails schema validation as an `InvalidCall` before the check runs.
 - **Dynamic resolvers**: A `{ resolver = "name", argument = "arg" }` form maps a required top-level string argument to literal readers, under the same `parameters` rule. It is valid as an audience delta or as the value of `includes`.
 - **History checks (`requires.effects`)**: `has` verifies `prior(k)` against appended effects; `has_no` verifies `no_prior(k)` against appended effects plus unsettled reservations — emits reserved at release and not yet observed to succeed or fail.
 - **Attention demands (`requires.attention`)**: Forces fresh authority sign-off on *every* call, never satisfied by execution history.

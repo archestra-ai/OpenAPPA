@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use appa_engine::candidate::DerivedVia;
 use appa_engine::check::UnestablishedFact;
 use appa_engine::contract::{
-    AudienceRequirement, DynamicAudienceBinding, PinnedDynamicResolution, RecipientSpec, ToolContract,
+    AudienceRequirement, DynamicAudienceBinding, PinnedDynamicResolution, PinnedMembership, RecipientSpec, ToolContract,
 };
 pub(crate) use appa_engine::engine::ForkStatus;
 use appa_engine::engine::{Engine, EngineError};
@@ -80,6 +80,7 @@ pub enum ExternalRequest {
         argument: String,
         value: String,
     },
+    Membership { resolver: String, group: String },
 }
 
 /// A typed external answer. `None`/`Abstain` mean the external gave
@@ -99,6 +100,11 @@ pub enum ExternalEvidence {
     Dynamic {
         resolver: String,
         argument: String,
+        readers: Option<Vec<String>>,
+    },
+    Membership {
+        resolver: String,
+        group: String,
         readers: Option<Vec<String>>,
     },
 }
@@ -861,15 +867,29 @@ impl RuntimeEngine {
         entropy: &OfferNonce,
         spawn: bool,
     ) -> Result<EngineDecision, EngineRefusal> {
-        let pins = match self.resolve_dynamics(call, evidence) {
-            Ok(pins) => pins,
-            Err(Resolution::Feedback(text)) => return Ok(deny(text)),
-            Err(Resolution::Consult(requests)) => return Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
+        let (pins, memberships) = match (
+            self.resolve_dynamics(call, evidence),
+            self.resolve_memberships(call, evidence),
+        ) {
+            (Ok(pins), Ok(memberships)) => (pins, memberships),
+            (Err(Resolution::Feedback(text)), _) | (_, Err(Resolution::Feedback(text))) => return Ok(deny(text)),
+            (dynamics, memberships) => {
+                let requests = [dynamics.err(), memberships.map(|_| ()).err()]
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|missing| match missing {
+                        Resolution::Consult(requests) => requests,
+                        Resolution::Feedback(_) => Vec::new(),
+                    })
+                    .collect();
+                return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
+            }
         };
         let proposed = CoreProposedCall {
             tool: ToolName::new(call.tool.clone()),
             arguments: call.arguments.get().as_bytes().to_vec(),
             dynamic_resolutions: pins,
+            memberships,
         };
         let decision = if spawn {
             match self.decide_proposal(view, trajectory, proposed.clone(), entropy, true) {
@@ -1340,6 +1360,83 @@ impl RuntimeEngine {
         }
         Ok(pins)
     }
+
+    fn resolve_memberships(
+        &self,
+        call: &ProposedCall,
+        evidence: &[ExternalEvidence],
+    ) -> Result<Vec<PinnedMembership>, Resolution> {
+        let tool = ToolName::new(call.tool.clone());
+        let Some(contract) = self.engine.registry().tool(&tool) else {
+            return Ok(Vec::new());
+        };
+        // Same fast path as the dynamic pass: no placeholder, nothing to read.
+        if !contract.requires.label.audience.iter().any(|requirement| {
+            matches!(
+                requirement,
+                appa_engine::contract::AudienceRequirement::Includes(
+                    appa_engine::contract::RecipientSpec::Placeholder(_)
+                )
+            )
+        }) {
+            return Ok(Vec::new());
+        }
+        let Ok(resolved) = self.engine.resolve_call(tool, call.arguments.get().as_bytes()) else {
+            return Ok(Vec::new());
+        };
+        let reads = appa_engine::check::group_reads(contract, &resolved);
+        if reads.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(resolver) = self.engine.registry().membership() else {
+            let read = &reads[0];
+            return Err(Resolution::Feedback(format!(
+                "[appa] {}: argument {} names {}, but this deployment registers no membership resolver; the call was not checked",
+                call.tool, read.argument, read.group
+            )));
+        };
+        let mut pins = Vec::new();
+        let mut requests: Vec<ExternalRequest> = Vec::new();
+        for read in reads {
+            let group = read.group.as_str();
+            let answer = evidence.iter().find_map(|entry| match entry {
+                ExternalEvidence::Membership {
+                    resolver: named,
+                    group: expanded,
+                    readers,
+                } if named == resolver.as_str() && expanded == group => Some(readers.clone()),
+                _ => None,
+            });
+            match answer {
+                None => {
+                    let request = ExternalRequest::Membership {
+                        resolver: resolver.as_str().to_string(),
+                        group: group.to_string(),
+                    };
+                    if !requests.contains(&request) {
+                        requests.push(request);
+                    }
+                }
+                Some(Some(readers)) => {
+                    match PinnedMembership::new(read.argument.clone(), readers.into_iter().map(ReaderId::new)) {
+                        Ok(pin) => pins.push(pin),
+                        Err(_) => return Err(Resolution::Feedback(unresolved_group(&call.tool, &read.group))),
+                    }
+                }
+                Some(None) => return Err(Resolution::Feedback(unresolved_group(&call.tool, &read.group))),
+            }
+        }
+        if !requests.is_empty() {
+            return Err(Resolution::Consult(requests));
+        }
+        Ok(pins)
+    }
+}
+
+fn unresolved_group(tool: &str, group: &appa_engine::names::GroupName) -> String {
+    format!(
+        "[appa] {tool}: membership of {group} could not be resolved; the call was not checked — propose it again later"
+    )
 }
 
 enum AuthorityOutcome {
@@ -1802,7 +1899,12 @@ fn gap_text(gap: &appa_engine::check::Gap) -> String {
         Gap::TrustFloor { required, actual } => {
             format!("trust is {actual:?}, below the required floor {required:?}")
         }
-        Gap::Includes { recipients } => format!("the readers do not include {recipients:?}"),
+        Gap::Includes { recipients } => match recipients {
+            appa_engine::label::Audience::Public => "the readers are not the public audience".to_string(),
+            appa_engine::label::Audience::Restricted(readers) => {
+                format!("the readers do not include {} required recipient(s)", readers.len())
+            }
+        },
         Gap::UnresolvedDynamicRecipient { resolver, argument } => {
             format!(
                 "recipient argument {argument} did not resolve via {}",

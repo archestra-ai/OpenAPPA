@@ -1,5 +1,5 @@
-//! Calls to the externals: authorities, sanitizers, and dynamic
-//! resolvers.
+//! Calls to the externals: authorities, sanitizers, dynamic resolvers,
+//! and the membership resolver.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -58,10 +58,11 @@ pub enum ConsultOutcome {
     NoAnswer(NoAnswerReason),
 }
 
-/// The outcome of one dynamic resolution: the literal
-/// readers, or an unresolved recipient.
+/// The outcome of one reader-set resolution — dynamic or membership:
+/// the literal readers, or no answer. An empty
+/// reader set is a successful answer.
 #[derive(Debug, Clone, PartialEq)]
-pub enum DynamicResolution {
+pub enum ReadersResolution {
     Resolved { readers: Vec<String> },
     Unresolved(NoAnswerReason),
 }
@@ -89,8 +90,15 @@ struct DynamicRequest<'a> {
     value: &'a str,
 }
 
+#[derive(Debug, Serialize)]
+struct MembershipRequest<'a> {
+    version: u32,
+    resolver: &'a str,
+    group: &'a str,
+}
+
 #[derive(Debug, Deserialize)]
-struct DynamicResponse {
+struct ReadersResponse {
     version: u32,
     readers: Vec<String>,
 }
@@ -118,6 +126,7 @@ pub struct ExternalServices {
     authorities: BTreeMap<String, AuthorityBackend>,
     sanitizers: BTreeMap<String, SanitizerBackend>,
     dynamic: Option<Endpoint>,
+    membership: Option<Endpoint>,
 }
 
 impl ExternalServices {
@@ -178,6 +187,7 @@ impl ExternalServices {
             authorities,
             sanitizers,
             dynamic: config.dynamic,
+            membership: config.membership,
         })
     }
 
@@ -311,13 +321,10 @@ impl ExternalServices {
 
     /// One dynamic resolution: the named string argument's
     /// value in, literal readers out.
-    pub async fn resolve_dynamic(&self, resolver: &str, tool: &str, argument: &str, value: &str) -> DynamicResolution {
-        let endpoint = match &self.dynamic {
-            Some(endpoint) => endpoint,
-            None => {
-                tracing::debug!(resolver, "dynamic resolution without a configured endpoint");
-                return DynamicResolution::Unresolved(NoAnswerReason::Unregistered);
-            }
+    pub async fn resolve_dynamic(&self, resolver: &str, tool: &str, argument: &str, value: &str) -> ReadersResolution {
+        let Some(endpoint) = &self.dynamic else {
+            tracing::debug!(resolver, "dynamic resolution without a configured endpoint");
+            return ReadersResolution::Unresolved(NoAnswerReason::Unregistered);
         };
         let request = DynamicRequest {
             version: 1,
@@ -326,27 +333,48 @@ impl ExternalServices {
             argument,
             value,
         };
-        let body = match self.post(endpoint, &request).await {
-            Ok(body) => body,
-            Err(reason) => return DynamicResolution::Unresolved(reason),
+        match self.literal_readers(endpoint, &request).await {
+            Ok(readers) => ReadersResolution::Resolved { readers },
+            Err(reason) => ReadersResolution::Unresolved(reason),
+        }
+    }
+
+    /// One membership resolution: a group name in, the
+    /// group's literal readers out.
+    pub async fn resolve_membership(&self, resolver: &str, group: &str) -> ReadersResolution {
+        let Some(endpoint) = &self.membership else {
+            tracing::debug!(resolver, group, "membership resolution without a configured endpoint");
+            return ReadersResolution::Unresolved(NoAnswerReason::Unregistered);
         };
-        let response: DynamicResponse = match serde_json::from_slice(&body) {
-            Ok(response) => response,
-            Err(_) => return DynamicResolution::Unresolved(NoAnswerReason::Malformed),
+        let request = MembershipRequest {
+            version: 1,
+            resolver,
+            group,
         };
+        match self.literal_readers(endpoint, &request).await {
+            Ok(readers) => ReadersResolution::Resolved { readers },
+            Err(reason) => ReadersResolution::Unresolved(reason),
+        }
+    }
+
+    async fn literal_readers(
+        &self,
+        endpoint: &Endpoint,
+        request: &impl Serialize,
+    ) -> Result<Vec<String>, NoAnswerReason> {
+        let body = self.post(endpoint, request).await?;
+        let response: ReadersResponse = serde_json::from_slice(&body).map_err(|_| NoAnswerReason::Malformed)?;
         if response.version != 1 {
-            return DynamicResolution::Unresolved(NoAnswerReason::UnsupportedVersion);
+            return Err(NoAnswerReason::UnsupportedVersion);
         }
         if response
             .readers
             .iter()
             .any(|reader| reader == "public" || reader.starts_with('@'))
         {
-            return DynamicResolution::Unresolved(NoAnswerReason::Malformed);
+            return Err(NoAnswerReason::Malformed);
         }
-        DynamicResolution::Resolved {
-            readers: response.readers,
-        }
+        Ok(response.readers)
     }
 
     async fn post<T: Serialize>(&self, endpoint: &Endpoint, request: &T) -> Result<Vec<u8>, NoAnswerReason> {
@@ -443,7 +471,8 @@ mod tests {
             max_body_bytes: cap,
             authorities: BTreeMap::new(),
             sanitizers: BTreeMap::new(),
-            dynamic: dynamic_url.map(|url| Endpoint { url, token: None }),
+            dynamic: dynamic_url.clone().map(|url| Endpoint { url, token: None }),
+            membership: dynamic_url.map(|url| Endpoint { url, token: None }),
         }
     }
 
@@ -455,7 +484,7 @@ mod tests {
         services_over(externals(dynamic_url, timeout_ms, cap))
     }
 
-    async fn resolve(services: &ExternalServices) -> DynamicResolution {
+    async fn resolve(services: &ExternalServices) -> ReadersResolution {
         services
             .resolve_dynamic("recipients", "send_message", "channel", "#general")
             .await
@@ -477,9 +506,72 @@ mod tests {
         let outcome = resolve(&services(Some(url), 2000, 65536)).await;
         assert_eq!(
             outcome,
-            DynamicResolution::Resolved {
+            ReadersResolution::Resolved {
                 readers: vec!["alice".to_string(), "bob".to_string()],
             },
+        );
+    }
+
+    #[tokio::test]
+    async fn a_membership_resolution_returns_the_groups_readers_or_nothing() {
+        let url = stub(Router::new().route(
+            "/",
+            post(|body: String| async move {
+                let request: serde_json::Value = serde_json::from_str(&body).expect("the request is JSON");
+                assert_eq!(request["version"], 1);
+                assert_eq!(request["resolver"], "directory");
+                assert_eq!(request["group"], "auditors");
+                r#"{"version":1,"readers":[]}"#
+            }),
+        ))
+        .await;
+        assert_eq!(
+            services(Some(url), 2000, 65536)
+                .resolve_membership("directory", "auditors")
+                .await,
+            ReadersResolution::Resolved { readers: vec![] },
+        );
+
+        let url = stub(Router::new().route("/", post(|| async { r#"{"version":1,"readers":["alice","bob"]}"# }))).await;
+        assert_eq!(
+            services(Some(url), 2000, 65536)
+                .resolve_membership("directory", "auditors")
+                .await,
+            ReadersResolution::Resolved {
+                readers: vec!["alice".to_string(), "bob".to_string()]
+            },
+        );
+
+        let url = stub(Router::new().route("/", post(|| async { r#"{"version":1,"readers":["public"]}"# }))).await;
+        assert_eq!(
+            services(Some(url), 2000, 65536)
+                .resolve_membership("directory", "auditors")
+                .await,
+            ReadersResolution::Unresolved(NoAnswerReason::Malformed),
+        );
+        let url = stub(Router::new().route("/", post(|| async { r#"{"version":1,"readers":["@nested"]}"# }))).await;
+        assert_eq!(
+            services(Some(url), 2000, 65536)
+                .resolve_membership("directory", "auditors")
+                .await,
+            ReadersResolution::Unresolved(NoAnswerReason::Malformed),
+        );
+        let url = stub(Router::new().route(
+            "/",
+            post(|| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+        ))
+        .await;
+        assert_eq!(
+            services(Some(url), 2000, 65536)
+                .resolve_membership("directory", "auditors")
+                .await,
+            ReadersResolution::Unresolved(NoAnswerReason::NonSuccess { status: 500 }),
+        );
+        assert_eq!(
+            services(None, 2000, 65536)
+                .resolve_membership("directory", "auditors")
+                .await,
+            ReadersResolution::Unresolved(NoAnswerReason::Unregistered),
         );
     }
 
@@ -492,38 +584,38 @@ mod tests {
         .await;
         assert_eq!(
             resolve(&services(Some(url), 2000, 65536)).await,
-            DynamicResolution::Unresolved(NoAnswerReason::NonSuccess { status: 500 }),
+            ReadersResolution::Unresolved(NoAnswerReason::NonSuccess { status: 500 }),
         );
 
         let url = stub(Router::new().route("/", post(|| async { "not json at all" }))).await;
         assert_eq!(
             resolve(&services(Some(url), 2000, 65536)).await,
-            DynamicResolution::Unresolved(NoAnswerReason::Malformed),
+            ReadersResolution::Unresolved(NoAnswerReason::Malformed),
         );
 
         let url = stub(Router::new().route("/", post(|| async { r#"{"version":1,"readers":[42]}"# }))).await;
         assert_eq!(
             resolve(&services(Some(url), 2000, 65536)).await,
-            DynamicResolution::Unresolved(NoAnswerReason::Malformed),
+            ReadersResolution::Unresolved(NoAnswerReason::Malformed),
         );
 
         let url = stub(Router::new().route("/", post(|| async { r#"{"version":1}"# }))).await;
         assert_eq!(
             resolve(&services(Some(url), 2000, 65536)).await,
-            DynamicResolution::Unresolved(NoAnswerReason::Malformed),
+            ReadersResolution::Unresolved(NoAnswerReason::Malformed),
         );
 
         let url = stub(Router::new().route("/", post(|| async { r#"{"version":2,"readers":["alice"]}"# }))).await;
         assert_eq!(
             resolve(&services(Some(url), 2000, 65536)).await,
-            DynamicResolution::Unresolved(NoAnswerReason::UnsupportedVersion),
+            ReadersResolution::Unresolved(NoAnswerReason::UnsupportedVersion),
         );
 
         let url =
             stub(Router::new().route("/", post(|| async { r#"{"version":1,"readers":["alice","public"]}"# }))).await;
         assert_eq!(
             resolve(&services(Some(url), 2000, 65536)).await,
-            DynamicResolution::Unresolved(NoAnswerReason::Malformed),
+            ReadersResolution::Unresolved(NoAnswerReason::Malformed),
         );
 
         let url = stub(Router::new().route(
@@ -533,7 +625,7 @@ mod tests {
         .await;
         assert_eq!(
             resolve(&services(Some(url), 2000, 64)).await,
-            DynamicResolution::Unresolved(NoAnswerReason::Oversized),
+            ReadersResolution::Unresolved(NoAnswerReason::Oversized),
         );
 
         let url = stub(Router::new().route(
@@ -546,19 +638,19 @@ mod tests {
         .await;
         assert_eq!(
             resolve(&services(Some(url), 50, 65536)).await,
-            DynamicResolution::Unresolved(NoAnswerReason::Timeout),
+            ReadersResolution::Unresolved(NoAnswerReason::Timeout),
         );
 
         assert_eq!(
             resolve(&services(None, 2000, 65536)).await,
-            DynamicResolution::Unresolved(NoAnswerReason::Unregistered),
+            ReadersResolution::Unresolved(NoAnswerReason::Unregistered),
         );
 
         let url =
             stub(Router::new().route("/", post(|| async { r#"{"version":1,"readers":["alice","@admins"]}"# }))).await;
         assert_eq!(
             resolve(&services(Some(url), 2000, 65536)).await,
-            DynamicResolution::Unresolved(NoAnswerReason::Malformed),
+            ReadersResolution::Unresolved(NoAnswerReason::Malformed),
         );
 
         let url = stub(Router::new().route(
@@ -574,7 +666,7 @@ mod tests {
         .await;
         assert_eq!(
             resolve(&services(Some(url), 2000, 65536)).await,
-            DynamicResolution::Unresolved(NoAnswerReason::NonSuccess { status: 301 }),
+            ReadersResolution::Unresolved(NoAnswerReason::NonSuccess { status: 301 }),
         );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -584,7 +676,7 @@ mod tests {
         drop(listener);
         assert_eq!(
             resolve(&services(Some(dead), 2000, 65536)).await,
-            DynamicResolution::Unresolved(NoAnswerReason::Transport),
+            ReadersResolution::Unresolved(NoAnswerReason::Transport),
         );
     }
 
@@ -596,7 +688,7 @@ mod tests {
         let url = raw_stub(response.leak().as_bytes(), false).await;
         assert_eq!(
             resolve(&services(Some(url), 2000, 64)).await,
-            DynamicResolution::Unresolved(NoAnswerReason::Oversized),
+            ReadersResolution::Unresolved(NoAnswerReason::Oversized),
         );
     }
 
@@ -607,7 +699,7 @@ mod tests {
         let url = raw_stub(response.as_bytes(), true).await;
         assert_eq!(
             resolve(&services(Some(url), 200, 65536)).await,
-            DynamicResolution::Unresolved(NoAnswerReason::Timeout),
+            ReadersResolution::Unresolved(NoAnswerReason::Timeout),
         );
     }
 

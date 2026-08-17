@@ -8,7 +8,7 @@ use crate::candidate::CallStage;
 use crate::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec, ToolContract};
 use crate::fact::EffectKind;
 use crate::label::{Adequacy, Audience, Dimension, EstablishedLabel, PartialLabel, ReaderId, Trust};
-use crate::names::{DynamicResolverName, MarkName};
+use crate::names::{AudienceArgument, DynamicResolverName, GroupName, MarkName};
 use crate::projection::Views;
 use crate::value::{ResolvedCall, ValueId};
 
@@ -303,12 +303,94 @@ fn history_gaps(
 fn resolve_recipients(spec: &RecipientSpec, call: &ResolvedCall) -> Option<Audience> {
     match spec {
         RecipientSpec::Static(audience) => Some(audience.clone()),
-        RecipientSpec::Placeholder(key) => call
-            .arguments()
-            .get(key)
-            .and_then(|value| value.as_str())
-            .map(|value| Audience::restricted([ReaderId::new(value)])),
+        RecipientSpec::Placeholder(key) => match placeholder_argument(key, call)? {
+            AudienceArgument::Public => Some(Audience::Public),
+            AudienceArgument::Reader(reader) => Some(Audience::restricted([reader])),
+            AudienceArgument::Group(_) => call
+                .membership(key)
+                .map(|membership| Audience::restricted(membership.readers().iter().cloned())),
+        },
         RecipientSpec::Dynamic(binding) => call.dynamic_resolution(binding).cloned(),
+    }
+}
+
+fn placeholder_argument(key: &str, call: &ResolvedCall) -> Option<AudienceArgument> {
+    call.arguments()
+        .get(key)
+        .and_then(|value| value.as_str())
+        .and_then(AudienceArgument::parse)
+}
+
+/// One group a proposed call reads through a placeholder: the argument that spells it
+/// and the group it spells. What the runtime resolves and what the engine requires a pin for.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct GroupRead {
+    pub argument: String,
+    pub group: GroupName,
+}
+
+/// Every group this call's placeholders spell, in argument order. These are
+/// the expansions the call must carry before it can be checked.
+pub fn group_reads(contract: &ToolContract, call: &ResolvedCall) -> Vec<GroupRead> {
+    contract
+        .requires
+        .label
+        .audience
+        .iter()
+        .filter_map(|requirement| match requirement {
+            AudienceRequirement::Includes(RecipientSpec::Placeholder(key)) => match placeholder_argument(key, call) {
+                Some(AudienceArgument::Group(group)) => Some(GroupRead {
+                    argument: key.clone(),
+                    group,
+                }),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum MembershipRefusal {
+    #[error("the call names groups its check needs expansions for")]
+    Needed(Vec<GroupRead>),
+    #[error("the pinned membership answer for argument {0} is not bound to this call")]
+    Foreign(String),
+}
+
+/// The pinned answers a checked call may carry are exactly the ones its placeholders spell:
+/// one per group-reading argument, nothing else, and one expansion per group
+/// — two arguments spelling the same group share one resolution. The live boundary
+/// and the replay validator both run this, so a log cannot hold pins the deciding path refused.
+pub(crate) fn validate_memberships(contract: &ToolContract, call: &ResolvedCall) -> Result<(), MembershipRefusal> {
+    let reads = group_reads(contract, call);
+    let mut expansions: Vec<(&GroupName, &BTreeSet<ReaderId>)> = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
+    for membership in call.memberships() {
+        let argument = membership.argument();
+        let Some(read) = reads.iter().find(|read| read.argument == argument) else {
+            return Err(MembershipRefusal::Foreign(argument.to_string()));
+        };
+        if seen.contains(&argument) {
+            return Err(MembershipRefusal::Foreign(argument.to_string()));
+        }
+        seen.push(argument);
+        match expansions.iter().find(|(group, _)| **group == read.group) {
+            Some((_, readers)) if *readers != membership.readers() => {
+                return Err(MembershipRefusal::Foreign(argument.to_string()));
+            }
+            Some(_) => {}
+            None => expansions.push((&read.group, membership.readers())),
+        }
+    }
+    let missing: Vec<GroupRead> = reads
+        .into_iter()
+        .filter(|read| !seen.contains(&read.argument.as_str()))
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(MembershipRefusal::Needed(missing))
     }
 }
 

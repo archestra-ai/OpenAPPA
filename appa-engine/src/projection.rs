@@ -452,13 +452,15 @@ impl Projection {
                     receiving,
                     proposed_effects,
                     dynamic_resolutions: resolutions,
+                    memberships,
                     subject,
                     proposed_label: _,
                 } => {
                     dispatch_calls.insert(
                         dispatch.clone(),
                         ResolvedCall::new(tool.clone(), arguments.clone())
-                            .with_dynamic_resolutions(resolutions.clone()),
+                            .with_dynamic_resolutions(resolutions.clone())
+                            .with_memberships(memberships.clone()),
                     );
                     receiving_bounds.insert(dispatch.clone(), receiving.clone());
                     if let Some(subject) = subject {
@@ -1433,6 +1435,7 @@ mod tests {
                 receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 dynamic_resolutions: Vec::new(),
+                memberships: Vec::new(),
                 subject: None,
             },
             Fact::DispatchClosed {
@@ -1461,6 +1464,7 @@ mod tests {
                 receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 dynamic_resolutions: Vec::new(),
+                memberships: Vec::new(),
                 subject: None,
             },
             Fact::DispatchClosed {
@@ -1488,6 +1492,7 @@ mod tests {
                 receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 dynamic_resolutions: Vec::new(),
+                memberships: Vec::new(),
                 subject: None,
             },
             Fact::DispatchClosed {
@@ -1869,6 +1874,7 @@ mod tests {
                 receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([]).unwrap(),
                 dynamic_resolutions: Vec::new(),
+                memberships: Vec::new(),
                 subject: None,
             },
             Fact::ValueAdmitted {

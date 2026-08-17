@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::contract::{DynamicAudienceBinding, PinnedDynamicResolution};
+use crate::contract::{DynamicAudienceBinding, PinnedDynamicResolution, PinnedMembership};
 use crate::label::Label;
 use crate::params::CanonicalArguments;
 
@@ -88,6 +88,10 @@ impl CanonicalDigest {
             for resolution in &call.dynamic_resolutions {
                 hasher.update(canonical_resolution(resolution));
             }
+            hasher.update([1u8]);
+            for membership in &call.memberships {
+                hasher.update(canonical_membership(membership));
+            }
         }
         CanonicalDigest(hasher.finalize().into())
     }
@@ -99,6 +103,10 @@ impl CanonicalDigest {
 
 fn canonical_resolution(resolution: &PinnedDynamicResolution) -> Vec<u8> {
     serde_json_canonicalizer::to_vec(resolution).expect("a pinned resolution canonicalizes")
+}
+
+fn canonical_membership(membership: &PinnedMembership) -> Vec<u8> {
+    serde_json_canonicalizer::to_vec(membership).expect("a pinned membership canonicalizes")
 }
 
 /// A digest of a raw tool result. Binds a cast resolution or a child-return derivation to the bytes it
@@ -419,6 +427,7 @@ pub struct ResolvedCall {
     tool: ToolName,
     arguments: CanonicalArguments,
     dynamic_resolutions: Vec<PinnedDynamicResolution>,
+    memberships: Vec<PinnedMembership>,
 }
 
 impl<'de> Deserialize<'de> for ResolvedCall {
@@ -428,14 +437,24 @@ impl<'de> Deserialize<'de> for ResolvedCall {
             tool: ToolName,
             arguments: CanonicalArguments,
             dynamic_resolutions: Vec<PinnedDynamicResolution>,
+            #[serde(default)]
+            memberships: Vec<PinnedMembership>,
         }
 
         let wire = WireCall::deserialize(deserializer)?;
         let pinned = wire.dynamic_resolutions.clone();
-        let canonical = ResolvedCall::new(wire.tool, wire.arguments).with_dynamic_resolutions(wire.dynamic_resolutions);
+        let pinned_memberships = wire.memberships.clone();
+        let canonical = ResolvedCall::new(wire.tool, wire.arguments)
+            .with_dynamic_resolutions(wire.dynamic_resolutions)
+            .with_memberships(wire.memberships);
         if canonical.dynamic_resolutions != pinned {
             return Err(serde::de::Error::custom(
                 "pinned dynamic answers are not in their canonical order",
+            ));
+        }
+        if canonical.memberships != pinned_memberships {
+            return Err(serde::de::Error::custom(
+                "pinned membership answers are not in their canonical order",
             ));
         }
         Ok(canonical)
@@ -448,6 +467,7 @@ impl ResolvedCall {
             tool,
             arguments,
             dynamic_resolutions: Vec::new(),
+            memberships: Vec::new(),
         }
     }
 
@@ -490,6 +510,26 @@ impl ResolvedCall {
             .and_then(PinnedDynamicResolution::audience)
     }
 
+    /// Attach the membership answers pinned to this call. Canonical order only: a
+    /// duplicate binding is not merged here — the boundary refuses it
+    /// ([`crate::check::validate_memberships`]) — so the set the runtime handed over is exactly
+    /// the set the call carries.
+    pub fn with_memberships(mut self, memberships: Vec<PinnedMembership>) -> Self {
+        self.memberships = memberships;
+        self.memberships.sort_by_cached_key(canonical_membership);
+        self
+    }
+
+    pub fn memberships(&self) -> &[PinnedMembership] {
+        &self.memberships
+    }
+
+    pub fn membership(&self, argument: &str) -> Option<&PinnedMembership> {
+        self.memberships
+            .iter()
+            .find(|membership| membership.argument() == argument)
+    }
+
     /// The canonical digest of this exact rendered call, recomputed from the tool and arguments.
     /// The pinned answers are **not** part of it: a repeat is the same rendered call whatever a
     /// resolver said, which is why anything holding a call by identity alone must compare the call
@@ -501,16 +541,22 @@ impl ResolvedCall {
     /// The call a substitution of this one's arguments renders: the same callee, the
     /// replacement arguments, and only those pinned answers the replacement leaves standing.
     pub(crate) fn substituting(&self, arguments: CanonicalArguments) -> ResolvedCall {
+        let unchanged = |argument: &str| arguments.value().get(argument) == self.arguments.value().get(argument);
         let inherited = self
             .dynamic_resolutions
             .iter()
-            .filter(|resolution| {
-                let argument = &resolution.binding().argument;
-                arguments.value().get(argument) == self.arguments.value().get(argument)
-            })
+            .filter(|resolution| unchanged(&resolution.binding().argument))
             .cloned()
             .collect();
-        ResolvedCall::new(self.tool.clone(), arguments).with_dynamic_resolutions(inherited)
+        let memberships = self
+            .memberships
+            .iter()
+            .filter(|membership| unchanged(membership.argument()))
+            .cloned()
+            .collect();
+        ResolvedCall::new(self.tool.clone(), arguments)
+            .with_dynamic_resolutions(inherited)
+            .with_memberships(memberships)
     }
 }
 

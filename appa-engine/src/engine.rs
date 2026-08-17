@@ -1615,6 +1615,23 @@ impl Engine {
                 });
             }
         };
+        let mut needed = Vec::new();
+        for call in &proposals {
+            let contract = self
+                .registry
+                .tool(call.tool())
+                .expect("a resolved call names a checkable tool");
+            match check::validate_memberships(contract, call) {
+                Ok(()) => {}
+                Err(check::MembershipRefusal::Needed(reads)) => needed.extend(reads),
+                Err(check::MembershipRefusal::Foreign(argument)) => {
+                    return Err(TransitionError::ForeignMembership { argument });
+                }
+            }
+        }
+        if !needed.is_empty() {
+            return Err(TransitionError::MembershipNeeded { needed });
+        }
 
         let mut working = std::borrow::Cow::Borrowed(view.projection());
         for fact in &facts {
@@ -1721,7 +1738,10 @@ impl Engine {
             .enumerate()
             .map(|(position, proposed)| {
                 self.resolve_call(proposed.tool.clone(), &proposed.arguments)
-                    .map(|call| call.with_dynamic_resolutions(proposed.dynamic_resolutions.clone()))
+                    .map(|call| {
+                        call.with_dynamic_resolutions(proposed.dynamic_resolutions.clone())
+                            .with_memberships(proposed.memberships.clone())
+                    })
                     .map_err(|error| (position, error))
             })
             .collect::<Result<_, _>>()?;
@@ -3432,6 +3452,7 @@ pub(crate) fn opened_dispatch(
         receiving: current.bound().clone(),
         proposed_effects: contract.emits.clone(),
         dynamic_resolutions: call.dynamic_resolutions().to_vec(),
+        memberships: call.memberships().to_vec(),
         subject,
     };
     (dispatch, fact)
@@ -3598,6 +3619,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         };
         open_engine(cfg)
     }
@@ -3706,6 +3728,7 @@ mod tests {
             tool: call.tool().clone(),
             arguments: call.canonical_arguments().canonical_bytes().to_vec(),
             dynamic_resolutions: call.dynamic_resolutions().to_vec(),
+            memberships: call.memberships().to_vec(),
         }
     }
 
@@ -3990,6 +4013,7 @@ mod tests {
                 receiving: EstablishedLabel::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
                 proposed_effects: crate::fact::EffectSet::default(),
                 dynamic_resolutions: Vec::new(),
+                memberships: Vec::new(),
                 subject: None,
             },
         ];
@@ -4564,6 +4588,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![redactor],
             casts: vec![],
+            membership: None,
         });
         let call = call("fetch", json!({}));
         let mut log = vec![user_value(known(Trust::new(2), Audience::Public))];
@@ -4648,6 +4673,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![redactor],
             casts: vec![],
+            membership: None,
         });
         let call = call("fetch", json!({}));
         let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
@@ -4870,6 +4896,7 @@ mod tests {
                 sanitizer("scrubber", Trust::new(1), Trust::new(2)),
             ],
             casts: vec![],
+            membership: None,
         })
     }
 
@@ -5354,6 +5381,7 @@ mod tests {
                 hint: None,
             }],
             casts: vec![],
+            membership: None,
         })
     }
 
@@ -6141,6 +6169,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         };
         let mut declaration = crate::profile::covering_declaration(&config);
         declaration.context_control = false;
@@ -6672,6 +6701,7 @@ mod tests {
             authorities: vec![officer("officer-a"), officer("officer-b")],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         })
     }
 
@@ -6838,6 +6868,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![declassify],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let opened = appended_facts(blocked_batch(&e, &log, "b1", nonce()));
@@ -8169,6 +8200,7 @@ mod tests {
                 receiving: EstablishedLabel::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
                 proposed_effects: EffectSet::default(),
                 dynamic_resolutions: Vec::new(),
+                memberships: Vec::new(),
                 subject: None,
             }],
         ]
@@ -8240,6 +8272,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![declassify],
             casts: vec![],
+            membership: None,
         };
         let call = call("get_ticket", json!({}));
         let records = vec![user_value(known(TRUSTED, Audience::Public))];
@@ -8345,6 +8378,7 @@ mod tests {
                     vec![crate::names::TagName::new("web")],
                 ),
             ],
+            membership: None,
         })
     }
 
@@ -8460,6 +8494,7 @@ mod tests {
                 vec![SUSPICIOUS, TRUSTED],
                 vec![crate::names::TagName::new("web")],
             )],
+            membership: None,
         });
         let (log, dispatch, raw, _) = resolving_dispatch(&alone);
         let again = alone
@@ -8946,6 +8981,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![declassify],
             casts: vec![],
+            membership: None,
         });
         let child = TrajectoryId::new("child");
         let mut log = vec![user_value(known(TRUSTED, Audience::Public))];
@@ -9291,6 +9327,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![classifier],
+            membership: None,
         };
         let e = open_engine(cfg);
         let cast_fact = |value: u64, resolved: EstablishedLabel, cast: &str| Fact::CastApplied {
@@ -9379,6 +9416,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![classifier],
+            membership: None,
         });
         let child = TrajectoryId::new("child");
         let unknown_source = user_value(Label::new(Dim::Unknown, Dim::Known(Audience::Public)));
@@ -9527,6 +9565,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![webby],
+            membership: None,
         };
         let e = open_engine(cfg);
         assert_eq!(
@@ -9559,6 +9598,7 @@ mod tests {
                     receiving: EstablishedLabel::top(),
                     proposed_effects: crate::fact::EffectSet::default(),
                     dynamic_resolutions: Vec::new(),
+                    memberships: Vec::new(),
                     subject: None,
                 },
                 Fact::ValueAdmitted {
@@ -9764,6 +9804,7 @@ mod tests {
             authorities: vec![officer],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         };
         let e = open_engine(cfg);
         let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
@@ -9880,6 +9921,7 @@ mod tests {
             receiving: established(TRUSTED, Audience::Public),
             proposed_effects: EffectSet::default(),
             dynamic_resolutions: vec![],
+            memberships: Vec::new(),
             subject: None,
         };
         let ghost_call = call("ghost", json!({}));
@@ -9919,6 +9961,7 @@ mod tests {
             authorities: vec![officer],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         };
         let e = open_engine(cfg);
         let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
@@ -9983,6 +10026,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         };
         let mut declaration = crate::profile::covering_declaration(&cfg);
         for name in provider_run {
@@ -10199,6 +10243,7 @@ mod tests {
                 hint: None,
             }],
             casts: vec![],
+            membership: None,
         };
         let bound = ReturnPolicy::Sanitized(crate::names::SanitizerName::new("redactor"));
         let e = Engine::open(DeploymentPolicy {
@@ -10262,6 +10307,7 @@ mod tests {
             tool: ToolName::new(tool),
             arguments: arguments.to_vec(),
             dynamic_resolutions: Vec::new(),
+            memberships: Vec::new(),
         }
     }
 
@@ -10967,6 +11013,372 @@ mod tests {
         assert_eq!(blocked[0].call.dynamic_resolution(&binding), Some(&outsider));
     }
 
+    fn membership_engine(authorities: Vec<crate::authority::Authority>) -> Engine {
+        let mut send = plain_tool("send");
+        send.parameters = crate::params::test_string_argument_schema("to");
+        send.requires = Requires {
+            label: LabelRequirements {
+                trust_floor: None,
+                audience: vec![AudienceRequirement::Includes(RecipientSpec::Placeholder("to".into()))],
+            },
+            ..Requires::default()
+        };
+        open_engine(RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: vec![send],
+            authorities,
+            sanitizers: vec![],
+            casts: vec![],
+            membership: Some(crate::names::MembershipResolverName::new("directory")),
+        })
+    }
+
+    fn pinned_send(to: &str, memberships: Vec<crate::contract::PinnedMembership>) -> crate::transition::ProposedCall {
+        raw(&call("send", json!({ "to": to })).with_memberships(memberships))
+    }
+
+    fn expansion(argument: &str, readers: &[&str]) -> crate::contract::PinnedMembership {
+        crate::contract::PinnedMembership::new(argument, readers.iter().map(|reader| ReaderId::new(*reader)))
+            .expect("literal readers pin")
+    }
+
+    #[test]
+    fn a_public_placeholder_argument_is_the_public_audience() {
+        let e = membership_engine(vec![]);
+        let restricted = vec![user_value(known(
+            TRUSTED,
+            Audience::restricted([ReaderId::new("auditor")]),
+        ))];
+        let decision = e
+            .handle(
+                &viewing(&e, &restricted),
+                batch("b1", Vec::new(), vec![pinned_send("public", vec![])]),
+            )
+            .expect("the batch decides");
+        let (released, blocked) = answered(&decision);
+        assert!(released.is_empty());
+        assert_eq!(
+            blocked[0].block.raw.requirement_gaps,
+            vec![crate::check::Gap::Includes {
+                recipients: Audience::Public
+            }]
+        );
+        assert!(
+            blocked[0].offers.is_empty(),
+            "no authority holds a reader ceiling, so nothing covers a Public recipient"
+        );
+
+        let public = vec![user_value(known(TRUSTED, Audience::Public))];
+        let decision = e
+            .handle(
+                &viewing(&e, &public),
+                batch("b2", Vec::new(), vec![pinned_send("public", vec![])]),
+            )
+            .expect("the batch decides");
+        let (released, blocked) = answered(&decision);
+        assert_eq!(tool_names(released), ["send"]);
+        assert!(blocked.is_empty());
+        let literal = vec![user_value(known(
+            TRUSTED,
+            Audience::restricted([ReaderId::new("public")]),
+        ))];
+        let decision = e
+            .handle(
+                &viewing(&e, &literal),
+                batch("b3", Vec::new(), vec![pinned_send("public", vec![])]),
+            )
+            .expect("the batch decides");
+        assert!(answered(&decision).0.is_empty());
+    }
+
+    #[test]
+    fn a_public_reader_ceiling_covers_a_public_placeholder_recipient() {
+        let officer = crate::authority::Authority {
+            name: AuthorityName::new("officer"),
+            mandate: crate::authority::Mandate {
+                reader_ceiling: Some(Audience::Public),
+                ..crate::authority::Mandate::default()
+            },
+            scope: crate::authority::Scope::default(),
+            hint: None,
+        };
+        let e = membership_engine(vec![officer]);
+        let restricted = vec![user_value(known(
+            TRUSTED,
+            Audience::restricted([ReaderId::new("auditor")]),
+        ))];
+        let decision = e
+            .handle(
+                &viewing(&e, &restricted),
+                batch("b1", Vec::new(), vec![pinned_send("public", vec![])]),
+            )
+            .expect("the batch decides");
+        let (_, blocked) = answered(&decision);
+        assert_eq!(blocked[0].offers.len(), 1, "one ruling plan names the officer");
+    }
+
+    #[test]
+    fn a_group_placeholder_reads_its_pinned_expansion() {
+        let e = membership_engine(vec![]);
+        let log = vec![user_value(known(
+            TRUSTED,
+            Audience::restricted([ReaderId::new("alice"), ReaderId::new("bob")]),
+        ))];
+        let covered = pinned_send("@team", vec![expansion("to", &["alice"])]);
+        let uncovered = pinned_send("@team", vec![expansion("to", &["alice", "carol"])]);
+        let empty = pinned_send("@nobody", vec![expansion("to", &[])]);
+        let decision = e
+            .handle(
+                &viewing(&e, &log),
+                batch("b1", Vec::new(), vec![covered, uncovered, empty]),
+            )
+            .expect("the batch decides");
+        let (released, blocked) = answered(&decision);
+        assert_eq!(released.len(), 2);
+        assert_eq!(released[0].call.membership("to").unwrap().readers().len(), 1);
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(
+            blocked[0].block.raw.requirement_gaps,
+            vec![crate::check::Gap::Includes {
+                recipients: Audience::restricted([ReaderId::new("alice"), ReaderId::new("carol")])
+            }]
+        );
+        let facts = appended_facts(decision);
+        let persisted: Vec<_> = facts
+            .iter()
+            .filter_map(|fact| match fact {
+                Fact::DispatchOpened { memberships, .. } => Some(memberships.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            persisted,
+            vec![vec![expansion("to", &["alice"])], vec![expansion("to", &[])]]
+        );
+        assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
+    }
+
+    #[test]
+    fn an_unpinned_group_refuses_the_batch_with_no_fact() {
+        let e = membership_engine(vec![]);
+        let log = vec![user_value(known(TRUSTED, Audience::Public))];
+        let needed = e.handle(
+            &viewing(&e, &log),
+            batch("b1", Vec::new(), vec![pinned_send("@team", vec![])]),
+        );
+        assert_eq!(
+            needed,
+            Err(TransitionError::MembershipNeeded {
+                needed: vec![crate::check::GroupRead {
+                    argument: "to".into(),
+                    group: crate::names::GroupName::new("team"),
+                }]
+            })
+        );
+        let unregistered = engine(vec![{
+            let mut send = plain_tool("send");
+            send.parameters = crate::params::test_string_argument_schema("to");
+            send.requires = Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Placeholder("to".into()))],
+                },
+                ..Requires::default()
+            };
+            send
+        }]);
+        assert!(matches!(
+            unregistered.handle(
+                &viewing(&unregistered, &log),
+                batch("b1", Vec::new(), vec![pinned_send("@team", vec![])])
+            ),
+            Err(TransitionError::MembershipNeeded { .. })
+        ));
+        for foreign in [
+            pinned_send("alice", vec![expansion("to", &["alice"])]),
+            pinned_send("@team", vec![expansion("body", &["alice"])]),
+            pinned_send("@team", vec![expansion("to", &["alice"]), expansion("to", &["bob"])]),
+            pinned_send("@team", vec![expansion("to", &["alice"]), expansion("to", &["alice"])]),
+        ] {
+            assert!(matches!(
+                e.handle(&viewing(&e, &log), batch("b1", Vec::new(), vec![foreign])),
+                Err(TransitionError::ForeignMembership { .. })
+            ));
+        }
+        let decision = e
+            .handle(
+                &viewing(&e, &log),
+                batch("b1", Vec::new(), vec![pinned_send("@", vec![])]),
+            )
+            .expect("a malformed spelling still decides");
+        assert!(answered(&decision).0.is_empty());
+    }
+
+    #[test]
+    fn membership_pins_are_batch_payload() {
+        let e = membership_engine(vec![]);
+        let log = vec![user_value(known(
+            TRUSTED,
+            Audience::restricted([ReaderId::new("alice")]),
+        ))];
+        let first = e
+            .handle(
+                &viewing(&e, &log),
+                batch(
+                    "b1",
+                    Vec::new(),
+                    vec![pinned_send("@team", vec![expansion("to", &["alice"])])],
+                ),
+            )
+            .expect("the batch decides");
+        let ran = answered(&first).0[0].dispatch.clone();
+        let log = [log, appended_facts(first)].concat();
+        let repeat = e
+            .handle(
+                &viewing(&e, &log),
+                batch(
+                    "b1",
+                    Vec::new(),
+                    vec![pinned_send("@team", vec![expansion("to", &["alice"])])],
+                ),
+            )
+            .expect("the repeat answers");
+        assert_eq!(repeat.append, None);
+        assert_eq!(answered(&repeat).0[0].dispatch, ran);
+        assert_eq!(
+            e.handle(
+                &viewing(&e, &log),
+                batch(
+                    "b1",
+                    Vec::new(),
+                    vec![pinned_send("@team", vec![expansion("to", &["bob"])])]
+                ),
+            ),
+            Err(TransitionError::BatchIdentityConflict)
+        );
+    }
+
+    #[test]
+    fn replay_refuses_tampered_membership_pins() {
+        let e = membership_engine(vec![]);
+        let records = vec![user_value(known(
+            TRUSTED,
+            Audience::restricted([ReaderId::new("alice")]),
+        ))];
+        let decision = e
+            .handle(
+                &viewing(&e, &records),
+                batch(
+                    "b1",
+                    Vec::new(),
+                    vec![pinned_send("@team", vec![expansion("to", &["alice"])])],
+                ),
+            )
+            .expect("the batch decides");
+        let facts = appended_facts(decision);
+        assert_eq!(e.validate_replay(&[records.clone(), facts.clone()].concat()), Ok(()));
+        let tampered = |mutate: &dyn Fn(&mut Fact)| {
+            let mut facts = facts.clone();
+            for fact in &mut facts {
+                mutate(fact);
+            }
+            e.validate_replay(&[records.clone(), facts].concat())
+        };
+        assert_eq!(
+            tampered(&|fact| {
+                if let Fact::DispatchOpened { memberships, .. } = fact {
+                    memberships.clear();
+                }
+            }),
+            Err(TransitionRefusal::UnbackedDecision)
+        );
+        assert_eq!(
+            tampered(&|fact| {
+                if let Fact::DispatchOpened { memberships, .. } = fact {
+                    memberships.push(expansion("body", &["anyone"]));
+                }
+            }),
+            Err(TransitionRefusal::UnbackedDecision)
+        );
+        assert_eq!(
+            tampered(&|fact| {
+                if let Fact::ProposalBatchDecided { proposals, .. } = fact {
+                    proposals[0] = proposals[0].clone().with_memberships(vec![expansion("to", &["bob"])]);
+                }
+            }),
+            Err(TransitionRefusal::MisdecidedBatch)
+        );
+        assert_eq!(
+            tampered(&|fact| {
+                if let Fact::ProposalBatchDecided { proposals, .. } = fact {
+                    proposals[0] = proposals[0]
+                        .clone()
+                        .with_memberships(vec![expansion("body", &["alice"])]);
+                }
+            }),
+            Err(TransitionRefusal::ForgedMembership)
+        );
+    }
+
+    #[test]
+    fn a_call_approval_carries_the_offered_calls_pins_exactly() {
+        let officer = crate::authority::Authority {
+            name: AuthorityName::new("officer"),
+            mandate: crate::authority::Mandate {
+                reader_ceiling: Some(Audience::Public),
+                ..crate::authority::Mandate::default()
+            },
+            scope: crate::authority::Scope::default(),
+            hint: None,
+        };
+        let e = membership_engine(vec![officer]);
+        let alice = Audience::restricted([ReaderId::new("alice")]);
+        let opening = vec![user_value(known(TRUSTED, alice.clone()))];
+        let blocked = appended_facts(
+            e.handle(
+                &viewing(&e, &opening),
+                batch(
+                    "b1",
+                    Vec::new(),
+                    vec![pinned_send("@team", vec![expansion("to", &["alice", "carol"])])],
+                ),
+            )
+            .expect("the batch decides"),
+        );
+        let (offer, plan) = opened_offers(&blocked)[0].clone();
+        let log = [opening, blocked].concat();
+        let approved = appended_facts(
+            execute_offer(
+                &e,
+                &log,
+                offer,
+                OfferOutcome::Approved(evidence_for(offer, &plan, "send", partial(TRUSTED, alice))),
+            )
+            .expect("the officer's ruling arms the call"),
+        );
+        assert_eq!(e.validate_replay(&[log.clone(), approved.clone()].concat()), Ok(()));
+        let mut tampered = approved;
+        for fact in &mut tampered {
+            if let Fact::CallApproved { call, .. } = fact {
+                *call = call.clone().with_memberships(vec![expansion("to", &["alice"])]);
+            }
+        }
+        assert_eq!(
+            e.validate_replay(&[log, tampered].concat()),
+            Err(TransitionRefusal::UnbackedApproval)
+        );
+    }
+
+    #[test]
+    fn a_substitution_keeps_a_membership_pin_only_for_an_unchanged_argument() {
+        let pinned =
+            call("send", json!({ "to": "@team", "body": "hi" })).with_memberships(vec![expansion("to", &["alice"])]);
+        let same_to = pinned.substituting(crate::params::test_arguments(&json!({ "to": "@team", "body": "bye" })));
+        assert_eq!(same_to.memberships(), pinned.memberships());
+        let other_to = pinned.substituting(crate::params::test_arguments(&json!({ "to": "@other", "body": "hi" })));
+        assert!(other_to.memberships().is_empty());
+    }
+
     #[test]
     fn replay_refuses_a_provider_admission_no_act_declared() {
         let e = batch_engine();
@@ -11279,6 +11691,7 @@ mod tests {
             authorities: vec![],
             sanitizers,
             casts,
+            membership: None,
         }
     }
 
@@ -12566,6 +12979,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![lifting_sanitizer("redactor"), lifting_sanitizer("attest-schema")],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let blocked = proposed(&e, &log, "b1", nonce(), call("fetch", json!({}))).expect("the batch decides");
@@ -12598,6 +13012,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![attest],
             casts: vec![],
+            membership: None,
         });
         let child = TrajectoryId::new("child");
         let mut log = spawn_family(&e, Some(&verdict_schema()), &child);

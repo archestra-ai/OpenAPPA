@@ -99,6 +99,7 @@ impl SessionInner {
                 authorities: Default::default(),
                 sanitizers: Default::default(),
                 dynamic: None,
+                membership: None,
             },
         )
         .map_err(|error| error.to_string())?;

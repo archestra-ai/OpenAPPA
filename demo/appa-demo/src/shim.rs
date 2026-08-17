@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::approvals::Approvals;
 use crate::derive::Derivations;
-use crate::world::{AUTHORITY_PATH, DYNAMIC_RESOLVER_PATH, SANITIZER_PATH, TOOLS_PATH};
+use crate::world::{AUTHORITY_PATH, DYNAMIC_RESOLVER_PATH, MEMBERSHIP_PATH, SANITIZER_PATH, TOOLS_PATH};
 
 use crate::systems::{
     CreateCustomerArgs, CreateError, CreateIssueArgs, SendEmailArgs, System, TransferArgs, Verb, create, list,
@@ -50,6 +50,7 @@ pub async fn serve(world: World) -> std::io::Result<SocketAddr> {
         .route(&format!("{AUTHORITY_PATH}/{{name}}"), post(authority))
         .route(&format!("{SANITIZER_PATH}/{{name}}"), post(sanitize))
         .route(DYNAMIC_RESOLVER_PATH, post(dynamic_resolver))
+        .route(MEMBERSHIP_PATH, post(membership))
         .with_state(Arc::new(world));
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
@@ -167,6 +168,24 @@ async fn dynamic_resolver(
         "ap-review@corp.example" => vec!["cfo@corp.example", "ap-lead@corp.example"],
         "all@acme.com" => vec!["ceo@acme.com", "staff@acme.com"],
         recipient => vec![recipient],
+    };
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "version": 1, "readers": readers })),
+    )
+}
+
+#[derive(Deserialize)]
+struct MembershipRequest {
+    version: u32,
+    group: String,
+}
+
+async fn membership(axum::Json(request): axum::Json<MembershipRequest>) -> (StatusCode, axum::Json<serde_json::Value>) {
+    let readers = match (request.version, request.group.as_str()) {
+        (1, "finance") => vec!["cfo@corp.example", "ap-lead@corp.example"],
+        (1, "acme") => vec!["ceo@acme.com", "staff@acme.com"],
+        _ => return (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({}))),
     };
     (
         StatusCode::OK,

@@ -61,9 +61,10 @@ impl Trust {
 /// intersection/subset are exact. Two spellings are reserved — `public` and a leading `@` —
 /// which the algebra must never hold as a reader: a group is expanded to literal IDs by the
 /// membership resolver before a reader set is built. The constructor cannot enforce that, so the
-/// rule is [`is_literal`](ReaderId::is_literal), applied on the ingresses that carry it today:
-/// registry declarations at load, cast answers against their ceiling, and dynamic resolver answers.
-/// A `$recipient` argument and an imported fact are not yet among them (`T14`, `T31`).
+/// rule is [`is_literal`](ReaderId::is_literal), applied on the ingresses that carry it:
+/// registry declarations at load, cast answers against their ceiling, dynamic resolver answers,
+/// and membership expansions. A `$recipient` argument never reaches the constructor with either
+/// spelling: the check reads `public` and `@group` as what they are first.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ReaderId(String);
 

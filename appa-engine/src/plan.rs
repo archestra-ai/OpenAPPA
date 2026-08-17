@@ -980,6 +980,7 @@ mod tests {
             authorities: vec![steward],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(Label::new(Dim::Unknown, Dim::Known(Audience::Public)))];
 
@@ -1047,6 +1048,7 @@ mod tests {
                 hint: None,
             }],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(Label::new(Dim::Known(TRUSTED), Dim::Known(internal)))];
 
@@ -1149,6 +1151,7 @@ mod tests {
                 ),
             ],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
 
@@ -1208,6 +1211,7 @@ mod tests {
                 ),
             ],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let call = call("lookup", json!({ "room": "internal" }))
@@ -1249,6 +1253,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let unresolved = call("send", json!({ "channel": "support" }))
@@ -1309,6 +1314,7 @@ mod tests {
                 },
             )],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("publish", json!({})));
@@ -1389,6 +1395,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let planned = plan_of(&without, &log, &call("wipe", json!({})));
         assert!(
@@ -1403,6 +1410,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![scrub],
             casts: vec![],
+            membership: None,
         });
         assert_eq!(
             plan_of(&with, &log, &call("wipe", json!({}))).plans,
@@ -1468,6 +1476,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(Label::new(Dim::Unknown, Dim::Known(Audience::Public)))];
 
@@ -1517,6 +1526,7 @@ mod tests {
             authorities: vec![generous],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(Label::new(Dim::Known(TRUSTED), Dim::Unknown))];
         let planned = plan_of(&registry, &log, &call("send", json!({})));
@@ -1565,6 +1575,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("send", json!({})));
@@ -1631,6 +1642,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("send", json!({})));
@@ -1676,6 +1688,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("send", json!({})));
@@ -1723,6 +1736,7 @@ mod tests {
             authorities: vec![officer],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
@@ -1774,6 +1788,7 @@ mod tests {
             authorities: vec![officer("officer-a"), officer("officer-b"), attester],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
@@ -1853,6 +1868,7 @@ mod tests {
             authorities: vec![officer("executive", Trust::new(2)), officer("officer", TRUSTED)],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
@@ -1901,6 +1917,7 @@ mod tests {
             ],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(
             TRUSTED,
@@ -1941,6 +1958,7 @@ mod tests {
             ],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![
             user_value(known(TRUSTED, Audience::Public)),
@@ -1962,6 +1980,7 @@ mod tests {
             proposed_effects: EffectSet::new(kinds.iter().copied().map(EffectKind::new))
                 .expect("distinct generated effect kinds"),
             dynamic_resolutions: vec![],
+            memberships: Vec::new(),
             subject: None,
         }
     }
@@ -1994,6 +2013,7 @@ mod tests {
             authorities: vec![keeper],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![
             user_value(known(TRUSTED, Audience::Public)),
@@ -2034,6 +2054,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let expected = vec![redispatch("backup", vec![Gap::Prior(EffectKind::new("backup.done"))])];
         let clear = vec![user_value(known(TRUSTED, Audience::Public))];
@@ -2094,6 +2115,7 @@ mod tests {
             ],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(
             TRUSTED,
@@ -2140,6 +2162,7 @@ mod tests {
             ],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(
             SUSPICIOUS,
@@ -2188,6 +2211,7 @@ mod tests {
             authorities: vec![officer("a", None), officer("b", None)],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let hinted = build(RegistryConfig {
             trust_chain: chain(),
@@ -2198,6 +2222,7 @@ mod tests {
             ],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
         let call = call("wire", json!({}));
@@ -2245,6 +2270,7 @@ mod tests {
             authorities: vec![officer("officer-a"), officer("officer-b")],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         })
     }
 
@@ -2334,6 +2360,7 @@ mod tests {
             authorities: vec![officer],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let wire = call("wire", json!({}));
         let log = vec![
@@ -2385,6 +2412,7 @@ mod tests {
             authorities: vec![officer],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let send = call("send", json!({}));
         let expected = vec![redispatch("emitter", vec![Gap::Prior(EffectKind::new("receipt"))])];
@@ -2440,6 +2468,7 @@ mod tests {
             authorities: vec![gate],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let send = call("send", json!({}));
         let null_rendering = ResolvedCall::new(ToolName::new("emitter"), crate::params::test_arguments(&json!({})));
@@ -2482,6 +2511,7 @@ mod tests {
             authorities: vec![attester("a"), attester("b")],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
@@ -2528,6 +2558,7 @@ mod tests {
             authorities: vec![officer],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
@@ -2562,6 +2593,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(SUSPICIOUS, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
@@ -2589,6 +2621,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("get", json!({})));
@@ -2629,6 +2662,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("delete_db", json!({})));
@@ -2666,6 +2700,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("delete_db", json!({})));
@@ -2719,6 +2754,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(
             TRUSTED,
@@ -2764,6 +2800,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("archive", json!({})));
@@ -2793,6 +2830,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("delete_db", json!({})));
@@ -2829,6 +2867,7 @@ mod tests {
             authorities: vec![officer],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
@@ -2866,6 +2905,7 @@ mod tests {
             authorities: vec![officer],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
@@ -2902,6 +2942,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         });
         let log = vec![user_value(known(TRUSTED, Audience::Public))];
         let planned = plan_of(&registry, &log, &call("a", json!({})));
@@ -3176,6 +3217,7 @@ mod tests {
                 authorities,
                 sanitizers,
                 casts: vec![],
+                membership: None,
             });
             if matches!(built, Err(crate::registry::LoadError::TooManyPlanAlternatives { .. })) {
                 return Ok(());
@@ -3265,6 +3307,7 @@ mod tests {
                 authorities,
                 sanitizers,
                 casts: vec![],
+                membership: None,
             });
             if matches!(built, Err(crate::registry::LoadError::TooManyPlanAlternatives { .. })) {
                 return Ok(());
@@ -3403,6 +3446,7 @@ mod tests {
                 authorities: authorities.clone(),
                 sanitizers: vec![],
                 casts: vec![],
+                membership: None,
             });
             if matches!(built, Err(crate::registry::LoadError::TooManyPlanAlternatives { .. })) {
                 return Ok(());
@@ -3512,7 +3556,8 @@ mod tests {
                     Gap::Attention(_)
                     | Gap::Prior(_)
                     | Gap::Cap { .. }
-                    | Gap::UnresolvedDynamicRecipient { .. } => Some(O::Equal),
+                    | Gap::UnresolvedDynamicRecipient { .. }
+                    => Some(O::Equal),
                 }
             };
             let precedes = |a: &Vec<(AuthorityName, Vec<Gap>)>, b: &Vec<(AuthorityName, Vec<Gap>)>| -> bool {

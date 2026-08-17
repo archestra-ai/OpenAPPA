@@ -403,6 +403,8 @@ fn identity_document(
         "authorities": authorities,
         "sanitizers": sanitizers,
         "casts": casts,
+        // Which directory expands a group is part of what the policy means.
+        "membership": registry.membership,
         "child_return": child_return,
         "deployment": profile,
     })
@@ -592,6 +594,7 @@ mod tests {
             authorities: vec![],
             sanitizers: vec![],
             casts: vec![],
+            membership: None,
         }
     }
 

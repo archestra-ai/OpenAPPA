@@ -224,6 +224,8 @@ pub enum Fact {
         #[serde(default)]
         dynamic_resolutions: Vec<crate::contract::PinnedDynamicResolution>,
         #[serde(default)]
+        memberships: Vec<crate::contract::PinnedMembership>,
+        #[serde(default)]
         subject: Option<crate::basis::SubjectKey>,
     },
     DispatchSucceeded {
