@@ -58,7 +58,8 @@ claude plugin marketplace add archestra-ai/OpenAPPA &&
 ```
 
 The plugin installs a `clappa` command that runs Claude Code protected by
-OpenAPPA. Plain `claude` sessions stay untouched.
+OpenAPPA. Plain `claude` sessions stay untouched. Setup ends with the runtime
+running and answering, so the first `clappa` session starts at once.
 
 The default policy covers Claude Code's built-in tools only. Start `clappa` and
 run `/appa-tool-sync`: it finds your MCP servers and proposes a policy for them.
@@ -163,9 +164,15 @@ guide](integrations/claude-code/README.md).
 
 ## Upgrade
 
-The plugin tracks the marketplace. To upgrade the runtime, remove
-`~/.local/bin/appa-runtime-v2` and ask a plain `claude` session to set up APPA
-again; it installs the latest release.
+The plugin tracks the marketplace. To upgrade the runtime, stop the running
+one and remove `~/.local/bin/appa-runtime-v2`, then ask a plain `claude` session
+to set up APPA again; it installs the latest release and starts it. Stopping it
+first matters: a runtime already answering on the port keeps serving, and the
+new binary would never run.
+
+```sh
+pkill -f appa-runtime-v2 && rm ~/.local/bin/appa-runtime-v2
+```
 
 ## Uninstall
 

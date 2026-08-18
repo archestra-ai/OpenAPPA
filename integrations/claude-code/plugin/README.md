@@ -24,17 +24,24 @@ successful tool-result admission; WSL runs the POSIX hooks as-is.
 without changing Claude's settings automatically; unprotected sessions show
 the mascot with a `clappa` reminder instead of runtime status.
 
-A protected session starts the runtime itself: at session start,
-`hooks/ensure-runtime.sh` (on Windows, `hook.ps1`) launches the
-installed `appa-runtime-v2` when nothing healthy answers `/health`, and
-the session proceeds only once it does. When the binary is not
-installed at all, an unprotected session offers the install as a
-prompted task:
-`hooks/setup-appa.md` tells the model how to download, verify, and
-install the release binary on request, under the session's normal
-command approval — so the plugin alone completes the install. A runtime
-that dies mid-session still blocks the session until the next session
-start brings it back.
+The install and every protected session share one starter,
+`hooks/ensure-runtime.sh` (on Windows, `hook.ps1 -EnsureRuntime`): it
+launches the installed `appa-runtime-v2` when nothing healthy answers
+`/health` and returns only once one does. The last step of the install
+runs it, so a protected session normally finds the runtime already up and
+its SessionStart start is a single health probe. When the binary is not
+installed at all, an unprotected session offers the install as a prompted
+task: `hooks/setup-appa.md` tells the model how to download, verify,
+install, and start the release binary on request, under the session's
+normal command approval — so the plugin alone completes the install. A
+runtime that dies mid-session still blocks the session until the next
+session start brings it back.
+
+Concurrent starts need no lock: the runtime binds the loopback port, so
+the first process to bind serves and every later one exits at once. Each
+hook declares a timeout longer than its own deadline, because Claude Code
+kills a hook that outruns the timeout and then lets the action proceed —
+an undeclared timeout is the one way these hooks fail open.
 
 On session start the hooks also print `hooks/session-context.md` into
 the model's context: short guidance on how to act in a protected session

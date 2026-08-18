@@ -8,7 +8,7 @@
             "type": "command",
             "command": "powershell.exe",
             "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${CLAUDE_PLUGIN_ROOT}/hooks/hook.ps1"],
-            "timeout": 130
+            "timeout": 150
           },
           {
             "type": "command",
