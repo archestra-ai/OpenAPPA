@@ -45,13 +45,25 @@ Short sentences. Plain words. No jargon.
   sentence.
 - Ask nothing before the plan. The plan carries your assumptions;
   the user's reply corrects them.
+- Pace: the user should see the plan, not the research. Phases 1 and 2
+  are mechanical — batch the lookups and decide from what is in front
+  of you. A minute of silence before the plan is a failure.
+- Never read memory files, `MEMORY.md`, project docs, or anything
+  beyond this file and the machine state it names. Recalled memory
+  describes past machine states and stale pitfalls; every rule this
+  run needs is written here, and the machine is the source of truth.
 
 ## Phase 1 — inventory
+
+Two tool calls in most sessions: one shell call for the process and
+the server list together, one read of the config. The tool surface —
+the wire names and descriptions — is already in your context; do not
+re-probe it.
 
 Find the runtime and its config:
 
 ```sh
-ps ax -o command | grep appa-runtime-v2 | grep -v grep
+ps ax -o command | grep appa-runtime-v2 | grep -v grep; claude mcp list
 ```
 
 Take the `--config` path from the command line. A process started
