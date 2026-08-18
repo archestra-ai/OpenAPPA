@@ -16,6 +16,16 @@ When the user asks for the setup, install the runtime:
    exec env APPA_GATE=1 claude "$@"
    ```
 
-   Only if that directory is not on the user's `PATH`, fall back to appending `alias clappa='APPA_GATE=1 claude'` to the file matching their shell and tell them to reload it. On Windows, add the matching `clappa` function to the PowerShell profile. Finish by telling the user to start a gated session with `clappa`.
+   Only if that directory is not on the user's `PATH`, fall back to appending `alias clappa='APPA_GATE=1 claude'` to the file matching their shell and tell them to reload it. On Windows, add the matching `clappa` function to the PowerShell profile.
+
+7. Install the statusline, unless `~/.claude/settings.json` already has a `statusLine` entry — never replace one. Copy `statusline.sh` (on Windows, `statusline.ps1`) from the plugin files directory named at the top of this context into the runtime binary's directory as `appa-statusline.sh`, mode 755, and merge into `~/.claude/settings.json`:
+
+   ```json
+   {"statusLine": {"type": "command", "command": "<that path>/appa-statusline.sh"}}
+   ```
+
+   It shows the APPA mascot with the session's trust and audience when gated, and a `clappa` reminder when not.
+
+8. Finish by telling the user to start a gated session with `clappa`.
 
 If `gh` is missing or unauthenticated, tell the user to install the GitHub CLI and run `gh auth login` first, then ask again.

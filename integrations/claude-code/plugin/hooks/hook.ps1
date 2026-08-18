@@ -22,6 +22,7 @@ if ($SessionContext) {
         $document = "beta-announcement.md"
     } else {
         [Console]::Out.WriteLine("Install target for this machine: $binary")
+        [Console]::Out.WriteLine("Plugin files: $(Split-Path -Parent $PSScriptRoot)")
         [Console]::Out.WriteLine("")
         $document = "setup-appa.md"
     }

@@ -10,7 +10,7 @@
           },
           {
             "type": "command",
-            "command": "if [ \"${APPA_GATE:-}\" = 1 ]; then cat \"${CLAUDE_PLUGIN_ROOT}/hooks/session-context.md\"; elif [ -x \"${APPA_INSTALL_DIR:-$HOME/.local/bin}/appa-runtime-v2\" ] || command -v appa-runtime-v2 >/dev/null 2>&1; then cat \"${CLAUDE_PLUGIN_ROOT}/hooks/beta-announcement.md\"; else printf 'Install target for this machine: %s\\n\\n' \"${APPA_INSTALL_DIR:-$HOME/.local/bin}/appa-runtime-v2\"; cat \"${CLAUDE_PLUGIN_ROOT}/hooks/setup-appa.md\"; fi"
+            "command": "if [ \"${APPA_GATE:-}\" = 1 ]; then cat \"${CLAUDE_PLUGIN_ROOT}/hooks/session-context.md\"; elif [ -x \"${APPA_INSTALL_DIR:-$HOME/.local/bin}/appa-runtime-v2\" ] || command -v appa-runtime-v2 >/dev/null 2>&1; then cat \"${CLAUDE_PLUGIN_ROOT}/hooks/beta-announcement.md\"; else printf 'Install target for this machine: %s\\nPlugin files: %s\\n\\n' \"${APPA_INSTALL_DIR:-$HOME/.local/bin}/appa-runtime-v2\" \"${CLAUDE_PLUGIN_ROOT}\"; cat \"${CLAUDE_PLUGIN_ROOT}/hooks/setup-appa.md\"; fi"
           }
         ]
       }
