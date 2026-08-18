@@ -11,11 +11,12 @@
 # every failure — runtime down, unknown trajectory, missing jq or
 # curl, malformed stdin — prints the mascot alone and exits 0.
 #
-# An ungated session (no APPA_GATE=1) never queries the runtime; it
-# prints the mascot with a reminder that clappa starts the gate.
+# An unprotected session (no APPA_GATE=1) never queries the runtime; it
+# prints the mascot with a reminder that clappa starts a protected
+# session.
 input=$(cat)
 if [ "${APPA_GATE:-}" != 1 ]; then
-  printf '▄█▄▄▄█▄  ungated — run clappa to gate\n██▄█▄██\n'
+  printf '▄█▄▄▄█▄  unprotected — run clappa to protect\n██▄█▄██\n'
   exit 0
 fi
 chips=''

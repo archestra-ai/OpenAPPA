@@ -1,16 +1,17 @@
 # appa-runtime plugin
 
-Gates a Claude Code session through the appa-runtime-v2 process: the
-hooks send every event to it, and the `execute_remedy_plan` MCP server
-lets the model pursue an offered remedy. Hooks fail closed — while the
-process is down, every action in a gated session is blocked.
+Protects a Claude Code session through the appa-runtime-v2 process:
+the hooks send every event to it, and the `execute_remedy_plan` MCP
+server lets the model pursue an offered remedy. Hooks fail closed —
+while the process is down, every action in a protected session is
+blocked.
 
-The plugin gates only sessions launched with `APPA_GATE=1` (the
+The plugin protects only sessions launched with `APPA_GATE=1` (the
 `clappa` alias). The hooks read the variable from the Claude Code
-process environment, fixed at launch, so a session cannot ungate
-itself. In every other session the plugin is inert: it checks nothing,
-starts nothing, and only announces once, at session start, that the
-beta is available and `clappa` starts a gated session
+process environment, fixed at launch, so a session cannot turn the
+protection off. In every other session the plugin is inert: it checks
+nothing, starts nothing, and only announces once, at session start,
+that the beta is available and `clappa` starts a protected session
 (`hooks/beta-announcement.md`) — or, when the runtime binary is not
 installed, offers its installation as a prompted task
 (`hooks/setup-appa.md`).
@@ -20,14 +21,15 @@ Windows swaps in `hooks/hooks.windows.json`, which drives the
 `hooks/hook.ps1` adapter to block failed prompt, tool-call, and
 successful tool-result admission; WSL runs the POSIX hooks as-is.
 `statusline.sh` and `statusline.ps1` provide matching status displays
-without changing Claude's settings automatically; ungated sessions show
+without changing Claude's settings automatically; unprotected sessions show
 the mascot with a `clappa` reminder instead of runtime status.
 
-A gated session starts the runtime itself: at session start,
+A protected session starts the runtime itself: at session start,
 `hooks/ensure-runtime.sh` (on Windows, `hook.ps1`) launches the
 installed `appa-runtime-v2` when nothing healthy answers `/health`, and
-the gate proceeds only once it does. When the binary is not installed
-at all, an ungated session offers the install as a prompted task:
+the session proceeds only once it does. When the binary is not
+installed at all, an unprotected session offers the install as a
+prompted task:
 `hooks/setup-appa.md` tells the model how to download, verify, and
 install the release binary on request, under the session's normal
 command approval — so the plugin alone completes the install. A runtime
@@ -35,7 +37,7 @@ that dies mid-session still blocks the session until the next session
 start brings it back.
 
 On session start the hooks also print `hooks/session-context.md` into
-the model's context: short guidance on how to act in a gated session
+the model's context: short guidance on how to act in a protected session
 (blocks are decisions, run a clear remedy plan without asking, explain
 blocks to the user simply). Advice only; it enforces nothing.
 

@@ -1,5 +1,5 @@
 {
   "name": "appa-runtime",
-  "description": "Gates this session's flows through the appa-runtime-v2 process: every prompt, tool call, tool result, and child return is checked before it proceeds. Hooks fail closed - if the runtime does not answer, the action is blocked.",
+  "description": "Protects this session's flows through the appa-runtime-v2 process: every prompt, tool call, tool result, and child return is checked before it proceeds. Hooks fail closed - if the runtime does not answer, the action is blocked.",
   "version": "0.0.1"
 }
