@@ -2,7 +2,7 @@
 title: How it works
 category: Get started
 order: 2
-description: The whole model in one sitting — what OpenAPPA guarantees and what it costs.
+description: Deterministic security guarantees, flow tracking, and how agents self-correct.
 ---
 
 ## OpenAPPA enforces information-flow policy proactively
@@ -52,13 +52,13 @@ The current label is calculated directly as a functional fold over the labels of
 label = admittedLabels.reduce(narrow, startingLabel)   // narrow only ever restricts
 ```
 
-## Reading data costs the agent reach
+## Reading data limits future actions
 
 OpenAPPA evaluates tools *proactively before dispatch*, informing the agent of lost reach before data enters its context. Reading internal data restricts future steps to internal context, making public destinations unavailable unless explicitly approved or sanitized.
 
 This pre-fetch choice is presented as a **narrowing** stop. If the agent accepts the narrowing, the choice is logged and the call proceeds. Subsequent steps at the same restriction level proceed without repeating prompts. Alternatively, a registered **sanitizer** (such as a PII scrubber) can derive a clean output to preserve public reach.
 
-## A child's narrowing dies with it
+## Sub-agents isolate sensitive reads
 
 Child trajectories isolate label modifications within host-managed sub-executions. A child starts with the parent trajectory's current label, but any data read within the child narrows the child's label exclusively. When the child completes, it returns a single value across its boundary that folds into the parent trajectory like any other tool read. If that raw return would narrow the parent, the merge stops at the boundary until accepted directly or cleaned through a registered `sanitizer`. Parent and child branches share a single append-only log so that all sends and approvals remain globally auditable.
 
