@@ -35,3 +35,4 @@ And where it is genuinely unavoidable, OpenAPPA also lets you plug in non-determ
 - [How OpenAPPA works](/how-it-works) — the whole model in one sitting.
 - [Reading a policy](/contracts) — what each declaration means, and what a wrong one looks like.
 - [Benchmarks](/evaluation) — empirical paper results and running bench-corp.
+- [Discord](https://discord.gg/B5fmSxHKZ7) — questions, feedback, and RFC discussion with the people building it.
