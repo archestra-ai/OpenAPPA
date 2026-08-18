@@ -3,7 +3,6 @@
 ## Install
 
 ```sh
-gh auth login && gh auth setup-git   # while the repo is private
 claude plugin marketplace add archestra-ai/OpenAPPA &&
   claude plugin install appa-runtime@appa &&
   claude "set up APPA"
