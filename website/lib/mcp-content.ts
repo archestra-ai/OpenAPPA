@@ -14,7 +14,7 @@ import { getAllDocs, type DocPage } from "@/lib/docs";
 
 const FIGURE_DESCRIPTIONS: Record<string, string> = {
   "fig-claude-code-hooks":
-    "[Animated figure: a protected Claude Code session sends each hook event to APPA; one tool call comes back allowed, one comes back blocked with safer options.]",
+    "[Animated figure: a protected Claude Code session sends each hook event to OpenAPPA; one tool call comes back allowed, one comes back blocked with safer options.]",
   "fig-connected-agent":
     "[Animated figure: an agent connected to Jira, Salesforce, GitHub, and Granola composes a client update from all four sources.]",
   "fig-exfiltration":

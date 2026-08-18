@@ -5,8 +5,8 @@ import { chip, drawCard, ease, lerp, roundRect, seg, type Theme } from "@/compon
 import { logoPixelData } from "@/components/Logo";
 
 /* Integration figure: a protected Claude Code session. Every hook event
-   goes to APPA, and APPA answers before the action runs. One call comes
-   back allowed, one comes back blocked with safer options. */
+   goes to OpenAPPA, and OpenAPPA answers before the action runs. One call
+   comes back allowed, one comes back blocked with safer options. */
 
 const W = 900;
 const H = 430;
@@ -40,7 +40,7 @@ const CALL_2 = { out: [0.48, 0.58], post: [0.6, 0.68], back: [0.71, 0.79], done:
 
 const NOTES: { at: number; text: string; color: "accent" | "danger" }[] = [
   { at: CALL_1.done, text: "✓ allowed — the call runs", color: "accent" },
-  { at: CALL_2.done, text: "✕ blocked — APPA tells the agent how to proceed safely", color: "danger" },
+  { at: CALL_2.done, text: "✕ blocked — OpenAPPA tells the agent how to proceed safely", color: "danger" },
 ];
 
 /** The pixel wordmark, drawn straight onto the canvas. */
@@ -134,7 +134,7 @@ function draw(ctx: CanvasRenderingContext2D, t: number, th: Theme) {
     ctx.fillText(name, HOOKS.x + 14, rowY(i));
   });
 
-  /* APPA */
+  /* OpenAPPA */
   ctx.save();
   if (runtimeBusy) {
     ctx.shadowColor = th.accent;
@@ -151,7 +151,7 @@ function draw(ctx: CanvasRenderingContext2D, t: number, th: Theme) {
   drawLogo(ctx, th, RUNTIME.x + 14, RUNTIME.y + 13, 10);
   ctx.fillStyle = th.textStrong;
   ctx.font = font(13, 500);
-  ctx.fillText("APPA", RUNTIME.x + 14, RUNTIME.y + 46);
+  ctx.fillText("OpenAPPA", RUNTIME.x + 14, RUNTIME.y + 46);
   ["Policy Config", "Deterministic Engine", "Event Log"].forEach((line, i) => {
     drawCard(ctx, th, RUNTIME.x + 14, RUNTIME.y + 66 + i * 48, RUNTIME.w - 28, 38, line, th.border);
   });
