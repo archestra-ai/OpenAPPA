@@ -4,9 +4,9 @@
 
 ```sh
 gh auth login && gh auth setup-git   # while the repo is private
-claude plugin marketplace add archestra-ai/OpenAPPA &&
-  claude plugin install appa-runtime@appa &&
-  claude "set up APPA"
+claude plugin marketplace add archestra-ai/OpenAPPA
+claude plugin install appa-runtime@appa
+claude "set up APPA"
 ```
 
 `clappa` starts a protected session; plain `claude` stays unprotected.
