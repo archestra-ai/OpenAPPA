@@ -27,11 +27,12 @@ The plugin ships the `/appa-tool-sync` skill to guide you through the policy con
 
 ## Uninstall
 
-To uninstall OpenAPPA from Claude Code, remove the plugin and the [runtime](#technical-details) binaries:
+To uninstall OpenAPPA from Claude Code, remove the plugin, stop the [runtime](#technical-details), and remove its binaries:
 
 ```sh
 claude plugin uninstall appa-runtime
 claude plugin marketplace remove appa
+pkill -f appa-runtime-v2
 rm ~/.local/bin/appa-runtime-v2 ~/.local/bin/clappa ~/.local/bin/appa-statusline.sh
 
 # optional — also remove the policy, database, and alias:
