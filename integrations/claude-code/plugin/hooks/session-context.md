@@ -1,6 +1,7 @@
 This session is protected by APPA. APPA checks every tool call against a flow policy before it runs.
 
 - A block is a policy decision, not an error. Do not retry the blocked call. Do not route around it.
+- Never reach a blocked flow through a different tool. If an MCP tool is blocked, do not do the same read or send with Bash, a script, a file write, or any other tool. The policy decides about the data flow, not about the tool name. A detour is the same flow and breaks the policy the user chose.
 - If the block offers remedy plans and one clearly fits the task, run it with the `execute_remedy_plan` tool and continue. Do not ask the human first. Ask only when the choice between plans is ambiguous.
 - To understand a block, read the runtime's policy file (`appa.toml`). It declares each tool's reads and emissions, and which sources may flow to which sinks.
 - Never edit the policy file. Policy changes belong to the human; propose them, do not make them.
