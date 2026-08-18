@@ -1,5 +1,6 @@
 param(
-    [switch]$SessionContext
+    [switch]$SessionContext,
+    [switch]$EnsureRuntime
 )
 
 # Hooks protect only sessions launched with APPA_GATE=1 (the clappa
@@ -31,10 +32,6 @@ if ($SessionContext) {
     exit 0
 }
 
-if (-not $protected) {
-    exit 0
-}
-
 $runtimeUrl = if ($env:APPA_RUNTIME_URL) {
     $env:APPA_RUNTIME_URL.TrimEnd("/")
 } else {
@@ -43,16 +40,17 @@ $runtimeUrl = if ($env:APPA_RUNTIME_URL) {
 
 function Test-RuntimeHealthy {
     try {
-        (Invoke-RestMethod -Uri "$runtimeUrl/health" -TimeoutSec 2 -UseBasicParsing) -eq "ok"
+        (Invoke-RestMethod -Uri "$runtimeUrl/health" -TimeoutSec 1 -UseBasicParsing) -eq "ok"
     } catch {
         $false
     }
 }
 
 # SessionStart starts the installed runtime when nothing healthy answers,
-# so a protected session works without any service setup. Installing the
-# binary is not this script's job: an unprotected session offers that as a
-# prompted task.
+# so a protected session works without any service setup, and the last step
+# of the install starts it through -EnsureRuntime. Installing the binary is
+# not this script's job: an unprotected session offers that as a prompted
+# task.
 function Start-RuntimeIfDown {
     if (Test-RuntimeHealthy) {
         return
@@ -60,17 +58,48 @@ function Start-RuntimeIfDown {
     if (-not (Test-Path -LiteralPath $binary)) {
         return
     }
+    # The runtime writes the default policy on its first start and refuses
+    # to start when it cannot. The policy and the database live in two
+    # different directories on Windows, so both must exist first.
+    New-Item -ItemType Directory -Path $configDir -Force | Out-Null
     New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
     Start-Process -FilePath $binary -WindowStyle Hidden -ArgumentList @(
         "--config", (Join-Path $configDir "appa.toml"),
         "--db", (Join-Path $dataDir "appa.db")
     ) | Out-Null
-    for ($attempt = 0; $attempt -lt 15; $attempt++) {
+    # A wall-clock budget, not a count of probes: one probe is instant
+    # where the port refuses and costs the full deadline where it hangs.
+    # The whole start must fit inside the timeout hooks.windows.json
+    # declares for SessionStart.
+    $deadline = (Get-Date).AddSeconds(20)
+    while ((Get-Date) -lt $deadline) {
         if (Test-RuntimeHealthy) {
             return
         }
         Start-Sleep -Seconds 1
     }
+}
+
+# The last step of the install starts the runtime through this switch, so
+# the install and every protected session start share one starter. It runs
+# outside the protection guard, because the session that installs is not
+# protected. It exits 0 only while /health answers, which is the proof the
+# install reports.
+if ($EnsureRuntime) {
+    if (-not (Test-Path -LiteralPath $binary)) {
+        [Console]::Error.WriteLine("appa protection: appa-runtime-v2 is not installed; expected at $binary")
+        exit 1
+    }
+    Start-RuntimeIfDown
+    if (Test-RuntimeHealthy) {
+        exit 0
+    }
+    [Console]::Error.WriteLine("appa protection: runtime did not become healthy at $runtimeUrl. Its own error is the last line of $(Join-Path $dataDir 'runtime.stderr.log')")
+    exit 1
+}
+
+if (-not $protected) {
+    exit 0
 }
 
 # The hooks that report a finished turn. They decide nothing, so they
