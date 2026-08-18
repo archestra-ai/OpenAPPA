@@ -130,23 +130,42 @@ servers, proposes one policy entry per tool, and marks which tools read data
 that must stay in the session or send data outward. It asks once about servers
 it cannot judge. You review the complete proposal before it writes anything.
 
-For development from a source checkout, run the runtime on its own port
-so an installed runtime on 8787 is untouched, and point a session at it
-with `APPA_RUNTIME_URL` — the hooks, the MCP server, and the statusline
-all follow it:
+For development from a source checkout, one setup covers the runtime
+and the plugin. The dev runtime runs from source on its own port, so
+an installed runtime on 8787 is untouched; `clappa` loads the plugin
+from the checkout, so every prompt file — hooks, skills, the setup and
+session prompts — is read live at session start, and an edit needs no
+reinstall or cache refresh. A Claude session performing this setup
+does all of it and prints the last command instead of running it —
+it is interactive and belongs to the user:
 
 ```sh
 cp integrations/claude-code/examples/claude-code.appa.toml appa.toml
 nohup cargo run --bin appa-runtime-v2 -- --config appa.toml --db appa.db --listen 127.0.0.1:8788 >appa-runtime.log 2>&1 &
+claude plugin uninstall appa-runtime
 APPA_GATE=1 APPA_RUNTIME_URL=http://127.0.0.1:8788 claude --plugin-dir integrations/claude-code/plugin
 ```
 
-The last command is interactive and belongs to the user: a Claude
-session performing this setup runs the first two and prints the third.
+and rewrites the `clappa` shim's body:
+
+```sh
+#!/bin/sh
+exec env APPA_GATE=1 claude --plugin-dir "/path/to/OpenAPPA/integrations/claude-code/plugin" "$@"
+```
+
+The uninstall matters: a plugin loaded twice fires every hook twice.
+The `--plugin-dir` flag changes where the prompts come from, not which
+runtime serves — `clappa` still gates through the installed runtime,
+while the printed command gates through the dev one. The statusline
+follows whichever runtime the session gates through: its chips and its
+policy statistics both come from the runtime's status read, which
+names the served policy's path.
 
 `APPA_RUNTIME_URL` is fixed at session launch, like `APPA_GATE`: a
 running session cannot be pointed at a different runtime. To move
-between the installed and the dev runtime, start a new session.
+between the installed and the dev runtime, start a new session. The
+revert, once the work merges: reinstall `appa-runtime@appa` and drop
+the flag from the shim.
 
 ## Upgrade
 
@@ -172,10 +191,14 @@ statusline setting separately if you created them.
 Claude Code reads `statusLine` only from your own settings — a plugin
 cannot set it. In a protected session the script shows the APPA pixel
 mascot plus the session's current Trust and Audience, read from the
-process's `GET /status`. In an unprotected session it shows the mascot
-with a reminder that `clappa` starts a protected session, and never
-queries the
-runtime. Both platform scripts fail open: runtime down, unknown
+process's `GET /status`, and a second row with the policy's tool
+counts: `tools:` is every `[[policy.tool]]` entry in the deployment's
+`appa.toml`, `rules:` the entries carrying label rules (an argument
+pin such as `parameters` constrains a call and labels nothing, so it
+does not count), and the row names `/appa-tool-sync` as the skill that
+adds rules. In an unprotected session it shows the mascot with a
+reminder that `clappa` starts a protected session, and never queries
+the runtime. Both platform scripts fail open: runtime down, unknown
 trajectory, or malformed input prints the mascot alone, never a blocked
 action. The POSIX script also needs `jq` and `curl`.
 

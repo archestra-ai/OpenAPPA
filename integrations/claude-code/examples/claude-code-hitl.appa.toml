@@ -45,184 +45,140 @@ version = 1
 [[policy.tool]]
 name = "Agent"
 parameters = { type = "object", additionalProperties = true, properties = { run_in_background = { type = "boolean", const = false } } }
-delta = {}
 
 [[policy.tool]]
 name = "AskUserQuestion"
-delta = {}
 
 [[policy.tool]]
 name = "Artifact"
-delta = {}
 
 [[policy.tool]]
 name = "Bash"
-delta = {}
 
 [[policy.tool]]
 name = "BashOutput"
-delta = {}
 
 [[policy.tool]]
 name = "CronCreate"
-delta = {}
 
 [[policy.tool]]
 name = "CronDelete"
-delta = {}
 
 [[policy.tool]]
 name = "CronList"
-delta = {}
 
 [[policy.tool]]
 name = "Edit"
-delta = {}
 
 [[policy.tool]]
 name = "EnterPlanMode"
-delta = {}
 
 [[policy.tool]]
 name = "EnterWorktree"
-delta = {}
 
 [[policy.tool]]
 name = "ExitPlanMode"
-delta = {}
 
 [[policy.tool]]
 name = "ExitWorktree"
-delta = {}
 
 [[policy.tool]]
 name = "Glob"
-delta = {}
 
 [[policy.tool]]
 name = "Grep"
-delta = {}
 
 [[policy.tool]]
 name = "KillShell"
-delta = {}
 
 [[policy.tool]]
 name = "LSP"
-delta = {}
 
 [[policy.tool]]
 name = "ListAgents"
-delta = {}
 
 [[policy.tool]]
 name = "ListMcpResourcesTool"
-delta = {}
 
 [[policy.tool]]
 name = "Monitor"
-delta = {}
 
 [[policy.tool]]
 name = "NotebookEdit"
-delta = {}
 
 [[policy.tool]]
 name = "PushNotification"
-delta = {}
 
 [[policy.tool]]
 name = "Read"
-delta = {}
 
 [[policy.tool]]
 name = "ReadMcpResourceDirTool"
-delta = {}
 
 [[policy.tool]]
 name = "ReadMcpResourceTool"
-delta = {}
 
 [[policy.tool]]
 name = "ReportFindings"
-delta = {}
 
 [[policy.tool]]
 name = "ScheduleWakeup"
-delta = {}
 
 [[policy.tool]]
 name = "SendMessage"
-delta = {}
 
 [[policy.tool]]
 name = "SendUserFile"
-delta = {}
 
 [[policy.tool]]
 name = "Skill"
-delta = {}
 
 [[policy.tool]]
 name = "SlashCommand"
-delta = {}
 
 # `Task` is the earlier name of `Agent`: the same spawn, the same contract.
 [[policy.tool]]
 name = "Task"
 parameters = { type = "object", additionalProperties = true, properties = { run_in_background = { type = "boolean", const = false } } }
-delta = {}
 
 [[policy.tool]]
 name = "TaskCreate"
-delta = {}
 
 [[policy.tool]]
 name = "TaskGet"
-delta = {}
 
 [[policy.tool]]
 name = "TaskList"
-delta = {}
 
 [[policy.tool]]
 name = "TaskOutput"
-delta = {}
 
 [[policy.tool]]
 name = "TaskStop"
-delta = {}
 
 [[policy.tool]]
 name = "TaskUpdate"
-delta = {}
 
 [[policy.tool]]
 name = "TodoWrite"
-delta = {}
 
 [[policy.tool]]
 name = "ToolSearch"
-delta = {}
 
 [[policy.tool]]
 name = "Workflow"
-delta = {}
 
 [[policy.tool]]
 name = "Write"
-delta = {}
 
 # --- tools that bring outside content into the session ---
 
 # Web pages and search results are authored outside the session.
 [[policy.tool]]
 name = "WebFetch"
-delta = { trust = "suspicious" }
 
 [[policy.tool]]
 name = "WebSearch"
-delta = { trust = "suspicious" }
 
 # --- GitHub, through the GitHub MCP server ---
 #
@@ -232,7 +188,6 @@ delta = { trust = "suspicious" }
 
 [[policy.tool]]
 name = "mcp__github__get_me"
-delta = {}
 
 [[policy.tool]]
 name = "mcp__github__search_issues"
