@@ -10,8 +10,9 @@ This page describes how to run Claude Code with OpenAPPA. OpenAPPA integrates wi
 ## Install
 
 ```sh
-claude plugin marketplace add archestra-ai/OpenAPPA
-claude plugin install appa-runtime@appa
+claude plugin marketplace add archestra-ai/OpenAPPA &&
+  claude plugin install appa-runtime@appa &&
+  claude "set up APPA"
 ```
 
 This installs the OpenAPPA plugin into your Claude Code. While OpenAPPA is in beta, the plugin ships a `clappa` command that runs Claude Code protected by OpenAPPA. If you want to just keep using Claude Code, start it as usual — plain `claude` sessions stay untouched.
@@ -24,13 +25,22 @@ The plugin ships the `/appa-tool-sync` skill to guide you through the policy con
 
 ## Uninstall
 
+To uninstall OpenAPPA from Claude Code, ask Claude to remove the plugin and the [runtime](#technical-details) binaries:
+
 ```sh
-claude plugin uninstall appa-runtime
-claude plugin marketplace remove appa
-rm ~/.local/bin/appa-runtime-v2
+claude "uninstall APPA: uninstall the appa-runtime plugin, remove the appa
+plugin marketplace, delete appa-runtime-v2, clappa, and appa-statusline.sh
+from ~/.local/bin, and in ~/.claude/settings.json delete the statusLine
+entry only if it runs appa-statusline.sh — if it chains other commands,
+remove just the appa part"
 ```
 
-The policy file and the decision history stay on disk; delete them only if you want them gone.
+Optionally, also remove the policy file, the decision database, and the shell alias:
+
+```sh
+claude "finish removing APPA: delete the appa config and data directories,
+and remove the clappa alias from my shell rc if present"
+```
 
 ## Technical details
 
