@@ -26,6 +26,6 @@ When the user asks for the setup, install the runtime:
 
    It shows the APPA mascot with the session's trust and audience when protected, and a `clappa` reminder when not.
 
-8. Finish by telling the user to start a protected session with `clappa`. Add a tip on the next line: run the `/appa-tool-sync` skill in the `clappa` session to build the initial security policy for the MCP tools they have installed. Format both `clappa` and `/appa-tool-sync` as inline code.
+8. Finish by telling the user to start a protected session with `clappa`. Add a tip on the next line: run the `/appa-tool-sync` skill in the `clappa` session to build the initial security policy. Format both `clappa` and `/appa-tool-sync` as inline code.
 
 If `gh` is missing or unauthenticated, tell the user to install the GitHub CLI and run `gh auth login` first, then ask again.
