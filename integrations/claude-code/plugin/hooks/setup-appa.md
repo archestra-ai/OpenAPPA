@@ -8,7 +8,7 @@ When the user asks for the setup, install the runtime:
 2. Download the archive plus `SHA256SUMS` and `version.txt` into a temporary directory: `gh release download --repo archestra-ai/OpenAPPA --pattern <archive> --pattern SHA256SUMS --pattern version.txt`. While the repository is private this needs an authenticated `gh`; once public, `curl -fsSL https://github.com/archestra-ai/OpenAPPA/releases/latest/download/<asset>` works too.
 3. Verify before anything runs: the archive's SHA-256 must equal its line in `SHA256SUMS` (`shasum -a 256` or `sha256sum`). On a mismatch, stop and tell the user; do not install.
 4. Extract the archive and check the binary: `./appa-runtime-v2 --version` must print exactly `appa-runtime-v2 <contents of version.txt>`.
-5. Install the binary to the install target named at the top of this context, mode 755, creating the directory when needed. That exact path is where the plugin's hooks look for it; do not choose a different location. Do not start it: protected sessions start it on demand.
+5. Install the binary to the install target named at the top of this context, mode 755, creating the directory when needed. That exact path is where the plugin's hooks look for it; do not choose a different location. Do not start it: protected sessions start it on demand. When reporting this step, do not say "not started" as if something is missing — say the runtime will be started when `clappa` is called, formatting `clappa` as inline code.
 6. Create the `clappa` command as an executable, not an alias, so it works in every open terminal with no shell reload: write `clappa` into the same directory as the runtime binary, mode 755, containing:
 
    ```sh
