@@ -138,8 +138,11 @@ all follow it:
 ```sh
 cp integrations/claude-code/examples/claude-code.appa.toml appa.toml
 nohup cargo run --bin appa-runtime-v2 -- --config appa.toml --db appa.db --listen 127.0.0.1:8788 >appa-runtime.log 2>&1 &
-APPA_GATE=1 APPA_RUNTIME_URL=http://127.0.0.1:8788 claude --plugin-dir integrations/claude-code/plugin
+APPA_GATE=1 APPA_RUNTIME_URL=http://127.0.0.1:8788 APPA_CONFIG_DIR="$PWD" claude --plugin-dir integrations/claude-code/plugin
 ```
+
+`APPA_CONFIG_DIR` points the statusline's policy statistics at the dev
+`appa.toml`; without it they read the platform-default policy.
 
 The last command is interactive and belongs to the user: a Claude
 session performing this setup runs the first two and prints the third.
