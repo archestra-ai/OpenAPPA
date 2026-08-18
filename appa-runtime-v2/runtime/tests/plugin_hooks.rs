@@ -4,28 +4,78 @@ use std::process::{Command, Stdio};
 use axum::Router;
 use axum::routing::post;
 
+/// The hooks that report a finished turn. Every blocking outcome on one
+/// of these means "do not stop", so none of them may carry one.
+const TURN_ENDS: [&str; 3] = ["Stop", "StopFailure", "SubagentStop"];
+
+fn turn_end_command() -> &'static str {
+    "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; curl -s -m 30 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" \
+     -H 'content-type: application/json' --data-binary @- -o /dev/null; exit 0"
+}
+
+fn shipped(file: &str) -> serde_json::Value {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../integrations/claude-code/plugin/hooks")
+        .join(file);
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap_or_else(|_| panic!("the shipped {file} is readable")))
+        .unwrap_or_else(|_| panic!("the shipped {file} parses"))
+}
+
+/// The two shipped hook maps gate the same events. Nothing else compares
+/// them, so a hook added to one and not the other leaves that platform
+/// on the behaviour the other one fixed.
+#[test]
+fn both_shipped_hook_maps_gate_the_same_events() {
+    let posix = shipped("hooks.json");
+    let windows = shipped("hooks.windows.json");
+    let names = |map: &serde_json::Value| {
+        let mut names: Vec<String> = map["hooks"]
+            .as_object()
+            .expect("the hook map is an object")
+            .keys()
+            .cloned()
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(
+        names(&posix),
+        names(&windows),
+        "the shipped hook maps gate different events"
+    );
+    for event in TURN_ENDS {
+        assert!(
+            windows["hooks"][event][0]["hooks"][0]["command"].is_string(),
+            "the Windows map does not gate {event}",
+        );
+    }
+}
+
 fn shipped_command() -> String {
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../integrations/claude-code/plugin/hooks/hooks.json");
-    let hooks: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(path).expect("the shipped hooks.json is readable"))
-            .expect("the shipped hooks.json parses");
+    let hooks = shipped("hooks.json");
     let command = hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
         .as_str()
         .expect("the PreToolUse hook carries a command")
         .to_string();
-    for event in [
-        "UserPromptSubmit",
-        "PostToolUse",
-        "SubagentStart",
-        "SubagentStop",
-        "PostToolUseFailure",
-    ] {
+    for event in ["UserPromptSubmit", "PostToolUse", "SubagentStart", "PostToolUseFailure"] {
         let entry = &hooks["hooks"][event][0]["hooks"][0]["command"];
         assert_eq!(
             entry.as_str(),
             Some(command.as_str()),
             "the {event} hook command drifted from the PreToolUse one",
+        );
+    }
+    // A turn end decides nothing, and blocking this hook holds the actor
+    // in a turn it has finished, so these three never carry the blocking
+    // exit and never print an answer.
+    for event in TURN_ENDS {
+        let entry = hooks["hooks"][event][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the {event} hook carries a command"));
+        assert_eq!(
+            entry,
+            turn_end_command(),
+            "the {event} hook is no longer the non-blocking turn-end command",
         );
     }
     assert_eq!(
@@ -136,6 +186,19 @@ async fn an_ungated_session_posts_nothing_and_never_blocks() {
         .expect("the blocking task joins");
     assert_eq!(code, 0, "an ungated session must not be blocked");
     assert_eq!(stdout, "", "an ungated session posts nothing");
+}
+
+/// Blocking a turn end holds the actor in a turn it has finished, so a
+/// runtime that answers nothing costs a call left open, never a turn
+/// that cannot end.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unreachable_runtime_never_blocks_a_turn_end() {
+    let url = refused_url().await;
+    let (code, stdout) = tokio::task::spawn_blocking(move || run_hook(turn_end_command(), &url))
+        .await
+        .expect("the blocking task joins");
+    assert_eq!(code, 0, "a turn end must never block the harness");
+    assert_eq!(stdout, "", "a turn end prints no decision");
 }
 
 #[tokio::test(flavor = "multi_thread")]

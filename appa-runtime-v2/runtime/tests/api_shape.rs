@@ -52,6 +52,11 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
             let _: Option<TrajectoryId> = child;
             let _: String = text;
         }
+        HookEvent::TurnEnd { actor } => {
+            let Actor { root, child } = actor;
+            let _: TrajectoryId = root;
+            let _: Option<TrajectoryId> = child;
+        }
         HookEvent::ToolCall { actor: _, call, spawn } => {
             let ProposedCall { tool, arguments } = call;
             let _: String = tool;

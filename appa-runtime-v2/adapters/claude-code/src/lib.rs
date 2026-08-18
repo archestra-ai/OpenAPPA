@@ -20,7 +20,7 @@
 //! | `PostToolUse` for `Agent` (`Task`) | `SpawnResult` |
 //! | `PostToolUse`, `PostToolUseFailure` | `ToolResult` (the Q14 outcome mapping) |
 //! | `SubagentStart` | `ChildStart`, naming the family's spawn in flight |
-//! | `SubagentStop` | no event: a lifecycle marker |
+//! | `Stop`, `StopFailure`, `SubagentStop` | `TurnEnd` for the actor that finished |
 //!
 //! Subagents. Claude Code spawns a subagent through its `Agent` tool
 //! (`Task` is its older name), so the codec marks that call as the
@@ -36,7 +36,8 @@
 //! the named child against the fork it bound, and the parent receives
 //! what crosses. `SubagentStop` fires before it and carries the same
 //! text, but a hook there cannot substitute what the parent receives —
-//! it can only keep the subagent running — so it maps to no event.
+//! it can only keep the subagent running — so it crosses as the child's
+//! `TurnEnd` and never as its return.
 //! A subagent started with `run_in_background: true` returns through a
 //! task notification no hook observes; the shipped example policies
 //! refuse that argument at the spawn call.
@@ -51,7 +52,7 @@
 //! | `PostToolUseFailure` | `Failure` — the run failed; no effects commit |
 //! | `PostToolUse` with a `tool_response` | `Success` carrying that response's JSON rendering |
 //! | `PostToolUse` with no `tool_response` (absent or null — the wire spells them alike) | `Indeterminate` — no effects commit, the reservation stands |
-//! | no outcome hook at all | nothing is reported; the dispatch stays open |
+//! | no outcome hook at all | nothing is reported; the dispatch stays open until the actor's `TurnEnd` closes it as not run |
 //!
 //! The mapping is total over those shapes. It reads no error shape out
 //! of a `tool_response` body: no recorded live example of one exists,
@@ -313,7 +314,13 @@ fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
             })),
             None => Err(malformed("SubagentStart without an agent id")),
         },
-        "SubagentStop" => Ok(None),
+        "Stop" | "StopFailure" => Ok(Some(HookEvent::TurnEnd { actor: event.actor() })),
+        // Without the agent id this would name the root, whose one open
+        // dispatch at this point is the `Agent` spawn still in flight.
+        "SubagentStop" => match event.agent_id.as_deref() {
+            Some(_) => Ok(Some(HookEvent::TurnEnd { actor: event.actor() })),
+            None => Err(malformed("SubagentStop without an agent id")),
+        },
         other => {
             tracing::debug!(hook = other, "hook event outside the codec's mapping");
             Ok(None)
@@ -574,6 +581,28 @@ mod tests {
     }
 
     #[test]
+    fn every_turn_end_hook_names_the_actor_that_finished() {
+        for (hook, child) in [
+            ("Stop", None),
+            ("StopFailure", None),
+            ("SubagentStop", Some(TrajectoryId("cc:s1:a1".to_string()))),
+        ] {
+            let mut body = serde_json::json!({"hook_event_name": hook, "session_id": "s1"});
+            if child.is_some() {
+                body["agent_id"] = serde_json::Value::String("a1".to_string());
+            }
+            let parsed = parse(body.to_string().as_bytes()).expect("the turn end parses");
+            assert_eq!(
+                parsed,
+                Some(HookEvent::TurnEnd {
+                    actor: Actor { root: root(), child },
+                }),
+                "{hook} did not cross as its actor's turn end",
+            );
+        }
+    }
+
+    #[test]
     fn missing_required_fields_are_named_refusals() {
         for (event, detail) in [
             (
@@ -596,6 +625,10 @@ mod tests {
                 serde_json::json!({"hook_event_name": "SubagentStart", "session_id": "s1"}),
                 "SubagentStart without an agent id",
             ),
+            (
+                serde_json::json!({"hook_event_name": "SubagentStop", "session_id": "s1"}),
+                "SubagentStop without an agent id",
+            ),
         ] {
             assert_eq!(
                 parse_value(&event),
@@ -610,7 +643,7 @@ mod tests {
 
     #[test]
     fn unmapped_hooks_parse_to_no_event() {
-        for name in ["Stop", "SubagentStop", "SomethingNew"] {
+        for name in ["PreCompact", "Notification", "SomethingNew"] {
             let event = serde_json::json!({
                 "hook_event_name": name,
                 "session_id": "s1",

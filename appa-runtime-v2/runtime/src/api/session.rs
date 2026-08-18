@@ -188,6 +188,62 @@ impl Session {
         Ok(())
     }
 
+    /// The actor finished a turn. A call still open here got no outcome
+    /// hook and will never get one: Claude Code reports none for a call
+    /// refused at its permission prompt. Left open it refuses every
+    /// later proposal as a second call in flight, for the life of the
+    /// trajectory.
+    ///
+    /// The close is `Indeterminate`, not a failure. What the runtime
+    /// observed is the absence of a report, which does not say whether
+    /// the call ran: an outcome hook that never reached the runtime
+    /// looks the same as a call the harness refused. Indeterminate is
+    /// the outcome for exactly that — the dispatch closes and the
+    /// effect reservation stands, so a real emission is never dropped
+    /// from the ledger on the strength of a missing hook.
+    ///
+    /// Not an engine event when nothing is carried, which is every
+    /// ordinary turn: the view is read, no fact is appended.
+    pub async fn on_turn_end(&mut self) -> Result<(), EventError> {
+        let Some(open) = self.carried_call()? else {
+            tracing::debug!(trajectory = %self.trajectory.0, "turn ended with no call outstanding");
+            return Ok(());
+        };
+        self.abandon_open(&ToolOutcome::Indeterminate).await?;
+        tracing::debug!(
+            trajectory = %self.trajectory.0,
+            dispatch = ?open.id,
+            tool = %open.tool,
+            "call closed as unreported at the turn end",
+        );
+        Ok(())
+    }
+
+    /// The call a turn end closes. A trajectory that has ended or never
+    /// opened carries nothing, so a turn end that names one is a no-op
+    /// rather than a refusal — a turn ends for reasons the engine does
+    /// not model.
+    ///
+    /// A substituted release is never carried. It stands across turns by
+    /// construction: no proposal released it, so no outcome hook is owed
+    /// for it, and it ends only when the harness runs it or proposes
+    /// past it (`claim_or_abandon`). Closing it here would discard the
+    /// remedy that minted it.
+    fn carried_call(&self) -> Result<Option<OpenDispatch>, EventError> {
+        let log = self.inner.log(&self.root)?;
+        let policy = self.inner.resolve_policy(&self.deployment, &log)?;
+        let view = self
+            .inner
+            .engine
+            .rebuild_view(&policy, &log)
+            .map_err(EventError::from)?;
+        match self.inner.engine.liveness(&view, &self.trajectory) {
+            Liveness::Ended | Liveness::Unopened => Ok(None),
+            Liveness::Live if self.inner.engine.substituted_release(&view, &self.trajectory).is_some() => Ok(None),
+            Liveness::Live => Ok(self.inner.engine.open_dispatches(&view, &self.trajectory).pop()),
+        }
+    }
+
     pub async fn on_tool_call(&mut self, call: ProposedCall, spawn: bool) -> Result<ToolCallDecision, EventError> {
         if is_control_tool(&call.tool) {
             tracing::debug!(trajectory = %self.trajectory.0, "control tool passes unchecked");
@@ -276,7 +332,7 @@ impl Session {
         let outcome = ToolOutcome::Failure {
             message: "the harness did not run the substituted call".to_string(),
         };
-        self.abandon_release(&outcome).await?;
+        self.abandon_open(&outcome).await?;
         tracing::debug!(
             trajectory = %self.trajectory.0,
             dispatch = ?open.id,
@@ -287,14 +343,21 @@ impl Session {
         Err(EventError::SubstitutionAbandoned { tool: open.tool })
     }
 
-    async fn abandon_release(&self, outcome: &ToolOutcome) -> Result<EngineDecision, EventError> {
+    /// Close the call this trajectory has open as one that did not run.
+    /// The dispatch is re-read from the view on every replay, so a
+    /// contended append never closes an occurrence the winning writer
+    /// already closed. Both callers reach here with one dispatch open:
+    /// a substituted release the harness declined to run, and a
+    /// released call whose turn ended without an outcome.
+    async fn abandon_open(&self, outcome: &ToolOutcome) -> Result<EngineDecision, EventError> {
         self.drive_with_evidence(
             |context, evidence| {
-                let Some(open) = context.substituted_release() else {
-                    return Err(EventError::CallOutstanding);
+                let open = context.open_dispatches();
+                let [open] = open.as_slice() else {
+                    return Err(EventError::UnknownDispatch);
                 };
                 Ok(EngineEvent::ToolOutcome {
-                    dispatch: open.id,
+                    dispatch: open.id.clone(),
                     outcome: outcome.clone(),
                     evidence,
                     entropy: fresh_entropy(),
@@ -788,13 +851,6 @@ impl Decided<'_> {
             .inner
             .engine
             .open_dispatches(self.view, &self.session.trajectory)
-    }
-
-    fn substituted_release(&self) -> Option<OpenDispatch> {
-        self.session
-            .inner
-            .engine
-            .substituted_release(self.view, &self.session.trajectory)
     }
 
     fn canonical_bytes(&self, call: &ProposedCall) -> Option<Vec<u8>> {
@@ -2852,6 +2908,38 @@ context_control = true
         }
     }
 
+    /// No proposal released the substituted call, so no outcome hook is
+    /// owed for it and a turn that ends before the harness runs it
+    /// leaves it standing. Closing it would discard the remedy.
+    #[tokio::test]
+    async fn a_turn_end_leaves_a_standing_substituted_call_alone() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(
+            substituting_config(SUBSTITUTED_SEND, None),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let hop = narrowed_and_blocked(&runtime, &mut session).await;
+        session.on_remedy(hop, None).await.expect("the hop executes");
+        assert!(standing_release(&runtime).is_some());
+
+        session.on_turn_end().await.expect("the turn end acks");
+
+        assert!(
+            standing_release(&runtime).is_some(),
+            "the substituted call still stands after the turn ended"
+        );
+        assert_eq!(
+            session
+                .on_tool_call(send(REDACTED_BODY), false)
+                .await
+                .expect("the next turn is still handed the substituted call"),
+            ToolCallDecision::Allow { spawn: None },
+        );
+    }
+
     #[tokio::test]
     async fn another_call_while_a_substituted_call_stands_abandons_it() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -4144,6 +4232,138 @@ context_control = true
             .await
             .expect("with nothing in flight the same end crosses");
         assert!(matches!(runtime.live(&root(), &child("c1")), Err(SessionError::Ended)));
+    }
+
+    /// The harness refused the released call at its permission prompt,
+    /// so no outcome hook fires for it. Without the turn end that
+    /// dispatch would refuse every later proposal for the life of the
+    /// trajectory.
+    #[tokio::test]
+    async fn a_turn_end_closes_the_call_the_harness_never_ran() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        assert_eq!(
+            session
+                .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
+                .await
+                .expect("the call releases"),
+            ToolCallDecision::Allow { spawn: None },
+        );
+        assert!(matches!(
+            session.on_tool_call(fetch(serde_json::json!({"a": 2})), false).await,
+            Err(EventError::CallOutstanding),
+        ));
+
+        session.on_turn_end().await.expect("the turn end closes it");
+
+        assert!(runtime.open_dispatches(&root(), &root()).is_empty());
+        assert!(
+            runtime
+                .audit(&root())
+                .expect("the audit reads")
+                .iter()
+                .any(|entry| matches!(
+                    &entry.event,
+                    crate::engine::AuditEvent::Closed {
+                        outcome: crate::engine::DispatchOutcome::Unknown
+                    }
+                )),
+            "the unreported dispatch closed as unknown, not as a run that failed"
+        );
+        assert_eq!(
+            session
+                .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
+                .await
+                .expect("the next turn proposes freely"),
+            ToolCallDecision::Allow { spawn: None },
+        );
+    }
+
+    /// The outcome the close ruled out cannot be reported afterwards:
+    /// a call the log says did not run admits no value.
+    #[tokio::test]
+    async fn an_outcome_reported_after_its_turn_end_is_refused() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        session
+            .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
+            .await
+            .expect("the call releases");
+        session.on_turn_end().await.expect("the turn end closes it");
+
+        let error = session
+            .on_tool_result(
+                fetch(serde_json::json!({"a": 1})),
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("the run did happen".to_string()),
+                },
+            )
+            .await
+            .expect_err("the closed dispatch takes no outcome");
+        assert!(matches!(error, EventError::UnknownDispatch), "got {error:?}");
+    }
+
+    /// A turn end is not an engine event when nothing is outstanding,
+    /// which is every ordinary turn.
+    #[tokio::test]
+    async fn a_turn_end_over_a_settled_trajectory_appends_nothing() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        session
+            .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
+            .await
+            .expect("the call releases");
+        session
+            .on_tool_result(
+                fetch(serde_json::json!({"a": 1})),
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("body".to_string()),
+                },
+            )
+            .await
+            .expect("the outcome closes the dispatch");
+
+        let settled = runtime.log_facts(&root()).len();
+        session.on_turn_end().await.expect("the turn end acks");
+        session.on_turn_end().await.expect("a repeat acks too");
+        assert_eq!(runtime.log_facts(&root()).len(), settled, "no fact is appended");
+    }
+
+    /// A child carries its own dispatches, and one left open holds the
+    /// child's return at the boundary.
+    #[tokio::test]
+    async fn a_child_turn_end_closes_its_abandoned_call_so_the_child_can_end() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut child_session = open_child(&mut session, fetch(serde_json::json!({"a": 1})), child("c1")).await;
+        child_session
+            .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
+            .await
+            .expect("the child's call releases");
+
+        let error = child_session
+            .on_child_end(Some("done".to_string()))
+            .await
+            .expect_err("a child with a call still open does not end");
+        assert!(matches!(error, EventError::ChildDispatchOpen), "got {error:?}");
+
+        child_session
+            .on_turn_end()
+            .await
+            .expect("the child's turn end closes it");
+        assert!(runtime.open_dispatches(&root(), &child("c1")).is_empty());
+        child_session
+            .on_child_end(Some("done".to_string()))
+            .await
+            .expect("with nothing in flight the child ends");
     }
 
     #[tokio::test]

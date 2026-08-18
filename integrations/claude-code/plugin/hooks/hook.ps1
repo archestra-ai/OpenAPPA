@@ -73,6 +73,11 @@ function Start-RuntimeIfDown {
     }
 }
 
+# The hooks that report a finished turn. They decide nothing, so they
+# never block, and they take the shorter deadline: a turn end waits on
+# no evidence round trip.
+$turnEnds = @("Stop", "StopFailure", "SubagentStop")
+
 try {
     $payload = [Console]::In.ReadToEnd()
     $hookInput = $null
@@ -84,11 +89,20 @@ try {
     if ($null -ne $hookInput -and $hookInput.hook_event_name -eq "SessionStart") {
         Start-RuntimeIfDown
     }
+    $timeout = if ($null -ne $hookInput -and $turnEnds -contains $hookInput.hook_event_name) { 30 } else { 120 }
     $response = Invoke-WebRequest -Uri "$runtimeUrl/hook" -Method Post `
-        -ContentType "application/json" -Body $payload -TimeoutSec 120 -UseBasicParsing
+        -ContentType "application/json" -Body $payload -TimeoutSec $timeout -UseBasicParsing
     [Console]::Out.Write([string]$response.Content)
 } catch {
     $failure = $_.Exception.Message
+    # A turn end decides nothing, and every blocking outcome on these
+    # hooks means "do not stop", which would hold the actor in a turn it
+    # has finished. A runtime that does not answer costs a call left
+    # open, which the next turn end closes.
+    if ($null -ne $hookInput -and $turnEnds -contains $hookInput.hook_event_name) {
+        [Console]::Error.WriteLine("OpenAPPA runtime did not answer the turn end: $failure")
+        exit 0
+    }
     if ($null -ne $hookInput -and $hookInput.hook_event_name -eq "PostToolUse") {
         @{
             decision = "block"

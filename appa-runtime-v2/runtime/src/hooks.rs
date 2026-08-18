@@ -50,6 +50,23 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
                 Err(error) => fold(error, block),
             }
         }
+        HookEvent::TurnEnd { actor } => {
+            // A turn end gates nothing, so it answers `Ack` whatever
+            // happens. The refusal families both mean "do not end the
+            // turn" on this hook, which would hold the harness in a turn
+            // it has finished; a close that failed leaves the call open
+            // and the next proposal refuses on its own.
+            if let Err(error) = on_actor(
+                runtime,
+                &actor,
+                |mut session| async move { session.on_turn_end().await },
+            )
+            .await
+            {
+                tracing::warn!(root = %actor.root.0, %error, "the turn end closed no abandoned call");
+            }
+            HookDecision::Ack
+        }
         HookEvent::ToolCall { actor, call, spawn } => {
             if is_control_tool(&call.tool) {
                 return control_call(runtime, &actor, &call);
@@ -341,6 +358,70 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// On this hook every refusal family means "do not end the turn",
+    /// so a turn end answers with no opinion whatever the close did —
+    /// including for a session the runtime never opened.
+    #[tokio::test]
+    async fn a_turn_end_answers_with_no_opinion_even_over_an_unknown_session() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_real_runtime(&dir);
+        for hook in ["Stop", "StopFailure", "SubagentStop"] {
+            let mut body = serde_json::json!({
+                "hook_event_name": hook,
+                "session_id": "never-opened",
+                "last_assistant_message": "the summary",
+            });
+            if hook == "SubagentStop" {
+                body["agent_id"] = serde_json::Value::String("a1".to_string());
+            }
+            let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&body).expect("re-serializes")).await;
+            assert_eq!(
+                (status, answer),
+                (200, serde_json::json!({})),
+                "the {hook} hook blocked"
+            );
+        }
+    }
+
+    /// The wedge this hook exists to clear: a released call the harness
+    /// never ran refuses every later proposal until the turn ends.
+    #[tokio::test]
+    async fn a_turn_end_frees_a_trajectory_the_missing_outcome_wedged() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_real_runtime(&dir);
+        let propose = |command: &str| {
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "s1",
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+            })
+        };
+        let released = call_hook(&runtime, &serde_json::to_vec(&propose("ls")).expect("re-serializes")).await;
+        assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
+
+        // The harness refused it at its permission prompt: no outcome hook fires.
+        let wedged = call_hook(
+            &runtime,
+            &serde_json::to_vec(&propose("echo hi")).expect("re-serializes"),
+        )
+        .await;
+        assert_eq!(wedged.1["hookSpecificOutput"]["permissionDecision"], "deny");
+
+        let stop = serde_json::json!({"hook_event_name": "Stop", "session_id": "s1"});
+        assert_eq!(
+            call_hook(&runtime, &serde_json::to_vec(&stop).expect("re-serializes")).await,
+            (200, serde_json::json!({})),
+        );
+
+        let freed = call_hook(
+            &runtime,
+            &serde_json::to_vec(&propose("echo hi")).expect("re-serializes"),
+        )
+        .await;
+        assert_eq!(freed.1["hookSpecificOutput"]["permissionDecision"], "allow");
     }
 
     #[tokio::test]

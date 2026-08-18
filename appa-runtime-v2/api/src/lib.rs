@@ -80,6 +80,11 @@ pub enum HookEvent {
         actor: Actor,
         text: String,
     },
+    /// The actor finished a turn. Nothing it released is still running,
+    /// so a dispatch still open names a call the harness never ran.
+    TurnEnd {
+        actor: Actor,
+    },
     ToolCall {
         actor: Actor,
         call: ProposedCall,
