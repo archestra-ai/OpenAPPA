@@ -159,6 +159,7 @@ session to set up APPA again; it installs the latest release.
 ```sh
 claude plugin uninstall appa-runtime
 claude plugin marketplace remove appa
+pkill -f appa-runtime-v2
 rm ~/.local/bin/appa-runtime-v2
 ```
 
