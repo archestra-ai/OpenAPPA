@@ -44,7 +44,7 @@ requires = { audience = { cap = ["finance", "@auditors"] } }  # group in a cap
 delta    = {}
 ```
 
-Resolution is fresh per operation, and pinned within one: the set resolved at a call's check is the set its block, its plan offers, its release and its admission use, and a written list means its literal readers plus the current members of each group it names. A member added to the directory reaches the next check without a policy reload; removal reaches only future resolutions — a set already resolved stands. Records keep the resolved readers, never the group name. `public` is reserved and never a group member; a directory answer containing it is malformed.
+Resolution is fresh per operation, and pinned within one: the set resolved at a call's check is the set its block, its plan offers, its release and its admission use, and a written list means its literal readers plus the current members of each group it names. Directory updates take effect on the next policy check without a reload. Once resolved for a specific tool call, reader sets stay pinned to that call. Records keep the resolved readers, never the group name. `public` is reserved and never a group member; a directory answer containing it is malformed.
 
 A resolver that produces no answer — a timeout, an error, malformed or oversized data — resumes nothing: the check does not complete and no engine fact is appended. An empty reader set is a successful answer. The endpoint accepts a versioned JSON POST request: `{version:1,resolver,group}`, with `group` the name without its `@` mark. It returns `{version:1,readers:[...]}`.
 
@@ -197,7 +197,7 @@ builtin = "redact-email"
 
 | Implementation | Description | Audit Properties |
 |---|---|---|
-| **`builtin = "redact-email"`** | The stock in-process redactor: replaces email-like tokens with a fixed placeholder. | Deterministic and offline; registering it vouches for exactly that transform. |
+| **`builtin = "redact-email"`** | In-process redactor: replaces email addresses with a fixed placeholder. | Deterministic and offline; guarantees exact string transformation without external calls. |
 | **(reserved name `attest-schema`)** | The quarantine-exit sanitizer, registered by name alone: the engine applies it itself, so it takes no `[externals]` entry, and binding one is a load error. | Derives the return unchanged; claims instruction-cleanliness only. |
 | **`builtin = "<module name>"`** | A deployer builtin module: your own compiled scrubber, loaded at startup and called in-process. | Same mandate ceiling as any implementation; deployer trusted code. |
 | **`url = ...`** | A scrubbing service behind an endpoint. | The derivation is re-validated against the declared transition before admission. |
@@ -228,7 +228,7 @@ The reserved builtin `attest-schema` covers the quarantine exit without touching
 [[sanitizer]]
 name = "attest-schema"
 on   = ["tool_output"]
-hint = "Vouches a fork-bound structured return; shape only, no content claims."
+hint = "Verifies the sub-agent returned valid structured data matching the schema."
 
 [sanitizer.mandate]
 trust = { from = "suspicious", to = "trusted" }
