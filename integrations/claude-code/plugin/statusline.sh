@@ -11,9 +11,11 @@
 # The second row counts the policy's tools: `tools:` is every
 # [[policy.tool]] entry, `rules:` the entries carrying more than the
 # neutral annotation (bare `name` plus `delta = {}`), and the hint
-# names the skill that adds rules. The policy path is the platform
-# default under APPA_CONFIG_DIR's rules; a runtime started with a
-# different --config shows that file's counts or none.
+# names the skill that adds rules. The policy is the file the runtime's
+# status read names in `policy_path` — the served `--config` — so the
+# counts follow the runtime the session gates through; when the read
+# gives no path, the platform default under APPA_CONFIG_DIR's rules is
+# the fallback.
 #
 # A statusline fails open, the opposite of the hooks' `|| exit 2`:
 # every failure — runtime down, unknown trajectory, missing jq or
@@ -29,6 +31,7 @@ if [ "${APPA_GATE:-}" != 1 ]; then
   exit 0
 fi
 chips=''
+live_policy=''
 if command -v jq >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
   sid=$(printf '%s' "$input" | jq -er '.session_id' 2>/dev/null) &&
     body=$(curl -sf --connect-timeout 0.1 -m 0.3 --get \
@@ -38,14 +41,22 @@ if command -v jq >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
       jq -er 'select((.trust | type) == "string" and (.audience | type) == "string")
         | "trust:\(.trust)  audience:\(.audience)"' 2>/dev/null) ||
     chips=''
+  live_policy=$(printf '%s' "${body:-}" |
+    jq -er 'select((.policy_path | type) == "string") | .policy_path' 2>/dev/null) ||
+    live_policy=''
 fi
 
-case "$(uname -s)" in
-  Darwin) config_dir=${APPA_CONFIG_DIR:-"$HOME/Library/Application Support/appa"} ;;
-  *) config_dir=${APPA_CONFIG_DIR:-"${XDG_CONFIG_HOME:-$HOME/.config}/appa"} ;;
-esac
+if [ -n "$live_policy" ] && [ -f "$live_policy" ]; then
+  policy=$live_policy
+else
+  case "$(uname -s)" in
+    Darwin) config_dir=${APPA_CONFIG_DIR:-"$HOME/Library/Application Support/appa"} ;;
+    *) config_dir=${APPA_CONFIG_DIR:-"${XDG_CONFIG_HOME:-$HOME/.config}/appa"} ;;
+  esac
+  policy=$config_dir/appa.toml
+fi
 stats=''
-if [ -f "$config_dir/appa.toml" ] && command -v awk >/dev/null 2>&1; then
+if [ -f "$policy" ] && command -v awk >/dev/null 2>&1; then
   stats=$(awk '
     /^\[\[policy\.tool\]\]/ { if (intool && tuned) rules++; total++; intool=1; tuned=0; next }
     /^\[policy\.tool\./ { if (intool) tuned=1; next }
@@ -63,7 +74,7 @@ if [ -f "$config_dir/appa.toml" ] && command -v awk >/dev/null 2>&1; then
       if (intool && tuned) rules++
       if (total > 0) printf "tools:%d rules:%d", total, rules
     }
-  ' "$config_dir/appa.toml" 2>/dev/null) || stats=''
+  ' "$policy" 2>/dev/null) || stats=''
 fi
 
 top='▄█▄▄▄█▄'

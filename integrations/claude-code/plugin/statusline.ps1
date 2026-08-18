@@ -5,10 +5,17 @@ $mascotBottom = "$fullBlock$fullBlock$lowerHalf$fullBlock$lowerHalf$fullBlock$fu
 
 # Counts the policy's tools: every [[policy.tool]] entry, and the entries
 # carrying more than the neutral annotation (bare name plus delta = {}).
-# Mirrors statusline.sh; any parse failure returns nothing (fail open).
+# The policy is the file the runtime's status read names in policy_path;
+# when no path arrived, the platform default under APPA_CONFIG_DIR's
+# rules is the fallback. Mirrors statusline.sh; any parse failure
+# returns nothing (fail open).
 function Get-PolicyStats {
-    $configDir = if ($env:APPA_CONFIG_DIR) { $env:APPA_CONFIG_DIR } else { Join-Path $env:APPDATA "appa" }
-    $policy = Join-Path $configDir "appa.toml"
+    param($LivePolicy)
+    $policy = $LivePolicy
+    if (-not $policy -or -not (Test-Path -LiteralPath $policy)) {
+        $configDir = if ($env:APPA_CONFIG_DIR) { $env:APPA_CONFIG_DIR } else { Join-Path $env:APPDATA "appa" }
+        $policy = Join-Path $configDir "appa.toml"
+    }
     if (-not (Test-Path -LiteralPath $policy)) {
         return $null
     }
@@ -68,11 +75,12 @@ try {
     }
 
     Write-Output "$mascotTop  trust:$($status.trust)  audience:$($status.audience)"
+    $livePolicy = $status.policy_path
 } catch {
     Write-Output $mascotTop
 }
 
-$stats = Get-PolicyStats
+$stats = Get-PolicyStats -LivePolicy $livePolicy
 if ($stats) {
     Write-Output "$mascotBottom  $stats · /appa-tool-sync adds rules"
 } else {

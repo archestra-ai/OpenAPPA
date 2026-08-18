@@ -193,14 +193,31 @@ struct StatusQuery {
     trajectory: String,
 }
 
+/// The status wire answer: the trajectory's projection plus
+/// `policy_path`, the canonical path of the served `--config` file.
+/// The path is a fact of this process, not the log, so it joins the
+/// answer here and never enters `TrajectoryStatus`.
+#[derive(serde::Serialize)]
+struct StatusBody {
+    #[serde(flatten)]
+    status: appa_runtime_v2::api::TrajectoryStatus,
+    policy_path: String,
+}
+
+/// The statusline's read: a projection of the log rendered to strings.
+/// Every refusal is 404 — the statusline fails open to its badge, and
+/// the diagnostic detail stays in this process's tracing.
 async fn status(
     State(state): State<AppState>,
     query: Result<axum::extract::Query<StatusQuery>, axum::extract::rejection::QueryRejection>,
-) -> Result<axum::Json<appa_runtime_v2::api::TrajectoryStatus>, axum::http::StatusCode> {
+) -> Result<axum::Json<StatusBody>, axum::http::StatusCode> {
     let query = query.map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
     let id = appa_runtime_v2::api::TrajectoryId(query.0.trajectory);
     match state.runtime.status(&id) {
-        Some(status) => Ok(axum::Json(status)),
+        Some(status) => Ok(axum::Json(StatusBody {
+            status,
+            policy_path: state.config.display().to_string(),
+        })),
         None => Err(axum::http::StatusCode::NOT_FOUND),
     }
 }
@@ -256,7 +273,9 @@ async fn main() -> ExitCode {
     let state = AppState {
         runtime: Arc::clone(&runtime),
         codec: args.adapter.codec(),
-        config: args.config,
+        // Canonical, so the status read reports a path any consumer can
+        // open regardless of this process's working directory.
+        config: args.config.canonicalize().unwrap_or(args.config),
         adapter: args.adapter,
         instance_id,
     };
