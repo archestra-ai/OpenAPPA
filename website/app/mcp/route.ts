@@ -1,7 +1,7 @@
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
 
-import { getMcpDoc, getMcpDocs, getSpecRules, lookupSpecRule, searchMcpDocs } from "@/lib/mcp-content";
+import { getMcpDoc, getMcpDocs, searchMcpDocs } from "@/lib/mcp-content";
 import { GLOSSARY_TERMS } from "@/lib/search";
 import { termDefinition } from "@/lib/terms";
 
@@ -99,25 +99,6 @@ const handler = createMcpHandler(
         if (definition) return text(`${term.trim()}: ${definition}`);
         const known = GLOSSARY_TERMS.join(", ");
         return text(`No glossary entry for "${term}". Known terms: ${known}.`);
-      },
-    );
-
-    server.registerTool(
-      "lookup_rule",
-      {
-        title: "Look up a spec rule",
-        description:
-          "Normative text of an OpenAPPA specification rule by its stable id (families: POS, LBL, CHK, RMD, AUT, RUL, SAN, LOG, BRN, UNK, CFG, EXT, IMP, THR) — e.g. LBL-6 or CHK-15.",
-        inputSchema: z.object({
-          rule_id: z.string().describe('Rule id, e.g. "LBL-6"'),
-        }),
-      },
-      async ({ rule_id }) => {
-        const rules = getSpecRules();
-        if (rules === null) return text("The spec is not bundled in this deployment; rule lookup is unavailable.");
-        const rule = lookupSpecRule(rule_id);
-        if (!rule) return text(`No rule "${rule_id}". Rule ids look like LBL-6; ${rules.length} rules are indexed.`);
-        return text(`[${rule.id}] ${rule.text}`);
       },
     );
 

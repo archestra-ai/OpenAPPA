@@ -14,7 +14,9 @@ pub enum DerivedVia {
         name: SanitizerName,
         transition: crate::authority::Transition,
     },
-    Cast { name: CastName },
+    Cast {
+        name: CastName,
+    },
 }
 
 /// The sanitizers a candidate's chain has already spent, in application order.

@@ -68,7 +68,7 @@ export function SearchModal({ isOpen, onClose }: { isOpen: boolean; onClose: () 
             ref={inputRef}
             type="text"
             className="search-input"
-            placeholder="Search docs, rules (e.g. LBL-6), or terms..."
+            placeholder="Search docs or terms..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />

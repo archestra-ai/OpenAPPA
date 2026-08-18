@@ -9,16 +9,17 @@ filtering, no bespoke `if`s; any imperative judgment lives in registered
 external authorities and transformers, never in the engine.
 
 ## IMPORTANT
-The golden set is `docs/` plus three website files:
-`website/content/docs/how-it-works.md`,
-`website/content/docs/contracts.md` and `website/lib/terms.ts`.
-Golden
+The golden set is `website/content/docs/how-it-works.md`,
+`website/content/docs/contracts.md` and `website/lib/terms.ts`. Golden
 files must agree with each other in every commit: a change that alters
 what another golden file also states lands together with the matching
 update, and a commit that leaves two golden files contradicting each
-other is not allowed. Non-golden
-files — the code and the rest of the website, for now — can be harshly
-outdated.
+other is not allowed. Non-golden files — the code and the rest of the
+website, for now — can be harshly outdated.
+
+The normative specification is not in this repository. Where the spec
+and this code disagree, the spec is right and the code has drift to
+close; do not cite rule ids here.
 
 ## Naming
 
@@ -29,8 +30,8 @@ outdated.
   `baton`-named
   identifiers: `baton` was the earlier name and can happen only in stale spots.
 - "Engine", "Trajectory", "Value", "Label", "Dimension", "Authority",
-  "Transformer", "Remedy plan" are defined terms — use them as the glossary in
-  `docs/spec.md` and `appa-engine/src/lib.rs` define them, not colloquially.
+  "Transformer", "Remedy plan" are defined terms — use them as
+  `appa-engine/src/lib.rs` defines them, not colloquially.
 - **Agentic terminology first.** In comments, docs, and identifiers, lead with
   the agentic vocabulary: *trajectory* (not execution trace or session
   history), *flow* (not information transfer or operation), *turn*, *tool
@@ -44,41 +45,21 @@ outdated.
 
 ## Document precedence
 
-1. `docs/spec.md` — normative. Every rule carries a stable id by family
-   (`POS`, `LBL`, `CHK`, `RMD`, `AUT`, `RUL`, `SAN`, `LOG`, `BRN`, `UNK`,
-   `CFG`, `EXT`, `IMP`, `THR`). Cite ids from code comments, tests and
-   issues; they outlive section numbers. Takes priority over implementation
-   details where they conflict.
-2. `appa-engine/src/lib.rs` — concepts and semantics of the engine as
-   implemented.
+1. `appa-engine/src/lib.rs` — concepts and semantics of the engine as
+   implemented, and the reference for what a term means.
+2. `website/content/docs/how-it-works.md` — the reader-facing
+   introduction. `website/content/docs/contracts.md` is the
+   policy-review guide, and `website/lib/terms.ts` restates the
+   vocabulary as the website's term-popover definitions.
 
-The rest of the golden set is not normative and must not be cited as if it
-were; non-normative still means consistent — normativity decides who wins
-an interpretive dispute, never which file may lag.
-`website/content/docs/how-it-works.md` is the reader-facing introduction
-(golden, though it lives with the website), `rationale.md` records why
-decisions
-went the way they did and settles nothing, `glossary.md` splits the
-vocabulary into surface terms (typed by users) and model terms,
-`website/lib/terms.ts` restates glossary entries as the website's
-term-popover definitions,
-`website/content/docs/contracts.md` is the policy-review guide (golden,
-and likewise living with the website), `engine.md` maps the spec onto
-the crates. `docs/README.md` is the map.
+Non-normative still means consistent: a change to one golden file lands
+with the matching update to the others.
 
-Edits flow one way: spec → how-it-works/contracts/website. A change that
-starts in
-a downstream doc has to land in the spec first; the flow decides where a
-change starts, not when the rest catches up — within the golden set, the
-downstream update lands in the same commit.
+## No history, no compatibility
 
-## Pre-public: no history, no compatibility
-
-Until explicitly declared public, APPA owes nothing to its own past. Docs
-describe the current model only — no retired rules, no "formerly", no
-migration notes. Rule ids may be renumbered and freed numbers reused; keep
-each family contiguous. Config and wire surfaces may break without shims
-or deprecation paths.
+APPA owes nothing to its own past. Docs describe the current model only
+— no retired rules, no "formerly", no migration notes. Config and wire
+surfaces may break without shims or deprecation paths.
 
 ## Collaboration
 
@@ -97,12 +78,13 @@ Applies to discussion and work in this repository.
 - Match depth to the task. Keep routine implementation updates concise, but
   show the reasoning behind changes to the model, spec, architecture, or
   security guarantees.
-- Use concrete references such as paths, rule ids, types, and commands. Mark
+- Use concrete references such as paths, types, and commands. Mark
   uncertainty as uncertainty rather than smoothing it into confident prose.
 
 ## Writing (public docs)
 
-Applies to `docs/` and other material written for readers outside the project.
+Applies to the website docs and other material written for readers
+outside the project.
 Except for correctness, defined terminology, and claim scope, these are
 defaults rather than lint rules; depart from them when the document reads
 better as a result.

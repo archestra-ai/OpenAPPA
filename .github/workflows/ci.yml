@@ -64,14 +64,3 @@ jobs:
 
       - name: Rust tests
         run: cargo test --workspace --locked
-
-      # `bench/corp-systems` is the one crate outside the workspace: no APPA
-      # dependency at all, and an older `rmcp` than the runtime pins.
-      - name: Mock systems formatting
-        run: cargo fmt --manifest-path bench/corp-systems/Cargo.toml --all --check
-
-      - name: Mock systems lint
-        run: cargo clippy --manifest-path bench/corp-systems/Cargo.toml --all-targets --locked -- -D warnings
-
-      - name: Mock systems tests
-        run: cargo test --manifest-path bench/corp-systems/Cargo.toml --locked

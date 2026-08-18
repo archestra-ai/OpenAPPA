@@ -5,11 +5,10 @@
 //! views. It returns a decision plus a validated batch of facts to append. It performs no IO,
 //! reads no clock, and never mutates a store — an outer runtime owns state and appends the batch.
 //!
-//! This crate is the reference for engine concepts and semantics (per `CLAUDE.md` document
-//! precedence). It implements `docs/spec.md`, which is normative: where the two disagree, the
-//! spec is right and this crate has drift to close.
+//! This crate is the reference for engine concepts and semantics: what a term means here is
+//! what it means across APPA.
 //!
-//! The model is two monoids (see `docs/spec.md`): a **checked** monoid of label actions
+//! The model is two monoids: a **checked** monoid of label actions
 //! (audience × trust) and a **free** monoid of events. Propagation folds the label
 //! restrictively (min trust, intersect audience) into a partial label — an established bound
 //! plus the unresolved source identities per dimension; checking is the

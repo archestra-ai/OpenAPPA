@@ -1,4 +1,3 @@
-
 use std::sync::{Arc, Mutex};
 
 use appa_runtime_api::{Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};

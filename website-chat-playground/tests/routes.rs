@@ -1,4 +1,3 @@
-
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -218,7 +217,9 @@ enum Reply {
         message: serde_json::Value,
         after: Duration,
     },
-    PursuesTheOffer { call: String },
+    PursuesTheOffer {
+        call: String,
+    },
 }
 
 impl Provider {

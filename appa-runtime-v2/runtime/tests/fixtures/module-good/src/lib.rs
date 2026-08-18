@@ -1,4 +1,3 @@
-
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use appa_builtin::{BuiltinError, BuiltinInput, export_builtin_authority};

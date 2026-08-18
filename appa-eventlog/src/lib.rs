@@ -49,7 +49,9 @@ const SCHEMA_VERSION: i64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Backend {
-    Sqlite { path: PathBuf },
+    Sqlite {
+        path: PathBuf,
+    },
     /// Private to one [`LogStore`] and gone when it drops. An in-memory adapter sits
     /// beside the durable one deliberately: the decision core cannot tell them apart.
     Memory,

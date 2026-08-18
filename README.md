@@ -50,5 +50,4 @@ the [integration guide](integrations/claude-code/README.md).
 - [Integration guide](integrations/claude-code/README.md) — Windows, file locations
 - [How OpenAPPA works](website/content/docs/how-it-works.md)
 - [Policy contracts](website/content/docs/contracts.md)
-- [Normative specification](docs/spec.md)
 - [Runtime](appa-runtime-v2/README.md)

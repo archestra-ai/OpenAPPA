@@ -1,4 +1,3 @@
-
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -15,9 +14,7 @@ pub struct Provider {
 
 enum Step {
     Says(WireMessage),
-    Remedy {
-        id: String,
-    },
+    Remedy { id: String },
 }
 
 impl Provider {

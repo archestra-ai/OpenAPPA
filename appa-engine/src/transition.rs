@@ -376,7 +376,9 @@ pub struct Blocked {
 pub enum FollowUp {
     Outcome(OutcomeFollowUp),
     Child(ChildFollowUp),
-    Fork { child: TrajectoryId },
+    Fork {
+        child: TrajectoryId,
+    },
     Offer(OfferFollowUp),
     Proposals {
         released: Vec<Released>,

@@ -138,7 +138,10 @@ pub enum DeclaredTransition {
         from_includes: DeclaredAudience,
         to: DeclaredAudience,
     },
-    Trust { from_floor: Trust, to: Trust },
+    Trust {
+        from_floor: Trust,
+        to: Trust,
+    },
 }
 
 impl DeclaredTransition {

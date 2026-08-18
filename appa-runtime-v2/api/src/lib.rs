@@ -73,8 +73,13 @@ pub enum SpawnRef {
 /// at all for hooks the deployment does not gate.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HookEvent {
-    SessionStart { root: TrajectoryId },
-    Prompt { actor: Actor, text: String },
+    SessionStart {
+        root: TrajectoryId,
+    },
+    Prompt {
+        actor: Actor,
+        text: String,
+    },
     ToolCall {
         actor: Actor,
         call: ProposedCall,
@@ -112,19 +117,31 @@ pub enum HookEvent {
 #[derive(Debug, Clone, PartialEq)]
 pub enum HookDecision {
     Ack,
-    AllowCall { spawn: Option<SpawnBinding> },
+    AllowCall {
+        spawn: Option<SpawnBinding>,
+    },
     PassControl,
-    DenyCall { feedback: String },
-    Block { reason: String },
-    ReplaceOutput { output: String },
+    DenyCall {
+        feedback: String,
+    },
+    Block {
+        reason: String,
+    },
+    ReplaceOutput {
+        output: String,
+    },
     /// The child's return crosses as `value` and not as the child
     /// spelled it — a `return_sanitizer` produced it. A
     /// return that crosses unchanged answers `Ack`, so this variant
     /// names a substitution and never merely a crossing. A harness with
     /// no way to substitute the return where the parent receives it
     /// cannot enforce it.
-    ChildReturn { value: String },
-    Refuse { detail: String },
+    ChildReturn {
+        value: String,
+    },
+    Refuse {
+        detail: String,
+    },
 }
 
 /// A refusal at the parse stage, before any event exists. `Unreadable`

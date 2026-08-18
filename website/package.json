@@ -3,9 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "predev": "node scripts/sync-spec.mjs",
     "dev": "next dev -p 4321",
-    "prebuild": "node scripts/sync-spec.mjs",
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit"

@@ -20,7 +20,10 @@ use serde::Serialize;
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireEvent {
-    Says { trajectory: String, text: String },
+    Says {
+        trajectory: String,
+        text: String,
+    },
     ToolProposed {
         trajectory: String,
         call_id: String,
@@ -37,25 +40,49 @@ pub enum WireEvent {
         outcome: String,
         effects: Vec<String>,
     },
-    ToolResult { trajectory: String, body: String },
+    ToolResult {
+        trajectory: String,
+        body: String,
+    },
     Label {
         trajectory: String,
         trust: String,
         audience: String,
     },
-    Remedy { trajectory: String, text: String },
-    Sanitized { trajectory: String, sanitizer: String },
-    Fork { parent: String, child: String },
-    Merge { trajectory: String },
+    Remedy {
+        trajectory: String,
+        text: String,
+    },
+    Sanitized {
+        trajectory: String,
+        sanitizer: String,
+    },
+    Fork {
+        parent: String,
+        child: String,
+    },
+    Merge {
+        trajectory: String,
+    },
     ApprovalRequested {
         id: String,
         tool: String,
         detail: serde_json::Value,
     },
-    ApprovalResolved { id: String, approved: bool, expired: bool },
-    Answer { text: String },
-    Stopped { text: String },
-    Error { message: String },
+    ApprovalResolved {
+        id: String,
+        approved: bool,
+        expired: bool,
+    },
+    Answer {
+        text: String,
+    },
+    Stopped {
+        text: String,
+    },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

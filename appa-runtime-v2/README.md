@@ -102,8 +102,6 @@ without SQL, and are the supported way to look.
   old database refuses to open; use a fresh `--db` path.
 - **Stopping the process blocks gated sessions.** That is the design,
   not a fault. Uninstall the plugin if you want ungated sessions back.
-- **`docs/runtime.md`** is the contract the crates in this directory
-  implement — the process (`runtime/`), the shared vocabulary
-  (`api/`), and the Claude Code adapter (`adapters/claude-code/`) —
-  and the directory's `CLAUDE.md` describes the layout and the
-  engine-boundary status.
+- **The directory's `CLAUDE.md`** describes the layout: the process
+  (`runtime/`), the shared vocabulary (`api/`), and the Claude Code
+  adapter (`adapters/claude-code/`).

@@ -63,8 +63,8 @@ request text to match the session from step 0.
 
 The log rows are the actual record — decode their bytes (inspect the
 format; deserialize accordingly, one fact per line). For what each fact
-kind means, read the fact definitions in `appa-engine/src/fact.rs` and
-the glossary in `docs/spec.md`; do not guess from names.
+kind means, read the fact definitions in `appa-engine/src/fact.rs`;
+do not guess from names.
 
 While decoding, build:
 
@@ -109,8 +109,7 @@ only one — check for the others and explain all that hold.
 
 Before stating whether a block is final or liftable, check what the
 current runtime actually supports (casts, authorities, offers):
-`appa-runtime-v2/CLAUDE.md` and `docs/engine.md` record the current
-state and interims. Do not assert capabilities or gaps from memory.
+`appa-runtime-v2/CLAUDE.md` records the current state. Do not assert capabilities or gaps from memory.
 
 ## 6. Explain in plain language
 

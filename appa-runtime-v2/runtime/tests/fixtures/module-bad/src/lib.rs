@@ -1,4 +1,3 @@
-
 #[repr(C)]
 pub struct RawDescriptor {
     pub name_ptr: *const u8,

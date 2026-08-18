@@ -38,9 +38,7 @@ pub enum NoAnswerReason {
     Unregistered,
     Unreachable,
     Dismissed,
-    NonSuccess {
-        status: u16,
-    },
+    NonSuccess { status: u16 },
     Timeout,
     Transport,
     Malformed,

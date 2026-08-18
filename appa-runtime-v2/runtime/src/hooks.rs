@@ -110,11 +110,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
                 Err(error) => refuse(error.to_string()),
             }
         }
-        HookEvent::ChildEnd {
-            root,
-            child,
-            value,
-        } => {
+        HookEvent::ChildEnd { root, child, value } => {
             let said = value.clone();
             match on_child(runtime, &root, &child, |mut session| {
                 let value = value.clone();

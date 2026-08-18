@@ -376,8 +376,13 @@ impl ChildReturnId {
 /// context is outside engine policy and admits nothing, so it has no provenance here.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Provenance {
-    ToolResult { dispatch: DispatchId },
-    ChildReturn { child: TrajectoryId, id: ChildReturnId },
+    ToolResult {
+        dispatch: DispatchId,
+    },
+    ChildReturn {
+        child: TrajectoryId,
+        id: ChildReturnId,
+    },
     ProviderRun {
         tool: ToolName,
         batch: crate::transition::ProposalBatchId,

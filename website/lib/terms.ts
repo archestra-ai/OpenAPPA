@@ -1,5 +1,5 @@
 /* Inline-code terms and their popover definitions, restating entries of
-   the repository's docs/glossary.md. Golden: a glossary or spec change
+   the model's vocabulary. Golden: a vocabulary change
    that touches a term here lands with the matching update in the same
    commit. Keys are the exact chip text as written in the markdown; a chip
    with no entry renders as plain code. */

@@ -1,5 +1,5 @@
 //! The runtime API: `Runtime` and `Session` — the harness-agnostic
-//! event model declared in `docs/runtime.md`.
+//! event model this crate declares.
 
 mod session;
 
@@ -53,12 +53,8 @@ impl ExactCall {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ToolCallDecision {
-    Allow {
-        spawn: Option<SpawnBinding>,
-    },
-    Deny {
-        feedback: String,
-    },
+    Allow { spawn: Option<SpawnBinding> },
+    Deny { feedback: String },
     Control,
 }
 
@@ -432,7 +428,7 @@ impl Runtime {
     }
 
     /// Replace the serving deployment with the one this configuration
-    /// declares, without stopping the process (`docs/runtime.md`,
+    /// declares, without stopping the process (
     /// reloading a policy). The caller reads the file; the runtime never
     /// learns where a configuration came from, so an embedding host
     /// reloads a composed policy the same way.
@@ -843,8 +839,7 @@ fn validate_deployment(policy: &appa_policy::Config, config: &Config) -> Result<
     let profile = policy.engine().profile();
     if profile.binding() == appa_engine::profile::BindingMode::Token {
         return Err(OpenError::UnsupportedPolicy(
-            "[deployment] binding = \"token\" — this runtime binds trajectories by harness session ids"
-                .to_string(),
+            "[deployment] binding = \"token\" — this runtime binds trajectories by harness session ids".to_string(),
         ));
     }
     if profile.provider_surfaces().next().is_some() {

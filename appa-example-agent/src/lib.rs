@@ -2,8 +2,7 @@
 //!
 //! The runtime does not run a loop and does not want one: the harness
 //! owns inference, tool execution and the transcript, and the runtime
-//! answers one question in front of every flow (`docs/runtime.md`,
-//! principle 1). This crate is a harness of that shape, for hosts that
+//! answers one question in front of every flow. This crate is a harness of that shape, for hosts that
 //! embed the runtime rather than serving hooks to an editor.
 //!
 //! It drives the same public dispatcher a hook adapter reaches —

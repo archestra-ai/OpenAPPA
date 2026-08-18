@@ -1,10 +1,6 @@
 # appa-runtime-v2
 
-The process that gates a harness's flows. The architecture — layers,
-principles, the engine boundary, event semantics, the builtin-module
-contract — lives in `docs/runtime.md`, part of the golden set and the
-contract for this folder; read it first. Where these crates and that
-contract conflict, the contract wins. This file only says what lives
+The process that gates a harness's flows. This file says what lives
 where.
 
 The log itself is not here: `appa-eventlog` at the repository root owns the

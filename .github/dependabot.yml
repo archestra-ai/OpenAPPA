@@ -20,16 +20,6 @@ updates:
           - minor
           - patch
 
-  - package-ecosystem: cargo
-    directory: /bench/corp-systems
-    schedule:
-      interval: weekly
-    cooldown:
-      default-days: 7
-    commit-message:
-      prefix: deps
-      prefix-development: deps
-
   - package-ecosystem: github-actions
     directory: /
     schedule:

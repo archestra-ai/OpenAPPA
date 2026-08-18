@@ -151,10 +151,7 @@ enum ShapeNode {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum IntegerConstraint {
-    Bounds {
-        minimum: i64,
-        maximum: i64,
-    },
+    Bounds { minimum: i64, maximum: i64 },
     Const(i64),
     Enum(Vec<i64>),
 }

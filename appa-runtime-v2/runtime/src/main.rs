@@ -1,5 +1,4 @@
-//! Process entry: an HTTP listener for hooks (`docs/runtime.md`, layers
-//! table). Policy decisions live behind the runtime API; this file
+//! Process entry: an HTTP listener for hooks. Policy decisions live behind the runtime API; this file
 //! parses flags, initializes a missing deployment config, opens the
 //! runtime, picks the adapter codec, and serves.
 

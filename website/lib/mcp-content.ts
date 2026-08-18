@@ -10,7 +10,7 @@ import { getAllDocs, type DocPage } from "@/lib/docs";
    with figure directives replaced by one-line text stand-ins and pages sliced
    into sections for targeted reads and full-text search. The docs menu is the
    catalog: only pages that appear in it (title + category frontmatter) are
-   served. Spec rules come from the build-local copy of docs/spec.md. */
+   served. */
 
 const FIGURE_DESCRIPTIONS: Record<string, string> = {
   "fig-connected-agent":
@@ -167,35 +167,4 @@ export function searchMcpDocs(query: string, limit = 10): McpSearchHit[] {
     .filter((h) => h.anchor !== null || !seenDocWithSection.has(h.slug))
     .slice(0, limit)
     .map(({ score: _score, ...hit }) => hit);
-}
-
-/* ——— spec rules ——— */
-
-export interface SpecRule {
-  id: string;
-  text: string;
-}
-
-/** Rules parsed from the build-local copy of docs/spec.md; null when the copy is absent. */
-export function getSpecRules(): SpecRule[] | null {
-  const specPath = path.join(process.cwd(), "content", "spec.md");
-  if (!fs.existsSync(specPath)) {
-    return null;
-  }
-  const raw = fs.readFileSync(specPath, "utf-8");
-  const rules: SpecRule[] = [];
-  const pattern = /^- \*\*\[([A-Z]{3}-\d+)\]\*\*\s*/gm;
-  const matches = [...raw.matchAll(pattern)];
-  for (let i = 0; i < matches.length; i++) {
-    const match = matches[i];
-    const start = match.index + match[0].length;
-    const nextBoundary = raw.slice(start).search(/\n- \*\*\[[A-Z]{3}-\d+\]\*\*|\n#{1,3} /);
-    const end = nextBoundary === -1 ? raw.length : start + nextBoundary;
-    rules.push({ id: match[1], text: raw.slice(start, end).trim() });
-  }
-  return rules;
-}
-
-export function lookupSpecRule(id: string): SpecRule | undefined {
-  return getSpecRules()?.find((r) => r.id.toLowerCase() === id.trim().toLowerCase());
 }

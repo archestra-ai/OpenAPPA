@@ -17,7 +17,9 @@ pub enum ResultAdmission {
     Failure,
     Indeterminate,
     SuccessNoValue,
-    SuccessRaw { body: ValueBody },
+    SuccessRaw {
+        body: ValueBody,
+    },
     SuccessCast {
         body: ValueBody,
         cast: CastName,
@@ -28,7 +30,9 @@ pub enum ResultAdmission {
         sanitizer: crate::names::SanitizerName,
         raw_digest: RawResultDigest,
     },
-    CandidateAccepted { offer: crate::value::OfferId },
+    CandidateAccepted {
+        offer: crate::value::OfferId,
+    },
     CandidateAdmissible,
 }
 

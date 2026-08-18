@@ -176,9 +176,7 @@ pub enum LoadError {
         "sanitizer attest-schema declares a scope: a child return originates from no tool, so the reserved builtin is unscoped"
     )]
     AttestSchemaScoped,
-    #[error(
-        "provider-run tool {tool} declares {construct}: a provider-run contract may declare only a static delta"
-    )]
+    #[error("provider-run tool {tool} declares {construct}: a provider-run contract may declare only a static delta")]
     ProviderRunConstruct {
         tool: String,
         construct: crate::profile::ProviderRunConstruct,

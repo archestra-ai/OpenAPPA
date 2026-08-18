@@ -119,7 +119,10 @@ pub enum ExternalRequest {
         argument: String,
         value: String,
     },
-    Membership { resolver: String, group: String },
+    Membership {
+        resolver: String,
+        group: String,
+    },
 }
 
 /// A typed external answer. `None`/`Abstain` mean the external gave
@@ -191,7 +194,10 @@ pub enum EngineEvent {
         evidence: Vec<ExternalEvidence>,
         entropy: OfferNonce,
     },
-    BindFork { fork: ForkId, child: TrajectoryId },
+    BindFork {
+        fork: ForkId,
+        child: TrajectoryId,
+    },
     ChildReturn {
         child: TrajectoryId,
         value: Option<String>,
@@ -282,7 +288,7 @@ pub struct AuditLabel {
     pub audience: String,
 }
 
-/// One decision the family log recorded, in log order (`docs/runtime.md`, the
+/// One decision the family log recorded, in log order (the
 /// audit read). Like [`TrajectoryStatus`] it is a projection: it gates
 /// nothing, appends nothing, and expires no offer. Primitives only,
 /// so no engine type leaves the boundary.
@@ -297,21 +303,44 @@ pub struct AuditEntry {
 /// this is the decision log, not the transcript.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum AuditEvent {
-    Forked { parent: String, seed: AuditLabel },
+    Forked {
+        parent: String,
+        seed: AuditLabel,
+    },
     Released {
         tool: String,
         label: AuditLabel,
         effects: Vec<String>,
     },
-    EffectsCommitted { effects: Vec<String> },
-    Closed { outcome: DispatchOutcome },
-    Admitted { label: AuditLabel },
-    Ruled { authority: String },
-    Denied { authority: String },
-    Narrowed { from: AuditLabel, to: AuditLabel },
-    Cast { cast: String, resolved: AuditLabel },
-    SanitizerBound { sanitizer: String },
-    Sanitized { sanitizer: String },
+    EffectsCommitted {
+        effects: Vec<String>,
+    },
+    Closed {
+        outcome: DispatchOutcome,
+    },
+    Admitted {
+        label: AuditLabel,
+    },
+    Ruled {
+        authority: String,
+    },
+    Denied {
+        authority: String,
+    },
+    Narrowed {
+        from: AuditLabel,
+        to: AuditLabel,
+    },
+    Cast {
+        cast: String,
+        resolved: AuditLabel,
+    },
+    SanitizerBound {
+        sanitizer: String,
+    },
+    Sanitized {
+        sanitizer: String,
+    },
     ChildReturn {
         sanitizer: Option<String>,
         label: AuditLabel,
@@ -322,9 +351,7 @@ pub enum AuditEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum DispatchOutcome {
-    Ran {
-        effects: Vec<String>,
-    },
+    Ran { effects: Vec<String> },
     Failed,
     Unknown,
 }

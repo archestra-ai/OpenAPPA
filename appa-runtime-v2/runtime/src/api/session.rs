@@ -211,29 +211,27 @@ impl Session {
             .await?;
 
         match decision.then {
-            Next::ModelResponse { invocations, feedback } => {
-                match (invocations.as_slice(), feedback.as_slice()) {
-                    ([released], []) => {
-                        tracing::debug!(
-                            trajectory = %self.trajectory.0,
-                            dispatch = %released.dispatch.0,
-                            tool = %released.tool,
-                            spawn = released.fork.is_some(),
-                            "call released"
-                        );
-                        Ok(ToolCallDecision::Allow {
-                            spawn: released.fork.clone(),
-                        })
-                    }
-                    ([], feedback) if !feedback.is_empty() => {
-                        tracing::debug!(trajectory = %self.trajectory.0, "call blocked");
-                        Ok(ToolCallDecision::Deny {
-                            feedback: join_feedback(feedback),
-                        })
-                    }
-                    _ => Err(EventError::UnexpectedDecision),
+            Next::ModelResponse { invocations, feedback } => match (invocations.as_slice(), feedback.as_slice()) {
+                ([released], []) => {
+                    tracing::debug!(
+                        trajectory = %self.trajectory.0,
+                        dispatch = %released.dispatch.0,
+                        tool = %released.tool,
+                        spawn = released.fork.is_some(),
+                        "call released"
+                    );
+                    Ok(ToolCallDecision::Allow {
+                        spawn: released.fork.clone(),
+                    })
                 }
-            }
+                ([], feedback) if !feedback.is_empty() => {
+                    tracing::debug!(trajectory = %self.trajectory.0, "call blocked");
+                    Ok(ToolCallDecision::Deny {
+                        feedback: join_feedback(feedback),
+                    })
+                }
+                _ => Err(EventError::UnexpectedDecision),
+            },
             _ => Err(EventError::UnexpectedDecision),
         }
     }
@@ -1910,11 +1908,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
                 .expect("the no-answer is delivered");
             assert!(matches!(got, RemedyDecision::NoAnswer { .. }), "got {got:?}");
             let log_after = runtime.log_facts(&root());
-            assert_eq!(
-                log_before.len(),
-                log_after.len(),
-                "an abstention appends no fact",
-            );
+            assert_eq!(log_before.len(), log_after.len(), "an abstention appends no fact",);
             assert!(matches!(
                 session.on_remedy(offer, None).await.expect("the offer is still live"),
                 RemedyDecision::NoAnswer { .. },

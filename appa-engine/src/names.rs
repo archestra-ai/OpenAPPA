@@ -21,12 +21,8 @@ macro_rules! name_newtype {
     };
 }
 
-name_newtype!(
-    AuthorityName
-);
-name_newtype!(
-    SanitizerName
-);
+name_newtype!(AuthorityName);
+name_newtype!(SanitizerName);
 
 impl SanitizerName {
     /// The reserved builtin sanitizer of the quarantine exit. The engine
@@ -39,18 +35,10 @@ impl SanitizerName {
     }
 }
 
-name_newtype!(
-    CastName
-);
-name_newtype!(
-    DynamicResolverName
-);
-name_newtype!(
-    MembershipResolverName
-);
-name_newtype!(
-    GroupName
-);
+name_newtype!(CastName);
+name_newtype!(DynamicResolverName);
+name_newtype!(MembershipResolverName);
+name_newtype!(GroupName);
 
 impl std::fmt::Display for GroupName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -82,15 +70,9 @@ impl AudienceArgument {
     }
 }
 
-name_newtype!(
-    MarkName
-);
-name_newtype!(
-    TagName
-);
-name_newtype!(
-    SurfaceName
-);
+name_newtype!(MarkName);
+name_newtype!(TagName);
+name_newtype!(SurfaceName);
 
 #[cfg(test)]
 mod tests {

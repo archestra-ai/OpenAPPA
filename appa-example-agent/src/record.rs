@@ -12,7 +12,9 @@ pub struct CallId(pub String);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Record {
-    Says { text: String },
+    Says {
+        text: String,
+    },
     Proposes {
         call: CallId,
         tool: String,
@@ -23,14 +25,34 @@ pub enum Record {
         tool: String,
         feedback: String,
     },
-    Admitted { call: CallId, body: String },
-    Substituted { call: CallId, body: String },
-    OutputBlocked { call: CallId, reason: String },
-    OfferTaken { detail: String },
-    OfferRefused { feedback: String },
-    Forked { depth: u32, errand: String },
-    ReturnBlocked { reason: String },
-    Answers { text: String },
+    Admitted {
+        call: CallId,
+        body: String,
+    },
+    Substituted {
+        call: CallId,
+        body: String,
+    },
+    OutputBlocked {
+        call: CallId,
+        reason: String,
+    },
+    OfferTaken {
+        detail: String,
+    },
+    OfferRefused {
+        feedback: String,
+    },
+    Forked {
+        depth: u32,
+        errand: String,
+    },
+    ReturnBlocked {
+        reason: String,
+    },
+    Answers {
+        text: String,
+    },
 }
 
 impl Record {

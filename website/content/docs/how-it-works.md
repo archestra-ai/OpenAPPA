@@ -220,5 +220,3 @@ Adopting OpenAPPA shifts your security model from manual code checks to formal a
 
 - [Reading a policy](/contracts): Guide to reviewing and writing policy configuration.
 - [Benchmarks](/evaluation): Empirical paper results on multi-step workflows and bench-corp.
-- `docs/spec.md`: Normative specification containing all formal rule identifiers.
-- `docs/rationale.md`: Design rationales behind algebraic invariants and label dimensions.

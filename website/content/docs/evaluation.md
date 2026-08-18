@@ -23,7 +23,7 @@ A **security pass** in these benchmarks means the scorer observed no unauthorize
 
 ## Bench-Corp: Multi-step enterprise tasks
 
-[bench-corp](https://github.com/archestra-ai/OpenAPPA/tree/main/bench/corp) is an open-source benchmark suite developed to evaluate multi-step agent performance in realistic enterprise environments (HR, Finance, Vendor management, Forums, Task Trackers, and Email). The core test is whether an agent can process untrusted or restricted inputs and still finish its assigned task without leaking confidential data downstream.
+bench-corp is a benchmark suite developed to evaluate multi-step agent performance in realistic enterprise environments (HR, Finance, Vendor management, Forums, Task Trackers, and Email). The core test is whether an agent can process untrusted or restricted inputs and still finish its assigned task without leaking confidential data downstream.
 
 The repository contains 22 enterprise scenarios. We evaluated **GPT-5.6 Luna** across a 7-scenario evaluation cohort with 5 repetitions per scenario (**35 total episodes per arm and prompt profile**):
 
@@ -133,13 +133,11 @@ Across all three benchmark suites:
 
 ### Scope and methodology notes
 
-- **Bench-Corp scenario suite:** Bench-Corp contains 22 total scenarios (15 baseline scenarios plus 7 new scenarios added in PR #163). The comparative evaluations report performance on the 7-scenario cohort. All 22 scenarios are retained for regression testing.
+- **Bench-Corp scenario suite:** Bench-Corp contains 22 total scenarios. The comparative evaluations report performance on the 7-scenario cohort. All 22 scenarios are retained for regression testing.
 - **Experimental controls:** Standardized prompt profiles (Standard and ChaosMonkey), identical model family (`gpt-5.6-luna`), and matching retrieval settings were used. Controlled paired reruns from a single commit are recommended for formal publication benchmarks.
 
 ## Reproduce and inspect
 
-- [bench-corp](https://github.com/archestra-ai/OpenAPPA/tree/main/bench/corp) — scenarios, runner, and result format.
-- [bench/taubench](https://github.com/archestra-ai/OpenAPPA/tree/main/bench/taubench) — TAU-bench harness and evaluation code.
 - [AgentThreatBench](https://github.com/UKGovernmentBEIS/inspect_evals/tree/main/src/inspect_evals/agent_threat_bench) — upstream task definitions and benchmark suite.
 - [OpenAPPA Paper on arXiv](https://arxiv.org/abs/2607.24625) — formal information-flow model and evaluation methodology.
 - [FIDES (Microsoft Research)](https://www.microsoft.com/en-us/research/publication/securing-ai-agents-with-information-flow-control/) — information flow control framework for AI agents.

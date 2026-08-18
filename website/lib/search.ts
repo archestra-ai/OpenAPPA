@@ -4,7 +4,7 @@ export interface SearchResult {
   id: string;
   title: string;
   subtitle?: string;
-  type: "doc" | "section" | "rule" | "term";
+  type: "doc" | "section" | "term";
   url: string;
   snippet?: string;
 }
@@ -55,20 +55,6 @@ const STATIC_SECTIONS = [
   { title: "Sanitizers", url: "/contracts#sanitizers", docTitle: "Policy reference" },
   { title: "Casts", url: "/contracts#casts", docTitle: "Policy reference" },
   { title: "Empirical evaluation", url: "/evaluation#summary-of-empirical-findings", docTitle: "Evaluating OpenAPPA" },
-];
-
-const STATIC_RULES = [
-  { id: "LBL-6", title: "LBL-6: Restrictive Delta Invariant", url: "/contracts#tools", snippet: "A tool's delta can only narrow audience or lower trust." },
-  { id: "CHK-9", title: "CHK-9: Dynamic Recipient Audience Check", url: "/contracts#tools", snippet: "Requires recipient matching using dynamic placeholders like $recipient." },
-  { id: "CHK-15", title: "CHK-15: Dual-Gate Contract Evaluation", url: "/contracts#tools", snippet: "Evaluates both delta narrowing and requires gates on a single dispatch." },
-  { id: "RUL-1", title: "RUL-1: Authority Approval Invariant", url: "/contracts#authorities", snippet: "Authority approvals clear gaps for one dispatch without raising overall label." },
-  { id: "RUL-8", title: "RUL-8: Resolver Context Logging", url: "/contracts#authorities", snippet: "Dynamic authority resolvers receive call digest and log decision verbatim." },
-  { id: "SAN-4", title: "SAN-4: Sanitizer Transition Mandate", url: "/contracts#sanitizers", snippet: "Defines exact label transition for scrubbed data." },
-  { id: "SAN-6", title: "SAN-6: Sanitizer Audit Trail", url: "/contracts#sanitizers", snippet: "Log records transition name and sanitizer ID." },
-  { id: "SAN-7", title: "SAN-7: Cast Resolution Types", url: "/contracts#casts", snippet: "Resolves Unknown label dimensions via constant or resolver." },
-  { id: "SAN-8", title: "SAN-8: Cast Ceiling Re-validation", url: "/contracts#casts", snippet: "Engine re-validates resolver response against declared ceiling." },
-  { id: "CFG-8", title: "CFG-8: Mandatory Set Operators", url: "/contracts#set-operators", snippet: "Set declarations without explicit operators fail policy load." },
-  { id: "UNK-5", title: "UNK-5: Unannotated Output State", url: "/contracts#what-to-check-when-reviewing", snippet: "Unannotated tool outputs enter in Unknown state." },
 ];
 
 export const GLOSSARY_TERMS = [
@@ -136,20 +122,6 @@ export function searchDocs(query: string): SearchResult[] {
         subtitle: `${sec.docTitle} section`,
         type: "section",
         url: sec.url,
-      });
-    }
-  }
-
-  // Match Rule IDs
-  for (const rule of STATIC_RULES) {
-    if (rule.id.toLowerCase().includes(q) || rule.title.toLowerCase().includes(q)) {
-      results.push({
-        id: `rule-${rule.id}`,
-        title: rule.title,
-        subtitle: "Spec Invariant",
-        type: "rule",
-        url: rule.url,
-        snippet: rule.snippet,
       });
     }
   }
