@@ -43,9 +43,36 @@ fn as_root(mut event: serde_json::Value) -> serde_json::Value {
     event
 }
 
+/// The shipped example names its tools without a `delta` on purpose:
+/// results are admitted as fully unknown until a generated rule says
+/// otherwise. These scenarios are about return crossings, not label
+/// generation, so they pin the neutral annotation — `delta = {}` on
+/// every tool the example leaves unannotated — to keep the labels the
+/// crossings reason about definite.
+fn neutralized(example: &str) -> String {
+    let mut parts = example.split("[[policy.tool]]");
+    let mut out = parts.next().expect("the example has a preamble").to_string();
+    for part in parts {
+        out.push_str("[[policy.tool]]");
+        if part.contains("delta =") {
+            out.push_str(part);
+            continue;
+        }
+        let name = part.find("name = ").expect("every tool names itself");
+        let line_end = part[name..].find('\n').expect("the name line ends") + name + 1;
+        out.push_str(&part[..line_end]);
+        out.push_str("delta = {}\n");
+        out.push_str(&part[line_end..]);
+    }
+    out
+}
+
+/// The shipped example deployment, plus whatever policy tables the
+/// scenario adds inside `[policy]` and after `[externals]`.
 fn deployment(policy_extra: &str, externals_extra: &str) -> Runtime {
     let example = std::fs::read_to_string(repo_root().join("integrations/claude-code/examples/claude-code.appa.toml"))
         .expect("the shipped example is readable");
+    let example = neutralized(&example);
     let (policy, externals) = example
         .split_once("[externals]")
         .expect("the example carries an [externals] table");
