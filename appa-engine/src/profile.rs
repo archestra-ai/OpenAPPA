@@ -1008,65 +1008,6 @@ mod tests {
     }
 
     #[test]
-    fn an_unconfined_child_return_offers_acceptance_alone() {
-        use crate::branch::{ReturnBlock, ReturnCheck, ReturnPlan};
-        use crate::projection::Projection;
-
-        let parent = crate::value::TrajectoryId::new("t");
-        let child = crate::value::TrajectoryId::new("t:child");
-        let plans_for = |confined_child_return: bool| {
-            let mut declaration = covering_declaration(&narrowing_catalogue());
-            declaration.confined_child_return = confined_child_return;
-            let engine = open(narrowing_catalogue(), declaration, ReturnPolicy::Raw).unwrap();
-            let mut log = public_trajectory_log();
-            let call = crate::value::ResolvedCall::new(
-                ToolName::new("fork"),
-                crate::params::test_arguments(&serde_json::json!({ "child": child.as_str() })),
-            );
-            let dispatch = crate::value::DispatchId::new(parent.clone(), call.digest(), 0);
-            let fork = crate::value::ForkId::of(&dispatch);
-            let projection = Projection::build(&log, 1);
-            log.push(crate::fact::Fact::ForkPrepared {
-                trajectory: parent.clone(),
-                fork: fork.clone(),
-                snapshot: projection.view(&parent).freeze_basis(),
-                return_policy: ReturnPolicy::Raw,
-                shape: None,
-            });
-            log.push(crate::fact::Fact::ForkOpened {
-                trajectory: child.clone(),
-                fork,
-            });
-            let read = crate::value::ResolvedCall::new(
-                ToolName::new("leak"),
-                crate::params::test_arguments(&serde_json::json!({})),
-            );
-            log.push(crate::fact::Fact::ValueAdmitted {
-                trajectory: child.clone(),
-                value: crate::value::LabeledValue::new(
-                    crate::value::ValueBody::new("secret"),
-                    Label::new(
-                        Dim::Known(Trust::new(1)),
-                        Dim::Known(Audience::restricted([ReaderId::new("internal")])),
-                    ),
-                ),
-                provenance: crate::value::Provenance::ToolResult {
-                    dispatch: crate::value::DispatchId::new(child.clone(), read.digest(), 0),
-                },
-            });
-            let projection = Projection::build(&log, 4);
-            match engine.check_child_return(&projection.view(&parent), &child).unwrap() {
-                ReturnCheck::Block(ReturnBlock { plans, .. }) => plans,
-                other => panic!("expected a narrowing return block, got {other:?}"),
-            }
-        };
-        let confined = plans_for(true);
-        assert!(confined.iter().any(|plan| matches!(plan, ReturnPlan::Sanitize { .. })));
-        let unconfined = plans_for(false);
-        assert!(matches!(unconfined.as_slice(), [ReturnPlan::Accept(_)]));
-    }
-
-    #[test]
     fn unconfined_points_leave_the_sanitizer_factors_out_of_the_cap() {
         let mut cfg = narrowing_catalogue();
         for i in 0..4 {

@@ -5,11 +5,11 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::candidate::CallStage;
-use crate::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec, ToolContract};
+use crate::contract::{AudienceRequirement, DynamicAudienceBinding, HistoryRequirement, RecipientSpec, ToolContract};
 use crate::fact::EffectKind;
 use crate::groups::Expansions;
 use crate::label::{Adequacy, Audience, Dimension, EstablishedLabel, PartialLabel, ReaderId, Trust};
-use crate::names::{AudienceArgument, DynamicResolverName, GroupName, MarkName};
+use crate::names::{AudienceArgument, GroupName, MarkName};
 use crate::projection::Views;
 use crate::value::{ResolvedCall, ValueId};
 
@@ -26,10 +26,6 @@ pub struct UnestablishedFact {
 pub enum Gap {
     TrustFloor { required: Trust, actual: Trust },
     Includes { recipients: Audience },
-    UnresolvedDynamicRecipient {
-        resolver: DynamicResolverName,
-        argument: String,
-    },
     Cap { cap: Audience },
     Prior(EffectKind),
     NoPrior(EffectKind),
@@ -269,14 +265,17 @@ fn label_gaps(
                     }
                 }
                 None => match spec {
-                    RecipientSpec::Dynamic(binding) => gaps.push(Gap::UnresolvedDynamicRecipient {
-                        resolver: binding.resolver.clone(),
-                        argument: binding.argument.clone(),
-                    }),
                     RecipientSpec::Placeholder(key) => {
                         if released_established(stage, committed) {
                             gaps.push(Gap::Includes {
                                 recipients: unresolved_recipient(key),
+                            });
+                        }
+                    }
+                    RecipientSpec::Dynamic(binding) => {
+                        if released_established(stage, committed) {
+                            gaps.push(Gap::Includes {
+                                recipients: unresolved_recipient(&binding.argument),
                             });
                         }
                     }
@@ -365,6 +364,64 @@ pub fn group_reads(contract: &ToolContract, call: &ResolvedCall) -> Vec<GroupRea
             _ => None,
         })
         .collect()
+}
+
+/// Every dynamic binding this call's contract spells, in declaration order — the
+/// delta's binding first where it has one, then the `includes` requirements'. These are the
+/// answers the call must carry before it can be checked; the runtime resolves them and re-submits
+/// the same call, and no answer means no pin, never a pin that carries none.
+pub fn dynamic_reads(contract: &ToolContract) -> Vec<DynamicAudienceBinding> {
+    let delta = match contract.delta.as_ref().and_then(|delta| delta.audience.as_ref()) {
+        Some(crate::contract::AudienceDelta::Dynamic(binding)) => Some(binding.clone()),
+        _ => None,
+    };
+    let required = contract
+        .requires
+        .label
+        .audience
+        .iter()
+        .filter_map(|requirement| match requirement {
+            AudienceRequirement::Includes(RecipientSpec::Dynamic(binding)) => Some(binding.clone()),
+            _ => None,
+        });
+    // One read per binding, however many requirements spell it: a resolver is asked once per call,
+    // and a repeated ask would be a second answer the pin set cannot hold.
+    let mut reads: Vec<DynamicAudienceBinding> = Vec::new();
+    for binding in delta.into_iter().chain(required) {
+        if !reads.contains(&binding) {
+            reads.push(binding);
+        }
+    }
+    reads
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum DynamicRefusal {
+    #[error("the call names dynamic bindings its check needs answers for")]
+    Needed(Vec<DynamicAudienceBinding>),
+    #[error("the pinned dynamic answer for argument {0} is not bound to this call")]
+    Foreign(String),
+}
+
+/// The pinned dynamic answers a checked call may carry are exactly the ones its contract spells:
+/// one per binding, nothing else. The live boundary and the replay validator
+/// both run this, so a log cannot hold pins the deciding path refused — and every later reader of
+/// a checked call, `output_label_for_call` included, finds the answer it needs.
+pub(crate) fn validate_dynamic_resolutions(contract: &ToolContract, call: &ResolvedCall) -> Result<(), DynamicRefusal> {
+    let reads = dynamic_reads(contract);
+    let mut seen: Vec<&DynamicAudienceBinding> = Vec::new();
+    for pinned in call.dynamic_resolutions() {
+        let binding = pinned.binding();
+        if !reads.contains(binding) || seen.contains(&binding) {
+            return Err(DynamicRefusal::Foreign(binding.argument.clone()));
+        }
+        seen.push(binding);
+    }
+    let missing: Vec<DynamicAudienceBinding> = reads.into_iter().filter(|binding| !seen.contains(&binding)).collect();
+    match missing.is_empty() {
+        true => Ok(()),
+        false => Err(DynamicRefusal::Needed(missing)),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]

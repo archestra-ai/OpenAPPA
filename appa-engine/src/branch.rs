@@ -5,11 +5,9 @@ use thiserror::Error;
 use crate::check::Narrowing;
 use crate::fact::{BoundaryKind, Fact, ReturnDerivation, ReturnPolicy};
 use crate::groups::{Expansions, GroupResolution};
-use crate::label::{EstablishedLabel, PartialLabel};
-use crate::names::SanitizerName;
 use crate::projection::Views;
 use crate::registry::Registry;
-use crate::value::{ChildReturnId, LabeledValue, Provenance, RawResultDigest, TrajectoryId, ValueBody};
+use crate::value::{ChildReturnId, LabeledValue, Provenance, TrajectoryId, ValueBody};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum BranchError {
@@ -17,68 +15,40 @@ pub enum BranchError {
     AlreadyEnded,
     #[error("the child was not forked from this parent (reparenting/cross-family merge refused)")]
     NotDirectParent,
-    #[error("no sanitizer registered as {0}")]
-    UnknownSanitizer(String),
-    #[error("sanitizer {0} is not registered for output")]
-    SanitizerNotOutput(String),
-    #[error("the child fold does not satisfy the sanitizer's `from` precondition")]
-    TransitionSourceUnmet,
-    #[error("the family state changed since the return block was offered")]
-    ReturnOfferStale,
-    #[error("the chosen plan is not among the freshly offered return plans")]
-    ReturnPlanNotOffered,
-    #[error("the submission kind does not match the chosen return plan")]
-    SubmissionMismatch,
     #[error("the trajectory has no fork binding — only a child may return")]
     NotForked,
     #[error("the submission does not match the child's fork return policy")]
     ReturnPolicyMismatch,
-    #[error("the return policy consumes an unestablished dimension — a cast establishes it, then the return crosses")]
-    ReturnFoldUnestablished,
-    #[error("a raw return that narrows the parent merges only through an executed return plan")]
-    ReturnNarrowsParent,
+}
+
+/// What a raw-bound child's submission comes to: the atomic crossing batch, or the exact
+/// narrowing the parent must accept first. One verdict, so a caller cannot merge a batch the gate
+/// would have priced — the two are alternatives of one decision, never two questions asked twice.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RawCrossing {
+    Merged(Vec<Fact>),
+    Narrows(Narrowing),
 }
 
 pub(crate) fn submit_child_return(
     registry: &Registry,
     parent: &Views,
     child: &TrajectoryId,
-    ret: ReturnSubmission,
+    body: &ValueBody,
     expansions: &Expansions,
-) -> Result<Vec<Fact>, BranchError> {
-    match parent.parent_of(child) {
-        Some(direct) if direct == parent.trajectory() => {}
-        _ => return Err(BranchError::NotDirectParent),
+) -> Result<RawCrossing, BranchError> {
+    if let Some(narrowing) = raw_return_narrowing(parent, child)? {
+        return Ok(RawCrossing::Narrows(narrowing));
     }
-    if parent.has_ended(child) {
-        return Err(BranchError::AlreadyEnded);
-    }
-    let policy = parent.return_policy_of(child).ok_or(BranchError::NotForked)?.clone();
     let fold = parent.branch_label(child);
-    let (value, derivation) = match (policy, ret) {
-        (ReturnPolicy::Raw, ReturnSubmission::Raw { body }) => {
-            match check_child_return(registry, parent, child, expansions)? {
-                ReturnCheck::Allow => {}
-                ReturnCheck::Block(_) => return Err(BranchError::ReturnNarrowsParent),
-            }
-            (
-                LabeledValue::new(body, fold.bound().clone().into_label()),
-                ReturnDerivation::Raw,
-            )
-        }
-        (ReturnPolicy::Sanitized(bound), ReturnSubmission::Derived { body, raw_digest }) => {
-            sanitized_crossing(registry, &fold, &bound, body, raw_digest, expansions)?
-        }
-        _ => return Err(BranchError::ReturnPolicyMismatch),
-    };
-    Ok(crossing_facts(
+    Ok(RawCrossing::Merged(crossing_facts(
         parent,
         child,
-        value,
-        derivation,
+        LabeledValue::new(body.clone(), fold.bound().clone().into_label()),
+        ReturnDerivation::Raw,
         None,
         registry.resolutions(expansions),
-    ))
+    )))
 }
 
 /// Record a child's **void return**: the child-attributed terminal ends the branch and
@@ -144,37 +114,6 @@ pub(crate) fn crossing_facts(
     facts
 }
 
-/// One return remedy the agent may execute on a blocked raw return — closed and return-specific:
-/// the tool-block vocabulary (authorities, redispatch, fork advice) is unrepresentable here.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ReturnPlan {
-    Accept(Narrowing),
-    Sanitize {
-        sanitizer: SanitizerName,
-        residual: Option<Narrowing>,
-    },
-}
-
-/// The verdict on a proposed raw child return: two outcomes, like the tool path's
-/// [`crate::check::CheckOutcome`]. Decided from the parent's [`Views`] alone — both folds and the
-/// fork linkage come from one projection snapshot, so mixed-snapshot checks are unrepresentable.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ReturnCheck {
-    Allow,
-    Block(ReturnBlock),
-}
-
-/// What blocked the return: the raw crossing would narrow the parent's established bound.
-/// `plans` is non-empty by construction (`Accept` is always offered), in deterministic order —
-/// `Accept` first, then sanitizer plans in registry name order. An unresolved child fold blocks
-/// nothing here: the bound carries every known restriction, and the unresolved
-/// identities cross into the parent's own label at the merge.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReturnBlock {
-    pub narrowing: Narrowing,
-    pub plans: Vec<ReturnPlan>,
-}
-
 /// What a raw crossing of `child`'s fold would cost the parent: `None` where
 /// the merge narrows nothing and the raw value may cross, the exact narrowing otherwise. Refused
 /// for a non-child, an ended branch, and a fork whose policy is not raw — the blocked-return flow
@@ -205,151 +144,6 @@ pub(crate) fn raw_return_narrowing(parent: &Views, child: &TrajectoryId) -> Resu
     }))
 }
 
-/// Decide whether a raw return by `child` may merge silently into the parent, and if not, which
-/// return plans could cross it. A sanitizer plan carries no residual only when its relabel fully
-/// clears the narrowing; when one remains (any trust component included) the plan names exactly
-/// that residual. A sanitizer whose relabel changes nothing about the merged label is not offered
-/// at all.
-pub(crate) fn check_child_return(
-    registry: &Registry,
-    parent: &Views,
-    child: &TrajectoryId,
-    expansions: &Expansions,
-) -> Result<ReturnCheck, BranchError> {
-    let Some(narrowing) = raw_return_narrowing(parent, child)? else {
-        return Ok(ReturnCheck::Allow);
-    };
-    let fold = parent.branch_label(child);
-    let current = parent.current_label();
-    let candidate = narrowing.to.clone();
-    let fold_label = fold.bound().clone().into_label();
-    let mut plans = vec![ReturnPlan::Accept(narrowing.clone())];
-    if !registry.profile().confines_child_return() {
-        return Ok(ReturnCheck::Block(ReturnBlock { narrowing, plans }));
-    }
-    for sanitizer in registry.sanitizers() {
-        if sanitizer.name.is_attest_schema() {
-            continue;
-        }
-        if !fold.is_established(sanitizer.transition.dimension()) {
-            continue;
-        }
-        let Some(derived) = sanitizer.derive_output(&fold_label, &[], expansions) else {
-            continue;
-        };
-        let sanitized =
-            EstablishedLabel::from_label(&derived).expect("a derivation of an established fold is established");
-        let merged = current.bound().combine(&sanitized);
-        if &merged == current.bound() {
-            plans.push(ReturnPlan::Sanitize {
-                sanitizer: sanitizer.name.clone(),
-                residual: None,
-            });
-        } else if strictly_improves(&candidate, &merged) {
-            plans.push(ReturnPlan::Sanitize {
-                sanitizer: sanitizer.name.clone(),
-                residual: Some(Narrowing {
-                    from: current.bound().clone(),
-                    to: merged,
-                }),
-            });
-        }
-    }
-    Ok(ReturnCheck::Block(ReturnBlock { narrowing, plans }))
-}
-
-fn strictly_improves(candidate: &EstablishedLabel, merged: &EstablishedLabel) -> bool {
-    &candidate.combine(merged) == candidate && merged != candidate
-}
-
-/// What a child submits through `submit_result`, or the runtime submits for a chosen return
-/// plan: the raw body, or a registered transformer's derivation with the raw submission's digest
-/// (the runtime computes it over the raw bytes before deriving — the raw text itself never
-/// reaches the engine). The crossing path is derived from the fork binding or the chosen plan,
-/// never selected by this submission: a kind that does not match is refused.
-pub enum ReturnSubmission {
-    Raw {
-        body: ValueBody,
-    },
-    Derived {
-        body: ValueBody,
-        raw_digest: RawResultDigest,
-    },
-}
-
-#[cfg(test)]
-pub(crate) fn execute_child_return_plan(
-    registry: &Registry,
-    parent: &Views,
-    child: &TrajectoryId,
-    chosen: ReturnPlan,
-    submission: ReturnSubmission,
-    expansions: &Expansions,
-) -> Result<Vec<Fact>, BranchError> {
-    let plans = match check_child_return(registry, parent, child, expansions)? {
-        ReturnCheck::Block(block) => block.plans,
-        // Allow: the state moved since the offer — nothing here to execute.
-        ReturnCheck::Allow => return Err(BranchError::ReturnOfferStale),
-    };
-    if !plans.contains(&chosen) {
-        return Err(BranchError::ReturnPlanNotOffered);
-    }
-
-    let fold = parent.branch_label(child);
-    let (value, derivation, acceptance) = match (chosen, submission) {
-        (ReturnPlan::Accept(narrowing), ReturnSubmission::Raw { body }) => (
-            LabeledValue::new(body, fold.bound().clone().into_label()),
-            ReturnDerivation::Raw,
-            Some(narrowing),
-        ),
-        (ReturnPlan::Sanitize { sanitizer, residual }, ReturnSubmission::Derived { body, raw_digest }) => {
-            let (value, derivation) = sanitized_crossing(registry, &fold, &sanitizer, body, raw_digest, expansions)?;
-            (value, derivation, residual)
-        }
-        // A raw submission for a sanitize plan, or a derivation for Accept.
-        _ => return Err(BranchError::SubmissionMismatch),
-    };
-
-    Ok(crossing_facts(
-        parent,
-        child,
-        value,
-        derivation,
-        acceptance,
-        registry.resolutions(expansions),
-    ))
-}
-
-fn sanitized_crossing(
-    registry: &Registry,
-    fold: &PartialLabel,
-    sanitizer: &SanitizerName,
-    body: ValueBody,
-    raw_digest: RawResultDigest,
-    expansions: &Expansions,
-) -> Result<(LabeledValue, ReturnDerivation), BranchError> {
-    let registered = registry
-        .sanitizer(sanitizer)
-        .ok_or_else(|| BranchError::UnknownSanitizer(sanitizer.as_str().to_string()))?;
-    if !fold.is_established(registered.transition.dimension()) {
-        return Err(BranchError::ReturnFoldUnestablished);
-    }
-    if !registered.on.output {
-        return Err(BranchError::SanitizerNotOutput(sanitizer.as_str().to_string()));
-    }
-    let fold_label = fold.bound().clone().into_label();
-    let derived = registered
-        .derive_output(&fold_label, &[], expansions)
-        .ok_or(BranchError::TransitionSourceUnmet)?;
-    let value = LabeledValue::new(body, derived);
-    let derivation = ReturnDerivation::Sanitized {
-        sanitizer: sanitizer.clone(),
-        raw_digest,
-        transition: registered.transition.resolve(expansions),
-    };
-    Ok((value, derivation))
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -363,13 +157,13 @@ mod tests {
     use crate::groups::DeclaredAudience;
     use crate::label::Adequacy;
     use crate::label::Dimension;
+    use crate::label::EstablishedLabel;
+    use crate::label::PartialLabel;
     use crate::label::{Audience, Dim, Label, ReaderId, Trust};
-    use crate::names::CastName;
+    use crate::names::{CastName, SanitizerName};
     use crate::projection::Projection;
     use crate::registry::{RegistryConfig, TrustChain};
-    use crate::value::{
-        DispatchId, LabeledValue, Provenance, RawResultDigest, ResolvedCall, ToolName, ValueBody, ValueId,
-    };
+    use crate::value::{DispatchId, LabeledValue, Provenance, ResolvedCall, ToolName, ValueBody, ValueId};
     use serde_json::json;
 
     const SUSPICIOUS: Trust = Trust::new(0);
@@ -436,7 +230,7 @@ mod tests {
             proposed_effects: EffectSet::default(),
             dynamic_resolutions: Vec::new(),
             memberships: Vec::new(),
-            subject: None,
+            subject: crate::basis::fixture_subject(&trajectory),
             resolutions: vec![],
         });
         log.push(Fact::DispatchClosed {
@@ -520,9 +314,14 @@ mod tests {
         ReturnPolicy::Sanitized(SanitizerName::new("declassify"))
     }
 
-    fn raw(body: &str) -> ReturnSubmission {
-        ReturnSubmission::Raw {
-            body: ValueBody::new(body),
+    fn raw(body: &str) -> ValueBody {
+        ValueBody::new(body)
+    }
+
+    fn merged(crossing: RawCrossing) -> Vec<Fact> {
+        match crossing {
+            RawCrossing::Merged(facts) => facts,
+            RawCrossing::Narrows(narrowing) => panic!("expected a merged crossing, got {narrowing:?}"),
         }
     }
 
@@ -544,14 +343,16 @@ mod tests {
     fn a_non_narrowing_raw_return_crosses_in_one_batch() {
         let mut log = forked(known(SUSPICIOUS, internal()));
         let projection = build(&log);
-        let ret = submit_child_return(
-            &registry(),
-            &projection.view(&parent()),
-            &child(),
-            raw("secret"),
-            &Expansions::default(),
-        )
-        .unwrap();
+        let ret = merged(
+            submit_child_return(
+                &registry(),
+                &projection.view(&parent()),
+                &child(),
+                &raw("secret"),
+                &Expansions::default(),
+            )
+            .unwrap(),
+        );
         assert!(matches!(&ret[0], Fact::ChildReturn { .. }));
         assert!(matches!(&ret[1], Fact::ValueAdmitted { .. }));
         assert!(matches!(
@@ -574,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn a_narrowing_raw_return_cannot_merge_silently() {
+    fn a_narrowing_raw_return_is_priced_not_merged() {
         let mut log = forked(known(TRUSTED, Audience::Public));
         admit(&mut log, child(), known(SUSPICIOUS, internal()));
         let projection = build(&log);
@@ -583,213 +384,14 @@ mod tests {
                 &registry(),
                 &projection.view(&parent()),
                 &child(),
-                raw("secret"),
+                &raw("secret"),
                 &Expansions::default()
             ),
-            Err(BranchError::ReturnNarrowsParent)
+            Ok(RawCrossing::Narrows(Narrowing {
+                from: EstablishedLabel::new(TRUSTED, Audience::Public),
+                to: EstablishedLabel::new(SUSPICIOUS, internal()),
+            }))
         );
-    }
-
-    #[test]
-    fn sanitized_return_relabels_audience_preserving_trust() {
-        let mut log = forked_bound(known(SUSPICIOUS, internal()), sanitized_policy());
-        let projection = build(&log);
-        let ret = submit_child_return(
-            &registry(),
-            &projection.view(&parent()),
-            &child(),
-            ReturnSubmission::Derived {
-                body: ValueBody::new("redacted"),
-                raw_digest: RawResultDigest::of(b"secret"),
-            },
-            &Expansions::default(),
-        )
-        .unwrap();
-        log.extend(ret);
-        let projection = build(&log);
-        let value = projection
-            .view(&parent())
-            .child_return(&ChildReturnId::new(child(), 0))
-            .unwrap()
-            .clone();
-        assert_eq!(value.label.trust, Dim::Known(SUSPICIOUS));
-        assert_eq!(value.label.audience, Dim::Known(Audience::Public));
-        assert_eq!(
-            projection.view(&parent()).current_label(),
-            partial(SUSPICIOUS, internal())
-        );
-    }
-
-    fn menu_registry() -> Registry {
-        let declassify = Sanitizer {
-            name: SanitizerName::new("declassify"),
-            on: SanitizerPoints {
-                input: false,
-                output: true,
-            },
-            transition: DeclaredTransition::Audience {
-                from_includes: DeclaredAudience::literal(internal()),
-                to: DeclaredAudience::literal(Audience::Public),
-            },
-            scope: Scope::default(),
-            hint: None,
-        };
-        let to_finance = Sanitizer {
-            name: SanitizerName::new("to-finance"),
-            on: SanitizerPoints {
-                input: false,
-                output: true,
-            },
-            transition: DeclaredTransition::Audience {
-                from_includes: DeclaredAudience::literal(internal()),
-                to: DeclaredAudience::literal(Audience::restricted([ReaderId::new("finance")])),
-            },
-            scope: Scope::default(),
-            hint: None,
-        };
-        let input_only = Sanitizer {
-            name: SanitizerName::new("input-only"),
-            on: SanitizerPoints {
-                input: true,
-                output: false,
-            },
-            transition: DeclaredTransition::Audience {
-                from_includes: DeclaredAudience::literal(internal()),
-                to: DeclaredAudience::literal(Audience::Public),
-            },
-            scope: Scope::default(),
-            hint: None,
-        };
-        Registry::build_covered(RegistryConfig {
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![],
-            authorities: vec![],
-            sanitizers: vec![declassify, to_finance, input_only],
-            casts: vec![],
-            membership: None,
-        })
-        .unwrap()
-    }
-
-    fn check(registry: &Registry, log: &[Fact]) -> ReturnCheck {
-        let projection = build(log);
-        check_child_return(registry, &projection.view(&parent()), &child(), &Expansions::default()).unwrap()
-    }
-
-    #[test]
-    fn a_non_narrowing_raw_return_is_allowed() {
-        let log = forked(known(SUSPICIOUS, internal()));
-        assert_eq!(check(&registry(), &log), ReturnCheck::Allow);
-        let mut log = forked(known(SUSPICIOUS, internal()));
-        admit(&mut log, child(), known(TRUSTED, internal()));
-        assert_eq!(check(&registry(), &log), ReturnCheck::Allow);
-    }
-
-    #[test]
-    fn a_narrowing_raw_return_is_blocked_with_accept_always_offered() {
-        let mut log = forked(known(TRUSTED, Audience::Public));
-        admit(&mut log, child(), known(SUSPICIOUS, internal()));
-        match check(&registry(), &log) {
-            ReturnCheck::Block(ReturnBlock { narrowing, plans }) => {
-                assert_eq!(narrowing.from, established(TRUSTED, Audience::Public));
-                assert_eq!(narrowing.to, established(SUSPICIOUS, internal()));
-                assert_eq!(
-                    plans,
-                    vec![
-                        ReturnPlan::Accept(Narrowing {
-                            from: established(TRUSTED, Audience::Public),
-                            to: established(SUSPICIOUS, internal()),
-                        }),
-                        ReturnPlan::Sanitize {
-                            sanitizer: SanitizerName::new("declassify"),
-                            residual: Some(Narrowing {
-                                from: established(TRUSTED, Audience::Public),
-                                to: established(SUSPICIOUS, Audience::Public),
-                            }),
-                        },
-                    ]
-                );
-            }
-            other => panic!("expected Block, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn an_audience_only_narrowing_offers_the_clearing_sanitizer_standalone() {
-        let mut log = forked(known(SUSPICIOUS, Audience::Public));
-        admit(&mut log, child(), known(SUSPICIOUS, internal()));
-        match check(&menu_registry(), &log) {
-            ReturnCheck::Block(ReturnBlock { plans, .. }) => {
-                assert_eq!(
-                    plans,
-                    vec![
-                        ReturnPlan::Accept(Narrowing {
-                            from: established(SUSPICIOUS, Audience::Public),
-                            to: established(SUSPICIOUS, internal()),
-                        }),
-                        ReturnPlan::Sanitize {
-                            sanitizer: SanitizerName::new("declassify"),
-                            residual: None,
-                        },
-                    ]
-                );
-            }
-            other => panic!("expected Block, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn every_return_menu_fits_the_catalogue_bound() {
-        let bound = 3;
-        for parent in [
-            known(TRUSTED, Audience::Public),
-            known(SUSPICIOUS, Audience::Public),
-            known(TRUSTED, internal()),
-        ] {
-            let mut log = forked(parent);
-            admit(&mut log, child(), known(SUSPICIOUS, internal()));
-            match check(&menu_registry(), &log) {
-                ReturnCheck::Block(ReturnBlock { plans, .. }) => {
-                    assert!(!plans.is_empty(), "acceptance is always offered");
-                    assert!(plans.len() <= bound);
-                }
-                other => panic!("expected a narrowing block, got {other:?}"),
-            }
-        }
-    }
-
-    #[test]
-    fn a_worse_or_equal_relabel_is_never_offered() {
-        let mut log = forked(known(TRUSTED, internal()));
-        admit(&mut log, child(), known(SUSPICIOUS, internal()));
-        match check(&menu_registry(), &log) {
-            ReturnCheck::Block(ReturnBlock { plans, .. }) => {
-                assert_eq!(
-                    plans,
-                    vec![ReturnPlan::Accept(Narrowing {
-                        from: established(TRUSTED, internal()),
-                        to: established(SUSPICIOUS, internal()),
-                    })]
-                );
-            }
-            other => panic!("expected Block, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn an_inapplicable_sanitizer_is_not_offered() {
-        let mut log = forked(known(SUSPICIOUS, Audience::Public));
-        admit(
-            &mut log,
-            child(),
-            known(SUSPICIOUS, Audience::restricted([ReaderId::new("finance")])),
-        );
-        match check(&registry(), &log) {
-            ReturnCheck::Block(ReturnBlock { plans, .. }) => {
-                assert!(matches!(plans.as_slice(), [ReturnPlan::Accept(_)]))
-            }
-            other => panic!("expected Block, got {other:?}"),
-        }
     }
 
     #[test]
@@ -801,18 +403,21 @@ mod tests {
             Label::new(Dim::Unknown, Dim::Known(Audience::Public)),
         );
         let unknown_value = ValueId::new(0);
-        assert_eq!(check(&cast_registry(), &log), ReturnCheck::Allow);
+        let projection = build(&log);
+        assert_eq!(raw_return_narrowing(&projection.view(&parent()), &child()), Ok(None));
         assert_eq!(resolve(&log, &parent(), 0), Err(CastError::ForeignValue));
 
         let projection = build(&log);
-        let ret = submit_child_return(
-            &cast_registry(),
-            &projection.view(&parent()),
-            &child(),
-            raw("found"),
-            &Expansions::default(),
-        )
-        .unwrap();
+        let ret = merged(
+            submit_child_return(
+                &cast_registry(),
+                &projection.view(&parent()),
+                &child(),
+                &raw("found"),
+                &Expansions::default(),
+            )
+            .unwrap(),
+        );
         log.extend(ret);
         let projection = build(&log);
         let parent_label = projection.view(&parent()).current_label();
@@ -841,16 +446,18 @@ mod tests {
         let mut log = forked(known(TRUSTED, Audience::Public));
         admit(&mut log, child(), Label::new(Dim::Unknown, Dim::Unknown));
         admit(&mut log, parent(), Label::new(Dim::Known(TRUSTED), Dim::Unknown));
-        assert_eq!(check(&registry(), &log), ReturnCheck::Allow);
         let projection = build(&log);
-        let ret = submit_child_return(
-            &registry(),
-            &projection.view(&parent()),
-            &child(),
-            raw("found"),
-            &Expansions::default(),
-        )
-        .unwrap();
+        assert_eq!(raw_return_narrowing(&projection.view(&parent()), &child()), Ok(None));
+        let ret = merged(
+            submit_child_return(
+                &registry(),
+                &projection.view(&parent()),
+                &child(),
+                &raw("found"),
+                &Expansions::default(),
+            )
+            .unwrap(),
+        );
         log.extend(ret);
         let label = build(&log).view(&parent()).current_label();
         assert_eq!(
@@ -865,18 +472,10 @@ mod tests {
 
     #[test]
     fn absorption_activates_only_at_the_merge() {
-        let mut log = forked(known(TRUSTED, Audience::Public));
+        let mut log = forked(known(SUSPICIOUS, Audience::Public));
         admit(&mut log, child(), known(SUSPICIOUS, Audience::Public));
         admit(&mut log, child(), Label::new(Dim::Known(SUSPICIOUS), Dim::Unknown));
         let unknown_value = ValueId::new(1);
-        let blocked = check(&registry(), &log);
-        let narrowing = match &blocked {
-            ReturnCheck::Block(ReturnBlock { narrowing, plans }) => {
-                assert!(matches!(plans.as_slice(), [ReturnPlan::Accept(_)]));
-                narrowing.clone()
-            }
-            other => panic!("expected a narrowing block, got {other:?}"),
-        };
         assert!(
             build(&log)
                 .view(&parent())
@@ -885,15 +484,17 @@ mod tests {
         );
         assert_eq!(resolve(&log, &parent(), 1), Err(CastError::ForeignValue));
 
-        let batch = execute(
-            &registry(),
-            &log,
-            &ReturnPlan::Accept(narrowing),
-            ReturnSubmission::Raw {
-                body: ValueBody::new("found"),
-            },
-        )
-        .unwrap();
+        let projection = build(&log);
+        let batch = merged(
+            submit_child_return(
+                &registry(),
+                &projection.view(&parent()),
+                &child(),
+                &raw("found"),
+                &Expansions::default(),
+            )
+            .unwrap(),
+        );
         let (merge, before) = batch.split_last().expect("the crossing ends at its merge");
         assert!(matches!(
             merge,
@@ -920,157 +521,23 @@ mod tests {
         );
     }
 
-    fn masking_registry() -> Registry {
-        let declassify = Sanitizer {
-            name: SanitizerName::new("declassify"),
-            on: SanitizerPoints {
-                input: false,
-                output: true,
-            },
-            transition: DeclaredTransition::Audience {
-                from_includes: DeclaredAudience::literal(internal()),
-                to: DeclaredAudience::literal(Audience::Public),
-            },
-            scope: Scope::default(),
-            hint: None,
-        };
-        Registry::build_covered(RegistryConfig {
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools: vec![read_tool()],
-            authorities: vec![],
-            sanitizers: vec![declassify],
-            casts: vec![Cast {
-                name: CastName::new("classify"),
-                resolution: CastResolution::Constant(DeclaredLabel::literal(established(SUSPICIOUS, internal()))),
-                scope: Scope::default(),
-            }],
-            membership: None,
-        })
-        .unwrap()
-    }
-
-    fn classify(registry: &Registry, log: &[Fact], actor: &TrajectoryId) -> Result<Vec<Fact>, CastError> {
-        admit_cast(
-            registry,
-            &build(log).view(actor),
-            ValueId::new(0),
-            CastAnswer {
-                cast: CastName::new("classify"),
-                resolved: established(SUSPICIOUS, internal()),
-            },
-            &Expansions::default(),
-        )
-    }
-
-    fn masked_crossing(registry: &Registry) -> Vec<Fact> {
-        let mut log = forked_bound(known(TRUSTED, Audience::Public), sanitized_policy());
-        admit(&mut log, child(), Label::new(Dim::Unknown, Dim::Known(internal())));
-        let projection = build(&log);
-        let ret = submit_child_return(
-            registry,
-            &projection.view(&parent()),
-            &child(),
-            ReturnSubmission::Derived {
-                body: ValueBody::new("redacted"),
-                raw_digest: RawResultDigest::of(b"secret"),
-            },
-            &Expansions::default(),
-        )
-        .expect("the transitioned dimension is established, so the crossing derives");
-        log.extend(ret);
-        log
-    }
-
-    #[test]
-    fn a_sanitized_crossing_rides_the_untouched_dimension_through_masked() {
-        let registry = masking_registry();
-        let mut log = masked_crossing(&registry);
-        let parent_label = build(&log).view(&parent()).current_label();
-        assert_eq!(parent_label.bound(), &established(TRUSTED, Audience::Public));
-        assert_eq!(
-            parent_label.unresolved(Dimension::Trust).collect::<Vec<_>>(),
-            vec![ValueId::new(0)]
-        );
-
-        let batch = classify(&registry, &log, &parent()).expect("the parent resolves the merge-carried identity");
-        log.extend(batch);
-        let projection = build(&log);
-        assert_eq!(
-            projection.view(&parent()).current_label(),
-            partial(SUSPICIOUS, Audience::Public)
-        );
-        assert_eq!(
-            projection.view(&child()).current_label(),
-            partial(SUSPICIOUS, internal())
-        );
-    }
-
-    #[test]
-    fn a_sanitized_crossing_with_an_unresolved_transitioned_dimension_is_refused() {
-        let mut log = forked_bound(known(TRUSTED, internal()), sanitized_policy());
-        admit(&mut log, child(), Label::new(Dim::Known(TRUSTED), Dim::Unknown));
-        let projection = build(&log);
-        assert_eq!(
-            submit_child_return(
-                &registry(),
-                &projection.view(&parent()),
-                &child(),
-                ReturnSubmission::Derived {
-                    body: ValueBody::new("redacted"),
-                    raw_digest: RawResultDigest::of(b"secret"),
-                },
-                &Expansions::default()
-            ),
-            Err(BranchError::ReturnFoldUnestablished)
-        );
-    }
-
-    #[test]
-    fn a_later_fork_inherits_the_absorbed_identities_masked() {
-        let registry = masking_registry();
-        let mut log = masked_crossing(&registry);
-        let sibling = TrajectoryId::new("sibling");
-        let seed = fork_records(&log, &parent(), &sibling, ReturnPolicy::Raw);
-        log.extend(seed);
-
-        let projection = build(&log);
-        let seeded = projection.view(&sibling).current_label();
-        assert_eq!(seeded, projection.view(&parent()).current_label());
-        let snapshot = snapshot_of(&log, &sibling);
-        assert_eq!(snapshot.seed(), &seeded);
-        assert!(
-            !snapshot.inherited().contains(&ValueId::new(0)),
-            "an absorbed identity seeds the pin but never joins the inherited set"
-        );
-
-        let batch = classify(&registry, &log, &sibling).expect("the absorbed identity is in the fork's reach");
-        log.extend(batch);
-        let projection = build(&log);
-        assert_eq!(
-            projection.view(&parent()).current_label(),
-            partial(SUSPICIOUS, Audience::Public)
-        );
-        assert_eq!(
-            projection.view(&sibling).current_label(),
-            partial(SUSPICIOUS, Audience::Public)
-        );
-    }
-
     #[test]
     fn a_known_return_merges_into_an_unknown_parent() {
         let mut log = forked(known(TRUSTED, Audience::Public));
         admit(&mut log, parent(), Label::new(Dim::Known(TRUSTED), Dim::Unknown));
-        assert_eq!(check(&registry(), &log), ReturnCheck::Allow);
-
         let projection = build(&log);
-        let batch = submit_child_return(
-            &registry(),
-            &projection.view(&parent()),
-            &child(),
-            raw("result"),
-            &Expansions::default(),
-        )
-        .expect("a known return merges into an Unknown parent");
+        assert_eq!(raw_return_narrowing(&projection.view(&parent()), &child()), Ok(None));
+
+        let batch = merged(
+            submit_child_return(
+                &registry(),
+                &projection.view(&parent()),
+                &child(),
+                &raw("result"),
+                &Expansions::default(),
+            )
+            .expect("a known return merges into an Unknown parent"),
+        );
         assert!(
             batch
                 .iter()
@@ -1086,314 +553,12 @@ mod tests {
     }
 
     #[test]
-    fn a_return_check_for_a_non_child_is_refused() {
+    fn a_return_narrowing_check_for_a_non_child_is_refused() {
         let log = vec![opened(parent(), known(TRUSTED, Audience::Public))];
         let projection = build(&log);
         assert_eq!(
-            check_child_return(
-                &registry(),
-                &projection.view(&parent()),
-                &TrajectoryId::new("stranger"),
-                &Expansions::default()
-            ),
+            raw_return_narrowing(&projection.view(&parent()), &TrajectoryId::new("stranger")),
             Err(BranchError::NotDirectParent)
-        );
-    }
-
-    fn blocked_family() -> Vec<Fact> {
-        let mut log = forked(known(TRUSTED, Audience::Public));
-        admit(&mut log, child(), known(SUSPICIOUS, internal()));
-        log
-    }
-
-    fn execute(
-        registry: &Registry,
-        log: &[Fact],
-        chosen: &ReturnPlan,
-        submission: ReturnSubmission,
-    ) -> Result<Vec<Fact>, BranchError> {
-        let projection = build(log);
-        execute_child_return_plan(
-            registry,
-            &projection.view(&parent()),
-            &child(),
-            chosen.clone(),
-            submission,
-            &Expansions::default(),
-        )
-    }
-
-    fn accept_blocked_family() -> ReturnPlan {
-        ReturnPlan::Accept(Narrowing {
-            from: established(TRUSTED, Audience::Public),
-            to: established(SUSPICIOUS, internal()),
-        })
-    }
-
-    #[test]
-    fn executing_accept_merges_raw_with_a_return_scoped_acceptance() {
-        let mut log = blocked_family();
-        let batch = execute(
-            &registry(),
-            &log,
-            &accept_blocked_family(),
-            ReturnSubmission::Raw {
-                body: ValueBody::new("findings"),
-            },
-        )
-        .unwrap();
-        assert!(matches!(
-            &batch[0],
-            Fact::ChildReturn {
-                derivation: ReturnDerivation::Raw,
-                ..
-            }
-        ));
-        match &batch[1] {
-            Fact::ChildReturnAcceptance {
-                trajectory,
-                child_return,
-                narrowing,
-            } => {
-                assert_eq!(trajectory, &parent());
-                assert_eq!(child_return, &ChildReturnId::new(child(), 0));
-                assert_eq!(narrowing.from, established(TRUSTED, Audience::Public));
-                assert_eq!(narrowing.to, established(SUSPICIOUS, internal()));
-            }
-            other => panic!("expected ChildReturnAcceptance, got {other:?}"),
-        }
-        assert!(matches!(&batch[2], Fact::ValueAdmitted { .. }));
-        assert!(matches!(
-            &batch[3],
-            Fact::Boundary {
-                kind: BoundaryKind::Merge { .. },
-                ..
-            }
-        ));
-        log.extend(batch);
-        let projection = build(&log);
-        assert_eq!(
-            projection.view(&parent()).current_label(),
-            partial(SUSPICIOUS, internal())
-        );
-    }
-
-    #[test]
-    fn executing_sanitize_then_accept_merges_the_derivation_with_the_residual() {
-        let mut log = blocked_family();
-        let chosen = ReturnPlan::Sanitize {
-            sanitizer: SanitizerName::new("declassify"),
-            residual: Some(Narrowing {
-                from: established(TRUSTED, Audience::Public),
-                to: established(SUSPICIOUS, Audience::Public),
-            }),
-        };
-        let batch = execute(
-            &registry(),
-            &log,
-            &chosen,
-            ReturnSubmission::Derived {
-                body: ValueBody::new("redacted"),
-                raw_digest: RawResultDigest::of(b"findings"),
-            },
-        )
-        .unwrap();
-        match &batch[1] {
-            Fact::ChildReturnAcceptance { narrowing, .. } => {
-                assert_eq!(narrowing.to, established(SUSPICIOUS, Audience::Public));
-            }
-            other => panic!("expected ChildReturnAcceptance, got {other:?}"),
-        }
-        log.extend(batch);
-        let projection = build(&log);
-        assert_eq!(
-            projection.view(&parent()).current_label(),
-            partial(SUSPICIOUS, Audience::Public)
-        );
-        assert!(log.iter().any(|f| matches!(
-            f,
-            Fact::ChildReturn {
-                derivation: ReturnDerivation::Sanitized { .. },
-                ..
-            }
-        )));
-    }
-
-    #[test]
-    fn executing_a_standalone_sanitize_needs_no_acceptance() {
-        let mut log = forked(known(SUSPICIOUS, Audience::Public));
-        admit(&mut log, child(), known(SUSPICIOUS, internal()));
-        let batch = execute(
-            &registry(),
-            &log,
-            &ReturnPlan::Sanitize {
-                sanitizer: SanitizerName::new("declassify"),
-                residual: None,
-            },
-            ReturnSubmission::Derived {
-                body: ValueBody::new("redacted"),
-                raw_digest: RawResultDigest::of(b"findings"),
-            },
-        )
-        .unwrap();
-        assert!(!batch.iter().any(|f| matches!(f, Fact::ChildReturnAcceptance { .. })));
-        log.extend(batch);
-        let projection = build(&log);
-        assert_eq!(
-            projection.view(&parent()).current_label(),
-            partial(SUSPICIOUS, Audience::Public)
-        );
-    }
-
-    #[test]
-    fn an_unoffered_plan_is_refused() {
-        let log = blocked_family();
-        assert_eq!(
-            execute(
-                &registry(),
-                &log,
-                &ReturnPlan::Sanitize {
-                    sanitizer: SanitizerName::new("declassify"),
-                    residual: None,
-                },
-                ReturnSubmission::Derived {
-                    body: ValueBody::new("redacted"),
-                    raw_digest: RawResultDigest::of(b"findings"),
-                },
-            ),
-            Err(BranchError::ReturnPlanNotOffered)
-        );
-        assert_eq!(
-            execute(
-                &registry(),
-                &log,
-                &ReturnPlan::Sanitize {
-                    sanitizer: SanitizerName::new("declassify"),
-                    residual: Some(Narrowing {
-                        from: established(TRUSTED, internal()),
-                        to: established(SUSPICIOUS, internal()),
-                    }),
-                },
-                ReturnSubmission::Derived {
-                    body: ValueBody::new("redacted"),
-                    raw_digest: RawResultDigest::of(b"findings"),
-                },
-            ),
-            Err(BranchError::ReturnPlanNotOffered)
-        );
-    }
-
-    #[test]
-    fn a_mismatched_submission_is_refused() {
-        let log = blocked_family();
-        assert_eq!(
-            execute(
-                &registry(),
-                &log,
-                &accept_blocked_family(),
-                ReturnSubmission::Derived {
-                    body: ValueBody::new("redacted"),
-                    raw_digest: RawResultDigest::of(b"findings"),
-                },
-            ),
-            Err(BranchError::SubmissionMismatch)
-        );
-    }
-
-    #[test]
-    fn a_moved_family_refuses_the_offer_by_value_not_by_identity() {
-        let log = blocked_family();
-        let mut converged = log.clone();
-        admit(&mut converged, parent(), known(SUSPICIOUS, internal()));
-        assert_eq!(
-            execute(
-                &registry(),
-                &converged,
-                &accept_blocked_family(),
-                ReturnSubmission::Raw {
-                    body: ValueBody::new("findings"),
-                },
-            ),
-            Err(BranchError::ReturnOfferStale)
-        );
-        let mut punctuated = log.clone();
-        punctuated.push(Fact::Boundary {
-            trajectory: parent(),
-            kind: BoundaryKind::TurnEnd,
-        });
-        assert!(
-            execute(
-                &registry(),
-                &punctuated,
-                &accept_blocked_family(),
-                ReturnSubmission::Raw {
-                    body: ValueBody::new("findings"),
-                },
-            )
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn an_executed_plan_consumes_the_childs_return_channel() {
-        let mut log = blocked_family();
-        let batch = execute(
-            &registry(),
-            &log,
-            &accept_blocked_family(),
-            ReturnSubmission::Raw {
-                body: ValueBody::new("findings"),
-            },
-        )
-        .unwrap();
-        log.extend(batch);
-        assert_eq!(
-            execute(
-                &registry(),
-                &log,
-                &ReturnPlan::Sanitize {
-                    sanitizer: SanitizerName::new("declassify"),
-                    residual: Some(Narrowing {
-                        from: established(TRUSTED, Audience::Public),
-                        to: established(SUSPICIOUS, Audience::Public),
-                    }),
-                },
-                ReturnSubmission::Derived {
-                    body: ValueBody::new("redacted"),
-                    raw_digest: RawResultDigest::of(b"findings"),
-                },
-            ),
-            Err(BranchError::AlreadyEnded)
-        );
-
-        let mut log = blocked_family();
-        let batch = execute(
-            &registry(),
-            &log,
-            &ReturnPlan::Sanitize {
-                sanitizer: SanitizerName::new("declassify"),
-                residual: Some(Narrowing {
-                    from: established(TRUSTED, Audience::Public),
-                    to: established(SUSPICIOUS, Audience::Public),
-                }),
-            },
-            ReturnSubmission::Derived {
-                body: ValueBody::new("redacted"),
-                raw_digest: RawResultDigest::of(b"findings"),
-            },
-        )
-        .unwrap();
-        log.extend(batch);
-        assert_eq!(
-            execute(
-                &registry(),
-                &log,
-                &accept_blocked_family(),
-                ReturnSubmission::Raw {
-                    body: ValueBody::new("findings"),
-                },
-            ),
-            Err(BranchError::AlreadyEnded)
         );
     }
 
@@ -1401,14 +566,16 @@ mod tests {
     fn a_second_return_from_one_child_is_refused() {
         let mut log = forked(known(SUSPICIOUS, internal()));
         let projection = build(&log);
-        let ret = submit_child_return(
-            &registry(),
-            &projection.view(&parent()),
-            &child(),
-            raw("first"),
-            &Expansions::default(),
-        )
-        .unwrap();
+        let ret = merged(
+            submit_child_return(
+                &registry(),
+                &projection.view(&parent()),
+                &child(),
+                &raw("first"),
+                &Expansions::default(),
+            )
+            .unwrap(),
+        );
         log.extend(ret);
         let projection = build(&log);
         assert_eq!(
@@ -1416,18 +583,13 @@ mod tests {
                 &registry(),
                 &projection.view(&parent()),
                 &child(),
-                raw("second"),
+                &raw("second"),
                 &Expansions::default()
             ),
             Err(BranchError::AlreadyEnded)
         );
         assert_eq!(
-            check_child_return(
-                &registry(),
-                &projection.view(&parent()),
-                &child(),
-                &Expansions::default()
-            ),
+            raw_return_narrowing(&projection.view(&parent()), &child()),
             Err(BranchError::AlreadyEnded)
         );
     }
@@ -1464,18 +626,13 @@ mod tests {
                 &registry(),
                 &projection.view(&parent()),
                 &child(),
-                raw("late"),
+                &raw("late"),
                 &Expansions::default()
             ),
             Err(BranchError::AlreadyEnded)
         );
         assert_eq!(
-            check_child_return(
-                &registry(),
-                &projection.view(&parent()),
-                &child(),
-                &Expansions::default()
-            ),
+            raw_return_narrowing(&projection.view(&parent()), &child()),
             Err(BranchError::AlreadyEnded)
         );
     }
@@ -1484,14 +641,16 @@ mod tests {
     fn competing_terminals_linearize_to_at_most_one() {
         let mut log = forked(known(SUSPICIOUS, internal()));
         let projection = build(&log);
-        let ret = submit_child_return(
-            &registry(),
-            &projection.view(&parent()),
-            &child(),
-            raw("finding"),
-            &Expansions::default(),
-        )
-        .unwrap();
+        let ret = merged(
+            submit_child_return(
+                &registry(),
+                &projection.view(&parent()),
+                &child(),
+                &raw("finding"),
+                &Expansions::default(),
+            )
+            .unwrap(),
+        );
         submit_void_return(&projection.view(&parent()), &child()).unwrap();
         log.extend(ret);
         let projection = build(&log);
@@ -1503,21 +662,6 @@ mod tests {
 
     #[test]
     fn a_submission_off_the_fork_policy_is_refused() {
-        let log = forked(known(TRUSTED, internal()));
-        let projection = build(&log);
-        assert_eq!(
-            submit_child_return(
-                &registry(),
-                &projection.view(&parent()),
-                &child(),
-                ReturnSubmission::Derived {
-                    body: ValueBody::new("redacted"),
-                    raw_digest: RawResultDigest::of(b"x"),
-                },
-                &Expansions::default()
-            ),
-            Err(BranchError::ReturnPolicyMismatch)
-        );
         let log = forked_bound(known(SUSPICIOUS, internal()), sanitized_policy());
         let projection = build(&log);
         assert_eq!(
@@ -1525,7 +669,7 @@ mod tests {
                 &registry(),
                 &projection.view(&parent()),
                 &child(),
-                raw("leak"),
+                &raw("leak"),
                 &Expansions::default()
             ),
             Err(BranchError::ReturnPolicyMismatch)
@@ -1533,16 +677,11 @@ mod tests {
     }
 
     #[test]
-    fn a_blocked_return_check_applies_only_under_a_raw_policy() {
+    fn a_return_narrowing_check_applies_only_under_a_raw_policy() {
         let log = forked_bound(known(TRUSTED, internal()), sanitized_policy());
         let projection = build(&log);
         assert_eq!(
-            check_child_return(
-                &registry(),
-                &projection.view(&parent()),
-                &child(),
-                &Expansions::default()
-            ),
+            raw_return_narrowing(&projection.view(&parent()), &child()),
             Err(BranchError::ReturnPolicyMismatch)
         );
     }
@@ -1551,94 +690,20 @@ mod tests {
     fn return_facts_audit_their_derivation() {
         let log = forked(known(SUSPICIOUS, internal()));
         let projection = build(&log);
-        let ret = submit_child_return(
-            &registry(),
-            &projection.view(&parent()),
-            &child(),
-            raw("secret"),
-            &Expansions::default(),
-        )
-        .unwrap();
-        match &ret[0] {
-            Fact::ChildReturn { derivation, .. } => assert_eq!(derivation, &ReturnDerivation::Raw),
-            other => panic!("expected ChildReturn, got {other:?}"),
-        }
-
-        let log = forked_bound(known(SUSPICIOUS, internal()), sanitized_policy());
-        let projection = build(&log);
-        let ret = submit_child_return(
-            &registry(),
-            &projection.view(&parent()),
-            &child(),
-            ReturnSubmission::Derived {
-                body: ValueBody::new("redacted"),
-                raw_digest: RawResultDigest::of(b"secret"),
-            },
-            &Expansions::default(),
-        )
-        .unwrap();
-        match &ret[0] {
-            Fact::ChildReturn { derivation, .. } => assert_eq!(
-                derivation,
-                &ReturnDerivation::Sanitized {
-                    sanitizer: SanitizerName::new("declassify"),
-                    raw_digest: RawResultDigest::of(b"secret"),
-                    transition: crate::authority::Transition::Audience {
-                        from_includes: internal(),
-                        to: Audience::Public,
-                    },
-                }
-            ),
-            other => panic!("expected ChildReturn, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn sanitized_return_with_unmet_from_is_refused() {
-        let finance = Audience::restricted([ReaderId::new("finance")]);
-        let log = forked_bound(known(TRUSTED, finance), sanitized_policy());
-        let projection = build(&log);
-        assert_eq!(
+        let ret = merged(
             submit_child_return(
                 &registry(),
                 &projection.view(&parent()),
                 &child(),
-                ReturnSubmission::Derived {
-                    body: ValueBody::new("x"),
-                    raw_digest: RawResultDigest::of(b"secret"),
-                },
-                &Expansions::default()
-            ),
-            Err(BranchError::TransitionSourceUnmet)
+                &raw("secret"),
+                &Expansions::default(),
+            )
+            .unwrap(),
         );
-    }
-
-    #[test]
-    fn merge_admits_the_returned_label_and_the_parent_fold_still_combines() {
-        let mut log = forked_bound(known(SUSPICIOUS, internal()), sanitized_policy());
-        let values_before = log.iter().filter(|f| matches!(f, Fact::ValueAdmitted { .. })).count();
-        let projection = build(&log);
-        let ret = submit_child_return(
-            &registry(),
-            &projection.view(&parent()),
-            &child(),
-            ReturnSubmission::Derived {
-                body: ValueBody::new("redacted"),
-                raw_digest: RawResultDigest::of(b"secret"),
-            },
-            &Expansions::default(),
-        )
-        .unwrap();
-        log.extend(ret);
-        let projection = build(&log);
-        assert_eq!(
-            projection.value_label(ValueId::new(values_before as u64)),
-            Some(&known(SUSPICIOUS, Audience::Public))
-        );
-        assert_eq!(
-            projection.view(&parent()).current_label(),
-            partial(SUSPICIOUS, internal())
-        );
+        match &ret[0] {
+            Fact::ChildReturn { derivation, .. } => assert_eq!(derivation, &ReturnDerivation::Raw),
+            other => panic!("expected ChildReturn, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1651,7 +716,7 @@ mod tests {
                 &registry(),
                 &projection.view(&stranger),
                 &child(),
-                raw("r"),
+                &raw("r"),
                 &Expansions::default()
             ),
             Err(BranchError::NotDirectParent)
@@ -1674,7 +739,7 @@ mod tests {
             proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
             dynamic_resolutions: Vec::new(),
             memberships: Vec::new(),
-            subject: None,
+            subject: crate::basis::fixture_subject(&child()),
             resolutions: vec![],
         });
         log.push(Fact::DispatchClosed {
@@ -1880,7 +945,7 @@ mod tests {
             proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
             dynamic_resolutions: Vec::new(),
             memberships: Vec::new(),
-            subject: None,
+            subject: crate::basis::fixture_subject(&child()),
             resolutions: vec![],
         });
         let projection = build(&log);

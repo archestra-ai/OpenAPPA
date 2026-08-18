@@ -4,7 +4,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::basis::SubjectKey;
 use crate::candidate::{DerivedCandidate, SanitizerLineage};
-use crate::check::Narrowing;
 use crate::contract::PinnedDynamicResolution;
 use crate::fact::{
     BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ForkSnapshot, ObservedResult, ReturnPolicy,
@@ -195,7 +194,6 @@ pub struct Projection {
     absorbed: BTreeMap<TrajectoryId, BTreeMap<ValueId, BTreeSet<Dimension>>>,
     ended: BTreeSet<TrajectoryId>,
     bound_sanitizers: BTreeMap<DispatchId, SanitizerName>,
-    accepted: BTreeMap<DispatchId, Narrowing>,
     /// The live derived candidate of each subject that has one. A successful hop
     /// replaces its subject's entry, so this holds the candidate the next stage plans from — never
     /// a chain, which the engine deliberately does not precompute.
@@ -244,7 +242,6 @@ impl Projection {
             absorbed: BTreeMap::new(),
             ended: BTreeSet::new(),
             bound_sanitizers: BTreeMap::new(),
-            accepted: BTreeMap::new(),
             candidates: BTreeMap::new(),
             denials: BTreeMap::new(),
             opening: None,
@@ -331,7 +328,6 @@ impl Projection {
             absorbed,
             ended,
             bound_sanitizers,
-            accepted,
             candidates,
             denials,
             opening,
@@ -491,9 +487,7 @@ impl Projection {
                     );
                     receiving_bounds.insert(dispatch.clone(), receiving.clone());
                     dispatch_resolutions.insert(dispatch.clone(), resolutions.clone());
-                    if let Some(subject) = subject {
-                        subject_dispatches.insert(subject.clone(), dispatch.clone());
-                    }
+                    subject_dispatches.insert(subject.clone(), dispatch.clone());
                     open.insert(dispatch.clone());
                     reservations.insert(dispatch.clone(), proposed_effects.clone());
                     *occurrences.entry((trajectory.clone(), *dispatch.digest())).or_insert(0) += 1;
@@ -534,12 +528,7 @@ impl Projection {
                         v.label = resolved.clone().into_label();
                     }
                 }
-                Fact::Acceptance {
-                    dispatch, narrowing, ..
-                } => {
-                    accepted.insert(dispatch.clone(), narrowing.clone());
-                }
-                Fact::Ruling { .. } | Fact::ChildReturnAcceptance { .. } => {}
+                Fact::Acceptance { .. } | Fact::Ruling { .. } | Fact::ChildReturnAcceptance { .. } => {}
                 Fact::Denial {
                     trajectory,
                     digest,
@@ -665,7 +654,6 @@ impl Projection {
                 Fact::Boundary { trajectory, kind } => {
                     boundaries.push(trajectory.clone());
                     match kind {
-                        BoundaryKind::TurnEnd => {}
                         BoundaryKind::Merge { .. } => {
                             if !merge_absorption.is_empty() {
                                 let table = absorbed.entry(trajectory.clone()).or_default();
@@ -884,14 +872,6 @@ impl Views<'_> {
     /// is what the engine reports on — never a call the caller re-supplies.
     pub(crate) fn dispatch_call(&self, dispatch: &DispatchId) -> Option<&ResolvedCall> {
         self.projection.dispatch_calls.get(dispatch)
-    }
-
-    /// The dispatch this trajectory opened for exactly this call, oldest first.
-    pub(crate) fn dispatch_of(&self, call: &ResolvedCall) -> Option<DispatchId> {
-        let digest = call.digest();
-        (0..self.dispatch_count(&digest))
-            .map(|occurrence| DispatchId::new(self.trajectory.clone(), digest, occurrence))
-            .find(|dispatch| self.dispatch_call(dispatch) == Some(call))
     }
 
     /// What the runtime observed at this dispatch's success checkpoint, if it recorded
@@ -1260,14 +1240,6 @@ impl Views<'_> {
         self.projection.bound_sanitizers.get(dispatch)
     }
 
-    /// The narrowing this dispatch's release accepted before it opened. `UNK-16` makes
-    /// it sufficient for what that dispatch admits, whatever the live fold has done since: a
-    /// pinned contribution that did not narrow its receiving bound cannot become newly narrowing,
-    /// and one that did already carries this acceptance.
-    pub(crate) fn accepted_narrowing(&self, dispatch: &DispatchId) -> Option<&Narrowing> {
-        self.projection.accepted.get(dispatch)
-    }
-
     /// The live derived candidate of this subject, if a hop has produced one. The next
     /// stage plans from it, and a successor replaces it.
     pub(crate) fn candidate(&self, subject: &SubjectKey) -> Option<&DerivedCandidate> {
@@ -1493,7 +1465,7 @@ mod tests {
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 dynamic_resolutions: Vec::new(),
                 memberships: Vec::new(),
-                subject: None,
+                subject: crate::basis::fixture_subject(&traj("a")),
                 resolutions: vec![],
             },
             Fact::DispatchClosed {
@@ -1523,7 +1495,7 @@ mod tests {
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 dynamic_resolutions: Vec::new(),
                 memberships: Vec::new(),
-                subject: None,
+                subject: crate::basis::fixture_subject(&traj("a")),
                 resolutions: vec![],
             },
             Fact::DispatchClosed {
@@ -1552,7 +1524,7 @@ mod tests {
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 dynamic_resolutions: Vec::new(),
                 memberships: Vec::new(),
-                subject: None,
+                subject: crate::basis::fixture_subject(&traj("a")),
                 resolutions: vec![],
             },
             Fact::DispatchClosed {
@@ -1645,7 +1617,7 @@ mod tests {
             admit("a", labeled(2, Audience::Public)),
             Fact::Boundary {
                 trajectory: traj("a"),
-                kind: BoundaryKind::TurnEnd,
+                kind: BoundaryKind::VoidReturn,
             },
         ];
         assert_eq!(build(&log), build(&log));
@@ -1945,7 +1917,7 @@ mod tests {
                 proposed_effects: EffectSet::new([]).unwrap(),
                 dynamic_resolutions: Vec::new(),
                 memberships: Vec::new(),
-                subject: None,
+                subject: crate::basis::fixture_subject(&traj("a")),
                 resolutions: vec![],
             },
             Fact::ValueAdmitted {

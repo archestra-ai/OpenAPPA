@@ -488,18 +488,13 @@ impl ResolvedCall {
         &self.arguments
     }
 
+    /// Attach the dynamic answers pinned to this call. Canonical order only: a
+    /// duplicate binding is not merged here — the boundary refuses it
+    /// ([`crate::check::validate_dynamic_resolutions`]) — so the set the runtime handed over is
+    /// exactly the set the call carries, and which audience a flow targets never depends on the
+    /// order two conflicting answers arrived in.
     pub fn with_dynamic_resolutions(mut self, resolutions: Vec<PinnedDynamicResolution>) -> Self {
-        self.dynamic_resolutions.clear();
-        for resolution in resolutions {
-            match self
-                .dynamic_resolutions
-                .iter()
-                .position(|existing| existing.binding() == resolution.binding())
-            {
-                Some(index) => self.dynamic_resolutions[index] = resolution,
-                None => self.dynamic_resolutions.push(resolution),
-            }
-        }
+        self.dynamic_resolutions = resolutions;
         self.dynamic_resolutions.sort_by_cached_key(canonical_resolution);
         self
     }
@@ -512,7 +507,7 @@ impl ResolvedCall {
         self.dynamic_resolutions
             .iter()
             .find(|resolution| resolution.binding() == binding)
-            .and_then(PinnedDynamicResolution::audience)
+            .map(PinnedDynamicResolution::audience)
     }
 
     /// Attach the membership answers pinned to this call. Canonical order only: a
@@ -618,14 +613,13 @@ mod tests {
             argument: "recipient".into(),
         };
         let base = call("send", json!({ "recipient": "room" }));
-        let resolved = base
-            .clone()
-            .with_dynamic_resolutions(vec![PinnedDynamicResolution::from_answer(
+        let resolved = base.clone().with_dynamic_resolutions(vec![
+            PinnedDynamicResolution::from_answer(
                 binding,
-                Some(crate::label::Audience::restricted([crate::label::ReaderId::new(
-                    "alice",
-                )])),
-            )]);
+                crate::label::Audience::restricted([crate::label::ReaderId::new("alice")]),
+            )
+            .expect("a literal reader set pins"),
+        ]);
         assert_eq!(base.digest(), resolved.digest());
     }
 
@@ -637,10 +631,9 @@ mod tests {
                     resolver: crate::names::DynamicResolverName::new(resolver),
                     argument: "recipient".into(),
                 },
-                Some(crate::label::Audience::restricted([crate::label::ReaderId::new(
-                    reader,
-                )])),
+                crate::label::Audience::restricted([crate::label::ReaderId::new(reader)]),
             )
+            .expect("a literal reader set pins")
         };
         let base = call("send", json!({ "recipient": "room" }));
         let one = base
@@ -662,10 +655,9 @@ mod tests {
                     resolver: crate::names::DynamicResolverName::new(resolver),
                     argument: "recipient".into(),
                 },
-                Some(crate::label::Audience::restricted([crate::label::ReaderId::new(
-                    "alice",
-                )])),
+                crate::label::Audience::restricted([crate::label::ReaderId::new("alice")]),
             )
+            .expect("a literal reader set pins")
         };
         let canonical = call("send", json!({ "recipient": "room" }))
             .with_dynamic_resolutions(vec![answer("acl"), answer("directory")]);
@@ -675,14 +667,20 @@ mod tests {
             canonical
         );
 
-        for spelling in [
-            vec![answer("directory"), answer("acl")],
-            vec![answer("acl"), answer("acl"), answer("directory")],
-        ] {
-            let mut tampered = wire.clone();
-            tampered["dynamic_resolutions"] = serde_json::to_value(&spelling).expect("answers serialize");
-            assert!(serde_json::from_value::<ResolvedCall>(tampered).is_err());
-        }
+        let mut tampered = wire.clone();
+        tampered["dynamic_resolutions"] =
+            serde_json::to_value(vec![answer("directory"), answer("acl")]).expect("answers serialize");
+        assert!(serde_json::from_value::<ResolvedCall>(tampered).is_err());
+
+        let duplicated = vec![answer("acl"), answer("acl"), answer("directory")];
+        let mut carried = wire;
+        carried["dynamic_resolutions"] = serde_json::to_value(&duplicated).expect("answers serialize");
+        assert_eq!(
+            serde_json::from_value::<ResolvedCall>(carried)
+                .expect("a canonically ordered duplicate is carried, not merged")
+                .dynamic_resolutions(),
+            duplicated.as_slice()
+        );
     }
 
     #[test]

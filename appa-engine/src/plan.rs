@@ -45,9 +45,8 @@
 //! adding the step leaves `is_curable` unchanged — acceptance was already always available for a
 //! narrowing, so the sanitizer adds alternatives, never remedies for a requirement gap.
 //!
-//! Blocked **child returns** are planned separately with their own closed vocabulary
-//! ([`crate::branch::ReturnPlan`]: accept, or sanitize with an optional accepted residual) — a
-//! return crossing
+//! Blocked **child returns** are planned by [`return_stage`] with their own closed vocabulary —
+//! acceptance of the current residual, or one applicable helpful sanitizer hop. A return crossing
 //! has no dispatch, no gaps, and no authorities, so none of this module's tool-block machinery
 //! applies to it. The tool-output plans here mirror its shape deliberately.
 
@@ -310,12 +309,12 @@ fn enumerate_plans(
         let settlements = narrowing_remedies(registry, current, contract, call, block.narrowing.as_ref(), expansions);
         for required in assignments {
             for settlement in &settlements {
-                let mut steps: Vec<RemedyStep> = Vec::new();
-                if let Some(narrowing) = &settlement.accept {
-                    steps.push(RemedyStep::Accept(narrowing.clone()));
-                }
+                let mut steps: Vec<RemedyStep> = match settlement {
+                    NarrowingSettlement::Accept(narrowing) => vec![RemedyStep::Accept(narrowing.clone())],
+                    NarrowingSettlement::Nothing | NarrowingSettlement::Sanitize(_) => Vec::new(),
+                };
                 steps.extend(required.iter().map(|r| RemedyStep::Authorize(r.authority.clone())));
-                if let Some(sanitizer) = &settlement.sanitize {
+                if let NarrowingSettlement::Sanitize(sanitizer) = settlement {
                     steps.push(RemedyStep::Sanitize(sanitizer.clone()));
                 }
                 candidates.push(PlanCandidate {
@@ -531,7 +530,7 @@ fn gap_power_cmp(gap: &Gap, a: &GapPower<'_>, b: &GapPower<'_>) -> Option<Orderi
         Gap::Attention(_) => Some(Ordering::Equal),
         // These gaps have no covering authority by construction (`enumerate_assignments` returns
         // `None`), so no assignment reaching this comparison carries one.
-        Gap::Prior(_) | Gap::Cap { .. } | Gap::UnresolvedDynamicRecipient { .. } => Some(Ordering::Equal),
+        Gap::Prior(_) | Gap::Cap { .. } => Some(Ordering::Equal),
     }
 }
 
@@ -598,20 +597,19 @@ fn enumerate_assignments(
     }
 }
 
-/// One way a block's narrowing settles: by acceptance alone, through an output sanitizer with
-/// acceptance of exactly the residual its relabel cannot shed, or by a full-clear sanitizer owing
-/// no acceptance — the shape `BRN-12` already fixes for child returns, applied at tool output.
-/// The settlement carries *what* is settled; [`enumerate_plans`] composes it into the
-/// canonical step order.
-pub(crate) struct NarrowingSettlement {
-    pub(crate) accept: Option<Narrowing>,
-    pub(crate) sanitize: Option<SanitizerName>,
+/// One way a block's narrowing settles: the agent accepts it, or a bound output
+/// sanitizer withholds the raw result and the confined stage settles whatever residual its relabel
+/// cannot shed. Never both — a sanitizer route accepts no guessed residual — and a block with no
+/// narrowing settles nothing. The settlement carries *what* is settled; [`enumerate_plans`]
+/// composes it into the canonical step order.
+pub(crate) enum NarrowingSettlement {
+    Nothing,
+    Accept(Narrowing),
+    Sanitize(SanitizerName),
 }
 
 /// The ways this block's narrowing can be settled: acceptance always, then one
-/// settlement per applicable output sanitizer, in registry name order. The transition validator
-/// holds a persisted remedy release to this same list, so a log cannot record a settlement the
-/// planner would not have offered. A block with no narrowing
+/// settlement per applicable output sanitizer, in registry name order. A block with no narrowing
 /// yields one empty settlement, so the caller's cross product still produces the plain authority
 /// plans.
 pub(crate) fn narrowing_remedies(
@@ -623,15 +621,9 @@ pub(crate) fn narrowing_remedies(
     expansions: &Expansions,
 ) -> Vec<NarrowingSettlement> {
     let Some(narrowing) = narrowing else {
-        return vec![NarrowingSettlement {
-            accept: None,
-            sanitize: None,
-        }];
+        return vec![NarrowingSettlement::Nothing];
     };
-    let mut settlements = vec![NarrowingSettlement {
-        accept: Some(narrowing.clone()),
-        sanitize: None,
-    }];
+    let mut settlements = vec![NarrowingSettlement::Accept(narrowing.clone())];
     if !registry.profile().confines_result(&contract.name) {
         return settlements;
     }
@@ -640,10 +632,7 @@ pub(crate) fn narrowing_remedies(
         if sanitized_commit(current, &output, sanitizer, expansions).is_none() {
             continue;
         }
-        settlements.push(NarrowingSettlement {
-            accept: None,
-            sanitize: Some(sanitizer.name.clone()),
-        });
+        settlements.push(NarrowingSettlement::Sanitize(sanitizer.name.clone()));
     }
     settlements
 }
@@ -737,28 +726,6 @@ fn sanitized_commit(
             .established_part(),
     );
     (sanitized != raw).then_some(sanitized)
-}
-
-/// The residual a bound sanitizer's relabel is *predicted* to leave, before its derivation exists.
-pub(crate) fn predicted_residual(
-    registry: &Registry,
-    contract: &ToolContract,
-    call: &ResolvedCall,
-    sanitizer: &SanitizerName,
-    current: &PartialLabel,
-    expansions: &Expansions,
-) -> Option<Narrowing> {
-    let sanitizer = registry.sanitizer(sanitizer)?;
-    let sanitized = sanitized_commit(
-        current,
-        &contract.output_label_for_call(call, expansions),
-        sanitizer,
-        expansions,
-    )?;
-    (&sanitized != current.bound()).then(|| Narrowing {
-        from: current.bound().clone(),
-        to: sanitized,
-    })
 }
 
 /// Is a further output sanitizer helpful on a confined candidate?
@@ -956,11 +923,11 @@ pub(crate) fn bound_contribution(
     Some(derived.established_part())
 }
 
-/// The rulings a block's remedy plan needs gathered: for each authority the block routes to, the gaps
-/// its ruling must cover. The mandate routing (which authority covers which gap) stays here in the
-/// engine; the runtime only gathers a ruling from each named authority for its gaps and hands them to
-/// `execute_remedy_plan`. A gap with no covering authority is omitted — the plan is then not executable and
-/// `execute_remedy_plan` reports the gap uncovered.
+/// The rulings a block's remedy plan needs gathered: for each authority the block routes to, the
+/// gaps its ruling must cover. The mandate routing (which authority covers which gap) stays here
+/// in the engine; the runtime only gathers a ruling from each named authority for its gaps and
+/// executes the offer that named them. A gap no registered authority covers builds no assignment
+/// at all, so the block offers no plan over it rather than offering one that cannot execute.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequiredRuling {
     pub authority: AuthorityName,
@@ -982,7 +949,7 @@ pub(crate) fn covers_gap(authority: &Authority, gap: &Gap, tags: &[TagName], exp
         Gap::NoPrior(kind) => authority.scope.covers(tags) && mandate.waivers.contains(kind),
         // Attention routes by its own currency — the attended mark — never by scope.
         Gap::Attention(mark) => mandate.attends.contains(mark),
-        Gap::Prior(_) | Gap::Cap { .. } | Gap::UnresolvedDynamicRecipient { .. } => false,
+        Gap::Prior(_) | Gap::Cap { .. } => false,
     }
 }
 
@@ -1489,8 +1456,9 @@ mod tests {
             membership: None,
         });
         let log = vec![opened(known(TRUSTED, Audience::Public))];
-        let call = call("lookup", json!({ "room": "internal" }))
-            .with_dynamic_resolutions(vec![PinnedDynamicResolution::from_answer(binding, Some(internal()))]);
+        let call = call("lookup", json!({ "room": "internal" })).with_dynamic_resolutions(vec![
+            PinnedDynamicResolution::from_answer(binding, internal()).expect("a literal reader set pins"),
+        ]);
 
         let planned = plan_of(&registry, &log, &call);
         assert_eq!(
@@ -1498,24 +1466,10 @@ mod tests {
             ["declassify".to_string(), "finance-only".to_string()]
         );
         assert!(!any_prebundled_residual(&planned));
-        assert_eq!(
-            predicted_residual(
-                &registry,
-                registry.tool(&ToolName::new("lookup")).unwrap(),
-                &call,
-                &SanitizerName::new("finance-only"),
-                &PartialLabel::established(established(TRUSTED, Audience::Public)),
-                &Expansions::default()
-            ),
-            Some(Narrowing {
-                from: established(TRUSTED, Audience::Public),
-                to: established(TRUSTED, finance),
-            })
-        );
     }
 
     #[test]
-    fn an_unresolved_dynamic_recipient_has_no_remedy_and_an_empty_answer_is_valid() {
+    fn an_empty_dynamic_answer_is_valid_evidence() {
         let binding = DynamicAudienceBinding {
             resolver: crate::names::DynamicResolverName::new("channel-members"),
             argument: "channel".into(),
@@ -1532,20 +1486,8 @@ mod tests {
             membership: None,
         });
         let log = vec![opened(known(TRUSTED, Audience::Public))];
-        let unresolved = call("send", json!({ "channel": "support" }))
-            .with_dynamic_resolutions(vec![PinnedDynamicResolution::from_answer(binding.clone(), None)]);
-        let planned = plan_of(&registry, &log, &unresolved);
-        assert_eq!(
-            planned.raw.requirement_gaps,
-            [Gap::UnresolvedDynamicRecipient {
-                resolver: binding.resolver.clone(),
-                argument: binding.argument.clone(),
-            }]
-        );
-        assert!(planned.plans.is_empty());
-
         let empty = call("send", json!({ "channel": "empty" })).with_dynamic_resolutions(vec![
-            PinnedDynamicResolution::from_answer(binding, Some(Audience::restricted([]))),
+            PinnedDynamicResolution::from_answer(binding, Audience::restricted([])).expect("an empty answer pins"),
         ]);
         let projection = Projection::build(&log, log.len() as u64);
         assert_eq!(
@@ -2304,7 +2246,7 @@ mod tests {
                 .expect("distinct generated effect kinds"),
             dynamic_resolutions: vec![],
             memberships: Vec::new(),
-            subject: None,
+            subject: crate::basis::fixture_subject(&traj()),
             resolutions: vec![],
         }
     }
@@ -2627,22 +2569,6 @@ mod tests {
             assigned(&plan_of(&registry, &log, &denied_call)),
             vec![vec!["officer-b"]]
         );
-    }
-
-    #[test]
-    fn a_stale_offer_naming_a_denied_authority_is_refused_at_execution() {
-        let registry = two_officer_registry();
-        let wire = call("wire", json!({"amount": 5}));
-        let log = vec![opened(known(SUSPICIOUS, Audience::Public))];
-        let stale = exec(&plan_of(&registry, &log, &wire).plans[0]).clone();
-
-        let log = vec![opened(known(SUSPICIOUS, Audience::Public)), denial(&wire, "officer-a")];
-        let projection = Projection::build(&log, log.len() as u64);
-        let trajectory = traj();
-        let views = projection.view(&trajectory);
-        let refused =
-            crate::execute::execute_remedy_plan(&registry, &views, &stale, &wire, &[], &Expansions::default());
-        assert_eq!(refused, Err(crate::execute::PlanError::UnknownPlan(0)));
     }
 
     #[test]
@@ -3295,7 +3221,7 @@ mod tests {
                     .is_some_and(|ceiling| within(recipients, &ceiling.resolve(&Expansions::default()))),
                 Gap::NoPrior(kind) => authority.mandate.waivers.contains(kind),
                 Gap::Attention(mark) => authority.mandate.attends.contains(mark),
-                Gap::Prior(_) | Gap::Cap { .. } | Gap::UnresolvedDynamicRecipient { .. } => false,
+                Gap::Prior(_) | Gap::Cap { .. } => false,
             })
         }
 
@@ -3811,7 +3737,7 @@ mod tests {
                         .is_some_and(|c| Dim::Known(c.resolve(&Expansions::default())).covers(recipients) == Adequacy::Holds),
                     Gap::NoPrior(kind) => scoped && authority.mandate.waivers.contains(kind),
                     Gap::Attention(mark) => authority.mandate.attends.contains(mark),
-                    Gap::Prior(_) | Gap::Cap { .. } | Gap::UnresolvedDynamicRecipient { .. } => false,
+                    Gap::Prior(_) | Gap::Cap { .. } => false,
                 }
             };
             let per_gap: Vec<Vec<&Authority>> = raw.requirement_gaps.iter()
@@ -3873,11 +3799,7 @@ mod tests {
                         let sb: std::collections::BTreeSet<_> = b.waivers.iter().collect();
                         inclusion(sa.is_subset(&sb), sb.is_subset(&sa))
                     }
-                    Gap::Attention(_)
-                    | Gap::Prior(_)
-                    | Gap::Cap { .. }
-                    | Gap::UnresolvedDynamicRecipient { .. }
-                    => Some(O::Equal),
+                    Gap::Attention(_) | Gap::Prior(_) | Gap::Cap { .. } => Some(O::Equal),
                 }
             };
             let precedes = |a: &Vec<(AuthorityName, Vec<Gap>)>, b: &Vec<(AuthorityName, Vec<Gap>)>| -> bool {

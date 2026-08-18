@@ -27,14 +27,13 @@
 //! set. A missing or malformed answer stays runtime-side and fails closed
 //! — no no-answer variant ever enters an engine operation.
 //!
-//! Offers are engine-derived remedies. The trajectory that may execute one
-//! comes from the harness channel carrying the control act, never from the id;
-//! the quoted id is resolved against the offers that trajectory's
-//! own log opened. The offered payload lives only in this process. Execution never
-//! trusts the cache: the plan is re-derived from the live views and matched
-//! by value, so a stale offer declines instead of executing. A
-//! restart forgets pending offers — the model hears "no longer stands" and
-//! re-proposes; durable engine-owned offers are `T21`.
+//! Offers are engine-derived remedies and engine-owned facts: the runtime
+//! holds no offer state of its own, so a restart loses none of them. The
+//! trajectory that may execute one comes from the harness channel carrying
+//! the control act, never from the id; the quoted id is resolved
+//! against the offers that trajectory's own log opened. Execution re-derives
+//! the plan from the live views and matches it by value, so an offer whose
+//! basis has moved declines instead of executing.
 
 use std::collections::BTreeMap;
 #[cfg(test)]
@@ -42,9 +41,7 @@ use std::sync::Mutex;
 
 use appa_engine::candidate::DerivedVia;
 use appa_engine::check::UnestablishedFact;
-use appa_engine::contract::{
-    AudienceRequirement, DynamicAudienceBinding, PinnedDynamicResolution, PinnedMembership, RecipientSpec, ToolContract,
-};
+use appa_engine::contract::{PinnedDynamicResolution, PinnedMembership};
 pub(crate) use appa_engine::engine::ForkStatus;
 use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
@@ -815,8 +812,6 @@ impl RuntimeEngine {
             Fact::Boundary { kind, .. } => match kind {
                 BoundaryKind::Merge { .. } => AuditEvent::Merged,
                 BoundaryKind::VoidReturn => AuditEvent::VoidReturn,
-                // A turn's end is the harness's punctuation, not a decision.
-                BoundaryKind::TurnEnd => return Some(None),
             },
             Fact::TrajectoryOpened { .. } | Fact::ProposalBatchDecided { .. } => return Some(None),
             Fact::OfferOpened { .. }
@@ -1395,8 +1390,8 @@ impl RuntimeEngine {
                 call.tool
             )));
         };
-        let mut bindings = dynamic_bindings(contract).peekable();
-        if bindings.peek().is_none() {
+        let bindings = appa_engine::check::dynamic_reads(contract);
+        if bindings.is_empty() {
             return Ok(Vec::new());
         }
         let Ok(resolved) = self.engine.resolve_call(tool, call.arguments.get().as_bytes()) else {
@@ -1404,9 +1399,12 @@ impl RuntimeEngine {
         };
         let mut pins = Vec::new();
         let mut requests = Vec::new();
-        for binding in bindings {
+        for binding in &bindings {
             let Some(argument_value) = resolved.arguments().get(&binding.argument).and_then(|v| v.as_str()) else {
-                continue;
+                return Err(Resolution::Feedback(unresolved_recipient(
+                    &call.tool,
+                    &binding.argument,
+                )));
             };
             let answer = evidence.iter().find_map(|entry| match entry {
                 ExternalEvidence::Dynamic {
@@ -1423,9 +1421,23 @@ impl RuntimeEngine {
                     argument: binding.argument.clone(),
                     value: argument_value.to_string(),
                 }),
-                Some(readers) => {
-                    let audience = readers.map(|readers| Audience::restricted(readers.into_iter().map(ReaderId::new)));
-                    pins.push(PinnedDynamicResolution::from_answer(binding.clone(), audience));
+                Some(None) => {
+                    return Err(Resolution::Feedback(unresolved_recipient(
+                        &call.tool,
+                        &binding.argument,
+                    )));
+                }
+                Some(Some(readers)) => {
+                    let audience = Audience::restricted(readers.into_iter().map(ReaderId::new));
+                    match PinnedDynamicResolution::from_answer(binding.clone(), audience) {
+                        Some(pin) => pins.push(pin),
+                        None => {
+                            return Err(Resolution::Feedback(unresolved_recipient(
+                                &call.tool,
+                                &binding.argument,
+                            )));
+                        }
+                    }
                 }
             }
         }
@@ -1563,6 +1575,12 @@ impl RuntimeEngine {
         }
         Ok(pins)
     }
+}
+
+fn unresolved_recipient(tool: &str, argument: &str) -> String {
+    format!(
+        "[appa] {tool}: the recipients of {argument} could not be resolved; the call was not checked — propose it again later"
+    )
 }
 
 fn unresolved_group(tool: &str, group: &GroupName) -> String {
@@ -2037,25 +2055,6 @@ fn label_wire(
     })
 }
 
-/// The dynamic recipient bindings a contract declares, at
-/// both declaration sites: `requires.audience.includes` and
-/// `delta.audience`.
-pub(crate) fn dynamic_bindings(contract: &ToolContract) -> impl Iterator<Item = &DynamicAudienceBinding> {
-    let from_requires = contract.requires.label.audience.iter().filter_map(|req| match req {
-        AudienceRequirement::Includes(RecipientSpec::Dynamic(binding)) => Some(binding),
-        _ => None,
-    });
-    let from_delta = contract
-        .delta
-        .as_ref()
-        .and_then(|delta| delta.audience.as_ref())
-        .and_then(|audience| match audience {
-            appa_engine::contract::AudienceDelta::Dynamic(binding) => Some(binding),
-            _ => None,
-        });
-    from_requires.chain(from_delta)
-}
-
 fn gap_text(gap: &appa_engine::check::Gap) -> String {
     use appa_engine::check::Gap;
     match gap {
@@ -2068,12 +2067,6 @@ fn gap_text(gap: &appa_engine::check::Gap) -> String {
                 format!("the readers do not include {} required recipient(s)", readers.len())
             }
         },
-        Gap::UnresolvedDynamicRecipient { resolver, argument } => {
-            format!(
-                "recipient argument {argument} did not resolve via {}",
-                resolver.as_str()
-            )
-        }
         // The count only, as for `includes`: a cap may resolve a directory group.
         Gap::Cap { cap } => format!("the committed readers exceed the cap of {}", audience_count(cap)),
         Gap::Prior(effect) => format!("requires a prior {} effect", effect.as_str()),
@@ -2290,10 +2283,89 @@ impl TestSeam {
 
 #[cfg(test)]
 mod tests {
-    use super::{OfferId, audience_wire, remedy_instruction, remedy_lines, terminal_safe};
+    use super::{
+        ExternalEvidence, ExternalRequest, OfferId, ProposedCall, Resolution, RuntimeEngine, audience_wire,
+        remedy_instruction, remedy_lines, terminal_safe,
+    };
     use appa_engine::label::{Audience, ReaderId};
     use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RemedyStep};
     use std::collections::BTreeSet;
+
+    fn dynamic_engine() -> RuntimeEngine {
+        let policy = appa_policy::Config::from_toml_str(
+            r#"
+                version = 1
+                [[dynamic_resolver]]
+                name = "directory"
+                [[tool]]
+                name = "send"
+                parameters = { type = "object", properties = { to = { type = "string" } }, required = ["to"] }
+                delta = { audience = { resolver = "directory", argument = "to" } }
+            "#,
+        )
+        .expect("the fixture policy compiles");
+        RuntimeEngine::new(policy.engine().clone())
+    }
+
+    fn send(arguments: serde_json::Value) -> ProposedCall {
+        ProposedCall {
+            tool: "send".to_string(),
+            arguments: serde_json::value::RawValue::from_string(arguments.to_string())
+                .expect("the fixture arguments serialize"),
+        }
+    }
+
+    fn answered(readers: Option<Vec<String>>) -> ExternalEvidence {
+        ExternalEvidence::Dynamic {
+            resolver: "directory".to_string(),
+            argument: "to".to_string(),
+            readers,
+        }
+    }
+
+    #[test]
+    fn only_a_successful_dynamic_answer_becomes_a_pin() {
+        let e = dynamic_engine();
+        let call = send(serde_json::json!({ "to": "hr" }));
+
+        match e.resolve_dynamics(&call, &[]) {
+            Err(Resolution::Consult(requests)) => assert_eq!(
+                requests,
+                vec![ExternalRequest::Dynamic {
+                    resolver: "directory".to_string(),
+                    tool: "send".to_string(),
+                    argument: "to".to_string(),
+                    value: "hr".to_string(),
+                }]
+            ),
+            _ => panic!("an unanswered binding consults its resolver"),
+        }
+
+        let unchecked = |evidence: &[ExternalEvidence], call: &ProposedCall| matches!(e.resolve_dynamics(call, evidence), Err(Resolution::Feedback(text)) if text.contains("send"));
+        assert!(unchecked(&[answered(None)], &call), "no answer checks nothing");
+        assert!(
+            unchecked(&[answered(Some(vec!["@finance".to_string()]))], &call),
+            "an answer naming no literal reader set is not evidence either"
+        );
+        assert!(
+            e.resolve_dynamics(&send(serde_json::json!({ "to": 7 })), &[])
+                .is_ok_and(|pins| pins.is_empty())
+        );
+
+        let pinned = |evidence: &[ExternalEvidence]| match e.resolve_dynamics(&call, evidence) {
+            Ok(pins) => pins.iter().map(|pin| pin.audience().clone()).collect::<Vec<_>>(),
+            Err(_) => panic!("a successful answer pins"),
+        };
+        assert_eq!(
+            pinned(&[answered(Some(vec!["hr".to_string()]))]),
+            vec![Audience::restricted([ReaderId::new("hr")])]
+        );
+        assert_eq!(
+            pinned(&[answered(Some(Vec::new()))]),
+            vec![Audience::restricted([])],
+            "an empty reader set is a successful answer, not the absence of one"
+        );
+    }
 
     #[test]
     fn remedies_pair_each_plan_with_its_own_offer() {
@@ -2424,41 +2496,5 @@ mod tests {
             "the unresolved source crosses by its own id: {rendered}",
         );
         assert_eq!(rendered["unresolved_audience"], serde_json::json!([7]));
-    }
-
-    #[test]
-    fn only_the_api_module_calls_the_boundary() {
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut offenders = Vec::new();
-        check_dir(&src, &src, &mut offenders);
-        assert!(
-            offenders.is_empty(),
-            "engine-boundary references outside src/api and src/lib.rs: {offenders:?}",
-        );
-    }
-
-    fn check_dir(root: &std::path::Path, dir: &std::path::Path, offenders: &mut Vec<String>) {
-        for entry in std::fs::read_dir(dir).expect("crate source directory is readable") {
-            let path = entry.expect("crate source entry is readable").path();
-            if path.is_dir() {
-                check_dir(root, &path, offenders);
-                continue;
-            }
-            if path.extension().is_none_or(|e| e != "rs") {
-                continue;
-            }
-            let relative = path
-                .strip_prefix(root)
-                .expect("entry sits under the crate source root")
-                .to_string_lossy()
-                .into_owned();
-            if relative == "engine.rs" || relative == "lib.rs" || relative.starts_with("api/") {
-                continue;
-            }
-            let text = std::fs::read_to_string(&path).expect("crate source file is readable");
-            if text.contains("crate::engine") || text.contains("super::engine") || text.contains("appa_engine") {
-                offenders.push(relative);
-            }
-        }
     }
 }

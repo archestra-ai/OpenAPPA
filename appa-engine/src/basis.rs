@@ -100,6 +100,18 @@ pub enum SubjectKey {
     Return(ChildReturnId),
 }
 
+/// The subject a hand-built opening stands on, for a fixture whose point is not which decision
+/// released it. Test-only: every opening a decision produces names the proposal position it was
+/// released for.
+#[cfg(test)]
+pub(crate) fn fixture_subject(trajectory: &TrajectoryId) -> SubjectKey {
+    SubjectKey::Call {
+        trajectory: trajectory.clone(),
+        batch: ProposalBatchId::new("fixture"),
+        position: 0,
+    }
+}
+
 /// Which engine act a declaration belongs to, named by the identity that act already has. No new
 /// identity concept: a decision is recognised by the thing it decides.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

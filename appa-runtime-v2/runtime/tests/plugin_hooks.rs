@@ -16,7 +16,6 @@ fn shipped_command() -> String {
         .expect("the PreToolUse hook carries a command")
         .to_string();
     for event in [
-        "SessionStart",
         "UserPromptSubmit",
         "PostToolUse",
         "SubagentStart",
@@ -30,14 +29,31 @@ fn shipped_command() -> String {
             "the {event} hook command drifted from the PreToolUse one",
         );
     }
+    assert_eq!(
+        hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"].as_str(),
+        Some(
+            command
+                .replace(
+                    "; curl",
+                    "; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/ensure-runtime.sh\" </dev/null && curl",
+                )
+                .as_str()
+        ),
+        "the SessionStart hook is no longer the shared command plus its runtime start",
+    );
     command
 }
 
 fn run_hook(command: &str, url: &str) -> (i32, String) {
+    run_gated(command, url, true)
+}
+
+fn run_gated(command: &str, url: &str, gated: bool) -> (i32, String) {
     let mut child = Command::new("sh")
         .arg("-c")
         .arg(command)
         .env("APPA_RUNTIME_URL", url)
+        .env("APPA_GATE", if gated { "1" } else { "0" })
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -54,6 +70,18 @@ fn run_hook(command: &str, url: &str) -> (i32, String) {
         output.status.code().expect("the hook command exits with a code"),
         String::from_utf8_lossy(&output.stdout).into_owned(),
     )
+}
+
+async fn refused_url() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("an ephemeral loopback port binds");
+    let url = format!(
+        "http://{}",
+        listener.local_addr().expect("the bound address is readable")
+    );
+    drop(listener);
+    url
 }
 
 async fn stub(router: Router) -> String {
@@ -93,12 +121,19 @@ async fn a_server_error_exits_2_instead_of_failing_open() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_unreachable_runtime_exits_2() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+async fn an_ungated_session_posts_nothing_and_never_blocks() {
+    let url = refused_url().await;
+    let command = shipped_command();
+    let (code, stdout) = tokio::task::spawn_blocking(move || run_gated(&command, &url, false))
         .await
-        .expect("an ephemeral loopback port binds");
-    let url = format!("http://{}", listener.local_addr().expect("addr"));
-    drop(listener);
+        .expect("the blocking task joins");
+    assert_eq!(code, 0, "an ungated session must not be blocked");
+    assert_eq!(stdout, "", "an ungated session posts nothing");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unreachable_runtime_exits_2() {
+    let url = refused_url().await;
     let command = shipped_command();
     let (code, _) = tokio::task::spawn_blocking(move || run_hook(&command, &url))
         .await

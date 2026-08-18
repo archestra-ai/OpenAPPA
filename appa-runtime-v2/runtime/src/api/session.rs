@@ -893,7 +893,7 @@ mod tests {
         (0..punctuation)
             .map(|_| Fact::Boundary {
                 trajectory: appa_engine::value::TrajectoryId::new("cc:root"),
-                kind: BoundaryKind::TurnEnd,
+                kind: BoundaryKind::VoidReturn,
             })
             .collect()
     }
@@ -1047,7 +1047,8 @@ mod tests {
             session.on_tool_call(call(), false).await.expect("the replay commits"),
             ToolCallDecision::Allow { spawn: None },
         );
-        assert_eq!(boundaries(&runtime), 5);
+        assert_eq!(boundaries(&runtime), 2);
+        assert_eq!(runtime.log_basis(&root()), 3);
 
         let entropies: Vec<_> = runtime
             .engine_seen()
@@ -1085,7 +1086,8 @@ mod tests {
             REPLAY_LIMIT as usize,
             "every attempt decided"
         );
-        assert_eq!(boundaries(&runtime), 3 * REPLAY_LIMIT as usize);
+        assert_eq!(boundaries(&runtime), 0);
+        assert_eq!(runtime.log_basis(&root()), 1 + REPLAY_LIMIT as u64);
     }
 
     fn control_call(name: &str) -> ProposedCall {

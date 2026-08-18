@@ -156,16 +156,13 @@ impl ForkSnapshot {
     }
 }
 
-/// A boundary is punctuation, not a decision: it marks the log, never gates it (pending offers
-/// die with their turn, and execution is always re-validated against the live state). The engine
-/// appends one at the end of each assistant turn and at merge. A fork's branch structure lives on
-/// its own two records (`ForkPrepared`, `ForkOpened`); `Merge` carries the consumed child return.
+/// A boundary is punctuation, not a decision: it marks the log, never gates it — an offer stands
+/// on its subject's basis rather than on any boundary, and executing one is re-validated against
+/// the live state. A fork's branch structure lives on its own two records
+/// (`ForkPrepared`, `ForkOpened`); `Merge` carries the consumed child return.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BoundaryKind {
-    TurnEnd,
-    Merge {
-        child_return: ChildReturnId,
-    },
+    Merge { child_return: ChildReturnId },
     VoidReturn,
 }
 
@@ -227,8 +224,7 @@ pub enum Fact {
         memberships: Vec<crate::contract::PinnedMembership>,
         #[serde(default)]
         resolutions: Vec<crate::groups::GroupResolution>,
-        #[serde(default)]
-        subject: Option<crate::basis::SubjectKey>,
+        subject: crate::basis::SubjectKey,
     },
     DispatchSucceeded {
         trajectory: TrajectoryId,

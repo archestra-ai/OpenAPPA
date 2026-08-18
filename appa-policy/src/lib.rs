@@ -154,7 +154,7 @@ impl Config {
             tools.push(t.convert(&trust_chain)?);
         }
         for tool in &tools {
-            for binding in dynamic_bindings(tool) {
+            for binding in appa_engine::check::dynamic_reads(tool) {
                 if !dynamic_resolver_names.contains(&binding.resolver) {
                     return Err(ConfigError::UnregisteredDynamicResolver {
                         tool: tool.name.as_str().into(),
@@ -812,15 +812,13 @@ impl RawCast {
         let scope = Scope {
             tags: self.scope.tags.into_iter().map(TagName::new).collect(),
         };
-        match (self.constant, self.resolver) {
-            (Some(constant), None) => Ok(Cast {
+        match self.constant {
+            Some(constant) => Ok(Cast {
                 name: CastName::new(self.name),
                 resolution: CastResolution::Constant(constant.convert(chain, &ctx)?),
                 scope,
             }),
-            (Some(_), Some(_)) => Err(bad_impl("cast", &self.name, "declares both constant and resolver")),
-            (None, None) => Err(bad_impl("cast", &self.name, "declares neither constant nor resolver")),
-            (None, Some(_)) => unreachable!("resolver casts are refused above"),
+            None => Err(bad_impl("cast", &self.name, "declares no constant")),
         }
     }
 }
@@ -849,19 +847,6 @@ fn bad_impl(kind: &'static str, name: &str, reason: &str) -> ConfigError {
         name: name.to_string(),
         reason: reason.to_string(),
     }
-}
-
-fn dynamic_bindings(tool: &ToolContract) -> Vec<&DynamicAudienceBinding> {
-    let mut bindings = Vec::new();
-    if let Some(AudienceDelta::Dynamic(binding)) = tool.delta.as_ref().and_then(|d| d.audience.as_ref()) {
-        bindings.push(binding);
-    }
-    for requirement in &tool.requires.label.audience {
-        if let AudienceRequirement::Includes(RecipientSpec::Dynamic(binding)) = requirement {
-            bindings.push(binding);
-        }
-    }
-    bindings
 }
 
 fn parse_trust(name: &str, chain: &TrustChain, context: &str) -> Result<Trust, ConfigError> {

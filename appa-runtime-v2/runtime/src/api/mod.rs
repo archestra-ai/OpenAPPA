@@ -910,8 +910,8 @@ fn validate_deployment(policy: &appa_policy::Config, config: &Config) -> Result<
         }
     }
     let dynamic_binding = rc.tools.iter().find_map(|tool| {
-        crate::engine::dynamic_bindings(tool)
-            .next()
+        appa_engine::check::dynamic_reads(tool)
+            .first()
             .map(|binding| binding.resolver.as_str().to_string())
     });
     if let Some(resolver) = dynamic_binding

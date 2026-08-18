@@ -52,29 +52,34 @@ impl From<Dim<Audience>> for AudienceDelta {
     }
 }
 
+/// One successful dynamic answer pinned to a proposed call: the literal reader set the
+/// deployment's resolver returned for the argument this binding names. Only a successful answer
+/// exists here — no answer is the absence of a pin, which the boundary refuses before any fact
+/// ([`crate::check::validate_dynamic_resolutions`]), never a pin that carries none.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PinnedDynamicResolution {
     binding: DynamicAudienceBinding,
-    audience: Option<Audience>,
+    audience: Audience,
 }
 
 impl PinnedDynamicResolution {
-    /// Pin one resolver answer. A malformed dynamic answer contributes no audience:
-    /// `public` is not a literal reader set, and an `@group` must go through membership resolution.
-    pub fn from_answer(binding: DynamicAudienceBinding, audience: Option<Audience>) -> Self {
-        let audience = audience.filter(|answer| match answer {
-            Audience::Public => false,
-            Audience::Restricted(readers) => readers.iter().all(ReaderId::is_literal),
-        });
-        PinnedDynamicResolution { binding, audience }
+    /// Pin one resolver answer, or refuse it as malformed: `public` is not a literal
+    /// reader set, and an `@group` must go through membership resolution. An empty reader set is a
+    /// valid answer.
+    pub fn from_answer(binding: DynamicAudienceBinding, audience: Audience) -> Option<Self> {
+        match &audience {
+            Audience::Public => None,
+            Audience::Restricted(readers) if !readers.iter().all(ReaderId::is_literal) => None,
+            Audience::Restricted(_) => Some(PinnedDynamicResolution { binding, audience }),
+        }
     }
 
     pub fn binding(&self) -> &DynamicAudienceBinding {
         &self.binding
     }
 
-    pub fn audience(&self) -> Option<&Audience> {
-        self.audience.as_ref()
+    pub fn audience(&self) -> &Audience {
+        &self.audience
     }
 }
 
@@ -86,11 +91,13 @@ impl<'de> Deserialize<'de> for PinnedDynamicResolution {
         #[derive(Deserialize)]
         struct WireResolution {
             binding: DynamicAudienceBinding,
-            audience: Option<Audience>,
+            audience: Audience,
         }
 
         let wire = WireResolution::deserialize(deserializer)?;
-        Ok(PinnedDynamicResolution::from_answer(wire.binding, wire.audience))
+        PinnedDynamicResolution::from_answer(wire.binding, wire.audience).ok_or_else(|| {
+            serde::de::Error::custom("a dynamic answer is a literal reader set, never public or a group")
+        })
     }
 }
 
@@ -302,16 +309,17 @@ impl ToolContract {
         )
     }
 
-    /// The output label with a proposed call's dynamic audience answer pinned into it. A missing
-    /// or failed answer leaves that dimension Unknown.
+    /// The output label with a proposed call's dynamic audience answer pinned into it.
+    /// Only a successful answer enters the engine, and every binding a contract spells carries one
+    /// by the time a call is checked — [`crate::check::validate_dynamic_resolutions`] refuses the
+    /// proposal otherwise, before any fact, and replay holds a persisted call to the same rule.
     pub(crate) fn output_label_for_call(&self, call: &crate::value::ResolvedCall, expansions: &Expansions) -> Label {
         let mut label = self.output_label(expansions);
         if let Some(AudienceDelta::Dynamic(binding)) = self.delta.as_ref().and_then(|delta| delta.audience.as_ref()) {
-            label.audience = call
+            let answer = call
                 .dynamic_resolution(binding)
-                .cloned()
-                .map(Dim::Known)
-                .unwrap_or(Dim::Unknown);
+                .expect("a checked call carries an answer for every dynamic binding its contract spells");
+            label.audience = Dim::Known(answer.clone());
         }
         label
     }
@@ -327,9 +335,8 @@ impl ToolContract {
         let mut label = self.output_label(expansions);
         if let Some(AudienceDelta::Dynamic(binding)) = self.delta.as_ref().and_then(|delta| delta.audience.as_ref()) {
             let mut matching = resolutions.iter().filter(|resolution| resolution.binding() == binding);
-            let answer = matching.next().and_then(PinnedDynamicResolution::audience);
-            label.audience = match (answer, matching.next()) {
-                (Some(audience), None) => Dim::Known(audience.clone()),
+            label.audience = match (matching.next(), matching.next()) {
+                (Some(pinned), None) => Dim::Known(pinned.audience().clone()),
                 _ => Dim::Unknown,
             };
         }
@@ -357,11 +364,8 @@ mod tests {
 
     #[test]
     fn a_dynamic_answer_keeps_only_literal_reader_sets() {
-        let pinned = |audience| {
-            PinnedDynamicResolution::from_answer(binding(), Some(audience))
-                .audience()
-                .cloned()
-        };
+        let pinned =
+            |audience| PinnedDynamicResolution::from_answer(binding(), audience).map(|pin| pin.audience().clone());
 
         assert_eq!(pinned(Audience::Public), None);
         assert_eq!(pinned(Audience::restricted([ReaderId::new("public")])), None);

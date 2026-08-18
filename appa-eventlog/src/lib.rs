@@ -277,7 +277,11 @@ impl LogStore {
         let mut connection = self.lock();
         #[cfg(feature = "fault-injection")]
         if self.contention_fires() {
-            let foreign = encode(&foreign_batch(&based_on.root));
+            // A foreign writer wins the race in its own committed transaction, exactly as a
+            // second process would. It takes the position and records nothing, so this caller's
+            // append conflicts on position and replays, and an assertion reads whose write landed
+            // from the position rather than from records a later read would have to accept.
+            let foreign = encode(&foreign_batch());
             let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let at = position(&transaction, &based_on.root)?;
             transaction.execute(
@@ -370,14 +374,12 @@ impl LogStore {
     }
 }
 
+/// What a raced append's foreign writer records: nothing. A batch takes a log position whether or
+/// not it holds facts, so the race is won — the caller's append conflicts and replays — without
+/// minting a record every later read would then have to accept.
 #[cfg(feature = "fault-injection")]
-fn foreign_batch(root: &TrajectoryId) -> Vec<Fact> {
-    (0..3)
-        .map(|_| Fact::Boundary {
-            trajectory: root.clone(),
-            kind: appa_engine::fact::BoundaryKind::TurnEnd,
-        })
-        .collect()
+fn foreign_batch() -> Vec<Fact> {
+    Vec::new()
 }
 
 #[cfg(feature = "fault-injection")]
@@ -527,7 +529,7 @@ mod tests {
     fn punctuation() -> Vec<Fact> {
         vec![Fact::Boundary {
             trajectory: root(),
-            kind: appa_engine::fact::BoundaryKind::TurnEnd,
+            kind: appa_engine::fact::BoundaryKind::VoidReturn,
         }]
     }
 

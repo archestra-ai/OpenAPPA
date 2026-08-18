@@ -80,16 +80,6 @@ impl ToolShim {
         }
     }
 
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
-        self
-    }
-
-    pub fn with_body_cap_bytes(mut self, body_cap_bytes: usize) -> Self {
-        self.body_cap_bytes = body_cap_bytes;
-        self
-    }
-
     /// Run one released call and classify what was observed. The
     /// mapping is total over the shapes this transport can produce,
     /// and it assumes least where it cannot tell: a call that may have

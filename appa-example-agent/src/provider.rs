@@ -97,19 +97,6 @@ impl OpenAiConfig {
         self.request_timeout = request_timeout;
         self
     }
-
-    pub fn with_response_body_cap_bytes(mut self, response_body_cap_bytes: usize) -> Self {
-        self.response_body_cap_bytes = response_body_cap_bytes;
-        self
-    }
-
-    pub fn endpoint(&self) -> &Endpoint {
-        &self.endpoint
-    }
-
-    pub fn model(&self) -> &ModelId {
-        &self.model
-    }
 }
 
 /// Why an upstream inference round failed. Every variant is
@@ -148,10 +135,6 @@ impl OpenAiCompatible {
 
     pub fn openrouter(model: impl Into<ModelId>, api_key: impl Into<String>) -> Self {
         OpenAiCompatible::new(OpenAiConfig::openrouter(model, api_key))
-    }
-
-    pub fn config(&self) -> &OpenAiConfig {
-        &self.config
     }
 
     /// Run one provider call. The configured model replaces any model

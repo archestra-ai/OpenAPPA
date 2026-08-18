@@ -120,11 +120,6 @@ pub(crate) fn confined_residual(receiving: &EstablishedLabel, derived: &Label) -
     })
 }
 
-/// Does this candidate cross now, or does its residual still owe the agent an acceptance?
-pub(crate) fn settles_now(views: &Views, dispatch: &DispatchId, residual: Option<&Narrowing>) -> bool {
-    residual.is_none() || views.accepted_narrowing(dispatch) == residual
-}
-
 /// The candidate a bound sanitizer's first derivation makes of one confined result.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn bound_candidate(
@@ -383,7 +378,7 @@ pub(crate) fn admit_result(
             let DerivedCandidate::Result { value, residual, .. } = &derived else {
                 unreachable!("a bound output sanitizer derives a confined result")
             };
-            if !settles_now(views, dispatch, residual.as_ref()) {
+            if residual.is_some() {
                 return Err(AdmitError::ConfinedResidual);
             }
             let value = value.clone();
@@ -660,7 +655,7 @@ mod tests {
             proposed_effects: EffectSet::new([EffectKind::new("read")]).unwrap(),
             dynamic_resolutions: Vec::new(),
             memberships: Vec::new(),
-            subject: None,
+            subject: crate::basis::fixture_subject(&traj()),
             resolutions: vec![],
         };
         (record, dispatch)
@@ -1285,10 +1280,10 @@ mod tests {
             ToolName::new("dynamic_scan"),
             crate::params::test_arguments(&json!({ "room": "internal" })),
         )
-        .with_dynamic_resolutions(vec![PinnedDynamicResolution::from_answer(
-            binding.clone(),
-            Some(Audience::restricted([ReaderId::new("finance")])),
-        )]);
+        .with_dynamic_resolutions(vec![
+            PinnedDynamicResolution::from_answer(binding.clone(), Audience::restricted([ReaderId::new("finance")]))
+                .expect("a literal reader set pins"),
+        ]);
         let dispatch = DispatchId::new(traj(), call.digest(), 0);
         let log = vec![Fact::DispatchOpened {
             trajectory: traj(),
@@ -1298,9 +1293,11 @@ mod tests {
             proposed_label: EstablishedLabel::top(),
             receiving: EstablishedLabel::top(),
             proposed_effects: EffectSet::new([EffectKind::new("read")]).unwrap(),
-            dynamic_resolutions: vec![PinnedDynamicResolution::from_answer(binding, Some(internal()))],
+            dynamic_resolutions: vec![
+                PinnedDynamicResolution::from_answer(binding, internal()).expect("a literal reader set pins"),
+            ],
             memberships: Vec::new(),
-            subject: None,
+            subject: crate::basis::fixture_subject(&traj()),
             resolutions: vec![],
         }];
         let projection = views_of(&log);
@@ -1794,10 +1791,6 @@ mod tests {
             Err(AdmitError::SanitizerBindingMismatch)
         );
 
-        let residual = Narrowing {
-            from: EstablishedLabel::top(),
-            to: EstablishedLabel::new(SUSPICIOUS, Audience::Public),
-        };
         assert_eq!(
             admit_result(
                 &reg,
@@ -1812,50 +1805,6 @@ mod tests {
                 &Expansions::default()
             ),
             Err(AdmitError::ConfinedResidual)
-        );
-
-        log.push(Fact::Acceptance {
-            trajectory: t.clone(),
-            dispatch: dispatch.clone(),
-            plan: crate::plan::PlanId::new(1),
-            narrowing: residual.clone(),
-        });
-        let p = views_of(&log);
-        let batch = admit_result(
-            &reg,
-            &p.view(&t),
-            &dispatch,
-            &call,
-            ResultAdmission::SuccessSanitized {
-                body: ValueBody::new("redacted"),
-                sanitizer: crate::names::SanitizerName::new("declassify"),
-                raw_digest: RawResultDigest::of(b"ticket"),
-            },
-            &Expansions::default(),
-        )
-        .unwrap();
-        assert!(batch.iter().any(|fact| matches!(
-            fact,
-            Fact::CandidateDerived {
-                via: crate::candidate::DerivedVia::Sanitizer { name, .. },
-                derived: DerivedCandidate::Result { source, residual: Some(_), .. },
-                lineage,
-                ..
-            } if name.as_str() == "declassify"
-                && source == &RawResultDigest::of(b"ticket")
-                && lineage.names() == [name.clone()]
-        )));
-        let admitted = batch
-            .iter()
-            .find_map(|fact| match fact {
-                Fact::ValueAdmitted { value, .. } => Some(value),
-                _ => None,
-            })
-            .expect("the derivation is admitted");
-        assert_eq!(admitted.body.as_str(), "redacted");
-        assert_eq!(
-            admitted.label,
-            Label::new(Dim::Known(SUSPICIOUS), Dim::Known(Audience::Public))
         );
     }
 
