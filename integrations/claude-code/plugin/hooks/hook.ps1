@@ -2,13 +2,14 @@ param(
     [switch]$SessionContext
 )
 
-# Hooks gate only sessions launched with APPA_GATE=1 (the clappa function).
-# The guard reads the Claude Code process environment, fixed at launch, so a
-# session cannot ungate itself. Without the variable the gate hook exits 0
-# and -SessionContext prints beta-announcement.md — or setup-appa.md when
-# the runtime binary is not installed: instructions for the model to offer
-# and perform the install as a prompted task.
-$gated = $env:APPA_GATE -eq "1"
+# Hooks protect only sessions launched with APPA_GATE=1 (the clappa
+# function). The guard reads the Claude Code process environment, fixed at
+# launch, so a session cannot turn the protection off. Without the variable
+# the protection hook exits 0 and -SessionContext prints
+# beta-announcement.md — or setup-appa.md when the runtime binary is not
+# installed: instructions for the model to offer and perform the install as
+# a prompted task.
+$protected = $env:APPA_GATE -eq "1"
 
 $dataDir = if ($env:APPA_DATA_DIR) { $env:APPA_DATA_DIR } else { Join-Path $env:LOCALAPPDATA "appa" }
 $configDir = if ($env:APPA_CONFIG_DIR) { $env:APPA_CONFIG_DIR } else { Join-Path $env:APPDATA "appa" }
@@ -16,7 +17,7 @@ $installDir = if ($env:APPA_INSTALL_DIR) { $env:APPA_INSTALL_DIR } else { Join-P
 $binary = Join-Path $installDir "appa-runtime-v2.exe"
 
 if ($SessionContext) {
-    if ($gated) {
+    if ($protected) {
         $document = "session-context.md"
     } elseif (Test-Path -LiteralPath $binary) {
         $document = "beta-announcement.md"
@@ -30,7 +31,7 @@ if ($SessionContext) {
     exit 0
 }
 
-if (-not $gated) {
+if (-not $protected) {
     exit 0
 }
 
@@ -49,8 +50,8 @@ function Test-RuntimeHealthy {
 }
 
 # SessionStart starts the installed runtime when nothing healthy answers,
-# so a gated session works without any service setup. Installing the
-# binary is not this script's job: an ungated session offers that as a
+# so a protected session works without any service setup. Installing the
+# binary is not this script's job: an unprotected session offers that as a
 # prompted task.
 function Start-RuntimeIfDown {
     if (Test-RuntimeHealthy) {

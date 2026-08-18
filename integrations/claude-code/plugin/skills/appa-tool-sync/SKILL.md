@@ -206,4 +206,4 @@ To use them, start a new clappa session.
 The last line matters and is easy to get wrong: a session keeps the
 policy file it started with, so the tools you just added do not work
 in the session that added them. Keep the reminder to that one short
-line, and name `clappa` — only sessions started with it are gated.
+line, and name `clappa` — only sessions started with it are protected.

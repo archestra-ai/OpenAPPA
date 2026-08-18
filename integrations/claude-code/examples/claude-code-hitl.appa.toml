@@ -1,4 +1,4 @@
-# Example deployment for gating a Claude Code session, with a human
+# Example deployment for protecting a Claude Code session, with a human
 # authority on one tool. Read `claude-code.appa.toml` first: this file
 # is that policy plus the `hitl` wiring.
 #

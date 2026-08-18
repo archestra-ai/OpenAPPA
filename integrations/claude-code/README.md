@@ -1,6 +1,6 @@
 # Claude Code integration
 
-Everything needed to gate a Claude Code session through the
+Everything needed to protect a Claude Code session through the
 appa-runtime-v2 process lives in this directory: the plugin (hooks, the
 `execute_remedy_plan` MCP server, the `appa-debug` skill), the
 statusline script, example policies, and the install and uninstall
@@ -12,9 +12,10 @@ How it works, in one paragraph: the plugin registers hooks on every
 session event — prompt, tool call, tool result, subagent start and
 finish. Each hook posts the event to the runtime process and blocks the
 action unless the process answers yes. The hooks fail closed: while the
-process is down, every action in a gated session is blocked — silence
-never means yes. A subagent started with the `Agent` tool runs as a
-child of the session: its own tool calls are gated, and its final
+process is down, every action in a protected session is blocked —
+silence never means yes. A subagent started with the `Agent` tool runs
+as a child of the session: its own tool calls are checked the same way,
+and its final
 message is checked — and rewritten or withheld — where the parent
 receives it, in the `Agent` tool's result.
 
@@ -37,7 +38,7 @@ receives it, in the `Agent` tool's result.
 
 ## Install
 
-The plugin manager installs the gate; nothing else is downloaded ahead
+The plugin manager installs the protection; nothing else is downloaded ahead
 of time:
 
 ```sh
@@ -76,11 +77,12 @@ Set `APPA_INSTALL_DIR`, `APPA_CONFIG_DIR`, or `APPA_DATA_DIR` in the
 environment to change these locations; the hooks and the setup
 instructions follow them.
 
-## Gate a Claude Code session
+## Protect a Claude Code session
 
 The plugin is present in every session but inert until a session
-opts in with `APPA_GATE=1`. Keep normal `claude` sessions ungated and
-use a separate `clappa` command for gated ones. The setup task creates
+opts in with `APPA_GATE=1`. Keep normal `claude` sessions unprotected
+and use a separate `clappa` command for protected ones. The setup task
+creates
 it as an executable beside the runtime binary — a PATH command works in
 every open terminal with no shell reload, unlike an alias:
 
@@ -97,16 +99,17 @@ Windows, add this function to your PowerShell profile:
 function clappa { $env:APPA_GATE = "1"; try { claude @args } finally { Remove-Item Env:APPA_GATE -ErrorAction SilentlyContinue } }
 ```
 
-Only sessions started with `APPA_GATE=1` are gated. The hooks read the
-variable from the Claude Code process environment, fixed at launch, so a
-session cannot ungate itself mid-session. A plain `claude` session stays
-ungated and announces once, at session start, that the beta is available
-and `clappa` starts a gated session.
+Only sessions started with `APPA_GATE=1` are protected. The hooks read
+the variable from the Claude Code process environment, fixed at launch,
+so a session cannot turn the protection off mid-session. A plain
+`claude` session stays unprotected and announces once, at session
+start, that the beta is available and `clappa` starts a protected
+session.
 
-A gated session starts the installed runtime at SessionStart when
+A protected session starts the installed runtime at SessionStart when
 nothing healthy answers `/health`, then blocks every action while the
 runtime is unavailable. When the binary is not installed at all, an
-ungated session installs it as a prompted task: its session context
+unprotected session installs it as a prompted task: its session context
 (`hooks/setup-appa.md`) has the model offer the setup and, on request,
 download the release archive for the current system, verify its
 checksum and version, and install the binary — each step under the
@@ -122,7 +125,7 @@ The command must print `ok`.
 
 The default policy names only Claude Code's built-in tools. APPA blocks every
 installed MCP tool until the policy names it. Start `clappa` and run
-`/appa-tool-sync`. The skill exists only in gated sessions. It inventories MCP
+`/appa-tool-sync`. The skill exists only in protected sessions. It inventories MCP
 servers, proposes one policy entry per tool, and marks which tools read data
 that must stay in the session or send data outward. It asks once about servers
 it cannot judge. You review the complete proposal before it writes anything.
@@ -166,10 +169,11 @@ statusline setting separately if you created them.
 ## Statusline, manually
 
 Claude Code reads `statusLine` only from your own settings — a plugin
-cannot set it. In a gated session the script shows the APPA pixel
+cannot set it. In a protected session the script shows the APPA pixel
 mascot plus the session's current Trust and Audience, read from the
-process's `GET /status`. In an ungated session it shows the mascot with
-a reminder that `clappa` starts the gate, and never queries the
+process's `GET /status`. In an unprotected session it shows the mascot
+with a reminder that `clappa` starts a protected session, and never
+queries the
 runtime. Both platform scripts fail open: runtime down, unknown
 trajectory, or malformed input prints the mascot alone, never a blocked
 action. The POSIX script also needs `jq` and `curl`.
@@ -198,7 +202,7 @@ absolute path:
 }
 ```
 
-The setting applies to every session, gated or not; the script's
+The setting applies to every session, protected or not; the script's
 `APPA_GATE` branch keeps the two states distinguishable at a glance.
 
 On POSIX systems, keep an existing statusline such as claude-powerline and add
@@ -222,7 +226,8 @@ every statusline refresh:
   runtime validates before it installs, so a bad file answers 422 and
   changes nothing. Sessions started after the reload bind the new
   policy; sessions already running keep the file they opened with.
-- **Stopping the process blocks gated sessions.** That is the design,
-  not a fault. Start a plain `claude` if you want an ungated session.
-- **The plugin adds roughly zero tokens to a session.** The gating is
-  hooks and an MCP server, not prompt text.
+- **Stopping the process blocks protected sessions.** That is the
+  design, not a fault. Start a plain `claude` if you want an
+  unprotected session.
+- **The plugin adds roughly zero tokens to a session.** The protection
+  is hooks and an MCP server, not prompt text.

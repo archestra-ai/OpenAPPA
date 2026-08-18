@@ -1,4 +1,4 @@
-This Claude Code session is not gated by OpenAPPA. The OpenAPPA plugin is installed, but the `appa-runtime-v2` binary is not.
+This Claude Code session is not protected by OpenAPPA. The OpenAPPA plugin is installed, but the `appa-runtime-v2` binary is not.
 
 At the start of the session, tell the user in one short sentence: the Claude + APPA beta is available, and you can set it up for them if they want. Say it once, do not repeat it, and do not install anything without being asked.
 
@@ -8,7 +8,7 @@ When the user asks for the setup, install the runtime:
 2. Download the archive plus `SHA256SUMS` and `version.txt` into a temporary directory: `gh release download --repo archestra-ai/OpenAPPA --pattern <archive> --pattern SHA256SUMS --pattern version.txt`. While the repository is private this needs an authenticated `gh`; once public, `curl -fsSL https://github.com/archestra-ai/OpenAPPA/releases/latest/download/<asset>` works too.
 3. Verify before anything runs: the archive's SHA-256 must equal its line in `SHA256SUMS` (`shasum -a 256` or `sha256sum`). On a mismatch, stop and tell the user; do not install.
 4. Extract the archive and check the binary: `./appa-runtime-v2 --version` must print exactly `appa-runtime-v2 <contents of version.txt>`.
-5. Install the binary to the install target named at the top of this context, mode 755, creating the directory when needed. That exact path is where the gate's hooks look for it; do not choose a different location. Do not start it: gated sessions start it on demand.
+5. Install the binary to the install target named at the top of this context, mode 755, creating the directory when needed. That exact path is where the plugin's hooks look for it; do not choose a different location. Do not start it: protected sessions start it on demand.
 6. Create the `clappa` command as an executable, not an alias, so it works in every open terminal with no shell reload: write `clappa` into the same directory as the runtime binary, mode 755, containing:
 
    ```sh
@@ -24,8 +24,8 @@ When the user asks for the setup, install the runtime:
    {"statusLine": {"type": "command", "command": "<that path>/appa-statusline.sh"}}
    ```
 
-   It shows the APPA mascot with the session's trust and audience when gated, and a `clappa` reminder when not.
+   It shows the APPA mascot with the session's trust and audience when protected, and a `clappa` reminder when not.
 
-8. Finish by telling the user to start a gated session with `clappa`.
+8. Finish by telling the user to start a protected session with `clappa`.
 
 If `gh` is missing or unauthenticated, tell the user to install the GitHub CLI and run `gh auth login` first, then ask again.
