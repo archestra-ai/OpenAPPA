@@ -256,4 +256,15 @@ constant = { trust = "suspicious",
              audience = { exactly = ["public"] } }  # Complete label; unscoped fallback, registered last
 ```
 
-Applicable casts — matched by scope tags — evaluate in registration order. Register constant casts last: a cast placed after a constant that covers it can never run, and the loader refuses it. The engine validates every resolver response against its declared `may_cast` ceiling before admitting the value. A `public` audience cap is an open gate: it lets a single resolver answer resolve a value to `public` and lift its audience restriction entirely — review it like any covering mandate.
+```toml
+[externals.casts.content-classifier]           # the deployment binds the classifier
+url = "https://classify.corp/label"
+```
+
+A resolver is the only implementation a cast takes: the answer is a label the `may_cast` ceiling has to bound, not a stock transform, so `builtin` is refused. A constant is answered from the policy, so it binds nothing and an `[externals]` entry for it is a load error.
+
+Applicable casts — matched by scope tags — evaluate in registration order until one answers. A resolver that cannot answer — unreachable, timed out, malformed — is skipped, which is what makes a trailing constant the deployment's declared fallback. Register constant casts last: a cast placed after a constant that covers it can never run, and the loader refuses it.
+
+The engine validates every resolver response against its declared `may_cast` ceiling before admitting the value. An answer over the ceiling is refused outright and falls through to nothing: a classifier answering wider than its policy allows is misbehaving, not silent, and the result stays withheld. A `public` audience cap is an open gate: it lets a single resolver answer resolve a value to `public` and lift its audience restriction entirely — review it like any covering mandate.
+
+A tool that declares its own pending dimension — `delta = { trust = "unknown" }` — is held rather than annotated late: the deployment lists it in `confined_results`, the runtime keeps the raw result from the model, and the cast reads it first. A restricting answer reaches the agent as a narrowing offer, and the bytes are delivered only if it accepts.

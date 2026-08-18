@@ -904,25 +904,36 @@ pub(crate) fn resolvable_source(
     })
 }
 
-/// The first registered cast that could establish `value`, beside the bytes it would read.
+/// Every registered cast that could establish `value`, in registration order, beside the bytes
+/// they would read. The runtime tries them in that order until one answers, so a constant
+/// registered last is the declared fallback here exactly as it is at a held result. A constant
+/// arrives already resolved against the memberships pinned for this act.
 /// `None` where the value kept no body, carries no label, or no registered cast reaches it — each
 /// leaves the value unestablished, which fails closed at whatever consumes it.
-pub(crate) fn castable_source(
+pub(crate) fn castable_sources(
     registry: &Registry,
     views: &Views,
     value: crate::value::ValueId,
     expansions: &Expansions,
-) -> Option<(crate::names::CastName, crate::value::ValueBody)> {
+) -> Option<(Vec<crate::transition::ApplicableCast>, crate::value::ValueBody)> {
     let body = views.value_body(value)?.clone();
     let prior = views.value_label(value)?;
-    registry
+    let casts: Vec<crate::transition::ApplicableCast> = registry
         .casts()
         .iter()
-        .find(|cast| {
+        .filter(|cast| {
             cast.resolution.can_establish(prior, expansions)
                 && cast.scope.reaches(registry, views, value).unwrap_or(false)
         })
-        .map(|cast| (cast.name.clone(), body))
+        .map(|cast| crate::transition::ApplicableCast {
+            name: cast.name.clone(),
+            constant: match &cast.resolution {
+                crate::authority::CastResolution::Constant(constant) => Some(constant.resolve(expansions)),
+                crate::authority::CastResolution::Resolver { .. } => None,
+            },
+        })
+        .collect();
+    (!casts.is_empty()).then_some((casts, body))
 }
 
 /// The established contribution a bound output sanitizer's first derivation would make, resolved

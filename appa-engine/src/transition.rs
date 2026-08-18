@@ -316,7 +316,7 @@ pub enum EvidenceRequest {
         body: ValueBody,
     },
     Cast {
-        cast: crate::names::CastName,
+        casts: Vec<ApplicableCast>,
         value: crate::value::ValueId,
         body: ValueBody,
     },

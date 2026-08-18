@@ -609,8 +609,8 @@ impl Engine {
                     &lineage,
                     expansions,
                 ) {
-                    plan::ReturnStagePlan::Resolve { cast, value } => {
-                        return self.resolving(view, views, return_act(child), facts, cast, value);
+                    plan::ReturnStagePlan::Resolve { value, .. } => {
+                        return self.resolving(view, views, return_act(child), facts, value, expansions);
                     }
                     plan::ReturnStagePlan::Stage(plans) => plans,
                 };
@@ -688,7 +688,7 @@ impl Engine {
                 registered.transition.dimension(),
                 expansions,
             ) {
-                Some((cast, value)) => self.resolving(view, views, return_act(child), facts, cast, value),
+                Some((_, value)) => self.resolving(view, views, return_act(child), facts, value, expansions),
                 None => self.rejecting(
                     view,
                     child,
@@ -842,8 +842,8 @@ impl Engine {
             expansions,
         ) {
             plan::ReturnStagePlan::Stage(plans) => plans,
-            plan::ReturnStagePlan::Resolve { cast, value } => {
-                return self.resolving(view, views, return_act(child), facts, cast, value);
+            plan::ReturnStagePlan::Resolve { value, .. } => {
+                return self.resolving(view, views, return_act(child), facts, value, expansions);
             }
         };
         let (batch, staged) = self.pending_stage(
@@ -899,13 +899,14 @@ impl Engine {
         views: &Views,
         act: crate::basis::DecidedAct,
         facts: Vec<Fact>,
-        cast: crate::names::CastName,
         value: crate::value::ValueId,
+        expansions: &Expansions,
     ) -> Result<EngineDecision, TransitionError> {
-        let body = views
-            .value_body(value)
-            .expect("a resolvable source retains the bytes its resolver reads")
-            .clone();
+        // Required here rather than at each caller: the ask carries every applicable cast, and a
+        // constant is read whole to reach the runtime already resolved.
+        expansions.require(&plan::cast_selection_groups(&self.registry))?;
+        let (casts, body) = plan::castable_sources(&self.registry, views, value, expansions)
+            .expect("a resolvable source retains its bytes and the cast the caller selected");
         let append = match facts.is_empty() {
             true => None,
             false => {
@@ -916,7 +917,7 @@ impl Engine {
         };
         Ok(EngineDecision {
             append,
-            follow_up: FollowUp::Child(ChildFollowUp::Resolve(EvidenceRequest::Cast { cast, value, body })),
+            follow_up: FollowUp::Child(ChildFollowUp::Resolve(EvidenceRequest::Cast { casts, value, body })),
         })
     }
 
@@ -1178,8 +1179,8 @@ impl Engine {
             expansions,
         ) {
             plan::ReturnStagePlan::Stage(plans) => plans,
-            plan::ReturnStagePlan::Resolve { cast, value } => {
-                return self.resolving(view, views, return_act(id.child()), facts, cast, value);
+            plan::ReturnStagePlan::Resolve { value, .. } => {
+                return self.resolving(view, views, return_act(id.child()), facts, value, expansions);
             }
         };
         let (batch, staged) = self.pending_stage(
@@ -2060,8 +2061,8 @@ impl Engine {
         Ok(unestablished
             .into_iter()
             .filter_map(|value| {
-                plan::castable_source(&self.registry, &views, value, expansions)
-                    .map(|(cast, body)| EvidenceRequest::Cast { cast, value, body })
+                plan::castable_sources(&self.registry, &views, value, expansions)
+                    .map(|(casts, body)| EvidenceRequest::Cast { casts, value, body })
             })
             .collect())
     }
@@ -9734,8 +9735,12 @@ mod tests {
         );
         let value = match &asked.follow_up {
             FollowUp::ProposalsResolve(requests) => match requests.as_slice() {
-                [EvidenceRequest::Cast { cast, value, body }] => {
-                    assert_eq!(cast.as_str(), "classifier");
+                [EvidenceRequest::Cast { casts, value, body }] => {
+                    assert_eq!(
+                        casts.iter().map(|cast| cast.name.as_str()).collect::<Vec<_>>(),
+                        ["classifier"],
+                        "the ask carries every applicable cast, in registration order"
+                    );
                     assert_eq!(body.as_str(), "read", "the ask carries the bytes the classifier reads");
                     *value
                 }
@@ -13376,7 +13381,10 @@ mod tests {
         assert_eq!(
             asked.follow_up,
             FollowUp::Child(ChildFollowUp::Resolve(EvidenceRequest::Cast {
-                cast: crate::names::CastName::new("classifier"),
+                casts: vec![crate::transition::ApplicableCast {
+                    name: crate::names::CastName::new("classifier"),
+                    constant: None,
+                }],
                 value: ValueId::new(0),
                 body: ValueBody::new("page"),
             }))
@@ -14007,8 +14015,8 @@ mod tests {
             .expect("the unresolved dimension asks for its capable cast");
         assert!(matches!(
             &asked.follow_up,
-            FollowUp::Child(ChildFollowUp::Resolve(EvidenceRequest::Cast { cast, body, .. }))
-                if cast.as_str() == "classifier" && body.as_str() == "page"
+            FollowUp::Child(ChildFollowUp::Resolve(EvidenceRequest::Cast { casts, body, .. }))
+                if casts.iter().any(|cast| cast.name.as_str() == "classifier") && body.as_str() == "page"
         ));
     }
 

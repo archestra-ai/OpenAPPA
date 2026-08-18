@@ -29,6 +29,12 @@ name = "scan_files"
 tags = ["files"]
 delta = { trust = "unknown" }
 
+# Unannotated and inside the files scope: the lazy path meets the same cast cascade,
+# constant fallback included.
+[[policy.tool]]
+name = "list_files"
+tags = ["files"]
+
 [[policy.tool]]
 name = "notify"
 requires = { trust = "trusted" }
@@ -460,6 +466,32 @@ async fn a_source_the_classifier_calls_suspicious_blocks_the_call_that_asked() {
         HookDecision::DenyCall { .. }
     ));
     assert_eq!(classifier.bodies(), vec![PAGE.to_string()]);
+}
+
+/// The cascade is one rule, not two: a blocked call whose classifier is silent falls
+/// through to the constant behind it exactly as a held result does.
+#[tokio::test]
+async fn a_blocked_call_falls_through_to_the_constant_when_the_classifier_is_silent() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, classifier) = serve_classifier().await;
+    classifier.answering("files-classifier", Answer::Down);
+    let runtime = opened(&dir, &url).await;
+
+    assert_eq!(
+        propose(&runtime, "list_files").await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert_eq!(returned(&runtime, "list_files", FILES).await, HookDecision::Ack);
+    assert!(matches!(
+        propose(&runtime, "notify").await,
+        HookDecision::DenyCall { .. }
+    ));
+    assert_eq!(
+        established(&runtime),
+        vec![("files-fallback".to_string(), "suspicious".to_string())],
+        "the constant answered the ask the silent classifier left"
+    );
+    assert_eq!(classifier.consults(), 1);
 }
 
 /// A classifier that cannot speak grants nothing and blocks nothing: the value stays

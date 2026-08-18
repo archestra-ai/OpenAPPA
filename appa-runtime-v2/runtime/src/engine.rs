@@ -132,9 +132,10 @@ pub enum ExternalRequest {
         source: RawResultDigest,
         body: ValueBody,
     },
-    /// Classify one admitted value the engine already chose a cast for.
+    /// Classify one admitted value a blocked act reads. Same cascade, same order: the two
+    /// asks differ only in what the answer resolves.
     Cast {
-        cast: String,
+        casts: Vec<ApplicableCast>,
         value: ValueId,
         body: ValueBody,
     },
@@ -1038,17 +1039,13 @@ impl RuntimeEngine {
                 let chain = self.engine.registry().trust_chain();
                 let mut consults = Vec::new();
                 for request in requests {
-                    let EvidenceRequest::Cast { cast, value, body } = request else {
+                    let EvidenceRequest::Cast { casts, value, body } = request else {
                         return Err(EngineRefusal::Invariant {
                             detail: "a proposal batch asked for something other than a cast".to_string(),
                         });
                     };
                     match cast_state(chain, evidence, value) {
-                        CastAnswerState::Missing => consults.push(ExternalRequest::Cast {
-                            cast: cast.as_str().to_string(),
-                            value,
-                            body,
-                        }),
+                        CastAnswerState::Missing => consults.push(ExternalRequest::Cast { casts, value, body }),
                         CastAnswerState::NoAnswer | CastAnswerState::Resolved => {
                             return Ok(deny_next(
                                 "[appa] no registered cast could establish what this call reads; the call is blocked"
@@ -2082,9 +2079,9 @@ fn resolve_or_withhold(
                 offers: Vec::new(),
             })),
         },
-        EvidenceRequest::Cast { cast, value, body } => match cast_state(chain, evidence, value) {
+        EvidenceRequest::Cast { casts, value, body } => match cast_state(chain, evidence, value) {
             CastAnswerState::Missing => Ok(Next::ResolveExternal(vec![ExternalRequest::Cast {
-                cast: cast.as_str().to_string(),
+                casts,
                 value,
                 body,
             }])),
