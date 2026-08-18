@@ -47,7 +47,7 @@ use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
 use appa_engine::fact::{BoundaryKind, CloseOutcome, EffectSet, Fact, ReturnDerivation};
 use appa_engine::groups::GroupExpansion;
-use appa_engine::label::{Audience, Dim, Dimension, Label, PartialLabel, ReaderId, Trust};
+use appa_engine::label::{Audience, Dim, Dimension, EstablishedLabel, Label, PartialLabel, ReaderId, Trust};
 use appa_engine::names::GroupName;
 use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RequiredRuling};
 use appa_engine::profile::PolicyFileKey as EnginePolicyFileKey;
@@ -59,11 +59,11 @@ use appa_engine::transition::Blocked as CoreBlocked;
 /// the event or passed with the read.
 pub(crate) use appa_engine::transition::EngineView;
 use appa_engine::transition::{
-    ChildFollowUp, ChildReport, ChildSubmission, Confined, EngineDecision as CoreDecision, EngineEvent as CoreEvent,
-    Evidence, EvidenceRequest, FollowUp, ForkBinding, OfferConsult, OfferExecution, OfferFollowUp, OfferOutcome,
-    OutcomeBody as CoreOutcomeBody, OutcomeFollowUp, PendingReturnStage, ProposalBatch, ProposalBatchId,
-    ProposedCall as CoreProposedCall, Released, SpawnMark, ToolOutcome as CoreToolOutcome, ToolReport, TransitionError,
-    TransitionRefusal, ValidatedFactBatch,
+    ApplicableCast, ChildFollowUp, ChildReport, ChildSubmission, Confined, EngineDecision as CoreDecision,
+    EngineEvent as CoreEvent, Evidence, EvidenceRequest, FollowUp, ForkBinding, OfferConsult, OfferExecution,
+    OfferFollowUp, OfferOutcome, OutcomeBody as CoreOutcomeBody, OutcomeFollowUp, PendingReturnStage, ProposalBatch,
+    ProposalBatchId, ProposedCall as CoreProposedCall, Released, SpawnMark, ToolOutcome as CoreToolOutcome, ToolReport,
+    TransitionError, TransitionRefusal, ValidatedFactBatch,
 };
 use appa_engine::value::{
     DispatchId as EngineDispatchId, ForkId, OfferId as EngineOfferId, OfferNonce as EngineOfferNonce, Provenance,
@@ -73,6 +73,7 @@ use appa_eventlog::Log;
 
 use crate::api::OutcomeBody;
 pub(crate) use crate::api::{DispatchId, OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
+use crate::external::{CastAnswer, CastAudience};
 
 /// One fresh 256-bit random number per act that can surface offers; the
 /// runtime mixes it into every `OfferId` it mints.
@@ -123,6 +124,36 @@ pub enum ExternalRequest {
         resolver: String,
         group: String,
     },
+    /// Classify a result the model has not seen. The applicable casts travel in
+    /// registration order and a constant among them arrives already resolved, so the
+    /// session answers it without a call.
+    PendingCast {
+        casts: Vec<ApplicableCast>,
+        source: RawResultDigest,
+        body: ValueBody,
+    },
+    /// Classify one admitted value the engine already chose a cast for.
+    Cast {
+        cast: String,
+        value: ValueId,
+        body: ValueBody,
+    },
+}
+
+/// One cast's answer as the session obtained it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CastVerdict {
+    pub cast: String,
+    pub label: CastLabel,
+}
+
+/// Where a cast's label came from. A declared constant is the engine's own read echoed
+/// back; a classified answer is a resolver's wire strings, still to be read against the
+/// policy's trust chain.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CastLabel {
+    Declared(EstablishedLabel),
+    Classified(CastAnswer),
 }
 
 /// A typed external answer. `None`/`Abstain` mean the external gave
@@ -148,6 +179,15 @@ pub enum ExternalEvidence {
         resolver: String,
         group: String,
         readers: Option<Vec<String>>,
+    },
+    /// `None` means every applicable cast was asked and none answered usably.
+    PendingCast {
+        source: RawResultDigest,
+        verdict: Option<CastVerdict>,
+    },
+    Cast {
+        value: ValueId,
+        verdict: Option<CastVerdict>,
     },
 }
 
@@ -1048,12 +1088,28 @@ impl RuntimeEngine {
         let report = ToolReport {
             dispatch: dispatch.clone(),
             outcome: engine_outcome(outcome),
-            evidence: sanitizer_evidence(evidence),
+            evidence: [
+                sanitizer_evidence(evidence),
+                cast_evidence(self.engine.registry().trust_chain(), evidence),
+            ]
+            .concat(),
             offer_nonce: engine_nonce(entropy),
             expansions: expansions.expansions(),
         };
         let decision = match self.engine.handle(view, CoreEvent::Outcome(report)) {
             Ok(decision) => decision,
+            // A classifier's answer the engine will not admit — over its ceiling, out of
+            // scope, or disagreeing with a dimension already established. The classifier
+            // misbehaved; the log is not in question, so the result is withheld and the
+            // report stays repeatable rather than refusing the session.
+            Err(TransitionError::InadmissibleResolution) => {
+                return Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
+                    feedback:
+                        "[appa] the classifier's answer was not admissible; the result is withheld and may be retried"
+                            .to_string(),
+                    offers: Vec::new(),
+                })));
+            }
             Err(TransitionError::MembershipNeeded { needed }) => {
                 return match self.membership_consult(&expansions, needed)? {
                     MembershipConsult::Requests(requests) => {
@@ -1077,9 +1133,10 @@ impl RuntimeEngine {
                 Next::PresentToModel(outcome_presentation(outcome, admitted))
             }
             FollowUp::Outcome(OutcomeFollowUp::Resolve(request)) => resolve_or_withhold(
+                self.engine.registry().trust_chain(),
                 request,
                 evidence,
-                "[appa] the sanitizer gave no answer; the result is withheld and may be retried",
+                "[appa] no registered cast or sanitizer answered; the result is withheld and may be retried",
             )?,
             FollowUp::Outcome(OutcomeFollowUp::Staged(confined)) => {
                 Next::PresentToModel(self.confined_delivery(&confined))
@@ -1357,12 +1414,24 @@ impl RuntimeEngine {
             child: engine_id(child),
             fork,
             submission,
-            evidence: sanitizer_evidence(evidence),
+            evidence: [
+                sanitizer_evidence(evidence),
+                cast_evidence(self.engine.registry().trust_chain(), evidence),
+            ]
+            .concat(),
             offer_nonce: engine_nonce(entropy),
             expansions: expansions.expansions(),
         };
         let decision = match self.engine.handle(view, CoreEvent::ChildReturn(report)) {
             Ok(decision) => decision,
+            Err(TransitionError::InadmissibleResolution) => {
+                return Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
+                    feedback:
+                        "[appa] the classifier's answer was not admissible; the return is withheld and may be retried"
+                            .to_string(),
+                    offers: Vec::new(),
+                })));
+            }
             Err(TransitionError::MembershipNeeded { needed }) => {
                 return match self.membership_consult(&expansions, needed)? {
                     MembershipConsult::Requests(requests) => {
@@ -1392,9 +1461,10 @@ impl RuntimeEngine {
                 offers: Vec::new(),
             }),
             FollowUp::Child(ChildFollowUp::Resolve(request)) => resolve_or_withhold(
+                self.engine.registry().trust_chain(),
                 request,
                 evidence,
-                "[appa] the return sanitizer gave no answer; the return is withheld and may be retried",
+                "[appa] no registered cast or return sanitizer answered; the return is withheld and may be retried",
             )?,
             other => {
                 return Err(EngineRefusal::Invariant {
@@ -1805,6 +1875,89 @@ fn outcome_presentation(outcome: &ToolOutcome, admitted: Option<ValueBody>) -> P
     }
 }
 
+/// Whether the session has an answer for a cast the engine asked about. The three states
+/// are what stops a redrive loop: an answer the policy cannot read is `NoAnswer`, never a
+/// fresh request, so a classifier naming a rank outside the chain withholds once instead
+/// of being asked forever.
+enum CastAnswerState {
+    Missing,
+    NoAnswer,
+    Resolved,
+}
+
+fn cast_label(chain: &TrustChain, verdict: &CastVerdict) -> Option<EstablishedLabel> {
+    match &verdict.label {
+        CastLabel::Declared(label) => Some(label.clone()),
+        CastLabel::Classified(answer) => {
+            let trust = chain.rank_of(&answer.trust)?;
+            let audience = match &answer.audience {
+                CastAudience::Public => Audience::Public,
+                CastAudience::Readers(readers) => Audience::restricted(readers.iter().map(ReaderId::new)),
+            };
+            Some(EstablishedLabel::new(trust, audience))
+        }
+    }
+}
+
+fn cast_evidence(chain: &TrustChain, evidence: &[ExternalEvidence]) -> Vec<Evidence> {
+    evidence
+        .iter()
+        .filter_map(|entry| match entry {
+            ExternalEvidence::PendingCast {
+                source,
+                verdict: Some(verdict),
+            } => Some(Evidence::PendingCast {
+                cast: appa_engine::names::CastName::new(verdict.cast.clone()),
+                source: *source,
+                resolved: cast_label(chain, verdict)?,
+            }),
+            ExternalEvidence::Cast {
+                value,
+                verdict: Some(verdict),
+            } => Some(Evidence::Cast {
+                cast: appa_engine::names::CastName::new(verdict.cast.clone()),
+                value: *value,
+                resolved: cast_label(chain, verdict)?,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn pending_cast_state(chain: &TrustChain, evidence: &[ExternalEvidence], source: &RawResultDigest) -> CastAnswerState {
+    for entry in evidence {
+        if let ExternalEvidence::PendingCast {
+            source: reported,
+            verdict,
+        } = entry
+            && reported == source
+        {
+            return match verdict.as_ref().and_then(|verdict| cast_label(chain, verdict)) {
+                Some(_) => CastAnswerState::Resolved,
+                None => CastAnswerState::NoAnswer,
+            };
+        }
+    }
+    CastAnswerState::Missing
+}
+
+fn cast_state(chain: &TrustChain, evidence: &[ExternalEvidence], value: ValueId) -> CastAnswerState {
+    for entry in evidence {
+        if let ExternalEvidence::Cast {
+            value: reported,
+            verdict,
+        } = entry
+            && *reported == value
+        {
+            return match verdict.as_ref().and_then(|verdict| cast_label(chain, verdict)) {
+                Some(_) => CastAnswerState::Resolved,
+                None => CastAnswerState::NoAnswer,
+            };
+        }
+    }
+    CastAnswerState::Missing
+}
+
 fn sanitizer_evidence(evidence: &[ExternalEvidence]) -> Vec<Evidence> {
     evidence
         .iter()
@@ -1854,6 +2007,7 @@ fn authority_verdict(evidence: &[ExternalEvidence], name: &str) -> Option<(Autho
 }
 
 fn resolve_or_withhold(
+    chain: &TrustChain,
     request: EvidenceRequest,
     evidence: &[ExternalEvidence],
     withheld: &str,
@@ -1879,9 +2033,28 @@ fn resolve_or_withhold(
                 body,
             }]))
         }
-        EvidenceRequest::Cast { .. } | EvidenceRequest::PendingCast { .. } => Err(EngineRefusal::Invariant {
-            detail: "the engine asked for a cast resolution this runtime does not drive".to_string(),
-        }),
+        EvidenceRequest::PendingCast { casts, source, body } => match pending_cast_state(chain, evidence, &source) {
+            CastAnswerState::Missing => Ok(Next::ResolveExternal(vec![ExternalRequest::PendingCast {
+                casts,
+                source,
+                body,
+            }])),
+            CastAnswerState::NoAnswer | CastAnswerState::Resolved => Ok(Next::PresentToModel(Presentation::Blocked {
+                feedback: withheld.to_string(),
+                offers: Vec::new(),
+            })),
+        },
+        EvidenceRequest::Cast { cast, value, body } => match cast_state(chain, evidence, value) {
+            CastAnswerState::Missing => Ok(Next::ResolveExternal(vec![ExternalRequest::Cast {
+                cast: cast.as_str().to_string(),
+                value,
+                body,
+            }])),
+            CastAnswerState::NoAnswer | CastAnswerState::Resolved => Ok(Next::PresentToModel(Presentation::Blocked {
+                feedback: withheld.to_string(),
+                offers: Vec::new(),
+            })),
+        },
     }
 }
 

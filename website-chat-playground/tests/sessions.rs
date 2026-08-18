@@ -73,15 +73,42 @@ trust_chain = ["suspicious", "trusted"]
 [[tool]]
 name = "list_customers"
 delta = { audience = "unknown" }
+
+[[cast]]
+name = "classifier"
+resolver = { may_cast = { trust = ["suspicious"], audience = { cap = ["public"] } } }
 "#;
 
     let Err(error) = sessions
         .create(policy, &[System::Crm].into_iter().collect(), MODEL)
         .await
     else {
-        panic!("a pending-cast delta must be refused, not accepted and left inert");
+        panic!("the playground serves no classifier route, so a resolver-backed cast must be refused");
     };
     assert!(matches!(error, CreateError::Open(_)), "got: {error}");
+}
+
+#[tokio::test]
+async fn a_pending_cast_delta_runs_under_a_constant_cast() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let sessions = sessions(&dir, Duration::from_secs(600));
+    let policy = r#"
+version = 1
+trust_chain = ["suspicious", "trusted"]
+
+[[tool]]
+name = "list_customers"
+delta = { audience = "unknown" }
+
+[[cast]]
+name = "paranoid"
+constant = { trust = "suspicious", audience = { exactly = ["public"] } }
+"#;
+
+    sessions
+        .create(policy, &[System::Crm].into_iter().collect(), MODEL)
+        .await
+        .expect("a constant cast is answered from the policy, so the deployment runs it");
 }
 
 #[tokio::test]

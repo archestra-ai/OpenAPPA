@@ -54,6 +54,9 @@ pub struct Externals {
     pub max_body_bytes: usize,
     pub authorities: BTreeMap<String, Implementation>,
     pub sanitizers: BTreeMap<String, Implementation>,
+    /// The classifiers a resolver-backed `[[cast]]` consults. Endpoint-only: a constant
+    /// cast is answered from the policy and binds nothing here.
+    pub casts: BTreeMap<String, Endpoint>,
     pub dynamic: Option<Endpoint>,
     /// The membership resolver the policy's `[membership]` registers.
     pub membership: Option<Endpoint>,
@@ -171,6 +174,8 @@ struct RawExternals {
     authorities: BTreeMap<String, RawImplementation>,
     #[serde(default)]
     sanitizers: BTreeMap<String, RawImplementation>,
+    #[serde(default)]
+    casts: BTreeMap<String, RawImplementation>,
     dynamic: Option<RawImplementation>,
     membership: Option<RawImplementation>,
 }
@@ -237,6 +242,7 @@ impl Config {
                 max_body_bytes: raw.externals.max_body_bytes,
                 authorities: resolve_implementations("authorities", raw.externals.authorities, &lookup)?,
                 sanitizers: resolve_implementations("sanitizers", raw.externals.sanitizers, &lookup)?,
+                casts: resolve_endpoints("casts", raw.externals.casts, &lookup)?,
                 dynamic: raw
                     .externals
                     .dynamic
@@ -299,6 +305,22 @@ fn resolve_implementations(
                 }
             };
             Ok((name, implementation))
+        })
+        .collect()
+}
+
+/// A section whose every entry is an endpoint. A cast classifies content over the wire or
+/// resolves to a declared constant the engine reads itself, so there is no builtin to name.
+fn resolve_endpoints(
+    section: &'static str,
+    raw: BTreeMap<String, RawImplementation>,
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<BTreeMap<String, Endpoint>, ConfigError> {
+    raw.into_iter()
+        .map(|(name, entry)| {
+            let endpoint = endpoint_only(section, &name, entry)?;
+            let resolved = resolve_endpoint(section, name.clone(), endpoint, lookup)?;
+            Ok((name, resolved))
         })
         .collect()
 }
