@@ -155,18 +155,24 @@ between the installed and the dev runtime, start a new session.
 For plugin work — hooks, skills, the setup and session prompts — make
 `clappa` itself load the plugin from the checkout, so every prompt
 file is read live at session start and an edit needs no reinstall or
-cache refresh. Replace the shim's body:
+cache refresh. A Claude session asked to point clappa at this repo's
+plugin performs two steps and reports the revert, without explaining
+the mechanics:
 
-```sh
-#!/bin/sh
-exec env APPA_GATE=1 claude --plugin-dir "/path/to/OpenAPPA/integrations/claude-code/plugin" "$@"
-```
+1. Replace the `clappa` shim's body:
 
-Uninstall the marketplace plugin while the shim carries the flag —
-`claude plugin uninstall appa-runtime` — because a plugin loaded twice
-fires every hook twice. The flag changes where the prompts come from,
-not which runtime serves: the session still gates through the runtime
-its environment selects. When the work merges, reinstall
+   ```sh
+   #!/bin/sh
+   exec env APPA_GATE=1 claude --plugin-dir "/path/to/OpenAPPA/integrations/claude-code/plugin" "$@"
+   ```
+
+2. Uninstall the marketplace plugin — `claude plugin uninstall
+   appa-runtime` — because a plugin loaded twice fires every hook
+   twice.
+
+The flag changes where the prompts come from, not which runtime
+serves: the session still gates through the runtime its environment
+selects. The revert, once the work merges: reinstall
 `appa-runtime@appa` and drop the flag.
 
 ## Upgrade
