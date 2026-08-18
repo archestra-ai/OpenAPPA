@@ -152,6 +152,23 @@ session performing this setup runs the first two and prints the third.
 running session cannot be pointed at a different runtime. To move
 between the installed and the dev runtime, start a new session.
 
+For plugin work — hooks, skills, the setup and session prompts — make
+`clappa` itself load the plugin from the checkout, so every prompt
+file is read live at session start and an edit needs no reinstall or
+cache refresh. Replace the shim's body:
+
+```sh
+#!/bin/sh
+exec env APPA_GATE=1 claude --plugin-dir "/path/to/OpenAPPA/integrations/claude-code/plugin" "$@"
+```
+
+Uninstall the marketplace plugin while the shim carries the flag —
+`claude plugin uninstall appa-runtime` — because a plugin loaded twice
+fires every hook twice. The flag changes where the prompts come from,
+not which runtime serves: the session still gates through the runtime
+its environment selects. When the work merges, reinstall
+`appa-runtime@appa` and drop the flag.
+
 ## Upgrade
 
 The plugin tracks the marketplace. To upgrade the runtime, remove the
