@@ -903,8 +903,9 @@ impl Engine {
         expansions: &Expansions,
     ) -> Result<EngineDecision, TransitionError> {
         // Required here rather than at each caller: the ask carries every applicable cast, and a
-        // constant is read whole to reach the runtime already resolved.
-        expansions.require(&plan::cast_selection_groups(&self.registry))?;
+        // constant is read whole to reach the runtime already resolved. Only the constants whose
+        // scope reaches this value are read, so an unrelated one raises no consult.
+        expansions.require(&plan::constant_groups_reaching(&self.registry, views, value))?;
         let (casts, body) = plan::castable_sources(&self.registry, views, value, expansions)
             .expect("a resolvable source retains its bytes and the cast the caller selected");
         let append = match facts.is_empty() {
@@ -2057,14 +2058,14 @@ impl Engine {
         if unestablished.is_empty() {
             return Ok(Vec::new());
         }
-        expansions.require(&plan::cast_selection_groups(&self.registry))?;
-        Ok(unestablished
-            .into_iter()
-            .filter_map(|value| {
-                plan::castable_sources(&self.registry, &views, value, expansions)
-                    .map(|(casts, body)| EvidenceRequest::Cast { casts, value, body })
-            })
-            .collect())
+        let mut requests = Vec::new();
+        for value in unestablished {
+            expansions.require(&plan::constant_groups_reaching(&self.registry, &views, value))?;
+            if let Some((casts, body)) = plan::castable_sources(&self.registry, &views, value, expansions) {
+                requests.push(EvidenceRequest::Cast { casts, value, body });
+            }
+        }
+        Ok(requests)
     }
 
     fn seal_admissions(
@@ -14176,6 +14177,66 @@ mod tests {
             let mut json = serde_json::to_value(fact).expect("a fact serializes");
             json["ValueAdmitted"]["provenance"]["ProviderRun"]["resolutions"] = resolutions;
             serde_json::from_value(json)
+        }
+
+        /// Selection routes by scope, and scope needs no directory. A constant scoped away from
+        /// this value is not read, so its group never becomes a question the blocked call has to
+        /// answer before its own cast can be asked for.
+        #[test]
+        fn a_constant_scoped_elsewhere_raises_no_membership_for_the_call_it_cannot_reach() {
+            let mut read = plain_tool("read_web");
+            read.tags = vec![crate::names::TagName::new("web")];
+            read.delta = None;
+            let mut elsewhere_read = plain_tool("read_files");
+            elsewhere_read.tags = vec![crate::names::TagName::new("files")];
+            elsewhere_read.delta = None;
+            let mut send = plain_tool("send");
+            send.requires = Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(TRUSTED),
+                    audience: vec![],
+                },
+                ..Requires::default()
+            };
+            let mut cfg = config(vec![read, elsewhere_read, send], vec![]);
+            cfg.casts = vec![
+                resolver_cast(
+                    "web-classifier",
+                    vec![SUSPICIOUS, TRUSTED],
+                    vec![crate::names::TagName::new("web")],
+                ),
+                crate::authority::Cast {
+                    name: crate::names::CastName::new("elsewhere"),
+                    resolution: crate::authority::CastResolution::Constant(crate::authority::DeclaredLabel {
+                        trust: SUSPICIOUS,
+                        audience: grouped(&[], &["team"]),
+                    }),
+                    scope: crate::authority::Scope {
+                        tags: vec![crate::names::TagName::new("files")],
+                    },
+                },
+            ];
+            let e = grouped_engine(cfg, &[], known(TRUSTED, Audience::Public));
+            let mut log = vec![opened(&e)];
+            reads(&e, &mut log, &traj(), "read_web");
+
+            let asked = e
+                .handle(
+                    &viewing(&e, &log),
+                    batch_with("b-scoped", vec![], vec![raw(&call("send", json!({})))], vec![]),
+                )
+                .expect("no membership stands between the block and the cast that clears it");
+            assert!(
+                matches!(
+                    &asked.follow_up,
+                    FollowUp::ProposalsResolve(requests)
+                        if requests.len() == 1
+                            && matches!(&requests[0], EvidenceRequest::Cast { casts, .. }
+                                if casts.iter().map(|cast| cast.name.as_str()).eq(["web-classifier"]))
+                ),
+                "only the cast whose scope reaches the value is asked: {:?}",
+                asked.follow_up
+            );
         }
 
         #[test]

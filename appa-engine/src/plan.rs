@@ -1083,6 +1083,27 @@ pub(crate) fn return_stage_groups(registry: &Registry, lineage: &SanitizerLineag
     groups
 }
 
+/// The groups selecting a cast for `value` reads: the declared audience of every constant cast
+/// whose scope reaches it. Scope routing needs no directory answer, so narrowing by it first
+/// keeps a constant scoped elsewhere from pulling a membership consult into a decision its
+/// answer cannot affect.
+pub(crate) fn constant_groups_reaching(
+    registry: &Registry,
+    views: &Views,
+    value: crate::value::ValueId,
+) -> Vec<GroupName> {
+    registry
+        .casts()
+        .iter()
+        .filter(|cast| cast.scope.reaches(registry, views, value).unwrap_or(false))
+        .filter_map(|cast| match &cast.resolution {
+            crate::authority::CastResolution::Constant(constant) => Some(constant.audience.groups().cloned()),
+            crate::authority::CastResolution::Resolver { .. } => None,
+        })
+        .flatten()
+        .collect()
+}
+
 pub(crate) fn cast_selection_groups(registry: &Registry) -> Vec<GroupName> {
     registry
         .casts()
