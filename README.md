@@ -8,7 +8,7 @@ claude plugin marketplace add archestra-ai/OpenAPPA &&
   claude "set up APPA"
 ```
 
-`clappa` starts a gated session; plain `claude` stays ungated.
+`clappa` starts a protected session; plain `claude` stays unprotected.
 
 ## Setup
 
@@ -42,7 +42,7 @@ claude "set up APPA from this repo for local development"
 ```
 
 Claude starts the dev runtime from source on its own port and prints
-the command that starts a gated session against it. The steps live in
+the command that starts a protected session against it. The steps live in
 the [integration guide](integrations/claude-code/README.md).
 
 ## Documentation

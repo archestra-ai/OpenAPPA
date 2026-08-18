@@ -1,10 +1,10 @@
 #!/bin/sh
 # Starts the installed appa-runtime-v2 when no healthy runtime answers.
-# SessionStart runs this before the gate posts its first event, so a gated
-# session works without a login service. Exit 0 means a healthy runtime
-# answers; any other exit makes the chained gate hook block.
-# Installing the binary is not this script's job: an ungated session offers
-# that as a prompted task (hooks/setup-appa.md).
+# SessionStart runs this before the hooks post their first event, so a
+# protected session works without a login service. Exit 0 means a healthy
+# runtime answers; any other exit makes the chained protection hook block.
+# Installing the binary is not this script's job: an unprotected session
+# offers that as a prompted task (hooks/setup-appa.md).
 #
 # The lock only serializes concurrent SessionStarts during the poll window:
 # whichever session creates it spawns the runtime, the others wait on
@@ -37,7 +37,7 @@ expected_binary=${APPA_INSTALL_DIR:-"$HOME/.local/bin"}/appa-runtime-v2
 binary=$expected_binary
 if [ ! -x "$binary" ]; then
   binary=$(command -v appa-runtime-v2 2>/dev/null) || {
-    printf 'appa gate: appa-runtime-v2 is not installed; expected at %s. Run in a plain terminal: claude "set up APPA"\n' \
+    printf 'appa protection: appa-runtime-v2 is not installed; expected at %s. Run in a plain terminal: claude "set up APPA"\n' \
       "$expected_binary" >&2
     exit 1
   }
@@ -60,5 +60,5 @@ while [ "$attempts" -lt 15 ]; do
   attempts=$((attempts + 1))
   sleep 1
 done
-printf 'appa gate: runtime did not become healthy at %s\n' "$runtime_url" >&2
+printf 'appa protection: runtime did not become healthy at %s\n' "$runtime_url" >&2
 exit 1

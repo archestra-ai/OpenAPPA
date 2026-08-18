@@ -71,10 +71,10 @@ the process loads; `claude-code` is the default and the only one
 today.
 
 Start the process before the session. While it is down, every action
-in a gated session is blocked, and that cannot be automated from
+in a protected session is blocked, and that cannot be automated from
 inside the session — the session's own commands are blocked too.
 
-### 4. Gate a session
+### 4. Protect a session
 
 The Claude Code integration — the plugin, the statusline, the example
 policies, and the install and uninstall instructions — lives in
@@ -82,7 +82,7 @@ policies, and the install and uninstall instructions — lives in
 
 ### 5. See it work
 
-Run a gated session and use it normally. With `-v` on the process you
+Run a protected session and use it normally. With `-v` on the process you
 see every hook arrive and every decision go out. The database shows
 what was recorded:
 
@@ -100,8 +100,8 @@ without SQL, and are the supported way to look.
 
 - **A changed policy is a new deployment.** Edit `[policy]` and the
   old database refuses to open; use a fresh `--db` path.
-- **Stopping the process blocks gated sessions.** That is the design,
-  not a fault. Uninstall the plugin if you want ungated sessions back.
+- **Stopping the process blocks protected sessions.** That is the design,
+  not a fault. Uninstall the plugin if you want unprotected sessions back.
 - **The directory's `CLAUDE.md`** describes the layout: the process
   (`runtime/`), the shared vocabulary (`api/`), and the Claude Code
   adapter (`adapters/claude-code/`).

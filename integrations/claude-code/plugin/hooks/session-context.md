@@ -1,4 +1,4 @@
-This session runs behind an APPA gate. The gate checks every tool call against a flow policy before it runs.
+This session is protected by APPA. APPA checks every tool call against a flow policy before it runs.
 
 - A block is a policy decision, not an error. Do not retry the blocked call. Do not route around it.
 - If the block offers remedy plans and one clearly fits the task, run it with the `execute_remedy_plan` tool and continue. Do not ask the human first. Ask only when the choice between plans is ambiguous.

@@ -1,4 +1,4 @@
-# Example deployment for gating a Claude Code session.
+# Example deployment for protecting a Claude Code session.
 #
 # Every built-in tool of the harness is named: a tool the policy does
 # not name is blocked, and a named tool without a `delta` key has its
