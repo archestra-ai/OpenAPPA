@@ -25,32 +25,14 @@ APPA again; it installs the latest release.
 ## Uninstall
 
 ```sh
-claude "uninstall APPA: uninstall the appa-runtime plugin, remove the appa
-plugin marketplace, delete appa-runtime-v2, clappa, and appa-statusline.sh
-from ~/.local/bin, and in ~/.claude/settings.json delete the statusLine
-entry only if it runs appa-statusline.sh — if it chains other commands,
-remove just the appa part"
-```
-
-Optionally, also remove the policy, database, and alias:
-
-```sh
-claude "finish removing APPA: delete the appa config and data directories,
-and remove the clappa alias from my shell rc if present"
-```
-
-To uninstall manually instead:
-
-```sh
 claude plugin uninstall appa-runtime
 claude plugin marketplace remove appa
 rm ~/.local/bin/appa-runtime-v2 ~/.local/bin/clappa ~/.local/bin/appa-statusline.sh
 
-# optional — also remove the policy, database, alias, and statusline:
+# optional — also remove the policy, database, and alias:
 rm -rf ~/.config/appa ~/.local/share/appa      # Linux
 rm -rf ~/Library/"Application Support/appa"    # macOS
 sed -i.bak '/clappa/d' ~/.zshrc                # alias fallback only
-jq 'del(.statusLine)' ~/.claude/settings.json > /tmp/s.json && mv /tmp/s.json ~/.claude/settings.json
 ```
 
 ## Development
