@@ -7,6 +7,8 @@ description: Putting OpenAPPA between Claude Code and its tools.
 
 This page describes how to run Claude Code with OpenAPPA. OpenAPPA integrates with Claude Code as a plugin; while it is in beta, the plugin ships a `clappa` command that runs Claude Code protected by OpenAPPA.
 
+![A protected Claude Code session refuses to post content from a private meeting recording to a public GitHub repo, and explains why](/images/claude-code-blocked-flow.png)
+
 ## Install
 
 ```sh
