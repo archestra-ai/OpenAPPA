@@ -166,12 +166,22 @@ port keeps serving, and the new binary would never run.
 claude plugin uninstall appa-runtime
 claude plugin marketplace remove appa
 pkill -f appa-runtime-v2
-rm ~/.local/bin/appa-runtime-v2
+rm ~/.local/bin/appa-runtime-v2 ~/.local/bin/clappa ~/.local/bin/appa-statusline.sh
+
+# drop the statusline entry the setup wrote, and keep one of your own:
+jq 'if (.statusLine.command? // "") | test("appa-statusline") then del(.statusLine) else . end' \
+  ~/.claude/settings.json > ~/.claude/settings.json.new &&
+  mv ~/.claude/settings.json.new ~/.claude/settings.json
 ```
 
+The setup writes the `statusLine` entry into your own settings, so
+removing the script alone leaves Claude Code running a command that no
+longer exists. The `jq` line removes that entry only while it runs
+`appa-statusline.sh`, so a statusline of your own survives untouched.
+
 The policy and database stay at the locations in the table above; delete
-them only if you want the history gone. Remove a `clappa` alias or a
-statusline setting separately if you created them.
+them only if you want the history gone. Remove a `clappa` shell alias
+separately if you added one instead of the command.
 
 ## Statusline, manually
 
