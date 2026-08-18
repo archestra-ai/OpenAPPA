@@ -38,14 +38,13 @@ sed -i.bak '/clappa/d' ~/.zshrc                # alias fallback only
 ## Development
 
 ```sh
-claude "set up APPA from this repo for local development"   # runtime work
-claude "point clappa at this repo's plugin"                 # plugin work
+claude "set up APPA from this repo for local development"
 ```
 
-The first starts the dev runtime from source on its own port and
-prints the command that starts a protected session against it. The
-second makes protected sessions read the plugin's prompt files live
-from the checkout. The steps for both live in the
+Claude starts the dev runtime from source on its own port, points
+`clappa` at the checkout's plugin so protected sessions read the
+prompt files live, and prints the command that starts a protected
+session against the dev runtime. The steps live in the
 [integration guide](integrations/claude-code/README.md).
 
 ## Documentation
