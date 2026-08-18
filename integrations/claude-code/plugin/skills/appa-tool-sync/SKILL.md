@@ -55,15 +55,17 @@ Short sentences. Plain words. No jargon.
 
 ## Phase 1 — inventory
 
-Two tool calls in most sessions: one shell call for the process and
-the server list together, one read of the config. The tool surface —
-the wire names and descriptions — is already in your context; do not
-re-probe it.
+Two tool calls in most sessions: one shell call for the runtime
+process, one read of the config. The tool surface — wire names,
+descriptions, which servers answered, which need auth — is already in
+your context; do not re-probe it. Run `claude mcp list` only when the
+context leaves a server's state genuinely unclear: it health-probes
+every server and waits out the timeouts of the dead ones.
 
 Find the runtime and its config:
 
 ```sh
-ps ax -o command | grep appa-runtime-v2 | grep -v grep; claude mcp list
+ps ax -o command | grep appa-runtime-v2 | grep -v grep
 ```
 
 Take the `--config` path from the command line. A process started
