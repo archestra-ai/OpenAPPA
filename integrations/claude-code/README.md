@@ -51,7 +51,10 @@ plain `claude` session offers to install it (`hooks/setup-appa.md`) —
 download the release archive for the current system, verify its SHA-256
 against the release `SHA256SUMS` and its version against `version.txt`,
 and place the binary — each step under the session's normal command
-approval. While the repository is private, run
+approval. The last step starts the runtime through the plugin's own
+starter and reports the answer `/health` gave, so the install ends with a
+process that has actually run on this machine, the default policy written,
+and no start left for the first protected session to pay for. While the repository is private, run
 `gh auth login && gh auth setup-git` first.
 
 Linux binaries require glibc 2.34 or newer. Alpine and other musl-only
@@ -107,8 +110,9 @@ start, that the beta is available and `clappa` starts a protected
 session.
 
 A protected session starts the installed runtime at SessionStart when
-nothing healthy answers `/health`, then blocks every action while the
-runtime is unavailable. When the binary is not installed at all, an
+nothing healthy answers `/health` — normally a no-op, because the install
+left it running — then blocks every action while the runtime is
+unavailable. When the binary is not installed at all, an
 unprotected session installs it as a prompted task: its session context
 (`hooks/setup-appa.md`) has the model offer the setup and, on request,
 download the release archive for the current system, verify its
@@ -150,9 +154,11 @@ between the installed and the dev runtime, start a new session.
 
 ## Upgrade
 
-The plugin tracks the marketplace. To upgrade the runtime, remove the
-binary from the location in the table above and ask a plain `claude`
-session to set up APPA again; it installs the latest release.
+The plugin tracks the marketplace. To upgrade the runtime, stop the
+running one, remove the binary from the location in the table above, and
+ask a plain `claude` session to set up APPA again; it installs the latest
+release and starts it. Stop it first: a runtime already answering on the
+port keeps serving, and the new binary would never run.
 
 ## Uninstall
 
