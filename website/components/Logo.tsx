@@ -214,6 +214,94 @@ export function Logo({ height = 15 }: { height?: number | string }) {
   );
 }
 
+/* The same arrangement as `Logo`, drawn as one SVG instead of three boxes held
+   together by CSS — which is what makes it a file you can hand someone. The
+   CSS lockup's proportions are restated here in the wordmark's own units, with
+   one cap height as the unit, so the two stay the same shape. No tagline: the
+   asset outlives whatever status line the site is carrying this month. */
+export function PixelLockup({
+  capHeight = 30,
+  className,
+  style,
+}: {
+  /** Cap height in px; the whole lockup scales from it. */
+  capHeight?: number;
+  className?: string;
+  style?: CSSProperties;
+}) {
+  // Whole units throughout: the CSS proportions land on fractions, and a
+  // viewBox of `0 -20.61111 640.3333 111.2222` is a poor thing to hand
+  // someone. Rounding moves the mark by less than a third of one of its own
+  // pixels.
+  const unit = CAP_ROWS * CELL; // one cap height, in wordmark units
+  const markWidth = Math.round((26 / 15) * unit); // .logo-mark: --logo-h * 26/15
+  const markHeight = Math.round((markWidth * MARK_ROWS) / MARK_COLS);
+  const wordHeight = ROWS * CELL;
+  const { pixels, width: wordWidth } = layoutWord("OpenAPPA");
+  const wordX = markWidth + Math.round(0.7 * unit); // .logo-lockup: gap = --logo-h * 0.7
+  // Centred on the word box, then lifted a row so it centres on the caps.
+  const markY = Math.round((wordHeight - markHeight) / 2 - unit / 7);
+
+  const top = Math.min(0, markY);
+  const height = Math.max(wordHeight, markY + markHeight) - top;
+  const width = wordX + wordWidth;
+  const scale = markWidth / MARK_COLS;
+
+  const body: ReactNode[] = [];
+  const eyes: ReactNode[] = [];
+  BEAST.forEach((row, y) => {
+    for (let x = 0; x < MARK_COLS; x++) {
+      const cell = row[x];
+      if (cell === ".") continue;
+      // An eye is the background colour painted over fur, so the body pixel
+      // underneath has to be there for the blink to reveal something.
+      if (cell === "4") {
+        body.push(<rect key={`u${x}-${y}`} x={x} y={y} width={1} height={1} fill={MARK_FILL["1"]} />);
+      }
+      const rect = <rect key={`${x}-${y}`} x={x} y={y} width={1} height={1} fill={MARK_FILL[cell]} />;
+      (cell === "4" ? eyes : body).push(rect);
+    }
+  });
+
+  return (
+    <svg
+      viewBox={`0 ${top} ${width} ${height}`}
+      width={(capHeight * width) / unit}
+      height={(capHeight * height) / unit}
+      className={className}
+      style={style}
+      shapeRendering="crispEdges"
+      role="img"
+      aria-label="OpenAPPA"
+    >
+      {/* Two groups, not one: the float animation animates `transform`, and a
+          CSS transform overrides the attribute it lands on — putting both on
+          one group silently drops the scale and the mascot renders at a fifth
+          of its size. The outer group places it; the inner one moves. */}
+      <g transform={`translate(0 ${markY}) scale(${scale})`}>
+        <g className="appa-mark-float">
+          {body}
+          {/* Same group and class as the standalone mark, so the lockup blinks
+              on the page and the GIF export finds the eyes to close. */}
+          <g className="appa-mark-eyes">{eyes}</g>
+        </g>
+      </g>
+      <g transform={`translate(${wordX} 0)`}>
+        {pixels.map(({ x, y, dim }) => (
+          <rect
+            key={`w${x}-${y}`}
+            x={x * CELL}
+            y={y * CELL}
+            width={CELL}
+            height={CELL}
+            fill={dim ? "var(--text-weak)" : "currentColor"}
+          />
+        ))}
+      </g>
+    </svg>
+  );
+}
+
 /** Raw pixel grid of the wordmark, for canvas renderers (e.g. tutorial figures). */
 export function logoPixelData() {
   const { pixels, width } = layoutWord("OpenAPPA");
