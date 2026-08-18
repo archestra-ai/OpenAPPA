@@ -7,8 +7,8 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use appa_engine::authority::{
-    Authority, Cast, CastResolution, DeclaredLabel, DeclaredTransition, Hint, Mandate, Sanitizer, SanitizerPoints,
-    Scope,
+    Authority, Cast, CastCeiling, CastResolution, DeclaredLabel, DeclaredTransition, Hint, Mandate, Sanitizer,
+    SanitizerPoints, Scope,
 };
 use appa_engine::contract::{
     AudienceDelta, AudienceRequirement, Delta, DynamicAudienceBinding, HistoryRequirement, LabelRequirements,
@@ -795,7 +795,7 @@ struct RawIncludes {
 struct RawCast {
     name: String,
     constant: Option<RawConstantLabel>,
-    resolver: Option<toml::Value>,
+    resolver: Option<RawCastResolver>,
     #[serde(default)]
     scope: RawScope,
 }
@@ -803,24 +803,77 @@ struct RawCast {
 impl RawCast {
     fn convert(self, chain: &TrustChain) -> Result<Cast, ConfigError> {
         let ctx = format!("cast {}", self.name);
-        if self.resolver.is_some() {
-            return Err(ConfigError::ForbiddenInlineBinding {
-                kind: "cast",
-                name: self.name,
-            });
-        }
         let scope = Scope {
             tags: self.scope.tags.into_iter().map(TagName::new).collect(),
         };
-        match self.constant {
-            Some(constant) => Ok(Cast {
-                name: CastName::new(self.name),
-                resolution: CastResolution::Constant(constant.convert(chain, &ctx)?),
-                scope,
-            }),
-            None => Err(bad_impl("cast", &self.name, "declares no constant")),
-        }
+        let resolution = match (self.constant, self.resolver) {
+            (Some(_), Some(_)) => {
+                return Err(bad_impl(
+                    "cast",
+                    &self.name,
+                    "declares both a constant and a resolver — a cast resolves one way or the other",
+                ));
+            }
+            (Some(constant), None) => CastResolution::Constant(constant.convert(chain, &ctx)?),
+            (None, Some(resolver)) => CastResolution::Resolver {
+                may_cast: resolver.convert(chain, &self.name)?,
+            },
+            (None, None) => return Err(bad_impl("cast", &self.name, "declares neither a constant nor a resolver")),
+        };
+        Ok(Cast {
+            name: CastName::new(self.name),
+            resolution,
+            scope,
+        })
     }
+}
+
+/// A resolver-backed cast as the policy writes it: the ceiling only. The endpoint binds
+/// at the deployment, so any binding key here is refused like every other inline binding.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCastResolver {
+    may_cast: RawMayCast,
+    url: Option<toml::Value>,
+    builtin: Option<toml::Value>,
+    token_env: Option<toml::Value>,
+}
+
+impl RawCastResolver {
+    fn convert(self, chain: &TrustChain, name: &str) -> Result<CastCeiling, ConfigError> {
+        if self.url.is_some() || self.builtin.is_some() || self.token_env.is_some() {
+            return Err(ConfigError::ForbiddenInlineBinding {
+                kind: "cast",
+                name: name.to_string(),
+            });
+        }
+        let ctx = format!("cast {name} may_cast");
+        Ok(CastCeiling {
+            trust: self
+                .may_cast
+                .trust
+                .iter()
+                .map(|rank| parse_trust(rank, chain, &ctx))
+                .collect::<Result<_, _>>()?,
+            audience: parse_declared_audience(&self.may_cast.audience.cap, &ctx)?,
+        })
+    }
+}
+
+/// The complete product ceiling: the trust ranks a resolver may grant, and the cap its
+/// resolved audience must stay within. An empty `trust` admits no unresolved trust at all.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMayCast {
+    #[serde(default)]
+    trust: Vec<String>,
+    audience: RawCap,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCap {
+    cap: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -1018,7 +1071,7 @@ confined_results = ["lookup"]
             ),
             (
                 "cast",
-                "version = 1\n[[cast]]\nname = \"c\"\nresolver = { url = \"https://cast.invalid\", may_cast = { trust = [\"trusted\"] } }\n",
+                "version = 1\n[[cast]]\nname = \"c\"\nresolver = { url = \"https://cast.invalid\", may_cast = { trust = [\"trusted\"], audience = { cap = [\"public\"] } } }\n",
             ),
             (
                 "membership resolver",
@@ -1032,6 +1085,58 @@ confined_results = ["lookup"]
                     Err(ConfigError::ForbiddenInlineBinding { kind: found, .. }) if found == kind
                 ),
                 "{kind} inline binding was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_resolver_cast_registers_the_ceiling_the_policy_declares() {
+        let policy = "version = 1\n\
+             [[tool]]\nname = \"fetch\"\ntags = [\"web\"]\n\
+             [[cast]]\nname = \"content-classifier\"\n\
+             resolver = { may_cast = { trust = [\"suspicious\"], audience = { cap = [\"public\"] } } }\n\
+             [cast.scope]\ntags = [\"web\"]\n";
+        let config = Config::from_toml_str(policy).expect("a resolver cast loads");
+        let cast = config
+            .registry()
+            .cast(&CastName::new("content-classifier"))
+            .expect("content-classifier registers");
+        match &cast.resolution {
+            CastResolution::Resolver { may_cast } => {
+                assert_eq!(may_cast.trust, vec![Trust::new(0)]);
+                assert_eq!(may_cast.audience, DeclaredAudience::Public);
+            }
+            other => panic!("expected a resolver ceiling, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_may_cast_omitting_trust_admits_no_unresolved_trust() {
+        let policy = "version = 1\n\
+             [[tool]]\nname = \"fetch\"\ndelta = { audience = \"unknown\" }\n\
+             [[cast]]\nname = \"audience-only\"\n\
+             resolver = { may_cast = { audience = { cap = [\"public\"] } } }\n\
+             [deployment]\nconfined_results = [\"fetch\"]\n";
+        let config = Config::from_toml_str(policy).expect("an audience-only ceiling loads");
+        assert!(matches!(
+            &config.registry().cast(&CastName::new("audience-only")).expect("it registers").resolution,
+            CastResolution::Resolver { may_cast } if may_cast.trust.is_empty()
+        ));
+    }
+
+    #[test]
+    fn a_cast_declaring_both_forms_or_neither_is_refused() {
+        let both = "version = 1\n[[cast]]\nname = \"c\"\n\
+             constant = { trust = \"suspicious\", audience = { exactly = [\"public\"] } }\n\
+             resolver = { may_cast = { trust = [\"trusted\"], audience = { cap = [\"public\"] } } }\n";
+        let neither = "version = 1\n[[cast]]\nname = \"c\"\n";
+        for (case, policy) in [("both", both), ("neither", neither)] {
+            assert!(
+                matches!(
+                    Config::from_toml_str(policy),
+                    Err(ConfigError::BadImplementation { kind: "cast", .. })
+                ),
+                "a cast declaring {case} must be refused"
             );
         }
     }
