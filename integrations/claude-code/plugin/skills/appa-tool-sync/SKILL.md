@@ -200,4 +200,4 @@ resolver is a running process: name the restart command, because after
 a reboot its tools' reads are blocked until it is back. And a session
 keeps the policy it started with, so the tools you just added do not
 work in the session that added them — name `clappa`, since only
-sessions started with it are gated.
+sessions started with it are protected.
