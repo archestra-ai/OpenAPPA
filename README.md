@@ -182,6 +182,11 @@ claude plugin marketplace remove appa
 pkill -f appa-runtime-v2
 rm ~/.local/bin/appa-runtime-v2 ~/.local/bin/clappa ~/.local/bin/appa-statusline.sh
 
+# drop the statusline entry the setup wrote, and keep one of your own:
+jq 'if (.statusLine.command? // "") | test("appa-statusline") then del(.statusLine) else . end' \
+  ~/.claude/settings.json > ~/.claude/settings.json.new &&
+  mv ~/.claude/settings.json.new ~/.claude/settings.json
+
 # optional — also remove the policy, database, and alias:
 rm -rf ~/.config/appa ~/.local/share/appa      # Linux
 rm -rf ~/Library/"Application Support/appa"    # macOS

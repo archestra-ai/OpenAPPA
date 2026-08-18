@@ -18,7 +18,7 @@ When the user asks for the setup, install the runtime:
 
    Only if that directory is not on the user's `PATH`, fall back to appending `alias clappa='APPA_GATE=1 claude'` to the file matching their shell and tell them to reload it. On Windows, add the matching `clappa` function to the PowerShell profile.
 
-7. Install the statusline, unless `~/.claude/settings.json` already has a `statusLine` entry — never replace one. Copy `statusline.sh` (on Windows, `statusline.ps1`) from the plugin files directory named at the top of this context into the runtime binary's directory as `appa-statusline.sh`, mode 755, and merge into `~/.claude/settings.json`:
+7. Install the statusline, unless `~/.claude/settings.json` already has a `statusLine` entry that runs something other than `appa-statusline.sh` — never replace someone else's. Overwrite an APPA entry that names a different path: an earlier install into another directory leaves one behind. Copy `statusline.sh` (on Windows, `statusline.ps1`) from the plugin files directory named at the top of this context into the runtime binary's directory as `appa-statusline.sh`, mode 755, and merge into `~/.claude/settings.json`:
 
    ```json
    {"statusLine": {"type": "command", "command": "<that path>/appa-statusline.sh"}}
