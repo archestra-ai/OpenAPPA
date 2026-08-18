@@ -1,15 +1,24 @@
 #!/bin/sh
 # The APPA statusline: the pixel mascot, plus the root trajectory's
-# current Trust and Audience from the runtime's /status read.
+# current Trust and Audience from the runtime's /status read, plus
+# policy statistics from the deployment's appa.toml.
 #
 # The mark is the website mascot as half blocks — solid pixels, eyes
 # as terminal-background gaps, like the SVG. The chips render the
 # statusline's stdin `session_id` mapped to the trajectory the Claude
 # Code adapter names, `cc:<session_id>`.
 #
+# The second row counts the policy's tools: `tools:` is every
+# [[policy.tool]] entry, `rules:` the entries carrying more than the
+# neutral annotation (bare `name` plus `delta = {}`), and the hint
+# names the skill that adds rules. The policy path is the platform
+# default under APPA_CONFIG_DIR's rules; a runtime started with a
+# different --config shows that file's counts or none.
+#
 # A statusline fails open, the opposite of the hooks' `|| exit 2`:
 # every failure — runtime down, unknown trajectory, missing jq or
-# curl, malformed stdin — prints the mascot alone and exits 0.
+# curl, malformed stdin, unreadable policy — prints the mascot alone
+# and exits 0.
 #
 # An unprotected session (no APPA_GATE=1) never queries the runtime; it
 # prints the mascot with a reminder that clappa starts a protected
@@ -30,9 +39,36 @@ if command -v jq >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
         | "trust:\(.trust)  audience:\(.audience)"' 2>/dev/null) ||
     chips=''
 fi
-if [ -n "$chips" ]; then
-  printf '▄█▄▄▄█▄  %s\n██▄█▄██\n' "$chips"
-else
-  printf '▄█▄▄▄█▄\n██▄█▄██\n'
+
+case "$(uname -s)" in
+  Darwin) config_dir=${APPA_CONFIG_DIR:-"$HOME/Library/Application Support/appa"} ;;
+  *) config_dir=${APPA_CONFIG_DIR:-"${XDG_CONFIG_HOME:-$HOME/.config}/appa"} ;;
+esac
+stats=''
+if [ -f "$config_dir/appa.toml" ] && command -v awk >/dev/null 2>&1; then
+  stats=$(awk '
+    /^\[\[policy\.tool\]\]/ { if (intool && tuned) rules++; total++; intool=1; tuned=0; next }
+    /^\[policy\.tool\./ { if (intool) tuned=1; next }
+    /^\[/ { if (intool && tuned) rules++; intool=0; next }
+    intool && /^[A-Za-z_]+[ \t]*=/ {
+      key=$1
+      if (key == "name") next
+      if (key == "delta") {
+        line=$0; sub(/^[^=]*=[ \t]*/, "", line)
+        if (line ~ /^\{[ \t]*\}[ \t]*$/) next
+      }
+      tuned=1
+    }
+    END {
+      if (intool && tuned) rules++
+      if (total > 0) printf "tools:%d rules:%d", total, rules
+    }
+  ' "$config_dir/appa.toml" 2>/dev/null) || stats=''
 fi
+
+top='▄█▄▄▄█▄'
+bottom='██▄█▄██'
+[ -z "$chips" ] || top="$top  $chips"
+[ -z "$stats" ] || bottom="$bottom  $stats · /appa-tool-sync adds rules"
+printf '%s\n%s\n' "$top" "$bottom"
 exit 0

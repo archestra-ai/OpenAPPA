@@ -172,9 +172,12 @@ statusline setting separately if you created them.
 Claude Code reads `statusLine` only from your own settings — a plugin
 cannot set it. In a protected session the script shows the APPA pixel
 mascot plus the session's current Trust and Audience, read from the
-process's `GET /status`. In an unprotected session it shows the mascot
-with a reminder that `clappa` starts a protected session, and never
-queries the
+process's `GET /status`, and a second row with the policy's tool
+counts: `tools:` is every `[[policy.tool]]` entry in the deployment's
+`appa.toml`, `rules:` the entries carrying more than the neutral
+annotation, and the row names `/appa-tool-sync` as the skill that adds
+rules. In an unprotected session it shows the mascot with a reminder
+that `clappa` starts a protected session, and never queries the
 runtime. Both platform scripts fail open: runtime down, unknown
 trajectory, or malformed input prints the mascot alone, never a blocked
 action. The POSIX script also needs `jq` and `curl`.

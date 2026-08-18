@@ -3,6 +3,46 @@ $fullBlock = [char]0x2588
 $mascotTop = "$lowerHalf$fullBlock$lowerHalf$lowerHalf$lowerHalf$fullBlock$lowerHalf"
 $mascotBottom = "$fullBlock$fullBlock$lowerHalf$fullBlock$lowerHalf$fullBlock$fullBlock"
 
+# Counts the policy's tools: every [[policy.tool]] entry, and the entries
+# carrying more than the neutral annotation (bare name plus delta = {}).
+# Mirrors statusline.sh; any parse failure returns nothing (fail open).
+function Get-PolicyStats {
+    $configDir = if ($env:APPA_CONFIG_DIR) { $env:APPA_CONFIG_DIR } else { Join-Path $env:APPDATA "appa" }
+    $policy = Join-Path $configDir "appa.toml"
+    if (-not (Test-Path -LiteralPath $policy)) {
+        return $null
+    }
+    try {
+        $total = 0; $rules = 0; $inTool = $false; $tuned = $false
+        foreach ($line in (Get-Content -LiteralPath $policy)) {
+            if ($line -match '^\[\[policy\.tool\]\]') {
+                if ($inTool -and $tuned) { $rules++ }
+                $total++; $inTool = $true; $tuned = $false
+                continue
+            }
+            if ($line -match '^\[policy\.tool\.') {
+                if ($inTool) { $tuned = $true }
+                continue
+            }
+            if ($line -match '^\[') {
+                if ($inTool -and $tuned) { $rules++ }
+                $inTool = $false
+                continue
+            }
+            if ($inTool -and $line -match '^([A-Za-z_]+)[ \t]*=[ \t]*(.*)$') {
+                $key = $Matches[1]
+                if ($key -eq "name") { continue }
+                if ($key -eq "delta" -and $Matches[2] -match '^\{[ \t]*\}[ \t]*$') { continue }
+                $tuned = $true
+            }
+        }
+        if ($inTool -and $tuned) { $rules++ }
+        if ($total -gt 0) { "tools:$total rules:$rules" } else { $null }
+    } catch {
+        $null
+    }
+}
+
 try {
     [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
     if ($env:APPA_GATE -ne "1") {
@@ -28,9 +68,14 @@ try {
     }
 
     Write-Output "$mascotTop  trust:$($status.trust)  audience:$($status.audience)"
-    Write-Output $mascotBottom
 } catch {
     Write-Output $mascotTop
+}
+
+$stats = Get-PolicyStats
+if ($stats) {
+    Write-Output "$mascotBottom  $stats · /appa-tool-sync adds rules"
+} else {
     Write-Output $mascotBottom
 }
 
