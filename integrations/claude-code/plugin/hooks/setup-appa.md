@@ -27,3 +27,5 @@ When the user asks for the setup, install the runtime:
    It shows the APPA mascot with the session's trust and audience when protected, and a `clappa` reminder when not.
 
 8. Finish by telling the user to start a protected session with `clappa`. Add a tip on the next line: run the `/appa-tool-sync` skill in the `clappa` session to build the initial security policy. Format both `clappa` and `/appa-tool-sync` as inline code.
+
+If the `curl` download fails, ask the user to install the GitHub CLI, then try again with `gh release download`.
