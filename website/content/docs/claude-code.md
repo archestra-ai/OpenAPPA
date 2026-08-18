@@ -42,6 +42,20 @@ claude "finish removing APPA: delete the appa config and data directories,
 and remove the clappa alias from my shell rc if present"
 ```
 
+To uninstall manually instead:
+
+```sh
+claude plugin uninstall appa-runtime
+claude plugin marketplace remove appa
+rm ~/.local/bin/appa-runtime-v2 ~/.local/bin/clappa ~/.local/bin/appa-statusline.sh
+
+# optional — also remove the policy, database, alias, and statusline:
+rm -rf ~/.config/appa ~/.local/share/appa      # Linux
+rm -rf ~/Library/"Application Support/appa"    # macOS
+sed -i.bak '/clappa/d' ~/.zshrc                # alias fallback only
+jq 'del(.statusLine)' ~/.claude/settings.json > /tmp/s.json && mv /tmp/s.json ~/.claude/settings.json
+```
+
 ## Technical details
 
 OpenAPPA runs on your machine as a single binary with a built-in web server. That server is what receives the Claude Code hooks.
