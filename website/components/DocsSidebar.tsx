@@ -4,7 +4,6 @@ import { Fragment, useCallback, useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-import { GitHubSoon } from "@/components/GitHubSoon";
 import { useDrawerDismissal, useMobileNav } from "@/components/MobileNav";
 import { SearchIcon, useSearch } from "@/components/SearchProvider";
 import { ThemeToggle } from "@/components/ThemeToggle";
@@ -68,7 +67,9 @@ export function DocsSidebar({
             <a href="https://arxiv.org/abs/2607.24625" target="_blank" rel="noreferrer">
               Paper
             </a>
-            <GitHubSoon />
+            <a href="https://github.com/archestra-ai/openappa" target="_blank" rel="noreferrer">
+              GitHub
+            </a>
             <ThemeToggle />
           </div>
         </div>
