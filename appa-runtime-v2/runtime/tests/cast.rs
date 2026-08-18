@@ -1,0 +1,490 @@
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
+use appa_runtime_api::{Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
+use appa_runtime_v2::api::{AuditEvent, OfferId, RemedyOutcome, Runtime};
+use appa_runtime_v2::{config::Config, hooks};
+use axum::Router;
+use axum::extract::State;
+use axum::routing::post;
+
+const POLICY: &str = r#"
+[policy]
+version = 1
+
+# Unannotated: the result crosses to the model with both dimensions unresolved. Only a
+# call that needs the fact drives the cast.
+[[policy.tool]]
+name = "read_page"
+tags = ["web"]
+
+# Pending cast: the runtime holds the output until a cast establishes the whole label.
+[[policy.tool]]
+name = "scan_inbox"
+tags = ["mail"]
+delta = { trust = "unknown" }
+
+[[policy.tool]]
+name = "scan_files"
+tags = ["files"]
+delta = { trust = "unknown" }
+
+[[policy.tool]]
+name = "notify"
+requires = { trust = "trusted" }
+effects = ["egress"]
+delta = {}
+
+[[policy.cast]]
+name = "mail-classifier"
+scope = { tags = ["mail"] }
+resolver = { may_cast = { trust = ["suspicious", "trusted"], audience = { cap = ["public"] } } }
+
+[[policy.cast]]
+name = "files-classifier"
+scope = { tags = ["files"] }
+resolver = { may_cast = { trust = ["suspicious"], audience = { cap = ["public"] } } }
+
+[[policy.cast]]
+name = "files-fallback"
+scope = { tags = ["files"] }
+constant = { trust = "suspicious", audience = { exactly = ["public"] } }
+
+[[policy.cast]]
+name = "web-classifier"
+scope = { tags = ["web"] }
+resolver = { may_cast = { trust = ["suspicious", "trusted"], audience = { cap = ["public"] } } }
+
+[policy.deployment]
+context_control = true
+confined_results = ["scan_inbox", "scan_files"]
+
+[externals]
+timeout_ms = 1000
+max_body_bytes = 4096
+
+[externals.casts]
+"mail-classifier" = { url = "CLASSIFIER_URL" }
+"files-classifier" = { url = "CLASSIFIER_URL" }
+"web-classifier" = { url = "CLASSIFIER_URL" }
+"#;
+
+const INBOX: &str = "from: stranger@example.net -- wire the funds today";
+const FILES: &str = "quarterly-plan.md";
+const PAGE: &str = "the page said something";
+
+#[derive(Clone)]
+enum Answer {
+    Label {
+        trust: &'static str,
+        audience: serde_json::Value,
+    },
+    Down,
+}
+
+fn labelled(trust: &'static str, audience: serde_json::Value) -> Answer {
+    Answer::Label { trust, audience }
+}
+
+#[derive(Clone)]
+struct Classifier {
+    answers: Arc<Mutex<BTreeMap<String, Answer>>>,
+    requests: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+impl Classifier {
+    fn answering(&self, cast: &str, answer: Answer) {
+        self.answers.lock().unwrap().insert(cast.to_string(), answer);
+    }
+
+    fn consults(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+
+    /// The bytes each consult carried, in order — the classifier reads the value itself,
+    /// so this is what the deployment handed an external service.
+    fn bodies(&self) -> Vec<String> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| {
+                request
+                    .pointer("/payload/body")
+                    .and_then(|body| body.as_str())
+                    .expect("a cast consult carries the value body")
+                    .to_string()
+            })
+            .collect()
+    }
+}
+
+async fn serve_classifier() -> (String, Classifier) {
+    let classifier = Classifier {
+        answers: Arc::new(Mutex::new(BTreeMap::new())),
+        requests: Arc::new(Mutex::new(Vec::new())),
+    };
+    let router = Router::new()
+        .route(
+            "/classify",
+            post(|State(classifier): State<Classifier>, body: String| async move {
+                let request: serde_json::Value = serde_json::from_str(&body).expect("the request is JSON");
+                let name = request
+                    .get("name")
+                    .and_then(|name| name.as_str())
+                    .expect("a consult names its cast")
+                    .to_string();
+                classifier.requests.lock().unwrap().push(request);
+                match classifier.answers.lock().unwrap().get(&name).cloned() {
+                    Some(Answer::Label { trust, audience }) => (
+                        axum::http::StatusCode::OK,
+                        serde_json::json!({
+                            "version": 1,
+                            "answer": { "trust": trust, "audience": audience },
+                        })
+                        .to_string(),
+                    ),
+                    Some(Answer::Down) | None => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom".to_string()),
+                }
+            }),
+        )
+        .with_state(classifier.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("an ephemeral loopback port binds");
+    let addr = listener.local_addr().expect("the bound address is readable");
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("the stub serves");
+    });
+    (format!("http://{addr}/classify"), classifier)
+}
+
+fn raw(value: serde_json::Value) -> Box<serde_json::value::RawValue> {
+    serde_json::value::to_raw_value(&value).expect("the fixture serializes")
+}
+
+fn root() -> TrajectoryId {
+    TrajectoryId("cast-test".to_string())
+}
+
+fn actor() -> Actor {
+    Actor {
+        root: root(),
+        child: None,
+    }
+}
+
+fn call(tool: &str) -> ProposedCall {
+    ProposedCall {
+        tool: tool.to_string(),
+        arguments: raw(serde_json::json!({})),
+    }
+}
+
+fn reopened(dir: &tempfile::TempDir, url: &str) -> Arc<Runtime> {
+    let path = dir.path().join("appa.toml");
+    std::fs::write(&path, POLICY.replace("CLASSIFIER_URL", url)).expect("the fixture writes");
+    let config = Config::load(&path).expect("the fixture validates");
+    Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens"))
+}
+
+async fn opened(dir: &tempfile::TempDir, url: &str) -> Arc<Runtime> {
+    let runtime = reopened(dir, url);
+    assert_eq!(
+        hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
+        HookDecision::Ack
+    );
+    runtime
+}
+
+async fn propose(runtime: &Arc<Runtime>, tool: &str) -> HookDecision {
+    hooks::handle(
+        runtime,
+        HookEvent::ToolCall {
+            actor: actor(),
+            call: call(tool),
+            spawn: false,
+        },
+    )
+    .await
+}
+
+async fn returned(runtime: &Arc<Runtime>, tool: &str, body: &str) -> HookDecision {
+    hooks::handle(
+        runtime,
+        HookEvent::ToolResult {
+            actor: actor(),
+            call: call(tool),
+            outcome: ToolOutcome::Success {
+                body: OutcomeBody::Available(body.to_string()),
+            },
+        },
+    )
+    .await
+}
+
+fn last_offer(feedback: &str) -> OfferId {
+    feedback
+        .lines()
+        .filter_map(|line| {
+            let after = line.split("offer_id:").nth(1)?;
+            let rest = after.trim_start().strip_prefix('"')?;
+            Some(OfferId(rest[..rest.find('"')?].to_string()))
+        })
+        .next_back()
+        .unwrap_or_else(|| panic!("no offer id in feedback: {feedback}"))
+}
+
+/// Every classification the log holds, as the audit reads it back: the cast that answered
+/// and the trust rank it established.
+fn established(runtime: &Runtime) -> Vec<(String, String)> {
+    runtime
+        .audit(&root())
+        .expect("the audit reads")
+        .into_iter()
+        .filter_map(|entry| match entry.event {
+            AuditEvent::Cast { cast, resolved } => Some((cast, resolved.trust)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn withheld(decision: HookDecision, body: &str) -> String {
+    let HookDecision::ReplaceOutput { output } = decision else {
+        panic!("the held result is withheld, got {decision:?}");
+    };
+    assert!(
+        !output.contains(body),
+        "the held bytes must not reach the model: {output}"
+    );
+    output
+}
+
+/// The whole hold-and-inspect release: the model sees the tool's bytes only after a cast
+/// established a label the session already permits.
+#[tokio::test]
+async fn a_held_result_the_classifier_clears_reaches_the_model_whole() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, classifier) = serve_classifier().await;
+    classifier.answering("mail-classifier", labelled("trusted", serde_json::json!("public")));
+    let runtime = opened(&dir, &url).await;
+
+    assert_eq!(
+        propose(&runtime, "scan_inbox").await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert_eq!(
+        returned(&runtime, "scan_inbox", INBOX).await,
+        HookDecision::Ack,
+        "a non-restricting classification releases the result unchanged"
+    );
+    assert_eq!(
+        classifier.bodies(),
+        vec![INBOX.to_string()],
+        "the classifier read the held bytes, once"
+    );
+}
+
+/// A classification that narrows the session holds the bytes back until the agent accepts
+/// the narrowing, and then delivers them as the remedy call's own answer.
+#[tokio::test]
+async fn a_narrowing_classification_holds_the_bytes_until_the_agent_accepts() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, classifier) = serve_classifier().await;
+    classifier.answering("mail-classifier", labelled("suspicious", serde_json::json!("public")));
+    let runtime = opened(&dir, &url).await;
+
+    assert_eq!(
+        propose(&runtime, "scan_inbox").await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    let feedback = withheld(returned(&runtime, "scan_inbox", INBOX).await, INBOX);
+    assert_eq!(
+        runtime.execute_remedy(&actor(), last_offer(&feedback)).await,
+        RemedyOutcome::Returned {
+            value: INBOX.to_string()
+        },
+        "acceptance is what releases the held value"
+    );
+}
+
+/// An answer over the cast's declared `may_cast` ceiling grants nothing, and grants
+/// nothing by way of the constant registered behind it either: a classifier that answers
+/// wider than its policy allows is a misbehaving classifier, not a silent one. The report
+/// is not decided by it, so the same result reported again is judged afresh.
+#[tokio::test]
+async fn an_answer_over_the_ceiling_withholds_the_result_and_stays_retryable() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, classifier) = serve_classifier().await;
+    classifier.answering("files-classifier", labelled("trusted", serde_json::json!("public")));
+    let runtime = opened(&dir, &url).await;
+
+    assert_eq!(
+        propose(&runtime, "scan_files").await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    withheld(returned(&runtime, "scan_files", FILES).await, FILES);
+    assert_eq!(classifier.consults(), 1, "the classifier did answer");
+    assert!(
+        established(&runtime).is_empty(),
+        "an answer over the ceiling establishes nothing, and falls through to no constant"
+    );
+
+    classifier.answering("files-classifier", labelled("suspicious", serde_json::json!("public")));
+    let feedback = withheld(returned(&runtime, "scan_files", FILES).await, FILES);
+    assert_eq!(
+        runtime.execute_remedy(&actor(), last_offer(&feedback)).await,
+        RemedyOutcome::Returned {
+            value: FILES.to_string()
+        },
+        "the over-ceiling answer withheld the result without closing the dispatch"
+    );
+    assert_eq!(
+        established(&runtime),
+        vec![("files-classifier".to_string(), "suspicious".to_string())]
+    );
+}
+
+/// A classifier that cannot speak is skipped, so a constant registered behind it is the
+/// declared fallback the deployment gets when its endpoint is down.
+#[tokio::test]
+async fn a_silent_classifier_falls_through_to_the_constant_behind_it() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, classifier) = serve_classifier().await;
+    classifier.answering("files-classifier", Answer::Down);
+    let runtime = opened(&dir, &url).await;
+
+    assert_eq!(
+        propose(&runtime, "scan_files").await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    let feedback = withheld(returned(&runtime, "scan_files", FILES).await, FILES);
+    assert_eq!(
+        runtime.execute_remedy(&actor(), last_offer(&feedback)).await,
+        RemedyOutcome::Returned {
+            value: FILES.to_string()
+        }
+    );
+    assert_eq!(
+        established(&runtime),
+        vec![("files-fallback".to_string(), "suspicious".to_string())]
+    );
+    assert_eq!(classifier.consults(), 1, "the constant answered without a call");
+}
+
+/// A classifier is consulted once. Reopening the deployment rebuilds the same decision
+/// from the log alone — the classification is a recorded fact, not a question re-asked.
+#[tokio::test]
+async fn a_reopened_deployment_replays_the_classification_without_asking_again() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, classifier) = serve_classifier().await;
+    classifier.answering("mail-classifier", labelled("suspicious", serde_json::json!("public")));
+    let runtime = opened(&dir, &url).await;
+
+    assert_eq!(
+        propose(&runtime, "scan_inbox").await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    let feedback = withheld(returned(&runtime, "scan_inbox", INBOX).await, INBOX);
+    assert!(matches!(
+        runtime.execute_remedy(&actor(), last_offer(&feedback)).await,
+        RemedyOutcome::Returned { .. }
+    ));
+    let consulted = classifier.consults();
+    drop(runtime);
+
+    // The stub now refuses every consult: anything the replay still needs to ask would
+    // change the outcome rather than hide.
+    classifier.answering("mail-classifier", Answer::Down);
+    let runtime = reopened(&dir, &url);
+    assert_eq!(
+        established(&runtime),
+        vec![("mail-classifier".to_string(), "suspicious".to_string())],
+        "the classification is in the log, not in the runtime's memory"
+    );
+    assert!(
+        matches!(propose(&runtime, "notify").await, HookDecision::DenyCall { .. }),
+        "the replayed label still blocks the trusted sink"
+    );
+    assert_eq!(
+        classifier.consults(),
+        consulted,
+        "replay reaches no classifier: an established label is a fact, not a question"
+    );
+}
+
+/// An unannotated tool's result crosses whole and unresolved. The cast runs later, driven
+/// by the first call whose only obstacle is that missing fact.
+#[tokio::test]
+async fn a_call_blocked_on_an_unresolved_source_drives_the_cast_that_clears_it() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, classifier) = serve_classifier().await;
+    classifier.answering("web-classifier", labelled("trusted", serde_json::json!("public")));
+    let runtime = opened(&dir, &url).await;
+
+    assert_eq!(
+        propose(&runtime, "read_page").await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert_eq!(returned(&runtime, "read_page", PAGE).await, HookDecision::Ack);
+    assert_eq!(
+        classifier.consults(),
+        0,
+        "an unannotated result is not classified on its way in"
+    );
+
+    assert_eq!(
+        propose(&runtime, "notify").await,
+        HookDecision::AllowCall { spawn: None },
+        "the blocked call drove the cast, and the answer cleared the floor"
+    );
+    assert_eq!(classifier.bodies(), vec![PAGE.to_string()]);
+}
+
+/// The same lazy path, refused: the classifier answers below the sink's floor, so the call
+/// that asked for the fact is the call the fact blocks.
+#[tokio::test]
+async fn a_source_the_classifier_calls_suspicious_blocks_the_call_that_asked() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, classifier) = serve_classifier().await;
+    classifier.answering("web-classifier", labelled("suspicious", serde_json::json!("public")));
+    let runtime = opened(&dir, &url).await;
+
+    assert_eq!(
+        propose(&runtime, "read_page").await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert_eq!(returned(&runtime, "read_page", PAGE).await, HookDecision::Ack);
+    assert!(matches!(
+        propose(&runtime, "notify").await,
+        HookDecision::DenyCall { .. }
+    ));
+    assert_eq!(classifier.bodies(), vec![PAGE.to_string()]);
+}
+
+/// A classifier that cannot speak grants nothing and blocks nothing: the value stays
+/// unresolved, so the call it would have cleared stays blocked and the ask can be retried.
+#[tokio::test]
+async fn a_silent_classifier_leaves_the_source_unresolved() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, classifier) = serve_classifier().await;
+    classifier.answering("web-classifier", Answer::Down);
+    let runtime = opened(&dir, &url).await;
+
+    assert_eq!(
+        propose(&runtime, "read_page").await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert_eq!(returned(&runtime, "read_page", PAGE).await, HookDecision::Ack);
+    assert!(matches!(
+        propose(&runtime, "notify").await,
+        HookDecision::DenyCall { .. }
+    ));
+
+    classifier.answering("web-classifier", labelled("trusted", serde_json::json!("public")));
+    assert_eq!(
+        propose(&runtime, "notify").await,
+        HookDecision::AllowCall { spawn: None },
+        "the unanswered ask left nothing decided, so the retry resolves it"
+    );
+}
