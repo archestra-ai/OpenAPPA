@@ -1013,6 +1013,118 @@ samp {
 }
 
 /* ————————————————————————————————————————————————
+   Claude Code guide — policy setup, two commands
+   ———————————————————————————————————————————————— */
+.claude-policy-timing {
+  display: grid;
+  grid-template-columns: 8.5rem minmax(0, 1fr);
+  margin: 1.25rem 0 1.75rem;
+  border: 1px solid var(--accent-border);
+  border-radius: 8px;
+  background: var(--accent-bg);
+  overflow: hidden;
+}
+
+.claude-policy-duration {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 18px;
+  border-right: 1px solid var(--accent-border);
+  font-family: var(--font-mono);
+}
+
+.claude-policy-duration strong {
+  color: var(--accent);
+  font-size: 19px;
+  line-height: 1.2;
+}
+
+.claude-policy-duration span {
+  margin-top: 4px;
+  color: var(--text-weak);
+  font-size: 10px;
+}
+
+.claude-policy-timing-copy {
+  padding: 13px 18px;
+}
+
+.prose .claude-policy-timing-copy p {
+  margin: 0.35rem 0;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.claude-session-choice {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  margin: 1.25rem 0 2rem;
+}
+
+.claude-session-choice > div {
+  display: flex;
+  flex-direction: column;
+  min-height: 132px;
+  padding: 16px;
+  border: 1px solid var(--border-weak);
+  border-radius: 7px;
+  background: var(--bg-weak);
+}
+
+.claude-session-choice code {
+  align-self: flex-start;
+  margin-bottom: 16px;
+  color: var(--text-weak);
+}
+
+.claude-session-choice strong {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.claude-session-choice span {
+  margin-top: 4px;
+  color: var(--text-weak);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.claude-session-choice .claude-session-protected {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+}
+
+.claude-session-protected code,
+.claude-session-protected strong {
+  color: var(--accent);
+}
+
+.prose img[alt*="Claude Code session"] {
+  display: block;
+  width: 100%;
+  margin: 1.25rem 0 2rem;
+  border: 1px solid var(--border-weak);
+  border-radius: 9px;
+}
+
+@media (max-width: 600px) {
+  .claude-policy-timing {
+    grid-template-columns: 1fr;
+  }
+
+  .claude-policy-duration {
+    border-right: none;
+    border-bottom: 1px solid var(--accent-border);
+  }
+
+  .claude-session-choice {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ————————————————————————————————————————————————
    Benchmark highlight panel (home) — emphasis bars, two small multiples
    ———————————————————————————————————————————————— */
 .bench-panel {

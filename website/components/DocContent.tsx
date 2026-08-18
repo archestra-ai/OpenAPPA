@@ -9,6 +9,10 @@ import remarkGfm from "remark-gfm";
 import { AdvisorySignup } from "@/components/AdvisorySignup";
 import { BenchmarkHighlight } from "@/components/BenchmarkHighlight";
 import { BrandAssets } from "@/components/BrandKit";
+import {
+  ClaudePolicyTiming,
+  ClaudeSessionChoice,
+} from "@/components/ClaudeCodeStory";
 import { CodeBlock } from "@/components/CodeBlock";
 import { ClaudeCodeHooksFigure } from "@/components/figures/ClaudeCodeHooksFigure";
 import { ConnectedAgentFigure } from "@/components/figures/ConnectedAgentFigure";
@@ -29,6 +33,8 @@ const DIRECTIVES: Record<string, () => ReactNode> = {
   "advisory-signup": () => <AdvisorySignup />,
   "benchmark-highlight": () => <BenchmarkHighlight />,
   "brand-assets": () => <BrandAssets />,
+  "claude-policy-timing": () => <ClaudePolicyTiming />,
+  "claude-session-choice": () => <ClaudeSessionChoice />,
   "fig-claude-code-hooks": () => <ClaudeCodeHooksFigure />,
   "fig-connected-agent": () => <ConnectedAgentFigure />,
   "fig-exfiltration": () => <ExfiltrationFigure />,
