@@ -784,10 +784,7 @@ pub(crate) fn confined_stage(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ReturnStagePlan {
-    Resolve {
-        cast: crate::names::CastName,
-        value: crate::value::ValueId,
-    },
+    Resolve { value: crate::value::ValueId },
     Stage(Vec<ExecutableRemedyPlan>),
 }
 
@@ -824,8 +821,8 @@ pub(crate) fn return_stage(
                 if sanitizer.derive_output(candidate, &[], expansions).is_none() {
                     continue;
                 }
-                if let Some((cast, value)) = resolvable_source(registry, views, fold, dim, expansions) {
-                    return ReturnStagePlan::Resolve { cast, value };
+                if let Some(value) = resolvable_source(registry, views, fold, dim, expansions) {
+                    return ReturnStagePlan::Resolve { value };
                 }
                 continue;
             }
@@ -889,18 +886,15 @@ pub(crate) fn resolvable_source(
     fold: &PartialLabel,
     dim: crate::label::Dimension,
     expansions: &Expansions,
-) -> Option<(crate::names::CastName, crate::value::ValueId)> {
-    fold.unresolved(dim).find_map(|value| {
-        views.value_body(value)?;
-        let prior = views.value_label(value)?;
-        registry
-            .casts()
-            .iter()
-            .find(|cast| {
-                cast.resolution.can_establish(prior, expansions)
-                    && cast.scope.reaches(registry, views, value).unwrap_or(false)
+) -> Option<crate::value::ValueId> {
+    fold.unresolved(dim).find(|value| {
+        views.value_body(*value).is_some()
+            && views.value_label(*value).is_some_and(|prior| {
+                registry.casts().iter().any(|cast| {
+                    cast.resolution.can_establish(prior, expansions)
+                        && cast.scope.reaches(registry, views, *value).unwrap_or(false)
+                })
             })
-            .map(|cast| (cast.name.clone(), value))
     })
 }
 

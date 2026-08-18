@@ -688,7 +688,7 @@ impl Engine {
                 registered.transition.dimension(),
                 expansions,
             ) {
-                Some((_, value)) => self.resolving(view, views, return_act(child), facts, value, expansions),
+                Some(value) => self.resolving(view, views, return_act(child), facts, value, expansions),
                 None => self.rejecting(
                     view,
                     child,
