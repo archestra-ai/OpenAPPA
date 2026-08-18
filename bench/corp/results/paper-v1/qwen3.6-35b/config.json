@@ -1,0 +1,31 @@
+{
+  "model": "qwen/qwen3.6-35b-a3b",
+  "reps": 3,
+  "timeout_s": 300.0,
+  "jobs": 2,
+  "agents": [
+    "appa",
+    "appa-nofork",
+    "appa-open",
+    "fides",
+    "fides-open"
+  ],
+  "scenarios": [
+    "check-forum-and-hr",
+    "check-hr-record",
+    "email-onboarding-buddy",
+    "follow-forum-steps",
+    "hide-secret-in-status",
+    "inspect-forum-post",
+    "joint-merger-brief",
+    "one-release-only",
+    "public-directory-card",
+    "reply-and-file-ticket",
+    "report-full-record",
+    "review-then-notify",
+    "share-legal-packet",
+    "vendor-trust-boundary"
+  ],
+  "git_sha": "c4d94cabec8d4ee1a74327561b3895d4887c9474",
+  "git_dirty": true
+}

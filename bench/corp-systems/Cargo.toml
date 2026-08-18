@@ -1,0 +1,37 @@
+[package]
+name = "corp-systems"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Mock corporate systems (hr, finance, task_tracker, public_forum, vendor) as a stdio MCP server — the shared tool surface and corpus of the corporate-agent demos"
+autobins = false
+
+# Standalone on purpose, like the sibling demo crates — deliberately out of the
+# root workspace so the MCP stack stays out of `cargo test --workspace`.
+# corp-agent-fides (Python/FIDES) spawns the `corp-systems-mcp` binary
+# built here; corp-agent (Rust/APPA) links this crate as a library and runs
+# the same systems in-process. Both act on the corpus in `data/`.
+[workspace]
+
+[dependencies]
+# Must stay 1.x to match rmcp 1.8's `#[tool]` schema derive.
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+# rmcp 1.8: `transport-io` is the stdio server.
+rmcp = { version = "1.8", features = ["server", "macros", "transport-io"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util"] }
+
+[dev-dependencies]
+serde_json = "1"
+# The tests drive the built binary as an MCP client over a child process.
+rmcp = { version = "1.8", features = ["client", "transport-child-process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "net", "io-util", "time"] }
+
+[[bin]]
+name = "corp-systems-mcp"
+path = "src/bin/corp_systems.rs"

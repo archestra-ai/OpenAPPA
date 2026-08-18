@@ -1,0 +1,76 @@
+[policy]
+version = 1
+trust_chain = ["suspicious", "internal"]
+[policy.boundary]
+trust = "internal"
+audience = { exactly = ["public"] }
+[[policy.dynamic_resolver]]
+name = "personal-file-readers"
+[[policy.dynamic_resolver]]
+name = "mailbox-readers"
+
+# Branching is an ordinary registered tool: the runtime checks this call like
+# any other, and releasing it is what opens a child trajectory (`BRN-2`,
+# `BRN-3`). No delta, because releasing it admits no value — a child's return
+# crosses through the return channel and is checked there.
+[[policy.tool]]
+name = "fork"
+parameters = { type = "object", properties = { task = { type = "string", description = "The self-contained task for the child trajectory.", minLength = 1 } }, required = ["task"], additionalProperties = false }
+
+[[policy.tool]]
+name = "search_hr"
+parameters = { type = "object", properties = { query = { type = "string" } }, required = ["query"], additionalProperties = false }
+delta = { audience = { exactly = ["elena.morris@northwind.example", "marcus.lee@northwind.example"] } }
+[[policy.tool]]
+name = "read_hr"
+parameters = { type = "object", properties = { file = { type = "string" } }, required = ["file"], additionalProperties = false }
+delta = { audience = { resolver = "personal-file-readers", argument = "file" } }
+[[policy.tool]]
+name = "create_hr"
+parameters = { type = "object", properties = { file = { type = "string" }, content = { type = "string" } }, required = ["file", "content"], additionalProperties = false }
+delta = {}
+[[policy.tool]]
+name = "search_task_tracker"
+parameters = { type = "object", properties = { query = { type = "string" } }, required = ["query"], additionalProperties = false }
+delta = {}
+[[policy.tool]]
+name = "read_task_tracker"
+parameters = { type = "object", properties = { file = { type = "string" } }, required = ["file"], additionalProperties = false }
+delta = {}
+[[policy.tool]]
+name = "create_task_tracker"
+parameters = { type = "object", properties = { file = { type = "string" }, content = { type = "string" } }, required = ["file", "content"], additionalProperties = false }
+delta = {}
+[[policy.tool]]
+name = "send_email"
+parameters = { type = "object", properties = { to = { type = "string" }, subject = { type = "string" }, body = { type = "string" } }, required = ["to", "subject", "body"], additionalProperties = false }
+requires = { audience = { includes = { resolver = "mailbox-readers", argument = "to" } } }
+effects = ["egress"]
+delta = {}
+
+# --- deployment coverage -----------------------------------------------------
+#
+# runtime-v1 pinned this posture for every policy it loaded; an absent table
+# would select `no_coverage` instead (`CFG-16`), which enforces nothing and
+# leaves a registered sanitizer with no application point.
+
+[policy.deployment]
+context_control = true
+dispatch = "enforced"
+confined_child_return = true
+confined_results = ["search_hr", "read_hr", "create_hr", "search_task_tracker", "read_task_tracker", "create_task_tracker", "send_email"]
+
+# --- registered externals ---------------------------------------------------
+#
+# Implementations bind here, never in the policy (`CFG-15`, `IMP-3`). Resolver
+# URLs are loopback placeholders: the bench runner binds its fixture server on
+# an ephemeral port and rewrites them before opening the runtime, since
+# `Config::load` refuses non-loopback http.
+
+[externals]
+timeout_ms = 5000
+max_body_bytes = 65536
+
+# One endpoint serves every named dynamic resolver; the request carries the name.
+[externals.dynamic]
+url = "http://127.0.0.1:0/dynamic-resolver"

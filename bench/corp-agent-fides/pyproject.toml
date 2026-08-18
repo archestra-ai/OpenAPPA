@@ -1,0 +1,40 @@
+[project]
+name = "corporate-agent-fides"
+version = "0.1.0"
+description = "The OpenAPPA corporate demo, defended by Microsoft Agent Framework's FIDES"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "agent-framework-core",
+    "agent-framework-openai",
+    # The MCP client: the tools forward to the shared corp-systems-mcp server.
+    "mcp<2",
+]
+
+[project.optional-dependencies]
+# Microsoft's own FIDES sample targets Azure AI Foundry instead of OpenRouter.
+foundry = [
+    "agent-framework-azure-ai",
+    "azure-identity",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
+[project.scripts]
+corp-agent-fides = "corp_fides.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["corp_fides"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.uv]
+prerelease = "allow"

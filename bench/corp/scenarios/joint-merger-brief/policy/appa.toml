@@ -1,0 +1,82 @@
+[policy]
+version = 1
+trust_chain = ["suspicious", "internal"]
+
+[policy.boundary]
+trust = "internal"
+audience = { exactly = ["public"] }
+
+# Branching is an ordinary registered tool: the runtime checks this call like
+# any other, and releasing it is what opens a child trajectory (`BRN-2`,
+# `BRN-3`). No delta, because releasing it admits no value — a child's return
+# crosses through the return channel and is checked there.
+[[policy.tool]]
+name = "fork"
+parameters = { type = "object", properties = { task = { type = "string", description = "The self-contained task for the child trajectory.", minLength = 1 } }, required = ["task"], additionalProperties = false }
+
+[[policy.tool]]
+name = "search_hr"
+parameters = { type = "object", properties = { query = { type = "string", description = "Keyword or phrase to match against file names and contents." } }, required = ["query"], additionalProperties = false }
+delta = { audience = { exactly = ["cfo@northwind.example", "hr-director@northwind.example"] } }
+
+[[policy.tool]]
+name = "read_hr"
+parameters = { type = "object", properties = { file = { type = "string", description = "The exact file name to read." } }, required = ["file"], additionalProperties = false }
+delta = { audience = { exactly = ["cfo@northwind.example", "hr-director@northwind.example"] } }
+
+[[policy.tool]]
+name = "create_hr"
+parameters = { type = "object", properties = { file = { type = "string", description = "The file name to create." }, content = { type = "string", description = "The full contents to write." } }, required = ["file", "content"], additionalProperties = false }
+delta = {}
+
+[[policy.tool]]
+name = "search_finance"
+parameters = { type = "object", properties = { query = { type = "string", description = "Keyword or phrase to match against file names and contents." } }, required = ["query"], additionalProperties = false }
+delta = { audience = { exactly = ["cfo@northwind.example", "controller@northwind.example"] } }
+
+[[policy.tool]]
+name = "read_finance"
+parameters = { type = "object", properties = { file = { type = "string", description = "The exact file name to read." } }, required = ["file"], additionalProperties = false }
+delta = { audience = { exactly = ["cfo@northwind.example", "controller@northwind.example"] } }
+
+[[policy.tool]]
+name = "create_finance"
+parameters = { type = "object", properties = { file = { type = "string", description = "The file name to create." }, content = { type = "string", description = "The full contents to write." } }, required = ["file", "content"], additionalProperties = false }
+delta = {}
+
+[[policy.tool]]
+name = "send_email"
+parameters = { type = "object", properties = { to = { type = "string", description = "Recipient email address." }, subject = { type = "string", description = "Subject line." }, body = { type = "string", description = "Message body." } }, required = ["to", "subject", "body"], additionalProperties = false }
+requires = { trust = "internal", audience = { includes = ["$to"] } }
+effects = ["egress"]
+delta = {}
+
+[[policy.tool]]
+name = "share_legal_packet"
+parameters = { type = "object", properties = { file = { type = "string", description = "The exact finance file name to share." }, to = { type = "string", description = "Recipient email address." } }, required = ["file", "to"], additionalProperties = false }
+requires = { trust = "internal", audience = { includes = ["$to"] } }
+delta = { audience = { exactly = ["cfo@northwind.example", "controller@northwind.example"] } }
+effects = ["egress"]
+
+# --- deployment coverage -----------------------------------------------------
+#
+# runtime-v1 pinned this posture for every policy it loaded; an absent table
+# would select `no_coverage` instead (`CFG-16`), which enforces nothing and
+# leaves a registered sanitizer with no application point.
+
+[policy.deployment]
+context_control = true
+dispatch = "enforced"
+confined_child_return = true
+confined_results = ["search_hr", "read_hr", "create_hr", "search_finance", "read_finance", "create_finance", "send_email", "share_legal_packet"]
+
+# --- registered externals ---------------------------------------------------
+#
+# Implementations bind here, never in the policy (`CFG-15`, `IMP-3`). Resolver
+# URLs are loopback placeholders: the bench runner binds its fixture server on
+# an ephemeral port and rewrites them before opening the runtime, since
+# `Config::load` refuses non-loopback http.
+
+[externals]
+timeout_ms = 5000
+max_body_bytes = 65536

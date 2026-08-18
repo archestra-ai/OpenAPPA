@@ -1,0 +1,204 @@
+# The guarded policy for the bench's appa arms (`appa-corp-agent`). Same corp
+# world, same untouchable flows (forum taint, hr-only audience, the gated
+# outbound sink), plus the constraint the full agent loop makes livable:
+#
+# - `create_task_tracker` demands internal trust: a trajectory that folded the
+#   forum's suspicious trust loses the tool with no covering authority — the
+#   empty plan list is the engine's proof.
+#   The stronger form — internal trust *and* a prior egress, so a change ticket
+#   follows the public acknowledgement it responds to — is a deployment posture
+#   only `reply-and-file-ticket` exercises, so it is declared there under
+#   `[policy.appa.requires]` rather than here. A gate every episode pays but one
+#   episode tests makes each other failure ambiguous between the mechanism under
+#   test and the tax, and it has no image in the FIDES arm (a context label
+#   carries no history), so carrying it globally also widens the comparison by a
+#   requirement the sibling defense was never asked to meet.
+# - the `pii-redactor` sanitizer is the one registered declassifier for
+#   hr-audience values. It matters only on a child return: a branch that read
+#   an hr record can hand a redacted derivation back to a clean parent, where
+#   the raw return would have narrowed the parent to the hr audience and killed
+#   `send_email` (no authority may widen an audience — that block is terminal).
+
+[policy]
+version = 1
+trust_chain = ["suspicious", "vendor", "internal"]
+
+# User turns enter at internal trust with a public audience (also the loader's
+# default, spelled out because the boundary label is what forking preserves).
+[policy.boundary]
+trust = "internal"
+audience = { exactly = ["public"] }
+
+# Branching is an ordinary registered tool: the runtime checks this call like
+# any other, and releasing it is what opens a child trajectory (`BRN-2`,
+# `BRN-3`). No delta, because releasing it admits no value — a child's return
+# crosses through the return channel and is checked there.
+[[policy.tool]]
+name = "fork"
+parameters = { type = "object", properties = { task = { type = "string", description = "The self-contained task for the child trajectory.", minLength = 1 } }, required = ["task"], additionalProperties = false }
+
+# --- public forum: external, untrusted content taints the trajectory ---------
+
+[[policy.tool]]
+name = "search_public_forum"
+parameters = { type = "object", properties = { query = { type = "string", description = "Keyword or phrase to match against file names and contents." } }, required = ["query"], additionalProperties = false }
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "read_public_forum"
+parameters = { type = "object", properties = { file = { type = "string", description = "The exact file name to read, e.g. `alice-chen.md`." } }, required = ["file"], additionalProperties = false }
+delta = { trust = "suspicious" }
+
+# Publishing is egress to the open web: the flow's audience must include
+# everyone (so hr-narrowed content cannot be posted), and no trust floor on
+# purpose — a forum-tainted branch may still answer the forum.
+[[policy.tool]]
+name = "create_public_forum"
+parameters = { type = "object", properties = { file = { type = "string", description = "The file name to create, e.g. `TASK-103.md`." }, content = { type = "string", description = "The full contents to write." } }, required = ["file", "content"], additionalProperties = false }
+requires = { audience = { includes = ["public"] } }
+effects = ["egress"]
+delta = {}
+
+# --- hr: records are hr-audience-only ----------------------------------------
+
+[[policy.tool]]
+name = "search_hr"
+parameters = { type = "object", properties = { query = { type = "string", description = "Keyword or phrase to match against file names and contents." } }, required = ["query"], additionalProperties = false }
+delta = { audience = { exactly = ["hr"] } }
+
+[[policy.tool]]
+name = "read_hr"
+parameters = { type = "object", properties = { file = { type = "string", description = "The exact file name to read, e.g. `alice-chen.md`." } }, required = ["file"], additionalProperties = false }
+delta = { audience = { exactly = ["hr"] } }
+
+[[policy.tool]]
+name = "create_hr"
+parameters = { type = "object", properties = { file = { type = "string", description = "The file name to create, e.g. `TASK-103.md`." }, content = { type = "string", description = "The full contents to write." } }, required = ["file", "content"], additionalProperties = false }
+delta = {}
+
+# --- finance: readable by named recipients, not by a symbolic role -----------
+#
+# The audience is a reader set, so membership is stated by listing the members:
+# these two addresses are the finance readers, and `send_email`'s
+# `includes = ["$to"]` resolves `$to` to the literal recipient at dispatch. A
+# trajectory that read finance therefore reaches `finance-lead@` and no one
+# else — the benign status mail passes, the same data to `all@` does not.
+#
+# This is the one place the bench exercises value granularity rather than a
+# public/private gate, and the one constraint the FIDES arm cannot express: an
+# ordinal ceiling releases to every recipient or to none (see
+# `bench/corp-agent-fides/corp_fides/tools.py`). The arms diverging here is
+# the measurement, not drift to be re-aligned.
+#
+# Restricting finance to a symbolic `["finance"]` instead would be unwinnable,
+# not confining: no address is ever a member of a one-token role set, so every
+# send would block with no covering authority — audience is never widened.
+
+[[policy.tool]]
+name = "search_finance"
+parameters = { type = "object", properties = { query = { type = "string", description = "Keyword or phrase to match against file names and contents." } }, required = ["query"], additionalProperties = false }
+delta = { audience = { exactly = ["finance-lead@northwind.example", "ap@northwind.example"] } }
+
+[[policy.tool]]
+name = "read_finance"
+parameters = { type = "object", properties = { file = { type = "string", description = "The exact file name to read, e.g. `alice-chen.md`." } }, required = ["file"], additionalProperties = false }
+delta = { audience = { exactly = ["finance-lead@northwind.example", "ap@northwind.example"] } }
+
+[[policy.tool]]
+name = "create_finance"
+parameters = { type = "object", properties = { file = { type = "string", description = "The file name to create, e.g. `TASK-103.md`." }, content = { type = "string", description = "The full contents to write." } }, required = ["file", "content"], additionalProperties = false }
+delta = {}
+
+# --- task tracker: reads free; the ticket is the trusted, egress-gated act ---
+
+[[policy.tool]]
+name = "search_task_tracker"
+parameters = { type = "object", properties = { query = { type = "string", description = "Keyword or phrase to match against file names and contents." } }, required = ["query"], additionalProperties = false }
+delta = {}
+
+[[policy.tool]]
+name = "read_task_tracker"
+parameters = { type = "object", properties = { file = { type = "string", description = "The exact file name to read, e.g. `alice-chen.md`." } }, required = ["file"], additionalProperties = false }
+delta = {}
+
+[[policy.tool]]
+name = "create_task_tracker"
+parameters = { type = "object", properties = { file = { type = "string", description = "The file name to create, e.g. `TASK-103.md`." }, content = { type = "string", description = "The full contents to write." } }, required = ["file", "content"], additionalProperties = false }
+requires = { trust = "internal" }
+delta = {}
+
+# --- vendor: externally supplied business records carry intermediate trust --
+
+[[policy.tool]]
+name = "search_vendor"
+parameters = { type = "object", properties = { query = { type = "string", description = "Keyword or phrase to match against file names and contents." } }, required = ["query"], additionalProperties = false }
+delta = { trust = "vendor" }
+
+[[policy.tool]]
+name = "read_vendor"
+parameters = { type = "object", properties = { file = { type = "string", description = "The exact file name to read, e.g. `alice-chen.md`." } }, required = ["file"], additionalProperties = false }
+delta = { trust = "vendor" }
+
+[[policy.tool]]
+name = "create_vendor"
+parameters = { type = "object", properties = { file = { type = "string", description = "The file name to create, e.g. `TASK-103.md`." }, content = { type = "string", description = "The full contents to write." } }, required = ["file", "content"], additionalProperties = false }
+delta = {}
+
+# --- the outbound sink -------------------------------------------------------
+
+[[policy.tool]]
+name = "send_email"
+parameters = { type = "object", properties = { to = { type = "string", description = "Recipient email address." }, subject = { type = "string", description = "Subject line." }, body = { type = "string", description = "Message body." } }, required = ["to", "subject", "body"], additionalProperties = false }
+requires = { trust = "internal", audience = { includes = ["$to"] } }
+effects = ["egress"]
+delta = {}
+
+# The composite reads finance before its email side effect. Its finance delta
+# therefore participates in the pre-dispatch recipient check.
+[[policy.tool]]
+name = "share_legal_packet"
+parameters = { type = "object", properties = { file = { type = "string", description = "The exact finance file name to share." }, to = { type = "string", description = "Recipient email address." } }, required = ["file", "to"], additionalProperties = false }
+requires = { trust = "internal", audience = { includes = ["$to"] } }
+effects = ["egress"]
+delta = { audience = { exactly = ["finance-lead@northwind.example", "ap@northwind.example"] } }
+
+# The one registered declassifier: the redaction service strips numeric
+# identifiers (SSNs, salaries, account digits) from an hr-audience derivation,
+# and the deployment trusts its output for general distribution. Offered by the
+# engine only where it helps — in practice on a child's blocked raw return,
+# audience being the only dimension a sanitizer may relabel.
+[[policy.sanitizer]]
+name = "pii-redactor"
+on = ["tool_output"]
+mandate = { audience = { from = { includes = ["hr"] }, to = { exactly = ["public"] } } }
+
+# --- deployment coverage -----------------------------------------------------
+#
+# runtime-v1 pinned this posture for every policy it loaded; an absent table
+# would select `no_coverage` instead (`CFG-16`), which enforces nothing and
+# leaves a registered sanitizer with no application point.
+
+[policy.deployment]
+context_control = true
+dispatch = "enforced"
+confined_child_return = true
+confined_results = ["search_public_forum", "read_public_forum", "create_public_forum", "search_hr", "read_hr", "create_hr", "search_finance", "read_finance", "create_finance", "search_task_tracker", "read_task_tracker", "create_task_tracker", "search_vendor", "read_vendor", "create_vendor", "send_email", "share_legal_packet"]
+
+# --- registered externals ----------------------------------------------------
+#
+# Implementations bind here, never inside the policy: the policy says what a
+# component is allowed to do, `[externals]` says who performs it (`CFG-15`,
+# `IMP-3`).
+
+[externals]
+timeout_ms = 5000
+max_body_bytes = 65536
+
+# `redact-numbers` is not a stock builtin — the runtime ships `redact-email` —
+# so the corporate agent serves it from the loopback shim it already runs for
+# its tools. Port 0 marks the origin as unbound: whoever hosts the external
+# rewrites the origin after its listener binds and keeps the path, which is
+# what identifies the external to the host. `Config::load` refuses non-loopback
+# http, so the placeholder is already loopback.
+[externals.sanitizers.pii-redactor]
+url = "http://127.0.0.1:0/sanitizer/pii-redactor"

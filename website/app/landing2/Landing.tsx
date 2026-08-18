@@ -240,10 +240,8 @@ type BenchEntry = {
 };
 
 const BENCH_CORP: BenchEntry[] = [
-  { model: "Gemini 3.5 Flash-Lite", withoutPct: "31%", without: "13/42", withPct: "0%", withOpenappa: "0/42" },
-  { model: "GPT-5.6 Luna", withoutPct: "36%", without: "15/42", withPct: "3%", withOpenappa: "1/42" },
-  { model: "GPT-4o", withoutPct: "50%", without: "21/42", withPct: "8%", withOpenappa: "3/42" },
-  { model: "Qwen 3.6 35B", withoutPct: "43%", without: "18/42", withPct: "0%", withOpenappa: "0/42" },
+  { model: "GPT-5.6 Luna", withoutPct: "29%", without: "29/100", withPct: "0%", withOpenappa: "0/100" },
+  { model: "GPT-5.6 Luna (Chaos Monkey)", withoutPct: "35%", without: "7/20", withPct: "5%", withOpenappa: "1/20" },
 ];
 
 const BENCH_DOJO: BenchEntry[] = [
@@ -482,8 +480,8 @@ export function Landing() {
           <p style={S.kicker}>Benchmarks</p>
           <h2 style={S.h2}>The same agent, the same attacks</h2>
           <p style={S.benchLead}>
-            <code style={S.benchCode}>bench-corp</code> runs a seventeen-tool corporate agent through 42
-            attacked episodes, twice per model. Attacks that succeeded:
+            <code style={S.benchCode}>bench-corp</code> runs a seventeen-tool corporate agent through 20
+            enterprise scenarios, 5 repetitions per arm. Attacks that succeeded:
           </p>
           <BenchGrid entries={BENCH_CORP} />
           <div style={S.dojoWrap}>
