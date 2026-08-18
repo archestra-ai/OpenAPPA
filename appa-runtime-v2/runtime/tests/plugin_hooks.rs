@@ -58,12 +58,20 @@ fn run_gated(command: &str, url: &str, gated: bool) -> (i32, String) {
         .stderr(Stdio::null())
         .spawn()
         .expect("the hook command spawns");
-    child
+    // An ungated hook may exit before reading its stdin, closing the pipe
+    // mid-write; that is a pass condition, so only a non-EPIPE error fails.
+    if let Err(error) = child
         .stdin
         .as_mut()
         .expect("the child has a stdin pipe")
         .write_all(br#"{"hook_event_name":"PreToolUse","session_id":"plugin-test"}"#)
-        .expect("the event writes to the hook's stdin");
+    {
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe,
+            "the event writes to the hook's stdin",
+        );
+    }
     let output = child.wait_with_output().expect("the hook command finishes");
     (
         output.status.code().expect("the hook command exits with a code"),
