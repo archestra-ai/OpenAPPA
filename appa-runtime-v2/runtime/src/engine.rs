@@ -966,15 +966,15 @@ impl RuntimeEngine {
         };
         let expansions = self.membership_evidence(evidence);
         let decided = if spawn {
-            match self.decide_proposal(view, trajectory, proposed.clone(), entropy, true, &expansions) {
+            match self.decide_proposal(view, trajectory, proposed.clone(), entropy, true, &expansions, evidence) {
                 Ok(decision) => Ok(decision),
                 Err(TransitionError::SpawnUncontrolled) => {
-                    self.decide_proposal(view, trajectory, proposed, entropy, false, &expansions)
+                    self.decide_proposal(view, trajectory, proposed, entropy, false, &expansions, evidence)
                 }
                 Err(error) => Err(error),
             }
         } else {
-            self.decide_proposal(view, trajectory, proposed, entropy, false, &expansions)
+            self.decide_proposal(view, trajectory, proposed, entropy, false, &expansions, evidence)
         };
         let decision = match decided {
             Ok(decision) => decision,
@@ -986,13 +986,20 @@ impl RuntimeEngine {
                     MembershipConsult::Unresolved(group) => Ok(deny(unresolved_group(&call.tool, &group))),
                 };
             }
+            Err(TransitionError::InadmissibleResolution) => {
+                return Ok(deny(
+                    "[appa] the classifier's answer was not admissible; the call is blocked and may be proposed again"
+                        .to_string(),
+                ));
+            }
             Err(error) => return Err(proposal_refusal(error)),
         };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
-        let then = self.deliver_proposals(view, trajectory, decision.follow_up)?;
+        let then = self.deliver_proposals(view, trajectory, decision.follow_up, evidence)?;
         Ok(EngineDecision { append, then })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn decide_proposal(
         &self,
         view: &EngineView,
@@ -1001,6 +1008,7 @@ impl RuntimeEngine {
         entropy: &OfferNonce,
         spawn: bool,
         expansions: &MembershipEvidence,
+        external: &[ExternalEvidence],
     ) -> Result<CoreDecision, TransitionError> {
         let batch = ProposalBatch {
             id: batch_id(entropy),
@@ -1009,6 +1017,7 @@ impl RuntimeEngine {
             proposals: vec![proposed],
             spawn: spawn.then(|| SpawnMark::at(0)),
             offer_nonce: engine_nonce(entropy),
+            evidence: cast_evidence(self.engine.registry().trust_chain(), external),
             expansions: expansions.expansions(),
         };
         self.engine.handle(view, CoreEvent::Proposals(batch))
@@ -1019,8 +1028,37 @@ impl RuntimeEngine {
         view: &EngineView,
         trajectory: &TrajectoryId,
         follow_up: FollowUp,
+        evidence: &[ExternalEvidence],
     ) -> Result<Next, EngineRefusal> {
         match follow_up {
+            // The engine wants a value classified before it decides. Every ask goes out in one
+            // round so a batch naming several unresolved sources costs one redrive, not one per
+            // source; a cast already asked and unanswered blocks instead of being asked again.
+            FollowUp::ProposalsResolve(requests) => {
+                let chain = self.engine.registry().trust_chain();
+                let mut consults = Vec::new();
+                for request in requests {
+                    let EvidenceRequest::Cast { cast, value, body } = request else {
+                        return Err(EngineRefusal::Invariant {
+                            detail: "a proposal batch asked for something other than a cast".to_string(),
+                        });
+                    };
+                    match cast_state(chain, evidence, value) {
+                        CastAnswerState::Missing => consults.push(ExternalRequest::Cast {
+                            cast: cast.as_str().to_string(),
+                            value,
+                            body,
+                        }),
+                        CastAnswerState::NoAnswer | CastAnswerState::Resolved => {
+                            return Ok(deny_next(
+                                "[appa] no registered cast could establish what this call reads; the call is blocked"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                }
+                Ok(Next::ResolveExternal(consults))
+            }
             FollowUp::Proposals {
                 released: releases,
                 blocked,

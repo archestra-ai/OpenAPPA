@@ -58,6 +58,9 @@ pub struct ProposalBatch {
     /// and offer identity it derives here and keeps none of it: entropy is input data, never engine
     /// state. Runtime supplies it per act and allocates no offer identity of its own.
     pub offer_nonce: crate::value::OfferNonce,
+    /// The cast answers the runtime obtained for values this batch's calls consume. A batch
+    /// carrying none is the ordinary case; the engine asks only when a block turns on a fact.
+    pub evidence: Vec<Evidence>,
     /// The membership answers the runtime obtained for the groups this act's declarations write:
     /// every group the engine named in a `MembershipNeeded` refusal of this
     /// same act, and nothing the policy does not write.
@@ -397,6 +400,10 @@ pub enum FollowUp {
         spent: Vec<ResolvedCall>,
         settled: Vec<Settled>,
     },
+    /// A call in this batch is blocked only for want of a fact a registered cast could
+    /// establish. Nothing is decided and nothing is appended: a resolution advances the family
+    /// basis, so every release and offer this batch would open must be stamped after it.
+    ProposalsResolve(Vec<EvidenceRequest>),
     Malformed {
         position: usize,
         error: crate::engine::EngineError,
@@ -3563,7 +3570,7 @@ fn belongs_to(sequence: &Sequence<'_>, act: &crate::basis::DecidedAct, fact: &Fa
                 ..
             },
         ) => id == act,
-        (DecidedAct::ChildReturn(_), Fact::CastApplied { .. }) => true,
+        (DecidedAct::ChildReturn(_) | DecidedAct::Proposals(_), Fact::CastApplied { .. }) => true,
         (
             DecidedAct::Offer(act),
             Fact::ChildReturn { id, .. }
@@ -3696,6 +3703,7 @@ mod tests {
                     }],
                     spawn: None,
                     offer_nonce: nonce(),
+                    evidence: Vec::new(),
                     expansions: vec![],
                 }),
             )

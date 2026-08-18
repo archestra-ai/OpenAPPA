@@ -1784,7 +1784,11 @@ impl Engine {
             });
         }
 
-        let mut facts: Vec<Fact> = match admitted {
+        // The answers to a previous drive's ask, landed before anything reads a label: the
+        // batch then composes against the resolved picture rather than the unresolved one.
+        let (_, cast_facts) = self.applied_casts(view.projection(), &batch.trajectory, &batch.evidence, expansions)?;
+        let mut facts: Vec<Fact> = cast_facts;
+        facts.extend(match admitted {
             0 => batch
                 .provider_results
                 .iter()
@@ -1808,7 +1812,7 @@ impl Engine {
                 })
                 .collect(),
             _ => Vec::new(),
-        };
+        });
 
         let proposals = match self.resolve_proposals(batch) {
             Ok(proposals) => proposals,
@@ -1854,6 +1858,19 @@ impl Engine {
         }
         if !unanswered.is_empty() {
             return Err(TransitionError::DynamicAnswerNeeded { needed: unanswered });
+        }
+
+        // A call blocked only for want of a fact asks for the fact before anything is composed.
+        // Nothing appends here: a resolution advances the family basis, so releases and offers
+        // stamped ahead of it would carry a basis the answer immediately stales.
+        if !self.registry.casts().is_empty() {
+            let requests = self.cast_requests(view, &batch.trajectory, &facts, &proposals, expansions)?;
+            if !requests.is_empty() {
+                return Ok(EngineDecision {
+                    append: None,
+                    follow_up: FollowUp::ProposalsResolve(requests),
+                });
+            }
         }
 
         let mut working = std::borrow::Cow::Borrowed(view.projection());
@@ -2001,6 +2018,52 @@ impl Engine {
             marked_return_shape(call).map_err(|error| (mark.index(), error))?;
         }
         Ok(proposals)
+    }
+
+    /// Every value this batch's blocked calls consume that no fact has established yet, paired
+    /// with the cast that could establish it. Read-only: the check runs again once the answers
+    /// land and the batch is composed against them.
+    fn cast_requests(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        facts: &[Fact],
+        proposals: &[ResolvedCall],
+        expansions: &Expansions,
+    ) -> Result<Vec<EvidenceRequest>, TransitionError> {
+        let mut working = std::borrow::Cow::Borrowed(view.projection());
+        for fact in facts {
+            working.to_mut().fold(fact);
+        }
+        let views = working.view(trajectory);
+        let mut unestablished: Vec<crate::value::ValueId> = Vec::new();
+        for call in proposals {
+            let contract = self
+                .registry
+                .tool(call.tool())
+                .expect("a resolved call names a checkable tool");
+            let check::CheckOutcome::Block(raw) =
+                check::evaluate(contract, &views, call, &CallStage::default(), expansions)
+            else {
+                continue;
+            };
+            for fact in &raw.unestablished {
+                if !unestablished.contains(&fact.value) {
+                    unestablished.push(fact.value);
+                }
+            }
+        }
+        if unestablished.is_empty() {
+            return Ok(Vec::new());
+        }
+        expansions.require(&plan::cast_selection_groups(&self.registry))?;
+        Ok(unestablished
+            .into_iter()
+            .filter_map(|value| {
+                plan::castable_source(&self.registry, &views, value, expansions)
+                    .map(|(cast, body)| EvidenceRequest::Cast { cast, value, body })
+            })
+            .collect())
     }
 
     fn seal_admissions(
@@ -4076,6 +4139,7 @@ mod tests {
                     proposals: vec![raw(&spawn)],
                     spawn: Some(crate::transition::SpawnMark::at(0)),
                     offer_nonce: nonce(),
+                    evidence: Vec::new(),
                     expansions: vec![],
                 }),
             )
@@ -4265,6 +4329,7 @@ mod tests {
                     proposals: vec![raw(&call)],
                     spawn: None,
                     offer_nonce: nonce(),
+                    evidence: Vec::new(),
                     expansions: vec![],
                 }),
             )
@@ -4320,6 +4385,7 @@ mod tests {
                 proposals: proposals.iter().map(raw).collect(),
                 spawn: None,
                 offer_nonce: nonce(),
+                evidence: Vec::new(),
                 expansions: vec![],
             })
         };
@@ -4480,6 +4546,7 @@ mod tests {
             proposals: vec![raw(&call)],
             spawn: None,
             offer_nonce: nonce(),
+            evidence: Vec::new(),
             expansions: vec![],
         });
 
@@ -4522,6 +4589,7 @@ mod tests {
                     proposals: vec![raw(&call)],
                     spawn: None,
                     offer_nonce: nonce(),
+                    evidence: Vec::new(),
                     expansions: vec![],
                 }),
             )
@@ -4918,6 +4986,7 @@ mod tests {
                     proposals: vec![raw(&call)],
                     spawn: None,
                     offer_nonce: nonce(),
+                    evidence: Vec::new(),
                     expansions: vec![],
                 }),
             )
@@ -6424,6 +6493,7 @@ mod tests {
                 proposals: vec![raw(&call)],
                 spawn,
                 offer_nonce: nonce(),
+                evidence: Vec::new(),
                 expansions: vec![],
             })
         };
@@ -6541,6 +6611,7 @@ mod tests {
                     proposals: vec![raw(&call)],
                     spawn: Some(crate::transition::SpawnMark::at(0)),
                     offer_nonce: nonce(),
+                    evidence: Vec::new(),
                     expansions: vec![],
                 }),
             )
@@ -6600,6 +6671,7 @@ mod tests {
                     proposals: vec![raw(&call)],
                     spawn: Some(crate::transition::SpawnMark::at(0)),
                     offer_nonce: nonce(),
+                    evidence: Vec::new(),
                     expansions: vec![],
                 }),
             )
@@ -6659,6 +6731,7 @@ mod tests {
                     proposals: vec![raw(&call("spawn", json!({})))],
                     spawn: Some(crate::transition::SpawnMark::at(0)),
                     offer_nonce: nonce(),
+                    evidence: Vec::new(),
                     expansions: vec![],
                 })
             ),
@@ -6684,6 +6757,7 @@ mod tests {
                     proposals: vec![raw(&call)],
                     spawn: Some(crate::transition::SpawnMark::at(0)),
                     offer_nonce: nonce(),
+                    evidence: Vec::new(),
                     expansions: vec![],
                 }),
             )
@@ -6828,6 +6902,7 @@ mod tests {
                 proposals: vec![raw(&call)],
                 spawn,
                 offer_nonce: nonce(),
+                evidence: Vec::new(),
                 expansions: vec![],
             })
         };
@@ -6973,6 +7048,7 @@ mod tests {
                 proposals: vec![raw(call)],
                 spawn: None,
                 offer_nonce: nonce(),
+                evidence: Vec::new(),
                 expansions: vec![],
             }),
         )
@@ -7091,6 +7167,7 @@ mod tests {
                 proposals: vec![raw(&proposal)],
                 spawn: None,
                 offer_nonce: nonce,
+                evidence: Vec::new(),
                 expansions: vec![],
             }),
         )
@@ -7505,6 +7582,7 @@ mod tests {
                     ],
                     spawn: None,
                     offer_nonce: nonce(),
+                    evidence: Vec::new(),
                     expansions: vec![],
                 }),
             )
@@ -8459,6 +8537,7 @@ mod tests {
                     proposals: vec![raw(&call)],
                     spawn: None,
                     offer_nonce: nonce(),
+                    evidence: Vec::new(),
                     expansions: vec![],
                 }),
             )
@@ -8631,6 +8710,7 @@ mod tests {
                     proposals: vec![raw(&call)],
                     spawn: None,
                     offer_nonce: nonce(),
+                    evidence: Vec::new(),
                     expansions: vec![],
                 })
             ),
@@ -9597,6 +9677,154 @@ mod tests {
             }
             other => panic!("expected attention gap, got {other:?}"),
         }
+    }
+
+    fn trusted_sink() -> ToolContract {
+        ToolContract {
+            name: ToolName::new("send"),
+            tags: vec![],
+            delta: Some(Delta::NONE),
+            parameters: crate::params::ToolParameters::open(),
+            emits: EffectSet::default(),
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(TRUSTED),
+                    audience: vec![],
+                },
+                ..Requires::default()
+            },
+        }
+    }
+
+    fn classifying_engine() -> Engine {
+        let mut cfg = test_config(vec![trusted_sink(), unknown_read()]);
+        cfg.casts = vec![resolver_cast("classifier", vec![SUSPICIOUS, TRUSTED], vec![])];
+        open_engine(cfg)
+    }
+
+    fn proposing_send(e: &Engine, log: &[Fact], id: &str, evidence: Vec<Evidence>) -> EngineEvent {
+        let _ = e;
+        EngineEvent::Proposals(ProposalBatch {
+            id: crate::transition::ProposalBatchId::new(id),
+            trajectory: traj(),
+            provider_results: Vec::new(),
+            proposals: vec![raw(&call("send", json!({})))],
+            spawn: None,
+            offer_nonce: nonce(),
+            evidence,
+            expansions: {
+                let _ = log;
+                Vec::new()
+            },
+        })
+    }
+
+    #[test]
+    fn a_call_blocked_only_on_an_unresolved_source_asks_for_its_cast() {
+        let e = classifying_engine();
+        let mut log = vec![opened(&e)];
+        reads(&e, &mut log, &traj(), "read_unknown");
+
+        let asked = e
+            .handle(&viewing(&e, &log), proposing_send(&e, &log, "b-ask", Vec::new()))
+            .expect("a block turning on a fact asks for the fact");
+        assert_eq!(
+            asked.append, None,
+            "nothing is decided or appended: a resolution moves the family basis"
+        );
+        let value = match &asked.follow_up {
+            FollowUp::ProposalsResolve(requests) => match requests.as_slice() {
+                [EvidenceRequest::Cast { cast, value, body }] => {
+                    assert_eq!(cast.as_str(), "classifier");
+                    assert_eq!(body.as_str(), "read", "the ask carries the bytes the classifier reads");
+                    *value
+                }
+                other => panic!("expected one cast request, got {other:?}"),
+            },
+            other => panic!("expected a resolution ask, got {other:?}"),
+        };
+
+        // Repeating the ask changes nothing: the request is not an act.
+        assert_eq!(
+            e.handle(&viewing(&e, &log), proposing_send(&e, &log, "b-ask", Vec::new()))
+                .expect("the ask repeats")
+                .append,
+            None
+        );
+
+        let answered = e
+            .handle(
+                &viewing(&e, &log),
+                proposing_send(
+                    &e,
+                    &log,
+                    "b-ask",
+                    vec![Evidence::Cast {
+                        cast: crate::names::CastName::new("classifier"),
+                        value,
+                        resolved: established(TRUSTED, Audience::Public),
+                    }],
+                ),
+            )
+            .expect("the answered batch decides");
+        let facts = appended_facts(answered.clone());
+        assert!(
+            facts.iter().any(|fact| matches!(fact, Fact::CastApplied { .. })),
+            "the resolution lands as a fact under the proposal act: {facts:?}"
+        );
+        assert!(
+            matches!(&answered.follow_up, FollowUp::Proposals { released, .. } if released.len() == 1),
+            "a trusted source clears the floor and the call releases: {:?}",
+            answered.follow_up
+        );
+        assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
+    }
+
+    #[test]
+    fn a_resolution_below_the_floor_blocks_the_call_it_was_asked_for() {
+        let e = classifying_engine();
+        let mut log = vec![opened(&e)];
+        reads(&e, &mut log, &traj(), "read_unknown");
+        let value = match &e
+            .handle(&viewing(&e, &log), proposing_send(&e, &log, "b-low", Vec::new()))
+            .expect("the block asks")
+            .follow_up
+        {
+            FollowUp::ProposalsResolve(requests) => match requests.as_slice() {
+                [EvidenceRequest::Cast { value, .. }] => *value,
+                other => panic!("expected one cast request, got {other:?}"),
+            },
+            other => panic!("expected a resolution ask, got {other:?}"),
+        };
+
+        let decided = e
+            .handle(
+                &viewing(&e, &log),
+                proposing_send(
+                    &e,
+                    &log,
+                    "b-low",
+                    vec![Evidence::Cast {
+                        cast: crate::names::CastName::new("classifier"),
+                        value,
+                        resolved: established(SUSPICIOUS, Audience::Public),
+                    }],
+                ),
+            )
+            .expect("the answered batch decides");
+        let facts = appended_facts(decided.clone());
+        assert!(facts.iter().any(|fact| matches!(fact, Fact::CastApplied { .. })));
+        match &decided.follow_up {
+            FollowUp::Proposals { released, blocked, .. } => {
+                assert!(
+                    released.is_empty(),
+                    "a suspicious source does not clear a trusted floor"
+                );
+                assert_eq!(blocked.len(), 1);
+            }
+            other => panic!("expected a decided batch, got {other:?}"),
+        }
+        assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
     }
 
     #[test]
@@ -10635,6 +10863,7 @@ mod tests {
                     proposals: vec![raw(&call("spawn", json!({})))],
                     spawn: Some(crate::transition::SpawnMark::at(0)),
                     offer_nonce: nonce(),
+                    evidence: Vec::new(),
                     expansions: vec![],
                 }),
             )
@@ -10768,6 +10997,7 @@ mod tests {
             proposals,
             spawn,
             offer_nonce: nonce(),
+            evidence: Vec::new(),
             expansions: vec![],
         })
     }
@@ -13909,6 +14139,7 @@ mod tests {
                 proposals,
                 spawn: None,
                 offer_nonce: nonce(),
+                evidence: Vec::new(),
                 expansions,
             })
         }
@@ -13997,6 +14228,20 @@ mod tests {
                 })),
                 "a constant arrives resolved to literal readers: the runtime never expands a group"
             );
+
+            // The membership refusal above discarded an unappended checkpoint. It lands on the
+            // drive that carries the expansion, and the report stays repeatable after it.
+            let facts = appended_facts(asked);
+            assert!(
+                facts.iter().any(|fact| matches!(fact, Fact::DispatchSucceeded { .. })),
+                "the checkpoint lands once the group is expanded: {facts:?}"
+            );
+            let log = [log, facts].concat();
+            let again = e
+                .handle(&viewing(&e, &log), report(vec![expansion("team", &["alice"])]))
+                .expect("the report repeats");
+            assert_eq!(again.append, None, "a repeated report commits nothing twice");
+            assert_eq!(e.validate_replay(&log), Ok(()));
         }
 
         #[test]

@@ -904,6 +904,27 @@ pub(crate) fn resolvable_source(
     })
 }
 
+/// The first registered cast that could establish `value`, beside the bytes it would read.
+/// `None` where the value kept no body, carries no label, or no registered cast reaches it — each
+/// leaves the value unestablished, which fails closed at whatever consumes it.
+pub(crate) fn castable_source(
+    registry: &Registry,
+    views: &Views,
+    value: crate::value::ValueId,
+    expansions: &Expansions,
+) -> Option<(crate::names::CastName, crate::value::ValueBody)> {
+    let body = views.value_body(value)?.clone();
+    let prior = views.value_label(value)?;
+    registry
+        .casts()
+        .iter()
+        .find(|cast| {
+            cast.resolution.can_establish(prior, expansions)
+                && cast.scope.reaches(registry, views, value).unwrap_or(false)
+        })
+        .map(|cast| (cast.name.clone(), body))
+}
+
 /// The established contribution a bound output sanitizer's first derivation would make, resolved
 /// here at dispatch. `None` where the sanitizer is unregistered or does not apply to
 /// this output at all. Resolved rather than left to a later registry read because a mandate group

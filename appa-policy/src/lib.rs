@@ -818,7 +818,13 @@ impl RawCast {
             (None, Some(resolver)) => CastResolution::Resolver {
                 may_cast: resolver.convert(chain, &self.name)?,
             },
-            (None, None) => return Err(bad_impl("cast", &self.name, "declares neither a constant nor a resolver")),
+            (None, None) => {
+                return Err(bad_impl(
+                    "cast",
+                    &self.name,
+                    "declares neither a constant nor a resolver",
+                ));
+            }
         };
         Ok(Cast {
             name: CastName::new(self.name),
