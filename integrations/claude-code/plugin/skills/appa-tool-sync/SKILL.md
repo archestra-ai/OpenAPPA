@@ -194,26 +194,39 @@ the reason, changes nothing, and leaves the policy that was already
 serving in place. Give the user the reason in plain words, fix the
 config, and reload again.
 
-Then close in about four sentences. What happened, and what to do:
+Then close in about three sentences. What happened, and what it
+protects:
 
 ```text
 Added 9 tools from 3 servers. The policy is live now.
 Two of them can send data outside: <name>, <name>.
 Notes and files stay private, so those two will block them.
-To use them, start a new clappa session.
 ```
 
-The last line matters and is easy to get wrong: a session keeps the
-policy file it started with, so the tools you just added do not work
-in the session that added them. Keep the reminder to that one short
-line, and name `clappa` — only sessions started with it are protected.
+Do not put the new-session reminder here — it opens step 9. Only when
+step 9 is skipped does the reminder end the close instead, as the same
+warning line step 9 prescribes.
 
 ## 9. Offer one prompt that shows the protection
 
-After the close, offer the user one prompt they can paste into that
-new session to watch the protection work. Compose it from the entries
-you just wrote — never from a fixed example and never from this
-document:
+After the close, offer the user one prompt they can paste into a new
+session to watch the protection work. Open with the new-session
+warning, bold with a warning emoji, then the paste invitation in the
+same paragraph:
+
+```text
+⚠️ **The new tools do not work in this session — it keeps the policy
+it started with. Start a new `clappa` session to use them.** If you
+want to watch the protection work, paste this into that new session:
+```
+
+The warning is easy to get wrong: a session keeps the policy file it
+started with, so the tools you just added do not work in the session
+that added them. Name `clappa` — only sessions started with it are
+protected.
+
+Then give the prompt as a blockquote. Compose it from the entries you
+just wrote — never from a fixed example and never from this document:
 
 - Pick one tool you marked as keeping data private. Steer away from
   the most sensitive sources — meeting recordings, mail.
@@ -235,4 +248,5 @@ see: the fetch works and the data comes in; the send is refused,
 because the summary carries what the private tool returned.
 
 If the sync wrote no private tool or no sending tool, skip this step
-and say nothing about it.
+and say nothing about it — but keep the warning: it then ends the
+step 8 close as its last line.
