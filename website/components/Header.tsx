@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import Link from "next/link";
 
+import { DiscordIcon } from "@/components/DiscordIcon";
 import { Logo } from "@/components/Logo";
 import { MobileNavToggle } from "@/components/MobileNav";
 import { SearchIcon, useSearch } from "@/components/SearchProvider";
@@ -57,6 +58,16 @@ export function Header({ fullBleed = false }: { fullBleed?: boolean }) {
           </a>
           <a href="https://github.com/archestra-ai/openappa" target="_blank" rel="noreferrer">
             GitHub
+          </a>
+          <a
+            href="https://discord.gg/B5fmSxHKZ7"
+            target="_blank"
+            rel="noreferrer"
+            className="discord-link"
+            aria-label="Join the OpenAPPA Discord"
+            title="Join the OpenAPPA Discord"
+          >
+            <DiscordIcon />
           </a>
           <ThemeToggle />
         </nav>

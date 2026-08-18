@@ -340,6 +340,13 @@ samp {
   color: var(--text-strong);
 }
 
+/* Icon-only nav links (the Discord mark) center on the text baseline row and
+   inherit the same rest/hover colors as their text siblings. */
+.site-header nav a.discord-link {
+  display: inline-flex;
+  align-items: center;
+}
+
 /* Below the docked breakpoint the header keeps only the menu button and the
    wordmark. Search, Paper, GitHub and the theme toggle move into the drawer —
    the same place the page navigation already lives, so one tap reaches all of
@@ -1459,6 +1466,11 @@ samp {
 
 .site-footer a:hover {
   color: var(--text-strong);
+}
+
+.site-footer-links {
+  display: inline-flex;
+  gap: 20px;
 }
 
 /* ————————————————————————————————————————————————

@@ -7,9 +7,14 @@ export default function SiteLayout({ children }: { children: React.ReactNode }) 
       {children}
       <footer className="site-footer">
         <span>© {new Date().getFullYear()} OpenAPPA</span>
-        <a href="https://github.com/archestra-ai/OpenAPPA" target="_blank" rel="noreferrer">
-          GitHub
-        </a>
+        <span className="site-footer-links">
+          <a href="https://discord.gg/B5fmSxHKZ7" target="_blank" rel="noreferrer">
+            Discord
+          </a>
+          <a href="https://github.com/archestra-ai/OpenAPPA" target="_blank" rel="noreferrer">
+            GitHub
+          </a>
+        </span>
       </footer>
     </>
   );

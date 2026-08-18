@@ -70,6 +70,9 @@ export function DocsSidebar({
             <a href="https://github.com/archestra-ai/openappa" target="_blank" rel="noreferrer">
               GitHub
             </a>
+            <a href="https://discord.gg/B5fmSxHKZ7" target="_blank" rel="noreferrer">
+              Discord
+            </a>
             <ThemeToggle />
           </div>
         </div>
