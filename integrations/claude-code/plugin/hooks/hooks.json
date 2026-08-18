@@ -1,12 +1,13 @@
 {
-  "description": "Hooks protect only sessions launched with APPA_GATE=1 (the clappa alias). The guard reads the Claude Code process environment, fixed at launch, so a session cannot turn the protection off. Without the variable every hook exits 0 and SessionStart prints beta-announcement.md instead of the protection context — a one-line invitation to try clappa — or, when the runtime binary is not installed, setup-appa.md: instructions for the model to offer and perform the install as a prompted task, prefixed with the resolved install target so the instructions and the hooks' binary lookup cannot disagree on the path. In a protected session every hook posts its event to the appa-runtime-v2 process and prints the runtime's answer. SessionStart first runs ensure-runtime.sh, which starts the installed runtime when nothing healthy answers /health. curl --fail-with-body exits non-zero on a non-2xx answer and on a connection failure; plain curl exits 0 on server errors and would fail open. The trailing exit 2 makes every failure the blocking hook outcome: no answer from the runtime blocks the action. SessionStart itself cannot block the session; the UserPromptSubmit hook blocks the first prompt instead. The 120-second deadline outlasts the runtime's own evidence round trips; a hook that still times out blocks, never passes. The context hook is advice, not enforcement, so its failure does not block. Stop, StopFailure and SubagentStop are the exception to the trailing exit 2: they report a finished turn, which decides nothing, and blocking on this hook holds the actor in a turn it has already finished. They discard the answer and always exit 0, and take the shorter deadline because a turn end waits on no evidence round trip, so a runtime that is down costs a call left open, never a turn that cannot end. The runtime closes on that event a call the harness never ran: a call refused at its permission prompt fires no outcome hook, and left open it would refuse every later call as a second one in flight.",
+  "description": "Hooks protect only sessions launched with APPA_GATE=1 (the clappa alias). The guard reads the Claude Code process environment, fixed at launch, so a session cannot turn the protection off. Without the variable every hook exits 0 and SessionStart prints beta-announcement.md instead of the protection context — a one-line invitation to try clappa — or, when the runtime binary is not installed, setup-appa.md: instructions for the model to offer and perform the install as a prompted task, prefixed with the resolved install target so the instructions and the hooks' binary lookup cannot disagree on the path. In a protected session every hook posts its event to the appa-runtime-v2 process and prints the runtime's answer. SessionStart first runs ensure-runtime.sh, which starts the installed runtime when nothing healthy answers /health; the install runs the same script as its last step, so a protected session normally finds the runtime already up. curl --fail-with-body exits non-zero on a non-2xx answer and on a connection failure; plain curl exits 0 on server errors and would fail open. The trailing exit 2 makes every failure the blocking hook outcome: no answer from the runtime blocks the action. SessionStart itself cannot block the session; the UserPromptSubmit hook blocks the first prompt instead. The 120-second deadline outlasts the runtime's own evidence round trips; a hook that still times out blocks, never passes. Every hook declares a timeout above its own curl deadline, and SessionStart's also covers the starter's 20-second budget. Claude Code kills a hook that outruns the timeout and then lets the action proceed, because it never reads the killed hook's exit code, so an undeclared timeout is the one way these hooks fail open. The context hook is advice, not enforcement, so its failure does not block. Stop, StopFailure and SubagentStop are the exception to the trailing exit 2: they report a finished turn, which decides nothing, and blocking on this hook holds the actor in a turn it has already finished. They discard the answer and always exit 0, and take the shorter deadline because a turn end waits on no evidence round trip, so a runtime that is down costs a call left open, never a turn that cannot end. The runtime closes on that event a call the harness never ran: a call refused at its permission prompt fires no outcome hook, and left open it would refuse every later call as a second one in flight.",
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/ensure-runtime.sh\" </dev/null && curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2"
+            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/ensure-runtime.sh\" </dev/null && curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2",
+            "timeout": 150
           },
           {
             "type": "command",
@@ -20,7 +21,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2"
+            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2",
+            "timeout": 130
           }
         ]
       }
@@ -31,7 +33,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2"
+            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2",
+            "timeout": 130
           }
         ]
       }
@@ -42,7 +45,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2"
+            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2",
+            "timeout": 130
           }
         ]
       }
@@ -52,7 +56,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; curl -s -m 30 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- -o /dev/null; exit 0"
+            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; curl -s -m 30 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- -o /dev/null; exit 0",
+            "timeout": 40
           }
         ]
       }
@@ -62,7 +67,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; curl -s -m 30 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- -o /dev/null; exit 0"
+            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; curl -s -m 30 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- -o /dev/null; exit 0",
+            "timeout": 40
           }
         ]
       }
@@ -72,7 +78,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2"
+            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2",
+            "timeout": 130
           }
         ]
       }
@@ -82,7 +89,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; curl -s -m 30 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- -o /dev/null; exit 0"
+            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; curl -s -m 30 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- -o /dev/null; exit 0",
+            "timeout": 40
           }
         ]
       }
@@ -93,7 +101,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2"
+            "command": "[ \"${APPA_GATE:-}\" = 1 ] || exit 0; curl --fail-with-body -sS -m 120 -X POST \"${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/hook\" -H 'content-type: application/json' --data-binary @- || exit 2",
+            "timeout": 130
           }
         ]
       }
