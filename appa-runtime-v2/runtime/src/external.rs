@@ -20,6 +20,7 @@ const HITL: &str = "hitl";
 pub enum ConsultKind {
     Authority,
     Sanitizer,
+    Cast,
 }
 
 impl ConsultKind {
@@ -27,6 +28,7 @@ impl ConsultKind {
         match self {
             ConsultKind::Authority => "authority",
             ConsultKind::Sanitizer => "sanitizer",
+            ConsultKind::Cast => "cast",
         }
     }
 }
@@ -54,6 +56,54 @@ pub enum NoAnswerReason {
 pub enum ConsultOutcome {
     Answer(serde_json::Value),
     NoAnswer(NoAnswerReason),
+}
+
+/// One classifier's complete answer, as the wire carried it and before the engine judges
+/// it: a trust rank name and an audience. Both dimensions or nothing — a cast establishes
+/// a whole label, so a half-filled answer is malformed rather than partially useful. The
+/// names stay unresolved here: only the engine holds the trust chain and the ceiling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CastAnswer {
+    pub trust: String,
+    pub audience: CastAudience,
+}
+
+/// The audience half of a cast answer. `Public` is legal here — unlike a dynamic
+/// resolver's reader set, a cast may resolve to public where its `may_cast` cap admits
+/// it — but `public` may never appear beside literal readers, and a group name is never a
+/// classifier's to write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CastAudience {
+    Public,
+    Readers(Vec<String>),
+}
+
+impl CastAnswer {
+    /// Read one classifier answer off the wire. Every rejection is a no-answer, never a
+    /// denial: a malformed classifier grants nothing and blocks nothing.
+    pub fn from_wire(answer: &serde_json::Value) -> Option<CastAnswer> {
+        let trust = answer.get("trust")?.as_str()?.to_string();
+        if trust.is_empty() {
+            return None;
+        }
+        let audience = match answer.get("audience")? {
+            serde_json::Value::String(token) if token == "public" => CastAudience::Public,
+            serde_json::Value::Array(readers) => {
+                let readers: Option<Vec<String>> = readers
+                    .iter()
+                    .map(|reader| match reader.as_str() {
+                        Some(reader) if !reader.is_empty() && reader != "public" && !reader.starts_with('@') => {
+                            Some(reader.to_string())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                CastAudience::Readers(readers?)
+            }
+            _ => return None,
+        };
+        Some(CastAnswer { trust, audience })
+    }
 }
 
 /// The outcome of one reader-set resolution — dynamic or membership:
@@ -123,6 +173,7 @@ pub struct ExternalServices {
     max_body_bytes: usize,
     authorities: BTreeMap<String, AuthorityBackend>,
     sanitizers: BTreeMap<String, SanitizerBackend>,
+    casts: BTreeMap<String, Endpoint>,
     dynamic: Option<Endpoint>,
     membership: Option<Endpoint>,
 }
@@ -186,6 +237,7 @@ impl ExternalServices {
             max_body_bytes: config.max_body_bytes,
             authorities,
             sanitizers,
+            casts: config.casts,
             dynamic: config.dynamic,
             membership: config.membership,
         })
@@ -229,6 +281,10 @@ impl ExternalServices {
                     None => ConsultOutcome::NoAnswer(NoAnswerReason::Malformed),
                 },
                 Some(SanitizerBackend::Module(module)) => self.call_module(module, kind, name, payload).await,
+            },
+            ConsultKind::Cast => match self.casts.get(name) {
+                None => unregistered(kind, name),
+                Some(endpoint) => self.post_consult(endpoint, kind, name, payload).await,
             },
         }
     }
@@ -471,6 +527,7 @@ mod tests {
             max_body_bytes: cap,
             authorities: BTreeMap::new(),
             sanitizers: BTreeMap::new(),
+            casts: BTreeMap::new(),
             dynamic: dynamic_url.clone().map(|url| Endpoint { url, token: None }),
             membership: dynamic_url.map(|url| Endpoint { url, token: None }),
         }

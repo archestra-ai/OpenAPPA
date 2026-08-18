@@ -784,10 +784,7 @@ pub(crate) fn confined_stage(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ReturnStagePlan {
-    Resolve {
-        cast: crate::names::CastName,
-        value: crate::value::ValueId,
-    },
+    Resolve { value: crate::value::ValueId },
     Stage(Vec<ExecutableRemedyPlan>),
 }
 
@@ -824,8 +821,8 @@ pub(crate) fn return_stage(
                 if sanitizer.derive_output(candidate, &[], expansions).is_none() {
                     continue;
                 }
-                if let Some((cast, value)) = resolvable_source(registry, views, fold, dim, expansions) {
-                    return ReturnStagePlan::Resolve { cast, value };
+                if let Some(value) = resolvable_source(registry, views, fold, dim, expansions) {
+                    return ReturnStagePlan::Resolve { value };
                 }
                 continue;
             }
@@ -889,19 +886,48 @@ pub(crate) fn resolvable_source(
     fold: &PartialLabel,
     dim: crate::label::Dimension,
     expansions: &Expansions,
-) -> Option<(crate::names::CastName, crate::value::ValueId)> {
-    fold.unresolved(dim).find_map(|value| {
-        views.value_body(value)?;
-        let prior = views.value_label(value)?;
-        registry
-            .casts()
-            .iter()
-            .find(|cast| {
-                cast.resolution.can_establish(prior, expansions)
-                    && cast.scope.reaches(registry, views, value).unwrap_or(false)
+) -> Option<crate::value::ValueId> {
+    fold.unresolved(dim).find(|value| {
+        views.value_body(*value).is_some()
+            && views.value_label(*value).is_some_and(|prior| {
+                registry.casts().iter().any(|cast| {
+                    cast.resolution.can_establish(prior, expansions)
+                        && cast.scope.reaches(registry, views, *value).unwrap_or(false)
+                })
             })
-            .map(|cast| (cast.name.clone(), value))
     })
+}
+
+/// Every registered cast that could establish `value`, in registration order, beside the bytes
+/// they would read. The runtime tries them in that order until one answers, so a constant
+/// registered last is the declared fallback here exactly as it is at a held result. A constant
+/// arrives already resolved against the memberships pinned for this act.
+/// `None` where the value kept no body, carries no label, or no registered cast reaches it — each
+/// leaves the value unestablished, which fails closed at whatever consumes it.
+pub(crate) fn castable_sources(
+    registry: &Registry,
+    views: &Views,
+    value: crate::value::ValueId,
+    expansions: &Expansions,
+) -> Option<(Vec<crate::transition::ApplicableCast>, crate::value::ValueBody)> {
+    let body = views.value_body(value)?.clone();
+    let prior = views.value_label(value)?;
+    let casts: Vec<crate::transition::ApplicableCast> = registry
+        .casts()
+        .iter()
+        .filter(|cast| {
+            cast.resolution.can_establish(prior, expansions)
+                && cast.scope.reaches(registry, views, value).unwrap_or(false)
+        })
+        .map(|cast| crate::transition::ApplicableCast {
+            name: cast.name.clone(),
+            constant: match &cast.resolution {
+                crate::authority::CastResolution::Constant(constant) => Some(constant.resolve(expansions)),
+                crate::authority::CastResolution::Resolver { .. } => None,
+            },
+        })
+        .collect();
+    (!casts.is_empty()).then_some((casts, body))
 }
 
 /// The established contribution a bound output sanitizer's first derivation would make, resolved
@@ -1055,6 +1081,27 @@ pub(crate) fn return_stage_groups(registry: &Registry, lineage: &SanitizerLineag
         groups.extend(cast_selection_groups(registry));
     }
     groups
+}
+
+/// The groups selecting a cast for `value` reads: the declared audience of every constant cast
+/// whose scope reaches it. Scope routing needs no directory answer, so narrowing by it first
+/// keeps a constant scoped elsewhere from pulling a membership consult into a decision its
+/// answer cannot affect.
+pub(crate) fn constant_groups_reaching(
+    registry: &Registry,
+    views: &Views,
+    value: crate::value::ValueId,
+) -> Vec<GroupName> {
+    registry
+        .casts()
+        .iter()
+        .filter(|cast| cast.scope.reaches(registry, views, value).unwrap_or(false))
+        .filter_map(|cast| match &cast.resolution {
+            crate::authority::CastResolution::Constant(constant) => Some(constant.audience.groups().cloned()),
+            crate::authority::CastResolution::Resolver { .. } => None,
+        })
+        .flatten()
+        .collect()
 }
 
 pub(crate) fn cast_selection_groups(registry: &Registry) -> Vec<GroupName> {

@@ -126,6 +126,10 @@ pub enum OpenError {
     ReservedTool(String),
     #[error("policy names {kind} {name}, which has no [externals] binding")]
     UnboundExternal { kind: &'static str, name: String },
+    #[error(
+        "cast {0} declares a constant, which the engine answers from the policy — remove its [externals.casts] binding"
+    )]
+    BoundConstantCast(String),
     #[error("the database is damaged: {0}")]
     Damaged(String),
     #[error("storage failure: {0}")]
@@ -854,23 +858,30 @@ fn validate_deployment(policy: &appa_policy::Config, config: &Config) -> Result<
     }
 
     let rc = policy.registry_config();
-    // Cast resolution is not wired in this runtime: an accepted
-    // declaration would sit inert while unestablished blocks stay
-    // terminal, so the declaration itself is refused.
-    if !rc.casts.is_empty() {
-        return Err(OpenError::UnsupportedPolicy(
-            "[[cast]] declarations — cast resolution is not wired in this runtime".to_string(),
-        ));
-    }
     for tool in &rc.tools {
         let name = tool.name.as_str();
-        if tool.pending_cast_dim().is_some() {
-            return Err(OpenError::UnsupportedPolicy(format!(
-                "tool {name} declares a pending-cast (\"unknown\") delta — cast resolution is not wired in this runtime"
-            )));
-        }
         if is_control_tool(name) {
             return Err(OpenError::ReservedTool(name.to_string()));
+        }
+    }
+    // A resolver-backed cast classifies over the wire, so it needs an endpoint. A
+    // constant is answered from the policy itself and binds nothing — an endpoint bound
+    // to one would never be called, so the deployment is refused rather than left
+    // believing a classifier runs.
+    for cast in &rc.casts {
+        let name = cast.name.as_str();
+        let bound = config.externals.casts.contains_key(name);
+        match (&cast.resolution, bound) {
+            (appa_engine::authority::CastResolution::Resolver { .. }, false) => {
+                return Err(OpenError::UnboundExternal {
+                    kind: "cast",
+                    name: name.to_string(),
+                });
+            }
+            (appa_engine::authority::CastResolution::Constant(_), true) => {
+                return Err(OpenError::BoundConstantCast(name.to_string()));
+            }
+            _ => {}
         }
     }
     for authority in &rc.authorities {

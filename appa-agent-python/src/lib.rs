@@ -98,6 +98,7 @@ impl SessionInner {
                 max_body_bytes: MAX_BODY_BYTES,
                 authorities: Default::default(),
                 sanitizers: Default::default(),
+                casts: Default::default(),
                 dynamic: None,
                 membership: None,
             },

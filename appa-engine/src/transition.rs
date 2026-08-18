@@ -58,6 +58,9 @@ pub struct ProposalBatch {
     /// and offer identity it derives here and keeps none of it: entropy is input data, never engine
     /// state. Runtime supplies it per act and allocates no offer identity of its own.
     pub offer_nonce: crate::value::OfferNonce,
+    /// The cast answers the runtime obtained for values this batch's calls consume. A batch
+    /// carrying none is the ordinary case; the engine asks only when a block turns on a fact.
+    pub evidence: Vec<Evidence>,
     /// The membership answers the runtime obtained for the groups this act's declarations write:
     /// every group the engine named in a `MembershipNeeded` refusal of this
     /// same act, and nothing the policy does not write.
@@ -313,15 +316,25 @@ pub enum EvidenceRequest {
         body: ValueBody,
     },
     Cast {
-        cast: crate::names::CastName,
+        casts: Vec<ApplicableCast>,
         value: crate::value::ValueId,
         body: ValueBody,
     },
     PendingCast {
-        casts: Vec<crate::names::CastName>,
+        casts: Vec<ApplicableCast>,
         source: RawResultDigest,
         body: ValueBody,
     },
+}
+
+/// One cast applicable to a pending result, in registration order. A constant cast arrives
+/// already resolved: the engine reads its declared label against the memberships pinned for this
+/// act, so the runtime never expands a group of its own accord. A resolver cast carries `None`
+/// and the runtime consults its endpoint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApplicableCast {
+    pub name: crate::names::CastName,
+    pub constant: Option<crate::label::EstablishedLabel>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -387,6 +400,10 @@ pub enum FollowUp {
         spent: Vec<ResolvedCall>,
         settled: Vec<Settled>,
     },
+    /// A call in this batch is blocked only for want of a fact a registered cast could
+    /// establish. Nothing is decided and nothing is appended: a resolution advances the family
+    /// basis, so every release and offer this batch would open must be stamped after it.
+    ProposalsResolve(Vec<EvidenceRequest>),
     Malformed {
         position: usize,
         error: crate::engine::EngineError,
@@ -3553,7 +3570,7 @@ fn belongs_to(sequence: &Sequence<'_>, act: &crate::basis::DecidedAct, fact: &Fa
                 ..
             },
         ) => id == act,
-        (DecidedAct::ChildReturn(_), Fact::CastApplied { .. }) => true,
+        (DecidedAct::ChildReturn(_) | DecidedAct::Proposals(_), Fact::CastApplied { .. }) => true,
         (
             DecidedAct::Offer(act),
             Fact::ChildReturn { id, .. }
@@ -3686,6 +3703,7 @@ mod tests {
                     }],
                     spawn: None,
                     offer_nonce: nonce(),
+                    evidence: Vec::new(),
                     expansions: vec![],
                 }),
             )

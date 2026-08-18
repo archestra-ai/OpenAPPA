@@ -5,10 +5,12 @@ use std::sync::Arc;
 
 use crate::elicit::Elicitation;
 use crate::engine::{
-    AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback, ForkStatus,
-    Liveness, Next, OfferNonce, OpenDispatch, Presentation, engine_id,
+    AuthorityVerdict, CastLabel, CastVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence,
+    ExternalRequest, Feedback, ForkStatus, Liveness, Next, OfferNonce, OpenDispatch, Presentation, engine_id,
 };
-use crate::external::{ConsultKind, ConsultOutcome, ReadersResolution};
+use crate::external::{CastAnswer, ConsultKind, ConsultOutcome, ReadersResolution};
+use appa_engine::transition::ApplicableCast;
+use appa_engine::value::ValueBody;
 
 use super::{
     ChildReturnDecision, Deployment, EventError, ExactCall, Inner, OfferId, OutcomeBody, ProposedCall, RemedyDecision,
@@ -818,6 +820,14 @@ impl Session {
                     readers,
                 }
             }
+            ExternalRequest::PendingCast { casts, source, body } => ExternalEvidence::PendingCast {
+                source: *source,
+                verdict: self.cascade(casts, body).await,
+            },
+            ExternalRequest::Cast { casts, value, body } => ExternalEvidence::Cast {
+                value: *value,
+                verdict: self.cascade(casts, body).await,
+            },
             // The membership resolver wire is the declared external contract verbatim.
             ExternalRequest::Membership { resolver, group } => {
                 let readers = match self.deployment.externals.resolve_membership(resolver, group).await {
@@ -830,6 +840,44 @@ impl Session {
                     readers,
                 }
             }
+        }
+    }
+
+    /// Every applicable cast, in registration order, until one answers. A constant arrives
+    /// already resolved and answers without a call; a resolver is consulted. A cast that gives
+    /// no answer is skipped so a constant registered last serves as the declared fallback —
+    /// but the first answer obtained is the one submitted, and the engine alone judges it.
+    async fn cascade(&self, casts: &[ApplicableCast], body: &ValueBody) -> Option<CastVerdict> {
+        let payload = serde_json::json!({ "body": body.as_str() });
+        for cast in casts {
+            let name = cast.name.as_str().to_string();
+            if let Some(constant) = &cast.constant {
+                return Some(CastVerdict {
+                    cast: name,
+                    label: CastLabel::Declared(constant.clone()),
+                });
+            }
+            if let Some(answer) = self.classify(&name, &payload).await {
+                return Some(CastVerdict {
+                    cast: name,
+                    label: CastLabel::Classified(answer),
+                });
+            }
+        }
+        None
+    }
+
+    /// One classifier consult. Every failure — unbound, unreachable, malformed, over the
+    /// body cap — is the same no-answer: a classifier that cannot speak grants nothing.
+    async fn classify(&self, cast: &str, payload: &serde_json::Value) -> Option<CastAnswer> {
+        match self
+            .deployment
+            .externals
+            .consult(ConsultKind::Cast, cast, payload, None)
+            .await
+        {
+            ConsultOutcome::Answer(answer) => CastAnswer::from_wire(&answer),
+            ConsultOutcome::NoAnswer(_) => None,
         }
     }
 }
@@ -1479,20 +1527,46 @@ attends = ["irreversible"]
     }
 
     #[test]
-    fn a_pending_cast_contract_refuses_open() {
+    fn a_pending_cast_contract_opens_with_a_registered_cast() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let policy = r#"
 version = 1
 [[policy.tool]]
 name = "fetch"
 delta = { trust = "unknown" }
+[[policy.cast]]
+name = "paranoid"
+constant = { trust = "suspicious", audience = { exactly = ["public"] } }
 [policy.deployment]
 confined_results = ["fetch"]
 "#;
-        assert!(matches!(
-            Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None),
-            Err(OpenError::UnsupportedPolicy(_)),
-        ));
+        assert!(
+            Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None).is_ok(),
+            "a pending-cast delta is served, not refused"
+        );
+    }
+
+    #[test]
+    fn a_resolver_cast_must_be_bound_at_the_deployment() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let policy = r#"
+version = 1
+[[policy.tool]]
+name = "fetch"
+delta = { trust = "unknown" }
+[[policy.cast]]
+name = "classifier"
+resolver = { may_cast = { trust = ["suspicious"], audience = { cap = ["public"] } } }
+[policy.deployment]
+confined_results = ["fetch"]
+"#;
+        assert!(
+            matches!(
+                Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None),
+                Err(OpenError::UnboundExternal { kind: "cast", .. }),
+            ),
+            "a classifier with no endpoint cannot answer, so the deployment does not open"
+        );
     }
 
     #[test]
@@ -1530,18 +1604,49 @@ starting_label = { trust = "suspicious" }
     }
 
     #[test]
-    fn a_cast_declaration_refuses_open() {
+    fn a_constant_cast_declaration_binds_nothing_and_opens() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let policy = r#"
 version = 1
+[[policy.tool]]
+name = "fetch"
 [[policy.cast]]
 name = "channel-class"
 constant = { trust = "trusted", audience = { exactly = ["public"] } }
 "#;
-        assert!(matches!(
-            Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None),
-            Err(OpenError::UnsupportedPolicy(_)),
-        ));
+        assert!(
+            Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None).is_ok(),
+            "a constant is answered from the policy, so it needs no [externals] entry"
+        );
+    }
+
+    #[test]
+    fn a_constant_cast_bound_to_an_endpoint_refuses_open() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let text = r#"
+[policy]
+version = 1
+[[policy.tool]]
+name = "fetch"
+[[policy.cast]]
+name = "channel-class"
+constant = { trust = "trusted", audience = { exactly = ["public"] } }
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+[externals.casts.channel-class]
+url = "https://classify.example/label"
+"#;
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, text).expect("the fixture writes");
+        let config = Config::load(&path).expect("the fixture validates");
+        assert!(
+            matches!(
+                Runtime::open(config, dir.path().join("appa.db"), None),
+                Err(OpenError::BoundConstantCast(_)),
+            ),
+            "an endpoint the engine would never call leaves the deployment believing a classifier runs"
+        );
     }
 
     #[test]
@@ -3256,6 +3361,7 @@ confined_child_return = true
             max_body_bytes: 65536,
             authorities: std::collections::BTreeMap::new(),
             sanitizers: std::collections::BTreeMap::new(),
+            casts: std::collections::BTreeMap::new(),
             dynamic: None,
             membership: None,
         }

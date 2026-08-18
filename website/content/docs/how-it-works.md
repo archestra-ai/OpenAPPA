@@ -34,7 +34,7 @@ OpenAPPA operates on three runtime concepts:
 
 Policy definitions remain strictly declarative TOML configurations. Instead of writing static allow or block rules for every tool interaction, developers declare tool contracts—specifying what permissions a tool requires (`requires`), how its output restricts security labels (`delta`), and what side effects it causes (`effects`). From these contracts, OpenAPPA automatically derives whether an action is permitted, blocked, or remediable across multi-step agent workflows.
 
-Dynamic judgment—such as regex filters, ML classifiers, or human approval queues—lives in registered components (authorities, sanitizers, casts) running as HTTP endpoints (`resolver`) or in-process modules (`builtin`). Every component is bounded by a strict mandate and may carry an advisory `hint` explaining its purpose to the agent during remedy selection.
+Dynamic judgment—such as regex filters, ML classifiers, or human approval queues—lives in registered components. Authorities and sanitizers run as HTTP endpoints (`resolver`) or in-process modules (`builtin`), are bounded by a strict `mandate`, and may carry an advisory `hint` explaining their purpose to the agent during remedy selection. Casts either declare a fixed label (`constant`) or call a classifier over HTTP (`resolver`) under a `may_cast` ceiling. Every answer is checked against the component's declared limit before it is admitted.
 
 ## Labels only move one way
 
@@ -153,10 +153,12 @@ Unannotated tools return data with an **Unknown** label state, representing unve
 |---|---|
 | **Unannotated Tool Dispatch** | Succeeds and assigns **Unknown** label state to its output. |
 | **Unregistered Tool Dispatch** | Refused directly by the engine before execution. |
-| **Requirement Check (`requires`)** | Fails closed when consuming an **Unknown** label value. |
+| **Requirement Check (`requires`)** | Drives the cast registered for the value, then checks the label it established; fails closed when no cast answers. |
 | **Child Merge Boundary** | Unknown child returns merge like any read: unresolved identities cross while every known restriction holds. Registered casts resolve them where the return policy consumes the dimension. |
 
-An Unknown label state does not halt execution until a tool contract's `requires` clause explicitly checks the value. To resolve an **Unknown** state, deployments register a **cast** component that assigns the value's complete label based on static rules or external evaluation services. This design allows deployments to start with a few high-risk tool annotations and incrementally expand policy coverage over time.
+An Unknown label state does not halt execution until a tool contract's `requires` clause explicitly checks the value. At that point the engine drives the **cast** registered for the value — a component that assigns its complete label from a fixed declaration or an external classifier — and decides on the answer it establishes. A value no registered cast reaches stays Unknown, and the call that needed it is refused. This design allows deployments to start with a few high-risk tool annotations and incrementally expand policy coverage over time.
+
+A deployment that would rather inspect the data before the model sees it declares the pending dimension on the tool itself, with `delta = { trust = "unknown" }`. The tool runs, the runtime holds its raw result back, and the cast reads the bytes the model has not: a non-restricting label releases the result, and a restricting one is offered to the agent as a narrowing to accept.
 
 ## Deploy at the gateway alone, or add components for full coverage
 
