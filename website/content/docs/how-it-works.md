@@ -52,7 +52,7 @@ The current label is calculated directly as a functional fold over the labels of
 label = admittedLabels.reduce(narrow, startingLabel)   // narrow only ever restricts
 ```
 
-## Reading sensitive data limits future actions
+## Reading data limits future actions
 
 OpenAPPA evaluates tools *proactively before dispatch*, informing the agent of lost reach before data enters its context. Reading internal data restricts future steps to internal context, making public destinations unavailable unless explicitly approved or sanitized.
 
