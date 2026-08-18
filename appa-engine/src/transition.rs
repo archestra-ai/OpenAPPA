@@ -318,10 +318,20 @@ pub enum EvidenceRequest {
         body: ValueBody,
     },
     PendingCast {
-        casts: Vec<crate::names::CastName>,
+        casts: Vec<ApplicableCast>,
         source: RawResultDigest,
         body: ValueBody,
     },
+}
+
+/// One cast applicable to a pending result, in registration order. A constant cast arrives
+/// already resolved: the engine reads its declared label against the memberships pinned for this
+/// act, so the runtime never expands a group of its own accord. A resolver cast carries `None`
+/// and the runtime consults its endpoint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApplicableCast {
+    pub name: crate::names::CastName,
+    pub constant: Option<crate::label::EstablishedLabel>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

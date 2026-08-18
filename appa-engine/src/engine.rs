@@ -1408,6 +1408,35 @@ impl Engine {
             _ => None,
         });
         let Some((cast, resolved)) = resolution else {
+            // Resolve the applicable constants before anything appends: a constant whose audience
+            // names a group needs that membership, and raising it here puts the consult one drive
+            // ahead of the cast consult rather than leaving the runtime holding a label it cannot
+            // build.
+            let applicable: Vec<&crate::authority::Cast> = self
+                .registry
+                .casts()
+                .iter()
+                .filter(|registered| registered.scope.covers(&contract.tags))
+                .collect();
+            expansions.require(
+                applicable
+                    .iter()
+                    .filter_map(|registered| match &registered.resolution {
+                        crate::authority::CastResolution::Constant(constant) => Some(constant.audience.groups()),
+                        crate::authority::CastResolution::Resolver { .. } => None,
+                    })
+                    .flatten(),
+            )?;
+            let casts = applicable
+                .iter()
+                .map(|registered| crate::transition::ApplicableCast {
+                    name: registered.name.clone(),
+                    constant: match &registered.resolution {
+                        crate::authority::CastResolution::Constant(constant) => Some(constant.resolve(expansions)),
+                        crate::authority::CastResolution::Resolver { .. } => None,
+                    },
+                })
+                .collect();
             let append = match checkpointed {
                 true => None,
                 false => {
@@ -1420,13 +1449,6 @@ impl Engine {
                     Some(self.seal(view, batch)?)
                 }
             };
-            let casts = self
-                .registry
-                .casts()
-                .iter()
-                .filter(|registered| registered.scope.covers(&contract.tags))
-                .map(|registered| registered.name.clone())
-                .collect();
             return Ok(EngineDecision {
                 append,
                 follow_up: FollowUp::Outcome(OutcomeFollowUp::Resolve(EvidenceRequest::PendingCast {
@@ -8861,8 +8883,14 @@ mod tests {
             FollowUp::Outcome(OutcomeFollowUp::Resolve(
                 crate::transition::EvidenceRequest::PendingCast {
                     casts: vec![
-                        crate::names::CastName::new("paranoid"),
-                        crate::names::CastName::new("stingy"),
+                        crate::transition::ApplicableCast {
+                            name: crate::names::CastName::new("paranoid"),
+                            constant: None,
+                        },
+                        crate::transition::ApplicableCast {
+                            name: crate::names::CastName::new("stingy"),
+                            constant: None,
+                        },
                     ],
                     source,
                     body: raw.clone(),
@@ -13909,6 +13937,66 @@ mod tests {
             let mut json = serde_json::to_value(fact).expect("a fact serializes");
             json["ValueAdmitted"]["provenance"]["ProviderRun"]["resolutions"] = resolutions;
             serde_json::from_value(json)
+        }
+
+        #[test]
+        fn a_group_writing_constant_reaches_the_pending_ask_already_resolved() {
+            let mut scan = plain_tool("scan");
+            scan.delta = Some(Delta {
+                trust: Some(Dim::Unknown),
+                audience: None,
+            });
+            let mut cfg = config(vec![scan], vec![]);
+            cfg.casts = vec![crate::authority::Cast {
+                name: crate::names::CastName::new("paranoid"),
+                resolution: crate::authority::CastResolution::Constant(crate::authority::DeclaredLabel {
+                    trust: SUSPICIOUS,
+                    audience: grouped(&[], &["team"]),
+                }),
+                scope: crate::authority::Scope::default(),
+            }];
+            let e = grouped_engine(cfg, &[], known(TRUSTED, Audience::Public));
+            let log = vec![opened(&e)];
+            let released = proposed(&e, &log, "b1", nonce(), call("scan", json!({}))).expect("the open call releases");
+            let dispatch = match &released.follow_up {
+                FollowUp::Proposals { released, .. } => released[0].dispatch.clone(),
+                other => panic!("the proposal releases, got {other:?}"),
+            };
+            let log = [log, appended_facts(released)].concat();
+            let raw = ValueBody::new("inbox bytes");
+            let report = |expansions: Vec<GroupExpansion>| {
+                EngineEvent::Outcome(ToolReport {
+                    dispatch: dispatch.clone(),
+                    outcome: ToolOutcome::Success {
+                        body: OutcomeBody::Available(raw.clone()),
+                    },
+                    evidence: vec![],
+                    offer_nonce: nonce(),
+                    expansions,
+                })
+            };
+
+            assert_eq!(
+                e.handle(&viewing(&e, &log), report(vec![])),
+                Err(TransitionError::MembershipNeeded { needed: vec![team()] }),
+                "the constant's group is needed to build the ask, one drive before the cast consult"
+            );
+
+            let asked = e
+                .handle(&viewing(&e, &log), report(vec![expansion("team", &["alice"])]))
+                .expect("the pending result asks for its resolution");
+            assert_eq!(
+                asked.follow_up,
+                FollowUp::Outcome(OutcomeFollowUp::Resolve(EvidenceRequest::PendingCast {
+                    casts: vec![crate::transition::ApplicableCast {
+                        name: crate::names::CastName::new("paranoid"),
+                        constant: Some(established(SUSPICIOUS, readers(&["alice"]))),
+                    }],
+                    source: RawResultDigest::of(raw.as_str().as_bytes()),
+                    body: raw.clone(),
+                })),
+                "a constant arrives resolved to literal readers: the runtime never expands a group"
+            );
         }
 
         #[test]
