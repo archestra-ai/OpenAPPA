@@ -19,13 +19,23 @@ appa-arxiv.tar.gz
 # Custom target dirs (CARGO_TARGET_DIR from tooling)
 target-*/
 .envrc
-bench/taubench/runs/
-bench/taubench/.tau2-bench/
-bench/taubench/data/.embeddings_cache/
+# Benchmark local data, runs, and caches
+runs/
+data/
+bench/**/runs/
+bench/**/.venv/
+bench/**/__pycache__/
+bench/**/.pytest_cache/
+bench/**/.ruff_cache/
+
+.venv/
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.ruff_cache/
 
 # Local session state and scratch, never committed.
 .DS_Store
 /tmp/
 /appa-mcp*
+

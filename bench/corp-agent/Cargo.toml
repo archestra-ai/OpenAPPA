@@ -1,0 +1,43 @@
+[package]
+name = "corporate-agent-demo"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "A corporate assistant agent on runtime-v2 over mock internal systems, used to exercise OpenAPPA"
+autobins = false
+
+[dependencies]
+# The gate in front of every flow, and the log the replay reads back.
+appa-runtime-v2 = { workspace = true }
+# The policy compiles here too: the tool catalogue is the harness's, and it is
+# read off the registry the same dialect produces.
+appa-policy = { workspace = true }
+appa-engine = { workspace = true }
+# The loop behind the `appa-corp-agent` binary.
+appa-example-agent = { workspace = true }
+# The corp systems' semantics, executed in-process by `appa-corp-agent` — the
+# same code the sibling MCP server wraps, so this agent and the FIDES demo act
+# on identical systems.
+corp-systems = { path = "../corp-systems" }
+# The loopback shim `appa-corp-agent` serves its policy tools on (the runtime's
+# tool backends are a closed set: builtin fixtures or HTTP).
+axum = { workspace = true }
+tokio-util = { workspace = true }
+# Explicit features (not left to unification): the loop and tests need sockets
+# and timeouts.
+tokio = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+anyhow = "1"
+tracing = { workspace = true }
+# The mediation log: the agent emits its decisions on the `appa::decision`
+# target and this renders them, so the loop carries no host's log format.
+tracing-subscriber = { version = "0.3", features = ["fmt", "registry"] }
+# One database per run, removed with the process.
+tempfile = "3"
+
+[[bin]]
+name = "appa-corp-agent"
+path = "src/bin/appa_corp_agent.rs"

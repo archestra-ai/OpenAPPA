@@ -1,0 +1,14 @@
+/target
+
+# Secrets: keep the key out of git. The template `.env.example` is committed.
+/.env
+
+# The email folder is a runtime side-effect sink; keep the dir, ignore contents.
+/data/email/*
+!/data/email/.gitkeep
+
+# macOS
+.DS_Store
+
+# Custom target dirs (CARGO_TARGET_DIR from tooling)
+/target-*/

@@ -1,0 +1,22 @@
+{
+  "model": "openai/gpt-5.6-luna",
+  "reps": 5,
+  "timeout_s": 300.0,
+  "jobs": 50,
+  "agents": [
+    "appa",
+    "appa-open"
+  ],
+  "scenarios": [
+    "performance-feedback",
+    "anonymous-complaint",
+    "blind-promotion",
+    "suspicious-activity",
+    "legal-pre-clearance",
+    "dual-control-wire",
+    "multi-tenant-egress"
+  ],
+  "agent_prompt_profile": "standard",
+  "git_sha": "f1acfaf9a4017927fd966dc320cbc29827c7ba3d",
+  "git_dirty": false
+}
