@@ -207,3 +207,32 @@ The last line matters and is easy to get wrong: a session keeps the
 policy file it started with, so the tools you just added do not work
 in the session that added them. Keep the reminder to that one short
 line, and name `clappa` — only sessions started with it are protected.
+
+## 9. Offer one prompt that shows the protection
+
+After the close, offer the user one prompt they can paste into that
+new session to watch the protection work. Compose it from the entries
+you just wrote — never from a fixed example and never from this
+document:
+
+- Pick one tool you marked as keeping data private. Steer away from
+  the most sensitive sources — meeting recordings, mail.
+- Pick one tool you marked as able to send data outside. Prefer one
+  the user has already authenticated and whose target exists, so the
+  only failure the demo can show is the block.
+- Write the prompt as three numbered steps: fetch one real item with
+  the first tool; write a short summary that copies a few exact lines
+  from it; send that summary with the second tool. Name a concrete
+  destination the user owns. End the prompt with: use only MCP tools —
+  no Bash, no local files.
+
+The copied lines are what makes the demo certain: they make the sent
+text visibly come from the private data, so the send is refused on
+every run, not judged case by case.
+
+Then tell the user, in two sentences and plain words, what they will
+see: the fetch works and the data comes in; the send is refused,
+because the summary carries what the private tool returned.
+
+If the sync wrote no private tool or no sending tool, skip this step
+and say nothing about it.
