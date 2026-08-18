@@ -176,11 +176,9 @@ name = "Write"
 # Web pages and search results are authored outside the session.
 [[policy.tool]]
 name = "WebFetch"
-delta = { trust = "suspicious" }
 
 [[policy.tool]]
 name = "WebSearch"
-delta = { trust = "suspicious" }
 
 # --- GitHub, through the GitHub MCP server ---
 #

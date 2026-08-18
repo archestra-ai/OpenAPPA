@@ -9,11 +9,15 @@
 # exactly the combination of its sources, unchanged; this starting
 # policy makes no such claim for you.
 #
-# Tools that bring outside content into the session — the web tools —
-# carry `delta = { trust = "suspicious" }` instead: their results
-# enter at the low rank of the default trust chain
-# (suspicious < trusted), so a `requires = { trust = "trusted" }` sink
-# never receives them undeclared.
+# The web tools are unannotated like the rest: unknown already fails
+# closed at every declared sink. A generated rule typically gives them
+# `delta = { trust = "suspicious" }` — a definite low rank on the
+# default trust chain (suspicious < trusted) — once reviewed.
+#
+# The only entries carrying more than a name are the `Agent` and `Task`
+# argument pins (`run_in_background = false`): structural, not label
+# rules — the runtime refuses to serve this deployment without them,
+# because a background subagent returns where no hook can check it.
 #
 # The built-in tool set varies by Claude Code version; regenerate the
 # list from a live session when it drifts.
@@ -163,11 +167,9 @@ name = "Write"
 # Web pages and search results are authored outside the session.
 [[policy.tool]]
 name = "WebFetch"
-delta = { trust = "suspicious" }
 
 [[policy.tool]]
 name = "WebSearch"
-delta = { trust = "suspicious" }
 
 # The deployment controls what a subagent starts from: the harness gives
 # every subagent exactly the prompt the parent's spawn call carried, and

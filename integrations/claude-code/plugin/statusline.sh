@@ -9,9 +9,10 @@
 # Code adapter names, `cc:<session_id>`.
 #
 # The second row counts the policy's tools: `tools:` is every
-# [[policy.tool]] entry, `rules:` the entries carrying more than the
-# neutral annotation (bare `name` plus `delta = {}`), and the hint
-# names the skill that adds rules. The policy is the file the runtime's
+# [[policy.tool]] entry, `rules:` the entries carrying label rules —
+# more than a bare `name`, an empty `delta = {}`, or a `parameters`
+# argument pin, which constrains a call's arguments and labels
+# nothing. The hint names the skill that adds rules. The policy is the file the runtime's
 # status read names in `policy_path` — the served `--config` — so the
 # counts follow the runtime the session gates through; when the read
 # gives no path, the platform default under APPA_CONFIG_DIR's rules is
@@ -63,7 +64,7 @@ if [ -f "$policy" ] && command -v awk >/dev/null 2>&1; then
     /^\[/ { if (intool && tuned) rules++; intool=0; next }
     intool && /^[A-Za-z_]+[ \t]*=/ {
       key=$1
-      if (key == "name") next
+      if (key == "name" || key == "parameters") next
       if (key == "delta") {
         line=$0; sub(/^[^=]*=[ \t]*/, "", line)
         if (line ~ /^\{[ \t]*\}[ \t]*$/) next

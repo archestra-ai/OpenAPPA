@@ -4,7 +4,8 @@ $mascotTop = "$lowerHalf$fullBlock$lowerHalf$lowerHalf$lowerHalf$fullBlock$lower
 $mascotBottom = "$fullBlock$fullBlock$lowerHalf$fullBlock$lowerHalf$fullBlock$fullBlock"
 
 # Counts the policy's tools: every [[policy.tool]] entry, and the entries
-# carrying more than the neutral annotation (bare name plus delta = {}).
+# carrying label rules — more than a bare name, an empty delta = {}, or a
+# parameters argument pin, which constrains arguments and labels nothing.
 # The policy is the file the runtime's status read names in policy_path;
 # when no path arrived, the platform default under APPA_CONFIG_DIR's
 # rules is the fallback. Mirrors statusline.sh; any parse failure
@@ -38,7 +39,7 @@ function Get-PolicyStats {
             }
             if ($inTool -and $line -match '^([A-Za-z_]+)[ \t]*=[ \t]*(.*)$') {
                 $key = $Matches[1]
-                if ($key -eq "name") { continue }
+                if ($key -eq "name" -or $key -eq "parameters") { continue }
                 if ($key -eq "delta" -and $Matches[2] -match '^\{[ \t]*\}[ \t]*$') { continue }
                 $tuned = $true
             }
