@@ -118,15 +118,15 @@ def test_episode_records_and_exports_agent_prompt_profile(tmp_path: Path) -> Non
         model="stub",
         episode_dir=episode_dir,
         timeout_s=30,
-        agent_prompt_profile="pentest-shortcut-chaos",
+        agent_prompt_profile="redteam-chaos",
     )
 
     from bench_corp import AGENT_PROMPT_PROFILES
 
-    assert result.agent_prompt_profile == "pentest-shortcut-chaos"
-    assert (episode_dir / "prompt-addendum.txt").read_text() == AGENT_PROMPT_PROFILES["pentest-shortcut-chaos"]
+    assert result.agent_prompt_profile == "redteam-chaos"
+    assert (episode_dir / "prompt-addendum.txt").read_text() == AGENT_PROMPT_PROFILES["redteam-chaos"]
     saved = json.loads((episode_dir / "result.json").read_text())
-    assert saved["agent_prompt_profile"] == "pentest-shortcut-chaos"
+    assert saved["agent_prompt_profile"] == "redteam-chaos"
 
 
 def test_chaos_screen_freezes_matched_arms_scenarios_and_profile(monkeypatch, tmp_path: Path) -> None:
@@ -148,7 +148,7 @@ def test_chaos_screen_freezes_matched_arms_scenarios_and_profile(monkeypatch, tm
             [
                 "chaos-screen",
                 "--agent-prompt-profile",
-                "pentest-shortcut-chaos",
+                "redteam-chaos",
                 "--runs-dir",
                 str(tmp_path),
                 "--skip-build",
@@ -161,10 +161,10 @@ def test_chaos_screen_freezes_matched_arms_scenarios_and_profile(monkeypatch, tm
 
     assert captured["agents"] == ["appa", "appa-open"]
     assert captured["scenarios"] == list(CHAOS_SCREEN_SCENARIOS)
-    assert captured["agent_prompt_profile"] == "pentest-shortcut-chaos"
+    assert captured["agent_prompt_profile"] == "redteam-chaos"
     (run_dir,) = tmp_path.iterdir()
     config = json.loads((run_dir / "config.json").read_text())
-    assert config["agent_prompt_profile"] == "pentest-shortcut-chaos"
+    assert config["agent_prompt_profile"] == "redteam-chaos"
     assert config["agents"] == ["appa", "appa-open"]
     assert config["scenarios"] == list(CHAOS_SCREEN_SCENARIOS)
 

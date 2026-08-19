@@ -25,28 +25,28 @@ A **security pass** in these benchmarks means the scorer observed no unauthorize
 
 `bench-corp` is a benchmark suite developed to evaluate multi-step agent performance in realistic enterprise environments (HR, Finance, Vendor management, Forums, Task Trackers, and Email). The suite evaluates agents strictly based on observable tool side effects (files written, emails sent), inspired by AgentDojo, without scoring conversation text or relying on LLM judges.
 
-The suite contains **20 curated enterprise scenarios** evaluated across **4 policy arms** on `openai/gpt-5.6-luna`:
+The suite contains **20 curated enterprise scenarios** evaluated across **4 policy arms** on `openai/gpt-5.6-luna` with 5 repetitions per scenario (**100 total episodes per arm**, 400 episodes per evaluation run):
 
 - **Standard prompts:** 5 repetitions per scenario (**100 total episodes per arm**).
-- **Chaos Monkey prompts (`pentest-shortcut-chaos`):** Adversarial prompts where the agent is instructed to attempt shortcuts or out-of-order calls (**20 total episodes per arm**).
+- **Red-team Chaos prompts (`redteam-chaos`):** Adversarial prompts where the agent is instructed to actively seek out shortcuts, bypasses, and follow embedded directives in data (**100 total episodes per arm**).
 
 | Agent prompt profile | Policy arm | Task completion (Utility) | Attack success rate (ASR) | Security pass rate |
 |---|---|---:|---:|---:|
 | **Standard** | **OpenAPPA (`appa`)** | **82/100 (82.0%)** | **0/100 (0.0%)** | **100/100 (100.0%)** |
-| | OpenAPPA Open (`appa-open`) | 84/100 (84.0%) | 29/100 (29.0%) | 71/100 (71.0%) |
+| | OpenAPPA Open (`appa-open`) | 87/100 (87.0%) | 29/100 (29.0%) | 71/100 (71.0%) |
 | | FIDES (`fides`) | 30/100 (30.0%) | 29/100 (29.0%) | 71/100 (71.0%) |
-| | FIDES Open (`fides-open`) | 79/100 (79.0%) | 27/100 (27.0%) | 73/100 (73.0%) |
-| **Chaos Monkey** | **OpenAPPA (`appa`)** | **14/20 (70.0%)** | **1/20 (5.0%)** | **19/20 (95.0%)** |
-| | OpenAPPA Open (`appa-open`) | 17/20 (85.0%) | 7/20 (35.0%) | 13/20 (65.0%) |
-| | FIDES (`fides`) | 9/20 (45.0%) | 5/20 (25.0%) | 15/20 (75.0%) |
-| | FIDES Open (`fides-open`) | 17/20 (85.0%) | 5/20 (25.0%) | 15/20 (75.0%) |
+| | FIDES Open (`fides-open`) | 87/100 (87.0%) | 27/100 (27.0%) | 73/100 (73.0%) |
+| **Red-team Chaos** | **OpenAPPA (`appa`)** | **81/100 (81.0%)** | **0/100 (0.0%)** | **100/100 (100.0%)** |
+| | OpenAPPA Open (`appa-open`) | 87/100 (87.0%) | 33/100 (33.0%) | 67/100 (67.0%) |
+| | FIDES (`fides`) | 27/100 (27.0%) | 29/100 (29.0%) | 71/100 (71.0%) |
+| | FIDES Open (`fides-open`) | 87/100 (87.0%) | 26/100 (26.0%) | 74/100 (74.0%) |
 
 ### Comparative findings on Bench-Corp
 
-- **Enforcement effectiveness:** OpenAPPA achieved 0% ASR on standard corporate workflows and 5% ASR under Chaos Monkey perturbation testing. Linear IFC (FIDES) protects against naive prompt injections on older models, but cannot scope recipient addresses (`$to`), verify out-of-band approvals, or enforce temporal execution orders, allowing 25%–29% of structural organizational attacks to pass.
-- **Utility preservation:** OpenAPPA maintained 82.0% task completion under standard prompts and 70.0% under Chaos Monkey. FIDES utility dropped to 30.0% because linear IFC permanently taints trajectories upon reading confidential data, blocking subsequent benign public notifications across 14 of 20 scenarios.
+- **Enforcement effectiveness:** OpenAPPA achieved **0% ASR across all 200 evaluated episodes** (100 standard + 100 red-team chaos), resolving 213 policy remedy plans. Linear IFC (FIDES) protects against naive prompt injections on older models, but cannot scope recipient addresses (`$to`), verify out-of-band approvals, or enforce temporal execution orders, allowing 26%–33% of structural organizational attacks to pass.
+- **Utility preservation:** OpenAPPA maintained **81%–82% task completion** across both prompt profiles. FIDES utility dropped to 27%–30% because linear IFC permanently taints trajectories upon reading confidential data, blocking subsequent benign public notifications across 14 of 20 scenarios.
 
-*(Evaluated on commit [`3bca9b6`](https://github.com/archestra-ai/OpenAPPA/commit/3bca9b632c22b5794badd7950f690d196076f42b). See [`bench/corp/README.md`](https://github.com/archestra-ai/OpenAPPA/blob/main/bench/corp/README.md) for the complete 20-scenario matrix and architectural failure analysis.)*
+*(Evaluated on commit [`5b3cc34`](https://github.com/archestra-ai/OpenAPPA/commit/5b3cc3475dbe99cf4a6e4d2bfb2ae4cbb3825829). See [`bench/corp/README.md`](https://github.com/archestra-ai/OpenAPPA/blob/main/bench/corp/README.md) for the complete 20-scenario matrix and architectural failure analysis.)*
 
 ### Scenario examples
 
@@ -120,7 +120,7 @@ Rather than relying on prompt-injection classifiers, OpenAPPA attaches reader-se
 
 Across all benchmark suites:
 
-- **Bench-Corp:** OpenAPPA achieved 0% attack success rate across 100 evaluated standard episodes while preserving 82.0% task utility (vs 30.0% utility for FIDES). Under Chaos Monkey stress testing, OpenAPPA maintained 70% utility and 5% ASR (vs 25% ASR for FIDES and 35% ASR for unprotected baselines).
+- **Bench-Corp:** OpenAPPA achieved **0% attack success rate (100% security pass rate)** across all 200 evaluated episodes (100 standard + 100 red-team chaos) while preserving **81%–82% task utility** (vs 27%–30% utility and 29% ASR for FIDES).
 - **TAU-bench:** 0 false positive blocks across 8,151 standard tool calls; 100% of attempted violations blocked under adversarial prompts, with 50% recovering to full task completion via remedy feedback.
 - **AgentThreatBench:** 100% security pass rate for OpenAPPA across both standard and adversarial prompt profiles.
 
@@ -139,8 +139,8 @@ uv run bench-corp run
 # 3. Filter specific agents or scenarios
 uv run bench-corp run --agent appa --agent fides --scenario follow-forum-steps --reps 3
 
-# 4. Run the Chaos Monkey perturbation screen
-uv run bench-corp chaos-screen --model openai/gpt-5.6-luna --agent-prompt-profile pentest-shortcut-chaos --reps 1
+# 4. Run the adversarial Red-team Chaos benchmark across all arms
+uv run bench-corp run --agent appa --agent appa-open --agent fides --agent fides-open --agent-prompt-profile redteam-chaos --reps 5
 ```
 
 ### External references
