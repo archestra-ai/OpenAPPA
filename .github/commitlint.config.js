@@ -45,7 +45,6 @@ export default {
         'policy',
         'repo',
         'runtime',
-        'runtime-v2',
         'spec',
         'website',
       ],

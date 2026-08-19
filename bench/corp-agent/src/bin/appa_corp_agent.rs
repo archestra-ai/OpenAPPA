@@ -1,4 +1,4 @@
-//! `appa-corp-agent`: the corporate assistant on runtime-v2.
+//! `appa-corp-agent`: the corporate assistant on the runtime.
 //!
 //! The runtime runs no loop and holds no transcript. This binary is the
 //! harness: it owns inference, the transcript, the tool catalogue and the
@@ -27,8 +27,8 @@ use appa_example_agent::wire::WireMessage;
 use appa_example_agent::{
     Agent, ArgumentKey, Limits, OpenAiCompatible, Outcome, SpawnTool, ToolCatalogue, ToolName, ToolShim, TranscriptHead,
 };
-use appa_runtime_v2::api::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, Runtime, TrajectoryId};
-use appa_runtime_v2::config::{Config, Endpoint, Implementation};
+use appa_runtime::api::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, Runtime, TrajectoryId};
+use appa_runtime::config::{Config, Endpoint, Implementation};
 use clap::Parser;
 use corp_systems::systems::System;
 use corporate_agent_demo::shim::{self, CorpWorld};
@@ -59,7 +59,7 @@ fn system_prompt() -> String {
 }
 
 #[derive(Parser)]
-#[command(about = "The corporate assistant on runtime-v2 (branching live), tools in-process")]
+#[command(about = "The corporate assistant on the runtime (branching live), tools in-process")]
 struct Args {
     /// The task for the agent.
     prompt: String,

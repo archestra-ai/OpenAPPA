@@ -68,8 +68,8 @@ To uninstall OpenAPPA from Claude Code, remove the plugin, stop the local runtim
 ```sh
 claude plugin uninstall appa-runtime
 claude plugin marketplace remove appa
-pkill -f appa-runtime-v2
-rm ~/.local/bin/appa-runtime-v2 ~/.local/bin/clappa ~/.local/bin/appa-statusline.sh
+pkill -f appa-runtime
+rm ~/.local/bin/appa-runtime ~/.local/bin/clappa ~/.local/bin/appa-statusline.sh
 
 # drop the statusline entry the setup wrote, and keep one of your own:
 jq 'if (.statusLine.command? // "") | test("appa-statusline") then del(.statusLine) else . end' \

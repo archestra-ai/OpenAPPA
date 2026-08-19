@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
+use appa_runtime::api::Runtime;
+use appa_runtime::{config::Config, hooks, mcp};
 use appa_runtime_api::{Actor, HookDecision, HookEvent, ProposedCall, TrajectoryId};
-use appa_runtime_v2::api::Runtime;
-use appa_runtime_v2::{config::Config, hooks, mcp};
 use rmcp::model::{ElicitRequestParams, ElicitResult, ElicitationAction};
 use rmcp::service::{RequestContext, RoleClient};
 use rmcp::{ClientHandler, ServiceExt};

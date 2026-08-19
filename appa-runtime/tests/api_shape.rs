@@ -2,20 +2,20 @@
 
 use std::path::PathBuf;
 
+use appa_runtime::api::{
+    AuditEvent, AuditLabel, DispatchOutcome, OfferId, OpenError, Reloaded, RemedyOutcome, Runtime, TrajectoryStatus,
+};
+use appa_runtime::config::Config;
+use appa_runtime::hooks;
 use appa_runtime_api::{
     Actor, Codec, HookDecision, HookEvent, OutcomeBody, ParseRefusal, ProposedCall, SpawnBinding, SpawnRef,
     ToolOutcome, TrajectoryId,
 };
-use appa_runtime_v2::api::{
-    AuditEvent, AuditLabel, DispatchOutcome, OfferId, OpenError, Reloaded, RemedyOutcome, Runtime, TrajectoryStatus,
-};
-use appa_runtime_v2::config::Config;
-use appa_runtime_v2::hooks;
 
 fn the_reexported_vocabulary(
-    id: appa_runtime_v2::api::TrajectoryId,
-    call: appa_runtime_v2::api::ProposedCall,
-    outcome: appa_runtime_v2::api::ToolOutcome,
+    id: appa_runtime::api::TrajectoryId,
+    call: appa_runtime::api::ProposedCall,
+    outcome: appa_runtime::api::ToolOutcome,
 ) {
     let _: TrajectoryId = id;
     let _: ProposedCall = call;

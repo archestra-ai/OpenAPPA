@@ -3,11 +3,11 @@ name = "appa-example-agent"
 version = "0.0.0"
 edition.workspace = true
 publish = false
-description = "A protoagent on runtime-v2: it owns the loop, the transcript and the tool catalogue, and gates every flow through the hook dispatcher"
+description = "A protoagent on the runtime: it owns the loop, the transcript and the tool catalogue, and gates every flow through the hook dispatcher"
 
 [dependencies]
 appa-runtime-api = { workspace = true }
-appa-runtime-v2 = { workspace = true }
+appa-runtime = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -34,7 +34,7 @@ fn free_port() -> u16 {
 }
 
 fn start(config: &Path, db: &Path, port: u16) -> Server {
-    let child = Command::new(env!("CARGO_BIN_EXE_appa-runtime-v2"))
+    let child = Command::new(env!("CARGO_BIN_EXE_appa-runtime"))
         .arg("--config")
         .arg(config)
         .arg("--db")
@@ -95,7 +95,7 @@ fn http(url: &str, method: &str, body: Option<&str>) -> Option<String> {
 }
 
 fn expect_startup_refusal(config: &Path, db: &Path, needle: &str) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_appa-runtime-v2"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_appa-runtime"))
         .arg("--config")
         .arg(config)
         .arg("--db")

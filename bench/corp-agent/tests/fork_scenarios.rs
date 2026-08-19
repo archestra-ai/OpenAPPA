@@ -21,8 +21,8 @@ use appa_example_agent::{
     Agent, ArgumentKey, Limits, OpenAiCompatible, OpenAiConfig, Outcome, SpawnTool, ToolCatalogue, ToolName, ToolShim,
     TranscriptHead,
 };
-use appa_runtime_v2::api::{AuditEntry, AuditEvent, Runtime, TrajectoryId};
-use appa_runtime_v2::config::{Config, Implementation};
+use appa_runtime::api::{AuditEntry, AuditEvent, Runtime, TrajectoryId};
+use appa_runtime::config::{Config, Implementation};
 use corp_systems::systems::System;
 use corporate_agent_demo::catalogue;
 use corporate_agent_demo::shim::{self, CorpWorld};

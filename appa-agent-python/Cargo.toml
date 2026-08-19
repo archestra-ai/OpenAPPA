@@ -13,7 +13,7 @@ extension-module = ["pyo3/extension-module"]
 
 [dependencies]
 appa-runtime-api = { workspace = true }
-appa-runtime-v2 = { workspace = true }
+appa-runtime = { workspace = true }
 pyo3 = { version = "0.29", features = ["abi3-py311"] }
 reqwest = { workspace = true }
 serde = { workspace = true }

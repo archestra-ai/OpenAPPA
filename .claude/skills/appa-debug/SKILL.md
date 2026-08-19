@@ -1,11 +1,11 @@
 ---
 name: appa-debug
-description: Explain what the APPA runtime-v2 recorded for a gated Claude Code session — which tool calls ran, which were blocked, and why — in plain language, by reading the runtime's SQLite database and the session transcript. Use when the user asks why a tool call was blocked, what happened in a gated session, or wants an APPA decision log explained.
+description: Explain what the APPA runtime recorded for a gated Claude Code session — which tool calls ran, which were blocked, and why — in plain language, by reading the runtime's SQLite database and the session transcript. Use when the user asks why a tool call was blocked, what happened in a gated session, or wants an APPA decision log explained.
 ---
 
 # appa-debug
 
-Reconstruct and explain a gated session from the APPA runtime-v2 store.
+Reconstruct and explain a gated session from the APPA runtime store.
 The audience is a person, possibly not an APPA expert: the final
 explanation must be plain language, with wire terms shown only where the
 user will see them in errors.
@@ -34,7 +34,7 @@ none does, show the candidates (id + first line of prompt) and ask.
 The db and config paths are flags of the running process:
 
 ```sh
-ps ax -o command | grep 'appa-runtime-v2 --config' | grep -v grep
+ps ax -o command | grep 'appa-runtime --config' | grep -v grep
 ```
 
 If no process is running, ask the user for the `.db` path. Read the
@@ -109,7 +109,7 @@ only one — check for the others and explain all that hold.
 
 Before stating whether a block is final or liftable, check what the
 current runtime actually supports (casts, authorities, offers):
-`appa-runtime-v2/CLAUDE.md` records the current state. Do not assert capabilities or gaps from memory.
+`appa-runtime/CLAUDE.md` records the current state. Do not assert capabilities or gaps from memory.
 
 ## 6. Explain in plain language
 

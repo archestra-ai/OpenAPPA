@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
+use appa_runtime::api::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, OfferId, RemedyOutcome, Runtime};
+use appa_runtime::{config::Config, hooks};
 use appa_runtime_api::{
     Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, SpawnRef, ToolOutcome, TrajectoryId,
 };
-use appa_runtime_v2::api::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, OfferId, RemedyOutcome, Runtime};
-use appa_runtime_v2::{config::Config, hooks};
 
 const POLICY: &str = r#"
 [policy]

@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-use appa_runtime_v2::api::{OpenError, Runtime};
-use appa_runtime_v2::config::Config;
+use appa_runtime::api::{OpenError, Runtime};
+use appa_runtime::config::Config;
 
 const CONFIG: &str = r#"
 [policy]
@@ -19,7 +19,7 @@ max_body_bytes = 65536
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
+        .join("..")
         .canonicalize()
         .expect("the workspace root resolves")
 }

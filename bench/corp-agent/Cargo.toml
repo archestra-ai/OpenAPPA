@@ -3,12 +3,12 @@ name = "corporate-agent-demo"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "A corporate assistant agent on runtime-v2 over mock internal systems, used to exercise OpenAPPA"
+description = "A corporate assistant agent on the runtime over mock internal systems, used to exercise OpenAPPA"
 autobins = false
 
 [dependencies]
 # The gate in front of every flow, and the log the replay reads back.
-appa-runtime-v2 = { workspace = true }
+appa-runtime = { workspace = true }
 # The policy compiles here too: the tool catalogue is the harness's, and it is
 # read off the registry the same dialect produces.
 appa-policy = { workspace = true }

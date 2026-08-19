@@ -1,5 +1,5 @@
 //! The spec's policy-dialect compiler: the configuration dialect (TOML) → the engine's
-//! [`RegistryConfig`] for runtime v2.
+//! [`RegistryConfig`] for the runtime.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -91,7 +91,7 @@ pub enum ConfigError {
 
 /// A fully parsed and **fully validated** policy: the opened [`Engine`] — registry, deployment
 /// profile, and policy identity behind the one validated constructor — plus the
-/// normalized declarations. Runtime-v2 owns implementation bindings.
+/// normalized declarations. The runtime owns implementation bindings.
 #[derive(Clone, Debug)]
 pub struct Config {
     engine: Engine,
@@ -100,7 +100,7 @@ pub struct Config {
 }
 
 impl Config {
-    /// Parse runtime-v2's declaration-only policy TOML. Inline implementation bindings are a
+    /// Parse the runtime's declaration-only policy TOML. Inline implementation bindings are a
     /// policy error because the deployment binds them in `[externals]`.
     pub fn from_toml_str(s: &str) -> Result<Config, ConfigError> {
         let raw: RawConfig = toml::from_str(s)?;
@@ -1048,7 +1048,7 @@ confined_results = ["lookup"]
 
     #[test]
     fn declaration_only_policy_builds_the_engine_registry() {
-        let config = Config::from_toml_str(DECLARATIONS).expect("the v2 policy compiles");
+        let config = Config::from_toml_str(DECLARATIONS).expect("the policy compiles");
         assert!(config.registry().tool(&ToolName::new("lookup")).is_some());
         assert!(config.registry().tool(&ToolName::new("send")).is_some());
         assert!(config.registry().authority(&AuthorityName::new("approver")).is_some());
@@ -1270,7 +1270,7 @@ confined_results = ["lookup"]
 
     #[test]
     fn the_deployment_table_compiles_into_the_validated_profile() {
-        let config = Config::from_toml_str(DECLARATIONS).expect("the v2 policy compiles");
+        let config = Config::from_toml_str(DECLARATIONS).expect("the policy compiles");
         let profile = config.engine().profile();
         assert_eq!(
             profile.executor_class(&ToolName::new("lookup")),

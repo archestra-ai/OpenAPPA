@@ -15,7 +15,7 @@ $protected = $env:APPA_GATE -eq "1"
 $dataDir = if ($env:APPA_DATA_DIR) { $env:APPA_DATA_DIR } else { Join-Path $env:LOCALAPPDATA "appa" }
 $configDir = if ($env:APPA_CONFIG_DIR) { $env:APPA_CONFIG_DIR } else { Join-Path $env:APPDATA "appa" }
 $installDir = if ($env:APPA_INSTALL_DIR) { $env:APPA_INSTALL_DIR } else { Join-Path $dataDir "bin" }
-$binary = Join-Path $installDir "appa-runtime-v2.exe"
+$binary = Join-Path $installDir "appa-runtime.exe"
 
 if ($SessionContext) {
     if ($protected) {
@@ -87,7 +87,7 @@ function Start-RuntimeIfDown {
 # install reports.
 if ($EnsureRuntime) {
     if (-not (Test-Path -LiteralPath $binary)) {
-        [Console]::Error.WriteLine("appa protection: appa-runtime-v2 is not installed; expected at $binary")
+        [Console]::Error.WriteLine("appa protection: appa-runtime is not installed; expected at $binary")
         exit 1
     }
     Start-RuntimeIfDown

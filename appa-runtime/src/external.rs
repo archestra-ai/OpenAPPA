@@ -907,7 +907,7 @@ mod tests {
 
     fn build_fixture(package: &str, features: Option<&str>) -> std::path::PathBuf {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
+            .join("..")
             .canonicalize()
             .expect("the workspace root resolves");
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());

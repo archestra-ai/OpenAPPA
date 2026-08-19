@@ -8,7 +8,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-appa-builtin = { path = "../../../../../appa-builtin" }
+appa-builtin = { path = "../../../../appa-builtin" }
 serde_json = { workspace = true }
 
 [lints]

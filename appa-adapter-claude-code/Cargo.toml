@@ -5,7 +5,7 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-appa-runtime-api = { path = "../../api" }
+appa-runtime-api = { path = "../appa-runtime-api" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

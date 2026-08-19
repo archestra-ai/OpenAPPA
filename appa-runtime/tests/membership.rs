@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
+use appa_runtime::api::{RemedyOutcome, Runtime};
+use appa_runtime::{config::Config, hooks};
 use appa_runtime_api::{Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
-use appa_runtime_v2::api::{RemedyOutcome, Runtime};
-use appa_runtime_v2::{config::Config, hooks};
 use axum::Router;
 use axum::extract::State;
 use axum::routing::post;
@@ -157,13 +157,13 @@ async fn ran(runtime: &Arc<Runtime>, call: ProposedCall) {
     );
 }
 
-fn last_offer(feedback: &str) -> appa_runtime_v2::api::OfferId {
+fn last_offer(feedback: &str) -> appa_runtime::api::OfferId {
     feedback
         .lines()
         .filter_map(|line| {
             let after = line.split("offer_id:").nth(1)?;
             let rest = after.trim_start().strip_prefix('"')?;
-            Some(appa_runtime_v2::api::OfferId(rest[..rest.find('"')?].to_string()))
+            Some(appa_runtime::api::OfferId(rest[..rest.find('"')?].to_string()))
         })
         .next_back()
         .unwrap_or_else(|| panic!("no offer id in feedback: {feedback}"))
@@ -286,7 +286,7 @@ fn a_registered_membership_resolver_must_be_bound() {
     let config = Config::load(&path).expect("the file validates");
     assert!(matches!(
         Runtime::open(config, dir.path().join("appa.db"), None),
-        Err(appa_runtime_v2::api::OpenError::UnboundExternal { .. })
+        Err(appa_runtime::api::OpenError::UnboundExternal { .. })
     ));
 }
 

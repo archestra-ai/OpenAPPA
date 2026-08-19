@@ -7,7 +7,7 @@ use appa_example_agent::{
     Agent, ArgumentKey, Limits, OpenAiCompatible, OpenAiConfig, Outcome, SpawnTool, ToolCatalogue, ToolName, ToolShim,
     TranscriptHead,
 };
-use appa_runtime_v2::api::TrajectoryId;
+use appa_runtime::api::TrajectoryId;
 use harness::{Decisions, Provider, ToolHost, runtime, tool};
 
 const NEUTRAL: &str = r#"
@@ -20,7 +20,7 @@ name = "read_hr"
 name = "send_email"
 "#;
 
-async fn agent(runtime: appa_runtime_v2::api::Runtime, provider: &Provider, host: &ToolHost, tools: &[&str]) -> Agent {
+async fn agent(runtime: appa_runtime::api::Runtime, provider: &Provider, host: &ToolHost, tools: &[&str]) -> Agent {
     let endpoint = provider.clone().serve().await;
     let shim = format!("{}/tools", host.clone().serve().await);
     Agent::new(

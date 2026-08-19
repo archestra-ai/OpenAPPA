@@ -1,5 +1,5 @@
 #!/bin/sh
-# Starts the installed appa-runtime-v2 when no healthy runtime answers.
+# Starts the installed appa-runtime when no healthy runtime answers.
 # Two callers share it: the last step of the install (hooks/setup-appa.md)
 # and every protected SessionStart, which runs it before the hooks post
 # their first event. A protected session therefore needs no login service,
@@ -42,11 +42,11 @@ case "$(uname -s)" in
     ;;
 esac
 
-expected_binary=${APPA_INSTALL_DIR:-"$HOME/.local/bin"}/appa-runtime-v2
+expected_binary=${APPA_INSTALL_DIR:-"$HOME/.local/bin"}/appa-runtime
 binary=$expected_binary
 if [ ! -x "$binary" ]; then
-  binary=$(command -v appa-runtime-v2 2>/dev/null) || {
-    printf 'appa protection: appa-runtime-v2 is not installed; expected at %s. Run in a plain terminal: claude "set up APPA"\n' \
+  binary=$(command -v appa-runtime 2>/dev/null) || {
+    printf 'appa protection: appa-runtime is not installed; expected at %s. Run in a plain terminal: claude "set up APPA"\n' \
       "$expected_binary" >&2
     exit 1
   }

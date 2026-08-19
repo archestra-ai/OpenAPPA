@@ -15,7 +15,7 @@ fn turn_end_command() -> &'static str {
 
 fn shipped(file: &str) -> serde_json::Value {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../integrations/claude-code/plugin/hooks")
+        .join("../integrations/claude-code/plugin/hooks")
         .join(file);
     serde_json::from_str(&std::fs::read_to_string(path).unwrap_or_else(|_| panic!("the shipped {file} is readable")))
         .unwrap_or_else(|_| panic!("the shipped {file} parses"))

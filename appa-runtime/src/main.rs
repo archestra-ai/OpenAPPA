@@ -14,12 +14,12 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::routing::{get, post};
 use clap::Parser;
 
+use appa_runtime::api::{Reloaded, Runtime};
+use appa_runtime::config::Config;
+use appa_runtime::{hooks, mcp};
 use appa_runtime_api::Codec;
-use appa_runtime_v2::api::{Reloaded, Runtime};
-use appa_runtime_v2::config::Config;
-use appa_runtime_v2::{hooks, mcp};
 
-const DEFAULT_CONFIG: &str = include_str!("../../../integrations/claude-code/examples/claude-code.appa.toml");
+const DEFAULT_CONFIG: &str = include_str!("../../integrations/claude-code/examples/claude-code.appa.toml");
 
 fn ensure_default_config(path: &Path) -> io::Result<bool> {
     let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
@@ -37,8 +37,8 @@ fn ensure_default_config(path: &Path) -> io::Result<bool> {
 
 #[derive(Parser)]
 #[command(
-    name = "appa-runtime-v2",
-    version = include_str!("../../../version.txt").trim()
+    name = "appa-runtime",
+    version = include_str!("../../version.txt").trim()
 )]
 struct Args {
     #[arg(long, env = "APPA_CONFIG", default_value = "appa.toml")]
@@ -196,9 +196,9 @@ struct StatusQuery {
 async fn status(
     State(state): State<AppState>,
     query: Result<axum::extract::Query<StatusQuery>, axum::extract::rejection::QueryRejection>,
-) -> Result<axum::Json<appa_runtime_v2::api::TrajectoryStatus>, axum::http::StatusCode> {
+) -> Result<axum::Json<appa_runtime::api::TrajectoryStatus>, axum::http::StatusCode> {
     let query = query.map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
-    let id = appa_runtime_v2::api::TrajectoryId(query.0.trajectory);
+    let id = appa_runtime::api::TrajectoryId(query.0.trajectory);
     match state.runtime.status(&id) {
         Some(status) => Ok(axum::Json(status)),
         None => Err(axum::http::StatusCode::NOT_FOUND),
@@ -216,13 +216,13 @@ async fn main() -> ExitCode {
         .init();
 
     if let Err(refusal) = require_loopback(&args.listen) {
-        eprintln!("appa-runtime-v2: {refusal}");
+        eprintln!("appa-runtime: {refusal}");
         return ExitCode::FAILURE;
     }
     let instance_id = match instance_id_header(args.instance_id.as_deref()) {
         Ok(instance_id) => instance_id,
         Err(refusal) => {
-            eprintln!("appa-runtime-v2: --instance-id {refusal}");
+            eprintln!("appa-runtime: --instance-id {refusal}");
             return ExitCode::FAILURE;
         }
     };
@@ -230,25 +230,25 @@ async fn main() -> ExitCode {
         Ok(true) => tracing::info!(path = %args.config.display(), "created default configuration"),
         Ok(false) => {}
         Err(error) => {
-            eprintln!("appa-runtime-v2: cannot create {}: {error}", args.config.display());
+            eprintln!("appa-runtime: cannot create {}: {error}", args.config.display());
             return ExitCode::FAILURE;
         }
     }
     let config = match Config::load(&args.config) {
         Ok(config) => config,
         Err(error) => {
-            eprintln!("appa-runtime-v2: {error}");
+            eprintln!("appa-runtime: {error}");
             return ExitCode::FAILURE;
         }
     };
     if let Err(refusal) = refuse_unobservable_returns(args.adapter, config.policy_file().value()) {
-        eprintln!("appa-runtime-v2: {refusal}");
+        eprintln!("appa-runtime: {refusal}");
         return ExitCode::FAILURE;
     }
     let runtime = match Runtime::open(config, args.db, args.modules_dir) {
         Ok(runtime) => Arc::new(runtime),
         Err(error) => {
-            eprintln!("appa-runtime-v2: {error}");
+            eprintln!("appa-runtime: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -271,15 +271,15 @@ async fn main() -> ExitCode {
     let listener = match tokio::net::TcpListener::bind(args.listen).await {
         Ok(listener) => listener,
         Err(error) => {
-            eprintln!("appa-runtime-v2: cannot bind {}: {error}", args.listen);
+            eprintln!("appa-runtime: cannot bind {}: {error}", args.listen);
             return ExitCode::FAILURE;
         }
     };
-    tracing::info!(listen = %args.listen, "appa-runtime-v2 serving /hook, /mcp, /status, /reload, and /health");
+    tracing::info!(listen = %args.listen, "appa-runtime serving /hook, /mcp, /status, /reload, and /health");
     match axum::serve(listener, app).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("appa-runtime-v2: server failed: {error}");
+            eprintln!("appa-runtime: server failed: {error}");
             ExitCode::FAILURE
         }
     }
@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     fn a_context_controlling_deployment_must_pin_its_subagents_to_the_foreground() {
-        let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../integrations/claude-code/examples");
+        let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../integrations/claude-code/examples");
         for name in ["claude-code.appa.toml", "claude-code-hitl.appa.toml"] {
             let path = examples.join(name);
             let config = Config::load(&path).unwrap_or_else(|error| panic!("{name} does not load: {error}"));

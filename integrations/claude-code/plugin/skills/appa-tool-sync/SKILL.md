@@ -53,7 +53,7 @@ Short sentences. Plain words. No jargon.
 ## 1. Find the config the runtime is serving
 
 ```sh
-ps ax -o command | grep appa-runtime-v2 | grep -v grep
+ps ax -o command | grep appa-runtime | grep -v grep
 ```
 
 Take the `--config` path from the command line. A process started
