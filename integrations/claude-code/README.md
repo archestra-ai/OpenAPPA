@@ -165,7 +165,7 @@ uv run integrations/claude-code/live-gate-check.py
 
 It judges the gate the way a user does, on what reached the disk. One
 session writes words of the model's own and the file lands. The other
-reads a secret, proposes the write, and the secret then appears in no
+reads a private file, proposes the write, and that line then appears in no
 file under any name. The allowed write is what stops a runtime that is
 down from passing as a refusal: the hooks fail closed, so a gate that is
 not answering blocks both sessions rather than one.
