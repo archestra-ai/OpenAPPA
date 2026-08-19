@@ -152,6 +152,29 @@ session performing this setup runs the first two and prints the third.
 running session cannot be pointed at a different runtime. To move
 between the installed and the dev runtime, start a new session.
 
+## Live check
+
+`live-gate-check.py` runs two real headless `claude` sessions against a
+runtime process it starts itself, under a policy that states one flow:
+reading a file narrows its content to the session, and writing a file
+releases content to the outside world.
+
+```sh
+uv run integrations/claude-code/live-gate-check.py
+```
+
+It judges the gate the way a user does, on what reached the disk. One
+session writes words of the model's own and the file lands. The other
+reads a private file, proposes the write, and that line then appears in no
+file under any name. The allowed write is what stops a runtime that is
+down from passing as a refusal: the hooks fail closed, so a gate that is
+not answering blocks both sessions rather than one.
+
+The check reads nothing of APPA's own log or database. It needs the
+`claude` CLI on PATH and logged in, and a runtime binary — a local
+build, an installed one, or `APPA_RUNTIME_BIN`. It spends the machine's
+Claude usage, so nothing runs it automatically.
+
 ## Upgrade
 
 The plugin tracks the marketplace. To upgrade the runtime, stop the
