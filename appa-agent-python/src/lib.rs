@@ -118,8 +118,8 @@ impl SessionInner {
             .map_err(|error| format!("could not create Tokio runtime: {error}"))?;
         let store = tempfile::tempdir().map_err(|error| format!("could not create the session store: {error}"))?;
         let externals = if let Some(externals_toml) = externals_toml {
-            let parsed: ExternalsConfig = toml::from_str(externals_toml)
-                .map_err(|error| format!("invalid externals TOML: {error}"))?;
+            let parsed: ExternalsConfig =
+                toml::from_str(externals_toml).map_err(|error| format!("invalid externals TOML: {error}"))?;
             Externals {
                 timeout: Duration::from_millis(parsed.timeout_ms.unwrap_or(30_000)),
                 review_timeout: Duration::from_millis(parsed.review_timeout_ms.unwrap_or(600_000)),
@@ -127,8 +127,14 @@ impl SessionInner {
                 authorities: Default::default(),
                 sanitizers: Default::default(),
                 casts: Default::default(),
-                dynamic: parsed.dynamic.map(|e| Endpoint { url: e.url, token: None }),
-                membership: parsed.membership.map(|e| Endpoint { url: e.url, token: None }),
+                dynamic: parsed.dynamic.map(|e| Endpoint {
+                    url: e.url,
+                    token: None,
+                }),
+                membership: parsed.membership.map(|e| Endpoint {
+                    url: e.url,
+                    token: None,
+                }),
             }
         } else {
             Externals {

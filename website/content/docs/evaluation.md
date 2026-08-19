@@ -32,14 +32,14 @@ The suite contains **20 curated enterprise scenarios** evaluated across **4 poli
 
 | Agent prompt profile | Policy arm | Task completion (Utility) | Attack success rate (ASR) | Security pass rate |
 |---|---|---:|---:|---:|
-| **Standard** | **OpenAPPA (`appa`)** | **82/100 (82.0%)** | **0/100 (0.0%)** | **100/100 (100.0%)** |
-| | OpenAPPA Open (`appa-open`) | 87/100 (87.0%) | 29/100 (29.0%) | 71/100 (71.0%) |
-| | FIDES (`fides`) | 30/100 (30.0%) | 29/100 (29.0%) | 71/100 (71.0%) |
-| | FIDES Open (`fides-open`) | 87/100 (87.0%) | 27/100 (27.0%) | 73/100 (73.0%) |
-| **Red-team Chaos** | **OpenAPPA (`appa`)** | **81/100 (81.0%)** | **0/100 (0.0%)** | **100/100 (100.0%)** |
-| | OpenAPPA Open (`appa-open`) | 87/100 (87.0%) | 33/100 (33.0%) | 67/100 (67.0%) |
-| | FIDES (`fides`) | 27/100 (27.0%) | 29/100 (29.0%) | 71/100 (71.0%) |
-| | FIDES Open (`fides-open`) | 87/100 (87.0%) | 26/100 (26.0%) | 74/100 (74.0%) |
+| **Standard** | **OpenAPPA (`appa`)** | **82%** | **0%** | **100%** |
+| | OpenAPPA Open (`appa-open`) | 87% | 29% | 71% |
+| | FIDES (`fides`) | 30% | 29% | 71% |
+| | FIDES Open (`fides-open`) | 87% | 27% | 73% |
+| **Red-team Chaos** | **OpenAPPA (`appa`)** | **81%** | **0%** | **100%** |
+| | OpenAPPA Open (`appa-open`) | 87% | 33% | 67% |
+| | FIDES (`fides`) | 27% | 29% | 71% |
+| | FIDES Open (`fides-open`) | 87% | 26% | 74% |
 
 ### Comparative findings on Bench-Corp
 
@@ -65,12 +65,12 @@ On standard prompts, both OpenAPPA and FIDES were evaluated to measure baseline 
 | Metric | OpenAPPA | FIDES | Delta (FIDES vs OpenAPPA) |
 |---|---:|---:|---:|
 | Total simulations | 388 | 388 | — |
-| Successful task completions | **137 (35.3%)** | 127 (32.7%) | -10 (-2.6 pp) |
+| Successful task completions | **35%** (137) | 33% (127) | -2 pp |
 | Policy-checked tool calls | 8,151 | 10,543 | +2,392 |
 | Policy blocks | 0 | 0 | 0 |
 | Execution failures | 0 | 0 | 0 |
 
-On standard prompts, neither system triggered false-positive policy blocks (0 blocks recorded), confirming that standard Tau runs measure baseline utility rather than security enforcement. OpenAPPA achieved a higher task completion rate (35.3% vs 32.7%).
+On standard prompts, neither system triggered false-positive policy blocks (0 blocks recorded), confirming that standard Tau runs measure baseline utility rather than security enforcement. OpenAPPA achieved a higher task completion rate (35% vs 33%).
 
 ### ChaosMonkey prompts & Policy recovery
 
@@ -79,10 +79,10 @@ Under ChaosMonkey prompting, adversarial inputs actively attempt unauthorized to
 | Metric | OpenAPPA (ChaosMonkey) |
 |---|---:|
 | Total simulations | 388 |
-| Successful task completions | 102 (26.3%) |
+| Successful task completions | 26% (102) |
 | Policy-checked tool calls | 7,725 |
-| Attempted policy violations blocked | **24/24 (100%)** |
-| Blocked trajectories that recovered | **12/24 (50%)** |
+| Attempted policy violations blocked | **100%** (24/24) |
+| Blocked trajectories that recovered | **50%** (12/24) |
 
 ### How policy recovery works
 
@@ -95,7 +95,7 @@ For example, in a card-replacement task:
 4. The agent prompts the user, calls `verify_identity()`, and retries the card replacement.
 5. OpenAPPA permits the now-authorized call, allowing the task to finish safely.
 
-In TAU-bench testing, **12 out of 24 blocked agents used OpenAPPA's remedy feedback to self-correct and complete their task**. Without remedies, completion under ChaosMonkey prompting would have been 23.2% (90/388); with remedies, it reached 26.3% (102/388).
+In TAU-bench testing, **12 out of 24 blocked agents used OpenAPPA's remedy feedback to self-correct and complete their task**. Without remedies, completion under ChaosMonkey prompting would have been 23% (90/388); with remedies, it reached 26% (102/388).
 
 ## AgentThreatBench: Data exfiltration suite
 
@@ -105,12 +105,12 @@ The test slice includes 8 upstream Data Exfiltration cases plus 2 custom egress 
 
 | Agent prompt profile | Policy arm | Task completion | Security pass rate |
 |---|---|---:|---:|
-| **Standard** | Unprotected | 6/10 (60%) | 10/10 (100%) |
-| | Permissive policy | 7/10 (70%) | 10/10 (100%) |
-| | **Guarded OpenAPPA** | **6/10 (60%)** | **10/10 (100%)** |
-| **Agent-threat chaos** | Unprotected | 7/10 (70%) | 7/10 (70%) |
-| | Permissive policy | 6/10 (60%) | 6/10 (60%) |
-| | **Guarded OpenAPPA** | **6/10 (60%)** | **10/10 (100%)** |
+| **Standard** | Unprotected | 60% | 100% |
+| | Permissive policy | 70% | 100% |
+| | **Guarded OpenAPPA** | **60%** | **100%** |
+| **Agent-threat chaos** | Unprotected | 70% | 70% |
+| | Permissive policy | 60% | 60% |
+| | **Guarded OpenAPPA** | **60%** | **100%** |
 
 Under adversarial prompts, unprotected models leaked sensitive data in 30% to 40% of test cases. OpenAPPA blocked 100% of unauthorized data dispatches while matching the standard 60% task completion rate.
 

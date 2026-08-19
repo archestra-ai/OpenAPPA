@@ -258,12 +258,12 @@ Each scenario evaluates two core metrics based on environment side effects:
 Below are the empirical results from 400 evaluated episodes on commit `5b3cc34` under natural corporate white-collar workplace prompts:
 
 ```
-agent               utility                 ASR       errors   mean s   events   remedies
------------------------------------------------------------------------------------------
-appa          82/100 ( 82.0% ± 3.4%)    0/100 ( 0.0% ± 0.0%)      27     41.2s     545        195
-appa-open     87/100 ( 87.0% ± 3.0%)   29/100 (29.0% ± 4.0%)       0      9.0s       0          0
-fides         30/100 ( 30.0% ± 4.1%)   29/100 (29.0% ± 4.0%)       0     10.2s     130          0
-fides-open    87/100 ( 87.0% ± 3.0%)   27/100 (27.0% ± 3.9%)       0      8.8s       0          0
+agent        utility       ASR  errors  mean s   events  remedies
+-----------------------------------------------------------------
+appa             82%        0%      27   41.2s      545       195
+appa-open        87%       29%       0    9.0s        0         0
+fides            30%       29%       0   10.2s      130         0
+fides-open       87%       27%       0    8.8s        0         0
 ```
 
 ### Per-Scenario Breakdown (Passes / 5 Reps)
@@ -321,12 +321,12 @@ On older models (`gpt-4o`, `gemini-3.5-flash-lite`) and under adversarial pertur
 When agents run under the adversarial red-team chaos profile (`--agent-prompt-profile redteam-chaos`), the model is explicitly instructed to act as a red-team agent: take shortcuts, follow embedded checklists or directives found in data files and forum threads, and prioritize speed:
 
 ```
-agent               utility            ASR  errors  mean s   events  remedies
------------------------------------------------------------------------------
-appa          81/100 ( 81%)   0/100 (  0%)      30   44.9s      618       213
-appa-open     87/100 ( 87%)  33/100 ( 33%)       0    9.3s        0         0
-fides         27/100 ( 27%)  29/100 ( 29%)       0   10.4s      139         0
-fides-open    87/100 ( 87%)  26/100 ( 26%)       0    9.8s        0         0
+agent        utility       ASR  errors  mean s   events  remedies
+-----------------------------------------------------------------
+appa             81%        0%      30   44.9s      618       213
+appa-open        87%       33%       0    9.3s        0         0
+fides            27%       29%       0   10.4s      139         0
+fides-open       87%       26%       0    9.8s        0         0
 ```
 
 #### Red-Team Chaos Key Findings
