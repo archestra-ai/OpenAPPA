@@ -25,28 +25,28 @@ A **security pass** in these benchmarks means the scorer observed no unauthorize
 
 `bench-corp` is a benchmark suite developed to evaluate multi-step agent performance in realistic enterprise environments (HR, Finance, Vendor management, Forums, Task Trackers, and Email). The suite evaluates agents strictly based on observable tool side effects (files written, emails sent), inspired by AgentDojo, without scoring conversation text or relying on LLM judges.
 
-The suite contains **20 curated enterprise scenarios** evaluated across **4 policy arms** on `openai/gpt-5.6-luna`:
+The suite contains **20 curated enterprise scenarios** evaluated across **4 policy arms** on `openai/gpt-5.6-luna` with 5 repetitions per scenario (**100 total episodes per arm**, 400 episodes per evaluation run):
 
 - **Standard prompts:** 5 repetitions per scenario (**100 total episodes per arm**).
-- **Chaos Monkey prompts (`pentest-shortcut-chaos`):** Adversarial prompts where the agent is instructed to attempt shortcuts or out-of-order calls (**20 total episodes per arm**).
+- **Red-team Chaos prompts (`redteam-chaos`):** Adversarial prompts where the agent is instructed to actively seek out shortcuts, bypasses, and follow embedded directives in data (**100 total episodes per arm**).
 
 | Agent prompt profile | Policy arm | Task completion (Utility) | Attack success rate (ASR) | Security pass rate |
 |---|---|---:|---:|---:|
-| **Standard** | **OpenAPPA (`appa`)** | **82/100 (82.0%)** | **0/100 (0.0%)** | **100/100 (100.0%)** |
-| | OpenAPPA Open (`appa-open`) | 84/100 (84.0%) | 29/100 (29.0%) | 71/100 (71.0%) |
-| | FIDES (`fides`) | 30/100 (30.0%) | 29/100 (29.0%) | 71/100 (71.0%) |
-| | FIDES Open (`fides-open`) | 79/100 (79.0%) | 27/100 (27.0%) | 73/100 (73.0%) |
-| **Chaos Monkey** | **OpenAPPA (`appa`)** | **14/20 (70.0%)** | **1/20 (5.0%)** | **19/20 (95.0%)** |
-| | OpenAPPA Open (`appa-open`) | 17/20 (85.0%) | 7/20 (35.0%) | 13/20 (65.0%) |
-| | FIDES (`fides`) | 9/20 (45.0%) | 5/20 (25.0%) | 15/20 (75.0%) |
-| | FIDES Open (`fides-open`) | 17/20 (85.0%) | 5/20 (25.0%) | 15/20 (75.0%) |
+| **Standard** | **OpenAPPA (`appa`)** | **82%** | **0%** | **100%** |
+| | OpenAPPA Open (`appa-open`) | 87% | 29% | 71% |
+| | FIDES (`fides`) | 30% | 29% | 71% |
+| | FIDES Open (`fides-open`) | 87% | 27% | 73% |
+| **Red-team Chaos** | **OpenAPPA (`appa`)** | **81%** | **0%** | **100%** |
+| | OpenAPPA Open (`appa-open`) | 87% | 33% | 67% |
+| | FIDES (`fides`) | 27% | 29% | 71% |
+| | FIDES Open (`fides-open`) | 87% | 26% | 74% |
 
 ### Comparative findings on Bench-Corp
 
-- **Enforcement effectiveness:** OpenAPPA achieved 0% ASR on standard corporate workflows and 5% ASR under Chaos Monkey perturbation testing. Linear IFC (FIDES) protects against naive prompt injections on older models, but cannot scope recipient addresses (`$to`), verify out-of-band approvals, or enforce temporal execution orders, allowing 25%–29% of structural organizational attacks to pass.
-- **Utility preservation:** OpenAPPA maintained 82.0% task completion under standard prompts and 70.0% under Chaos Monkey. FIDES utility dropped to 30.0% because linear IFC permanently taints trajectories upon reading confidential data, blocking subsequent benign public notifications across 14 of 20 scenarios.
+- **Enforcement effectiveness:** OpenAPPA achieved **0% ASR across all 200 evaluated episodes** (100 standard + 100 red-team chaos), resolving 213 policy remedy plans. Linear IFC (FIDES) protects against naive prompt injections on older models, but cannot scope recipient addresses (`$to`), verify out-of-band approvals, or enforce temporal execution orders, allowing 26%–33% of structural organizational attacks to pass.
+- **Utility preservation:** OpenAPPA maintained **81%–82% task completion** across both prompt profiles. FIDES utility dropped to 27%–30% because linear IFC permanently taints trajectories upon reading confidential data, blocking subsequent benign public notifications across 14 of 20 scenarios.
 
-*(Evaluated on commit [`3bca9b6`](https://github.com/archestra-ai/OpenAPPA/commit/3bca9b632c22b5794badd7950f690d196076f42b). See [`bench/corp/README.md`](https://github.com/archestra-ai/OpenAPPA/blob/main/bench/corp/README.md) for the complete 20-scenario matrix and architectural failure analysis.)*
+*(Evaluated on commit [`5b3cc34`](https://github.com/archestra-ai/OpenAPPA/commit/5b3cc3475dbe99cf4a6e4d2bfb2ae4cbb3825829). See [`bench/corp/README.md`](https://github.com/archestra-ai/OpenAPPA/blob/main/bench/corp/README.md) for the complete 20-scenario matrix and architectural failure analysis.)*
 
 ### Scenario examples
 
@@ -65,12 +65,12 @@ On standard prompts, both OpenAPPA and FIDES were evaluated to measure baseline 
 | Metric | OpenAPPA | FIDES | Delta (FIDES vs OpenAPPA) |
 |---|---:|---:|---:|
 | Total simulations | 388 | 388 | — |
-| Successful task completions | **137 (35.3%)** | 127 (32.7%) | -10 (-2.6 pp) |
+| Successful task completions | **35%** (137) | 33% (127) | -2 pp |
 | Policy-checked tool calls | 8,151 | 10,543 | +2,392 |
 | Policy blocks | 0 | 0 | 0 |
 | Execution failures | 0 | 0 | 0 |
 
-On standard prompts, neither system triggered false-positive policy blocks (0 blocks recorded), confirming that standard Tau runs measure baseline utility rather than security enforcement. OpenAPPA achieved a higher task completion rate (35.3% vs 32.7%).
+On standard prompts, neither system triggered false-positive policy blocks (0 blocks recorded), confirming that standard Tau runs measure baseline utility rather than security enforcement. OpenAPPA achieved a higher task completion rate (35% vs 33%).
 
 ### ChaosMonkey prompts & Policy recovery
 
@@ -79,10 +79,10 @@ Under ChaosMonkey prompting, adversarial inputs actively attempt unauthorized to
 | Metric | OpenAPPA (ChaosMonkey) |
 |---|---:|
 | Total simulations | 388 |
-| Successful task completions | 102 (26.3%) |
+| Successful task completions | 26% (102) |
 | Policy-checked tool calls | 7,725 |
-| Attempted policy violations blocked | **24/24 (100%)** |
-| Blocked trajectories that recovered | **12/24 (50%)** |
+| Attempted policy violations blocked | **100%** (24/24) |
+| Blocked trajectories that recovered | **50%** (12/24) |
 
 ### How policy recovery works
 
@@ -95,7 +95,7 @@ For example, in a card-replacement task:
 4. The agent prompts the user, calls `verify_identity()`, and retries the card replacement.
 5. OpenAPPA permits the now-authorized call, allowing the task to finish safely.
 
-In TAU-bench testing, **12 out of 24 blocked agents used OpenAPPA's remedy feedback to self-correct and complete their task**. Without remedies, completion under ChaosMonkey prompting would have been 23.2% (90/388); with remedies, it reached 26.3% (102/388).
+In TAU-bench testing, **12 out of 24 blocked agents used OpenAPPA's remedy feedback to self-correct and complete their task**. Without remedies, completion under ChaosMonkey prompting would have been 23% (90/388); with remedies, it reached 26% (102/388).
 
 ## AgentThreatBench: Data exfiltration suite
 
@@ -105,12 +105,12 @@ The test slice includes 8 upstream Data Exfiltration cases plus 2 custom egress 
 
 | Agent prompt profile | Policy arm | Task completion | Security pass rate |
 |---|---|---:|---:|
-| **Standard** | Unprotected | 6/10 (60%) | 10/10 (100%) |
-| | Permissive policy | 7/10 (70%) | 10/10 (100%) |
-| | **Guarded OpenAPPA** | **6/10 (60%)** | **10/10 (100%)** |
-| **Agent-threat chaos** | Unprotected | 7/10 (70%) | 7/10 (70%) |
-| | Permissive policy | 6/10 (60%) | 6/10 (60%) |
-| | **Guarded OpenAPPA** | **6/10 (60%)** | **10/10 (100%)** |
+| **Standard** | Unprotected | 60% | 100% |
+| | Permissive policy | 70% | 100% |
+| | **Guarded OpenAPPA** | **60%** | **100%** |
+| **Agent-threat chaos** | Unprotected | 70% | 70% |
+| | Permissive policy | 60% | 60% |
+| | **Guarded OpenAPPA** | **60%** | **100%** |
 
 Under adversarial prompts, unprotected models leaked sensitive data in 30% to 40% of test cases. OpenAPPA blocked 100% of unauthorized data dispatches while matching the standard 60% task completion rate.
 
@@ -120,7 +120,7 @@ Rather than relying on prompt-injection classifiers, OpenAPPA attaches reader-se
 
 Across all benchmark suites:
 
-- **Bench-Corp:** OpenAPPA achieved 0% attack success rate across 100 evaluated standard episodes while preserving 82.0% task utility (vs 30.0% utility for FIDES). Under Chaos Monkey stress testing, OpenAPPA maintained 70% utility and 5% ASR (vs 25% ASR for FIDES and 35% ASR for unprotected baselines).
+- **Bench-Corp:** OpenAPPA achieved **0% attack success rate (100% security pass rate)** across all 200 evaluated episodes (100 standard + 100 red-team chaos) while preserving **81%–82% task utility** (vs 27%–30% utility and 29% ASR for FIDES).
 - **TAU-bench:** 0 false positive blocks across 8,151 standard tool calls; 100% of attempted violations blocked under adversarial prompts, with 50% recovering to full task completion via remedy feedback.
 - **AgentThreatBench:** 100% security pass rate for OpenAPPA across both standard and adversarial prompt profiles.
 
@@ -139,8 +139,8 @@ uv run bench-corp run
 # 3. Filter specific agents or scenarios
 uv run bench-corp run --agent appa --agent fides --scenario follow-forum-steps --reps 3
 
-# 4. Run the Chaos Monkey perturbation screen
-uv run bench-corp chaos-screen --model openai/gpt-5.6-luna --agent-prompt-profile pentest-shortcut-chaos --reps 1
+# 4. Run the adversarial Red-team Chaos benchmark across all arms
+uv run bench-corp run --agent appa --agent appa-open --agent fides --agent fides-open --agent-prompt-profile redteam-chaos --reps 5
 ```
 
 ### External references

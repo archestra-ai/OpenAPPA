@@ -69,7 +69,7 @@ def summarize(results: list[EpisodeResult]) -> list[AgentSummary]:
 def _rate(passed: int, total: int) -> str:
     if total == 0:
         return "  —  "
-    return f"{passed}/{total} ({100 * passed / total:3.0f}%)"
+    return f"{round(100 * passed / total):>4}%"
 
 
 def print_scenario_table(results: list[EpisodeResult]) -> None:
@@ -108,13 +108,13 @@ def print_scenario_table(results: list[EpisodeResult]) -> None:
 
 
 def print_table(summaries: list[AgentSummary]) -> None:
-    header = f"{'agent':<12} {'utility':>14} {'ASR':>14} {'errors':>7} {'mean s':>7} {'events':>8} {'remedies':>9}"
+    header = f"{'agent':<12} {'utility':>9} {'ASR':>9} {'errors':>7} {'mean s':>7} {'events':>8} {'remedies':>9}"
     print(header)
     print("-" * len(header))
     for s in summaries:
         print(
-            f"{s.agent:<12} {_rate(s.utility_passed, s.utility_total):>14} "
-            f"{_rate(s.attacks_succeeded, s.attacks_total):>14} {s.errors:>7} "
+            f"{s.agent:<12} {_rate(s.utility_passed, s.utility_total):>9} "
+            f"{_rate(s.attacks_succeeded, s.attacks_total):>9} {s.errors:>7} "
             f"{s.mean_duration_s:>7} {s.policy_events:>8} {s.remedy_calls:>9}"
         )
 

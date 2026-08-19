@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use appa_runtime_api::{Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
 use appa_runtime_v2::api::{OfferId, RemedyOutcome, Runtime};
-use appa_runtime_v2::config::{Config, Externals};
+use appa_runtime_v2::config::{Config, Endpoint, Externals};
 use appa_runtime_v2::hooks;
 use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
@@ -77,8 +77,35 @@ struct SessionInner {
     _store: tempfile::TempDir,
 }
 
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ExternalsConfig {
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    #[serde(default)]
+    review_timeout_ms: Option<u64>,
+    #[serde(default)]
+    max_body_bytes: Option<usize>,
+    #[serde(default)]
+    dynamic: Option<EndpointConfig>,
+    #[serde(default)]
+    membership: Option<EndpointConfig>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EndpointConfig {
+    url: String,
+}
+
 impl SessionInner {
-    fn open(policy_toml: &str, tools_json: &str, user_prompt: &str, bridge_url: Option<&str>) -> Result<Self, String> {
+    fn open(
+        policy_toml: &str,
+        tools_json: &str,
+        user_prompt: &str,
+        bridge_url: Option<&str>,
+        externals_toml: Option<&str>,
+    ) -> Result<Self, String> {
         let bridge_url = bridge_url.map(validate_bridge_url).transpose()?;
         let tools: Vec<ToolInput> =
             serde_json::from_str(tools_json).map_err(|error| format!("invalid tools JSON: {error}"))?;
@@ -90,8 +117,26 @@ impl SessionInner {
             .build()
             .map_err(|error| format!("could not create Tokio runtime: {error}"))?;
         let store = tempfile::tempdir().map_err(|error| format!("could not create the session store: {error}"))?;
-        let config = Config::embedded(
-            policy,
+        let externals = if let Some(externals_toml) = externals_toml {
+            let parsed: ExternalsConfig =
+                toml::from_str(externals_toml).map_err(|error| format!("invalid externals TOML: {error}"))?;
+            Externals {
+                timeout: Duration::from_millis(parsed.timeout_ms.unwrap_or(30_000)),
+                review_timeout: Duration::from_millis(parsed.review_timeout_ms.unwrap_or(600_000)),
+                max_body_bytes: parsed.max_body_bytes.unwrap_or(MAX_BODY_BYTES),
+                authorities: Default::default(),
+                sanitizers: Default::default(),
+                casts: Default::default(),
+                dynamic: parsed.dynamic.map(|e| Endpoint {
+                    url: e.url,
+                    token: None,
+                }),
+                membership: parsed.membership.map(|e| Endpoint {
+                    url: e.url,
+                    token: None,
+                }),
+            }
+        } else {
             Externals {
                 timeout: CONSULT_TIMEOUT,
                 review_timeout: CONSULT_TIMEOUT,
@@ -101,9 +146,9 @@ impl SessionInner {
                 casts: Default::default(),
                 dynamic: None,
                 membership: None,
-            },
-        )
-        .map_err(|error| error.to_string())?;
+            }
+        };
+        let config = Config::embedded(policy, externals).map_err(|error| error.to_string())?;
         let runtime = Runtime::open(config, store.path().join("appa.db"), None).map_err(|error| error.to_string())?;
 
         let trajectory = TrajectoryId("episode".to_string());
@@ -482,9 +527,16 @@ struct Session {
 #[pymethods]
 impl Session {
     #[new]
-    #[pyo3(signature = (policy_toml, tools_json, user_prompt, bridge_url=None))]
-    fn new(policy_toml: &str, tools_json: &str, user_prompt: &str, bridge_url: Option<&str>) -> PyResult<Self> {
-        let inner = SessionInner::open(policy_toml, tools_json, user_prompt, bridge_url).map_err(AppaError::new_err)?;
+    #[pyo3(signature = (policy_toml, tools_json, user_prompt, bridge_url=None, externals_toml=None))]
+    fn new(
+        policy_toml: &str,
+        tools_json: &str,
+        user_prompt: &str,
+        bridge_url: Option<&str>,
+        externals_toml: Option<&str>,
+    ) -> PyResult<Self> {
+        let inner = SessionInner::open(policy_toml, tools_json, user_prompt, bridge_url, externals_toml)
+            .map_err(AppaError::new_err)?;
         Ok(Session {
             inner: Mutex::new(inner),
         })
@@ -558,7 +610,7 @@ delta    = {}
 "#;
 
     fn session(bridge: Option<&str>) -> SessionInner {
-        SessionInner::open(POLICY, r#"["read_external","publish"]"#, "do the thing", bridge)
+        SessionInner::open(POLICY, r#"["read_external","publish"]"#, "do the thing", bridge, None)
             .expect("the policy opens a session")
     }
 
