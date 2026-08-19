@@ -116,13 +116,17 @@ struct Pending {
     call: ProposedCall,
 }
 
-/// One open child branch. `spawn` is the parent call whose dispatch the
-/// child's return closes, so the branch carries it from the fork to the
-/// return rather than trusting the caller to name it again.
-struct ChildBranch {
-    pending: Option<Pending>,
-    spawn: ProposedCall,
-    ended: bool,
+/// One child branch this session opened. `spawn` is the parent call whose
+/// dispatch the child's return closes, so the branch carries it from the fork
+/// to the return rather than trusting the caller to name it again. A branch
+/// that has returned keeps its id and nothing else: it owes no outcome and
+/// closes no dispatch, so a spent branch holding either is unrepresentable.
+enum ChildBranch {
+    Live {
+        pending: Option<Pending>,
+        spawn: ProposedCall,
+    },
+    Spent,
 }
 
 struct SessionInner {
@@ -249,27 +253,25 @@ impl SessionInner {
         match child {
             None => Ok(&mut self.pending),
             Some(id) => {
-                let branch = self.branch_mut(id)?;
-                Ok(&mut branch.pending)
+                let (pending, _) = self.live_mut(id)?;
+                Ok(pending)
             }
         }
     }
 
-    fn branch_mut(&mut self, child: &TrajectoryId) -> Result<&mut ChildBranch, String> {
-        let branch = self
-            .children
-            .get_mut(child)
-            .ok_or_else(|| format!("no child branch {} is open in this session", child.0))?;
-        match branch.ended {
-            true => Err(format!("the child branch {} has already returned", child.0)),
-            false => Ok(branch),
+    /// The dispatch slot and the spawn of a branch that has not returned.
+    fn live_mut(&mut self, child: &TrajectoryId) -> Result<(&mut Option<Pending>, &ProposedCall), String> {
+        match self.children.get_mut(child) {
+            None => Err(format!("no child branch {} is open in this session", child.0)),
+            Some(ChildBranch::Spent) => Err(format!("the child branch {} has already returned", child.0)),
+            Some(ChildBranch::Live { pending, spawn }) => Ok((pending, spawn)),
         }
     }
 
     fn holds_call(&self, child: Option<&TrajectoryId>) -> bool {
         match child {
             None => self.pending.is_some(),
-            Some(id) => self.children.get(id).is_some_and(|branch| branch.pending.is_some()),
+            Some(id) => matches!(self.children.get(id), Some(ChildBranch::Live { pending: Some(_), .. })),
         }
     }
 
@@ -294,7 +296,7 @@ impl SessionInner {
         // caller holding a stale handle gets the lifecycle fault it made and
         // not a policy block it did not.
         if let Some(child) = child {
-            self.branch_mut(child)?;
+            self.live_mut(child)?;
         }
         if self.holds_call(child) {
             return Err("a call is already pending; report its outcome first".to_string());
@@ -484,14 +486,7 @@ impl SessionInner {
             spawn: reference,
         })? {
             HookDecision::Ack => {
-                self.children.insert(
-                    child,
-                    ChildBranch {
-                        pending: None,
-                        spawn,
-                        ended: false,
-                    },
-                );
+                self.children.insert(child, ChildBranch::Live { pending: None, spawn });
                 Ok(())
             }
             other => Err(format!("the runtime answered a child start with {other:?}")),
@@ -511,17 +506,20 @@ impl SessionInner {
             Decision::Blocked { feedback } => encode(SpawnResponse::Blocked { feedback }),
             Decision::Control { reply } => encode(SpawnResponse::Control { reply }),
             Decision::Allowed { call, binding: None } => {
-                // The release prepared no fork, so no child exists to open. Close
-                // the dispatch before surfacing it: the parent owes an outcome.
-                let closed = self.admit(
+                // The release prepared no fork, so no child exists to open. The
+                // parent still owes this dispatch an outcome; a close that fails
+                // too is carried, never dropped, or the dispatch leaks unseen.
+                let unclosed = match self.admit(
                     None,
                     ToolOutcome::Failure {
                         message: "no child was opened: this spawn prepared no fork".to_string(),
                     },
-                );
-                let _ = closed;
+                ) {
+                    Ok(_) => String::new(),
+                    Err(error) => format!("; its dispatch stayed open: {error}"),
+                };
                 Err(format!(
-                    "the spawn of {} released no fork binding; the deployment does not control child context",
+                    "the spawn of {} released no fork binding; the deployment does not control child context{unclosed}",
                     call.tool
                 ))
             }
@@ -546,14 +544,14 @@ impl SessionInner {
         if self.closed {
             return Err("the session is closed".to_string());
         }
-        let branch = self.branch_mut(child)?;
-        if branch.pending.is_some() {
+        let (pending, spawn) = self.live_mut(child)?;
+        if pending.is_some() {
             return Err(format!(
                 "the child branch {} holds an open call; report or abandon it before returning",
                 child.0
             ));
         }
-        let spawn = branch.spawn.clone();
+        let spawn = spawn.clone();
         let said = value.clone();
         let decision = self.event(HookEvent::SpawnResult {
             actor: self.actor(None),
@@ -567,9 +565,7 @@ impl SessionInner {
         // The runtime closed the parent's spawn dispatch on every answer it
         // gives here, so the branch is spent whether the return crossed or not.
         self.pending = None;
-        if let Some(branch) = self.children.get_mut(child) {
-            branch.ended = true;
-        }
+        self.children.insert(child.clone(), ChildBranch::Spent);
         encode(match decision {
             HookDecision::Ack => ReturnResponse::Returned {
                 value: said,
@@ -588,7 +584,11 @@ impl SessionInner {
         if self.pending.is_some() {
             return Err("cannot close while a call is pending".to_string());
         }
-        if let Some(live) = self.children.iter().find(|(_, branch)| !branch.ended) {
+        if let Some(live) = self
+            .children
+            .iter()
+            .find(|(_, branch)| matches!(branch, ChildBranch::Live { .. }))
+        {
             return Err(format!("cannot close while the child branch {} is live", live.0.0));
         }
         self.closed = true;
