@@ -1,4 +1,4 @@
-name: Build appa-runtime-v2 binaries
+name: Build appa-runtime binaries
 
 on:
   workflow_call:
@@ -23,7 +23,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: build-appa-runtime-v2-${{ inputs.source_ref }}
+  group: build-appa-runtime-${{ inputs.source_ref }}
   cancel-in-progress: false
 
 jobs:
@@ -37,44 +37,44 @@ jobs:
             os: Linux
             arch: amd64
             target: x86_64-unknown-linux-gnu
-            executable: appa-runtime-v2
-            asset: appa-runtime-v2-x86_64-unknown-linux-gnu
-            archive: appa-runtime-v2-x86_64-unknown-linux-gnu.tar.gz
+            executable: appa-runtime
+            asset: appa-runtime-x86_64-unknown-linux-gnu
+            archive: appa-runtime-x86_64-unknown-linux-gnu.tar.gz
           - runner: ubuntu-24.04-arm
             os: Linux
             arch: arm64
             target: aarch64-unknown-linux-gnu
-            executable: appa-runtime-v2
-            asset: appa-runtime-v2-aarch64-unknown-linux-gnu
-            archive: appa-runtime-v2-aarch64-unknown-linux-gnu.tar.gz
+            executable: appa-runtime
+            asset: appa-runtime-aarch64-unknown-linux-gnu
+            archive: appa-runtime-aarch64-unknown-linux-gnu.tar.gz
           - runner: macos-15-intel
             os: macOS
             arch: amd64
             target: x86_64-apple-darwin
-            executable: appa-runtime-v2
-            asset: appa-runtime-v2-x86_64-apple-darwin
-            archive: appa-runtime-v2-x86_64-apple-darwin.tar.gz
+            executable: appa-runtime
+            asset: appa-runtime-x86_64-apple-darwin
+            archive: appa-runtime-x86_64-apple-darwin.tar.gz
           - runner: macos-15
             os: macOS
             arch: arm64
             target: aarch64-apple-darwin
-            executable: appa-runtime-v2
-            asset: appa-runtime-v2-aarch64-apple-darwin
-            archive: appa-runtime-v2-aarch64-apple-darwin.tar.gz
+            executable: appa-runtime
+            asset: appa-runtime-aarch64-apple-darwin
+            archive: appa-runtime-aarch64-apple-darwin.tar.gz
           - runner: windows-latest
             os: Windows
             arch: amd64
             target: x86_64-pc-windows-msvc
-            executable: appa-runtime-v2.exe
-            asset: appa-runtime-v2-x86_64-pc-windows-msvc
-            archive: appa-runtime-v2-x86_64-pc-windows-msvc.zip
+            executable: appa-runtime.exe
+            asset: appa-runtime-x86_64-pc-windows-msvc
+            archive: appa-runtime-x86_64-pc-windows-msvc.zip
           - runner: windows-11-arm
             os: Windows
             arch: arm64
             target: aarch64-pc-windows-msvc
-            executable: appa-runtime-v2.exe
-            asset: appa-runtime-v2-aarch64-pc-windows-msvc
-            archive: appa-runtime-v2-aarch64-pc-windows-msvc.zip
+            executable: appa-runtime.exe
+            asset: appa-runtime-aarch64-pc-windows-msvc
+            archive: appa-runtime-aarch64-pc-windows-msvc.zip
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     defaults:
@@ -94,7 +94,7 @@ jobs:
         env:
           RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
           TARGET: ${{ matrix.target }}
-        run: cargo build --release --locked --package appa-runtime-v2 --target "$TARGET"
+        run: cargo build --release --locked --package appa-runtime --target "$TARGET"
 
       - name: Verify release version
         if: inputs.expected_version != ''
@@ -104,7 +104,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           actual_version=$("./target/${TARGET}/release/${EXECUTABLE}" --version)
-          test "$actual_version" = "appa-runtime-v2 ${EXPECTED_VERSION}"
+          test "$actual_version" = "appa-runtime ${EXPECTED_VERSION}"
 
       - name: Verify Linux glibc baseline
         if: runner.os == 'Linux'

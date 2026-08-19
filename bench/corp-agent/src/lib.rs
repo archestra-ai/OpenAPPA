@@ -3,7 +3,7 @@
 //! One binary, `appa-corp-agent`, over the mock corporate systems (the sibling
 //! [`corp-systems`](../corp-systems) crate: `hr`, `finance`, `task_tracker`,
 //! `public_forum`, and `vendor`, plus email tools): the assistant on
-//! runtime-v2, where the harness owns the loop and the runtime answers one
+//! the runtime, where the harness owns the loop and the runtime answers one
 //! question in front of every flow. Branching is live — a tainting read can be
 //! confined to a child trajectory, and a child's return can cross through a
 //! registered sanitizer. Its tools run in-process ([`shim`]), the same

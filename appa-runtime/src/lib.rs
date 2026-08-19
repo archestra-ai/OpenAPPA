@@ -1,4 +1,4 @@
-//! appa-runtime-v2 — the process that gates a harness's flows.
+//! appa-runtime — the process that gates a harness's flows.
 
 pub mod api;
 pub mod config;

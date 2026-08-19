@@ -1,16 +1,15 @@
 use std::path::{Path, PathBuf};
 
-use appa_runtime_v2::api::{AuditEvent, Runtime, TrajectoryId};
-use appa_runtime_v2::config::Config;
-use appa_runtime_v2::hooks;
+use appa_runtime::api::{AuditEvent, Runtime, TrajectoryId};
+use appa_runtime::config::Config;
+use appa_runtime::hooks;
 
 const SESSION: &str = "18ebc556-b78f-452b-99ec-487a4f40e824";
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .and_then(Path::parent)
-        .expect("the runtime crate sits two levels below the repo root")
+        .expect("the runtime crate sits one level below the repo root")
         .to_path_buf()
 }
 

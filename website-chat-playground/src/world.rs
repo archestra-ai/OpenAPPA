@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use appa_runtime_v2::config::{Endpoint, Externals, Implementation};
+use appa_runtime::config::{Endpoint, Externals, Implementation};
 
 use crate::systems::System;
 

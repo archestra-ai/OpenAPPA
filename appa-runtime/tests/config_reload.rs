@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
+use appa_runtime::api::{OpenError, Runtime};
+use appa_runtime::{config::Config, hooks};
 use appa_runtime_api::{Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
-use appa_runtime_v2::api::{OpenError, Runtime};
-use appa_runtime_v2::{config::Config, hooks};
 
 fn policy_with(tools: &str) -> String {
     format!("[policy]\nversion = 1\n{tools}\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 4096\n")

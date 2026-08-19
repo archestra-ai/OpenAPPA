@@ -3,8 +3,8 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use appa_example_agent::wire::{WireMessage, WireTool, WireToolCall};
-use appa_runtime_v2::api::Runtime;
-use appa_runtime_v2::config::Config;
+use appa_runtime::api::Runtime;
+use appa_runtime::config::Config;
 
 #[derive(Clone, Default)]
 pub struct Provider {

@@ -1,25 +1,25 @@
 [package]
-name = "appa-runtime-v2"
+name = "appa-runtime"
 version = "0.0.0"
 edition.workspace = true
 publish = false
 
 [lib]
-name = "appa_runtime_v2"
+name = "appa_runtime"
 
 [[bin]]
-name = "appa-runtime-v2"
+name = "appa-runtime"
 path = "src/main.rs"
 
 [dependencies]
-appa-adapter-claude-code = { path = "../adapters/claude-code" }
+appa-adapter-claude-code = { path = "../appa-adapter-claude-code" }
 # The builtin-module ABI: one source of truth for the descriptor,
 # statuses, and version shared with deployer modules.
-appa-builtin = { path = "../../appa-builtin" }
+appa-builtin = { path = "../appa-builtin" }
 appa-engine = { workspace = true }
 appa-eventlog = { workspace = true }
 appa-policy = { workspace = true }
-appa-runtime-api = { path = "../api" }
+appa-runtime-api = { path = "../appa-runtime-api" }
 # `query` decodes the statusline's one GET parameter (`/status`).
 axum = { workspace = true, features = ["query"] }
 clap = { version = "4", features = ["derive", "env"] }

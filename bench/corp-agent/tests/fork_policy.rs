@@ -3,8 +3,8 @@
 //! deployment opens with the redactor bound to the shim that hosts it — the
 //! exact wiring `appa-corp-agent` performs at startup.
 
-use appa_runtime_v2::api::Runtime;
-use appa_runtime_v2::config::{Config, Implementation};
+use appa_runtime::api::Runtime;
+use appa_runtime::config::{Config, Implementation};
 use corp_systems::systems::System;
 use corporate_agent_demo::catalogue;
 use corporate_agent_demo::shim::{self, CorpWorld};

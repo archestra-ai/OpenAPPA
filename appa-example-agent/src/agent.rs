@@ -4,11 +4,11 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+use appa_runtime::api::{OfferId, RemedyOutcome, Runtime};
+use appa_runtime::hooks;
 use appa_runtime_api::{
     Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
 };
-use appa_runtime_v2::api::{OfferId, RemedyOutcome, Runtime};
-use appa_runtime_v2::hooks;
 use serde_json::value::RawValue;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;

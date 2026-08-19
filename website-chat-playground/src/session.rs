@@ -10,8 +10,8 @@ use appa_example_agent::wire::{WireMessage, WireTool};
 use appa_example_agent::{
     Endpoint, HttpClient, OpenAiCompatible, OpenAiConfig, ToolCatalogue, Transcript, TranscriptHead,
 };
-use appa_runtime_v2::api::{OpenError, Runtime, TrajectoryId};
-use appa_runtime_v2::config::{Config, ConfigError};
+use appa_runtime::api::{OpenError, Runtime, TrajectoryId};
+use appa_runtime::config::{Config, ConfigError};
 
 use crate::approvals::Approvals;
 use crate::derive::Derivations;

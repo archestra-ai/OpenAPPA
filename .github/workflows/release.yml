@@ -151,7 +151,7 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
-          pattern: appa-runtime-v2-*
+          pattern: appa-runtime-*
           merge-multiple: true
           skip-decompress: true
 
@@ -166,12 +166,12 @@ jobs:
         run: |
           test "$TAG_NAME" = "v${EXPECTED_VERSION}"
           expected_archives=(
-            appa-runtime-v2-x86_64-unknown-linux-gnu.tar.gz
-            appa-runtime-v2-aarch64-unknown-linux-gnu.tar.gz
-            appa-runtime-v2-x86_64-apple-darwin.tar.gz
-            appa-runtime-v2-aarch64-apple-darwin.tar.gz
-            appa-runtime-v2-x86_64-pc-windows-msvc.zip
-            appa-runtime-v2-aarch64-pc-windows-msvc.zip
+            appa-runtime-x86_64-unknown-linux-gnu.tar.gz
+            appa-runtime-aarch64-unknown-linux-gnu.tar.gz
+            appa-runtime-x86_64-apple-darwin.tar.gz
+            appa-runtime-aarch64-apple-darwin.tar.gz
+            appa-runtime-x86_64-pc-windows-msvc.zip
+            appa-runtime-aarch64-pc-windows-msvc.zip
           )
           for archive in "${expected_archives[@]}"; do
             test -f "$archive" || {
@@ -180,7 +180,7 @@ jobs:
             }
           done
           shopt -s nullglob
-          actual_archives=(appa-runtime-v2-*.tar.gz appa-runtime-v2-*.zip)
+          actual_archives=(appa-runtime-*.tar.gz appa-runtime-*.zip)
           if [ "${#actual_archives[@]}" -ne "${#expected_archives[@]}" ]; then
             echo "::error::expected exactly 6 release archives, found ${#actual_archives[@]}"
             exit 1

@@ -1,4 +1,4 @@
-//! `appa-example-agent` — a protoagent on runtime-v2.
+//! `appa-example-agent` — a protoagent on the runtime.
 //!
 //! The runtime does not run a loop and does not want one: the harness
 //! owns inference, tool execution and the transcript, and the runtime
@@ -6,7 +6,7 @@
 //! embed the runtime rather than serving hooks to an editor.
 //!
 //! It drives the same public dispatcher a hook adapter reaches —
-//! `appa_runtime_v2::hooks::handle`, with typed events — so there is no
+//! `appa_runtime::hooks::handle`, with typed events — so there is no
 //! second event model and no wire between the two. What the runtime
 //! deliberately does not hold, the agent does: the transcript, the tool
 //! catalogue, the budget, and the parent/child stack.
@@ -14,7 +14,7 @@
 //! ```no_run
 //! # use std::sync::Arc;
 //! # use appa_example_agent::{Agent, ToolCatalogue, ToolShim, OpenAiCompatible};
-//! # use appa_runtime_v2::api::{Runtime, TrajectoryId};
+//! # use appa_runtime::api::{Runtime, TrajectoryId};
 //! # async fn example(runtime: Arc<Runtime>, tools: Vec<appa_example_agent::wire::WireTool>) {
 //! let agent = Agent::new(
 //!     runtime,

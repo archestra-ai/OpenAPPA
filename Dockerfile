@@ -1,7 +1,7 @@
 # appa-demo: the chat-playground service behind openappa.com.
 #
 # Built from the repository root: `website-chat-playground` is a workspace member and
-# path-depends on the sibling crates (`appa-runtime-v2`, `appa-policy`,
+# path-depends on the sibling crates (`appa-runtime`, `appa-policy`,
 # `appa-engine`, `appa-example-agent`).
 #
 #   docker build -t appa-demo .
@@ -17,8 +17,12 @@ COPY appa-example-agent appa-example-agent
 COPY appa-agent-python appa-agent-python
 COPY appa-engine appa-engine
 COPY appa-policy appa-policy
-COPY appa-runtime-v2 appa-runtime-v2
+COPY appa-runtime appa-runtime
+COPY appa-runtime-api appa-runtime-api
+COPY appa-adapter-claude-code appa-adapter-claude-code
 COPY appa-builtin appa-builtin
+COPY appa-eventlog appa-eventlog
+COPY bench bench
 COPY website-chat-playground website-chat-playground
 RUN cargo build --release --locked --package website-chat-playground
 

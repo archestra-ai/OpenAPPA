@@ -1,6 +1,6 @@
 # appa-runtime plugin
 
-Protects a Claude Code session through the appa-runtime-v2 process:
+Protects a Claude Code session through the appa-runtime process:
 the hooks send every event to it, and the `execute_remedy_plan` MCP
 server lets the model pursue an offered remedy. Hooks fail closed —
 while the process is down, every action in a protected session is
@@ -26,7 +26,7 @@ the mascot with a `clappa` reminder instead of runtime status.
 
 The install and every protected session share one starter,
 `hooks/ensure-runtime.sh` (on Windows, `hook.ps1 -EnsureRuntime`): it
-launches the installed `appa-runtime-v2` when nothing healthy answers
+launches the installed `appa-runtime` when nothing healthy answers
 `/health` and returns only once one does. The last step of the install
 runs it, so a protected session normally finds the runtime already up and
 its SessionStart start is a single health probe. When the binary is not
@@ -51,7 +51,7 @@ blocks to the user simply). Advice only; it enforces nothing.
 Install and uninstall instructions live one level up
 ([README](../README.md)); build, configuration, and start of the
 process itself in the crate's
-[README](../../../appa-runtime-v2/README.md). The short form:
+[README](../../../appa-runtime/README.md). The short form:
 
 ```sh
 # one session, no installation

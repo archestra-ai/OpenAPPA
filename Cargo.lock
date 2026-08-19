@@ -90,8 +90,8 @@ dependencies = [
 name = "appa-agent-python"
 version = "0.1.0"
 dependencies = [
+ "appa-runtime",
  "appa-runtime-api",
- "appa-runtime-v2",
  "pyo3",
  "reqwest 0.12.28",
  "serde",
@@ -139,8 +139,8 @@ dependencies = [
 name = "appa-example-agent"
 version = "0.0.0"
 dependencies = [
+ "appa-runtime",
  "appa-runtime-api",
- "appa-runtime-v2",
  "axum",
  "reqwest 0.12.28",
  "serde",
@@ -177,15 +177,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "appa-runtime-api"
-version = "0.0.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "appa-runtime-v2"
+name = "appa-runtime"
 version = "0.0.0"
 dependencies = [
  "appa-adapter-claude-code",
@@ -210,6 +202,14 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "appa-runtime-api"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -459,7 +459,7 @@ dependencies = [
  "appa-engine",
  "appa-example-agent",
  "appa-policy",
- "appa-runtime-v2",
+ "appa-runtime",
  "axum",
  "clap",
  "corp-systems",
@@ -2529,7 +2529,7 @@ dependencies = [
  "appa-engine",
  "appa-example-agent",
  "appa-policy",
- "appa-runtime-v2",
+ "appa-runtime",
  "axum",
  "clap",
  "getrandom 0.3.4",

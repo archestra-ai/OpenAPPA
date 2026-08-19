@@ -82,7 +82,7 @@ fn render(outcome: RemedyOutcome) -> CallToolResult {
 impl ServerHandler for RemedyService {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
-        info.server_info.name = "appa-runtime-v2".to_string();
+        info.server_info.name = "appa-runtime".to_string();
         info.server_info.version = env!("CARGO_PKG_VERSION").to_string();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.instructions = Some(

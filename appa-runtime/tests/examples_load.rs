@@ -1,13 +1,12 @@
 use std::path::{Path, PathBuf};
 
-use appa_runtime_v2::api::Runtime;
-use appa_runtime_v2::config::Config;
+use appa_runtime::api::Runtime;
+use appa_runtime::config::Config;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .and_then(Path::parent)
-        .expect("the runtime crate sits two levels below the repo root")
+        .expect("the runtime crate sits one level below the repo root")
         .to_path_buf()
 }
 

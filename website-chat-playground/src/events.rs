@@ -14,7 +14,7 @@
 use appa_engine::label::{Audience, Dim, Label};
 use appa_engine::registry::TrustChain;
 use appa_example_agent::{Record, Recorded};
-use appa_runtime_v2::api::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome};
+use appa_runtime::api::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome};
 use serde::Serialize;
 
 #[derive(Clone, Debug, Serialize)]

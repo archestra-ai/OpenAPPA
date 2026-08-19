@@ -1,4 +1,4 @@
-# appa-runtime-v2
+# appa-runtime
 
 One process that sits between Claude Code and its tools and checks
 every step before it happens: the user's prompt, each tool call, each
@@ -23,7 +23,7 @@ task. An existing policy and database are always preserved.
 ### 1. Build
 
 ```sh
-cargo build -p appa-runtime-v2
+cargo build -p appa-runtime
 ```
 
 ### 2. Prepare the configuration
@@ -60,7 +60,7 @@ suspicious. Pass its path directly to `--config`.
 ### 3. Start the process
 
 ```sh
-./target/debug/appa-runtime-v2 --config appa.toml --db appa.db
+./target/debug/appa-runtime --config appa.toml --db appa.db
 ```
 
 `curl localhost:8787/health` prints `ok` when it is up. The listener
@@ -93,7 +93,7 @@ what was recorded:
 sqlite3 appa.db "SELECT seq, facts FROM logs WHERE root = 'cc:<session-id>' ORDER BY seq;"
 ```
 
-The `appa-runtime-v2 status` and `audit` reads answer the same questions
+The `appa-runtime status` and `audit` reads answer the same questions
 without SQL, and are the supported way to look.
 
 ## Things to know
@@ -102,6 +102,6 @@ without SQL, and are the supported way to look.
   old database refuses to open; use a fresh `--db` path.
 - **Stopping the process blocks protected sessions.** That is the design,
   not a fault. Uninstall the plugin if you want unprotected sessions back.
-- **The directory's `CLAUDE.md`** describes the layout: the process
-  (`runtime/`), the shared vocabulary (`api/`), and the Claude Code
-  adapter (`adapters/claude-code/`).
+- **This crate's `CLAUDE.md`** describes the layout: the process
+  (`appa-runtime/`), the shared vocabulary (`appa-runtime-api/`), and
+  the Claude Code adapter (`appa-adapter-claude-code/`).

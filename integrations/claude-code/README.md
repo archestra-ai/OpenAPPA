@@ -1,11 +1,11 @@
 # Claude Code integration
 
 Everything needed to protect a Claude Code session through the
-appa-runtime-v2 process lives in this directory: the plugin (hooks, the
+appa-runtime process lives in this directory: the plugin (hooks, the
 `execute_remedy_plan` MCP server, the `appa-debug` skill), the
 statusline script, example policies, and the install and uninstall
-instructions below. The process itself is the `appa-runtime-v2` crate;
-its [README](../../appa-runtime-v2/README.md) covers build,
+instructions below. The process itself is the `appa-runtime` crate;
+its [README](../../appa-runtime/README.md) covers build,
 configuration, and start.
 
 How it works, in one paragraph: the plugin registers hooks on every
@@ -69,9 +69,9 @@ WSL runs the POSIX hooks as-is.
 
 | System | Runtime | Policy | Database |
 | --- | --- | --- | --- |
-| Linux | `~/.local/bin/appa-runtime-v2` | `~/.config/appa/appa.toml` | `~/.local/share/appa/` |
-| macOS | `~/.local/bin/appa-runtime-v2` | `~/Library/Application Support/appa/appa.toml` | `~/Library/Application Support/appa/` |
-| Windows | `%LOCALAPPDATA%\appa\bin\appa-runtime-v2.exe` | `%APPDATA%\appa\appa.toml` | `%LOCALAPPDATA%\appa\` |
+| Linux | `~/.local/bin/appa-runtime` | `~/.config/appa/appa.toml` | `~/.local/share/appa/` |
+| macOS | `~/.local/bin/appa-runtime` | `~/Library/Application Support/appa/appa.toml` | `~/Library/Application Support/appa/` |
+| Windows | `%LOCALAPPDATA%\appa\bin\appa-runtime.exe` | `%APPDATA%\appa\appa.toml` | `%LOCALAPPDATA%\appa\` |
 
 The runtime creates the starting policy only when the policy path does
 not exist. It never replaces the policy or database.
@@ -141,7 +141,7 @@ all follow it:
 
 ```sh
 cp integrations/claude-code/examples/claude-code.appa.toml appa.toml
-nohup cargo run --bin appa-runtime-v2 -- --config appa.toml --db appa.db --listen 127.0.0.1:8788 >appa-runtime.log 2>&1 &
+nohup cargo run --bin appa-runtime -- --config appa.toml --db appa.db --listen 127.0.0.1:8788 >appa-runtime.log 2>&1 &
 APPA_GATE=1 APPA_RUNTIME_URL=http://127.0.0.1:8788 claude --plugin-dir integrations/claude-code/plugin
 ```
 
@@ -165,8 +165,8 @@ port keeps serving, and the new binary would never run.
 ```sh
 claude plugin uninstall appa-runtime
 claude plugin marketplace remove appa
-pkill -f appa-runtime-v2
-rm ~/.local/bin/appa-runtime-v2 ~/.local/bin/clappa ~/.local/bin/appa-statusline.sh
+pkill -f appa-runtime
+rm ~/.local/bin/appa-runtime ~/.local/bin/clappa ~/.local/bin/appa-statusline.sh
 
 # drop the statusline entry the setup wrote, and keep one of your own:
 jq 'if (.statusLine.command? // "") | test("appa-statusline") then del(.statusLine) else . end' \
