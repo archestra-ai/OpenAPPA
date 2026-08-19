@@ -86,6 +86,21 @@ def test_a_child_holding_an_open_call_does_not_return(session: Session):
     assert decision(child.finish({"status": "verified", "days_allowed": 20}))["kind"] == "returned"
 
 
+def test_the_parent_may_not_close_the_spawn_its_child_still_owes(session: Session):
+    """The parent's pending call while a child runs is that child's spawn, and
+    only its return closes it. Closing it on the parent would leave the child's
+    value nothing to cross on."""
+    _, child = session.spawn_child("researcher_1", return_schema=RETURN_SCHEMA)
+
+    with pytest.raises(AppaError, match="finish"):
+        session.report("done")
+    with pytest.raises(AppaError, match="finish"):
+        session.abandon()
+
+    assert decision(child.finish({"status": "verified", "days_allowed": 20}))["kind"] == "returned"
+    session.close()
+
+
 def test_a_branch_that_returned_is_spent(session: Session):
     child = quarantined(session)
     child.finish({"status": "verified", "days_allowed": 20})

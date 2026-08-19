@@ -268,6 +268,28 @@ impl SessionInner {
         }
     }
 
+    /// The live branch whose spawn the parent's pending call is. Only that
+    /// child's return closes it: an outcome reported on the parent would close
+    /// the spawn under a branch that still owes a value, leaving the return
+    /// nothing to cross on.
+    fn spawn_owed_by(&self) -> Option<&TrajectoryId> {
+        self.pending.as_ref()?;
+        self.children.iter().find_map(|(id, branch)| match branch {
+            ChildBranch::Live { .. } => Some(id),
+            ChildBranch::Spent => None,
+        })
+    }
+
+    fn refuse_closing_a_spawn(&self) -> Result<(), String> {
+        match self.spawn_owed_by() {
+            None => Ok(()),
+            Some(child) => Err(format!(
+                "the pending call is the spawn of child branch {}; end the branch with finish instead",
+                child.0
+            )),
+        }
+    }
+
     fn holds_call(&self, child: Option<&TrajectoryId>) -> bool {
         match child {
             None => self.pending.is_some(),
@@ -412,6 +434,9 @@ impl SessionInner {
     }
 
     fn admit(&mut self, child: Option<&TrajectoryId>, outcome: ToolOutcome) -> Result<String, String> {
+        if child.is_none() {
+            self.refuse_closing_a_spawn()?;
+        }
         let pending = self
             .slot(child)?
             .take()
@@ -447,6 +472,9 @@ impl SessionInner {
     }
 
     fn abandon(&mut self, child: Option<&TrajectoryId>) -> Result<(), String> {
+        if child.is_none() {
+            self.refuse_closing_a_spawn()?;
+        }
         let pending = self
             .slot(child)?
             .take()
@@ -1346,6 +1374,27 @@ return_sanitizer = "attest-schema"
             ),
             "returned",
             "the return crosses once the child owes nothing",
+        );
+    }
+
+    #[test]
+    fn the_parent_may_not_close_the_spawn_its_child_still_owes() {
+        let mut session = child_session();
+        assert_eq!(kind(&session.spawn_child(child(), SCHEMA).unwrap()), "opened");
+
+        let reported = session.root_report(Some("done"), false).unwrap_err();
+        assert!(reported.contains("finish"), "got: {reported}");
+        let abandoned = session.abandon(None).unwrap_err();
+        assert!(abandoned.contains("finish"), "got: {abandoned}");
+
+        assert_eq!(
+            kind(
+                &session
+                    .finish_child(&child(), Some(r#"{"status":"verified"}"#.to_string()))
+                    .unwrap()
+            ),
+            "returned",
+            "the spawn was still open for the return that closes it",
         );
     }
 
