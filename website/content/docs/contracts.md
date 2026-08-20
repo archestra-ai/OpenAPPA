@@ -98,7 +98,7 @@ name = "operator"
 can_cover_trust_to = "trusted"
 attends = ["privacy-review"]
 
-[externals.dynamic.classify-customer]
+[externals.dynamic]
 url = "https://resolver.internal/classify"
 ```
 
@@ -130,7 +130,7 @@ Output trust and audience each have one owner. A static delta and a resolver can
 
 All tool-level resolver answers are pinned to the complete argument object. Any argument substitution invalidates them. Every required resolver MUST answer before the check can complete.
 
-Each resolver has its own implementation. A tool-level resolver can bind the built-in Claude Code classifier directly on its declaration:
+One `[externals.dynamic]` HTTP endpoint serves every resolver that has no inline builtin; each request carries the resolver name. A tool-level resolver can instead bind the built-in Claude Code classifier directly on its declaration:
 
 ```toml
 [[dynamic_resolver]]
@@ -140,7 +140,7 @@ builtin = "claude-code"
 
 The builtin starts the locally installed and authenticated `claude` CLI in non-interactive safe mode with Sonnet, no tools, no project settings, and no session persistence. Its fixed prompt receives the resolver request, the current trajectory trust and audience (including whether either is unresolved), and the tool's static attention marks. Canonical arguments are explicitly treated as untrusted data. Claude returns structured output under a strict schema derived from `returns`, the policy trust chain, and the authority mandates' attended marks; `delta` and `requires` may appear together when both are requested.
 
-This POC supports only the tool-level `resolvers = [{ resolver, returns }]` form. The legacy single-argument audience form still requires a name-keyed HTTP endpoint, and binding that resolver itself to Claude is refused at startup. Claude answers have no separate ceiling: they are trusted classifier evidence and still pass the same exact-shape, policy-vocabulary, audience, and pin validation as HTTP answers. A missing CLI, authentication/process failure, timeout, malformed result, or oversized output produces no answer and fails closed. Each resolver binding starts one Claude invocation for a new proposal; pinned rechecks and replay do not invoke it again. Set `externals.timeout_ms` high enough for a model call and remember that each invocation has latency and account cost.
+This POC supports only the tool-level `resolvers = [{ resolver, returns }]` form. The legacy single-argument audience form still requires the shared HTTP endpoint, and binding that resolver itself to Claude is refused at startup. Claude answers have no separate ceiling: they are trusted classifier evidence and still pass the same exact-shape, policy-vocabulary, audience, and pin validation as HTTP answers. A missing CLI, authentication/process failure, timeout, malformed result, or oversized output produces no answer and fails closed. Each resolver binding starts one Claude invocation for a new proposal; pinned rechecks and replay do not invoke it again. Set `externals.timeout_ms` high enough for a model call and remember that each invocation has latency and account cost.
 
 ### Deployment coverage
 

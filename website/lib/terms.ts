@@ -61,7 +61,7 @@ const TERMS = {
   returns:
     "The trust, audience, and attention fields a tool-level resolver must return. Trust values select from the policy trust chain; attention values select from marks named by authority mandates. Trust and audience have one owner; attention is additive.",
   "[externals.dynamic]":
-    "The deployment binding shared by dynamic resolvers: either an HTTP endpoint or the tool-level-only Claude Code builtin.",
+    "The shared HTTP endpoint for every dynamic resolver without an inline builtin. Requests carry the resolver name.",
   internal:
     "An example reader for restricted internal data. Reading internal data closes off public destinations.",
   "{public, trusted}":

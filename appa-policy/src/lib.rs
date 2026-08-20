@@ -114,8 +114,8 @@ pub struct Config {
 }
 
 impl Config {
-    /// Parse the runtime's declaration-only policy TOML. Inline implementation bindings are a
-    /// policy error because the deployment binds them in `[externals]`.
+    /// Parse the policy TOML. HTTP implementation bindings remain deployment-owned; the
+    /// supported stock dynamic builtin may be selected on its resolver declaration.
     pub fn from_toml_str(s: &str) -> Result<Config, ConfigError> {
         let raw: RawConfig = toml::from_str(s)?;
         if raw.version != SUPPORTED_VERSION {

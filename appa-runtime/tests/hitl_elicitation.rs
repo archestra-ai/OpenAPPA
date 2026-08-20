@@ -226,7 +226,7 @@ timeout_ms = 1000
 review_timeout_ms = 5000
 max_body_bytes = 4096
 
-[externals.dynamic.classifier]
+[externals.dynamic]
 url = "{resolver_url}"
 
 [externals.authorities.operator]

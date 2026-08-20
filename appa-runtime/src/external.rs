@@ -281,11 +281,6 @@ enum SanitizerBackend {
     Module(Arc<LoadedModule>),
 }
 
-enum DynamicBackend {
-    Resolver(Endpoint),
-    ClaudeCode(ClaudeCodeBackend),
-}
-
 /// The dispatch tables over the configured implementations. Async and
 /// lock-free on the HTTP path; a module call serializes on its own
 /// gate inside a blocking task. The store's mutex is never in scope
@@ -296,7 +291,8 @@ pub struct ExternalServices {
     authorities: BTreeMap<String, AuthorityBackend>,
     sanitizers: BTreeMap<String, SanitizerBackend>,
     casts: BTreeMap<String, Endpoint>,
-    dynamic: BTreeMap<String, DynamicBackend>,
+    dynamic: Option<Endpoint>,
+    dynamic_builtins: BTreeMap<String, ClaudeCodeBackend>,
     membership: Option<Endpoint>,
 }
 
@@ -307,7 +303,11 @@ impl ExternalServices {
     /// implementation name. The registry is borrowed, not consumed: it
     /// loads once at open and outlives every deployment a configuration
     /// reload installs.
-    pub fn new(config: Externals, registry: &ModuleRegistry) -> Result<ExternalServices, ModulesError> {
+    pub fn new(
+        config: Externals,
+        registry: &ModuleRegistry,
+        dynamic_builtins: BTreeMap<String, String>,
+    ) -> Result<ExternalServices, ModulesError> {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(config.timeout)
@@ -354,25 +354,22 @@ impl ExternalServices {
             };
             sanitizers.insert(name, backend);
         }
-        let mut dynamic = BTreeMap::new();
-        for (name, implementation) in config.dynamic {
-            let backend = match implementation {
-                Implementation::Resolver(endpoint) => DynamicBackend::Resolver(endpoint),
-                Implementation::Builtin(builtin) if builtin == CLAUDE_CODE_BUILTIN => {
-                    DynamicBackend::ClaudeCode(ClaudeCodeBackend {
-                        timeout: config.timeout,
-                        max_body_bytes: config.max_body_bytes,
-                    })
-                }
-                Implementation::Builtin(builtin) => {
-                    return Err(ModulesError::UnknownBuiltin {
-                        section: "dynamic",
-                        name,
-                        builtin,
-                    });
-                }
-            };
-            dynamic.insert(name, backend);
+        let mut resolved_dynamic_builtins = BTreeMap::new();
+        for (name, builtin) in dynamic_builtins {
+            if builtin != CLAUDE_CODE_BUILTIN {
+                return Err(ModulesError::UnknownBuiltin {
+                    section: "dynamic",
+                    name,
+                    builtin,
+                });
+            }
+            resolved_dynamic_builtins.insert(
+                name,
+                ClaudeCodeBackend {
+                    timeout: config.timeout,
+                    max_body_bytes: config.max_body_bytes,
+                },
+            );
         }
         Ok(ExternalServices {
             http,
@@ -380,7 +377,8 @@ impl ExternalServices {
             authorities,
             sanitizers,
             casts: config.casts,
-            dynamic,
+            dynamic: config.dynamic,
+            dynamic_builtins: resolved_dynamic_builtins,
             membership: config.membership,
         })
     }
@@ -520,7 +518,7 @@ impl ExternalServices {
     /// One dynamic resolution: the named string argument's
     /// value in, literal readers out.
     pub async fn resolve_dynamic(&self, resolver: &str, tool: &str, argument: &str, value: &str) -> ReadersResolution {
-        let Some(DynamicBackend::Resolver(endpoint)) = self.dynamic.get(resolver) else {
+        let Some(endpoint) = &self.dynamic else {
             tracing::debug!(resolver, "dynamic resolution without a configured endpoint");
             return ReadersResolution::Unresolved(NoAnswerReason::Unregistered);
         };
@@ -546,10 +544,6 @@ impl ExternalServices {
         arguments: &serde_json::Value,
         context: &ToolResolutionContext,
     ) -> ToolResolution {
-        let Some(backend) = self.dynamic.get(resolver) else {
-            tracing::debug!(resolver, "tool resolution without a configured endpoint");
-            return ToolResolution::Unresolved(NoAnswerReason::Unregistered);
-        };
         let request = ToolResolutionRequest {
             version: 1,
             resolver,
@@ -559,8 +553,12 @@ impl ExternalServices {
             trust_ranks: &context.trust_ranks,
             attention_marks: &context.attention_marks,
         };
-        let raw = match backend {
-            DynamicBackend::Resolver(endpoint) => {
+        let raw = match self.dynamic_builtins.get(resolver) {
+            None => {
+                let Some(endpoint) = &self.dynamic else {
+                    tracing::debug!(resolver, "tool resolution without a configured implementation");
+                    return ToolResolution::Unresolved(NoAnswerReason::Unregistered);
+                };
                 let body = match self.post(endpoint, &request).await {
                     Ok(body) => body,
                     Err(reason) => return ToolResolution::Unresolved(reason),
@@ -570,7 +568,7 @@ impl ExternalServices {
                     Err(_) => return ToolResolution::Unresolved(NoAnswerReason::Malformed),
                 }
             }
-            DynamicBackend::ClaudeCode(claude) => {
+            Some(claude) => {
                 let request = ClaudeToolResolutionRequest {
                     base: &request,
                     current_dimensions: context,
@@ -800,27 +798,14 @@ mod tests {
             authorities: BTreeMap::new(),
             sanitizers: BTreeMap::new(),
             casts: BTreeMap::new(),
-            dynamic: dynamic_url
-                .clone()
-                .into_iter()
-                .flat_map(|url| {
-                    ["recipients", "classifier", "review"].map(move |name| {
-                        (
-                            name.to_string(),
-                            Implementation::Resolver(Endpoint {
-                                url: url.clone(),
-                                token: None,
-                            }),
-                        )
-                    })
-                })
-                .collect(),
+            dynamic: dynamic_url.clone().map(|url| Endpoint { url, token: None }),
             membership: dynamic_url.map(|url| Endpoint { url, token: None }),
         }
     }
 
     fn services_over(config: Externals) -> ExternalServices {
-        ExternalServices::new(config, &ModuleRegistry::empty()).expect("no builtin references are configured")
+        ExternalServices::new(config, &ModuleRegistry::empty(), BTreeMap::new())
+            .expect("no builtin references are configured")
     }
 
     fn services(dynamic_url: Option<String>, timeout_ms: u64, cap: usize) -> ExternalServices {
@@ -1530,7 +1515,7 @@ printf '%s' "$response""#;
         config
             .authorities
             .insert("auto".to_string(), Implementation::Builtin("no-such".to_string()));
-        match ExternalServices::new(config, &ModuleRegistry::empty()) {
+        match ExternalServices::new(config, &ModuleRegistry::empty(), BTreeMap::new()) {
             Err(ModulesError::UnknownBuiltin { section, name, builtin }) => {
                 assert_eq!(
                     (section, name.as_str(), builtin.as_str()),
@@ -1549,7 +1534,7 @@ printf '%s' "$response""#;
             .sanitizers
             .insert("pii".to_string(), Implementation::Builtin("approve".to_string()));
         assert!(matches!(
-            ExternalServices::new(config, &ModuleRegistry::empty()),
+            ExternalServices::new(config, &ModuleRegistry::empty(), BTreeMap::new()),
             Err(ModulesError::UnknownBuiltin {
                 section: "sanitizers",
                 ..
@@ -1615,7 +1600,8 @@ printf '%s' "$response""#;
         config
             .authorities
             .insert("auto".to_string(), Implementation::Builtin(implementation.to_string()));
-        let services = ExternalServices::new(config, &registry).expect("the module reference resolves");
+        let services =
+            ExternalServices::new(config, &registry, BTreeMap::new()).expect("the module reference resolves");
         (services, dir)
     }
 

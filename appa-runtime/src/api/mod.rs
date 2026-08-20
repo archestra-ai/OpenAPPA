@@ -8,6 +8,7 @@ mod session;
 #[cfg(test)]
 pub(crate) use session::raw;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -263,10 +264,13 @@ pub(crate) struct Deployment {
 impl Deployment {
     fn load(config: Config, modules: &crate::builtins::ModuleRegistry) -> Result<Deployment, OpenError> {
         let policy = compile_policy(&config)?;
-        let externals_config = bind_inline_dynamic_resolvers(&policy, &config.externals)?;
-        validate_deployment(&policy, &externals_config)?;
-        let externals =
-            ExternalServices::new(externals_config, modules).map_err(|error| OpenError::Modules(error.to_string()))?;
+        validate_deployment(&policy, &config.externals)?;
+        let dynamic_builtins = policy
+            .dynamic_resolver_builtins()
+            .map(|(name, builtin)| (name.as_str().to_string(), builtin.clone()))
+            .collect();
+        let externals = ExternalServices::new(config.externals.clone(), modules, dynamic_builtins)
+            .map_err(|error| OpenError::Modules(error.to_string()))?;
         Ok(Deployment {
             config,
             resident: RuntimeEngine::new(policy.engine().clone()),
@@ -840,26 +844,6 @@ impl Drop for OfferClaim {
     }
 }
 
-fn bind_inline_dynamic_resolvers(
-    policy: &appa_policy::Config,
-    configured: &crate::config::Externals,
-) -> Result<crate::config::Externals, OpenError> {
-    let mut merged = configured.clone();
-    for (resolver, builtin) in policy.dynamic_resolver_builtins() {
-        let name = resolver.as_str().to_string();
-        if merged
-            .dynamic
-            .insert(name.clone(), crate::config::Implementation::Builtin(builtin.clone()))
-            .is_some()
-        {
-            return Err(OpenError::UnsupportedPolicy(format!(
-                "dynamic resolver {name} has both an inline builtin and an [externals.dynamic.{name}] binding"
-            )));
-        }
-    }
-    Ok(merged)
-}
-
 fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::Externals) -> Result<(), OpenError> {
     let profile = policy.engine().profile();
     if profile.binding() == appa_engine::profile::BindingMode::Token {
@@ -879,6 +863,10 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
     }
 
     let rc = policy.registry_config();
+    let dynamic_builtins: BTreeMap<_, _> = policy
+        .dynamic_resolver_builtins()
+        .map(|(resolver, builtin)| (resolver.as_str(), builtin.as_str()))
+        .collect();
     for tool in &rc.tools {
         let name = tool.name.as_str();
         if is_control_tool(name) {
@@ -949,19 +937,14 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             );
         for (resolver, legacy_read) in references {
             let name = resolver.as_str();
-            let Some(implementation) = externals.dynamic.get(name) else {
+            let builtin = dynamic_builtins.get(name).copied();
+            if builtin.is_none() && externals.dynamic.is_none() {
                 return Err(OpenError::UnboundExternal {
                     kind: "dynamic resolver",
                     name: name.to_string(),
                 });
             };
-            if legacy_read
-                && matches!(
-                    implementation,
-                    crate::config::Implementation::Builtin(builtin)
-                        if builtin == crate::config::CLAUDE_CODE_BUILTIN
-                )
-            {
+            if legacy_read && builtin == Some(crate::config::CLAUDE_CODE_BUILTIN) {
                 return Err(OpenError::UnsupportedPolicy(format!(
                     "dynamic resolver {name} binds builtin = \"claude-code\", which supports tool-level `resolvers = [{{ resolver, returns }}]` only; its legacy single-argument audience binding requires an HTTP endpoint"
                 )));
@@ -1093,7 +1076,7 @@ mod deployment_tests {
                 authorities: BTreeMap::new(),
                 sanitizers: BTreeMap::new(),
                 casts: BTreeMap::new(),
-                dynamic: BTreeMap::new(),
+                dynamic: None,
                 membership: None,
             },
         )
@@ -1134,8 +1117,8 @@ mod deployment_tests {
     }
 
     #[test]
-    fn each_dynamic_resolver_needs_its_own_implementation_binding() {
-        let config = claude_config(
+    fn the_shared_http_endpoint_covers_every_non_builtin_resolver() {
+        let mut config = claude_config(
             r#"
                 version = 1
                 [[dynamic_resolver]]
@@ -1153,37 +1136,10 @@ mod deployment_tests {
                 resolvers = [{ resolver = "other-classifier", returns = { requires = ["attention"] } }]
             "#,
         );
-        assert!(matches!(
-            Deployment::load(config, &crate::builtins::ModuleRegistry::empty()),
-            Err(OpenError::UnboundExternal { kind: "dynamic resolver", name })
-                if name == "other-classifier"
-        ));
-    }
-
-    #[test]
-    fn an_inline_builtin_and_external_binding_cannot_compete_for_one_resolver() {
-        let policy = r#"
-            version = 1
-            [[dynamic_resolver]]
-            name = "bash-classifier"
-            builtin = "claude-code"
-            [[tool]]
-            name = "Bash"
-            delta = {}
-            resolvers = [{ resolver = "bash-classifier", returns = { requires = ["attention"] } }]
-        "#;
-        let mut config = claude_config(policy);
-        config.externals.dynamic.insert(
-            "bash-classifier".to_string(),
-            crate::config::Implementation::Resolver(crate::config::Endpoint {
-                url: "https://resolver.example".to_string(),
-                token: None,
-            }),
-        );
-        assert!(matches!(
-            Deployment::load(config, &crate::builtins::ModuleRegistry::empty()),
-            Err(OpenError::UnsupportedPolicy(message))
-                if message.contains("both an inline builtin") && message.contains("bash-classifier")
-        ));
+        config.externals.dynamic = Some(crate::config::Endpoint {
+            url: "https://resolver.example".to_string(),
+            token: None,
+        });
+        assert!(Deployment::load(config, &crate::builtins::ModuleRegistry::empty()).is_ok());
     }
 }

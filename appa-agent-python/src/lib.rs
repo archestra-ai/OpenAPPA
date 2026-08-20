@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use appa_runtime::api::{OfferId, RemedyOutcome, Runtime};
-use appa_runtime::config::{Config, Endpoint, Externals, Implementation};
+use appa_runtime::config::{Config, Endpoint, Externals};
 use appa_runtime::hooks;
 use appa_runtime_api::{
     Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
@@ -152,7 +152,7 @@ struct ExternalsConfig {
     #[serde(default)]
     max_body_bytes: Option<usize>,
     #[serde(default)]
-    dynamic: std::collections::BTreeMap<String, EndpointConfig>,
+    dynamic: Option<EndpointConfig>,
     #[serde(default)]
     membership: Option<EndpointConfig>,
 }
@@ -193,19 +193,10 @@ impl SessionInner {
                 authorities: Default::default(),
                 sanitizers: Default::default(),
                 casts: Default::default(),
-                dynamic: parsed
-                    .dynamic
-                    .into_iter()
-                    .map(|(name, endpoint)| {
-                        (
-                            name,
-                            Implementation::Resolver(Endpoint {
-                                url: endpoint.url,
-                                token: None,
-                            }),
-                        )
-                    })
-                    .collect(),
+                dynamic: parsed.dynamic.map(|endpoint| Endpoint {
+                    url: endpoint.url,
+                    token: None,
+                }),
                 membership: parsed.membership.map(|e| Endpoint {
                     url: e.url,
                     token: None,
@@ -219,7 +210,7 @@ impl SessionInner {
                 authorities: Default::default(),
                 sanitizers: Default::default(),
                 casts: Default::default(),
-                dynamic: Default::default(),
+                dynamic: None,
                 membership: None,
             }
         };
