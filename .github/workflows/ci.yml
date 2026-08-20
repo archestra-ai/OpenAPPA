@@ -86,3 +86,30 @@ jobs:
 
       - name: Python binding tests
         run: uv run --project appa-agent-python pytest appa-agent-python/tests
+
+  agentthreatbench-checks:
+    name: AgentThreatBench Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Rust
+        run: rustup show
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+
+      - name: AgentThreatBench lint
+        run: |
+          uv run --project bench/agentthreatbench ruff check bench/agentthreatbench
+          uv run --project bench/agentthreatbench ruff format --check bench/agentthreatbench
+
+      - name: AgentThreatBench tests
+        run: uv run --project bench/agentthreatbench pytest bench/agentthreatbench/tests

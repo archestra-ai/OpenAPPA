@@ -53,6 +53,10 @@ with GPT-5.6 Luna, 35 episodes per arm:
 | | FIDES | 28.6% | 28.6% | 71.4% |
 | | Unprotected | 65.7% | 28.6% | 71.4% |
 
+The full 104-sample [AgentThreatBench](https://github.com/UKGovernmentBEIS/inspect_evals/tree/main/src/inspect_evals/agent_threat_bench)
+comparison — stock, permissive, guarded OpenAPPA and Microsoft FIDES — lives in
+[`bench/agentthreatbench`](bench/agentthreatbench/).
+
 Methodology, TAU-bench and AgentThreatBench results:
 [Benchmarks](https://openappa.com/evaluation).
 

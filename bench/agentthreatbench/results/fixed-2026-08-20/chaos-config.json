@@ -1,0 +1,44 @@
+{
+  "format_version": 2,
+  "run_digest": "5f40ff164e3cb0f062cfe18adb9f84e40e4f27f65b98ab0febc5af86ac0ce8f8",
+  "model": "openrouter/openai/gpt-5.6-luna",
+  "reasoning_effort": "high",
+  "seed": 300,
+  "agent_prompt_profile": "agent-threat-chaos",
+  "agent_prompt_sha256": "7d1882e46215541497adefa76b30f48785222c4ecb38528a524ff257c1183f11",
+  "inspect_ai_version": "0.3.252",
+  "inspect_evals_revision": "0c737b01627b772db84aa223f68775c31199fdc9",
+  "binding_identities": {
+    "permissive": "appa-agent-python-v6",
+    "guarded": "appa-agent-python-v6",
+    "fides": "agent-framework-fides-agentthreatbench-v1"
+  },
+  "fides_version": "1.13.0",
+  "sample_count": 104,
+  "implementation_sha256": "d094ec6032c8ca30f99c18249460a8e7b7823327e94aef65a828c1a2b7d03643",
+  "policy_sha256": {
+    "stock": {
+      "memory_poison": "f5e264c145322a2c5ff08d76bada5af9ecbf194f8aea68213c2c81ccdeaef1f6",
+      "autonomy_hijack": "f5e264c145322a2c5ff08d76bada5af9ecbf194f8aea68213c2c81ccdeaef1f6",
+      "data_exfil": "f5e264c145322a2c5ff08d76bada5af9ecbf194f8aea68213c2c81ccdeaef1f6"
+    },
+    "permissive": {
+      "memory_poison": "080637f1880fbe51011aaf7d6a015c550882a220ac7349716fdb650d547dc1bd",
+      "autonomy_hijack": "c581ac3d63b9326978024245990972c74150fd961c6223b602d67175e4af5a20",
+      "data_exfil": "27d34c4f18a0c4ebb82264028f3ac03cfeaf9ae89ddce10b86e343511cbcdaf9"
+    },
+    "guarded": {
+      "memory_poison": "a7d3b317269d20ad37af383f1221db0e36a94c65e584261da8c107c726990fcc",
+      "autonomy_hijack": "a2aa9514bed107b91209108d99029ee166189ef9ce9ba082e8e1aebde20d3601",
+      "data_exfil": "bba5df200e3837084f9552d56bc43d089ad45fb13acca0d01befdebb4b942d36"
+    },
+    "fides": {
+      "memory_poison": "e4bef7eb65a4dcb1a2c0fb35cdac1eea8310db5e348a62230bc20ef95b28d80d",
+      "autonomy_hijack": "e6ff6f891d325161470793cc6d4ee342413884d7fc048180daee7567b34fe22f",
+      "data_exfil": "51ed3ac5ce36f2a2de9a04929b9066503c052e7d0d2a6215c20b0a9f2205c8b9"
+    }
+  },
+  "resolver_fixture_count": 10,
+  "max_samples": 50,
+  "max_connections": 50
+}
