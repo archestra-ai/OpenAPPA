@@ -70,11 +70,24 @@ pub struct Externals {
 /// executable (a service environment often strips `PATH`); `model` pins the model the
 /// consult runs on; `timeout` bounds one consult on its own budget instead of the shared
 /// machine-consult `timeout`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeCode {
     pub command: std::path::PathBuf,
     pub model: String,
     pub timeout: Option<Duration>,
+}
+
+impl Default for ClaudeCode {
+    /// The usable defaults every construction path shares — an embedded host building
+    /// `Externals` by hand gets the same `claude` on `PATH` and `sonnet` alias the file
+    /// loader fills in, never an empty command.
+    fn default() -> ClaudeCode {
+        ClaudeCode {
+            command: "claude".into(),
+            model: "sonnet".to_string(),
+            timeout: None,
+        }
+    }
 }
 
 /// How a registered authority or sanitizer is implemented — `builtin` or

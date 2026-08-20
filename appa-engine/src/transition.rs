@@ -1178,7 +1178,7 @@ impl<'a> Sequence<'a> {
                     return Err(TransitionRefusal::ForgedMembership);
                 }
                 // And its resolver answers, one per binding the contract spells.
-                if !crate::check::resolution_pins_valid(self.engine.registry(), contract, &call) {
+                if crate::check::validate_tool_resolutions(self.engine.registry(), contract, &call).is_err() {
                     return Err(TransitionRefusal::ForgedResolution);
                 }
                 if proposed_effects != &contract.emits {
@@ -2243,7 +2243,7 @@ impl<'a> Sequence<'a> {
             if crate::check::validate_memberships(contract, call).is_err() {
                 return Err(TransitionRefusal::ForgedMembership);
             }
-            if !crate::check::resolution_pins_valid(self.engine.registry(), contract, call) {
+            if crate::check::validate_tool_resolutions(self.engine.registry(), contract, call).is_err() {
                 return Err(TransitionRefusal::ForgedResolution);
             }
         }
@@ -3333,7 +3333,7 @@ impl<'a> Sequence<'a> {
         if call != &predecessor.substituting(call.canonical_arguments().clone()) {
             return Err(TransitionRefusal::ForgedLabel);
         }
-        if !crate::check::resolution_pins_valid(self.engine.registry(), contract, call) {
+        if crate::check::validate_tool_resolutions(self.engine.registry(), contract, call).is_err() {
             return Err(TransitionRefusal::SanitizerUnapplicable);
         }
 

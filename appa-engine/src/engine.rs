@@ -2988,7 +2988,7 @@ impl Engine {
             .extend(sanitizer.clone())
             .ok_or(TransitionError::SanitizerUnapplicable)?;
         let substituted = substituted_call(contract, call, body)?;
-        if !check::resolution_pins_valid(&self.registry, contract, &substituted) {
+        if check::validate_tool_resolutions(&self.registry, contract, &substituted).is_err() {
             return Err(TransitionError::SanitizerUnapplicable);
         }
 

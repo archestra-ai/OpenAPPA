@@ -579,14 +579,23 @@ impl ExternalServices {
                 }
             }
             Some(claude) => {
-                // One gate for every claude consult this runtime runs, deployments and
-                // reloads included: the permit is held until the child has exited.
-                let _permit = self
-                    .claude_permits
-                    .acquire()
-                    .await
-                    .expect("the claude consult gate is never closed");
-                match claude.resolve(&request).await {
+                // One deadline covers the permit wait and the subprocess: queueing behind
+                // the gate spends the same budget the consult itself would, so a saturated
+                // pool cannot stack timeout waves.
+                let deadline = tokio::time::Instant::now() + claude.timeout;
+                let permit = match tokio::time::timeout_at(deadline, self.claude_permits.acquire()).await {
+                    Ok(permit) => permit.expect("the claude consult gate is never closed"),
+                    Err(_) => {
+                        tracing::warn!(
+                            resolver,
+                            "the claude consult gate stayed saturated for the whole budget"
+                        );
+                        return ToolResolution::Unresolved(NoAnswerReason::Timeout);
+                    }
+                };
+                let answered = claude.resolve(&request, deadline).await;
+                drop(permit);
+                match answered {
                     Ok(response) => response,
                     Err(reason) => return ToolResolution::Unresolved(reason),
                 }
@@ -676,6 +685,16 @@ fn parse_tool_resolution(
     let Some(object) = raw.as_object() else {
         return ToolResolution::Unresolved(NoAnswerReason::Malformed);
     };
+    // An explicit null is not field absence: `{"trust": null}` spells a field the binding
+    // did not declare and is exactly as malformed as any other undeclared value.
+    let no_nulls = |value: &serde_json::Value| {
+        value
+            .as_object()
+            .is_none_or(|fields| fields.values().all(|field| !field.is_null()))
+    };
+    if object.values().any(|value| value.is_null()) || !object.values().all(no_nulls) {
+        return ToolResolution::Unresolved(NoAnswerReason::Malformed);
+    }
     let has_delta = object.contains_key("delta");
     let has_requires = object.contains_key("requires");
     let response: ToolResolutionResponse = match serde_json::from_value(raw) {
@@ -970,6 +989,7 @@ mod tests {
             r#"{"version":1,"requires":{"attention":[]}}"#,
             r#"{"version":1,"delta":{},"requires":{"attention":[]}}"#,
             r#"{"version":1,"requires":{"trust":"trusted","attention":[]}}"#,
+            r#"{"version":1,"requires":{"trust":null,"attention":[]}}"#,
             r#"{"version":1,"requires":null}"#,
             r#"{"version":1,"requires":{"attention":null}}"#,
             r#"{"version":1}"#,
@@ -1131,9 +1151,13 @@ mod tests {
         let command = fake_claude(capture.path(), &script);
         // The runtime's own wiring and secrets must not reach the child.
         unsafe { std::env::set_var("APPA_TEST_SECRET_TOKEN", "leaky") };
-        let raw = run_claude_code(&claude_backend(command, 2000, 65_536), &request)
-            .await
-            .expect("the fake Claude process returns structured output");
+        let raw = run_claude_code(
+            &claude_backend(command, 2000, 65_536),
+            &request,
+            tokio::time::Instant::now() + Duration::from_millis(2000),
+        )
+        .await
+        .expect("the fake Claude process returns structured output");
         unsafe { std::env::remove_var("APPA_TEST_SECRET_TOKEN") };
         assert!(matches!(
             parse_tool_resolution(
@@ -1200,7 +1224,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("a fixture directory is created");
         let run = |command: std::path::PathBuf, timeout_ms: u64, cap: usize| {
             let request = &request;
-            async move { run_claude_code(&claude_backend(command, timeout_ms, cap), request).await }
+            async move {
+                let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+                run_claude_code(&claude_backend(command, timeout_ms, cap), request, deadline).await
+            }
         };
         assert_eq!(
             run("/definitely/missing/claude".into(), 1000, 1024).await,

@@ -446,17 +446,6 @@ pub(crate) fn validate_tool_resolutions(
     }
 }
 
-/// Whether every resolver answer this call carries — dynamic and tool-level — is one its
-/// contract spells, completely. The one-invariant form for the choke points that fold both
-/// families into a single refusal; the proposal boundary keeps the discriminated validators.
-pub(crate) fn resolution_pins_valid(
-    registry: &crate::registry::Registry,
-    contract: &ToolContract,
-    call: &ResolvedCall,
-) -> bool {
-    validate_tool_resolutions(registry, contract, call).is_ok()
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum MembershipRefusal {
     #[error("the call names groups its check needs expansions for")]

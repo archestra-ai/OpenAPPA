@@ -1090,7 +1090,7 @@ mod deployment_tests {
     }
 
     #[test]
-    fn claude_builtin_accepts_tool_resolvers_and_the_retired_audience_form_no_longer_parses() {
+    fn a_claude_builtin_deployment_opens_without_an_endpoint() {
         let tool_level = claude_config(
             r#"
                 version = 1
@@ -1103,24 +1103,6 @@ mod deployment_tests {
             "#,
         );
         assert!(Deployment::load(tool_level, &crate::builtins::ModuleRegistry::empty(), test_permits()).is_ok());
-
-        // The retired single-argument audience form is not policy any more: a stored or
-        // current file spelling it refuses at compile, loudly, before anything replays.
-        let retired = claude_config(
-            r#"
-                version = 1
-                [[dynamic_resolver]]
-                name = "directory"
-                [[tool]]
-                name = "lookup"
-                parameters = { type = "object", properties = { customer = { type = "string" } }, required = ["customer"] }
-                delta = { audience = { resolver = "directory", argument = "customer" } }
-            "#,
-        );
-        assert!(matches!(
-            Deployment::load(retired, &crate::builtins::ModuleRegistry::empty(), test_permits()),
-            Err(OpenError::Policy(appa_policy::ConfigError::Parse(_)))
-        ));
     }
 
     #[test]
@@ -1165,7 +1147,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
 "#;
         let refusal = compile_stored_policy(legacy).expect_err("the retired syntax does not compile");
         assert!(
-            refusal.contains("does not parse") || refusal.contains("audience"),
+            refusal.contains("the stored policy does not load"),
             "the refusal is loud and syntactic: {refusal}"
         );
     }

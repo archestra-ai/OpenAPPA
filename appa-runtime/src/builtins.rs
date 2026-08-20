@@ -385,14 +385,16 @@ impl ClaudeCodeBackend {
     pub(crate) async fn resolve(
         &self,
         request: &crate::external::ToolResolutionRequest<'_>,
+        deadline: tokio::time::Instant,
     ) -> Result<serde_json::Value, crate::external::NoAnswerReason> {
-        run_claude_code(self, request).await
+        run_claude_code(self, request, deadline).await
     }
 }
 
 pub(crate) async fn run_claude_code(
     backend: &ClaudeCodeBackend,
     request: &crate::external::ToolResolutionRequest<'_>,
+    deadline: tokio::time::Instant,
 ) -> Result<serde_json::Value, crate::external::NoAnswerReason> {
     use std::process::Stdio;
 
@@ -471,7 +473,7 @@ pub(crate) async fn run_claude_code(
         }
         Ok(output)
     };
-    let output = match tokio::time::timeout(backend.timeout, exchange).await {
+    let output = match tokio::time::timeout_at(deadline, exchange).await {
         Ok(output) => output?,
         Err(_) => {
             let _ = child.kill().await;
