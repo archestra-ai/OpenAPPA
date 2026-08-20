@@ -69,7 +69,7 @@ impl Derivations {
             tools: None,
         };
         let completion = provider.complete(request).await.ok()?;
-        let derived = completion.content?;
+        let derived = completion.message.content?;
         match derived.trim().is_empty() {
             true => None,
             false => Some(derived),

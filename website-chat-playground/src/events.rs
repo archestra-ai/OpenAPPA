@@ -157,9 +157,12 @@ pub fn record_event(recorded: &Recorded) -> Vec<WireEvent> {
             trajectory,
             text: feedback.clone(),
         }],
-        Record::OfferTaken { .. } | Record::Forked { .. } | Record::ReturnBlocked { .. } | Record::Answers { .. } => {
-            Vec::new()
-        }
+        Record::OfferTaken { .. }
+        | Record::Forked { .. }
+        | Record::ReturnBlocked { .. }
+        | Record::ProviderRetried { .. }
+        | Record::BudgetFinalized
+        | Record::Answers { .. } => Vec::new(),
     }
 }
 

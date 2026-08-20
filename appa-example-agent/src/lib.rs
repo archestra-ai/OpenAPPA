@@ -45,7 +45,8 @@ pub use agent::{Agent, ArgumentKey, Outcome, SpawnTool, StopReason, ToolName, Tr
 pub use budget::Limits;
 pub use http::HttpClient;
 pub use provider::{
-    DEFAULT_COMPLETION_BODY_CAP_BYTES, Endpoint, ModelId, OpenAiCompatible, OpenAiConfig, ProviderError,
+    DEFAULT_COMPLETION_BODY_CAP_BYTES, Endpoint, ModelId, OpenAiCompatible, OpenAiConfig, ProviderCompletion,
+    ProviderError,
 };
 pub use record::{CallId, Record, Recorded};
 pub use tools::{DEFAULT_TOOL_BODY_CAP_BYTES, ToolCatalogue, ToolShim};

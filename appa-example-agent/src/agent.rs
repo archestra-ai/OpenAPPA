@@ -13,11 +13,19 @@ use serde_json::value::RawValue;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use crate::budget::{Exhausted, Limits, RunBudget};
+use crate::budget::{Exhausted, ForkUnavailable, Limits, RunBudget};
 use crate::provider::OpenAiCompatible;
 use crate::record::{CallId, Record, Recorded};
 use crate::tools::{CONTROL_TOOL, ToolCatalogue, ToolShim};
 use crate::wire::{ChatCompletionRequest, WireMessage, WireToolCall};
+
+/// A void child return is a control result, not an information-bearing value.
+/// The parent needs to know that the trajectory ended, however: an empty tool
+/// result makes it retry already-committed effects merely to obtain a reply.
+const VOID_CHILD_COMPLETION: &str = "[appa] the child trajectory ended and returned no value; no child result was admitted. This does not attest that its task or side effects succeeded. Do not repeat the delegated task merely to obtain a response.";
+const BLOCKED_CHILD_COMPLETION_CONTEXT: &str = "[appa] the child trajectory ended, but its return value was not admitted. This does not roll back child side effects; they may already have committed. Do not repeat the delegated task merely because its return was blocked.";
+const BUDGET_SKIPPED_CALL: &str = "[appa] this proposed call was not run because the execution budget was reached.";
+const BUDGET_FINALIZATION_PROMPT: &str = "The execution budget is reached. Do not call tools. Briefly report only work evidenced by this parent transcript and clearly name anything unresolved. Do not claim that a child task or side effect succeeded unless an admitted result says so.";
 
 /// The transcript's opening messages: the host's own configuration,
 /// never the policy's.
@@ -71,6 +79,7 @@ pub struct SpawnTool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Answer(String),
+    BudgetFinalized { answer: Option<String> },
     Stopped(StopReason),
 }
 
@@ -183,15 +192,20 @@ impl Agent {
 
         let mut opening = std::mem::take(&mut transcript.0);
         opening.push(WireMessage::user(task));
-        let (result, messages) = run.drive(Frame::root(root, opening)).await;
+        let (outcome, messages) = run.drive(Frame::root(root, opening)).await;
         transcript.0 = messages;
-        match result {
-            Ok(answer) => {
+        match &outcome {
+            Outcome::Answer(answer) => {
                 transcript.0.push(WireMessage::assistant(answer.clone()));
-                Outcome::Answer(answer)
             }
-            Err(stop) => Outcome::Stopped(stop),
+            Outcome::BudgetFinalized { answer } => {
+                if let Some(answer) = answer {
+                    transcript.0.push(WireMessage::assistant(answer.clone()));
+                }
+            }
+            Outcome::Stopped(_) => {}
         }
+        outcome
     }
 }
 
@@ -236,22 +250,23 @@ struct Run<'a> {
 }
 
 impl Run<'_> {
-    async fn drive(&mut self, root_frame: Frame) -> (Result<String, StopReason>, Vec<WireMessage>) {
+    async fn drive(&mut self, root_frame: Frame) -> (Outcome, Vec<WireMessage>) {
         let mut frame = root_frame;
         let mut parents: Vec<Suspended> = Vec::new();
 
         let result = loop {
             if self.cancel.is_cancelled() {
-                break Err(StopReason::Cancelled);
+                break Outcome::Stopped(StopReason::Cancelled);
             }
             if self.budget.deadline_elapsed() {
-                break Err(StopReason::BudgetExhausted);
+                return self.finalize_budget(frame, parents, false).await;
             }
 
             let Some(call) = frame.pending.pop_front() else {
                 let message = match self.infer(&frame).await {
                     Ok(message) => message,
-                    Err(stop) => break Err(stop),
+                    Err(StopReason::BudgetExhausted) => return self.finalize_budget(frame, parents, true).await,
+                    Err(stop) => break Outcome::Stopped(stop),
                 };
                 let calls = message.tool_calls.clone().unwrap_or_default();
                 if calls.is_empty() {
@@ -259,13 +274,13 @@ impl Run<'_> {
                         None => {
                             let answer = message.content.unwrap_or_default();
                             self.record(&frame, Record::Answers { text: answer.clone() }).await;
-                            break Ok(answer);
+                            break Outcome::Answer(answer);
                         }
                         Some(mut parent) => {
                             let crossed = self.return_to_parent(&mut parent, &frame, message.content).await;
                             frame = parent.frame;
                             if let Err(stop) = crossed {
-                                break Err(stop);
+                                break Outcome::Stopped(stop);
                             }
                         }
                     }
@@ -282,7 +297,8 @@ impl Run<'_> {
             };
 
             if self.budget.charge_tool_call() == Err(Exhausted) {
-                break Err(StopReason::BudgetExhausted);
+                frame.pending.push_front(call);
+                return self.finalize_budget(frame, parents, true).await;
             }
             match self.answer_call(&mut frame, &call).await {
                 Ok(Answered::Reply(text)) => frame.transcript.push(WireMessage::tool_result(&call.id, text)),
@@ -301,7 +317,7 @@ impl Run<'_> {
                     let depth = frame.depth;
                     self.record(&frame, Record::Forked { depth, errand }).await;
                 }
-                Err(stop) => break Err(stop),
+                Err(stop) => break Outcome::Stopped(stop),
             }
         };
 
@@ -310,6 +326,48 @@ impl Run<'_> {
             None => frame,
         };
         (result, root.transcript)
+    }
+
+    async fn finalize_budget(
+        &mut self,
+        mut frame: Frame,
+        mut parents: Vec<Suspended>,
+        allow_inference: bool,
+    ) -> (Outcome, Vec<WireMessage>) {
+        Self::answer_unrun_calls(&mut frame);
+        while let Some(mut parent) = parents.pop() {
+            if let Err(stop) = self.return_to_parent(&mut parent, &frame, None).await {
+                let root = parents
+                    .first()
+                    .map(|outermost| outermost.frame.transcript.clone())
+                    .unwrap_or(parent.frame.transcript);
+                return (Outcome::Stopped(stop), root);
+            }
+            frame = parent.frame;
+            Self::answer_unrun_calls(&mut frame);
+        }
+
+        self.record(&frame, Record::BudgetFinalized).await;
+        let answer = if allow_inference && !self.budget.deadline_elapsed() {
+            match self.infer_final(&frame).await {
+                Ok(answer) => answer,
+                Err(stop) => return (Outcome::Stopped(stop), frame.transcript),
+            }
+        } else {
+            None
+        };
+        if let Some(text) = &answer {
+            self.record(&frame, Record::Answers { text: text.clone() }).await;
+        }
+        (Outcome::BudgetFinalized { answer }, frame.transcript)
+    }
+
+    fn answer_unrun_calls(frame: &mut Frame) {
+        for call in frame.pending.drain(..) {
+            frame
+                .transcript
+                .push(WireMessage::tool_result(call.id, BUDGET_SKIPPED_CALL));
+        }
     }
 
     async fn record(&self, frame: &Frame, record: Record) {
@@ -356,6 +414,7 @@ impl Run<'_> {
         match hooks::handle(&self.agent.runtime, event).await {
             HookDecision::AllowCall { spawn } => self.run_released(frame, &id, proposed, spawn).await,
             HookDecision::DenyCall { feedback } => {
+                let feedback = self.with_spawn_context(frame, feedback);
                 self.record(
                     frame,
                     Record::Blocked {
@@ -408,11 +467,20 @@ impl Run<'_> {
             };
             return self.report(frame, id, call, outcome).await.map(Answered::Reply);
         };
-        if self.budget.charge_fork(frame.depth) == Err(Exhausted) {
-            let outcome = ToolOutcome::Failure {
-                message: "no child was opened: this run's fork budget is spent".to_string(),
-            };
-            return self.report(frame, id, call, outcome).await.map(Answered::Reply);
+        match self.budget.charge_fork(frame.depth) {
+            Ok(()) => {}
+            Err(ForkUnavailable::DepthLimit) => {
+                let outcome = ToolOutcome::Failure {
+                    message: "no child was opened: this trajectory is at its child-depth limit".to_string(),
+                };
+                return self.report(frame, id, call, outcome).await.map(Answered::Reply);
+            }
+            Err(ForkUnavailable::RunLimit) => {
+                let outcome = ToolOutcome::Failure {
+                    message: "no child was opened: this run's child capacity is spent".to_string(),
+                };
+                return self.report(frame, id, call, outcome).await.map(Answered::Reply);
+            }
         }
         let child = TrajectoryId(format!("{}:c{}", self.root.0, self.budget.forks()));
         let event = HookEvent::ChildStart {
@@ -445,7 +513,9 @@ impl Run<'_> {
                     ToolOutcome::Failure {
                         message: reason.clone(),
                     },
-                    Some(reason),
+                    Some(format!(
+                        "{reason}\n\nHarness context:\n  - {BLOCKED_CHILD_COMPLETION_CONTEXT}"
+                    )),
                 )
             }
             HookDecision::Refuse { detail } => return Err(StopReason::Refused(detail)),
@@ -453,11 +523,12 @@ impl Run<'_> {
         };
         let id = CallId(parent.reply_to.clone());
         let call = parent.call.clone();
-        let closed = self.report(&mut parent.frame, &id, call, outcome).await?;
+        self.report(&mut parent.frame, &id, call, outcome).await?;
+        let reply = crossed.unwrap_or_else(|| VOID_CHILD_COMPLETION.to_string());
         parent
             .frame
             .transcript
-            .push(WireMessage::tool_result(&parent.reply_to, crossed.unwrap_or(closed)));
+            .push(WireMessage::tool_result(&parent.reply_to, reply));
         Ok(())
     }
 
@@ -623,19 +694,60 @@ impl Run<'_> {
         }
         let mut messages = self.agent.head.0.clone();
         messages.extend(frame.transcript.iter().cloned());
+        let unavailable_spawn = self
+            .agent
+            .spawn
+            .as_ref()
+            .filter(|_| self.budget.fork_availability(frame.depth).is_err())
+            .map(|spawn| spawn.name.0.as_str());
         let request = ChatCompletionRequest {
             model: String::new(),
             messages,
-            tools: Some(self.agent.catalogue.advertised().to_vec()),
+            tools: Some(self.agent.catalogue.advertised_without(unavailable_spawn)),
         };
         tokio::select! {
             biased;
             _ = self.cancel.cancelled() => Err(StopReason::Cancelled),
             result = tokio::time::timeout(self.budget.remaining(), self.agent.provider.complete(request)) => {
                 match result {
-                    Ok(Ok(message)) => Ok(message),
+                    Ok(Ok(completion)) => {
+                        if completion.attempts > 1 {
+                            self.record(frame, Record::ProviderRetried { attempts: completion.attempts }).await;
+                        }
+                        Ok(completion.message)
+                    }
                     Ok(Err(error)) => Err(StopReason::InferenceFailed(error.to_string())),
                     Err(_) => Err(StopReason::BudgetExhausted),
+                }
+            }
+        }
+    }
+
+    async fn infer_final(&mut self, frame: &Frame) -> Result<Option<String>, StopReason> {
+        if self.budget.charge_finalization() == Err(Exhausted) {
+            return Ok(None);
+        }
+        let mut messages = self.agent.head.0.clone();
+        messages.extend(frame.transcript.iter().cloned());
+        messages.push(WireMessage::system(BUDGET_FINALIZATION_PROMPT));
+        let request = ChatCompletionRequest {
+            model: String::new(),
+            messages,
+            tools: None,
+        };
+        tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => Err(StopReason::Cancelled),
+            result = tokio::time::timeout(self.budget.remaining(), self.agent.provider.complete(request)) => {
+                match result {
+                    Ok(Ok(completion)) => {
+                        if completion.attempts > 1 {
+                            self.record(frame, Record::ProviderRetried { attempts: completion.attempts }).await;
+                        }
+                        Ok(completion.message.content)
+                    }
+                    Ok(Err(error)) => Err(StopReason::InferenceFailed(error.to_string())),
+                    Err(_) => Ok(None),
                 }
             }
         }
@@ -647,6 +759,21 @@ impl Run<'_> {
             HookDecision::Refuse { detail } => Err(StopReason::Refused(detail)),
             other => Err(unexpected("a lifecycle event", &other)),
         }
+    }
+
+    fn with_spawn_context(&self, frame: &Frame, feedback: String) -> String {
+        let context = match &self.agent.spawn {
+            None => "No child-trajectory tool is available in this harness.".to_string(),
+            Some(spawn) => match self.budget.fork_availability(frame.depth) {
+                Ok(()) => format!(
+                    "A child trajectory is available through the {} tool.",
+                    spawn.name.0
+                ),
+                Err(ForkUnavailable::DepthLimit) => "This trajectory is at its child-depth limit; do not delegate again. Use a listed remedy, finish permitted work here, or return control to the parent.".to_string(),
+                Err(ForkUnavailable::RunLimit) => "No child capacity remains in this run; use a listed remedy or finish permitted work here.".to_string(),
+            },
+        };
+        format!("{feedback}\n\nHarness context:\n  - {context}")
     }
 
     fn actor(&self, frame: &Frame) -> Actor {

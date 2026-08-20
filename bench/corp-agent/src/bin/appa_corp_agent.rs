@@ -99,6 +99,10 @@ struct Args {
     /// Suppress the mediation log; print only the final answer.
     #[arg(long)]
     quiet: bool,
+
+    /// Optional machine-readable terminal status for an embedding harness.
+    #[arg(long)]
+    status_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -203,9 +207,31 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    if let Some(path) = &args.status_file {
+        let status = match &outcome {
+            Outcome::Answer(_) => "completed",
+            Outcome::BudgetFinalized { .. } => "budget_finalized",
+            Outcome::Stopped(appa_example_agent::StopReason::InferenceFailed(_)) => "provider_failed",
+            Outcome::Stopped(appa_example_agent::StopReason::Refused(_)) => "runtime_refused",
+            Outcome::Stopped(appa_example_agent::StopReason::Cancelled) => "cancelled",
+            Outcome::Stopped(appa_example_agent::StopReason::BudgetExhausted) => "budget_exhausted",
+        };
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(&serde_json::json!({ "version": 1, "status": status }))?,
+        )
+        .with_context(|| format!("write terminal status to {}", path.display()))?;
+    }
+
     match outcome {
         Outcome::Answer(text) => {
             println!("\n=== answer ===\n{text}");
+            Ok(())
+        }
+        Outcome::BudgetFinalized { answer } => {
+            if let Some(answer) = answer.filter(|answer| !answer.trim().is_empty()) {
+                println!("\n=== answer ===\n{answer}");
+            }
             Ok(())
         }
         // Nothing on stdout: a reader of this run's answer — the

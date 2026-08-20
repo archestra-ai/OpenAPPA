@@ -50,6 +50,10 @@ pub enum Record {
     ReturnBlocked {
         reason: String,
     },
+    ProviderRetried {
+        attempts: u32,
+    },
+    BudgetFinalized,
     Answers {
         text: String,
     },
@@ -88,6 +92,10 @@ impl std::fmt::Display for Record {
             Record::OfferRefused { feedback } => write!(f, "offer refused: {feedback}"),
             Record::Forked { depth, errand } => write!(f, "forked at depth {depth} to: {errand}"),
             Record::ReturnBlocked { reason } => write!(f, "the child's return was blocked: {reason}"),
+            Record::ProviderRetried { attempts } => {
+                write!(f, "inference completed after {attempts} provider attempts")
+            }
+            Record::BudgetFinalized => write!(f, "execution budget reached; finalized without tools"),
             Record::Answers { text } => write!(f, "answers: {text}"),
         }
     }
