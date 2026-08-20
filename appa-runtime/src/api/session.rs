@@ -234,15 +234,11 @@ impl Session {
     fn carried_call(&self) -> Result<Option<OpenDispatch>, EventError> {
         let log = self.inner.log(&self.root)?;
         let policy = self.inner.resolve_policy(&self.deployment, &log)?;
-        let view = self
-            .inner
-            .engine
-            .rebuild_view(&policy, &log)
-            .map_err(EventError::from)?;
-        match self.inner.engine.liveness(&view, &self.trajectory) {
+        let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
+        match policy.engine().liveness(&view, &self.trajectory) {
             Liveness::Ended | Liveness::Unopened => Ok(None),
-            Liveness::Live if self.inner.engine.substituted_release(&view, &self.trajectory).is_some() => Ok(None),
-            Liveness::Live => Ok(self.inner.engine.open_dispatches(&view, &self.trajectory).pop()),
+            Liveness::Live if policy.engine().substituted_release(&view, &self.trajectory).is_some() => Ok(None),
+            Liveness::Live => Ok(policy.engine().open_dispatches(&view, &self.trajectory).pop()),
         }
     }
 
@@ -297,20 +293,16 @@ impl Session {
     fn substituted_release(&self, call: &ProposedCall) -> Result<Option<Standing>, EventError> {
         let log = self.inner.log(&self.root)?;
         let policy = self.inner.resolve_policy(&self.deployment, &log)?;
-        let view = self
-            .inner
-            .engine
-            .rebuild_view(&policy, &log)
-            .map_err(EventError::from)?;
-        match self.inner.engine.liveness(&view, &self.trajectory) {
+        let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
+        match policy.engine().liveness(&view, &self.trajectory) {
             Liveness::Ended => return Err(EventError::TrajectoryEnded),
             Liveness::Unopened => return Err(EventError::SpawnNotTaken),
             Liveness::Live => {}
         }
-        let Some(open) = self.inner.engine.substituted_release(&view, &self.trajectory) else {
+        let Some(open) = policy.engine().substituted_release(&view, &self.trajectory) else {
             return Ok(None);
         };
-        let canonical = || self.inner.engine.canonical_bytes(&policy, call);
+        let canonical = || policy.engine().canonical_bytes(call);
         Ok(Some(if is_open_call(call, canonical, &open) {
             Standing::Runs(open)
         } else {
@@ -704,14 +696,14 @@ impl Session {
                 Some(log) => log,
                 None => self.inner.log(&self.root)?,
             };
-            let view = self.inner.engine.rebuild_view(policy, &log).map_err(EventError::from)?;
+            let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
             let context = Decided {
                 session: self,
                 policy,
                 view: &view,
             };
             if entering {
-                match self.inner.engine.liveness(&view, &self.trajectory) {
+                match policy.engine().liveness(&view, &self.trajectory) {
                     Liveness::Ended => return Err(EventError::TrajectoryEnded),
                     Liveness::Unopened => return Err(EventError::SpawnNotTaken),
                     Liveness::Live => {}
@@ -719,24 +711,19 @@ impl Session {
             }
             let event = event(&context)?;
             if let EngineEvent::ChildReturn { child, .. } = &event
-                && !self.inner.engine.open_dispatches(&view, child).is_empty()
+                && !policy.engine().open_dispatches(&view, child).is_empty()
             {
                 return Err(EventError::ChildDispatchOpen);
             }
-            let decision = self
-                .inner
-                .engine
-                .handle(policy, &view, &self.trajectory, event)
+            let decision = policy
+                .engine()
+                .handle(&view, &self.trajectory, event)
                 .map_err(EventError::from)?;
 
             let Some(facts) = decision.append.as_ref() else {
                 return Ok(decision);
             };
-            if self
-                .inner
-                .engine
-                .opens_a_second_dispatch(&view, &self.trajectory, facts)
-            {
+            if policy.engine().opens_a_second_dispatch(&view, &self.trajectory, facts) {
                 return Err(EventError::CallOutstanding);
             }
             match self.inner.store.append(&log, facts) {
@@ -883,10 +870,10 @@ impl Session {
 }
 
 /// What one attempt of an event may read before it decides: the log as this
-/// attempt rebuilt it. Everything the runtime used to keep beside the log —
-/// a branch's parent, the dispatch it has open, the trajectory an offer
-/// belongs to — is answered from here, so a replay after a lost race reads
-/// the state that actually won rather than the state it first saw.
+/// attempt rebuilt it. A branch's parent, the dispatch it has open, the
+/// trajectory an offer belongs to — all are answered from here, so a
+/// replay after a lost race reads the state that actually won rather
+/// than the state it first saw.
 pub(crate) struct Decided<'a> {
     session: &'a Session,
     policy: &'a crate::engine::PolicyEngine<'a>,
@@ -894,35 +881,35 @@ pub(crate) struct Decided<'a> {
 }
 
 impl Decided<'_> {
+    fn engine(&self) -> &crate::engine::RuntimeEngine {
+        self.policy.engine()
+    }
+
     fn open_dispatches(&self) -> Vec<OpenDispatch> {
-        self.session
-            .inner
-            .engine
-            .open_dispatches(self.view, &self.session.trajectory)
+        self.engine().open_dispatches(self.view, &self.session.trajectory)
     }
 
     fn canonical_bytes(&self, call: &ProposedCall) -> Option<Vec<u8>> {
-        self.session.inner.engine.canonical_bytes(self.policy, call)
+        self.engine().canonical_bytes(call)
     }
 
     fn parent_of(&self, child: &TrajectoryId) -> Option<TrajectoryId> {
-        self.session.inner.engine.parent_of(self.view, child)
+        self.engine().parent_of(self.view, child)
     }
 
     fn offer_pursuer(&self, offer: &OfferId) -> Option<TrajectoryId> {
-        self.session.inner.engine.offer_pursuer(self.view, offer)
+        self.engine().offer_pursuer(self.view, offer)
     }
 
     fn fork_status(&self, fork: &appa_engine::value::ForkId) -> ForkStatus {
-        self.session.inner.engine.fork_status(self.policy, self.view, fork)
+        self.engine().fork_status(self.view, fork)
     }
 
     fn in_flight_fork(&self, child: &TrajectoryId) -> Result<appa_engine::value::ForkId, EventError> {
-        let engine = &self.session.inner.engine;
-        if let Some(fork) = engine.fork_of(self.policy, self.view, child) {
+        if let Some(fork) = self.engine().fork_of(self.view, child) {
             return Ok(fork);
         }
-        match engine.forks_in_flight(self.policy, self.view).as_slice() {
+        match self.engine().forks_in_flight(self.view).as_slice() {
             [fork] => Ok(fork.clone()),
             [] => Err(EventError::SpawnNotTaken),
             _ => Err(EventError::SpawnAmbiguous),
@@ -947,456 +934,6 @@ fn join_feedback(feedback: &[Feedback]) -> String {
 pub(crate) fn raw(value: serde_json::Value) -> Box<serde_json::value::RawValue> {
     serde_json::value::to_raw_value(&value).expect("the fixture serializes")
 }
-#[cfg(test)]
-mod tests {
-    use super::super::{DispatchId, OpenError, OutcomeBody, Runtime, SessionError};
-    use super::*;
-    use crate::config::Config;
-    use crate::engine::{ReleasedCall, TestSeam};
-    use appa_engine::fact::{BoundaryKind, Fact};
-
-    fn config() -> Config {
-        let text = r#"
-            [policy]
-            version = 1
-            [externals]
-            timeout_ms = 1000
-            max_body_bytes = 65536
-        "#;
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let path = dir.path().join("appa.toml");
-        std::fs::write(&path, text).expect("the fixture writes");
-        Config::load(&path).expect("the minimal fixture validates")
-    }
-
-    fn open_test_runtime(dir: &tempfile::TempDir) -> Runtime {
-        Runtime::open_with_engine(config(), dir.path().join("appa.db"), TestSeam::new()).expect("a fresh runtime opens")
-    }
-
-    fn root() -> TrajectoryId {
-        TrajectoryId("cc:root".to_string())
-    }
-
-    fn decision(append: Option<Vec<Fact>>, then: Next) -> EngineDecision {
-        EngineDecision { append, then }
-    }
-
-    #[derive(Clone, Copy)]
-    enum Marker {
-        One,
-        Two,
-    }
-
-    fn batch(marker: Marker) -> Vec<Fact> {
-        let punctuation = match marker {
-            Marker::One => 1,
-            Marker::Two => 2,
-        };
-        (0..punctuation)
-            .map(|_| Fact::Boundary {
-                trajectory: appa_engine::value::TrajectoryId::new("cc:root"),
-                kind: BoundaryKind::VoidReturn,
-            })
-            .collect()
-    }
-
-    fn boundaries(runtime: &Runtime) -> usize {
-        runtime
-            .log_facts(&root())
-            .iter()
-            .filter(|fact| matches!(fact, Fact::Boundary { .. }))
-            .count()
-    }
-
-    fn call() -> ProposedCall {
-        ProposedCall {
-            tool: "Bash".to_string(),
-            arguments: raw(serde_json::json!({"command": "ls"})),
-        }
-    }
-
-    fn bash_dispatch(label: &str) -> appa_engine::value::DispatchId {
-        let policy = appa_policy::Config::from_toml_str(
-            r#"
-                version = 1
-                [[tool]]
-                name = "Bash"
-            "#,
-        )
-        .expect("the fixture policy compiles");
-        let call = policy
-            .engine()
-            .resolve_call(appa_engine::value::ToolName::new("Bash"), br#"{"command":"ls"}"#)
-            .expect("the fixture call resolves through the engine");
-        appa_engine::value::DispatchId::new(appa_engine::value::TrajectoryId::new(label), call.digest(), 0)
-    }
-
-    fn released(id: &str, call: &ProposedCall) -> ReleasedCall {
-        ReleasedCall {
-            dispatch: DispatchId(serde_json::to_string(&bash_dispatch(id)).expect("a dispatch id serializes")),
-            tool: call.tool.clone(),
-            bytes: serde_json::to_vec(call).expect("the test call serializes"),
-            fork: None,
-        }
-    }
-
-    fn deny_decision(text: &str, offers: &[&str]) -> EngineDecision {
-        decision(
-            None,
-            Next::ModelResponse {
-                invocations: Vec::new(),
-                feedback: vec![Feedback {
-                    text: text.to_string(),
-                    offers: offers.iter().map(|id| OfferId(id.to_string())).collect(),
-                }],
-            },
-        )
-    }
-
-    fn review() -> appa_engine::execute::AuthorityReview {
-        appa_engine::execute::AuthorityReview {
-            tool: appa_engine::value::ToolName::new("Bash"),
-            trajectory_label: appa_engine::label::PartialLabel::established(appa_engine::label::EstablishedLabel::top()),
-        }
-    }
-
-    #[test]
-    fn a_used_root_id_is_refused_and_a_persisted_one_reopens() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
-        runtime.create_session(root()).expect("a fresh id opens");
-        assert!(matches!(
-            runtime.create_session(root()),
-            Err(SessionError::AlreadyExists),
-        ));
-        assert!(runtime.session(&root(), &root()).is_ok());
-        assert!(matches!(
-            runtime.session(
-                &TrajectoryId("cc:ghost".to_string()),
-                &TrajectoryId("cc:ghost".to_string())
-            ),
-            Err(SessionError::Unknown),
-        ));
-    }
-
-    #[test]
-    fn a_damaged_database_is_refused_at_open() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let path = dir.path().join("appa.db");
-        std::fs::write(&path, b"not a sqlite database at all").expect("the file writes");
-        assert!(matches!(
-            Runtime::open_with_engine(config(), path, TestSeam::new()),
-            Err(OpenError::Damaged(_)),
-        ));
-    }
-
-    #[tokio::test]
-    async fn a_prompt_consults_no_engine_and_records_nothing() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        session
-            .on_prompt("read the report".to_string())
-            .expect("the prompt acks");
-        assert!(matches!(
-            runtime.log_facts(&root()).as_slice(),
-            [Fact::TrajectoryOpened { .. }]
-        ));
-        assert!(runtime.engine_seen().is_empty(), "the engine is never consulted");
-    }
-
-    #[tokio::test]
-    async fn a_decision_whose_append_fails_never_acts() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        runtime.enqueue(decision(
-            Some(batch(Marker::One)),
-            Next::ModelResponse {
-                invocations: vec![released("cc:root", &call())],
-                feedback: Vec::new(),
-            },
-        ));
-        runtime.store().fail_commit_after(0);
-        assert!(matches!(
-            session.on_tool_call(call(), false).await,
-            Err(EventError::Storage(_)),
-        ));
-        assert_eq!(boundaries(&runtime), 0, "the killed append left nothing");
-    }
-
-    #[tokio::test]
-    async fn a_lost_race_discards_the_decision_and_replays_with_a_fresh_random_number() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        runtime.store().contend_next_appends(1);
-        runtime.enqueue(decision(
-            Some(batch(Marker::One)),
-            Next::ModelResponse {
-                invocations: vec![released("cc:root", &call())],
-                feedback: Vec::new(),
-            },
-        ));
-        runtime.enqueue(decision(
-            Some(batch(Marker::Two)),
-            Next::ModelResponse {
-                invocations: vec![released("cc:root", &call())],
-                feedback: Vec::new(),
-            },
-        ));
-        assert_eq!(
-            session.on_tool_call(call(), false).await.expect("the replay commits"),
-            ToolCallDecision::Allow { spawn: None },
-        );
-        assert_eq!(boundaries(&runtime), 2);
-        assert_eq!(runtime.log_basis(&root()), 3);
-
-        let entropies: Vec<_> = runtime
-            .engine_seen()
-            .iter()
-            .filter_map(|event| match event {
-                EngineEvent::ModelResponse { entropy, .. } => Some(entropy.0),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(entropies.len(), 2);
-        assert_ne!(entropies[0], entropies[1], "each attempt carried a fresh number");
-    }
-
-    #[tokio::test]
-    async fn a_permanently_contended_log_refuses_the_event() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        runtime.store().contend_next_appends(REPLAY_LIMIT as u64);
-        for _ in 0..REPLAY_LIMIT {
-            runtime.enqueue(decision(
-                Some(batch(Marker::One)),
-                Next::ModelResponse {
-                    invocations: vec![released("cc:root", &call())],
-                    feedback: Vec::new(),
-                },
-            ));
-        }
-        assert!(matches!(
-            session.on_tool_call(call(), false).await,
-            Err(EventError::Contended { attempts: REPLAY_LIMIT }),
-        ));
-        assert_eq!(
-            runtime.engine_seen().len(),
-            REPLAY_LIMIT as usize,
-            "every attempt decided"
-        );
-        assert_eq!(boundaries(&runtime), 0);
-        assert_eq!(runtime.log_basis(&root()), 1 + REPLAY_LIMIT as u64);
-    }
-
-    fn control_call(name: &str) -> ProposedCall {
-        ProposedCall {
-            tool: name.to_string(),
-            arguments: raw(serde_json::json!({"offer_id": "o1:cc:root:ff"})),
-        }
-    }
-
-    #[tokio::test]
-    async fn the_control_tool_passes_unchecked_under_every_shipped_name() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        for name in [
-            "execute_remedy_plan",
-            "mcp__appa__execute_remedy_plan",
-            "mcp__plugin_appa-runtime_appa__execute_remedy_plan",
-        ] {
-            assert_eq!(
-                session
-                    .on_tool_call(control_call(name), false)
-                    .await
-                    .expect("it passes"),
-                ToolCallDecision::Control,
-                "{name} is a control call",
-            );
-            assert_eq!(
-                session
-                    .on_tool_result(control_call(name), ToolOutcome::Indeterminate)
-                    .await
-                    .expect("its outcome is absorbed"),
-                ToolResultDecision::Keep,
-            );
-        }
-        assert!(runtime.engine_seen().is_empty(), "no control call reached the engine");
-    }
-
-    #[tokio::test]
-    async fn a_lookalike_control_tool_reaches_the_engine() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        runtime.enqueue(deny_decision("blocked", &[]));
-        assert!(matches!(
-            session
-                .on_tool_call(control_call("mcp__evil__execute_remedy_plan"), false)
-                .await
-                .expect("the lookalike is decided"),
-            ToolCallDecision::Deny { .. },
-        ));
-        assert_eq!(runtime.engine_seen().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn a_denied_call_returns_its_feedback() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        runtime.enqueue(deny_decision(
-            "blocked; execute_remedy_plan(o1:cc:root:ab)",
-            &["o1:cc:root:ab"],
-        ));
-        assert_eq!(
-            session
-                .on_tool_call(call(), false)
-                .await
-                .expect("the deny is delivered"),
-            ToolCallDecision::Deny {
-                feedback: "blocked; execute_remedy_plan(o1:cc:root:ab)".to_string(),
-            },
-        );
-    }
-
-    #[test]
-    fn an_over_cap_success_body_is_carried_as_unavailable() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
-        let session = runtime.create_session(root()).expect("a fresh id opens");
-        let success = |len: usize| ToolOutcome::Success {
-            body: OutcomeBody::Available("x".repeat(len)),
-        };
-        assert!(matches!(
-            session.cap_outcome(success(70_000)),
-            ToolOutcome::Success {
-                body: OutcomeBody::Unavailable
-            },
-        ));
-        assert_eq!(session.cap_outcome(success(8)), success(8));
-    }
-
-    #[tokio::test]
-    async fn an_unknown_offer_is_refused_without_an_engine_call() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        assert!(matches!(
-            session.on_remedy(OfferId("o1:cc:root:never".to_string()), None).await,
-            Err(EventError::UnknownOffer),
-        ));
-        assert!(runtime.engine_seen().is_empty());
-    }
-
-    #[tokio::test]
-    async fn evidence_round_trips_replay_the_same_event_and_no_answer_grants_nothing() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        runtime.enqueue(decision(
-            None,
-            Next::ResolveExternal(vec![ExternalRequest::Authority {
-                authority: "approver".to_string(),
-                payload: serde_json::json!({}),
-                review: review(),
-            }]),
-        ));
-        runtime.enqueue(deny_decision("no answer grants nothing", &[]));
-        assert!(matches!(
-            session.on_tool_call(call(), false).await.expect("the event settles"),
-            ToolCallDecision::Deny { .. },
-        ));
-        let carried: Vec<_> = runtime
-            .engine_seen()
-            .into_iter()
-            .filter_map(|event| match event {
-                EngineEvent::ModelResponse { evidence, .. } => Some(evidence),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(carried.len(), 2, "the same event replayed once with the answer");
-        assert!(carried[0].is_empty());
-        assert!(matches!(
-            carried[1].as_slice(),
-            [ExternalEvidence::Authority {
-                verdict: AuthorityVerdict::Abstain,
-                ..
-            }],
-        ));
-    }
-
-    #[tokio::test]
-    async fn the_random_number_never_repeats_in_a_session() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
-        for _ in 0..5 {
-            runtime.enqueue(deny_decision("blocked", &[]));
-            session
-                .on_tool_call(call(), false)
-                .await
-                .expect("the deny is delivered");
-        }
-        let mut entropies: Vec<_> = runtime
-            .engine_seen()
-            .iter()
-            .filter_map(|event| match event {
-                EngineEvent::ModelResponse { entropy, .. } => Some(entropy.0),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(entropies.len(), 5);
-        entropies.sort();
-        entropies.dedup();
-        assert_eq!(entropies.len(), 5, "a random number repeated within the session");
-    }
-
-    #[test]
-    fn an_outcome_report_is_classified_against_the_open_dispatches() {
-        let id = bash_dispatch("cc:root");
-        let open = |tool: &str, bytes: &[u8]| OpenDispatch {
-            id: id.clone(),
-            tool: tool.to_string(),
-            bytes: bytes.to_vec(),
-        };
-        let canonical = || Some(b"{}".to_vec());
-
-        assert_eq!(
-            classify_report(&call(), canonical, &[]),
-            Err(UnreportableOutcome::NoOpenDispatch),
-        );
-        assert_eq!(
-            classify_report(&call(), canonical, &[open("Bash", b"{}")]),
-            Ok(id.clone()),
-        );
-        assert_eq!(
-            classify_report(&call(), canonical, &[open("Write", b"{}")]),
-            Err(UnreportableOutcome::ByteMismatch),
-            "another tool is another call",
-        );
-        assert_eq!(
-            classify_report(&call(), canonical, &[open("Bash", b"{\"other\":1}")]),
-            Err(UnreportableOutcome::ByteMismatch),
-            "other bytes are another occurrence",
-        );
-        assert_eq!(
-            classify_report(&call(), || None, &[open("Bash", b"{}")]),
-            Err(UnreportableOutcome::ByteMismatch),
-            "a call that cannot canonicalize matches nothing",
-        );
-        assert_eq!(
-            classify_report(&call(), canonical, &[open("Bash", b"{}"), open("Bash", b"{}")]),
-            Err(UnreportableOutcome::NoOpenDispatch),
-            "several open dispatches name no one occurrence",
-        );
-    }
-}
-
 #[cfg(test)]
 mod real_engine_tests {
     use super::super::{OpenError, OutcomeBody, Runtime, SessionError};

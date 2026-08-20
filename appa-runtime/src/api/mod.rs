@@ -17,7 +17,7 @@ pub(crate) use session::{LateOpen, Session, is_control_tool};
 
 use crate::config::Config;
 use crate::elicit::Elicitation;
-use crate::engine::{EngineRefusal, EngineSeam, Liveness, PolicyEngine, RuntimeEngine};
+use crate::engine::{EngineRefusal, Liveness, PolicyEngine, RuntimeEngine};
 use crate::external::ExternalServices;
 use appa_eventlog::{Backend, Log, LogStore};
 
@@ -302,7 +302,6 @@ struct Inner {
     deployment: std::sync::RwLock<Arc<Deployment>>,
     retired: std::sync::Mutex<std::collections::BTreeMap<String, Arc<RuntimeEngine>>>,
     store: LogStore,
-    engine: EngineSeam,
     modules: crate::builtins::ModuleRegistry,
     executing: std::sync::Mutex<std::collections::BTreeSet<String>>,
     permits: std::sync::Mutex<std::collections::BTreeMap<String, Vec<Actor>>>,
@@ -323,7 +322,7 @@ impl Inner {
         deployment: &'a Deployment,
         log: &Log,
     ) -> Result<PolicyEngine<'a>, EventError> {
-        let opened = self.engine.opened_under(log).ok_or_else(|| {
+        let opened = crate::engine::opened_under(log).ok_or_else(|| {
             EventError::PolicyUnavailable(format!(
                 "the log of {} does not open with its opening record",
                 log.root().as_str()
@@ -389,27 +388,6 @@ impl Runtime {
     /// a policy this deployment cannot honor is refused before
     /// anything opens.
     pub fn open(config: Config, db: PathBuf, modules: Option<PathBuf>) -> Result<Runtime, OpenError> {
-        Runtime::with_engine(config, db, modules, EngineSeam::Real)
-    }
-
-    /// The tests' entry: the same runtime with decisions from the
-    /// enqueued queue and no modules directory. Every gate `open` runs
-    /// runs here too — only the decisions are fake.
-    #[cfg(test)]
-    pub(crate) fn open_with_engine(
-        config: Config,
-        db: PathBuf,
-        seam: crate::engine::TestSeam,
-    ) -> Result<Runtime, OpenError> {
-        Runtime::with_engine(config, db, None, EngineSeam::Test(seam))
-    }
-
-    fn with_engine(
-        config: Config,
-        db: PathBuf,
-        modules: Option<PathBuf>,
-        engine: EngineSeam,
-    ) -> Result<Runtime, OpenError> {
         let modules =
             crate::builtins::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
         let deployment = Deployment::load(config, &modules)?;
@@ -423,7 +401,6 @@ impl Runtime {
                 deployment: std::sync::RwLock::new(Arc::new(deployment)),
                 retired: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 store,
-                engine,
                 modules,
                 executing: std::sync::Mutex::new(std::collections::BTreeSet::new()),
                 permits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
@@ -517,12 +494,11 @@ impl Runtime {
             .inner
             .resolve_policy(&deployment, &log)
             .map_err(|error| SessionError::Storage(error.to_string()))?;
-        let view = self
-            .inner
-            .engine
-            .rebuild_view(&policy, &log)
+        let view = policy
+            .engine()
+            .rebuild_view(&log)
             .map_err(|refusal| SessionError::Storage(refusal.to_string()))?;
-        match self.inner.engine.liveness(&view, trajectory) {
+        match policy.engine().liveness(&view, trajectory) {
             Liveness::Unopened => Err(SessionError::Unknown),
             Liveness::Ended => Err(SessionError::Ended),
             Liveness::Live => Ok(()),
@@ -532,14 +508,14 @@ impl Runtime {
     pub fn status(&self, id: &TrajectoryId) -> Option<TrajectoryStatus> {
         let deployment = self.inner.deployment();
         let (policy, log) = self.root_log(&deployment, id, "status")?;
-        let view = match self.inner.engine.rebuild_view(&policy, &log) {
+        let view = match policy.engine().rebuild_view(&log) {
             Ok(view) => view,
             Err(refusal) => {
                 tracing::warn!(trajectory = %id.0, %refusal, "status read refused the persisted log");
                 return None;
             }
         };
-        self.inner.engine.trajectory_status(&policy, &view, id)
+        policy.engine().trajectory_status(&view, id)
     }
 
     /// Every decision this family's log recorded, in log order.
@@ -550,7 +526,7 @@ impl Runtime {
     pub fn audit(&self, id: &TrajectoryId) -> Option<Vec<AuditEntry>> {
         let deployment = self.inner.deployment();
         let (policy, log) = self.root_log(&deployment, id, "audit")?;
-        match self.inner.engine.audit(&policy, &log) {
+        match policy.engine().audit(&log) {
             Ok(entries) => entries,
             Err(refusal) => {
                 tracing::warn!(trajectory = %id.0, %refusal, "audit read refused the persisted log");
@@ -639,8 +615,8 @@ impl Runtime {
         let offer = crate::engine::resolve_rendered(&log, quoted)?;
         let deployment = self.inner.deployment();
         let policy = self.inner.resolve_policy(&deployment, &log).ok()?;
-        let view = self.inner.engine.rebuild_view(&policy, &log).ok()?;
-        let pursuer = self.inner.engine.offer_pursuer(&view, &offer)?;
+        let view = policy.engine().rebuild_view(&log).ok()?;
+        let pursuer = policy.engine().offer_pursuer(&view, &offer)?;
         Some((offer, pursuer))
     }
 
@@ -711,8 +687,8 @@ impl Runtime {
             .inner
             .resolve_policy(&deployment, &log)
             .expect("the opening policy resolves");
-        let view = self.inner.engine.rebuild_view(&policy, &log).expect("the log rebuilds");
-        self.inner.engine.open_dispatches(&view, trajectory)
+        let view = policy.engine().rebuild_view(&log).expect("the log rebuilds");
+        policy.engine().open_dispatches(&view, trajectory)
     }
 
     /// Does the root's log name this trajectory, for the tests that
@@ -725,8 +701,8 @@ impl Runtime {
             .inner
             .resolve_policy(&deployment, &log)
             .expect("the opening policy resolves");
-        let view = self.inner.engine.rebuild_view(&policy, &log).expect("the log rebuilds");
-        self.inner.engine.liveness(&view, trajectory) != Liveness::Unopened
+        let view = policy.engine().rebuild_view(&log).expect("the log rebuilds");
+        policy.engine().liveness(&view, trajectory) != Liveness::Unopened
     }
 
     /// The substituted call a trajectory has standing, for the tests
@@ -743,13 +719,12 @@ impl Runtime {
             .inner
             .resolve_policy(&deployment, &log)
             .expect("the opening policy resolves");
-        let view = self.inner.engine.rebuild_view(&policy, &log).expect("the log rebuilds");
-        self.inner.engine.substituted_release(&view, trajectory)
+        let view = policy.engine().rebuild_view(&log).expect("the log rebuilds");
+        policy.engine().substituted_release(&view, trajectory)
     }
 
     /// Rebuild one root's view, scoped to a trajectory in it, for the tests
-    /// that read a branch through the seam the root-only public surface does
-    /// not expose.
+    /// that read a branch the root-only public surface does not expose.
     #[cfg(test)]
     pub(crate) fn branch_status(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> Option<TrajectoryStatus> {
         let log = self.inner.log(root).expect("the log reads");
@@ -758,8 +733,8 @@ impl Runtime {
             .inner
             .resolve_policy(&deployment, &log)
             .expect("the policy resolves");
-        let view = self.inner.engine.rebuild_view(&policy, &log).expect("the log rebuilds");
-        self.inner.engine.trajectory_status(&policy, &view, trajectory)
+        let view = policy.engine().rebuild_view(&log).expect("the log rebuilds");
+        policy.engine().trajectory_status(&view, trajectory)
     }
 
     /// Drive one event straight at the engine and take its refusal, for the
@@ -777,11 +752,11 @@ impl Runtime {
             .inner
             .resolve_policy(&deployment, &log)
             .expect("the policy resolves");
-        let view = self.inner.engine.rebuild_view(&policy, &log).expect("the log rebuilds");
+        let view = policy.engine().rebuild_view(&log).expect("the log rebuilds");
         EventError::from(
-            self.inner
-                .engine
-                .handle(&policy, &view, trajectory, event)
+            policy
+                .engine()
+                .handle(&view, trajectory, event)
                 .expect_err("the moved subject refuses the event"),
         )
     }
@@ -801,16 +776,6 @@ impl Runtime {
     #[cfg(test)]
     pub(crate) fn minted_offers(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> Vec<OfferId> {
         crate::engine::minted_offers(&self.inner.log(root).expect("the log reads"), trajectory)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn enqueue(&self, decision: crate::engine::EngineDecision) {
-        self.inner.engine.enqueue(decision);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn engine_seen(&self) -> Vec<crate::engine::EngineEvent> {
-        self.inner.engine.seen()
     }
 
     /// How long a human review may stay open before the runtime treats
