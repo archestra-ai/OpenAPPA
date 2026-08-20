@@ -65,6 +65,36 @@ pub struct Engine {
     child_return: ReturnPolicy,
 }
 
+/// Where a stage is opened: the act that opens it, what that act moves, the nonce its offer ids
+/// derive from, and the subject its offers stand on.
+#[derive(Clone, Copy)]
+struct Opening<'a> {
+    act: &'a crate::basis::DecidedAct,
+    advance: &'a crate::basis::BasisAdvance,
+    nonce: &'a crate::value::OfferNonce,
+    subject: &'a crate::basis::SubjectKey,
+}
+
+/// A refused call and the block the check produced for it — what a remedy menu is planned over.
+#[derive(Clone, Copy)]
+struct BlockedCall<'a> {
+    call: &'a ResolvedCall,
+    raw: &'a crate::check::RawBlock,
+    stage: &'a CallStage,
+    role: plan::CallRole,
+}
+
+/// What a staged return's remedy menu is computed over: the crossing the child owes, at the
+/// label and body the stage stands on, and the sanitizer lineage that reached it.
+struct ReturnStageInput<'a> {
+    child: &'a TrajectoryId,
+    fold: &'a PartialLabel,
+    label: &'a Label,
+    body: &'a ValueBody,
+    residual: &'a Narrowing,
+    lineage: &'a SanitizerLineage,
+}
+
 impl Engine {
     /// The one validated constructor: policy and declaration validate together in one
     /// load — the structural registry lints and provider-run split, the profile-exact planner-cap
@@ -597,18 +627,19 @@ impl Engine {
                 let fold = views.branch_label(child);
                 let candidate = fold.bound().clone().into_label();
                 let lineage = SanitizerLineage::default();
-                expansions.require(&plan::return_stage_groups(&self.registry, &lineage))?;
-                let stage = match plan::return_stage(
-                    &self.registry,
+                let menu = self.return_menu(
                     views,
-                    child,
-                    &fold,
-                    &candidate,
-                    &body,
-                    &narrowing,
-                    &lineage,
+                    ReturnStageInput {
+                        child,
+                        fold: &fold,
+                        label: &candidate,
+                        body: &body,
+                        residual: &narrowing,
+                        lineage: &lineage,
+                    },
                     expansions,
-                ) {
+                )?;
+                let stage = match menu {
                     plan::ReturnStagePlan::Resolve { value, .. } => {
                         return self.resolving(view, views, return_act(child), facts, value, expansions);
                     }
@@ -829,18 +860,19 @@ impl Engine {
                 follow_up: FollowUp::Child(ChildFollowUp::Merged { admitted: derived }),
             });
         };
-        expansions.require(&plan::return_stage_groups(&self.registry, &lineage))?;
-        let stage = match plan::return_stage(
-            &self.registry,
+        let menu = self.return_menu(
             views,
-            child,
-            fold,
-            &label,
-            &derived,
-            &residual,
-            &lineage,
+            ReturnStageInput {
+                child,
+                fold,
+                label: &label,
+                body: &derived,
+                residual: &residual,
+                lineage: &lineage,
+            },
             expansions,
-        ) {
+        )?;
+        let stage = match menu {
             plan::ReturnStagePlan::Stage(plans) => plans,
             plan::ReturnStagePlan::Resolve { value, .. } => {
                 return self.resolving(view, views, return_act(child), facts, value, expansions);
@@ -943,7 +975,18 @@ impl Engine {
             .ok_or(TransitionError::UnknownDispatch)?
             .digest();
         let advance = Sequence::advance_of(self, view, &facts);
-        let (_, offers, opened) = self.open_offers(views, &act, &advance, &nonce, &subject, &call, &stage, expansions);
+        let (_, offers, opened) = self.open_offers(
+            views,
+            Opening {
+                act: &act,
+                advance: &advance,
+                nonce: &nonce,
+                subject: &subject,
+            },
+            &call,
+            &stage,
+            expansions,
+        );
         facts.extend(opened);
         let batch = self.declaring(act, advance, facts);
         Ok((
@@ -1168,18 +1211,19 @@ impl Engine {
         }
         let fold = views.branch_label(id.child());
         let lineage = views.lineage(&subject);
-        expansions.require(&plan::return_stage_groups(&self.registry, &lineage))?;
-        let stage = match plan::return_stage(
-            &self.registry,
+        let menu = self.return_menu(
             views,
-            id.child(),
-            &fold,
-            &label,
-            &body,
-            &residual,
-            &lineage,
+            ReturnStageInput {
+                child: id.child(),
+                fold: &fold,
+                label: &label,
+                body: &body,
+                residual: &residual,
+                lineage: &lineage,
+            },
             expansions,
-        ) {
+        )?;
+        let stage = match menu {
             plan::ReturnStagePlan::Stage(plans) => plans,
             plan::ReturnStagePlan::Resolve { value, .. } => {
                 return self.resolving(view, views, return_act(id.child()), facts, value, expansions);
@@ -1276,16 +1320,7 @@ impl Engine {
                         let contract = self.validated_contract(&call)?;
                         if contract.pending_cast_dim().is_some() {
                             return self.resolving_cast(
-                                view,
-                                &views,
-                                dispatch,
-                                &call,
-                                contract,
-                                raw,
-                                raw_digest,
-                                report,
-                                checkpointed.is_some(),
-                                expansions,
+                                view, &views, dispatch, &call, contract, raw, raw_digest, report, expansions,
                             );
                         }
                         ResultAdmission::SuccessRaw { body: raw.clone() }
@@ -1301,26 +1336,7 @@ impl Engine {
                             Evidence::Sanitizer { .. } | Evidence::Cast { .. } | Evidence::PendingCast { .. } => None,
                         });
                         let Some(derived) = derived else {
-                            let append = match checkpointed {
-                                Some(_) => None,
-                                None => {
-                                    let checkpoint = admit::observe_success(
-                                        &self.registry,
-                                        &views,
-                                        dispatch,
-                                        &call,
-                                        ObservedResult::Available(raw_digest),
-                                    )
-                                    .expect("an open, unreported dispatch checkpoints its observed success");
-                                    let advance = Sequence::advance_of(self, view, &checkpoint);
-                                    let batch = self.declaring(
-                                        crate::basis::DecidedAct::Outcome(dispatch.clone()),
-                                        advance,
-                                        checkpoint,
-                                    );
-                                    Some(self.seal(view, batch)?)
-                                }
-                            };
+                            let append = self.checkpoint_batch(view, &views, dispatch, &call, raw_digest)?;
                             return Ok(EngineDecision {
                                 append,
                                 follow_up: FollowUp::Outcome(OutcomeFollowUp::Resolve(EvidenceRequest::Sanitizer {
@@ -1373,7 +1389,6 @@ impl Engine {
                             &views,
                             dispatch,
                             &call,
-                            checkpointed.is_some(),
                             report.offer_nonce,
                             Fact::CandidateDerived {
                                 trajectory: views.trajectory().clone(),
@@ -1406,7 +1421,6 @@ impl Engine {
         raw: &ValueBody,
         raw_digest: RawResultDigest,
         report: &ToolReport,
-        checkpointed: bool,
         expansions: &Expansions,
     ) -> Result<EngineDecision, TransitionError> {
         let resolution = report.evidence.iter().find_map(|evidence| match evidence {
@@ -1445,23 +1459,7 @@ impl Engine {
                     },
                 })
                 .collect();
-            let append = match checkpointed {
-                true => None,
-                false => {
-                    let checkpoint = admit::observe_success(
-                        &self.registry,
-                        views,
-                        dispatch,
-                        call,
-                        ObservedResult::Available(raw_digest),
-                    )
-                    .expect("an open, unreported dispatch checkpoints its observed success");
-                    let advance = Sequence::advance_of(self, view, &checkpoint);
-                    let batch =
-                        self.declaring(crate::basis::DecidedAct::Outcome(dispatch.clone()), advance, checkpoint);
-                    Some(self.seal(view, batch)?)
-                }
-            };
+            let append = self.checkpoint_batch(view, views, dispatch, call, raw_digest)?;
             return Ok(EngineDecision {
                 append,
                 follow_up: FollowUp::Outcome(OutcomeFollowUp::Resolve(EvidenceRequest::PendingCast {
@@ -1506,7 +1504,6 @@ impl Engine {
             views,
             dispatch,
             call,
-            checkpointed,
             report.offer_nonce,
             Fact::CandidateDerived {
                 trajectory: views.trajectory().clone(),
@@ -1554,31 +1551,107 @@ impl Engine {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// The success checkpoint a still-open dispatch owes before any external step runs: its
+    /// declared effects commit now, while value finalization — an output sanitizer derivation, a
+    /// pending-cast resolution — is still in flight. Empty where the log already records the
+    /// observation.
+    /// The remedy menu a staged return offers, with the group requirement raised before the menu
+    /// reads anything. A `Resolve` answer is the caller's to continue: the three callers that can
+    /// see one continue differently, so this never decides for them.
+    fn return_menu(
+        &self,
+        views: &Views,
+        stage: ReturnStageInput<'_>,
+        expansions: &Expansions,
+    ) -> Result<plan::ReturnStagePlan, TransitionError> {
+        expansions.require(&plan::return_stage_groups(&self.registry, stage.lineage))?;
+        Ok(plan::return_stage(
+            &self.registry,
+            views,
+            stage.child,
+            stage.fold,
+            stage.label,
+            stage.body,
+            stage.residual,
+            stage.lineage,
+            expansions,
+        ))
+    }
+
+    /// The remedy menu a confined result's stage offers, with the group requirement raised before
+    /// the menu reads anything.
+    fn confined_menu(
+        &self,
+        contract: &ToolContract,
+        receiving: &EstablishedLabel,
+        label: &Label,
+        residual: &Narrowing,
+        lineage: &SanitizerLineage,
+        expansions: &Expansions,
+    ) -> Result<Vec<plan::ExecutableRemedyPlan>, TransitionError> {
+        expansions.require(&plan::confined_stage_groups(&self.registry, contract, lineage))?;
+        Ok(plan::confined_stage(
+            &self.registry,
+            contract,
+            receiving,
+            label,
+            residual,
+            lineage,
+            expansions,
+        ))
+    }
+
+    fn observed_checkpoint(
+        &self,
+        views: &Views,
+        dispatch: &DispatchId,
+        call: &ResolvedCall,
+        source: RawResultDigest,
+    ) -> Vec<Fact> {
+        if views.observed_result(dispatch).is_some() {
+            return Vec::new();
+        }
+        admit::observe_success(&self.registry, views, dispatch, call, ObservedResult::Available(source))
+            .expect("an open, unreported dispatch checkpoints its observed success")
+    }
+
+    /// [`Self::observed_checkpoint`] sealed as its own batch, for the paths that append it and
+    /// then hand the external step back to the runtime.
+    fn checkpoint_batch(
+        &self,
+        view: &EngineView,
+        views: &Views,
+        dispatch: &DispatchId,
+        call: &ResolvedCall,
+        source: RawResultDigest,
+    ) -> Result<Option<ValidatedFactBatch>, TransitionError> {
+        let checkpoint = self.observed_checkpoint(views, dispatch, call, source);
+        if checkpoint.is_empty() {
+            return Ok(None);
+        }
+        let advance = Sequence::advance_of(self, view, &checkpoint);
+        let batch = self.declaring(crate::basis::DecidedAct::Outcome(dispatch.clone()), advance, checkpoint);
+        Ok(Some(self.seal(view, batch)?))
+    }
+
     fn stage_candidate(
         &self,
         view: &EngineView,
         views: &Views,
         dispatch: &DispatchId,
         call: &ResolvedCall,
-        checkpointed: bool,
         nonce: crate::value::OfferNonce,
         derived: Fact,
         expansions: &Expansions,
     ) -> Result<EngineDecision, TransitionError> {
-        let mut facts = Vec::new();
-        if !checkpointed {
-            let source = match &derived {
-                Fact::CandidateDerived {
-                    derived: DerivedCandidate::Result { source, .. },
-                    ..
-                } => *source,
-                _ => unreachable!("a staged record is a derived candidate"),
-            };
-            facts.extend(
-                admit::observe_success(&self.registry, views, dispatch, call, ObservedResult::Available(source))
-                    .expect("an open, unreported dispatch checkpoints its observed success"),
-            );
-        }
+        let source = match &derived {
+            Fact::CandidateDerived {
+                derived: DerivedCandidate::Result { source, .. },
+                ..
+            } => *source,
+            _ => unreachable!("a staged record is a derived candidate"),
+        };
+        let mut facts = self.observed_checkpoint(views, dispatch, call, source);
         facts.push(derived);
         let (batch, confined) = self.staged(
             view,
@@ -1626,23 +1699,16 @@ impl Engine {
             .ok_or(TransitionError::UnknownDispatch)?
             .clone();
         let contract = self.dispatch_contract(views, dispatch)?;
-        expansions.require(&plan::confined_stage_groups(&self.registry, contract, &lineage))?;
-        let stage = plan::confined_stage(
-            &self.registry,
-            contract,
-            &receiving,
-            &value.label,
-            &residual,
-            &lineage,
-            expansions,
-        );
+        let stage = self.confined_menu(contract, &receiving, &value.label, &residual, &lineage, expansions)?;
         let advance = Sequence::advance_of(self, view, &facts);
         let (_, offers, opened) = self.open_offers(
             views,
-            &act,
-            &advance,
-            &nonce,
-            &subject,
+            Opening {
+                act: &act,
+                advance: &advance,
+                nonce: &nonce,
+                subject: &subject,
+            },
             dispatch.digest(),
             &stage,
             expansions,
@@ -1694,24 +1760,17 @@ impl Engine {
             .clone();
         let lineage = views.lineage(&subject);
         let contract = self.dispatch_contract(views, dispatch)?;
-        expansions.require(&plan::confined_stage_groups(&self.registry, contract, &lineage))?;
-        let stage = plan::confined_stage(
-            &self.registry,
-            contract,
-            &receiving,
-            &value.label,
-            &residual,
-            &lineage,
-            expansions,
-        );
+        let stage = self.confined_menu(contract, &receiving, &value.label, &residual, &lineage, expansions)?;
         let act = crate::basis::DecidedAct::Outcome(dispatch.clone());
         let advance = crate::basis::BasisAdvance::default();
         let (_, offers, opened) = self.open_offers(
             views,
-            &act,
-            &advance,
-            &nonce,
-            &subject,
+            Opening {
+                act: &act,
+                advance: &advance,
+                nonce: &nonce,
+                subject: &subject,
+            },
             dispatch.digest(),
             &stage,
             expansions,
@@ -1985,14 +2044,18 @@ impl Engine {
             };
             let (block, opened_offers) = self.surface_call_block(
                 &final_views,
-                &crate::basis::DecidedAct::Proposals(batch.id.clone()),
-                &advance,
-                &batch.offer_nonce,
-                &subject,
-                call,
-                &raw,
-                &CallStage::default(),
-                role,
+                Opening {
+                    act: &crate::basis::DecidedAct::Proposals(batch.id.clone()),
+                    advance: &advance,
+                    nonce: &batch.offer_nonce,
+                    subject: &subject,
+                },
+                BlockedCall {
+                    call,
+                    raw: &raw,
+                    stage: &CallStage::default(),
+                    role,
+                },
                 expansions,
             );
             facts.extend(opened_offers);
@@ -2093,27 +2156,18 @@ impl Engine {
         Ok(Some(self.seal(view, batch)?))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn surface_call_block(
         &self,
         views: &Views,
-        act: &crate::basis::DecidedAct,
-        advance: &crate::basis::BasisAdvance,
-        nonce: &crate::value::OfferNonce,
-        subject: &crate::basis::SubjectKey,
-        call: &ResolvedCall,
-        raw: &crate::check::RawBlock,
-        stage: &CallStage,
-        role: plan::CallRole,
+        opening: Opening<'_>,
+        blocked: BlockedCall<'_>,
         expansions: &Expansions,
     ) -> (Blocked, Vec<Fact>) {
+        let BlockedCall { call, raw, stage, role } = blocked;
         let planned = plan::plan(&self.registry, views, call, raw, stage, role, expansions);
         let (block_id, offers, opened) = self.open_offers(
             views,
-            act,
-            advance,
-            nonce,
-            subject,
+            opening,
             &call.digest(),
             &Engine::executable(&planned),
             expansions,
@@ -2129,14 +2183,10 @@ impl Engine {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn open_offers(
         &self,
         views: &Views,
-        act: &crate::basis::DecidedAct,
-        advance: &crate::basis::BasisAdvance,
-        nonce: &crate::value::OfferNonce,
-        subject: &crate::basis::SubjectKey,
+        opening: Opening<'_>,
         call: &crate::value::CanonicalDigest,
         plans: &[plan::ExecutableRemedyPlan],
         expansions: &Expansions,
@@ -2145,6 +2195,12 @@ impl Engine {
         Vec<(crate::value::OfferId, plan::PlanId)>,
         Vec<Fact>,
     ) {
+        let Opening {
+            act,
+            advance,
+            nonce,
+            subject,
+        } = opening;
         let basis = views.basis_after(advance, subject);
         let (trajectory, block_id) = match subject {
             crate::basis::SubjectKey::Call {
@@ -2402,16 +2458,7 @@ impl Engine {
         };
         let lineage = views.lineage(&subject);
         let contract = self.dispatch_contract(views, dispatch)?;
-        expansions.require(&plan::confined_stage_groups(&self.registry, contract, &lineage))?;
-        let stage = plan::confined_stage(
-            &self.registry,
-            contract,
-            &receiving,
-            &value.label,
-            &residual,
-            &lineage,
-            expansions,
-        );
+        let stage = self.confined_menu(contract, &receiving, &value.label, &residual, &lineage, expansions)?;
         if !stage.contains(&recorded.plan) {
             return self.invalidated(view, execution, recorded);
         }
@@ -2604,18 +2651,19 @@ impl Engine {
                 },
             ),
         };
-        expansions.require(&plan::return_stage_groups(&self.registry, &lineage))?;
-        let stage = match plan::return_stage(
-            &self.registry,
+        let menu = self.return_menu(
             views,
-            id.child(),
-            &fold,
-            &label,
-            &body,
-            &residual,
-            &lineage,
+            ReturnStageInput {
+                child: id.child(),
+                fold: &fold,
+                label: &label,
+                body: &body,
+                residual: &residual,
+                lineage: &lineage,
+            },
             expansions,
-        ) {
+        )?;
+        let stage = match menu {
             plan::ReturnStagePlan::Stage(plans) => plans,
             plan::ReturnStagePlan::Resolve { .. } => return self.invalidated(view, execution, recorded),
         };
@@ -2833,18 +2881,19 @@ impl Engine {
         // a consumed dimension resolvable now was resolvable when this stage's predecessor
         // opened; a fresh `Resolve` has no live path, and the empty stage it would leave
         // re-plans on the child's next report.
-        expansions.require(&plan::return_stage_groups(&self.registry, &lineage))?;
-        let stage = match plan::return_stage(
-            &self.registry,
+        let menu = self.return_menu(
             views,
-            id.child(),
-            fold,
-            &label,
-            body,
-            &residual,
-            &lineage,
+            ReturnStageInput {
+                child: id.child(),
+                fold,
+                label: &label,
+                body,
+                residual: &residual,
+                lineage: &lineage,
+            },
             expansions,
-        ) {
+        )?;
+        let stage = match menu {
             plan::ReturnStagePlan::Stage(plans) => plans,
             plan::ReturnStagePlan::Resolve { .. } => Vec::new(),
         };
@@ -2983,14 +3032,18 @@ impl Engine {
                 expansions.require(&plan::block_groups(&self.registry, contract, &raw, role))?;
                 let (block, opened) = self.surface_call_block(
                     views,
-                    &act,
-                    &staged,
-                    &execution.offer_nonce,
-                    &recorded.subject,
-                    &substituted,
-                    &raw,
-                    &next,
-                    role,
+                    Opening {
+                        act: &act,
+                        advance: &staged,
+                        nonce: &execution.offer_nonce,
+                        subject: &recorded.subject,
+                    },
+                    BlockedCall {
+                        call: &substituted,
+                        raw: &raw,
+                        stage: &next,
+                        role,
+                    },
                     expansions,
                 );
                 facts.extend(opened);
@@ -3367,16 +3420,21 @@ impl Engine {
         }
         let after = after.view(trajectory);
         let advance = Sequence::advance_of(self, view, &facts);
+        let role = after.call_role(&recorded.subject);
         let (block, opened) = self.surface_call_block(
             &after,
-            &crate::basis::DecidedAct::Offer(execution.offer),
-            &advance,
-            &execution.offer_nonce,
-            &recorded.subject,
-            call,
-            raw,
-            stage,
-            after.call_role(&recorded.subject),
+            Opening {
+                act: &crate::basis::DecidedAct::Offer(execution.offer),
+                advance: &advance,
+                nonce: &execution.offer_nonce,
+                subject: &recorded.subject,
+            },
+            BlockedCall {
+                call,
+                raw,
+                stage,
+                role,
+            },
             expansions,
         );
         facts.extend(opened);
