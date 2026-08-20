@@ -55,11 +55,10 @@ use appa_engine::transition::Blocked as CoreBlocked;
 /// the event or passed with the read.
 pub(crate) use appa_engine::transition::EngineView;
 use appa_engine::transition::{
-    ApplicableCast, ChildFollowUp, ChildReport, ChildSubmission, Confined, EngineDecision as CoreDecision,
-    EngineEvent as CoreEvent, Evidence, EvidenceRequest, FollowUp, ForkBinding, OfferConsult, OfferExecution,
-    OfferFollowUp, OfferOutcome, OutcomeBody as CoreOutcomeBody, OutcomeFollowUp, PendingReturnStage, ProposalBatch,
-    ProposalBatchId, ProposedCall as CoreProposedCall, Released, SpawnMark, ToolOutcome as CoreToolOutcome, ToolReport,
-    TransitionError, TransitionRefusal, ValidatedFactBatch,
+    ApplicableCast, ChildFollowUp, ChildReport, ChildSubmission, EngineEvent as CoreEvent, Evidence, EvidenceRequest,
+    FollowUp, ForkBinding, OfferConsult, OfferExecution, OfferFollowUp, OfferOutcome, OutcomeBody as CoreOutcomeBody,
+    OutcomeFollowUp, ProposalBatch, ProposalBatchId, ProposedCall as CoreProposedCall, Released, SpawnMark,
+    ToolOutcome as CoreToolOutcome, ToolReport, TransitionError, TransitionRefusal, ValidatedFactBatch,
 };
 use appa_engine::value::{
     DispatchId as EngineDispatchId, ForkId, OfferId as EngineOfferId, OfferNonce as EngineOfferNonce, Provenance,
@@ -886,16 +885,30 @@ impl RuntimeEngine {
             memberships,
         };
         let expansions = self.membership_evidence(evidence);
+        // A deployment that does not control context releases the marked call
+        // unmarked, so the batch may be decided twice. The mark is all that
+        // differs between the two attempts.
+        let decide = |proposed: CoreProposedCall, marked: bool| {
+            let batch = ProposalBatch {
+                id: batch_id(entropy),
+                trajectory: engine_id(trajectory),
+                provider_results: Vec::new(),
+                proposals: vec![proposed],
+                spawn: marked.then(|| SpawnMark::at(0)),
+                offer_nonce: engine_nonce(entropy),
+                evidence: cast_evidence(self.engine.registry().trust_chain(), evidence),
+                expansions: expansions.expansions(),
+            };
+            self.engine.handle(view, CoreEvent::Proposals(batch))
+        };
         let decided = if spawn {
-            match self.decide_proposal(view, trajectory, proposed.clone(), entropy, true, &expansions, evidence) {
+            match decide(proposed.clone(), true) {
                 Ok(decision) => Ok(decision),
-                Err(TransitionError::SpawnUncontrolled) => {
-                    self.decide_proposal(view, trajectory, proposed, entropy, false, &expansions, evidence)
-                }
+                Err(TransitionError::SpawnUncontrolled) => decide(proposed, false),
                 Err(error) => Err(error),
             }
         } else {
-            self.decide_proposal(view, trajectory, proposed, entropy, false, &expansions, evidence)
+            decide(proposed, false)
         };
         let decision = match decided {
             Ok(decision) => decision,
@@ -918,30 +931,6 @@ impl RuntimeEngine {
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
         let then = self.deliver_proposals(view, trajectory, decision.follow_up, evidence)?;
         Ok(EngineDecision { append, then })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn decide_proposal(
-        &self,
-        view: &EngineView,
-        trajectory: &TrajectoryId,
-        proposed: CoreProposedCall,
-        entropy: &OfferNonce,
-        spawn: bool,
-        expansions: &MembershipEvidence,
-        external: &[ExternalEvidence],
-    ) -> Result<CoreDecision, TransitionError> {
-        let batch = ProposalBatch {
-            id: batch_id(entropy),
-            trajectory: engine_id(trajectory),
-            provider_results: Vec::new(),
-            proposals: vec![proposed],
-            spawn: spawn.then(|| SpawnMark::at(0)),
-            offer_nonce: engine_nonce(entropy),
-            evidence: cast_evidence(self.engine.registry().trust_chain(), external),
-            expansions: expansions.expansions(),
-        };
-        self.engine.handle(view, CoreEvent::Proposals(batch))
     }
 
     fn deliver_proposals(
@@ -1093,9 +1082,11 @@ impl RuntimeEngine {
                 evidence,
                 "[appa] no registered cast or sanitizer answered; the result is withheld and may be retried",
             )?,
-            FollowUp::Outcome(OutcomeFollowUp::Staged(confined)) => {
-                Next::PresentToModel(self.confined_delivery(&confined))
-            }
+            FollowUp::Outcome(OutcomeFollowUp::Staged(confined)) => Next::PresentToModel(self.stage_delivery(
+                "[appa] the cleaned result still narrows this session.",
+                &confined.residual,
+                &confined.offers,
+            )),
             other => {
                 return Err(EngineRefusal::Invariant {
                     detail: format!("an outcome produced a non-outcome follow-up: {other:?}"),
@@ -1222,10 +1213,16 @@ impl RuntimeEngine {
             FollowUp::Offer(OfferFollowUp::Substituted { block }) => {
                 Next::PresentToModel(self.offer_block_delivery(&views, &block))
             }
-            FollowUp::Offer(OfferFollowUp::Staged(confined)) => Next::PresentToModel(self.confined_delivery(&confined)),
-            FollowUp::Offer(OfferFollowUp::ReturnStaged(stage)) => {
-                Next::PresentToModel(self.return_stage_delivery(&stage))
-            }
+            FollowUp::Offer(OfferFollowUp::Staged(confined)) => Next::PresentToModel(self.stage_delivery(
+                "[appa] the cleaned result still narrows this session.",
+                &confined.residual,
+                &confined.offers,
+            )),
+            FollowUp::Offer(OfferFollowUp::ReturnStaged(stage)) => Next::PresentToModel(self.stage_delivery(
+                "[appa] the child's return still narrows this session.",
+                &stage.residual,
+                &stage.offers,
+            )),
             FollowUp::Offer(OfferFollowUp::Released(release)) => Next::InvokeTool(released(&release)),
             FollowUp::Offer(OfferFollowUp::Settled(_)) => Next::PresentToModel(Presentation::Declined {
                 feedback: "[appa] the call this offer released is already settled; propose a fresh call".to_string(),
@@ -1296,25 +1293,18 @@ impl RuntimeEngine {
         Presentation::Blocked { feedback, offers }
     }
 
-    fn confined_delivery(&self, confined: &Confined) -> Presentation {
-        let offers: Vec<OfferId> = confined.offers.iter().map(|(offer, _)| offer_id(offer)).collect();
-        let feedback = stage_feedback(
-            "[appa] the cleaned result still narrows this session.",
-            &confined.residual,
-            &offers,
-            self.engine.registry().trust_chain(),
-        );
-        Presentation::Blocked { feedback, offers }
-    }
-
-    fn return_stage_delivery(&self, stage: &PendingReturnStage) -> Presentation {
-        let offers: Vec<OfferId> = stage.offers.iter().map(|(offer, _)| offer_id(offer)).collect();
-        let feedback = stage_feedback(
-            "[appa] the child's return still narrows this session.",
-            &stage.residual,
-            &offers,
-            self.engine.registry().trust_chain(),
-        );
+    /// One staged delivery: the narrowing the model must still accept,
+    /// and the remedies the stage opened for it. The headline names
+    /// what was staged; below it a tool result and a child return read
+    /// the same.
+    fn stage_delivery(
+        &self,
+        headline: &str,
+        residual: &appa_engine::check::Narrowing,
+        staged: &[(EngineOfferId, PlanId)],
+    ) -> Presentation {
+        let offers: Vec<OfferId> = staged.iter().map(|(offer, _)| offer_id(offer)).collect();
+        let feedback = stage_feedback(headline, residual, &offers, self.engine.registry().trust_chain());
         Presentation::Blocked { feedback, offers }
     }
 
@@ -1410,7 +1400,11 @@ impl RuntimeEngine {
                 value: admitted.as_str().to_string(),
             }),
             FollowUp::Child(ChildFollowUp::Ended) => Next::PresentToModel(Presentation::NoValue),
-            FollowUp::Child(ChildFollowUp::Pending(stage)) => Next::PresentToModel(self.return_stage_delivery(&stage)),
+            FollowUp::Child(ChildFollowUp::Pending(stage)) => Next::PresentToModel(self.stage_delivery(
+                "[appa] the child's return still narrows this session.",
+                &stage.residual,
+                &stage.offers,
+            )),
             FollowUp::Child(ChildFollowUp::Rejected { reason }) => Next::PresentToModel(Presentation::Blocked {
                 feedback: format!("[appa] the child's return could not cross: {reason:?}"),
                 offers: Vec::new(),
