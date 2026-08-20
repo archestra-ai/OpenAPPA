@@ -1535,11 +1535,6 @@ impl Engine {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    /// The success checkpoint a still-open dispatch owes before any external step runs: its
-    /// declared effects commit now, while value finalization — an output sanitizer derivation, a
-    /// pending-cast resolution — is still in flight. Empty where the log already records the
-    /// observation.
     /// The remedy menu a staged return offers, with the group requirement raised before the menu
     /// reads anything. A `Resolve` answer is the caller's to continue: the three callers that can
     /// see one continue differently, so this never decides for them.
@@ -1586,6 +1581,10 @@ impl Engine {
         ))
     }
 
+    /// The success checkpoint a still-open dispatch owes before any external step runs: its
+    /// declared effects commit now, while value finalization — an output sanitizer derivation, a
+    /// pending-cast resolution — is still in flight. Empty where the log already records the
+    /// observation.
     fn observed_checkpoint(
         &self,
         views: &Views,
@@ -1621,6 +1620,7 @@ impl Engine {
         )?))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn stage_candidate(
         &self,
         view: &EngineView,
@@ -1774,12 +1774,15 @@ impl Engine {
         })
     }
 
-    fn decide_proposals(
+    /// The guards a proposal batch passes before anything is read for a decision, in the order the
+    /// boundary applies them. Returns how many provider results the log already admitted for this
+    /// batch identity.
+    fn admissible_batch(
         &self,
-        view: &EngineView,
+        views: &Views,
         batch: &ProposalBatch,
         expansions: &Expansions,
-    ) -> Result<EngineDecision, TransitionError> {
+    ) -> Result<usize, TransitionError> {
         if let Some(mark) = batch.spawn {
             if mark.index() >= batch.proposals.len() {
                 return Err(TransitionError::SpawnMarkOutOfRange);
@@ -1791,7 +1794,6 @@ impl Engine {
         if batch.proposals.is_empty() && batch.provider_results.is_empty() {
             return Err(TransitionError::EmptyBatch);
         }
-        let views = view.projection().view(&batch.trajectory);
         // An ended branch is closed to new work, releases and admissions included.
         if views.has_ended(&batch.trajectory) {
             return Err(TransitionError::BranchEnded);
@@ -1823,25 +1825,92 @@ impl Engine {
                     .flat_map(ToolContract::groups),
             )?;
         }
+        Ok(admitted)
+    }
 
-        if let Some(decided) = views.decided_batch(&batch.id) {
-            if decided.trajectory != batch.trajectory {
-                return Err(TransitionError::BatchIdentityConflict);
+    /// A batch identity the log already decided answers from the record and appends nothing. The
+    /// repeat must carry the same trajectory and the same canonical payload, or it is a different
+    /// batch wearing a spent identity.
+    fn replayed_batch(
+        &self,
+        views: &Views,
+        batch: &ProposalBatch,
+        expansions: &Expansions,
+    ) -> Result<Option<EngineDecision>, TransitionError> {
+        let Some(decided) = views.decided_batch(&batch.id) else {
+            return Ok(None);
+        };
+        if decided.trajectory != batch.trajectory {
+            return Err(TransitionError::BatchIdentityConflict);
+        }
+        let recorded = decided.clone();
+        let Ok(proposals) = self.resolve_proposals(batch) else {
+            return Err(TransitionError::BatchIdentityConflict);
+        };
+        if recorded.payload != CanonicalDigest::of_batch(&proposals, batch.spawn) {
+            return Err(TransitionError::BatchIdentityConflict);
+        }
+        let expansions = expansions
+            .clone()
+            .inheriting(&self.recorded_expansions(&recorded.resolutions));
+        Ok(Some(EngineDecision {
+            append: None,
+            follow_up: self.decided_follow_up(views, batch, &proposals, &recorded.released, &expansions)?,
+        }))
+    }
+
+    /// Every proposal carries the memberships and dynamic answers its contract declares. A gap is
+    /// the runtime's to fill before the batch can be composed; a foreign claim is a refusal.
+    fn answered_proposals(&self, proposals: &[ResolvedCall]) -> Result<(), TransitionError> {
+        let mut needed = Vec::new();
+        let mut unanswered = Vec::new();
+        for call in proposals {
+            let contract = self
+                .registry
+                .tool(call.tool())
+                .expect("a resolved call names a checkable tool");
+            match check::validate_memberships(contract, call) {
+                Ok(()) => {}
+                Err(check::MembershipRefusal::Needed(reads)) => needed.extend(reads.into_iter().map(|read| read.group)),
+                Err(check::MembershipRefusal::Foreign(argument)) => {
+                    return Err(TransitionError::ForeignMembership { argument });
+                }
             }
-            let recorded = decided.clone();
-            let Ok(proposals) = self.resolve_proposals(batch) else {
-                return Err(TransitionError::BatchIdentityConflict);
-            };
-            if recorded.payload != CanonicalDigest::of_batch(&proposals, batch.spawn) {
-                return Err(TransitionError::BatchIdentityConflict);
+            match check::validate_dynamic_resolutions(contract, call) {
+                Ok(()) => {}
+                Err(check::DynamicRefusal::Needed(bindings)) => {
+                    for binding in bindings {
+                        if !unanswered.contains(&binding) {
+                            unanswered.push(binding);
+                        }
+                    }
+                }
+                Err(check::DynamicRefusal::Foreign(argument)) => {
+                    return Err(TransitionError::ForeignDynamicAnswer { argument });
+                }
             }
-            let expansions = expansions
-                .clone()
-                .inheriting(&self.recorded_expansions(&recorded.resolutions));
-            return Ok(EngineDecision {
-                append: None,
-                follow_up: self.decided_follow_up(&views, batch, &proposals, &recorded.released, &expansions)?,
-            });
+        }
+        if !needed.is_empty() {
+            needed.sort();
+            needed.dedup();
+            return Err(TransitionError::MembershipNeeded { needed });
+        }
+        if !unanswered.is_empty() {
+            return Err(TransitionError::DynamicAnswerNeeded { needed: unanswered });
+        }
+        Ok(())
+    }
+
+    fn decide_proposals(
+        &self,
+        view: &EngineView,
+        batch: &ProposalBatch,
+        expansions: &Expansions,
+    ) -> Result<EngineDecision, TransitionError> {
+        let views = view.projection().view(&batch.trajectory);
+        let admitted = self.admissible_batch(&views, batch, expansions)?;
+        if let Some(answer) = self.replayed_batch(&views, batch, expansions)? {
+            return Ok(answer);
         }
 
         // The answers to a previous drive's ask, landed before anything reads a label: the
@@ -1883,42 +1952,7 @@ impl Engine {
                 });
             }
         };
-        let mut needed = Vec::new();
-        let mut unanswered = Vec::new();
-        for call in &proposals {
-            let contract = self
-                .registry
-                .tool(call.tool())
-                .expect("a resolved call names a checkable tool");
-            match check::validate_memberships(contract, call) {
-                Ok(()) => {}
-                Err(check::MembershipRefusal::Needed(reads)) => needed.extend(reads.into_iter().map(|read| read.group)),
-                Err(check::MembershipRefusal::Foreign(argument)) => {
-                    return Err(TransitionError::ForeignMembership { argument });
-                }
-            }
-            match check::validate_dynamic_resolutions(contract, call) {
-                Ok(()) => {}
-                Err(check::DynamicRefusal::Needed(bindings)) => {
-                    for binding in bindings {
-                        if !unanswered.contains(&binding) {
-                            unanswered.push(binding);
-                        }
-                    }
-                }
-                Err(check::DynamicRefusal::Foreign(argument)) => {
-                    return Err(TransitionError::ForeignDynamicAnswer { argument });
-                }
-            }
-        }
-        if !needed.is_empty() {
-            needed.sort();
-            needed.dedup();
-            return Err(TransitionError::MembershipNeeded { needed });
-        }
-        if !unanswered.is_empty() {
-            return Err(TransitionError::DynamicAnswerNeeded { needed: unanswered });
-        }
+        self.answered_proposals(&proposals)?;
 
         // A call blocked only for want of a fact asks for the fact before anything is composed.
         // Nothing appends here: a resolution advances the family basis, so releases and offers
