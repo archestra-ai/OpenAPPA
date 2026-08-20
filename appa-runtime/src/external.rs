@@ -302,18 +302,21 @@ impl ExternalServices {
             name,
             payload,
         };
-        let body = match self.post(endpoint, &request).await {
-            Ok(body) => body,
-            Err(reason) => return ConsultOutcome::NoAnswer(reason),
+        let reason = match self.post(endpoint, &request).await {
+            Err(reason) => reason,
+            Ok(body) => match serde_json::from_slice::<ConsultResponse>(&body) {
+                Err(_) => NoAnswerReason::Malformed,
+                Ok(response) if response.version != 1 => NoAnswerReason::UnsupportedVersion,
+                Ok(response) => return ConsultOutcome::Answer(response.answer),
+            },
         };
-        let response: ConsultResponse = match serde_json::from_slice(&body) {
-            Ok(response) => response,
-            Err(_) => return ConsultOutcome::NoAnswer(NoAnswerReason::Malformed),
-        };
-        if response.version != 1 {
-            return ConsultOutcome::NoAnswer(NoAnswerReason::UnsupportedVersion);
-        }
-        ConsultOutcome::Answer(response.answer)
+        tracing::debug!(
+            kind = kind.wire_name(),
+            name,
+            ?reason,
+            "endpoint consult produced no answer"
+        );
+        ConsultOutcome::NoAnswer(reason)
     }
 
     async fn call_module(
@@ -391,7 +394,16 @@ impl ExternalServices {
         };
         match self.literal_readers(endpoint, &request).await {
             Ok(readers) => ReadersResolution::Resolved { readers },
-            Err(reason) => ReadersResolution::Unresolved(reason),
+            Err(reason) => {
+                tracing::debug!(
+                    resolver,
+                    tool,
+                    argument,
+                    ?reason,
+                    "dynamic resolution produced no answer"
+                );
+                ReadersResolution::Unresolved(reason)
+            }
         }
     }
 
@@ -409,7 +421,10 @@ impl ExternalServices {
         };
         match self.literal_readers(endpoint, &request).await {
             Ok(readers) => ReadersResolution::Resolved { readers },
-            Err(reason) => ReadersResolution::Unresolved(reason),
+            Err(reason) => {
+                tracing::debug!(resolver, group, ?reason, "membership resolution produced no answer");
+                ReadersResolution::Unresolved(reason)
+            }
         }
     }
 
