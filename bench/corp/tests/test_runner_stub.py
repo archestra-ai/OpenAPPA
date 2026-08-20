@@ -405,19 +405,32 @@ from pathlib import Path
 policy_path = Path(sys.argv[sys.argv.index("--policy") + 1])
 policy = tomllib.loads(policy_path.read_text())
 url = policy["externals"]["dynamic"]["url"]
+readers = ["cfo@northwind.example", "legal-lead@northwind.example"]
 for request, expected in [
     (
-        {"version": 1, "resolver": "document-acl", "tool": "share_legal_packet", "argument": "file", "value": "project-onyx-packet.md"},
-        ["cfo@northwind.example", "legal-lead@northwind.example"],
+        {
+            "version": 1,
+            "resolver": "document-acl",
+            "tool": "share_legal_packet",
+            "input": {"scope": "argument", "argument": "file", "value": "project-onyx-packet.md"},
+            "returns": {"delta": ["audience"], "requires": []},
+        },
+        {"version": 1, "delta": {"audience": readers}},
     ),
     (
-        {"version": 1, "resolver": "distribution-list-members", "tool": "share_legal_packet", "argument": "to", "value": "onyx-steering@northwind.example"},
-        ["cfo@northwind.example", "legal-lead@northwind.example"],
+        {
+            "version": 1,
+            "resolver": "distribution-list-members",
+            "tool": "share_legal_packet",
+            "input": {"scope": "argument", "argument": "to", "value": "onyx-steering@northwind.example"},
+            "returns": {"delta": [], "requires": ["audience"]},
+        },
+        {"version": 1, "requires": {"audience": {"includes": readers}}},
     ),
 ]:
     wire = urllib.request.Request(url, data=json.dumps(request).encode(), headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(wire) as response:
-        assert json.load(response) == {"version": 1, "readers": expected}
+        assert json.load(response) == expected
 '''
     )
     script.chmod(0o755)

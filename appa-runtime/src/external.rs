@@ -686,13 +686,17 @@ fn parse_tool_resolution(
         return ToolResolution::Unresolved(NoAnswerReason::Malformed);
     };
     // An explicit null is not field absence: `{"trust": null}` spells a field the binding
-    // did not declare and is exactly as malformed as any other undeclared value.
-    let no_nulls = |value: &serde_json::Value| {
-        value
-            .as_object()
-            .is_none_or(|fields| fields.values().all(|field| !field.is_null()))
-    };
-    if object.values().any(|value| value.is_null()) || !object.values().all(no_nulls) {
+    // did not declare and is exactly as malformed as any other undeclared value, at any
+    // depth of the envelope.
+    fn no_nulls(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Null => false,
+            serde_json::Value::Object(fields) => fields.values().all(no_nulls),
+            serde_json::Value::Array(items) => items.iter().all(no_nulls),
+            _ => true,
+        }
+    }
+    if !object.values().all(no_nulls) {
         return ToolResolution::Unresolved(NoAnswerReason::Malformed);
     }
     let has_delta = object.contains_key("delta");
@@ -990,6 +994,7 @@ mod tests {
             r#"{"version":1,"delta":{},"requires":{"attention":[]}}"#,
             r#"{"version":1,"requires":{"trust":"trusted","attention":[]}}"#,
             r#"{"version":1,"requires":{"trust":null,"attention":[]}}"#,
+            r#"{"version":1,"requires":{"audience":{"includes":null,"cap":["a"]},"attention":[]}}"#,
             r#"{"version":1,"requires":null}"#,
             r#"{"version":1,"requires":{"attention":null}}"#,
             r#"{"version":1}"#,

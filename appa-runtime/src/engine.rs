@@ -174,6 +174,9 @@ pub enum ExternalEvidence {
     ToolResolution {
         resolver: String,
         answer: ToolResolutionAnswer,
+        /// The label context the classifier answered under. Evidence matches only while the
+        /// call's current context is the one it described; a moved trajectory consults again.
+        context: ToolResolutionContext,
     },
     Membership {
         resolver: String,
@@ -1526,30 +1529,28 @@ impl RuntimeEngine {
             return Ok(Vec::new());
         }
         let chain = self.engine.registry().trust_chain();
-        // The consult payload — the canonical arguments and the classifier context — is built
-        // only when some binding still needs an answer; the evidence-complete pass, the one
-        // every admitted call takes, skips the parse and the context assembly entirely.
-        let mut consult: Option<(ResolvedCall, ToolResolutionContext)> = None;
+        // The consult payload — the canonical arguments and the classifier context — is also
+        // the clock resolver evidence is matched against: an answer given under a context this
+        // view no longer shows is not evidence for this call, and the binding consults again.
+        let (resolved, current_context) = self.tool_resolution_payload(view, trajectory, call, contract, &tool)?;
         let mut pins = Vec::new();
         let mut requests = Vec::new();
         for binding in &contract.resolvers {
             let answer = evidence.iter().find_map(|entry| match entry {
-                ExternalEvidence::ToolResolution { resolver, answer } if resolver == binding.resolver.as_str() => {
-                    Some(answer.clone())
-                }
+                ExternalEvidence::ToolResolution {
+                    resolver,
+                    answer,
+                    context,
+                } if resolver == binding.resolver.as_str() && *context == current_context => Some(answer.clone()),
                 _ => None,
             });
             match answer {
                 None => {
-                    if consult.is_none() {
-                        consult = Some(self.tool_resolution_payload(view, trajectory, call, contract, &tool)?);
-                    }
-                    let (resolved, context) = consult.as_ref().expect("the consult payload was just built");
                     requests.push(ExternalRequest::ToolResolution {
                         binding: binding.clone(),
                         tool: call.tool.clone(),
                         arguments: resolved.arguments().clone(),
-                        context: context.clone(),
+                        context: current_context.clone(),
                     });
                 }
                 Some(answer) => {
@@ -2640,7 +2641,7 @@ mod tests {
             )
             .expect("arguments serialize"),
         };
-        match engine.resolve_tool_resolutions(&view, &trajectory, &call, &[]) {
+        let consulted_context = match engine.resolve_tool_resolutions(&view, &trajectory, &call, &[]) {
             Err(Resolution::Consult(requests)) => match requests.as_slice() {
                 [
                     ExternalRequest::ToolResolution {
@@ -2656,11 +2657,42 @@ mod tests {
                     assert_eq!(context.trust_ranks, ["suspicious", "trusted"]);
                     assert_eq!(context.attention_marks, ["privacy-review"]);
                     assert_eq!(context.static_attention, ["static-review"]);
+                    context.clone()
                 }
                 other => panic!("expected one tool-resolution consult, got {other:?}"),
             },
             other => panic!("an unanswered tool resolver must consult, got {other:?}"),
-        }
+        };
+
+        // An answer given under a different label context is not evidence for this call:
+        // the binding consults again instead of replaying it.
+        let foreign_context = crate::external::ToolResolutionContext {
+            current_trust: "suspicious".to_string(),
+            current_trust_rank: 0,
+            ..consulted_context.clone()
+        };
+        assert!(matches!(
+            engine.resolve_tool_resolutions(
+                &view,
+                &trajectory,
+                &call,
+                &[ExternalEvidence::ToolResolution {
+                    resolver: "classifier".to_string(),
+                    answer: ToolResolutionAnswer {
+                        trust: Some("suspicious".to_string()),
+                        audience: Some(CastAudience::Public),
+                        required_trust: Some("trusted".to_string()),
+                        required_audience: Some(RequiredAudienceAnswer {
+                            includes: Some(CastAudience::Readers(vec!["support".to_string()])),
+                            cap: Some(CastAudience::Public),
+                        }),
+                        attention: Some(vec!["privacy-review".to_string()]),
+                    },
+                    context: foreign_context,
+                }],
+            ),
+            Err(Resolution::Consult(_))
+        ));
 
         let pins = engine
             .resolve_tool_resolutions(
@@ -2679,6 +2711,7 @@ mod tests {
                         }),
                         attention: Some(vec!["privacy-review".to_string(), "privacy-review".to_string()]),
                     },
+                    context: consulted_context,
                 }],
             )
             .expect("a complete answer pins");

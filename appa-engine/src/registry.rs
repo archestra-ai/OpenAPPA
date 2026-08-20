@@ -241,15 +241,19 @@ fn worst_case_plan_alternatives(
     let mut count: u128 = 1;
     let mut multiply = |competent: usize| count = count.saturating_mul(competent.max(1) as u128);
     // A dynamic floor or requirement is unknown at load, so its competent-authority count is
-    // the mandate-dimension approximation, computed once per dimension.
-    let trust_cap_competent = authorities
-        .iter()
-        .filter(|authority| authority.scope.covers(&tool.tags) && authority.mandate.trust_ceiling.is_some())
-        .count();
-    let reader_cap_competent = authorities
-        .iter()
-        .filter(|authority| authority.scope.covers(&tool.tags) && authority.mandate.reader_ceiling.is_some())
-        .count();
+    // the mandate-dimension approximation — computed only for a tool that carries one.
+    let trust_cap_competent = || {
+        authorities
+            .iter()
+            .filter(|authority| authority.scope.covers(&tool.tags) && authority.mandate.trust_ceiling.is_some())
+            .count()
+    };
+    let reader_cap_competent = || {
+        authorities
+            .iter()
+            .filter(|authority| authority.scope.covers(&tool.tags) && authority.mandate.reader_ceiling.is_some())
+            .count()
+    };
 
     if let Some(floor) = tool.requires.label.trust_floor {
         let gap = Gap::TrustFloor {
@@ -265,10 +269,10 @@ fn worst_case_plan_alternatives(
     }
     for binding in &tool.resolvers {
         if binding.returns.contains(&ResolverReturn::RequiredTrust) {
-            multiply(trust_cap_competent);
+            multiply(trust_cap_competent());
         }
         if binding.returns.contains(&ResolverReturn::RequiredAudience) {
-            multiply(reader_cap_competent);
+            multiply(reader_cap_competent());
         }
     }
     let mut seen_includes: Vec<&AudienceRequirement> = Vec::new();
@@ -276,7 +280,7 @@ fn worst_case_plan_alternatives(
         match requirement {
             AudienceRequirement::Includes(_) if !seen_includes.contains(&requirement) => {
                 seen_includes.push(requirement);
-                multiply(reader_cap_competent);
+                multiply(reader_cap_competent());
             }
             AudienceRequirement::Includes(_) | AudienceRequirement::Cap(_) => {}
         }
@@ -641,7 +645,11 @@ impl Registry {
                                 .is_ok()
                     }
                     CastResolution::Resolver { may_cast } => {
-                        matches!(tool.output_label(&literal).trust, Dim::Known(_)) || !may_cast.trust.is_empty()
+                        // A resolver-owned trust dimension arrives established by its pin, so
+                        // an audience-only cast is as usable here as beside a static trust.
+                        matches!(tool.output_label(&literal).trust, Dim::Known(_))
+                            || tool.resolver_owns(crate::contract::ResolverReturn::Trust)
+                            || !may_cast.trust.is_empty()
                     }
                 });
                 if !usable {

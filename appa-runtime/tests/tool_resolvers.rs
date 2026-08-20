@@ -331,7 +331,10 @@ async fn independent_consults_overlap_and_completion_order_never_moves_the_recor
             "beta",
             Answer::Wire(serde_json::json!({ "version": 1, "requires": { "trust": "suspicious" } })),
         );
-        classifier.delay(slow, Duration::from_millis(300));
+        // Both consults sleep: sequential execution would cost ~600ms, concurrent ~300ms.
+        classifier.delay("alpha", Duration::from_millis(300));
+        classifier.delay("beta", Duration::from_millis(300));
+        classifier.delay(slow, Duration::from_millis(320));
         let runtime = open_runtime(&dir, &two_resolver_policy(&url)).await;
         let started = Instant::now();
         assert_eq!(

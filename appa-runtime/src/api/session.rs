@@ -673,26 +673,15 @@ impl Session {
         let opened = self.inner.log(&self.root)?;
         let policy = self.inner.resolve_policy(&self.deployment, &opened)?;
         let mut opened = Some(opened);
+        // Resolver answers carry the label context they were classified under, and the
+        // engine matches them only while the call's current context is that one — a moved
+        // trajectory consults again by construction, so this loop carries evidence blindly.
         let mut evidence: Vec<ExternalEvidence> = Vec::new();
-        // Resolver answers are classified against the trajectory state the consult saw. A
-        // foreign append between rounds moves that state, so answers consulted under an
-        // older basis are discarded and asked again rather than replayed against a view
-        // they never described. Rulings a human already gave keep their own engine-side
-        // label pinning and are never dropped here.
-        let stale_machine_answers = |entry: &ExternalEvidence| matches!(entry, ExternalEvidence::ToolResolution { .. });
-        let mut consulted_at: Option<u64> = None;
-        let observed = std::cell::Cell::new(0u64);
         for _ in 0..EVIDENCE_LIMIT {
             let carried = evidence.clone();
             let entering = carried.is_empty();
-            let stale_from = consulted_at;
             let decision = self.drive(&policy, opened.take(), entering, |context| {
-                observed.set(context.basis);
-                let mut carried = carried.clone();
-                if stale_from.is_some_and(|basis| basis != context.basis) {
-                    carried.retain(|entry| !stale_machine_answers(entry));
-                }
-                event(context, carried)
+                event(context, carried.clone())
             })?;
             match decision.then {
                 // The engine batches every missing answer into one request set, and evidence
@@ -700,28 +689,22 @@ impl Session {
                 // consults run concurrently — a tool-resolution consult can take a model call's
                 // seconds, and the batch should cost its slowest member, not their sum. With a
                 // reviewer they stay serial: one staged review on screen at a time.
-                Next::ResolveExternal(requests) => {
-                    if consulted_at.is_some_and(|basis| basis != observed.get()) {
-                        evidence.retain(|entry| !stale_machine_answers(entry));
-                    }
-                    consulted_at = Some(observed.get());
-                    match elicitation {
-                        None => {
-                            // Batch-terminal: join_all settles every sibling first; any
-                            // resolver no-answer then aborts the invocation, discarding the
-                            // siblings' answers, before another engine round or any append.
-                            let consults = requests.into_iter().map(|request| self.consult(request, None));
-                            for answered in futures_util::future::join_all(consults).await {
-                                evidence.push(answered?);
-                            }
-                        }
-                        Some(_) => {
-                            for request in requests {
-                                evidence.push(self.consult(request, elicitation).await?);
-                            }
+                Next::ResolveExternal(requests) => match elicitation {
+                    None => {
+                        // Batch-terminal: join_all settles every sibling first; any
+                        // resolver no-answer then aborts the invocation, discarding the
+                        // siblings' answers, before another engine round or any append.
+                        let consults = requests.into_iter().map(|request| self.consult(request, None));
+                        for answered in futures_util::future::join_all(consults).await {
+                            evidence.push(answered?);
                         }
                     }
-                }
+                    Some(_) => {
+                        for request in requests {
+                            evidence.push(self.consult(request, elicitation).await?);
+                        }
+                    }
+                },
                 _ => return Ok(decision),
             }
         }
@@ -745,7 +728,6 @@ impl Session {
                 session: self,
                 policy,
                 view: &view,
-                basis: log.basis(),
             };
             if entering {
                 match self.inner.engine.liveness(&view, &self.trajectory) {
@@ -872,6 +854,7 @@ impl Session {
                 ExternalEvidence::ToolResolution {
                     resolver: binding.resolver.as_str().to_string(),
                     answer,
+                    context: context.clone(),
                 }
             }
             ExternalRequest::PendingCast { casts, source, body } => ExternalEvidence::PendingCast {
@@ -945,9 +928,6 @@ pub(crate) struct Decided<'a> {
     session: &'a Session,
     policy: &'a crate::engine::PolicyEngine<'a>,
     view: &'a EngineView,
-    /// The log position this view was rebuilt from — the clock resolver evidence is
-    /// bound to.
-    basis: u64,
 }
 
 impl Decided<'_> {
