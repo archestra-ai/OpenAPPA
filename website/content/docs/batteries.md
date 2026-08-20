@@ -9,8 +9,6 @@ Security rules should travel with the tools they protect. A team should not have
 
 That is our vision for APPA batteries. A battery will package ready-made OpenAPPA coverage for one agent harness or toolset. It will own the contracts and default judgments that are common to every deployment. Local settings will keep deployment-specific trust decisions under the deployer's control.
 
-> [!NOTE]
-> Batteries are an approved design, not a feature in the current release. This page describes what we want batteries to become and how we will build the first version.
 
 This page starts with the product and security principles behind batteries. It then walks through policy composition, local resolver processes, customization, failure behavior, and installation. It ends with the boundaries we are deliberately keeping around the first release. If OpenAPPA's flow model is new to you, read [How it works](/how-it-works) first. If you want to see today's harness integration, start with [Claude Code](/claude-code).
 
