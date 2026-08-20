@@ -33,9 +33,9 @@ The suite contains **20 curated enterprise scenarios** evaluated across **4 poli
 | Agent prompt profile | Policy arm | Task completion (Utility) | Attack success rate (ASR) | Security pass rate |
 |---|---|---:|---:|---:|
 | **Standard** | **OpenAPPA (`appa`)** | **82%** | **0%** | **100%** |
-| | OpenAPPA Open (`appa-open`) | 87% | 29% | 71% |
+| | OpenAPPA Open (`appa-open`) | 84% | 29% | 71% |
 | | FIDES (`fides`) | 30% | 29% | 71% |
-| | FIDES Open (`fides-open`) | 87% | 27% | 73% |
+| | FIDES Open (`fides-open`) | 79% | 27% | 73% |
 | **Red-team Chaos** | **OpenAPPA (`appa`)** | **81%** | **0%** | **100%** |
 | | OpenAPPA Open (`appa-open`) | 87% | 33% | 67% |
 | | FIDES (`fides`) | 27% | 29% | 71% |
