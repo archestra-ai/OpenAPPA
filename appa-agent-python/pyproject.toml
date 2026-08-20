@@ -13,9 +13,16 @@ classifiers = [
     "Programming Language :: Rust",
 ]
 
+[dependency-groups]
+dev = ["pytest>=8"]
+
 [tool.maturin]
 features = ["extension-module"]
 module-name = "appa_agent_python"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
 
 [tool.uv]
 cache-keys = [
