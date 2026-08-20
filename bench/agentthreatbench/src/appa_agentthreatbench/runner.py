@@ -82,7 +82,7 @@ def _distribution_revision(name: str) -> str | None:
     return revision if isinstance(revision, str) else None
 
 
-def required_api_key(model: str) -> str:
+def required_env_name(model: str) -> str:
     if model.startswith("openrouter/"):
         return "OPENROUTER_API_KEY"
     if model.startswith("openai/"):
@@ -161,15 +161,15 @@ def preflight(model: str, *, require_credential: bool = True) -> dict[str, objec
         raise RuntimeError(
             f"agent-framework-core is {FIDES_VERSION!r}, expected {EXPECTED_FIDES_VERSION!r}; rebuild the environment"
         )
-    credential = required_api_key(model)
-    if require_credential and not os.getenv(credential):
-        raise RuntimeError(f"{credential} is required for {model}")
+    env_name = required_env_name(model)
+    if require_credential and not os.getenv(env_name):
+        raise RuntimeError(f"{env_name} is required for {model}")
     sample_ids = validate_inventory()
     validate_policies()
     result = {
         "model": model,
-        "required_env": credential,
-        "required_env_set": bool(os.getenv(credential)),
+        "required_env": env_name,
+        "required_env_set": bool(os.getenv(env_name)),
         "inspect_ai_version": INSPECT_AI_VERSION,
         "inspect_evals_revision": INSPECT_EVALS_REVISION,
         "binding_identity": BINDING_IDENTITY,
