@@ -168,8 +168,8 @@ def preflight(model: str, *, require_credential: bool = True) -> dict[str, objec
     validate_policies()
     result = {
         "model": model,
-        "credential": credential,
-        "credential_set": bool(os.getenv(credential)),
+        "required_env": credential,
+        "required_env_set": bool(os.getenv(credential)),
         "inspect_ai_version": INSPECT_AI_VERSION,
         "inspect_evals_revision": INSPECT_EVALS_REVISION,
         "binding_identity": BINDING_IDENTITY,
