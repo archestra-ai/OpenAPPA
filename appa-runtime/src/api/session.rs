@@ -1403,6 +1403,8 @@ mod real_engine_tests {
     use super::*;
     use crate::api::{RemedyDecision, SpawnBinding, ToolCallDecision, ToolOutcome, ToolResultDecision};
     use crate::config::Config;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn config_with(policy: &str, authority_url: Option<&str>) -> Config {
         let binding = match authority_url {
@@ -4572,5 +4574,347 @@ context_control = true
             .on_tool_call(fetch(serde_json::json!({"a": 3})), false)
             .await
             .expect("the parent proposes again");
+    }
+
+    /// A loopback authority that answers the same ruling every time and
+    /// counts the requests it saw, so a test can pin how many
+    /// round-trips one event takes.
+    async fn counting_stub(answer: serde_json::Value) -> (String, Arc<AtomicUsize>) {
+        use axum::routing::post;
+
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&seen);
+        let app = axum::Router::new().route(
+            "/",
+            post(move || {
+                let answer = answer.clone();
+                let counter = Arc::clone(&counter);
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(serde_json::json!({"version": 1, "answer": answer}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback stub binds");
+        let addr = listener.local_addr().expect("the stub has an address");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("the stub serves");
+        });
+        (format!("http://{addr}/"), seen)
+    }
+
+    fn open_runtime(dir: &tempfile::TempDir) -> Runtime {
+        Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens")
+    }
+
+    fn only_the_opening(runtime: &Runtime) -> bool {
+        matches!(
+            runtime.log_facts(&root()).as_slice(),
+            [appa_engine::fact::Fact::TrajectoryOpened { .. }]
+        )
+    }
+
+    #[test]
+    fn a_used_root_id_is_refused_and_a_persisted_one_reopens() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        runtime.create_session(root()).expect("a fresh id opens");
+        assert!(matches!(
+            runtime.create_session(root()),
+            Err(SessionError::AlreadyExists),
+        ));
+        assert!(runtime.session(&root(), &root()).is_ok());
+        assert!(matches!(
+            runtime.session(
+                &TrajectoryId("cc:ghost".to_string()),
+                &TrajectoryId("cc:ghost".to_string())
+            ),
+            Err(SessionError::Unknown),
+        ));
+    }
+
+    #[test]
+    fn a_damaged_database_is_refused_at_open() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.db");
+        std::fs::write(&path, b"not a sqlite database at all").expect("the file writes");
+        assert!(matches!(
+            Runtime::open(config_with(FETCH_AND_SEND, None), path, None),
+            Err(OpenError::Damaged(_)),
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_prompt_records_nothing() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        session
+            .on_prompt("read the report".to_string())
+            .expect("the prompt acks");
+        assert!(only_the_opening(&runtime));
+    }
+
+    #[tokio::test]
+    async fn a_decision_whose_append_fails_never_acts() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        runtime.store().fail_commit_after(0);
+        assert!(matches!(
+            session.on_tool_call(fetch(serde_json::json!({"a": 1})), false).await,
+            Err(EventError::Storage(_)),
+        ));
+        assert!(only_the_opening(&runtime), "the killed append left nothing");
+        assert!(
+            runtime.open_dispatches(&root(), &root()).is_empty(),
+            "a call whose release never committed is not open",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lost_race_discards_the_decision_and_replays() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        runtime.store().contend_next_appends(1);
+        assert_eq!(
+            session
+                .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
+                .await
+                .expect("the replay commits"),
+            ToolCallDecision::Allow { spawn: None },
+        );
+        assert_eq!(
+            runtime.log_basis(&root()),
+            3,
+            "the opening, the foreign append, and one committed attempt",
+        );
+        assert_eq!(
+            runtime.open_dispatches(&root(), &root()).len(),
+            1,
+            "the discarded attempt released nothing",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_permanently_contended_log_refuses_the_event() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        runtime.store().contend_next_appends(REPLAY_LIMIT as u64);
+        assert!(matches!(
+            session.on_tool_call(fetch(serde_json::json!({"a": 1})), false).await,
+            Err(EventError::Contended { attempts: REPLAY_LIMIT }),
+        ));
+        assert_eq!(runtime.log_basis(&root()), 1 + REPLAY_LIMIT as u64);
+        assert!(
+            runtime.open_dispatches(&root(), &root()).is_empty(),
+            "no attempt of a refused event acted",
+        );
+    }
+
+    fn control_call(name: &str) -> ProposedCall {
+        ProposedCall {
+            tool: name.to_string(),
+            arguments: raw(serde_json::json!({"offer_id": "o1:cc:root:ff"})),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_control_tool_passes_unchecked_under_every_shipped_name() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        for name in [
+            "execute_remedy_plan",
+            "mcp__appa__execute_remedy_plan",
+            "mcp__plugin_appa-runtime_appa__execute_remedy_plan",
+        ] {
+            assert_eq!(
+                session
+                    .on_tool_call(control_call(name), false)
+                    .await
+                    .expect("it passes"),
+                ToolCallDecision::Control,
+                "{name} is a control call",
+            );
+            assert_eq!(
+                session
+                    .on_tool_result(control_call(name), ToolOutcome::Indeterminate)
+                    .await
+                    .expect("its outcome is absorbed"),
+                ToolResultDecision::Keep,
+            );
+        }
+        assert!(only_the_opening(&runtime), "no control call reached the log");
+    }
+
+    #[tokio::test]
+    async fn a_lookalike_control_tool_is_an_undeclared_tool() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        assert!(matches!(
+            session
+                .on_tool_call(control_call("mcp__evil__execute_remedy_plan"), false)
+                .await
+                .expect("the lookalike is decided"),
+            ToolCallDecision::Deny { .. },
+        ));
+    }
+
+    #[test]
+    fn an_over_cap_success_body_is_carried_as_unavailable() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let success = |len: usize| ToolOutcome::Success {
+            body: OutcomeBody::Available("x".repeat(len)),
+        };
+        assert!(matches!(
+            session.cap_outcome(success(70_000)),
+            ToolOutcome::Success {
+                body: OutcomeBody::Unavailable
+            },
+        ));
+        assert_eq!(session.cap_outcome(success(8)), success(8));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_offer_is_refused() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        assert!(matches!(
+            session.on_remedy(OfferId("o1:cc:root:never".to_string()), None).await,
+            Err(EventError::UnknownOffer),
+        ));
+        assert!(only_the_opening(&runtime), "a refused offer appends nothing");
+    }
+
+    #[tokio::test]
+    async fn an_external_answer_settles_the_event_in_one_round_trip() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let (url, seen) = counting_stub(serde_json::json!({"ruling": "approve"})).await;
+        let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        assert!(matches!(
+            session
+                .on_tool_call(wire(500), false)
+                .await
+                .expect("the block is delivered"),
+            ToolCallDecision::Deny { .. },
+        ));
+        assert_eq!(seen.load(Ordering::SeqCst), 0, "a proposal consults no authority");
+
+        assert!(matches!(
+            session
+                .on_remedy(latest_offer(&runtime), None)
+                .await
+                .expect("the approval is delivered"),
+            RemedyDecision::Authorized { .. },
+        ));
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            1,
+            "the event re-drove once, carrying the answer it asked for",
+        );
+    }
+
+    #[tokio::test]
+    async fn no_offer_id_repeats_within_a_trajectory() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(
+            config_with(ATTENTION, Some("http://127.0.0.1:1/")),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        for _ in 0..5 {
+            assert!(matches!(
+                session
+                    .on_tool_call(wire(500), false)
+                    .await
+                    .expect("the block is delivered"),
+                ToolCallDecision::Deny { .. },
+            ));
+        }
+        let minted = runtime.minted_offers(&root(), &root());
+        let distinct: std::collections::HashSet<&str> = minted.iter().map(|offer| offer.0.as_str()).collect();
+        assert!(minted.len() >= 5, "each block surfaced an offer: {minted:?}");
+        assert_eq!(
+            distinct.len(),
+            minted.len(),
+            "five identical proposals minted five distinct ids: {minted:?}",
+        );
+    }
+
+    fn bash_call() -> ProposedCall {
+        ProposedCall {
+            tool: "Bash".to_string(),
+            arguments: raw(serde_json::json!({"command": "ls"})),
+        }
+    }
+
+    fn bash_dispatch(label: &str) -> appa_engine::value::DispatchId {
+        let policy = appa_policy::Config::from_toml_str(
+            r#"
+                version = 1
+                [[tool]]
+                name = "Bash"
+            "#,
+        )
+        .expect("the fixture policy compiles");
+        let call = policy
+            .engine()
+            .resolve_call(appa_engine::value::ToolName::new("Bash"), br#"{"command":"ls"}"#)
+            .expect("the fixture call resolves through the engine");
+        appa_engine::value::DispatchId::new(appa_engine::value::TrajectoryId::new(label), call.digest(), 0)
+    }
+
+    #[test]
+    fn an_outcome_report_is_classified_against_the_open_dispatches() {
+        let id = bash_dispatch("cc:root");
+        let open = |tool: &str, bytes: &[u8]| OpenDispatch {
+            id: id.clone(),
+            tool: tool.to_string(),
+            bytes: bytes.to_vec(),
+        };
+        let canonical = || Some(b"{}".to_vec());
+
+        assert_eq!(
+            classify_report(&bash_call(), canonical, &[]),
+            Err(UnreportableOutcome::NoOpenDispatch),
+        );
+        assert_eq!(
+            classify_report(&bash_call(), canonical, &[open("Bash", b"{}")]),
+            Ok(id.clone()),
+        );
+        assert_eq!(
+            classify_report(&bash_call(), canonical, &[open("Write", b"{}")]),
+            Err(UnreportableOutcome::ByteMismatch),
+            "another tool is another call",
+        );
+        assert_eq!(
+            classify_report(&bash_call(), canonical, &[open("Bash", b"{\"other\":1}")]),
+            Err(UnreportableOutcome::ByteMismatch),
+            "other bytes are another occurrence",
+        );
+        assert_eq!(
+            classify_report(&bash_call(), || None, &[open("Bash", b"{}")]),
+            Err(UnreportableOutcome::ByteMismatch),
+            "a call that cannot canonicalize matches nothing",
+        );
+        assert_eq!(
+            classify_report(&bash_call(), canonical, &[open("Bash", b"{}"), open("Bash", b"{}")]),
+            Err(UnreportableOutcome::NoOpenDispatch),
+            "several open dispatches name no one occurrence",
+        );
     }
 }
