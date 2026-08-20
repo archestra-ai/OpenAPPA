@@ -53,9 +53,15 @@ const TERMS = {
   "[membership]":
     "The one registration every @name group resolves through. A group mention without it is a load error.",
   "[[dynamic_resolver]]":
-    "A named external that maps one top-level string tool argument to literal reader IDs for a dynamic audience contract. It is distinct from @group membership resolution.",
+    "A named external that classifies proposed tool calls: it reads what its binding shows it and returns its declared trust, audience, or attention fields. It is distinct from @group membership resolution.",
   argument:
-    "In a dynamic audience form, the top-level string tool argument passed to the named dynamic resolver.",
+    "In a resolver binding, the one required top-level string tool argument the resolver reads instead of the complete argument object.",
+  resolvers:
+    "A tool's dynamic resolver bindings. Each names a registered resolver, what it reads — the complete canonical argument object, or one declared argument — and the exact scoped fields it must return.",
+  returns:
+    "The trust, audience, and attention fields a tool-level resolver must return. Trust values select from the policy trust chain; attention values select from marks named by authority mandates. Trust and audience have one owner; attention is additive.",
+  "[externals.dynamic]":
+    "The shared HTTP endpoint for every dynamic resolver without an inline builtin. Requests carry the resolver name.",
   internal:
     "An example reader for restricted internal data. Reading internal data closes off public destinations.",
   "{public, trusted}":
@@ -86,7 +92,8 @@ const TERMS = {
   may_add:
     "The audience cover ceiling of an authority: the readers its rulings may cover.",
   can_waive: "The effect kinds an authority ruling may waive for one dispatch.",
-  attends: "The attention marks an authority's rulings satisfy.",
+  attends:
+    "The attention marks an authority's rulings satisfy. Tool-level dynamic resolvers can demand only marks present in at least one authority mandate.",
   scope:
     "The tags a registered component (authority, cast, or sanitizer) has jurisdiction over.",
   attention: "Named marks demanding a fresh ruling on every dispatch.",
@@ -105,7 +112,7 @@ const TERMS = {
   to: "In a sanitizer mandate: the exact target label state produced after the transition.",
   constant: "In a cast: every covered Unknown value resolves to one declared complete label.",
   resolver:
-    "The dynamic implementation of a registered external: authority rulings, cast decisions, sanitizer derivations, membership answers, or argument-to-reader-set answers.",
+    "The dynamic implementation of a registered external: authority rulings, cast decisions, sanitizer derivations, membership answers, or tool-contract fields.",
   may_cast:
     "The complete product ceiling on a cast resolver: the trust ranks and audience cap it may resolve an Unknown value within.",
   "[child]": "Run configuration for child sub-executions.",

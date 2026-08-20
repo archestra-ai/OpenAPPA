@@ -341,6 +341,7 @@ fn identity_document(
                 "name": tool.name,
                 "tags": sorted_set(&tool.tags),
                 "parameters": tool.parameters.normalized(),
+                "resolvers": sorted_set(&tool.resolvers),
                 "delta": tool.delta,
                 "emits": tool.emits,
                 "requires": {
@@ -520,10 +521,7 @@ pub(crate) fn validate_coverage(
             Some(ProviderRunConstruct::Requires)
         } else if contract.pending_cast_dim().is_some() {
             Some(ProviderRunConstruct::PendingCastDelta)
-        } else if matches!(
-            contract.delta.as_ref().and_then(|delta| delta.audience.as_ref()),
-            Some(crate::contract::AudienceDelta::Dynamic(_))
-        ) {
+        } else if !contract.resolvers.is_empty() {
             Some(ProviderRunConstruct::DynamicDelta)
         } else {
             None
@@ -598,7 +596,9 @@ mod tests {
     use crate::authority::{
         Authority, DeclaredLabel, DeclaredTransition, Hint, Mandate, Sanitizer, SanitizerPoints, Scope,
     };
-    use crate::contract::{AudienceDelta, Delta, DynamicAudienceBinding, LabelRequirements, Requires, ToolContract};
+    use crate::contract::{
+        AudienceDelta, Delta, LabelRequirements, Requires, ResolverReturn, ToolContract, ToolResolverBinding,
+    };
     use crate::engine::Engine;
     use crate::fact::EffectSet;
     use crate::groups::DeclaredAudience;
@@ -611,6 +611,7 @@ mod tests {
 
     fn tool(name: &str) -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -749,13 +750,11 @@ mod tests {
             }),
             (ProviderRunConstruct::DynamicDelta, {
                 let mut t = tool("search");
-                t.delta = Some(Delta {
-                    trust: None,
-                    audience: Some(AudienceDelta::Dynamic(DynamicAudienceBinding {
-                        resolver: DynamicResolverName::new("directory"),
-                        argument: "q".into(),
-                    })),
-                });
+                t.resolvers = vec![ToolResolverBinding {
+                    resolver: DynamicResolverName::new("directory"),
+                    argument: None,
+                    returns: [ResolverReturn::Audience].into_iter().collect(),
+                }];
                 t
             }),
         ];
@@ -1280,6 +1279,14 @@ mod tests {
             audience: None,
         });
         assert_ne!(identity(&delta_edit, &ReturnPolicy::Raw, &profile), base);
+
+        let mut resolver_edit = cfg.clone();
+        resolver_edit.tools[0].resolvers = vec![crate::contract::ToolResolverBinding {
+            resolver: crate::names::DynamicResolverName::new("classifier"),
+            argument: None,
+            returns: [crate::contract::ResolverReturn::Trust].into_iter().collect(),
+        }];
+        assert_ne!(identity(&resolver_edit, &ReturnPolicy::Raw, &profile), base);
 
         let sanitized = ReturnPolicy::Sanitized(SanitizerName::new("redactor"));
         assert_ne!(identity(&cfg, &sanitized, &profile), base);

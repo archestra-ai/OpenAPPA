@@ -193,14 +193,15 @@ impl SessionInner {
                 authorities: Default::default(),
                 sanitizers: Default::default(),
                 casts: Default::default(),
-                dynamic: parsed.dynamic.map(|e| Endpoint {
-                    url: e.url,
+                dynamic: parsed.dynamic.map(|endpoint| Endpoint {
+                    url: endpoint.url,
                     token: None,
                 }),
                 membership: parsed.membership.map(|e| Endpoint {
                     url: e.url,
                     token: None,
                 }),
+                claude_code: Default::default(),
             }
         } else {
             Externals {
@@ -212,6 +213,7 @@ impl SessionInner {
                 casts: Default::default(),
                 dynamic: None,
                 membership: None,
+                claude_code: Default::default(),
             }
         };
         let config = Config::embedded(policy, externals).map_err(|error| error.to_string())?;

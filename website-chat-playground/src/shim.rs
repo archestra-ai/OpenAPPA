@@ -144,35 +144,56 @@ pub struct SanitizerInput {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct DynamicResolverRequest {
     version: u32,
     resolver: String,
     tool: String,
-    argument: String,
-    value: String,
+    input: DynamicResolverInput,
+    returns: DynamicResolverReturns,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+enum DynamicResolverInput {
+    Argument { argument: String, value: String },
+    Call {},
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct DynamicResolverReturns {
+    delta: Vec<String>,
+    requires: Vec<String>,
 }
 
 async fn dynamic_resolver(
     axum::Json(request): axum::Json<DynamicResolverRequest>,
 ) -> (StatusCode, axum::Json<serde_json::Value>) {
+    let DynamicResolverInput::Argument { argument, value } = &request.input else {
+        return (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({})));
+    };
     if request.version != 1
         || request.resolver != "email-recipient-readers"
         || request.tool != "send_email"
-        || request.argument != "to"
+        || argument != "to"
     {
         return (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({})));
     }
 
-    let readers = match request.value.as_str() {
+    let readers = match value.as_str() {
         "ap-review@corp.example" => vec!["cfo@corp.example", "ap-lead@corp.example"],
         "all@acme.com" => vec!["ceo@acme.com", "staff@acme.com"],
         recipient => vec![recipient],
     };
-    (
-        StatusCode::OK,
-        axum::Json(serde_json::json!({ "version": 1, "readers": readers })),
-    )
+    // The answer carries exactly the binding's declared returned fields.
+    let mut answer = serde_json::json!({ "version": 1 });
+    if request.returns.delta.iter().any(|field| field == "audience") {
+        answer["delta"] = serde_json::json!({ "audience": readers });
+    }
+    if request.returns.requires.iter().any(|field| field == "audience") {
+        answer["requires"] = serde_json::json!({ "audience": { "includes": readers } });
+    }
+    (StatusCode::OK, axum::Json(answer))
 }
 
 #[derive(Deserialize)]
@@ -454,24 +475,37 @@ mod tests {
             version: 1,
             resolver: "email-recipient-readers".to_string(),
             tool: "send_email".to_string(),
-            argument: "to".to_string(),
-            value: value.to_string(),
+            input: DynamicResolverInput::Argument {
+                argument: "to".to_string(),
+                value: value.to_string(),
+            },
+            returns: DynamicResolverReturns {
+                delta: vec![],
+                requires: vec!["audience".to_string()],
+            },
         };
 
         let (status, axum::Json(answer)) = dynamic_resolver(axum::Json(resolve("ap-review@corp.example"))).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
-            answer["readers"],
+            answer["requires"]["audience"]["includes"],
             serde_json::json!(["cfo@corp.example", "ap-lead@corp.example"])
         );
+        assert!(answer.get("delta").is_none(), "only the declared fields are answered");
 
         let (status, axum::Json(answer)) = dynamic_resolver(axum::Json(resolve("all@acme.com"))).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(answer["readers"], serde_json::json!(["ceo@acme.com", "staff@acme.com"]));
+        assert_eq!(
+            answer["requires"]["audience"]["includes"],
+            serde_json::json!(["ceo@acme.com", "staff@acme.com"])
+        );
 
         let (status, axum::Json(answer)) = dynamic_resolver(axum::Json(resolve("person@corp.example"))).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(answer["readers"], serde_json::json!(["person@corp.example"]));
+        assert_eq!(
+            answer["requires"]["audience"]["includes"],
+            serde_json::json!(["person@corp.example"])
+        );
     }
 
     #[tokio::test]
@@ -480,8 +514,11 @@ mod tests {
             version: 2,
             resolver: "email-recipient-readers".to_string(),
             tool: "send_email".to_string(),
-            argument: "to".to_string(),
-            value: "ap-review@corp.example".to_string(),
+            input: DynamicResolverInput::Argument {
+                argument: "to".to_string(),
+                value: "ap-review@corp.example".to_string(),
+            },
+            returns: DynamicResolverReturns::default(),
         };
         let (status, _) = dynamic_resolver(axum::Json(request)).await;
         assert_eq!(status, StatusCode::NOT_FOUND);

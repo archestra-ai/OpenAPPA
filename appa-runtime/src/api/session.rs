@@ -8,7 +8,7 @@ use crate::engine::{
     AuthorityVerdict, CastLabel, CastVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence,
     ExternalRequest, Feedback, ForkStatus, Liveness, Next, OfferNonce, OpenDispatch, Presentation, engine_id,
 };
-use crate::external::{CastAnswer, ConsultKind, ConsultOutcome, ReadersResolution};
+use crate::external::{CastAnswer, ConsultKind, ConsultOutcome, ReadersResolution, ToolResolution};
 use appa_engine::transition::ApplicableCast;
 use appa_engine::value::ValueBody;
 
@@ -681,11 +681,27 @@ impl Session {
                 event(context, carried.clone())
             })?;
             match decision.then {
-                Next::ResolveExternal(requests) => {
-                    for request in requests {
-                        evidence.push(self.consult(request, elicitation).await);
+                // The engine batches every missing answer into one request set, and evidence
+                // is matched by resolver name, never by position. Without a reviewer the
+                // consults run concurrently — a tool-resolution consult can take a model call's
+                // seconds, and the batch should cost its slowest member, not their sum. With a
+                // reviewer they stay serial: one staged review on screen at a time.
+                Next::ResolveExternal(requests) => match elicitation {
+                    None => {
+                        // Batch-terminal: join_all settles every sibling first; any
+                        // resolver no-answer then aborts the invocation, discarding the
+                        // siblings' answers, before another engine round or any append.
+                        let consults = requests.into_iter().map(|request| self.consult(request, None));
+                        for answered in futures_util::future::join_all(consults).await {
+                            evidence.push(answered?);
+                        }
                     }
-                }
+                    Some(_) => {
+                        for request in requests {
+                            evidence.push(self.consult(request, elicitation).await?);
+                        }
+                    }
+                },
                 _ => return Ok(decision),
             }
         }
@@ -755,8 +771,15 @@ impl Session {
         Err(EventError::Contended { attempts: REPLAY_LIMIT })
     }
 
-    async fn consult(&self, request: ExternalRequest, elicitation: Option<&Elicitation>) -> ExternalEvidence {
-        match &request {
+    /// One external consult. Only a tool-resolution failure is an error: the check cannot
+    /// complete without the answer, no fact may be appended, and the refusal is operational
+    /// — never a policy denial. Every other external keeps its no-answer evidence shape.
+    async fn consult(
+        &self,
+        request: ExternalRequest,
+        elicitation: Option<&Elicitation>,
+    ) -> Result<ExternalEvidence, EventError> {
+        Ok(match &request {
             ExternalRequest::Authority {
                 authority,
                 payload,
@@ -798,26 +821,36 @@ impl Session {
                     derived,
                 }
             }
-            // The dynamic resolver wire is the declared external contract verbatim.
-            ExternalRequest::Dynamic {
-                resolver,
+            ExternalRequest::ToolResolution {
+                binding,
                 tool,
-                argument,
-                value,
+                arguments,
+                context,
             } => {
-                let readers = match self
+                let answer = match self
                     .deployment
                     .externals
-                    .resolve_dynamic(resolver, tool, argument, value)
+                    .resolve_tool(binding, tool, arguments, context)
                     .await
                 {
-                    ReadersResolution::Resolved { readers } => Some(readers),
-                    ReadersResolution::Unresolved(_) => None,
+                    ToolResolution::Resolved(answer) => answer,
+                    ToolResolution::Unresolved(reason) => {
+                        let resolver = binding.resolver.as_str();
+                        match reason {
+                            crate::external::NoAnswerReason::Unreachable | crate::external::NoAnswerReason::Timeout => {
+                                tracing::warn!(resolver, ?reason, "a tool-resolution consult produced no answer")
+                            }
+                            _ => tracing::debug!(resolver, ?reason, "a tool-resolution consult produced no answer"),
+                        }
+                        return Err(EventError::ResolverUnavailable {
+                            resolver: resolver.to_string(),
+                            reason: format!("{reason:?}"),
+                        });
+                    }
                 };
-                ExternalEvidence::Dynamic {
-                    resolver: resolver.clone(),
-                    argument: argument.clone(),
-                    readers,
+                ExternalEvidence::ToolResolution {
+                    resolver: binding.resolver.as_str().to_string(),
+                    answer,
                 }
             }
             ExternalRequest::PendingCast { casts, source, body } => ExternalEvidence::PendingCast {
@@ -840,7 +873,7 @@ impl Session {
                     readers,
                 }
             }
-        }
+        })
     }
 
     /// Every applicable cast, in registration order, until one answers. A constant arrives
@@ -3364,6 +3397,7 @@ confined_child_return = true
             casts: std::collections::BTreeMap::new(),
             dynamic: None,
             membership: None,
+            claude_code: Default::default(),
         }
     }
 

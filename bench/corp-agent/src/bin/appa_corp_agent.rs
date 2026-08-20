@@ -266,7 +266,7 @@ fn install_decision_log() {
 /// which is the right answer for a component nobody is hosting.
 fn bind_hosted_externals(config: &mut Config, origin: &str) -> usize {
     let externals = &mut config.externals;
-    let endpoints = externals
+    let mut endpoints: Vec<_> = externals
         .authorities
         .values_mut()
         .chain(externals.sanitizers.values_mut())
@@ -274,7 +274,8 @@ fn bind_hosted_externals(config: &mut Config, origin: &str) -> usize {
             Implementation::Resolver(endpoint) => Some(endpoint),
             Implementation::Builtin(_) => None,
         })
-        .chain(externals.dynamic.iter_mut());
+        .collect();
+    endpoints.extend(externals.dynamic.iter_mut());
     let mut bound = 0;
     for endpoint in endpoints {
         let Some(path) = endpoint.url.strip_prefix(UNBOUND_ORIGIN) else {

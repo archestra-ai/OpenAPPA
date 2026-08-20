@@ -160,14 +160,23 @@ pub fn externals_for(policy: &appa_policy::Config, base: &str) -> Externals {
         // The playground serves no classifier route, so a resolver-backed cast stays
         // unbound and refuses the policy at open. Constant casts need no binding.
         casts: std::collections::BTreeMap::new(),
-        dynamic: Some(Endpoint {
-            url: format!("{base}{DYNAMIC_RESOLVER_PATH}"),
-            token: None,
-        }),
+        // One HTTP endpoint serves every declaration not implemented inline.
+        dynamic: {
+            let inline: std::collections::BTreeSet<_> =
+                policy.dynamic_resolver_builtins().map(|(name, _)| name).collect();
+            policy
+                .dynamic_resolver_names()
+                .any(|name| !inline.contains(name))
+                .then(|| Endpoint {
+                    url: format!("{base}{DYNAMIC_RESOLVER_PATH}"),
+                    token: None,
+                })
+        },
         membership: Some(Endpoint {
             url: format!("{base}{MEMBERSHIP_PATH}"),
             token: None,
         }),
+        claude_code: Default::default(),
     }
 }
 

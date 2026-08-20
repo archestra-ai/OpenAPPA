@@ -9,7 +9,7 @@ use crate::authority::{Authority, Cast, CastResolution, DeclaredTransition, Hint
 use crate::contract::{AudienceDelta, AudienceRequirement, Delta, RecipientSpec, ToolContract};
 use crate::groups::{DeclaredAudience, ExpansionRefusal, Expansions, GroupExpansion, GroupResolution};
 use crate::label::{Audience, Dim, Dimension, ReaderId, Trust};
-use crate::names::{AuthorityName, CastName, GroupName, MembershipResolverName, SanitizerName, TagName};
+use crate::names::{AuthorityName, CastName, GroupName, MarkName, MembershipResolverName, SanitizerName, TagName};
 use crate::value::ToolName;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,7 +62,7 @@ impl TrustChain {
         self.ranks.is_empty()
     }
 
-    fn contains_rank(&self, trust: Trust) -> bool {
+    pub(crate) fn contains_rank(&self, trust: Trust) -> bool {
         (trust.rank() as usize) < self.ranks.len()
     }
 }
@@ -91,6 +91,12 @@ pub enum LoadError {
     DuplicateRank(String),
     #[error("duplicate tool contract: {0}")]
     DuplicateTool(String),
+    #[error("tool {tool} resolver {resolver} declares no returned dimensions")]
+    EmptyToolResolver { tool: String, resolver: String },
+    #[error("tool {tool} binds resolver {resolver} more than once")]
+    DuplicateToolResolver { tool: String, resolver: String },
+    #[error("tool {tool} gives {dimension:?} to more than one static or dynamic owner")]
+    DuplicateToolResolverDimension { tool: String, dimension: Dimension },
     #[error("duplicate authority: {0}")]
     DuplicateAuthority(String),
     #[error("duplicate sanitizer: {0}")]
@@ -228,12 +234,22 @@ fn worst_case_plan_alternatives(
     literal: &Expansions,
 ) -> u128 {
     use crate::check::Gap;
-    use crate::contract::{AudienceRequirement, HistoryRequirement};
+    use crate::contract::{AudienceRequirement, HistoryRequirement, ResolverReturn};
     use crate::fact::EffectKind;
     use crate::plan::covers_gap;
 
     let mut count: u128 = 1;
     let mut multiply = |competent: usize| count = count.saturating_mul(competent.max(1) as u128);
+    // A dynamic floor or requirement is unknown at load, so its competent-authority count is
+    // the mandate-dimension approximation, computed once per dimension.
+    let trust_cap_competent = authorities
+        .iter()
+        .filter(|authority| authority.scope.covers(&tool.tags) && authority.mandate.trust_ceiling.is_some())
+        .count();
+    let reader_cap_competent = authorities
+        .iter()
+        .filter(|authority| authority.scope.covers(&tool.tags) && authority.mandate.reader_ceiling.is_some())
+        .count();
 
     if let Some(floor) = tool.requires.label.trust_floor {
         let gap = Gap::TrustFloor {
@@ -247,19 +263,20 @@ fn worst_case_plan_alternatives(
                 .count(),
         );
     }
+    for binding in &tool.resolvers {
+        if binding.returns.contains(&ResolverReturn::RequiredTrust) {
+            multiply(trust_cap_competent);
+        }
+        if binding.returns.contains(&ResolverReturn::RequiredAudience) {
+            multiply(reader_cap_competent);
+        }
+    }
     let mut seen_includes: Vec<&AudienceRequirement> = Vec::new();
     for requirement in &tool.requires.label.audience {
         match requirement {
             AudienceRequirement::Includes(_) if !seen_includes.contains(&requirement) => {
                 seen_includes.push(requirement);
-                multiply(
-                    authorities
-                        .iter()
-                        .filter(|authority| {
-                            authority.scope.covers(&tool.tags) && authority.mandate.reader_ceiling.is_some()
-                        })
-                        .count(),
-                );
+                multiply(reader_cap_competent);
             }
             AudienceRequirement::Includes(_) | AudienceRequirement::Cap(_) => {}
         }
@@ -294,14 +311,30 @@ fn worst_case_plan_alternatives(
                 .count(),
         );
     }
+    if tool.resolver_owns(crate::contract::ResolverReturn::Attention) {
+        let dynamic_marks: BTreeSet<_> = authorities
+            .iter()
+            .flat_map(|authority| authority.mandate.attends.iter())
+            .filter(|mark| !seen_marks.contains(mark))
+            .cloned()
+            .collect();
+        for mark in dynamic_marks {
+            let gap = Gap::Attention(mark);
+            multiply(
+                authorities
+                    .iter()
+                    .filter(|authority| covers_gap(authority, &gap, &tool.tags, literal))
+                    .count(),
+            );
+        }
+    }
     let output = tool.output_label(literal);
     let applicable = match tool.pending_cast_dim() {
         _ if !confined => 0,
         Some(_) => 0,
-        None if matches!(
-            tool.delta.as_ref().and_then(|delta| delta.audience.as_ref()),
-            Some(AudienceDelta::Dynamic(_))
-        ) || tool.delta.iter().flat_map(Delta::groups).next().is_some() =>
+        None if tool.resolver_owns(crate::contract::ResolverReturn::Trust)
+            || tool.resolver_owns(crate::contract::ResolverReturn::Audience)
+            || tool.delta.iter().flat_map(Delta::groups).next().is_some() =>
         {
             sanitizers
                 .iter()
@@ -333,7 +366,7 @@ fn worst_case_plan_alternatives(
             requirement,
             AudienceRequirement::Cap(DeclaredAudience::Restricted { .. })
         )
-    });
+    }) || tool.resolver_owns(crate::contract::ResolverReturn::RequiredAudience);
     let redispatches = tools
         .values()
         .filter(|candidate| {
@@ -397,6 +430,7 @@ pub struct Registry {
     tools: BTreeMap<ToolName, ToolContract>,
     provider_run: BTreeMap<ToolName, ToolContract>,
     authorities: Vec<Authority>,
+    attention_marks: BTreeSet<MarkName>,
     sanitizers: BTreeMap<SanitizerName, Sanitizer>,
     casts: Vec<Cast>,
     membership: Option<MembershipResolverName>,
@@ -473,10 +507,11 @@ impl Registry {
                     AudienceRequirement::Cap(cap) => {
                         check_declared_readers(cap, || format!("tool {} cap", tool.name.as_str()))?;
                     }
-                    AudienceRequirement::Includes(RecipientSpec::Placeholder(_) | RecipientSpec::Dynamic(_)) => {}
+                    AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => {}
                 }
             }
             validate_pending_cast(&tool)?;
+            validate_tool_resolvers(&tool)?;
             let split = if profile.is_provider_run(&tool.name) {
                 &mut provider_run
             } else {
@@ -622,7 +657,15 @@ impl Registry {
                 };
                 earlier.scope.covers_scope(&cast.scope)
                     && castable.iter().all(|tool| {
-                        !pins_audience_beside_pending_trust(tool)
+                        // A tool whose audience a resolver pins per call cannot prove an
+                        // earlier constant dominates: the load-time output label is not the
+                        // label the cast would meet.
+                        let audience_pinned_per_call = matches!(
+                            tool.delta.as_ref().and_then(|delta| delta.trust.as_ref()),
+                            Some(Dim::Unknown)
+                        ) && tool
+                            .resolver_owns(crate::contract::ResolverReturn::Audience);
+                        !audience_pinned_per_call
                             && !writes_group(tool, earlier)
                             && earlier
                                 .resolution
@@ -638,11 +681,18 @@ impl Registry {
             }
         }
 
+        let attention_marks = config
+            .authorities
+            .iter()
+            .flat_map(|authority| authority.mandate.attends.iter().cloned())
+            .collect();
+
         Ok(Registry {
             trust_chain: config.trust_chain,
             tools,
             provider_run,
             authorities: config.authorities,
+            attention_marks,
             sanitizers,
             casts,
             membership: config.membership,
@@ -708,6 +758,17 @@ impl Registry {
         &self.authorities
     }
 
+    /// Every attention mark at least one registered authority attends, in stable name order.
+    /// Attention ignores scope, so this policy-wide set is also the complete set a dynamic
+    /// resolver may demand while retaining an in-place authority remedy.
+    pub fn attention_marks(&self) -> impl Iterator<Item = &MarkName> {
+        self.attention_marks.iter()
+    }
+
+    pub(crate) fn attends(&self, mark: &MarkName) -> bool {
+        self.attention_marks.contains(mark)
+    }
+
     pub fn authority(&self, name: &AuthorityName) -> Option<&Authority> {
         self.authorities.iter().find(|a| &a.name == name)
     }
@@ -729,12 +790,6 @@ impl Registry {
     }
 }
 
-fn pins_audience_beside_pending_trust(tool: &ToolContract) -> bool {
-    tool.delta.as_ref().is_some_and(|delta| {
-        matches!(delta.trust, Some(Dim::Unknown)) && matches!(delta.audience, Some(AudienceDelta::Dynamic(_)))
-    })
-}
-
 #[cfg(test)]
 impl Registry {
     pub(crate) fn build_covered(config: RegistryConfig) -> Result<Registry, LoadError> {
@@ -751,9 +806,17 @@ impl Registry {
 }
 
 fn validate_pending_cast(tool: &ToolContract) -> Result<(), LoadError> {
+    let requires_trust =
+        tool.requires.label.trust_floor.is_some() || tool.resolver_owns(crate::contract::ResolverReturn::RequiredTrust);
+    let requires_audience = !tool.requires.label.audience.is_empty()
+        || tool.resolver_owns(crate::contract::ResolverReturn::RequiredAudience);
     let Some(delta) = &tool.delta else {
-        let requires_label = tool.requires.label.trust_floor.is_some() || !tool.requires.label.audience.is_empty();
-        return if requires_label {
+        // Each dimension answers for itself: a resolver owning one dimension establishes
+        // nothing about the other. An unannotated dimension is fail-closed Unknown forever,
+        // so a requirement consuming it could never hold and is refused here.
+        let trust_described = tool.resolver_owns(crate::contract::ResolverReturn::Trust);
+        let audience_described = tool.resolver_owns(crate::contract::ResolverReturn::Audience);
+        return if (requires_trust && !trust_described) || (requires_audience && !audience_described) {
             Err(LoadError::UnannotatedWithLabelRequirement(
                 tool.name.as_str().to_string(),
             ))
@@ -767,20 +830,64 @@ fn validate_pending_cast(tool: &ToolContract) -> Result<(), LoadError> {
         return Err(LoadError::DualPendingCast(tool.name.as_str().to_string()));
     }
     match delta.pending_cast_dim() {
-        Some(Dimension::Trust) if tool.requires.label.trust_floor.is_some() => {
-            Err(LoadError::PendingCastWithRequirement {
-                tool: tool.name.as_str().to_string(),
-                dimension: Dimension::Trust,
-            })
-        }
-        Some(Dimension::Audience) if !tool.requires.label.audience.is_empty() => {
-            Err(LoadError::PendingCastWithRequirement {
-                tool: tool.name.as_str().to_string(),
-                dimension: Dimension::Audience,
-            })
-        }
+        Some(Dimension::Trust) if requires_trust => Err(LoadError::PendingCastWithRequirement {
+            tool: tool.name.as_str().to_string(),
+            dimension: Dimension::Trust,
+        }),
+        Some(Dimension::Audience) if requires_audience => Err(LoadError::PendingCastWithRequirement {
+            tool: tool.name.as_str().to_string(),
+            dimension: Dimension::Audience,
+        }),
         _ => Ok(()),
     }
+}
+
+fn validate_tool_resolvers(tool: &ToolContract) -> Result<(), LoadError> {
+    let mut names = BTreeSet::new();
+    let mut trust_owned = tool.delta.as_ref().is_some_and(|delta| delta.trust.is_some());
+    let mut audience_owned = tool.delta.as_ref().is_some_and(|delta| delta.audience.is_some());
+    for binding in &tool.resolvers {
+        if binding.returns.is_empty() {
+            return Err(LoadError::EmptyToolResolver {
+                tool: tool.name.as_str().to_string(),
+                resolver: binding.resolver.as_str().to_string(),
+            });
+        }
+        if !names.insert(&binding.resolver) {
+            return Err(LoadError::DuplicateToolResolver {
+                tool: tool.name.as_str().to_string(),
+                resolver: binding.resolver.as_str().to_string(),
+            });
+        }
+        if let Some(argument) = &binding.argument {
+            tool.parameters
+                .required_string_property(argument)
+                .map_err(|fault| LoadError::AudienceBindingSchema {
+                    context: format!("tool {} resolver {}", tool.name.as_str(), binding.resolver.as_str()),
+                    argument: argument.clone(),
+                    fault,
+                })?;
+        }
+        if binding.returns.contains(&crate::contract::ResolverReturn::Trust) {
+            if trust_owned {
+                return Err(LoadError::DuplicateToolResolverDimension {
+                    tool: tool.name.as_str().to_string(),
+                    dimension: Dimension::Trust,
+                });
+            }
+            trust_owned = true;
+        }
+        if binding.returns.contains(&crate::contract::ResolverReturn::Audience) {
+            if audience_owned {
+                return Err(LoadError::DuplicateToolResolverDimension {
+                    tool: tool.name.as_str().to_string(),
+                    dimension: Dimension::Audience,
+                });
+            }
+            audience_owned = true;
+        }
+    }
+    Ok(())
 }
 
 fn check_audience_bindings(tool: &ToolContract) -> Result<(), LoadError> {
@@ -793,13 +900,9 @@ fn check_audience_bindings(tool: &ToolContract) -> Result<(), LoadError> {
                 fault,
             })
     };
-    if let Some(AudienceDelta::Dynamic(binding)) = tool.delta.as_ref().and_then(|delta| delta.audience.as_ref()) {
-        check(&binding.argument, "delta")?;
-    }
     for requirement in &tool.requires.label.audience {
         match requirement {
             AudienceRequirement::Includes(RecipientSpec::Placeholder(argument)) => check(argument, "includes")?,
-            AudienceRequirement::Includes(RecipientSpec::Dynamic(binding)) => check(&binding.argument, "includes")?,
             AudienceRequirement::Includes(RecipientSpec::Static(_)) | AudienceRequirement::Cap(_) => {}
         }
     }
@@ -866,7 +969,8 @@ mod tests {
     use crate::authority::SanitizerPoints;
     use crate::authority::{CastCeiling, DeclaredLabel, Mandate, Scope};
     use crate::contract::{
-        AudienceRequirement, Delta, DynamicAudienceBinding, HistoryRequirement, LabelRequirements, Requires,
+        AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, Requires, ResolverReturn,
+        ToolResolverBinding,
     };
     use crate::fact::{EffectKind, EffectSet};
     use crate::label::EstablishedLabel;
@@ -890,6 +994,7 @@ mod tests {
 
     fn tool(name: &str) -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -1135,6 +1240,7 @@ mod tests {
 
     fn origin(name: &str, tags: &[&str], delta: Delta) -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: tags.iter().copied().map(crate::names::TagName::new).collect(),
             delta: Some(delta),
@@ -1306,12 +1412,10 @@ mod tests {
             &[],
             Delta {
                 trust: Some(Dim::Unknown),
-                audience: Some(crate::contract::AudienceDelta::Dynamic(DynamicAudienceBinding {
-                    resolver: crate::names::DynamicResolverName::new("directory"),
-                    argument: "room".into(),
-                })),
+                audience: None,
             },
         );
+        feed.resolvers = vec![audience_resolver("room")];
         feed.parameters = crate::params::test_string_argument_schema("room");
         cfg.tools = vec![feed];
         cfg.casts = vec![
@@ -1522,30 +1626,26 @@ mod tests {
         assert!(Registry::build_covered(cfg).is_ok());
     }
 
-    fn binding_sites(parameters: &crate::params::ToolParameters) -> Vec<(&'static str, RegistryConfig)> {
-        let binding = || DynamicAudienceBinding {
+    fn audience_resolver(argument: &str) -> ToolResolverBinding {
+        ToolResolverBinding {
             resolver: crate::names::DynamicResolverName::new("directory"),
-            argument: "to".into(),
-        };
+            argument: Some(argument.into()),
+            returns: [ResolverReturn::Audience].into_iter().collect(),
+        }
+    }
+    fn binding_sites(parameters: &crate::params::ToolParameters) -> Vec<(&'static str, RegistryConfig)> {
         let mut emitter = tool("emit");
         emitter.parameters = parameters.clone();
 
         let mut placeholder = emitter.clone();
         placeholder.requires.label.audience =
             vec![AudienceRequirement::Includes(RecipientSpec::Placeholder("to".into()))];
-        let mut dynamic_includes = emitter.clone();
-        dynamic_includes.requires.label.audience =
-            vec![AudienceRequirement::Includes(RecipientSpec::Dynamic(binding()))];
-        let mut dynamic_delta = emitter;
-        dynamic_delta.delta = Some(Delta {
-            trust: None,
-            audience: Some(AudienceDelta::Dynamic(binding())),
-        });
+        let mut scoped_resolver = emitter;
+        scoped_resolver.resolvers = vec![audience_resolver("to")];
 
         [
             ("tool emit includes", placeholder),
-            ("tool emit includes", dynamic_includes),
-            ("tool emit delta", dynamic_delta),
+            ("tool emit resolver directory", scoped_resolver),
         ]
         .into_iter()
         .map(|(context, tool)| {
@@ -1654,6 +1754,133 @@ mod tests {
     }
 
     #[test]
+    fn resolver_ownership_of_one_dimension_describes_only_that_dimension() {
+        use crate::contract::{LabelRequirements, Requires, ResolverReturn, ToolResolverBinding};
+
+        let owner = |field: ResolverReturn| {
+            vec![ToolResolverBinding {
+                resolver: crate::names::DynamicResolverName::new("classifier"),
+                argument: None,
+                returns: [field].into_iter().collect(),
+            }]
+        };
+        let trust_floor = Requires {
+            label: LabelRequirements {
+                trust_floor: Some(Trust::new(1)),
+                audience: vec![],
+            },
+            ..Requires::default()
+        };
+        let includes = Requires {
+            label: LabelRequirements {
+                trust_floor: None,
+                audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                    DeclaredAudience::literal(internal()),
+                ))],
+            },
+            ..Requires::default()
+        };
+
+        // A resolver owning the audience says nothing about trust: the trust dimension is
+        // still unannotated, and a trust requirement on it is refused — the pre-resolver
+        // refusal must not be bypassed by ownership of the other dimension.
+        let mut cfg = base();
+        cfg.tools = vec![ToolContract {
+            delta: None,
+            resolvers: owner(ResolverReturn::Audience),
+            requires: trust_floor.clone(),
+            ..tool("send")
+        }];
+        assert!(matches!(
+            Registry::build_covered(cfg),
+            Err(LoadError::UnannotatedWithLabelRequirement(name)) if name == "send"
+        ));
+
+        // Symmetric: trust ownership does not describe the audience.
+        let mut cfg = base();
+        cfg.tools = vec![ToolContract {
+            delta: None,
+            resolvers: owner(ResolverReturn::Trust),
+            requires: includes.clone(),
+            ..tool("send")
+        }];
+        assert!(matches!(
+            Registry::build_covered(cfg),
+            Err(LoadError::UnannotatedWithLabelRequirement(name)) if name == "send"
+        ));
+
+        // A requirement on the dimension the resolver itself establishes is sound: the pin
+        // is present by the time the check runs.
+        let mut cfg = base();
+        cfg.tools = vec![ToolContract {
+            delta: None,
+            resolvers: owner(ResolverReturn::Trust),
+            requires: trust_floor,
+            ..tool("send")
+        }];
+        assert!(Registry::build_covered(cfg).is_ok());
+
+        let mut cfg = base();
+        cfg.tools = vec![ToolContract {
+            delta: None,
+            resolvers: owner(ResolverReturn::Audience),
+            requires: includes,
+            ..tool("send")
+        }];
+        assert!(Registry::build_covered(cfg).is_ok());
+    }
+
+    #[test]
+    fn a_pending_cast_dimension_loads_beside_a_resolver_owning_the_other() {
+        use crate::contract::{ResolverReturn, ToolResolverBinding};
+
+        // Pending trust plus resolver-owned audience: two independent descriptions, one per
+        // dimension — this is the shape the shadowing guard and admission tests exercise.
+        let mut cfg = base();
+        cfg.tools = vec![ToolContract {
+            delta: Some(Delta {
+                trust: Some(Dim::Unknown),
+                audience: None,
+            }),
+            resolvers: vec![ToolResolverBinding {
+                resolver: crate::names::DynamicResolverName::new("classifier"),
+                argument: None,
+                returns: [ResolverReturn::Audience].into_iter().collect(),
+            }],
+            ..tool("send")
+        }];
+        cfg.casts = vec![resolver_cast(
+            "classifier-cast",
+            vec![Trust::new(0), Trust::new(1)],
+            Audience::Public,
+            Scope::default(),
+        )];
+        assert!(Registry::build_covered(cfg).is_ok());
+
+        // But a resolver claiming a dimension the delta already describes is a dual owner.
+        let mut cfg = base();
+        cfg.tools = vec![ToolContract {
+            delta: Some(Delta {
+                trust: Some(Dim::Unknown),
+                audience: None,
+            }),
+            resolvers: vec![ToolResolverBinding {
+                resolver: crate::names::DynamicResolverName::new("classifier"),
+                argument: None,
+                returns: [ResolverReturn::Trust].into_iter().collect(),
+            }],
+            ..tool("send")
+        }];
+        assert!(matches!(
+            Registry::build_covered(cfg),
+            Err(LoadError::DuplicateToolResolverDimension {
+                dimension: Dimension::Trust,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn refuses_label_requirements_on_an_unannotated_tool() {
         use crate::contract::{LabelRequirements, Requires};
 
@@ -1750,10 +1977,8 @@ mod tests {
     fn the_alternative_bound_counts_every_sanitizer_for_a_dynamic_output() {
         let mut dynamic = tool("lookup");
         dynamic.parameters = crate::params::test_string_argument_schema("customer");
-        dynamic.delta.as_mut().unwrap().audience = Some(AudienceDelta::Dynamic(DynamicAudienceBinding {
-            resolver: crate::names::DynamicResolverName::new("directory"),
-            argument: "customer".into(),
-        }));
+        dynamic.delta.as_mut().unwrap().audience = None;
+        dynamic.resolvers = vec![audience_resolver("customer")];
         let sanitizer = |index| Sanitizer {
             name: SanitizerName::new(format!("sanitizer-{index}")),
             on: SanitizerPoints {
@@ -1909,10 +2134,8 @@ mod tests {
             Some(AudienceDelta::Static(DeclaredAudience::literal(Audience::Public)));
         let mut dynamic = tool("dynamic-delta");
         dynamic.parameters = crate::params::test_string_argument_schema("to");
-        dynamic.delta.as_mut().unwrap().audience = Some(AudienceDelta::Dynamic(DynamicAudienceBinding {
-            resolver: crate::names::DynamicResolverName::new("directory"),
-            argument: "to".into(),
-        }));
+        dynamic.delta.as_mut().unwrap().audience = None;
+        dynamic.resolvers = vec![audience_resolver("to")];
         let mut pending = tool("pending-delta");
         pending.delta.as_mut().unwrap().audience = Some(AudienceDelta::PendingCast);
         let neutral = tool("neutral");

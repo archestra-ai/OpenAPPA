@@ -53,17 +53,34 @@ fn describe(contract: &ToolContract, chain: &TrustChain) -> String {
             match &delta.audience {
                 Some(AudienceDelta::Static(audience)) => clauses.push(format!("output audience={audience:?}")),
                 Some(AudienceDelta::PendingCast) => clauses.push("output audience=unknown".to_string()),
-                Some(AudienceDelta::Dynamic(binding)) => clauses.push(format!(
-                    "output audience=resolver:{}({})",
-                    binding.resolver.as_str(),
-                    binding.argument
-                )),
                 None => {}
             }
             if delta.is_none() {
                 clauses.push("output label is neutral".to_string());
             }
         }
+    }
+    for binding in &contract.resolvers {
+        let read = match &binding.argument {
+            Some(argument) => format!("argument {argument}"),
+            None => "the complete arguments".to_string(),
+        };
+        let returned: Vec<&str> = binding
+            .returns
+            .iter()
+            .map(|field| match field {
+                appa_engine::contract::ResolverReturn::Trust => "output trust",
+                appa_engine::contract::ResolverReturn::Audience => "output audience",
+                appa_engine::contract::ResolverReturn::RequiredTrust => "a required trust floor",
+                appa_engine::contract::ResolverReturn::RequiredAudience => "required recipients",
+                appa_engine::contract::ResolverReturn::Attention => "review marks",
+            })
+            .collect();
+        clauses.push(format!(
+            "resolver {} classifies {read} into {}",
+            binding.resolver.as_str(),
+            returned.join(", ")
+        ));
     }
     if let Some(trust) = contract.requires.label.trust_floor {
         clauses.push(format!(

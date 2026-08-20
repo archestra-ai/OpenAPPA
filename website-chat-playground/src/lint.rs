@@ -64,7 +64,7 @@ mod tests {
     use super::*;
 
     use appa_engine::authority::DeclaredTransition;
-    use appa_engine::contract::{AudienceDelta, AudienceRequirement, RecipientSpec};
+    use appa_engine::contract::AudienceDelta;
     use appa_engine::groups::DeclaredAudience;
     use appa_engine::label::ReaderId;
     use appa_engine::value::ToolName;
@@ -101,9 +101,10 @@ mod tests {
             .tool(&ToolName::new("send_email"))
             .expect("the email system provides send_email");
         assert!(matches!(
-            email.requires.label.audience.as_slice(),
-            [AudienceRequirement::Includes(RecipientSpec::Dynamic(binding))]
-                if binding.resolver.as_str() == "email-recipient-readers" && binding.argument == "to"
+            email.resolvers.as_slice(),
+            [binding]
+                if binding.resolver.as_str() == "email-recipient-readers"
+                    && binding.argument.as_deref() == Some("to")
         ));
         let sanitizers = &checked.config.registry_config().sanitizers;
         assert_eq!(sanitizers.len(), 2);
