@@ -83,11 +83,6 @@ pub enum Outcome {
     Stopped(StopReason),
 }
 
-enum RunCompletion {
-    Answer(String),
-    BudgetFinalized(Option<String>),
-}
-
 /// Why a run stopped without an answer. Every variant is fail-closed:
 /// the agent stops rather than proceeding past something it cannot
 /// account for.
@@ -197,21 +192,20 @@ impl Agent {
 
         let mut opening = std::mem::take(&mut transcript.0);
         opening.push(WireMessage::user(task));
-        let (result, messages) = run.drive(Frame::root(root, opening)).await;
+        let (outcome, messages) = run.drive(Frame::root(root, opening)).await;
         transcript.0 = messages;
-        match result {
-            Ok(RunCompletion::Answer(answer)) => {
+        match &outcome {
+            Outcome::Answer(answer) => {
                 transcript.0.push(WireMessage::assistant(answer.clone()));
-                Outcome::Answer(answer)
             }
-            Ok(RunCompletion::BudgetFinalized(answer)) => {
-                if let Some(answer) = &answer {
+            Outcome::BudgetFinalized { answer } => {
+                if let Some(answer) = answer {
                     transcript.0.push(WireMessage::assistant(answer.clone()));
                 }
-                Outcome::BudgetFinalized { answer }
             }
-            Err(stop) => Outcome::Stopped(stop),
+            Outcome::Stopped(_) => {}
         }
+        outcome
     }
 }
 
@@ -256,13 +250,13 @@ struct Run<'a> {
 }
 
 impl Run<'_> {
-    async fn drive(&mut self, root_frame: Frame) -> (Result<RunCompletion, StopReason>, Vec<WireMessage>) {
+    async fn drive(&mut self, root_frame: Frame) -> (Outcome, Vec<WireMessage>) {
         let mut frame = root_frame;
         let mut parents: Vec<Suspended> = Vec::new();
 
         let result = loop {
             if self.cancel.is_cancelled() {
-                break Err(StopReason::Cancelled);
+                break Outcome::Stopped(StopReason::Cancelled);
             }
             if self.budget.deadline_elapsed() {
                 return self.finalize_budget(frame, parents, false).await;
@@ -272,7 +266,7 @@ impl Run<'_> {
                 let message = match self.infer(&frame).await {
                     Ok(message) => message,
                     Err(StopReason::BudgetExhausted) => return self.finalize_budget(frame, parents, true).await,
-                    Err(stop) => break Err(stop),
+                    Err(stop) => break Outcome::Stopped(stop),
                 };
                 let calls = message.tool_calls.clone().unwrap_or_default();
                 if calls.is_empty() {
@@ -280,13 +274,13 @@ impl Run<'_> {
                         None => {
                             let answer = message.content.unwrap_or_default();
                             self.record(&frame, Record::Answers { text: answer.clone() }).await;
-                            break Ok(RunCompletion::Answer(answer));
+                            break Outcome::Answer(answer);
                         }
                         Some(mut parent) => {
                             let crossed = self.return_to_parent(&mut parent, &frame, message.content).await;
                             frame = parent.frame;
                             if let Err(stop) = crossed {
-                                break Err(stop);
+                                break Outcome::Stopped(stop);
                             }
                         }
                     }
@@ -323,7 +317,7 @@ impl Run<'_> {
                     let depth = frame.depth;
                     self.record(&frame, Record::Forked { depth, errand }).await;
                 }
-                Err(stop) => break Err(stop),
+                Err(stop) => break Outcome::Stopped(stop),
             }
         };
 
@@ -339,7 +333,7 @@ impl Run<'_> {
         mut frame: Frame,
         mut parents: Vec<Suspended>,
         allow_inference: bool,
-    ) -> (Result<RunCompletion, StopReason>, Vec<WireMessage>) {
+    ) -> (Outcome, Vec<WireMessage>) {
         Self::answer_unrun_calls(&mut frame);
         while let Some(mut parent) = parents.pop() {
             if let Err(stop) = self.return_to_parent(&mut parent, &frame, None).await {
@@ -347,7 +341,7 @@ impl Run<'_> {
                     .first()
                     .map(|outermost| outermost.frame.transcript.clone())
                     .unwrap_or(parent.frame.transcript);
-                return (Err(stop), root);
+                return (Outcome::Stopped(stop), root);
             }
             frame = parent.frame;
             Self::answer_unrun_calls(&mut frame);
@@ -357,7 +351,7 @@ impl Run<'_> {
         let answer = if allow_inference && !self.budget.deadline_elapsed() {
             match self.infer_final(&frame).await {
                 Ok(answer) => answer,
-                Err(stop) => return (Err(stop), frame.transcript),
+                Err(stop) => return (Outcome::Stopped(stop), frame.transcript),
             }
         } else {
             None
@@ -365,7 +359,7 @@ impl Run<'_> {
         if let Some(text) = &answer {
             self.record(&frame, Record::Answers { text: text.clone() }).await;
         }
-        (Ok(RunCompletion::BudgetFinalized(answer)), frame.transcript)
+        (Outcome::BudgetFinalized { answer }, frame.transcript)
     }
 
     fn answer_unrun_calls(frame: &mut Frame) {

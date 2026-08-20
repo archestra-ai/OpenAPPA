@@ -107,10 +107,8 @@ impl OpenAiConfig {
         self
     }
 
-    /// Configure inference attempts and their full-jitter backoff. Attempts
-    /// belong to one logical inference round: no transcript or tool state
-    /// changes until one response is accepted.
-    pub fn with_retry_policy(mut self, max_attempts: u32, base_delay: Duration, max_delay: Duration) -> Self {
+    #[cfg(test)]
+    fn with_test_retry_policy(mut self, max_attempts: u32, base_delay: Duration, max_delay: Duration) -> Self {
         self.max_attempts = max_attempts.max(1);
         self.retry_base_delay = base_delay;
         self.retry_max_delay = max_delay.max(base_delay);
@@ -305,11 +303,8 @@ mod tests {
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        let config = OpenAiConfig::new(format!("http://{address}"), "fixture/model", "test-key").with_retry_policy(
-            3,
-            Duration::ZERO,
-            Duration::ZERO,
-        );
+        let config = OpenAiConfig::new(format!("http://{address}"), "fixture/model", "test-key")
+            .with_test_retry_policy(3, Duration::ZERO, Duration::ZERO);
         OpenAiCompatible::with_http_client(config, HttpClient::loopback())
     }
 

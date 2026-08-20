@@ -182,7 +182,6 @@ async fn main() -> anyhow::Result<()> {
     .with_head(head)
     .with_limits(Limits {
         max_inference_rounds: 24,
-        finalization_rounds: 1,
         // Twice what v1 allowed, for the same episodes: an authorized
         // offer here names a call to propose again rather than running
         // it, so every acceptance costs a second call.

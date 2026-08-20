@@ -44,7 +44,6 @@ const EFFECTIVELY_UNBOUNDED: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 fn demo_limits() -> Limits {
     Limits {
         max_inference_rounds: 16,
-        finalization_rounds: 1,
         max_tool_calls: 32,
         run_deadline: EFFECTIVELY_UNBOUNDED,
         max_forks: 0,

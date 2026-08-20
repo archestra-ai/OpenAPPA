@@ -7,9 +7,6 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Limits {
     pub max_inference_rounds: u32,
-    /// Rounds held back from tool-using execution so the root can finish
-    /// without tools when an execution ceiling is reached.
-    pub finalization_rounds: u32,
     /// Tool calls answered across the whole run. One completion can
     /// propose any number of them, so the round ceiling does not bound
     /// this: without it a single response could keep the loop dispatching
@@ -24,7 +21,6 @@ impl Default for Limits {
     fn default() -> Self {
         Limits {
             max_inference_rounds: 24,
-            finalization_rounds: 1,
             max_tool_calls: 64,
             run_deadline: Duration::from_secs(240),
             max_forks: 4,
@@ -58,11 +54,10 @@ impl RunBudget {
         }
     }
 
-    /// Charge one tool-using provider call while preserving the configured
-    /// finalization reserve.
+    /// Charge one tool-using provider call while preserving the single
+    /// finalization round.
     pub(crate) fn charge_inference(&mut self) -> Result<(), Exhausted> {
-        let reserve = self.finalization_reserve();
-        if self.rounds >= self.limits.max_inference_rounds.saturating_sub(reserve) {
+        if self.rounds >= self.limits.max_inference_rounds.saturating_sub(1) {
             return Err(Exhausted);
         }
         self.rounds += 1;
@@ -72,15 +67,11 @@ impl RunBudget {
     /// Charge the final tool-free completion. It may spend the reserve but
     /// can never exceed the run's total inference ceiling.
     pub(crate) fn charge_finalization(&mut self) -> Result<(), Exhausted> {
-        if self.rounds >= self.limits.max_inference_rounds || self.finalization_reserve() == 0 {
+        if self.rounds >= self.limits.max_inference_rounds {
             return Err(Exhausted);
         }
         self.rounds += 1;
         Ok(())
-    }
-
-    fn finalization_reserve(&self) -> u32 {
-        self.limits.finalization_rounds.min(self.limits.max_inference_rounds)
     }
 
     /// Charge one tool call, before it is checked. `Err` means the
@@ -140,8 +131,7 @@ mod tests {
     #[test]
     fn each_ceiling_stops_its_own_charge() {
         let limits = Limits {
-            max_inference_rounds: 2,
-            finalization_rounds: 0,
+            max_inference_rounds: 3,
             max_tool_calls: 1,
             max_forks: 1,
             max_fork_depth: 2,
@@ -174,7 +164,6 @@ mod tests {
     fn execution_preserves_one_round_for_finalization() {
         let mut budget = RunBudget::new(Limits {
             max_inference_rounds: 3,
-            finalization_rounds: 1,
             ..Limits::default()
         });
         assert_eq!(budget.charge_inference(), Ok(()));
