@@ -44,6 +44,7 @@ const EFFECTIVELY_UNBOUNDED: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 fn demo_limits() -> Limits {
     Limits {
         max_inference_rounds: 16,
+        finalization_rounds: 1,
         max_tool_calls: 32,
         run_deadline: EFFECTIVELY_UNBOUNDED,
         max_forks: 0,
@@ -369,6 +370,10 @@ async fn session_message(
         let _ = pump.drain().await;
         let final_event = match outcome {
             Ok(Outcome::Answer(text)) => WireEvent::Answer { text },
+            Ok(Outcome::BudgetFinalized { answer: Some(text) }) => WireEvent::Answer { text },
+            Ok(Outcome::BudgetFinalized { answer: None }) => WireEvent::Stopped {
+                text: "the execution budget was reached before a final answer".to_string(),
+            },
             Ok(Outcome::Stopped(reason)) => WireEvent::Stopped {
                 text: reason.to_string(),
             },

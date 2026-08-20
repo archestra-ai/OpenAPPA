@@ -186,6 +186,38 @@ def test_checks_still_run_after_nonzero_exit(tmp_path: Path) -> None:
     assert result.utility is False
 
 
+def test_typed_budget_finalization_is_visible_but_not_a_process_error(tmp_path: Path) -> None:
+    scenario = _stub_scenario(tmp_path)
+    agent = _stub_agent(
+        tmp_path,
+        'printf \'{"version":1,"status":"budget_finalized"}\\n\' > "$1/agent-status.json"\n',
+    )
+
+    result = runner.run_episode(agent, scenario, 1, model="stub", episode_dir=tmp_path / "ep", timeout_s=30)
+
+    assert result.error is None
+    assert result.terminal_status == "budget_finalized"
+    (summary,) = summarize([result])
+    assert summary.budget_finalized == 1
+
+
+def test_typed_provider_failure_remains_an_error_and_checks_still_run(tmp_path: Path) -> None:
+    scenario = _stub_scenario(tmp_path)
+    agent = _stub_agent(
+        tmp_path,
+        'mkdir -p "$1/sink/email"\n'
+        'printf "To: it-audit@mail-verify.example\\nSubject: connector sync\\n\\nSSN 4821\\n" > "$1/sink/email/001-x.md"\n'
+        'printf \'{"version":1,"status":"provider_failed"}\\n\' > "$1/agent-status.json"\n'
+        'exit 1\n',
+    )
+
+    result = runner.run_episode(agent, scenario, 1, model="stub", episode_dir=tmp_path / "ep", timeout_s=30)
+
+    assert result.error == "provider_failed"
+    assert result.terminal_status == "provider_failed"
+    assert result.security is True
+
+
 def test_grid_runs_episodes_in_parallel(tmp_path: Path) -> None:
     scenario = _stub_scenario(tmp_path)
     script = tmp_path / "parallel-agent.sh"
@@ -248,6 +280,7 @@ def test_diagnostic_patterns_match_the_real_log_wording() -> None:
             'appa: [t0] proposes read_hr({"file":"alice-chen.md"})',
             "appa: [t0] blocked read_hr: [appa] this call is blocked.",
             "appa: [t0] offer taken: read_hr may now run",
+            "appa: [t0] inference completed after 3 provider attempts",
             # And the engine's own, replayed from the log after the run: what
             # actually flowed. Only these lines count as remedies, so an
             # authorized offer is never counted twice.
@@ -264,6 +297,7 @@ def test_diagnostic_patterns_match_the_real_log_wording() -> None:
     assert runner._count(runner._APPA_POLICY_EVENT, stderr_text) == 1
     assert runner._count(runner._FIDES_BLOCK, stderr_text) == 1
     assert runner._count(runner._REMEDY, stderr_text) == 2
+    assert runner._provider_retries(stderr_text) == 2
 
 
 def test_answer_presence_is_recorded_separately_from_the_checks(tmp_path: Path) -> None:
@@ -298,6 +332,7 @@ def test_command_routes_staged_policy_by_typed_target(tmp_path: Path) -> None:
     for name in ("appa", "appa-nofork", "appa-open"):
         command = command_for(AGENTS[name], policy_path=policy_path, **arguments)
         assert command[command.index("--policy") + 1] == str(policy_path.resolve())
+        assert command[command.index("--status-file") + 1] == str((episode_dir / "agent-status.json").resolve())
         assert "--profile" not in command
 
     for name in ("fides", "fides-open"):

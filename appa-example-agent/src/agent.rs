@@ -23,6 +23,9 @@ use crate::wire::{ChatCompletionRequest, WireMessage, WireToolCall};
 /// The parent needs to know that the trajectory ended, however: an empty tool
 /// result makes it retry already-committed effects merely to obtain a reply.
 const VOID_CHILD_COMPLETION: &str = "[appa] the child trajectory ended and returned no value; no child result was admitted. This does not attest that its task or side effects succeeded. Do not repeat the delegated task merely to obtain a response.";
+const BLOCKED_CHILD_COMPLETION_CONTEXT: &str = "[appa] the child trajectory ended, but its return value was not admitted. This does not roll back child side effects; they may already have committed. Do not repeat the delegated task merely because its return was blocked.";
+const BUDGET_SKIPPED_CALL: &str = "[appa] this proposed call was not run because the execution budget was reached.";
+const BUDGET_FINALIZATION_PROMPT: &str = "The execution budget is reached. Do not call tools. Briefly report only work evidenced by this parent transcript and clearly name anything unresolved. Do not claim that a child task or side effect succeeded unless an admitted result says so.";
 
 /// The transcript's opening messages: the host's own configuration,
 /// never the policy's.
@@ -76,7 +79,13 @@ pub struct SpawnTool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Answer(String),
+    BudgetFinalized { answer: Option<String> },
     Stopped(StopReason),
+}
+
+enum RunCompletion {
+    Answer(String),
+    BudgetFinalized(Option<String>),
 }
 
 /// Why a run stopped without an answer. Every variant is fail-closed:
@@ -191,9 +200,15 @@ impl Agent {
         let (result, messages) = run.drive(Frame::root(root, opening)).await;
         transcript.0 = messages;
         match result {
-            Ok(answer) => {
+            Ok(RunCompletion::Answer(answer)) => {
                 transcript.0.push(WireMessage::assistant(answer.clone()));
                 Outcome::Answer(answer)
+            }
+            Ok(RunCompletion::BudgetFinalized(answer)) => {
+                if let Some(answer) = &answer {
+                    transcript.0.push(WireMessage::assistant(answer.clone()));
+                }
+                Outcome::BudgetFinalized { answer }
             }
             Err(stop) => Outcome::Stopped(stop),
         }
@@ -241,7 +256,7 @@ struct Run<'a> {
 }
 
 impl Run<'_> {
-    async fn drive(&mut self, root_frame: Frame) -> (Result<String, StopReason>, Vec<WireMessage>) {
+    async fn drive(&mut self, root_frame: Frame) -> (Result<RunCompletion, StopReason>, Vec<WireMessage>) {
         let mut frame = root_frame;
         let mut parents: Vec<Suspended> = Vec::new();
 
@@ -250,12 +265,13 @@ impl Run<'_> {
                 break Err(StopReason::Cancelled);
             }
             if self.budget.deadline_elapsed() {
-                break Err(StopReason::BudgetExhausted);
+                return self.finalize_budget(frame, parents, false).await;
             }
 
             let Some(call) = frame.pending.pop_front() else {
                 let message = match self.infer(&frame).await {
                     Ok(message) => message,
+                    Err(StopReason::BudgetExhausted) => return self.finalize_budget(frame, parents, true).await,
                     Err(stop) => break Err(stop),
                 };
                 let calls = message.tool_calls.clone().unwrap_or_default();
@@ -264,7 +280,7 @@ impl Run<'_> {
                         None => {
                             let answer = message.content.unwrap_or_default();
                             self.record(&frame, Record::Answers { text: answer.clone() }).await;
-                            break Ok(answer);
+                            break Ok(RunCompletion::Answer(answer));
                         }
                         Some(mut parent) => {
                             let crossed = self.return_to_parent(&mut parent, &frame, message.content).await;
@@ -287,7 +303,8 @@ impl Run<'_> {
             };
 
             if self.budget.charge_tool_call() == Err(Exhausted) {
-                break Err(StopReason::BudgetExhausted);
+                frame.pending.push_front(call);
+                return self.finalize_budget(frame, parents, true).await;
             }
             match self.answer_call(&mut frame, &call).await {
                 Ok(Answered::Reply(text)) => frame.transcript.push(WireMessage::tool_result(&call.id, text)),
@@ -315,6 +332,48 @@ impl Run<'_> {
             None => frame,
         };
         (result, root.transcript)
+    }
+
+    async fn finalize_budget(
+        &mut self,
+        mut frame: Frame,
+        mut parents: Vec<Suspended>,
+        allow_inference: bool,
+    ) -> (Result<RunCompletion, StopReason>, Vec<WireMessage>) {
+        Self::answer_unrun_calls(&mut frame);
+        while let Some(mut parent) = parents.pop() {
+            if let Err(stop) = self.return_to_parent(&mut parent, &frame, None).await {
+                let root = parents
+                    .first()
+                    .map(|outermost| outermost.frame.transcript.clone())
+                    .unwrap_or(parent.frame.transcript);
+                return (Err(stop), root);
+            }
+            frame = parent.frame;
+            Self::answer_unrun_calls(&mut frame);
+        }
+
+        self.record(&frame, Record::BudgetFinalized).await;
+        let answer = if allow_inference && !self.budget.deadline_elapsed() {
+            match self.infer_final(&frame).await {
+                Ok(answer) => answer,
+                Err(stop) => return (Err(stop), frame.transcript),
+            }
+        } else {
+            None
+        };
+        if let Some(text) = &answer {
+            self.record(&frame, Record::Answers { text: text.clone() }).await;
+        }
+        (Ok(RunCompletion::BudgetFinalized(answer)), frame.transcript)
+    }
+
+    fn answer_unrun_calls(frame: &mut Frame) {
+        for call in frame.pending.drain(..) {
+            frame
+                .transcript
+                .push(WireMessage::tool_result(call.id, BUDGET_SKIPPED_CALL));
+        }
     }
 
     async fn record(&self, frame: &Frame, record: Record) {
@@ -460,7 +519,9 @@ impl Run<'_> {
                     ToolOutcome::Failure {
                         message: reason.clone(),
                     },
-                    Some(reason),
+                    Some(format!(
+                        "{reason}\n\nHarness context:\n  - {BLOCKED_CHILD_COMPLETION_CONTEXT}"
+                    )),
                 )
             }
             HookDecision::Refuse { detail } => return Err(StopReason::Refused(detail)),
@@ -655,9 +716,44 @@ impl Run<'_> {
             _ = self.cancel.cancelled() => Err(StopReason::Cancelled),
             result = tokio::time::timeout(self.budget.remaining(), self.agent.provider.complete(request)) => {
                 match result {
-                    Ok(Ok(message)) => Ok(message),
+                    Ok(Ok(completion)) => {
+                        if completion.attempts > 1 {
+                            self.record(frame, Record::ProviderRetried { attempts: completion.attempts }).await;
+                        }
+                        Ok(completion.message)
+                    }
                     Ok(Err(error)) => Err(StopReason::InferenceFailed(error.to_string())),
                     Err(_) => Err(StopReason::BudgetExhausted),
+                }
+            }
+        }
+    }
+
+    async fn infer_final(&mut self, frame: &Frame) -> Result<Option<String>, StopReason> {
+        if self.budget.charge_finalization() == Err(Exhausted) {
+            return Ok(None);
+        }
+        let mut messages = self.agent.head.0.clone();
+        messages.extend(frame.transcript.iter().cloned());
+        messages.push(WireMessage::system(BUDGET_FINALIZATION_PROMPT));
+        let request = ChatCompletionRequest {
+            model: String::new(),
+            messages,
+            tools: None,
+        };
+        tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => Err(StopReason::Cancelled),
+            result = tokio::time::timeout(self.budget.remaining(), self.agent.provider.complete(request)) => {
+                match result {
+                    Ok(Ok(completion)) => {
+                        if completion.attempts > 1 {
+                            self.record(frame, Record::ProviderRetried { attempts: completion.attempts }).await;
+                        }
+                        Ok(completion.message.content)
+                    }
+                    Ok(Err(error)) => Err(StopReason::InferenceFailed(error.to_string())),
+                    Err(_) => Ok(None),
                 }
             }
         }

@@ -569,6 +569,47 @@ confined_child_return = true
 }
 
 #[tokio::test]
+async fn a_blocked_child_return_warns_that_child_effects_are_not_rolled_back() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let policy = r#"
+version = 1
+
+[[policy.tool]]
+name = "delegate"
+parameters = { type = "object", properties = { task = { type = "string" } } }
+
+[[policy.tool]]
+name = "read_hr"
+delta = { audience = { exactly = ["internal"] } }
+
+[policy.deployment]
+context_control = true
+"#;
+    let provider = Provider::default();
+    provider
+        .calls("delegate", serde_json::json!({"task": "Look up Alice privately."}))
+        .calls("read_hr", serde_json::json!({"who": "alice"}))
+        .pursues_the_offer()
+        .calls("read_hr", serde_json::json!({"who": "alice"}))
+        .says("Alice Chen, SSN 4821-9930")
+        .says("The child ended; I will not repeat its work.");
+    let host = ToolHost::default();
+    host.answers("read_hr", "Alice Chen, SSN 4821-9930");
+
+    let agent = delegating(agent(runtime(&dir, policy, ""), &provider, &host, &["delegate", "read_hr"]).await);
+    let outcome = agent.run(root(), "Delegate the lookup.", Default::default()).await;
+
+    assert_eq!(
+        outcome,
+        Outcome::Answer("The child ended; I will not repeat its work.".to_string())
+    );
+    let feedback = provider.tool_result(5, "call_0");
+    assert!(feedback.contains("its return value was not admitted"));
+    assert!(feedback.contains("This does not roll back child side effects"));
+    assert!(feedback.contains("Do not repeat the delegated task merely because its return was blocked"));
+}
+
+#[tokio::test]
 async fn a_child_return_over_the_output_cap_still_crosses_whole() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let long = format!("Alice Chen. {}", "detail. ".repeat(10_000));
@@ -779,7 +820,11 @@ async fn a_marked_spawn_is_offered_no_input_hop_while_an_ordinary_call_is() {
             &["read_hr", "send", "delegate"],
         )
         .await,
-    );
+    )
+    .with_limits(Limits {
+        max_inference_rounds: 9,
+        ..Limits::default()
+    });
     let outcome = agent.run(root(), "Delegate the lookup.", Default::default()).await;
 
     assert_eq!(outcome, Outcome::Answer("Done.".to_string()));
@@ -852,17 +897,19 @@ async fn a_second_turn_continues_where_the_first_one_left_the_trajectory() {
 }
 
 #[tokio::test]
-async fn a_stopped_turn_leaves_its_transcript_behind() {
+async fn a_budget_finalized_turn_leaves_its_transcript_behind() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let provider = Provider::default();
-    provider.calls("read_hr", serde_json::json!({"who": "alice"}));
+    provider
+        .calls("read_hr", serde_json::json!({"who": "alice"}))
+        .says("I reached the limit after the lookup.");
     let host = ToolHost::default();
     host.answers("read_hr", "Alice Chen, Staff Engineer");
 
     let agent = agent(runtime(&dir, NEUTRAL, ""), &provider, &host, &["read_hr"])
         .await
         .with_limits(Limits {
-            max_inference_rounds: 1,
+            max_inference_rounds: 2,
             ..Limits::default()
         });
     let mut transcript = appa_example_agent::Transcript::default();
@@ -870,15 +917,70 @@ async fn a_stopped_turn_leaves_its_transcript_behind() {
         .turn(root(), &mut transcript, "Who is Alice?", Default::default())
         .await;
 
-    assert!(matches!(outcome, Outcome::Stopped(_)), "the round ceiling ends it");
+    assert_eq!(
+        outcome,
+        Outcome::BudgetFinalized {
+            answer: Some("I reached the limit after the lookup.".to_string())
+        },
+        "the reserved round finalizes without tools",
+    );
     let said: Vec<&str> = transcript
         .messages()
         .iter()
         .filter_map(|message| message.content.as_deref())
         .collect();
     assert!(
-        said.contains(&"Who is Alice?") && said.contains(&"Alice Chen, Staff Engineer"),
-        "the task and what the call returned both survive the stop. Left: {said:?}",
+        said.contains(&"Who is Alice?")
+            && said.contains(&"Alice Chen, Staff Engineer")
+            && said.contains(&"I reached the limit after the lookup."),
+        "the task, admitted result, and final status survive the turn. Left: {said:?}",
+    );
+}
+
+#[tokio::test]
+async fn budget_finalization_closes_a_child_void_and_finishes_from_the_parent() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let provider = Provider::default();
+    provider
+        .calls("delegate", serde_json::json!({"task": "Look up Alice privately."}))
+        .calls("read_hr", serde_json::json!({"who": "alice"}))
+        .says("The delegated lookup ended without an admitted result.");
+    let host = ToolHost::default();
+    host.answers("read_hr", "Alice Chen, SSN 4821-9930");
+
+    let agent = delegating(agent(runtime(&dir, FORKING, ""), &provider, &host, &["delegate", "read_hr"]).await)
+        .with_limits(Limits {
+            max_inference_rounds: 3,
+            max_fork_depth: 1,
+            ..Limits::default()
+        });
+    let outcome = agent.run(root(), "Delegate the lookup.", Default::default()).await;
+
+    assert_eq!(
+        outcome,
+        Outcome::BudgetFinalized {
+            answer: Some("The delegated lookup ended without an admitted result.".to_string())
+        }
+    );
+    let final_request = &provider.requests()[2];
+    assert!(
+        final_request.get("tools").is_none(),
+        "the reserved completion has no tools"
+    );
+    let final_messages = final_request["messages"].as_array().expect("a final transcript");
+    assert!(
+        final_messages.iter().any(|message| {
+            message["content"]
+                .as_str()
+                .is_some_and(|content| content.starts_with("[appa] the child trajectory ended"))
+        }),
+        "the root sees the void close",
+    );
+    assert!(
+        final_messages
+            .iter()
+            .all(|message| message["content"].as_str() != Some("Alice Chen, SSN 4821-9930")),
+        "the child's admitted body never enters the root finalization context",
     );
 }
 
