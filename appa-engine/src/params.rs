@@ -790,16 +790,15 @@ pub struct CanonicalArguments {
 
 impl CanonicalArguments {
     /// The engine construction path: one raw JSON object, strictly scanned and
-    /// schema-validated. Runtime raw-byte adoption is `T01`; the engine path is complete.
+    /// schema-validated.
     pub(crate) fn from_raw(bytes: &[u8], parameters: &ToolParameters) -> Result<Self, ArgumentError> {
         let unchecked = Self::from_raw_unchecked(bytes)?;
         parameters.validate(&unchecked.value)?;
         Ok(unchecked)
     }
 
-    /// Compatibility constructor for callers that hold a parsed value (`T01` owns the
-    /// runtime raw-byte cutover). It funnels through the same scanner and validation as
-    /// [`Self::from_raw`], so the two paths cannot diverge.
+    /// The construction path for callers that hold a parsed value. It funnels through the
+    /// same scanner and validation as [`Self::from_raw`], so the two paths cannot diverge.
     #[cfg(test)]
     pub(crate) fn from_value(value: &Value, parameters: &ToolParameters) -> Result<Self, ArgumentError> {
         let bytes = serde_json::to_vec(value).map_err(|e| ArgumentError::Syntax(e.to_string()))?;
