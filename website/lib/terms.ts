@@ -59,7 +59,7 @@ const TERMS = {
   resolvers:
     "Tool-level dynamic resolver bindings. Each receives the complete canonical argument object before the call is checked.",
   returns:
-    "The trust, audience, and attention fields a tool-level resolver must return. Trust and audience have one owner; attention is additive.",
+    "The trust, audience, and attention fields a tool-level resolver must return. Trust values select from the policy trust chain; attention values select from marks named by authority mandates. Trust and audience have one owner; attention is additive.",
   "[externals.dynamic]":
     "The deployment binding shared by dynamic resolvers: either an HTTP endpoint or the tool-level-only Claude Code builtin.",
   internal:
@@ -92,7 +92,8 @@ const TERMS = {
   may_add:
     "The audience cover ceiling of an authority: the readers its rulings may cover.",
   can_waive: "The effect kinds an authority ruling may waive for one dispatch.",
-  attends: "The attention marks an authority's rulings satisfy.",
+  attends:
+    "The attention marks an authority's rulings satisfy. Tool-level dynamic resolvers can demand only marks present in at least one authority mandate.",
   scope:
     "The tags a registered component (authority, cast, or sanitizer) has jurisdiction over.",
   attention: "Named marks demanding a fresh ruling on every dispatch.",

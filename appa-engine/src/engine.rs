@@ -1855,7 +1855,7 @@ impl Engine {
                     return Err(TransitionError::ForeignDynamicAnswer { argument });
                 }
             }
-            match check::validate_tool_resolutions(contract, call) {
+            match check::validate_tool_resolutions(&self.registry, contract, call) {
                 Ok(()) => {}
                 Err(check::ToolResolutionRefusal::Needed(bindings)) => {
                     return Err(TransitionError::ToolResolutionNeeded {
@@ -1867,6 +1867,9 @@ impl Engine {
                 }
                 Err(check::ToolResolutionRefusal::Foreign(resolver)) => {
                     return Err(TransitionError::ForeignToolResolution { resolver });
+                }
+                Err(check::ToolResolutionRefusal::OutsidePolicy(resolver)) => {
+                    return Err(TransitionError::InvalidToolResolution { resolver });
                 }
             }
         }
@@ -2932,7 +2935,7 @@ impl Engine {
             .extend(sanitizer.clone())
             .ok_or(TransitionError::SanitizerUnapplicable)?;
         let substituted = substituted_call(contract, call, body)?;
-        if !check::resolution_pins_valid(contract, &substituted) {
+        if !check::resolution_pins_valid(&self.registry, contract, &substituted) {
             return Err(TransitionError::SanitizerUnapplicable);
         }
 

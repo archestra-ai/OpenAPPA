@@ -50,8 +50,7 @@ confined_results = ["search_vendor", "read_vendor", "create_vendor", "send_email
 
 # --- registered externals ---------------------------------------------------
 #
-# Implementations bind here, never in the policy (`CFG-15`, `IMP-3`). Resolver
-# URLs are loopback placeholders: the bench runner binds its fixture server on
+# HTTP implementations bind here by resolver name. Resolver URLs are loopback placeholders: the bench runner binds its fixture server on
 # an ephemeral port and rewrites them before opening the runtime, since
 # `Config::load` refuses non-loopback http.
 
@@ -59,6 +58,9 @@ confined_results = ["search_vendor", "read_vendor", "create_vendor", "send_email
 timeout_ms = 5000
 max_body_bytes = 65536
 
-# One endpoint serves every named dynamic resolver; the request carries the name.
-[externals.dynamic]
+# Each resolver is bound independently. This fixture deliberately routes both names to one server.
+[externals.dynamic.tenant-record-readers]
+url = "http://127.0.0.1:0/dynamic-resolver"
+
+[externals.dynamic.mailbox-tenant-readers]
 url = "http://127.0.0.1:0/dynamic-resolver"

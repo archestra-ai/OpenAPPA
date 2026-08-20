@@ -68,24 +68,32 @@ OpenAPPA can also call the installed Claude Code CLI as a built-in tool-level dy
 ```toml
 [[dynamic_resolver]]
 name = "classify-customer"
+builtin = "claude-code"
 
 [[tool]]
 name = "get_customer"
 resolvers = [
-  { resolver = "classify-customer", returns = ["trust", "audience", "attention"] }
+  { resolver = "classify-customer", returns = { delta = ["trust", "audience"], requires = ["trust", "audience", "attention"] } }
 ]
+
+[[authority]]
+name = "operator"
+
+[authority.mandate]
+can_cover_trust_to = "trusted"
+attends = ["privacy-review"]
 
 [externals]
 timeout_ms = 60000
 max_body_bytes = 65536
 
-[externals.dynamic]
-builtin = "claude-code"
+[externals.authorities.operator]
+builtin = "hitl"
 ```
 
-The runtime uses the current user's Claude Code authentication and fixed Sonnet configuration. It starts a fresh safe-mode process with no tools, hooks, project settings, or persisted session. The classifier sees the complete canonical arguments, current trust and audience, valid trust ranks, and existing static attention requirements. It may return any combination selected by `returns`, including `delta` and `attention` together.
+The runtime uses the current user's Claude Code authentication and fixed Sonnet configuration. It starts a fresh safe-mode process with no tools, hooks, project settings, or persisted session. The classifier sees the complete canonical arguments, current trust and audience, the policy trust chain, the attention marks named by authority mandates, and existing static attention requirements. It may return output `delta` and call-time `requires` together. Dynamic requirements support a trust floor, an audience `includes` floor and `cap` ceiling, and a fresh attention mark selected from that policy-provided list; history remains static. If no authority attends any mark, the only valid dynamic attention answer is an empty list.
 
-This is a POC trusted classifier rather than a sandboxed policy authority: there is no additional ceiling on its answer, and argument-level prompt-injection resistance is best-effort. Process errors, timeouts, invalid fields, and invalid rank or audience values fail closed. The older single-argument audience resolver syntax remains HTTP-only.
+This is a POC trusted classifier rather than a sandboxed policy authority: there is no additional ceiling on its answer, and argument-level prompt-injection resistance is best-effort. Process errors, timeouts, invalid fields, and trust or attention values outside policy fail closed. The older single-argument audience resolver syntax remains HTTP-only.
 
 ## Uninstall
 

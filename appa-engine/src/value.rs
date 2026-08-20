@@ -665,7 +665,7 @@ mod tests {
         };
         let base = call("lookup", json!({ "id": 7, "deep": true }));
         let resolved = base.clone().with_tool_resolutions(vec![
-            PinnedToolResolution::from_answer(binding, Some(crate::label::Trust::new(0)), None, None)
+            PinnedToolResolution::from_answer(binding, Some(crate::label::Trust::new(0)), None, None, None, None)
                 .expect("the declared trust answer pins"),
         ]);
         assert_eq!(

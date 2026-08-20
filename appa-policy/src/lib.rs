@@ -109,6 +109,8 @@ pub struct Config {
     engine: Engine,
     registry_config: RegistryConfig,
     boundary_label: Label,
+    dynamic_resolver_names: BTreeSet<DynamicResolverName>,
+    dynamic_resolver_builtins: BTreeMap<DynamicResolverName, String>,
 }
 
 impl Config {
@@ -137,6 +139,7 @@ impl Config {
         };
 
         let mut dynamic_resolver_names = BTreeSet::new();
+        let mut dynamic_resolver_builtins = BTreeMap::new();
         for resolver in raw.dynamic_resolver {
             let name = DynamicResolverName::new(resolver.name);
             if resolver.resolver.is_some() {
@@ -147,6 +150,9 @@ impl Config {
             }
             if !dynamic_resolver_names.insert(name.clone()) {
                 return Err(ConfigError::DuplicateDynamicResolver(name.as_str().to_string()));
+            }
+            if let Some(builtin) = resolver.builtin {
+                dynamic_resolver_builtins.insert(name, builtin);
             }
         }
         let membership = match raw.membership {
@@ -262,6 +268,8 @@ impl Config {
             engine,
             registry_config,
             boundary_label,
+            dynamic_resolver_names,
+            dynamic_resolver_builtins,
         })
     }
 
@@ -281,6 +289,18 @@ impl Config {
 
     pub fn registry_config(&self) -> &RegistryConfig {
         &self.registry_config
+    }
+
+    /// Every `[[dynamic_resolver]]` the policy registers — the validated superset of every
+    /// resolver name a tool binding or dynamic read references.
+    pub fn dynamic_resolver_names(&self) -> impl Iterator<Item = &DynamicResolverName> {
+        self.dynamic_resolver_names.iter()
+    }
+
+    /// Inline builtin implementations attached to individual dynamic resolver
+    /// registrations. HTTP implementations remain deployment bindings.
+    pub fn dynamic_resolver_builtins(&self) -> impl Iterator<Item = (&DynamicResolverName, &String)> {
+        self.dynamic_resolver_builtins.iter()
     }
 }
 
@@ -413,6 +433,7 @@ struct RawLimits {
 struct RawDynamicResolver {
     name: String,
     resolver: Option<toml::Value>,
+    builtin: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -478,7 +499,16 @@ struct RawTool {
 #[serde(deny_unknown_fields)]
 struct RawToolResolver {
     resolver: String,
-    returns: Vec<String>,
+    returns: RawScopedResolverReturns,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawScopedResolverReturns {
+    #[serde(default)]
+    delta: Vec<String>,
+    #[serde(default)]
+    requires: Vec<String>,
 }
 
 impl RawTool {
@@ -517,26 +547,30 @@ impl RawTool {
         // `ConfigError::Registry` when the engine opens.
         let mut resolvers = Vec::new();
         for raw in self.resolvers {
+            use appa_engine::contract::{ResolverReturn, ReturnScope};
             let mut returns = BTreeSet::new();
-            for dimension in raw.returns {
-                let parsed = match dimension.as_str() {
-                    "trust" => appa_engine::contract::ResolverReturn::Trust,
-                    "audience" => appa_engine::contract::ResolverReturn::Audience,
-                    "attention" => appa_engine::contract::ResolverReturn::Attention,
-                    _ => {
+            for (scope, dimensions) in [
+                (ReturnScope::Delta, raw.returns.delta),
+                (ReturnScope::Requires, raw.returns.requires),
+            ] {
+                for dimension in dimensions {
+                    let parsed = ResolverReturn::ALL
+                        .into_iter()
+                        .find(|field| field.scope() == scope && field.wire_name() == dimension);
+                    let Some(parsed) = parsed else {
                         return Err(ConfigError::UnknownResolverReturn {
                             tool: self.name.clone(),
                             resolver: raw.resolver.clone(),
-                            dimension,
+                            dimension: format!("{}.{dimension}", scope.wire_name()),
+                        });
+                    };
+                    if !returns.insert(parsed) {
+                        return Err(ConfigError::DuplicateResolverReturn {
+                            tool: self.name.clone(),
+                            resolver: raw.resolver.clone(),
+                            dimension: format!("{}.{dimension}", scope.wire_name()),
                         });
                     }
-                };
-                if !returns.insert(parsed) {
-                    return Err(ConfigError::DuplicateResolverReturn {
-                        tool: self.name.clone(),
-                        resolver: raw.resolver.clone(),
-                        dimension,
-                    });
                 }
             }
             resolvers.push(appa_engine::contract::ToolResolverBinding {
@@ -1279,7 +1313,7 @@ confined_results = ["lookup"]
         assert!(matches!(
             Config::from_toml_str(
                 "version = 1\n[[tool]]\nname = \"lookup\"\n\
-                 resolvers = [{ resolver = \"classifier\", returns = [\"trust\"] }]\n"
+                 resolvers = [{ resolver = \"classifier\", returns = { delta = [\"trust\"] } }]\n"
             ),
             Err(ConfigError::UnregisteredDynamicResolver { tool, resolver })
                 if tool == "lookup" && resolver == "classifier"
@@ -1299,8 +1333,8 @@ name = "review"
 name = "lookup"
 parameters = { type = "object", properties = { id = { type = "string" }, deep = { type = "boolean" } }, required = ["id"] }
 resolvers = [
-  { resolver = "classifier", returns = ["trust", "audience"] },
-  { resolver = "review", returns = ["attention"] },
+  { resolver = "classifier", returns = { delta = ["trust", "audience"], requires = ["trust", "audience"] } },
+  { resolver = "review", returns = { requires = ["attention"] } },
 ]
 "#;
         let config = Config::from_toml_str(policy).expect("disjoint tool resolvers load");
@@ -1324,6 +1358,16 @@ resolvers = [
                 .returns
                 .contains(&appa_engine::contract::ResolverReturn::Attention)
         );
+        assert!(
+            tool.resolvers[0]
+                .returns
+                .contains(&appa_engine::contract::ResolverReturn::RequiredTrust)
+        );
+        assert!(
+            tool.resolvers[0]
+                .returns
+                .contains(&appa_engine::contract::ResolverReturn::RequiredAudience)
+        );
     }
 
     #[test]
@@ -1337,11 +1381,11 @@ resolvers = [
         for text in [
             policy(
                 "delta = { trust = \"suspicious\" }",
-                "{ resolver = \"one\", returns = [\"trust\"] }",
+                "{ resolver = \"one\", returns = { delta = [\"trust\"] } }",
             ),
             policy(
                 "",
-                "{ resolver = \"one\", returns = [\"audience\"] }, { resolver = \"two\", returns = [\"audience\"] }",
+                "{ resolver = \"one\", returns = { delta = [\"audience\"] } }, { resolver = \"two\", returns = { delta = [\"audience\"] } }",
             ),
         ] {
             assert!(matches!(
@@ -1360,15 +1404,15 @@ resolvers = [
             )
         };
         assert!(matches!(
-            Config::from_toml_str(&policy("[]")),
+            Config::from_toml_str(&policy("{}")),
             Err(ConfigError::Registry(LoadError::EmptyToolResolver { .. }))
         ));
         assert!(matches!(
-            Config::from_toml_str(&policy("[\"trust\", \"trust\"]")),
+            Config::from_toml_str(&policy("{ delta = [\"trust\", \"trust\"] }")),
             Err(ConfigError::DuplicateResolverReturn { .. })
         ));
         assert!(matches!(
-            Config::from_toml_str(&policy("[\"effects\"]")),
+            Config::from_toml_str(&policy("{ delta = [\"effects\"] }")),
             Err(ConfigError::UnknownResolverReturn { .. })
         ));
     }

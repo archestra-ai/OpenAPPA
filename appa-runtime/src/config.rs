@@ -57,9 +57,8 @@ pub struct Externals {
     /// The classifiers a resolver-backed `[[cast]]` consults. Endpoint-only: a constant
     /// cast is answered from the policy and binds nothing here.
     pub casts: BTreeMap<String, Endpoint>,
-    /// The shared dynamic-resolver implementation. HTTP supports both resolver
-    /// contracts; the `claude-code` builtin is deliberately tool-level only.
-    pub dynamic: Option<Implementation>,
+    /// Dynamic-resolver implementations, keyed by the policy registration name.
+    pub dynamic: BTreeMap<String, Implementation>,
     /// The membership resolver the policy's `[membership]` registers.
     pub membership: Option<Endpoint>,
 }
@@ -179,7 +178,8 @@ struct RawExternals {
     sanitizers: BTreeMap<String, RawImplementation>,
     #[serde(default)]
     casts: BTreeMap<String, RawImplementation>,
-    dynamic: Option<RawImplementation>,
+    #[serde(default)]
+    dynamic: BTreeMap<String, RawImplementation>,
     membership: Option<RawImplementation>,
 }
 
@@ -243,14 +243,23 @@ impl Config {
                 timeout: Duration::from_millis(raw.externals.timeout_ms),
                 review_timeout: Duration::from_millis(raw.externals.review_timeout_ms),
                 max_body_bytes: raw.externals.max_body_bytes,
-                authorities: resolve_implementations("authorities", raw.externals.authorities, &lookup)?,
-                sanitizers: resolve_implementations("sanitizers", raw.externals.sanitizers, &lookup)?,
+                authorities: resolve_implementations(
+                    "authorities",
+                    raw.externals.authorities,
+                    &lookup,
+                    crate::builtins::valid_implementation_name,
+                )?,
+                sanitizers: resolve_implementations(
+                    "sanitizers",
+                    raw.externals.sanitizers,
+                    &lookup,
+                    crate::builtins::valid_implementation_name,
+                )?,
                 casts: resolve_endpoints("casts", raw.externals.casts, &lookup)?,
-                dynamic: raw
-                    .externals
-                    .dynamic
-                    .map(|implementation| resolve_dynamic(implementation, &lookup))
-                    .transpose()?,
+                // `claude-code` is the one dynamic builtin; modules cannot serve this section.
+                dynamic: resolve_implementations("dynamic", raw.externals.dynamic, &lookup, |builtin| {
+                    builtin == CLAUDE_CODE_BUILTIN
+                })?,
                 membership: raw
                     .externals
                     .membership
@@ -264,25 +273,15 @@ impl Config {
     }
 }
 
-fn resolve_dynamic(
-    entry: RawImplementation,
-    lookup: &impl Fn(&str) -> Option<String>,
-) -> Result<Implementation, ConfigError> {
-    // `claude-code` is the one dynamic builtin; modules cannot serve this section.
-    resolve_implementation("dynamic", "dynamic", entry, lookup, |builtin| {
-        builtin == CLAUDE_CODE_BUILTIN
-    })
-}
-
 fn resolve_implementations(
     section: &'static str,
     raw: BTreeMap<String, RawImplementation>,
     lookup: &impl Fn(&str) -> Option<String>,
+    valid_builtin: fn(&str) -> bool,
 ) -> Result<BTreeMap<String, Implementation>, ConfigError> {
     raw.into_iter()
         .map(|(name, entry)| {
-            let implementation =
-                resolve_implementation(section, &name, entry, lookup, crate::builtins::valid_implementation_name)?;
+            let implementation = resolve_implementation(section, &name, entry, lookup, valid_builtin)?;
             Ok((name, implementation))
         })
         .collect()
@@ -459,7 +458,7 @@ mod tests {
         let config = parse(MINIMAL).expect("the minimal fixture validates");
         assert_eq!(config.externals.timeout, Duration::from_millis(5000));
         assert_eq!(config.externals.max_body_bytes, 65536);
-        assert!(config.externals.dynamic.is_none());
+        assert!(config.externals.dynamic.is_empty());
         assert_eq!(
             config.policy_file().value().get("anything").and_then(|v| v.as_str()),
             Some("the runtime does not interpret this"),
@@ -529,18 +528,22 @@ mod tests {
     #[test]
     fn a_present_secret_resolves_and_debug_redacts_it() {
         let text = format!(
-            "{MINIMAL}\n[externals.dynamic]\nurl = \"https://resolver.internal\"\ntoken_env = \"APPA_RESOLVER_TOKEN\"\n"
+            "{MINIMAL}\n[externals.dynamic.classifier]\nurl = \"https://resolver.internal\"\ntoken_env = \"APPA_RESOLVER_TOKEN\"\n"
         );
         let config = parse_with(&text, |var| {
             (var == "APPA_RESOLVER_TOKEN").then(|| "sekret".to_string())
         })
         .expect("the fixture with a set secret validates");
         assert!(!format!("{:?}", config.externals).contains("sekret"));
-        let dynamic = config.externals.dynamic.expect("the dynamic endpoint is set");
+        let dynamic = config
+            .externals
+            .dynamic
+            .get("classifier")
+            .expect("the named dynamic endpoint is set");
         let Implementation::Resolver(dynamic) = dynamic else {
             panic!("the URL config selects an endpoint");
         };
-        let token = dynamic.token.expect("the token resolved");
+        let token = dynamic.token.as_ref().expect("the token resolved");
         assert_eq!(token.reveal(), "sekret");
         assert_eq!(format!("{token:?}"), "Token(<redacted>)");
     }
@@ -566,15 +569,17 @@ mod tests {
             Some(Implementation::Builtin(name)) if name == "redact-email",
         ));
 
-        let text = format!("{MINIMAL}\n[externals.dynamic]\nbuiltin = \"claude-code\"\n");
+        let text = format!("{MINIMAL}\n[externals.dynamic.classifier]\nbuiltin = \"claude-code\"\n");
         let config = parse(&text).expect("the Claude Code dynamic builtin validates");
         assert!(matches!(
-            config.externals.dynamic,
+            config.externals.dynamic.get("classifier"),
             Some(Implementation::Builtin(name)) if name == CLAUDE_CODE_BUILTIN
         ));
-        let text = format!("{MINIMAL}\n[externals.dynamic]\nbuiltin = \"approve\"\n");
+        let text = format!("{MINIMAL}\n[externals.dynamic.classifier]\nbuiltin = \"approve\"\n");
         assert!(matches!(parse(&text), Err(ConfigError::InvalidBuiltinName { .. })));
-        let text = format!("{MINIMAL}\n[externals.dynamic]\nbuiltin = \"claude-code\"\ntoken_env = \"APPA_TOKEN\"\n");
+        let text = format!(
+            "{MINIMAL}\n[externals.dynamic.classifier]\nbuiltin = \"claude-code\"\ntoken_env = \"APPA_TOKEN\"\n"
+        );
         assert!(matches!(parse(&text), Err(ConfigError::ImplementationChoice { .. })));
         let text = format!("{MINIMAL}\n[externals.membership]\nbuiltin = \"approve\"\n");
         assert!(matches!(parse(&text), Err(ConfigError::BuiltinNotAllowed { .. })));

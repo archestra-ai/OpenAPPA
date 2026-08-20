@@ -152,7 +152,7 @@ struct ExternalsConfig {
     #[serde(default)]
     max_body_bytes: Option<usize>,
     #[serde(default)]
-    dynamic: Option<EndpointConfig>,
+    dynamic: std::collections::BTreeMap<String, EndpointConfig>,
     #[serde(default)]
     membership: Option<EndpointConfig>,
 }
@@ -193,12 +193,19 @@ impl SessionInner {
                 authorities: Default::default(),
                 sanitizers: Default::default(),
                 casts: Default::default(),
-                dynamic: parsed.dynamic.map(|e| {
-                    Implementation::Resolver(Endpoint {
-                        url: e.url,
-                        token: None,
+                dynamic: parsed
+                    .dynamic
+                    .into_iter()
+                    .map(|(name, endpoint)| {
+                        (
+                            name,
+                            Implementation::Resolver(Endpoint {
+                                url: endpoint.url,
+                                token: None,
+                            }),
+                        )
                     })
-                }),
+                    .collect(),
                 membership: parsed.membership.map(|e| Endpoint {
                     url: e.url,
                     token: None,
@@ -212,7 +219,7 @@ impl SessionInner {
                 authorities: Default::default(),
                 sanitizers: Default::default(),
                 casts: Default::default(),
-                dynamic: None,
+                dynamic: Default::default(),
                 membership: None,
             }
         };

@@ -79,7 +79,7 @@ A resolver that produces no answer — a timeout, an error, an abstention, malfo
 
 The endpoint accepts a versioned JSON POST request: `{version:1,resolver,tool,argument,value}`. It returns `{version:1,readers:[...]}`. Non-2xx responses, timeouts, malformed responses, and oversized responses fail closed.
 
-A tool-level resolver reads the complete canonical argument object. Its `returns` list selects `trust`, `audience`, `attention`, or a combination.
+A tool-level resolver reads the complete canonical argument object. Its scoped `returns` table selects output-label fields under `delta` and pre-dispatch constraints under `requires`.
 
 ```toml
 [[dynamic_resolver]]
@@ -88,13 +88,23 @@ name = "classify-customer"
 [[tool]]
 name = "get_customer"
 resolvers = [
-  { resolver = "classify-customer", returns = ["trust", "audience", "attention"] }
+  { resolver = "classify-customer", returns = { delta = ["trust", "audience"], requires = ["trust", "audience", "attention"] } }
 ]
+
+[[authority]]
+name = "operator"
+
+[authority.mandate]
+can_cover_trust_to = "trusted"
+attends = ["privacy-review"]
+
+[externals.dynamic.classify-customer]
+url = "https://resolver.internal/classify"
 ```
 
-The runtime sends `{version:1,resolver,tool,returns,arguments}` before it checks the call. `arguments` contains the complete schema-validated JSON object.
+The runtime sends `{version:1,resolver,tool,returns,arguments,trust_ranks,attention_marks}` before it checks the call. `arguments` contains the complete schema-validated JSON object. `trust_ranks` is the policy's complete trust chain. `attention_marks` is the stable, de-duplicated union of the marks named by authority mandates; attention routing is global and remains a literal mark-name match, never a scope match.
 
-The response places label contributions under `delta`. It places fresh authority demands under `attention`.
+The response mirrors those scopes. A dynamic audience requirement is an object with an `includes` floor, a `cap` ceiling, or both.
 
 ```json
 {
@@ -103,26 +113,34 @@ The response places label contributions under `delta`. It places fresh authority
     "trust": "suspicious",
     "audience": ["support", "audit"]
   },
-  "attention": ["privacy-review"]
+  "requires": {
+    "trust": "trusted",
+    "audience": {
+      "includes": ["support"],
+      "cap": ["support", "audit"]
+    },
+    "attention": ["privacy-review"]
+  }
 }
 ```
 
-The response MUST contain each declared field and MUST NOT contain an undeclared field. An audience is `"public"` or an array of literal readers. An empty array is valid.
+The response MUST contain each declared field and MUST NOT contain an undeclared field. A returned trust value MUST name an entry in `trust_ranks`, and every returned attention mark MUST name an entry in `attention_marks`. An audience is `"public"` or an array of literal readers. An empty attention array is valid; when `attention_marks` is empty it is the only valid attention answer. An empty `requires.audience` object is not valid. An out-of-policy value is malformed, produces no answer, and appends no engine fact.
 
-Trust and audience each have one owner. A static value and a resolver cannot own the same field. Two resolvers cannot own the same field. Static and resolved attention marks combine as a set.
+Output trust and audience each have one owner. A static delta and a resolver cannot own the same output field, and two resolvers cannot own the same output field. Requirements are additive: static requirements and requirements from several resolvers all apply. History requirements remain static.
 
 All tool-level resolver answers are pinned to the complete argument object. Any argument substitution invalidates them. Every required resolver MUST answer before the check can complete.
 
-The deployment can bind dynamic resolution to an HTTP endpoint, or use the built-in Claude Code classifier for tool-level resolvers:
+Each resolver has its own implementation. A tool-level resolver can bind the built-in Claude Code classifier directly on its declaration:
 
 ```toml
-[externals.dynamic]
+[[dynamic_resolver]]
+name = "classify-customer"
 builtin = "claude-code"
 ```
 
-The builtin starts the locally installed and authenticated `claude` CLI in non-interactive safe mode with Sonnet, no tools, no project settings, and no session persistence. Its fixed prompt receives the resolver request, the current trajectory trust and audience (including whether either is unresolved), the configured trust ranks, and the tool's static attention marks. Canonical arguments are explicitly treated as untrusted data. Claude returns structured output under a strict schema derived from `returns`; `delta` and `attention` may appear together when both are requested.
+The builtin starts the locally installed and authenticated `claude` CLI in non-interactive safe mode with Sonnet, no tools, no project settings, and no session persistence. Its fixed prompt receives the resolver request, the current trajectory trust and audience (including whether either is unresolved), and the tool's static attention marks. Canonical arguments are explicitly treated as untrusted data. Claude returns structured output under a strict schema derived from `returns`, the policy trust chain, and the authority mandates' attended marks; `delta` and `requires` may appear together when both are requested.
 
-This POC supports only the tool-level `resolvers = [{ resolver, returns }]` form. The legacy single-argument audience form still requires an HTTP endpoint, and a deployment combining it with the Claude builtin is refused at startup. Claude answers have no separate ceiling: they are trusted classifier evidence and still pass the same exact-shape, trust-rank, audience, and pin validation as HTTP answers. A missing CLI, authentication/process failure, timeout, malformed result, or oversized output produces no answer and fails closed. Each resolver binding starts one Claude invocation for a new proposal; pinned rechecks and replay do not invoke it again. Set `externals.timeout_ms` high enough for a model call and remember that each invocation has latency and account cost.
+This POC supports only the tool-level `resolvers = [{ resolver, returns }]` form. The legacy single-argument audience form still requires a name-keyed HTTP endpoint, and binding that resolver itself to Claude is refused at startup. Claude answers have no separate ceiling: they are trusted classifier evidence and still pass the same exact-shape, policy-vocabulary, audience, and pin validation as HTTP answers. A missing CLI, authentication/process failure, timeout, malformed result, or oversized output produces no answer and fails closed. Each resolver binding starts one Claude invocation for a new proposal; pinned rechecks and replay do not invoke it again. Set `externals.timeout_ms` high enough for a model call and remember that each invocation has latency and account cost.
 
 ### Deployment coverage
 

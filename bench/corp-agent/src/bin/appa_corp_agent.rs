@@ -244,7 +244,7 @@ fn bind_hosted_externals(config: &mut Config, origin: &str) -> usize {
         .authorities
         .values_mut()
         .chain(externals.sanitizers.values_mut())
-        .chain(externals.dynamic.iter_mut())
+        .chain(externals.dynamic.values_mut())
         .filter_map(|implementation| match implementation {
             Implementation::Resolver(endpoint) => Some(endpoint),
             Implementation::Builtin(_) => None,

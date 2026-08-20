@@ -3393,7 +3393,7 @@ confined_child_return = true
             authorities: std::collections::BTreeMap::new(),
             sanitizers: std::collections::BTreeMap::new(),
             casts: std::collections::BTreeMap::new(),
-            dynamic: None,
+            dynamic: std::collections::BTreeMap::new(),
             membership: None,
         }
     }

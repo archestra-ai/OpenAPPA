@@ -130,7 +130,17 @@ pub enum ReadersResolution {
 pub struct ToolResolutionAnswer {
     pub trust: Option<String>,
     pub audience: Option<CastAudience>,
+    pub required_trust: Option<String>,
+    pub required_audience: Option<RequiredAudienceAnswer>,
     pub attention: Option<Vec<String>>,
+}
+
+/// The audience half of a `requires` answer off the wire: an `includes` floor, a `cap`
+/// ceiling, or both — never neither.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequiredAudienceAnswer {
+    pub includes: Option<CastAudience>,
+    pub cap: Option<CastAudience>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,8 +149,8 @@ pub enum ToolResolution {
     Unresolved(NoAnswerReason),
 }
 
-/// Runtime context available to the stock Claude Code classifier. It is kept
-/// off the HTTP wire so existing resolver services retain their exact contract.
+/// Runtime context available only to the stock Claude Code classifier. Policy-derived
+/// trust ranks and attention marks live on the shared tool-resolution request instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ToolResolutionContext {
     pub current_trust: String,
@@ -148,8 +158,11 @@ pub struct ToolResolutionContext {
     pub current_audience: serde_json::Value,
     pub trust_unresolved: bool,
     pub audience_unresolved: bool,
-    pub valid_trust_ranks: Vec<String>,
     pub static_attention: Vec<String>,
+    #[serde(skip)]
+    pub trust_ranks: Vec<String>,
+    #[serde(skip)]
+    pub attention_marks: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -180,8 +193,36 @@ pub(crate) struct ToolResolutionRequest<'a> {
     pub(crate) version: u32,
     pub(crate) resolver: &'a str,
     pub(crate) tool: &'a str,
-    pub(crate) returns: &'a std::collections::BTreeSet<ResolverReturn>,
+    pub(crate) returns: ScopedReturns<'a>,
     pub(crate) arguments: &'a serde_json::Value,
+    pub(crate) trust_ranks: &'a [String],
+    pub(crate) attention_marks: &'a [String],
+}
+
+/// The binding's declared `returns` set, serialized in its wire scopes:
+/// `{"delta": [...], "requires": [...]}`. A view over the one set, so the wire form and the
+/// declared form cannot disagree.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ScopedReturns<'a>(pub(crate) &'a std::collections::BTreeSet<ResolverReturn>);
+
+impl Serialize for ScopedReturns<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+
+        use appa_engine::contract::ReturnScope;
+
+        let scoped = |scope: ReturnScope| -> Vec<&'static str> {
+            self.0
+                .iter()
+                .filter(|field| field.scope() == scope)
+                .map(|field| field.wire_name())
+                .collect()
+        };
+        let mut state = serializer.serialize_struct("ScopedReturns", 2)?;
+        state.serialize_field("delta", &scoped(ReturnScope::Delta))?;
+        state.serialize_field("requires", &scoped(ReturnScope::Requires))?;
+        state.end()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -202,7 +243,7 @@ struct ReadersResponse {
 struct ToolResolutionResponse {
     version: u32,
     delta: Option<ToolDeltaWire>,
-    attention: Option<Vec<String>>,
+    requires: Option<ToolRequiresWire>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -210,6 +251,21 @@ struct ToolResolutionResponse {
 struct ToolDeltaWire {
     trust: Option<String>,
     audience: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolRequiresWire {
+    trust: Option<String>,
+    audience: Option<RequiredAudienceWire>,
+    attention: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequiredAudienceWire {
+    includes: Option<serde_json::Value>,
+    cap: Option<serde_json::Value>,
 }
 
 enum AuthorityBackend {
@@ -240,7 +296,7 @@ pub struct ExternalServices {
     authorities: BTreeMap<String, AuthorityBackend>,
     sanitizers: BTreeMap<String, SanitizerBackend>,
     casts: BTreeMap<String, Endpoint>,
-    dynamic: Option<DynamicBackend>,
+    dynamic: BTreeMap<String, DynamicBackend>,
     membership: Option<Endpoint>,
 }
 
@@ -298,23 +354,26 @@ impl ExternalServices {
             };
             sanitizers.insert(name, backend);
         }
-        let dynamic = match config.dynamic {
-            None => None,
-            Some(Implementation::Resolver(endpoint)) => Some(DynamicBackend::Resolver(endpoint)),
-            Some(Implementation::Builtin(name)) if name == CLAUDE_CODE_BUILTIN => {
-                Some(DynamicBackend::ClaudeCode(ClaudeCodeBackend {
-                    timeout: config.timeout,
-                    max_body_bytes: config.max_body_bytes,
-                }))
-            }
-            Some(Implementation::Builtin(builtin)) => {
-                return Err(ModulesError::UnknownBuiltin {
-                    section: "dynamic",
-                    name: "dynamic".to_string(),
-                    builtin,
-                });
-            }
-        };
+        let mut dynamic = BTreeMap::new();
+        for (name, implementation) in config.dynamic {
+            let backend = match implementation {
+                Implementation::Resolver(endpoint) => DynamicBackend::Resolver(endpoint),
+                Implementation::Builtin(builtin) if builtin == CLAUDE_CODE_BUILTIN => {
+                    DynamicBackend::ClaudeCode(ClaudeCodeBackend {
+                        timeout: config.timeout,
+                        max_body_bytes: config.max_body_bytes,
+                    })
+                }
+                Implementation::Builtin(builtin) => {
+                    return Err(ModulesError::UnknownBuiltin {
+                        section: "dynamic",
+                        name,
+                        builtin,
+                    });
+                }
+            };
+            dynamic.insert(name, backend);
+        }
         Ok(ExternalServices {
             http,
             max_body_bytes: config.max_body_bytes,
@@ -461,7 +520,7 @@ impl ExternalServices {
     /// One dynamic resolution: the named string argument's
     /// value in, literal readers out.
     pub async fn resolve_dynamic(&self, resolver: &str, tool: &str, argument: &str, value: &str) -> ReadersResolution {
-        let Some(DynamicBackend::Resolver(endpoint)) = &self.dynamic else {
+        let Some(DynamicBackend::Resolver(endpoint)) = self.dynamic.get(resolver) else {
             tracing::debug!(resolver, "dynamic resolution without a configured endpoint");
             return ReadersResolution::Unresolved(NoAnswerReason::Unregistered);
         };
@@ -487,7 +546,7 @@ impl ExternalServices {
         arguments: &serde_json::Value,
         context: &ToolResolutionContext,
     ) -> ToolResolution {
-        let Some(backend) = &self.dynamic else {
+        let Some(backend) = self.dynamic.get(resolver) else {
             tracing::debug!(resolver, "tool resolution without a configured endpoint");
             return ToolResolution::Unresolved(NoAnswerReason::Unregistered);
         };
@@ -495,8 +554,10 @@ impl ExternalServices {
             version: 1,
             resolver,
             tool,
-            returns,
+            returns: ScopedReturns(returns),
             arguments,
+            trust_ranks: &context.trust_ranks,
+            attention_marks: &context.attention_marks,
         };
         let raw = match backend {
             DynamicBackend::Resolver(endpoint) => {
@@ -520,7 +581,7 @@ impl ExternalServices {
                 }
             }
         };
-        parse_tool_resolution(raw, returns)
+        parse_tool_resolution(raw, returns, &context.trust_ranks, &context.attention_marks)
     }
 
     /// One membership resolution: a group name in, the
@@ -598,12 +659,14 @@ impl ExternalServices {
 fn parse_tool_resolution(
     raw: serde_json::Value,
     returns: &std::collections::BTreeSet<ResolverReturn>,
+    trust_ranks: &[String],
+    attention_marks: &[String],
 ) -> ToolResolution {
     let Some(object) = raw.as_object() else {
         return ToolResolution::Unresolved(NoAnswerReason::Malformed);
     };
     let has_delta = object.contains_key("delta");
-    let has_attention = object.contains_key("attention");
+    let has_requires = object.contains_key("requires");
     let response: ToolResolutionResponse = match serde_json::from_value(raw) {
         Ok(response) => response,
         Err(_) => return ToolResolution::Unresolved(NoAnswerReason::Malformed),
@@ -613,16 +676,32 @@ fn parse_tool_resolution(
     }
     let wants_trust = returns.contains(&ResolverReturn::Trust);
     let wants_audience = returns.contains(&ResolverReturn::Audience);
+    let wants_required_trust = returns.contains(&ResolverReturn::RequiredTrust);
+    let wants_required_audience = returns.contains(&ResolverReturn::RequiredAudience);
     let wants_attention = returns.contains(&ResolverReturn::Attention);
     let (trust, audience) = match response.delta {
         Some(delta) => (delta.trust, delta.audience),
         None => (None, None),
     };
+    let (required_trust, required_audience, attention) = match response.requires {
+        Some(requires) => (requires.trust, requires.audience, requires.attention),
+        None => (None, None, None),
+    };
     if has_delta != (wants_trust || wants_audience)
-        || has_attention != wants_attention
+        || has_requires != (wants_required_trust || wants_required_audience || wants_attention)
         || wants_trust != trust.is_some()
         || wants_audience != audience.is_some()
-        || wants_attention != response.attention.is_some()
+        || wants_required_trust != required_trust.is_some()
+        || wants_required_audience != required_audience.is_some()
+        || wants_attention != attention.is_some()
+    {
+        return ToolResolution::Unresolved(NoAnswerReason::Malformed);
+    }
+    if trust
+        .iter()
+        .chain(required_trust.iter())
+        .any(|rank| !trust_ranks.contains(rank))
+        || attention.iter().flatten().any(|mark| !attention_marks.contains(mark))
     {
         return ToolResolution::Unresolved(NoAnswerReason::Malformed);
     }
@@ -633,10 +712,28 @@ fn parse_tool_resolution(
             None => return ToolResolution::Unresolved(NoAnswerReason::Malformed),
         },
     };
+    let required_audience = match required_audience {
+        None => None,
+        Some(wire) => {
+            if wire.includes.is_none() && wire.cap.is_none() {
+                return ToolResolution::Unresolved(NoAnswerReason::Malformed);
+            }
+            let audience = |value: Option<serde_json::Value>| match value {
+                None => Some(None),
+                Some(value) => CastAudience::from_wire(&value).map(Some),
+            };
+            let (Some(includes), Some(cap)) = (audience(wire.includes), audience(wire.cap)) else {
+                return ToolResolution::Unresolved(NoAnswerReason::Malformed);
+            };
+            Some(RequiredAudienceAnswer { includes, cap })
+        }
+    };
     ToolResolution::Resolved(ToolResolutionAnswer {
         trust,
         audience,
-        attention: response.attention,
+        required_trust,
+        required_audience,
+        attention,
     })
 }
 
@@ -705,7 +802,19 @@ mod tests {
             casts: BTreeMap::new(),
             dynamic: dynamic_url
                 .clone()
-                .map(|url| Implementation::Resolver(Endpoint { url, token: None })),
+                .into_iter()
+                .flat_map(|url| {
+                    ["recipients", "classifier", "review"].map(move |name| {
+                        (
+                            name.to_string(),
+                            Implementation::Resolver(Endpoint {
+                                url: url.clone(),
+                                token: None,
+                            }),
+                        )
+                    })
+                })
+                .collect(),
             membership: dynamic_url.map(|url| Endpoint { url, token: None }),
         }
     }
@@ -725,8 +834,9 @@ mod tests {
             current_audience: serde_json::Value::String("public".to_string()),
             trust_unresolved: false,
             audience_unresolved: false,
-            valid_trust_ranks: vec!["suspicious".to_string(), "trusted".to_string()],
             static_attention: vec![],
+            trust_ranks: vec!["suspicious".to_string(), "trusted".to_string()],
+            attention_marks: vec!["privacy-review".to_string(), "review".to_string()],
         }
     }
 
@@ -767,21 +877,31 @@ mod tests {
                 assert_eq!(request["version"], 1);
                 assert_eq!(request["resolver"], "classifier");
                 assert_eq!(request["tool"], "lookup");
+                assert_eq!(request["trust_ranks"], serde_json::json!(["suspicious", "trusted"]));
+                assert_eq!(
+                    request["attention_marks"],
+                    serde_json::json!(["privacy-review", "review"])
+                );
                 assert_eq!(
                     request["returns"],
-                    serde_json::json!(["trust", "audience", "attention"])
+                    serde_json::json!({
+                        "delta": ["trust", "audience"],
+                        "requires": ["trust", "audience", "attention"]
+                    })
                 );
                 assert_eq!(
                     request["arguments"],
                     serde_json::json!({"customer": {"id": 7}, "deep": true})
                 );
-                r#"{"version":1,"delta":{"trust":"suspicious","audience":"public"},"attention":["review"]}"#
+                r#"{"version":1,"delta":{"trust":"suspicious","audience":"public"},"requires":{"trust":"trusted","audience":{"includes":["support"],"cap":["support","audit"]},"attention":["review"]}}"#
             }),
         ))
         .await;
         let returns = [
             ResolverReturn::Trust,
             ResolverReturn::Audience,
+            ResolverReturn::RequiredTrust,
+            ResolverReturn::RequiredAudience,
             ResolverReturn::Attention,
         ]
         .into_iter()
@@ -800,6 +920,11 @@ mod tests {
             ToolResolution::Resolved(ToolResolutionAnswer {
                 trust: Some("suspicious".to_string()),
                 audience: Some(CastAudience::Public),
+                required_trust: Some("trusted".to_string()),
+                required_audience: Some(RequiredAudienceAnswer {
+                    includes: Some(CastAudience::Readers(vec!["support".to_string()])),
+                    cap: Some(CastAudience::Readers(vec!["support".to_string(), "audit".to_string()])),
+                }),
                 attention: Some(vec!["review".to_string()]),
             })
         );
@@ -809,23 +934,70 @@ mod tests {
     async fn a_tool_resolution_must_return_exactly_its_declared_fields() {
         let returns = [ResolverReturn::Attention].into_iter().collect();
         for response in [
-            r#"{"version":1,"attention":[]}"#,
-            r#"{"version":1,"delta":{},"attention":[]}"#,
-            r#"{"version":1,"delta":{"trust":"trusted"},"attention":[]}"#,
-            r#"{"version":1,"delta":null,"attention":[]}"#,
-            r#"{"version":1,"attention":null}"#,
+            r#"{"version":1,"requires":{"attention":[]}}"#,
+            r#"{"version":1,"delta":{},"requires":{"attention":[]}}"#,
+            r#"{"version":1,"requires":{"trust":"trusted","attention":[]}}"#,
+            r#"{"version":1,"requires":null}"#,
+            r#"{"version":1,"requires":{"attention":null}}"#,
             r#"{"version":1}"#,
         ] {
             let url = stub(Router::new().route("/", post(move || async move { response }))).await;
             let actual = services(Some(url), 2000, 65536)
                 .resolve_tool("review", "lookup", &returns, &serde_json::json!({}), &context())
                 .await;
-            if response == r#"{"version":1,"attention":[]}"# {
+            if response == r#"{"version":1,"requires":{"attention":[]}}"# {
                 assert!(matches!(actual, ToolResolution::Resolved(_)));
             } else {
                 assert_eq!(actual, ToolResolution::Unresolved(NoAnswerReason::Malformed));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_tool_resolution_rejects_trust_and_attention_outside_policy() {
+        let returns = [
+            ResolverReturn::Trust,
+            ResolverReturn::RequiredTrust,
+            ResolverReturn::Attention,
+        ]
+        .into_iter()
+        .collect();
+        for response in [
+            r#"{"version":1,"delta":{"trust":"invented"},"requires":{"trust":"trusted","attention":["review"]}}"#,
+            r#"{"version":1,"delta":{"trust":"suspicious"},"requires":{"trust":"invented","attention":["review"]}}"#,
+            r#"{"version":1,"delta":{"trust":"suspicious"},"requires":{"trust":"trusted","attention":["invented-review"]}}"#,
+        ] {
+            let url = stub(Router::new().route("/", post(move || async move { response }))).await;
+            assert_eq!(
+                services(Some(url), 2000, 65536)
+                    .resolve_tool("classifier", "lookup", &returns, &serde_json::json!({}), &context())
+                    .await,
+                ToolResolution::Unresolved(NoAnswerReason::Malformed)
+            );
+        }
+    }
+
+    #[test]
+    fn no_attended_marks_allows_only_an_empty_attention_answer() {
+        let returns = [ResolverReturn::Attention].into_iter().collect();
+        assert!(matches!(
+            parse_tool_resolution(
+                serde_json::json!({"version": 1, "requires": {"attention": []}}),
+                &returns,
+                &["suspicious".to_string(), "trusted".to_string()],
+                &[],
+            ),
+            ToolResolution::Resolved(_)
+        ));
+        assert_eq!(
+            parse_tool_resolution(
+                serde_json::json!({"version": 1, "requires": {"attention": ["invented-review"]}}),
+                &returns,
+                &["suspicious".to_string(), "trusted".to_string()],
+                &[],
+            ),
+            ToolResolution::Unresolved(NoAnswerReason::Malformed)
+        );
     }
 
     #[test]
@@ -834,12 +1006,15 @@ mod tests {
         let combined = [
             ResolverReturn::Trust,
             ResolverReturn::Audience,
+            ResolverReturn::RequiredTrust,
+            ResolverReturn::RequiredAudience,
             ResolverReturn::Attention,
         ]
         .into_iter()
         .collect();
-        let schema = claude_response_schema(&combined, &ranks);
-        assert_eq!(schema["required"], serde_json::json!(["version", "delta", "attention"]));
+        let marks = vec!["privacy-review".to_string(), "review".to_string()];
+        let schema = claude_response_schema(&combined, &ranks, &marks);
+        assert_eq!(schema["required"], serde_json::json!(["version", "delta", "requires"]));
         assert_eq!(
             schema["properties"]["delta"]["required"],
             serde_json::json!(["trust", "audience"])
@@ -850,11 +1025,24 @@ mod tests {
         );
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(schema["properties"]["delta"]["additionalProperties"], false);
+        assert_eq!(
+            schema["properties"]["requires"]["required"],
+            serde_json::json!(["trust", "audience", "attention"])
+        );
+        assert_eq!(schema["properties"]["requires"]["additionalProperties"], false);
+        assert_eq!(
+            schema["properties"]["requires"]["properties"]["attention"]["items"]["enum"],
+            serde_json::json!(["privacy-review", "review"])
+        );
 
         let attention = [ResolverReturn::Attention].into_iter().collect();
-        let schema = claude_response_schema(&attention, &ranks);
-        assert_eq!(schema["required"], serde_json::json!(["version", "attention"]));
+        let schema = claude_response_schema(&attention, &ranks, &[]);
+        assert_eq!(schema["required"], serde_json::json!(["version", "requires"]));
         assert!(schema["properties"].get("delta").is_none());
+        assert_eq!(
+            schema["properties"]["requires"]["properties"]["attention"]["maxItems"],
+            0
+        );
     }
 
     #[tokio::test]
@@ -862,6 +1050,8 @@ mod tests {
         let returns = [
             ResolverReturn::Trust,
             ResolverReturn::Audience,
+            ResolverReturn::RequiredTrust,
+            ResolverReturn::RequiredAudience,
             ResolverReturn::Attention,
         ]
         .into_iter()
@@ -873,8 +1063,10 @@ mod tests {
             version: 1,
             resolver: "customer-classifier",
             tool: "lookup",
-            returns: &returns,
+            returns: ScopedReturns(&returns),
             arguments: &arguments,
+            trust_ranks: &classifier_context.trust_ranks,
+            attention_marks: &classifier_context.attention_marks,
         };
         let request = ClaudeToolResolutionRequest {
             base: &base,
@@ -888,7 +1080,11 @@ mod tests {
             "structured_output": {
                 "version": 1,
                 "delta": {"trust": "suspicious", "audience": ["support", "audit"]},
-                "attention": ["privacy-review"]
+                "requires": {
+                    "trust": "trusted",
+                    "audience": {"includes": ["support"], "cap": ["support", "audit"]},
+                    "attention": ["privacy-review"]
+                }
             }
         })
         .to_string();
@@ -911,7 +1107,12 @@ printf '%s' "$response""#;
             .await
             .expect("the fake Claude process returns structured output");
         assert!(matches!(
-            parse_tool_resolution(raw, &returns),
+            parse_tool_resolution(
+                raw,
+                &returns,
+                &classifier_context.trust_ranks,
+                &classifier_context.attention_marks,
+            ),
             ToolResolution::Resolved(_)
         ));
 
@@ -920,6 +1121,8 @@ printf '%s' "$response""#;
                 .expect("stdin is JSON");
         assert_eq!(sent["resolver"], "customer-classifier");
         assert_eq!(sent["arguments"], arguments);
+        assert_eq!(sent["trust_ranks"], serde_json::json!(["suspicious", "trusted"]));
+        assert_eq!(sent["attention_marks"], serde_json::json!(["privacy-review", "review"]));
         assert_eq!(sent["current_dimensions"]["current_trust"], "trusted");
         assert_eq!(
             sent["current_dimensions"]["static_attention"],
@@ -953,8 +1156,10 @@ printf '%s' "$response""#;
             version: 1,
             resolver: "review",
             tool: "lookup",
-            returns: &returns,
+            returns: ScopedReturns(&returns),
             arguments: &arguments,
+            trust_ranks: &classifier_context.trust_ranks,
+            attention_marks: &classifier_context.attention_marks,
         };
         let request = ClaudeToolResolutionRequest {
             base: &base,
@@ -1004,7 +1209,14 @@ printf '%s' "$response""#;
             OsString::from("fake-claude"),
         ];
         assert_eq!(
-            run_claude_code(OsStr::new("/bin/sh"), &malformed, &request, Duration::from_secs(1), 1024).await,
+            run_claude_code(
+                OsStr::new("/bin/sh"),
+                &malformed,
+                &request,
+                Duration::from_secs(1),
+                1024
+            )
+            .await,
             Err(NoAnswerReason::Malformed)
         );
     }

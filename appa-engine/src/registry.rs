@@ -9,7 +9,7 @@ use crate::authority::{Authority, Cast, CastResolution, DeclaredTransition, Hint
 use crate::contract::{AudienceDelta, AudienceRequirement, Delta, RecipientSpec, ToolContract};
 use crate::groups::{DeclaredAudience, ExpansionRefusal, Expansions, GroupExpansion, GroupResolution};
 use crate::label::{Audience, Dim, Dimension, ReaderId, Trust};
-use crate::names::{AuthorityName, CastName, GroupName, MembershipResolverName, SanitizerName, TagName};
+use crate::names::{AuthorityName, CastName, GroupName, MarkName, MembershipResolverName, SanitizerName, TagName};
 use crate::value::ToolName;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,7 +62,7 @@ impl TrustChain {
         self.ranks.is_empty()
     }
 
-    fn contains_rank(&self, trust: Trust) -> bool {
+    pub(crate) fn contains_rank(&self, trust: Trust) -> bool {
         (trust.rank() as usize) < self.ranks.len()
     }
 }
@@ -234,12 +234,22 @@ fn worst_case_plan_alternatives(
     literal: &Expansions,
 ) -> u128 {
     use crate::check::Gap;
-    use crate::contract::{AudienceRequirement, HistoryRequirement};
+    use crate::contract::{AudienceRequirement, HistoryRequirement, ResolverReturn};
     use crate::fact::EffectKind;
     use crate::plan::covers_gap;
 
     let mut count: u128 = 1;
     let mut multiply = |competent: usize| count = count.saturating_mul(competent.max(1) as u128);
+    // A dynamic floor or requirement is unknown at load, so its competent-authority count is
+    // the mandate-dimension approximation, computed once per dimension.
+    let trust_cap_competent = authorities
+        .iter()
+        .filter(|authority| authority.scope.covers(&tool.tags) && authority.mandate.trust_ceiling.is_some())
+        .count();
+    let reader_cap_competent = authorities
+        .iter()
+        .filter(|authority| authority.scope.covers(&tool.tags) && authority.mandate.reader_ceiling.is_some())
+        .count();
 
     if let Some(floor) = tool.requires.label.trust_floor {
         let gap = Gap::TrustFloor {
@@ -253,19 +263,20 @@ fn worst_case_plan_alternatives(
                 .count(),
         );
     }
+    for binding in &tool.resolvers {
+        if binding.returns.contains(&ResolverReturn::RequiredTrust) {
+            multiply(trust_cap_competent);
+        }
+        if binding.returns.contains(&ResolverReturn::RequiredAudience) {
+            multiply(reader_cap_competent);
+        }
+    }
     let mut seen_includes: Vec<&AudienceRequirement> = Vec::new();
     for requirement in &tool.requires.label.audience {
         match requirement {
             AudienceRequirement::Includes(_) if !seen_includes.contains(&requirement) => {
                 seen_includes.push(requirement);
-                multiply(
-                    authorities
-                        .iter()
-                        .filter(|authority| {
-                            authority.scope.covers(&tool.tags) && authority.mandate.reader_ceiling.is_some()
-                        })
-                        .count(),
-                );
+                multiply(reader_cap_competent);
             }
             AudienceRequirement::Includes(_) | AudienceRequirement::Cap(_) => {}
         }
@@ -358,7 +369,7 @@ fn worst_case_plan_alternatives(
             requirement,
             AudienceRequirement::Cap(DeclaredAudience::Restricted { .. })
         )
-    });
+    }) || tool.resolver_owns(crate::contract::ResolverReturn::RequiredAudience);
     let redispatches = tools
         .values()
         .filter(|candidate| {
@@ -422,6 +433,7 @@ pub struct Registry {
     tools: BTreeMap<ToolName, ToolContract>,
     provider_run: BTreeMap<ToolName, ToolContract>,
     authorities: Vec<Authority>,
+    attention_marks: BTreeSet<MarkName>,
     sanitizers: BTreeMap<SanitizerName, Sanitizer>,
     casts: Vec<Cast>,
     membership: Option<MembershipResolverName>,
@@ -664,11 +676,18 @@ impl Registry {
             }
         }
 
+        let attention_marks = config
+            .authorities
+            .iter()
+            .flat_map(|authority| authority.mandate.attends.iter().cloned())
+            .collect();
+
         Ok(Registry {
             trust_chain: config.trust_chain,
             tools,
             provider_run,
             authorities: config.authorities,
+            attention_marks,
             sanitizers,
             casts,
             membership: config.membership,
@@ -734,6 +753,17 @@ impl Registry {
         &self.authorities
     }
 
+    /// Every attention mark at least one registered authority attends, in stable name order.
+    /// Attention ignores scope, so this policy-wide set is also the complete set a dynamic
+    /// resolver may demand while retaining an in-place authority remedy.
+    pub fn attention_marks(&self) -> impl Iterator<Item = &MarkName> {
+        self.attention_marks.iter()
+    }
+
+    pub(crate) fn attends(&self, mark: &MarkName) -> bool {
+        self.attention_marks.contains(mark)
+    }
+
     pub fn authority(&self, name: &AuthorityName) -> Option<&Authority> {
         self.authorities.iter().find(|a| &a.name == name)
     }
@@ -777,14 +807,17 @@ impl Registry {
 }
 
 fn validate_pending_cast(tool: &ToolContract) -> Result<(), LoadError> {
+    let requires_trust =
+        tool.requires.label.trust_floor.is_some() || tool.resolver_owns(crate::contract::ResolverReturn::RequiredTrust);
+    let requires_audience = !tool.requires.label.audience.is_empty()
+        || tool.resolver_owns(crate::contract::ResolverReturn::RequiredAudience);
     let Some(delta) = &tool.delta else {
         if tool.resolver_owns(crate::contract::ResolverReturn::Trust)
             || tool.resolver_owns(crate::contract::ResolverReturn::Audience)
         {
             return Ok(());
         }
-        let requires_label = tool.requires.label.trust_floor.is_some() || !tool.requires.label.audience.is_empty();
-        return if requires_label {
+        return if requires_trust || requires_audience {
             Err(LoadError::UnannotatedWithLabelRequirement(
                 tool.name.as_str().to_string(),
             ))
@@ -798,18 +831,14 @@ fn validate_pending_cast(tool: &ToolContract) -> Result<(), LoadError> {
         return Err(LoadError::DualPendingCast(tool.name.as_str().to_string()));
     }
     match delta.pending_cast_dim() {
-        Some(Dimension::Trust) if tool.requires.label.trust_floor.is_some() => {
-            Err(LoadError::PendingCastWithRequirement {
-                tool: tool.name.as_str().to_string(),
-                dimension: Dimension::Trust,
-            })
-        }
-        Some(Dimension::Audience) if !tool.requires.label.audience.is_empty() => {
-            Err(LoadError::PendingCastWithRequirement {
-                tool: tool.name.as_str().to_string(),
-                dimension: Dimension::Audience,
-            })
-        }
+        Some(Dimension::Trust) if requires_trust => Err(LoadError::PendingCastWithRequirement {
+            tool: tool.name.as_str().to_string(),
+            dimension: Dimension::Trust,
+        }),
+        Some(Dimension::Audience) if requires_audience => Err(LoadError::PendingCastWithRequirement {
+            tool: tool.name.as_str().to_string(),
+            dimension: Dimension::Audience,
+        }),
         _ => Ok(()),
     }
 }

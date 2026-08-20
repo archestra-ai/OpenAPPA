@@ -263,9 +263,10 @@ pub(crate) struct Deployment {
 impl Deployment {
     fn load(config: Config, modules: &crate::builtins::ModuleRegistry) -> Result<Deployment, OpenError> {
         let policy = compile_policy(&config)?;
-        validate_deployment(&policy, &config)?;
-        let externals = ExternalServices::new(config.externals.clone(), modules)
-            .map_err(|error| OpenError::Modules(error.to_string()))?;
+        let externals_config = bind_inline_dynamic_resolvers(&policy, &config.externals)?;
+        validate_deployment(&policy, &externals_config)?;
+        let externals =
+            ExternalServices::new(externals_config, modules).map_err(|error| OpenError::Modules(error.to_string()))?;
         Ok(Deployment {
             config,
             resident: RuntimeEngine::new(policy.engine().clone()),
@@ -839,7 +840,27 @@ impl Drop for OfferClaim {
     }
 }
 
-fn validate_deployment(policy: &appa_policy::Config, config: &Config) -> Result<(), OpenError> {
+fn bind_inline_dynamic_resolvers(
+    policy: &appa_policy::Config,
+    configured: &crate::config::Externals,
+) -> Result<crate::config::Externals, OpenError> {
+    let mut merged = configured.clone();
+    for (resolver, builtin) in policy.dynamic_resolver_builtins() {
+        let name = resolver.as_str().to_string();
+        if merged
+            .dynamic
+            .insert(name.clone(), crate::config::Implementation::Builtin(builtin.clone()))
+            .is_some()
+        {
+            return Err(OpenError::UnsupportedPolicy(format!(
+                "dynamic resolver {name} has both an inline builtin and an [externals.dynamic.{name}] binding"
+            )));
+        }
+    }
+    Ok(merged)
+}
+
+fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::Externals) -> Result<(), OpenError> {
     let profile = policy.engine().profile();
     if profile.binding() == appa_engine::profile::BindingMode::Token {
         return Err(OpenError::UnsupportedPolicy(
@@ -870,7 +891,7 @@ fn validate_deployment(policy: &appa_policy::Config, config: &Config) -> Result<
     // believing a classifier runs.
     for cast in &rc.casts {
         let name = cast.name.as_str();
-        let bound = config.externals.casts.contains_key(name);
+        let bound = externals.casts.contains_key(name);
         match (&cast.resolution, bound) {
             (appa_engine::authority::CastResolution::Resolver { .. }, false) => {
                 return Err(OpenError::UnboundExternal {
@@ -886,15 +907,14 @@ fn validate_deployment(policy: &appa_policy::Config, config: &Config) -> Result<
     }
     for authority in &rc.authorities {
         let name = authority.name.as_str();
-        if !config.externals.authorities.contains_key(name) {
+        if !externals.authorities.contains_key(name) {
             return Err(OpenError::UnboundExternal {
                 kind: "authority",
                 name: name.to_string(),
             });
         }
     }
-    if config
-        .externals
+    if externals
         .sanitizers
         .contains_key(appa_engine::names::SanitizerName::ATTEST_SCHEMA)
     {
@@ -908,46 +928,48 @@ fn validate_deployment(policy: &appa_policy::Config, config: &Config) -> Result<
         if sanitizer.name.is_attest_schema() {
             continue;
         }
-        if !config.externals.sanitizers.contains_key(name) {
+        if !externals.sanitizers.contains_key(name) {
             return Err(OpenError::UnboundExternal {
                 kind: "sanitizer",
                 name: name.to_string(),
             });
         }
     }
-    let dynamic_binding = rc.tools.iter().find_map(|tool| {
-        tool.resolvers
-            .first()
-            .map(|binding| binding.resolver.as_str().to_string())
-            .or_else(|| {
+    for tool in &rc.tools {
+        // Tool-level bindings first, then the legacy single-argument audience reads — the
+        // one lookup differs only in the claude-code refusal the legacy protocol carries.
+        let references = tool
+            .resolvers
+            .iter()
+            .map(|binding| (binding.resolver.clone(), false))
+            .chain(
                 appa_engine::check::dynamic_reads(tool)
-                    .first()
-                    .map(|binding| binding.resolver.as_str().to_string())
-            })
-    });
-    if let Some(resolver) = dynamic_binding
-        && config.externals.dynamic.is_none()
-    {
-        return Err(OpenError::UnboundExternal {
-            kind: "dynamic resolver",
-            name: resolver,
-        });
-    }
-    if matches!(
-        &config.externals.dynamic,
-        Some(crate::config::Implementation::Builtin(name)) if name == crate::config::CLAUDE_CODE_BUILTIN
-    ) && rc
-        .tools
-        .iter()
-        .any(|tool| !appa_engine::check::dynamic_reads(tool).is_empty())
-    {
-        return Err(OpenError::UnsupportedPolicy(
-            "[externals.dynamic] builtin = \"claude-code\" supports tool-level `resolvers = [{ resolver, returns }]` only; legacy single-argument audience resolvers require an HTTP endpoint"
-                .to_string(),
-        ));
+                    .into_iter()
+                    .map(|binding| (binding.resolver, true)),
+            );
+        for (resolver, legacy_read) in references {
+            let name = resolver.as_str();
+            let Some(implementation) = externals.dynamic.get(name) else {
+                return Err(OpenError::UnboundExternal {
+                    kind: "dynamic resolver",
+                    name: name.to_string(),
+                });
+            };
+            if legacy_read
+                && matches!(
+                    implementation,
+                    crate::config::Implementation::Builtin(builtin)
+                        if builtin == crate::config::CLAUDE_CODE_BUILTIN
+                )
+            {
+                return Err(OpenError::UnsupportedPolicy(format!(
+                    "dynamic resolver {name} binds builtin = \"claude-code\", which supports tool-level `resolvers = [{{ resolver, returns }}]` only; its legacy single-argument audience binding requires an HTTP endpoint"
+                )));
+            }
+        }
     }
     if let Some(resolver) = &rc.membership
-        && config.externals.membership.is_none()
+        && externals.membership.is_none()
     {
         return Err(OpenError::UnboundExternal {
             kind: "membership resolver",
@@ -1059,7 +1081,7 @@ mod deployment_tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::config::{CLAUDE_CODE_BUILTIN, Externals, Implementation};
+    use crate::config::Externals;
 
     fn claude_config(policy: &str) -> Config {
         Config::embedded(
@@ -1071,7 +1093,7 @@ mod deployment_tests {
                 authorities: BTreeMap::new(),
                 sanitizers: BTreeMap::new(),
                 casts: BTreeMap::new(),
-                dynamic: Some(Implementation::Builtin(CLAUDE_CODE_BUILTIN.to_string())),
+                dynamic: BTreeMap::new(),
                 membership: None,
             },
         )
@@ -1085,9 +1107,10 @@ mod deployment_tests {
                 version = 1
                 [[dynamic_resolver]]
                 name = "classifier"
+                builtin = "claude-code"
                 [[tool]]
                 name = "lookup"
-                resolvers = [{ resolver = "classifier", returns = ["trust", "audience", "attention"] }]
+                resolvers = [{ resolver = "classifier", returns = { delta = ["trust", "audience"], requires = ["attention"] } }]
             "#,
         );
         assert!(Deployment::load(tool_level, &crate::builtins::ModuleRegistry::empty()).is_ok());
@@ -1097,6 +1120,7 @@ mod deployment_tests {
                 version = 1
                 [[dynamic_resolver]]
                 name = "directory"
+                builtin = "claude-code"
                 [[tool]]
                 name = "lookup"
                 parameters = { type = "object", properties = { customer = { type = "string" } }, required = ["customer"] }
@@ -1106,6 +1130,60 @@ mod deployment_tests {
         assert!(matches!(
             Deployment::load(legacy, &crate::builtins::ModuleRegistry::empty()),
             Err(OpenError::UnsupportedPolicy(message)) if message.contains("tool-level") && message.contains("legacy")
+        ));
+    }
+
+    #[test]
+    fn each_dynamic_resolver_needs_its_own_implementation_binding() {
+        let config = claude_config(
+            r#"
+                version = 1
+                [[dynamic_resolver]]
+                name = "bash-classifier"
+                builtin = "claude-code"
+                [[dynamic_resolver]]
+                name = "other-classifier"
+                [[tool]]
+                name = "Bash"
+                delta = {}
+                resolvers = [{ resolver = "bash-classifier", returns = { requires = ["attention"] } }]
+                [[tool]]
+                name = "Other"
+                delta = {}
+                resolvers = [{ resolver = "other-classifier", returns = { requires = ["attention"] } }]
+            "#,
+        );
+        assert!(matches!(
+            Deployment::load(config, &crate::builtins::ModuleRegistry::empty()),
+            Err(OpenError::UnboundExternal { kind: "dynamic resolver", name })
+                if name == "other-classifier"
+        ));
+    }
+
+    #[test]
+    fn an_inline_builtin_and_external_binding_cannot_compete_for_one_resolver() {
+        let policy = r#"
+            version = 1
+            [[dynamic_resolver]]
+            name = "bash-classifier"
+            builtin = "claude-code"
+            [[tool]]
+            name = "Bash"
+            delta = {}
+            resolvers = [{ resolver = "bash-classifier", returns = { requires = ["attention"] } }]
+        "#;
+        let mut config = claude_config(policy);
+        config.externals.dynamic.insert(
+            "bash-classifier".to_string(),
+            crate::config::Implementation::Resolver(crate::config::Endpoint {
+                url: "https://resolver.example".to_string(),
+                token: None,
+            }),
+        );
+        assert!(matches!(
+            Deployment::load(config, &crate::builtins::ModuleRegistry::empty()),
+            Err(OpenError::UnsupportedPolicy(message))
+                if message.contains("both an inline builtin") && message.contains("bash-classifier")
         ));
     }
 }

@@ -39,15 +39,84 @@ pub struct DynamicAudienceBinding {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResolverReturn {
+    /// Output-label trust (`delta.trust`).
     Trust,
+    /// Output-label audience (`delta.audience`).
     Audience,
+    /// A call-time trust floor (`requires.trust`).
+    RequiredTrust,
+    /// Call-time audience constraints (`requires.audience`).
+    RequiredAudience,
+    /// Fresh call-time review marks (`requires.attention`).
     Attention,
+}
+
+/// The wire scope one returned field lives in: the output `delta` or the call-time `requires`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReturnScope {
+    Delta,
+    Requires,
+}
+
+impl ReturnScope {
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            ReturnScope::Delta => "delta",
+            ReturnScope::Requires => "requires",
+        }
+    }
+}
+
+impl ResolverReturn {
+    pub const ALL: [ResolverReturn; 5] = [
+        ResolverReturn::Trust,
+        ResolverReturn::Audience,
+        ResolverReturn::RequiredTrust,
+        ResolverReturn::RequiredAudience,
+        ResolverReturn::Attention,
+    ];
+
+    /// The one scope/name map every wire surface reads — the policy's `returns` table, the
+    /// resolver request, and the response shape all agree through it.
+    pub fn scope(self) -> ReturnScope {
+        match self {
+            ResolverReturn::Trust | ResolverReturn::Audience => ReturnScope::Delta,
+            ResolverReturn::RequiredTrust | ResolverReturn::RequiredAudience | ResolverReturn::Attention => {
+                ReturnScope::Requires
+            }
+        }
+    }
+
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            ResolverReturn::Trust | ResolverReturn::RequiredTrust => "trust",
+            ResolverReturn::Audience | ResolverReturn::RequiredAudience => "audience",
+            ResolverReturn::Attention => "attention",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ToolResolverBinding {
     pub resolver: DynamicResolverName,
     pub returns: BTreeSet<ResolverReturn>,
+}
+
+/// The audience half of a `requires` answer: an `includes` floor, a `cap` ceiling, or both.
+/// Dynamic answers may not contain groups: the exact literal audiences are pinned with the
+/// call and replayed verbatim.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequiredAudience {
+    pub includes: Option<Audience>,
+    pub cap: Option<Audience>,
+}
+
+impl RequiredAudience {
+    fn is_literal(&self) -> bool {
+        self.includes.iter().chain(self.cap.iter()).all(
+            |audience| !matches!(audience, Audience::Restricted(readers) if !readers.iter().all(ReaderId::is_literal)),
+        )
+    }
 }
 
 /// One successful tool-level resolver answer pinned to the call it classified. The constructor
@@ -57,6 +126,8 @@ pub struct PinnedToolResolution {
     binding: ToolResolverBinding,
     trust: Option<Trust>,
     audience: Option<Audience>,
+    required_trust: Option<Trust>,
+    required_audience: Option<RequiredAudience>,
     attention: Vec<MarkName>,
 }
 
@@ -65,16 +136,25 @@ impl PinnedToolResolution {
         binding: ToolResolverBinding,
         trust: Option<Trust>,
         audience: Option<Audience>,
+        required_trust: Option<Trust>,
+        required_audience: Option<RequiredAudience>,
         attention: Option<Vec<MarkName>>,
     ) -> Option<Self> {
         if binding.returns.is_empty()
             || binding.returns.contains(&ResolverReturn::Trust) != trust.is_some()
             || binding.returns.contains(&ResolverReturn::Audience) != audience.is_some()
+            || binding.returns.contains(&ResolverReturn::RequiredTrust) != required_trust.is_some()
+            || binding.returns.contains(&ResolverReturn::RequiredAudience) != required_audience.is_some()
             || binding.returns.contains(&ResolverReturn::Attention) != attention.is_some()
         {
             return None;
         }
         if matches!(&audience, Some(Audience::Restricted(readers)) if !readers.iter().all(ReaderId::is_literal)) {
+            return None;
+        }
+        if let Some(required) = &required_audience
+            && (!required.is_literal() || (required.includes.is_none() && required.cap.is_none()))
+        {
             return None;
         }
         let mut attention = attention.unwrap_or_default();
@@ -84,6 +164,8 @@ impl PinnedToolResolution {
             binding,
             trust,
             audience,
+            required_trust,
+            required_audience,
             attention,
         })
     }
@@ -98,6 +180,14 @@ impl PinnedToolResolution {
 
     pub fn audience(&self) -> Option<&Audience> {
         self.audience.as_ref()
+    }
+
+    pub fn required_trust(&self) -> Option<Trust> {
+        self.required_trust
+    }
+
+    pub fn required_audience(&self) -> Option<&RequiredAudience> {
+        self.required_audience.as_ref()
     }
 
     pub fn attention(&self) -> &[MarkName] {
@@ -115,6 +205,8 @@ impl<'de> Deserialize<'de> for PinnedToolResolution {
             binding: ToolResolverBinding,
             trust: Option<Trust>,
             audience: Option<Audience>,
+            required_trust: Option<Trust>,
+            required_audience: Option<RequiredAudience>,
             attention: Vec<MarkName>,
         }
 
@@ -125,8 +217,15 @@ impl<'de> Deserialize<'de> for PinnedToolResolution {
             .returns
             .contains(&ResolverReturn::Attention)
             .then_some(wire.attention);
-        let answer = PinnedToolResolution::from_answer(wire.binding, wire.trust, wire.audience, returned_attention)
-            .ok_or_else(|| serde::de::Error::custom("a pinned tool resolution must match its declared returns"))?;
+        let answer = PinnedToolResolution::from_answer(
+            wire.binding,
+            wire.trust,
+            wire.audience,
+            wire.required_trust,
+            wire.required_audience,
+            returned_attention,
+        )
+        .ok_or_else(|| serde::de::Error::custom("a pinned tool resolution must match its declared returns"))?;
         if answer.attention != original_attention {
             return Err(serde::de::Error::custom(
                 "pinned tool-resolution attention is not in canonical order",

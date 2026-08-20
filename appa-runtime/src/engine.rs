@@ -41,7 +41,9 @@ use std::sync::Mutex;
 
 use appa_engine::candidate::DerivedVia;
 use appa_engine::check::UnestablishedFact;
-use appa_engine::contract::{PinnedDynamicResolution, PinnedMembership, PinnedToolResolution, ToolResolverBinding};
+use appa_engine::contract::{
+    PinnedDynamicResolution, PinnedMembership, PinnedToolResolution, RequiredAudience, ToolResolverBinding,
+};
 pub(crate) use appa_engine::engine::ForkStatus;
 use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
@@ -1644,23 +1646,41 @@ impl RuntimeEngine {
                     )));
                 }
                 Some(Some(answer)) => {
+                    let rank = |name: &str, what: &str| {
+                        chain.rank_of(name).ok_or_else(|| {
+                            Resolution::Feedback(format!(
+                                "[appa] {}: dynamic resolver {} returned an unknown {what}",
+                                call.tool,
+                                binding.resolver.as_str()
+                            ))
+                        })
+                    };
                     let trust = answer
                         .trust
-                        .map(|name| {
-                            chain.rank_of(&name).ok_or_else(|| {
-                                Resolution::Feedback(format!(
-                                    "[appa] {}: dynamic resolver {} returned an unknown trust rank",
-                                    call.tool,
-                                    binding.resolver.as_str()
-                                ))
-                            })
-                        })
+                        .as_deref()
+                        .map(|name| rank(name, "trust rank"))
                         .transpose()?;
                     let audience = answer.audience.as_ref().map(resolved_audience);
+                    let required_trust = answer
+                        .required_trust
+                        .as_deref()
+                        .map(|name| rank(name, "required trust rank"))
+                        .transpose()?;
+                    let required_audience = answer.required_audience.as_ref().map(|required| RequiredAudience {
+                        includes: required.includes.as_ref().map(resolved_audience),
+                        cap: required.cap.as_ref().map(resolved_audience),
+                    });
                     let attention = answer
                         .attention
                         .map(|marks| marks.into_iter().map(MarkName::new).collect());
-                    match PinnedToolResolution::from_answer(binding.clone(), trust, audience, attention) {
+                    match PinnedToolResolution::from_answer(
+                        binding.clone(),
+                        trust,
+                        audience,
+                        required_trust,
+                        required_audience,
+                        attention,
+                    ) {
                         Some(pin) => pins.push(pin),
                         None => {
                             return Err(Resolution::Feedback(format!(
@@ -1716,8 +1736,14 @@ impl RuntimeEngine {
             },
             trust_unresolved: !current.is_established(Dimension::Trust),
             audience_unresolved: !current.is_established(Dimension::Audience),
-            valid_trust_ranks: (0..chain.len())
+            trust_ranks: (0..chain.len())
                 .filter_map(|rank| chain.name_of(Trust::new(rank as u8)).map(str::to_string))
+                .collect(),
+            attention_marks: self
+                .engine
+                .registry()
+                .attention_marks()
+                .map(|mark| mark.as_str().to_string())
                 .collect(),
             static_attention: contract
                 .requires
@@ -2677,7 +2703,8 @@ mod tests {
         ExternalEvidence, ExternalRequest, OfferId, ProposedCall, Resolution, RuntimeEngine, TrajectoryId,
         audience_wire, remedy_instruction, remedy_lines, terminal_safe,
     };
-    use crate::external::{CastAudience, ToolResolutionAnswer};
+    use crate::external::{CastAudience, RequiredAudienceAnswer, ToolResolutionAnswer};
+    use appa_engine::contract::RequiredAudience;
     use appa_engine::label::{Audience, ReaderId};
     use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RemedyStep};
     use std::collections::BTreeSet;
@@ -2759,7 +2786,7 @@ mod tests {
     }
 
     #[test]
-    fn one_tool_resolver_can_pin_trust_audience_and_attention_from_all_arguments() {
+    fn one_tool_resolver_can_pin_delta_and_requirements_from_all_arguments() {
         let policy = appa_policy::Config::from_toml_str(
             r#"
                 version = 1
@@ -2767,8 +2794,12 @@ mod tests {
                 name = "classifier"
                 [[tool]]
                 name = "lookup"
-                resolvers = [{ resolver = "classifier", returns = ["trust", "audience", "attention"] }]
+                resolvers = [{ resolver = "classifier", returns = { delta = ["trust", "audience"], requires = ["trust", "audience", "attention"] } }]
                 requires = { attention = ["static-review"] }
+                [[authority]]
+                name = "reviewer"
+                [authority.mandate]
+                attends = ["privacy-review"]
             "#,
         )
         .expect("the tool-level resolver policy compiles");
@@ -2797,7 +2828,8 @@ mod tests {
                     assert_eq!(binding.resolver.as_str(), "classifier");
                     assert_eq!(tool, "lookup");
                     assert_eq!(arguments, &serde_json::json!({"nested": {"id": 7}, "deep": true}));
-                    assert_eq!(context.valid_trust_ranks, ["suspicious", "trusted"]);
+                    assert_eq!(context.trust_ranks, ["suspicious", "trusted"]);
+                    assert_eq!(context.attention_marks, ["privacy-review"]);
                     assert_eq!(context.static_attention, ["static-review"]);
                 }
                 other => panic!("expected one tool-resolution consult, got {other:?}"),
@@ -2815,6 +2847,11 @@ mod tests {
                     answer: Some(ToolResolutionAnswer {
                         trust: Some("suspicious".to_string()),
                         audience: Some(CastAudience::Public),
+                        required_trust: Some("trusted".to_string()),
+                        required_audience: Some(RequiredAudienceAnswer {
+                            includes: Some(CastAudience::Readers(vec!["support".to_string()])),
+                            cap: Some(CastAudience::Public),
+                        }),
                         attention: Some(vec!["privacy-review".to_string(), "privacy-review".to_string()]),
                     }),
                 }],
@@ -2823,6 +2860,14 @@ mod tests {
         assert_eq!(pins.len(), 1);
         assert_eq!(pins[0].trust(), Some(appa_engine::label::Trust::new(0)));
         assert_eq!(pins[0].audience(), Some(&Audience::Public));
+        assert_eq!(pins[0].required_trust(), Some(appa_engine::label::Trust::new(1)));
+        assert_eq!(
+            pins[0].required_audience(),
+            Some(&RequiredAudience {
+                includes: Some(Audience::restricted([ReaderId::new("support")])),
+                cap: Some(Audience::Public),
+            })
+        );
         assert_eq!(
             pins[0].attention(),
             &[appa_engine::names::MarkName::new("privacy-review")],
