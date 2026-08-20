@@ -200,6 +200,19 @@ impl Engine {
         ))
     }
 
+    /// One act's facts, declared and sealed into the batch a decision appends. The declaration
+    /// is derived from the same facts it is prepended to, so the two cannot disagree.
+    fn decided(
+        &self,
+        view: &EngineView,
+        act: crate::basis::DecidedAct,
+        facts: Vec<Fact>,
+    ) -> Result<ValidatedFactBatch, TransitionError> {
+        let advance = Sequence::advance_of(self, view, &facts);
+        let batch = self.declaring(act, advance, facts);
+        Ok(self.seal(view, batch)?)
+    }
+
     fn declaring(
         &self,
         act: crate::basis::DecidedAct,
@@ -445,13 +458,8 @@ impl Engine {
             trajectory: binding.child.clone(),
             fork: binding.fork.clone(),
         }];
-        let batch = self.declaring(
-            crate::basis::DecidedAct::Binding(binding.fork.clone()),
-            Sequence::advance_of(self, view, &batch),
-            batch,
-        );
         Ok(EngineDecision {
-            append: Some(self.seal(view, batch)?),
+            append: Some(self.decided(view, crate::basis::DecidedAct::Binding(binding.fork.clone()), batch)?),
             follow_up: FollowUp::Fork {
                 child: binding.child.clone(),
             },
@@ -482,9 +490,8 @@ impl Engine {
         let body = match &report.submission {
             ChildSubmission::Void => {
                 let batch = branch::submit_void_return(&views, child).map_err(branch_refusal)?;
-                let batch = self.declaring(return_act(child), Sequence::advance_of(self, view, &batch), batch);
                 return Ok(EngineDecision {
-                    append: Some(self.seal(view, batch)?),
+                    append: Some(self.decided(view, return_act(child), batch)?),
                     follow_up: FollowUp::Child(ChildFollowUp::Ended),
                 });
             }
@@ -616,10 +623,8 @@ impl Engine {
         match branch::submit_child_return(&self.registry, views, child, &body, expansions).map_err(branch_refusal)? {
             branch::RawCrossing::Merged(crossing) => {
                 facts.extend(crossing);
-                let batch = facts;
-                let batch = self.declaring(return_act(child), Sequence::advance_of(self, view, &batch), batch);
                 Ok(EngineDecision {
-                    append: Some(self.seal(view, batch)?),
+                    append: Some(self.decided(view, return_act(child), facts)?),
                     follow_up: FollowUp::Child(ChildFollowUp::Merged { admitted: body }),
                 })
             }
@@ -776,10 +781,8 @@ impl Engine {
             _ => None,
         });
         let Some(derived) = derived else {
-            let batch = facts;
-            let batch = self.declaring(return_act(child), Sequence::advance_of(self, view, &batch), batch);
             return Ok(EngineDecision {
-                append: Some(self.seal(view, batch)?),
+                append: Some(self.decided(view, return_act(child), facts)?),
                 follow_up: FollowUp::Child(ChildFollowUp::Resolve(EvidenceRequest::Sanitizer {
                     sanitizer: name.clone(),
                     source: digest,
@@ -853,10 +856,8 @@ impl Engine {
                 None,
                 self.registry.resolutions(expansions),
             ));
-            let batch = facts;
-            let batch = self.declaring(return_act(child), Sequence::advance_of(self, view, &batch), batch);
             return Ok(EngineDecision {
-                append: Some(self.seal(view, batch)?),
+                append: Some(self.decided(view, return_act(child), facts)?),
                 follow_up: FollowUp::Child(ChildFollowUp::Merged { admitted: derived }),
             });
         };
@@ -917,10 +918,8 @@ impl Engine {
             reason: reason.clone(),
             resolutions: self.registry.resolutions(expansions),
         });
-        let batch = facts;
-        let batch = self.declaring(return_act(child), Sequence::advance_of(self, view, &batch), batch);
         Ok(EngineDecision {
-            append: Some(self.seal(view, batch)?),
+            append: Some(self.decided(view, return_act(child), facts)?),
             follow_up: FollowUp::Child(ChildFollowUp::Rejected { reason }),
         })
     }
@@ -942,11 +941,7 @@ impl Engine {
             .expect("a resolvable source retains its bytes and the cast the caller selected");
         let append = match facts.is_empty() {
             true => None,
-            false => {
-                let batch = facts;
-                let batch = self.declaring(act, Sequence::advance_of(self, view, &batch), batch);
-                Some(self.seal(view, batch)?)
-            }
+            false => Some(self.decided(view, act, facts)?),
         };
         Ok(EngineDecision {
             append,
@@ -1103,12 +1098,7 @@ impl Engine {
                     None => {
                         let append = match cast_facts.is_empty() {
                             true => None,
-                            false => {
-                                let batch = cast_facts;
-                                let batch =
-                                    self.declaring(return_act(child), Sequence::advance_of(self, view, &batch), batch);
-                                Some(self.seal(view, batch)?)
-                            }
+                            false => Some(self.decided(view, return_act(child), cast_facts)?),
                         };
                         Ok(EngineDecision {
                             append,
@@ -1539,13 +1529,8 @@ impl Engine {
             Fact::ValueAdmitted { value, .. } => Some(value.body.clone()),
             _ => None,
         });
-        let batch = self.declaring(
-            crate::basis::DecidedAct::Outcome(dispatch.clone()),
-            Sequence::advance_of(self, view, &batch),
-            batch,
-        );
         Ok(EngineDecision {
-            append: Some(self.seal(view, batch)?),
+            append: Some(self.decided(view, crate::basis::DecidedAct::Outcome(dispatch.clone()), batch)?),
             follow_up: FollowUp::Outcome(OutcomeFollowUp::Closed { admitted }),
         })
     }
@@ -1629,9 +1614,11 @@ impl Engine {
         if checkpoint.is_empty() {
             return Ok(None);
         }
-        let advance = Sequence::advance_of(self, view, &checkpoint);
-        let batch = self.declaring(crate::basis::DecidedAct::Outcome(dispatch.clone()), advance, checkpoint);
-        Ok(Some(self.seal(view, batch)?))
+        Ok(Some(self.decided(
+            view,
+            crate::basis::DecidedAct::Outcome(dispatch.clone()),
+            checkpoint,
+        )?))
     }
 
     fn stage_candidate(
@@ -2506,10 +2493,8 @@ impl Engine {
         .unwrap_or_else(|error| unreachable!("the confined stage admits what the log already proved: {error}"));
         facts.extend(admitted);
         let value = crossed(&facts);
-        let advance = Sequence::advance_of(self, view, &facts);
-        let batch = self.declaring(crate::basis::DecidedAct::Offer(execution.offer), advance, facts);
         Ok(EngineDecision {
-            append: Some(self.seal(view, batch)?),
+            append: Some(self.decided(view, crate::basis::DecidedAct::Offer(execution.offer), facts)?),
             follow_up: FollowUp::Offer(OfferFollowUp::Admitted { value }),
         })
     }
@@ -2607,10 +2592,8 @@ impl Engine {
         .unwrap_or_else(|error| unreachable!("the confined stage admits what this act just derived: {error}"));
         facts.extend(admitted);
         let value = crossed(&facts);
-        let advance = Sequence::advance_of(self, view, &facts);
-        let batch = self.declaring(crate::basis::DecidedAct::Offer(execution.offer), advance, facts);
         Ok(EngineDecision {
-            append: Some(self.seal(view, batch)?),
+            append: Some(self.decided(view, crate::basis::DecidedAct::Offer(execution.offer), facts)?),
             follow_up: FollowUp::Offer(OfferFollowUp::Admitted { value }),
         })
     }
@@ -2783,10 +2766,8 @@ impl Engine {
             Some(residual),
             self.registry.resolutions(expansions),
         ));
-        let advance = Sequence::advance_of(self, view, &facts);
-        let batch = self.declaring(crate::basis::DecidedAct::Offer(execution.offer), advance, facts);
         Ok(EngineDecision {
-            append: Some(self.seal(view, batch)?),
+            append: Some(self.decided(view, crate::basis::DecidedAct::Offer(execution.offer), facts)?),
             follow_up: FollowUp::Offer(OfferFollowUp::Admitted { value: admitted }),
         })
     }
@@ -2870,10 +2851,8 @@ impl Engine {
                 None,
                 self.registry.resolutions(expansions),
             ));
-            let advance = Sequence::advance_of(self, view, &facts);
-            let batch = self.declaring(crate::basis::DecidedAct::Offer(execution.offer), advance, facts);
             return Ok(EngineDecision {
-                append: Some(self.seal(view, batch)?),
+                append: Some(self.decided(view, crate::basis::DecidedAct::Offer(execution.offer), facts)?),
                 follow_up: FollowUp::Offer(OfferFollowUp::Admitted { value: body.clone() }),
             });
         };
@@ -3050,10 +3029,8 @@ impl Engine {
                 OfferFollowUp::Substituted { block: Box::new(block) }
             }
         };
-        let advance = Sequence::advance_of(self, view, &facts);
-        let batch = self.declaring(act, advance, facts);
         Ok(EngineDecision {
-            append: Some(self.seal(view, batch)?),
+            append: Some(self.decided(view, act, facts)?),
             follow_up: FollowUp::Offer(follow_up),
         })
     }
@@ -3429,12 +3406,7 @@ impl Engine {
                 nonce: &execution.offer_nonce,
                 subject: &recorded.subject,
             },
-            BlockedCall {
-                call,
-                raw,
-                stage,
-                role,
-            },
+            BlockedCall { call, raw, stage, role },
             expansions,
         );
         facts.extend(opened);
