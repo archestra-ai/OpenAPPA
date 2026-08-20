@@ -342,14 +342,119 @@ async fn a_child_that_says_nothing_returns_no_value() {
         .says("The child handled it.");
     let host = ToolHost::default();
 
-    let agent = delegating(agent(runtime(&dir, FORKING, ""), &provider, &host, &["delegate"]).await);
+    let agent =
+        delegating(agent(runtime(&dir, FORKING, ""), &provider, &host, &["delegate"]).await).with_limits(Limits {
+            max_inference_rounds: 8,
+            max_forks: 1,
+            ..Limits::default()
+        });
     let outcome = agent.run(root(), "Delegate the work.", Default::default()).await;
 
     assert_eq!(outcome, Outcome::Answer("The child handled it.".to_string()));
     assert_eq!(
         provider.tool_result(2, "call_0"),
-        "[appa] the result was not carried; nothing was admitted",
-        "a void return admits no value, so the spawn call closes carrying none",
+        "[appa] the child trajectory ended and returned no value; no child result was admitted. This does not attest that its task or side effects succeeded. Do not repeat the delegated task merely to obtain a response.",
+        "a void return admits no value but still acknowledges that the child ended",
+    );
+    let requests = provider.requests();
+    let parent_tools = requests[2]["tools"]
+        .as_array()
+        .expect("the parent request advertises tools")
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().expect("a tool name"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        parent_tools,
+        vec!["execute_remedy_plan"],
+        "the root also loses the spawn tool once the run-wide count is spent",
+    );
+}
+
+#[tokio::test]
+async fn an_empty_string_child_return_is_not_a_void_acknowledgement() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let provider = Provider::default();
+    provider
+        .calls("delegate", serde_json::json!({"task": "Return an empty value."}))
+        .says("")
+        .says("The empty value crossed.");
+    let host = ToolHost::default();
+
+    let agent = delegating(agent(runtime(&dir, FORKING, ""), &provider, &host, &["delegate"]).await);
+    let outcome = agent.run(root(), "Delegate it.", Default::default()).await;
+
+    assert_eq!(outcome, Outcome::Answer("The empty value crossed.".to_string()));
+    assert_eq!(
+        provider.tool_result(2, "call_0"),
+        "",
+        "Some(\"\") remains a value return rather than being rewritten as a void acknowledgement",
+    );
+}
+
+#[tokio::test]
+async fn a_child_is_not_offered_another_spawn_or_told_to_delegate_again() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let policy = r#"
+version = 1
+
+[[policy.tool]]
+name = "delegate"
+parameters = { type = "object", properties = { task = { type = "string" } } }
+
+[[policy.tool]]
+name = "read_hr"
+delta = { audience = { exactly = ["hr"] } }
+
+[policy.deployment]
+context_control = true
+"#;
+    let provider = Provider::default();
+    provider
+        .calls("delegate", serde_json::json!({"task": "Read the record here."}))
+        .calls("read_hr", serde_json::json!({"who": "alice"}))
+        .says_nothing()
+        .says("The child ended, so I will not repeat its task.");
+    let host = ToolHost::default();
+
+    let agent = delegating(agent(runtime(&dir, policy, ""), &provider, &host, &["delegate", "read_hr"]).await)
+        .with_limits(Limits {
+            max_fork_depth: 1,
+            ..Limits::default()
+        });
+    let outcome = agent.run(root(), "Delegate the read.", Default::default()).await;
+
+    assert_eq!(
+        outcome,
+        Outcome::Answer("The child ended, so I will not repeat its task.".to_string())
+    );
+    let advertised = |request: &serde_json::Value| {
+        request["tools"]
+            .as_array()
+            .expect("a request advertises tools")
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().expect("a tool name").to_string())
+            .collect::<Vec<_>>()
+    };
+    let requests = provider.requests();
+    assert!(
+        advertised(&requests[0]).contains(&"delegate".to_string()),
+        "the root may spawn"
+    );
+    assert_eq!(
+        advertised(&requests[1]),
+        vec!["read_hr".to_string(), "execute_remedy_plan".to_string()],
+        "the child cannot spend a round on a spawn that the depth limit will refuse",
+    );
+    let feedback = provider.tool_result(2, "call_1");
+    assert!(
+        feedback.contains("This trajectory is at its child-depth limit; do not delegate again."),
+        "the child gets truthful host capability context: {feedback}",
+    );
+    assert!(
+        provider
+            .tool_result(3, "call_0")
+            .starts_with("[appa] the child trajectory ended and returned no value"),
+        "the parent gets non-sensitive completion evidence",
     );
 }
 
@@ -381,8 +486,27 @@ async fn the_fork_depth_ceiling_refuses_a_spawn_below_it() {
     assert_eq!(outcome, Outcome::Answer("Everything is done.".to_string()));
     let refusal = provider.tool_result(3, "call_2");
     assert_eq!(
-        refusal, "no child was opened: this run's fork budget is spent",
+        refusal, "no child was opened: this trajectory is at its child-depth limit",
         "the third spawn sits at the ceiling and opens no child",
+    );
+    let requests = provider.requests();
+    let names = |nth: usize| {
+        requests[nth]["tools"]
+            .as_array()
+            .expect("a request advertises tools")
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().expect("a tool name"))
+            .collect::<Vec<_>>()
+    };
+    assert!(names(0).contains(&"delegate"), "the root may spawn");
+    assert!(
+        names(1).contains(&"delegate"),
+        "depth one may spawn when the limit is two"
+    );
+    assert_eq!(
+        names(2),
+        vec!["execute_remedy_plan"],
+        "the depth-two frame hides only the unavailable spawn tool",
     );
 }
 

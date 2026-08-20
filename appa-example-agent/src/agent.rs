@@ -13,11 +13,16 @@ use serde_json::value::RawValue;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use crate::budget::{Exhausted, Limits, RunBudget};
+use crate::budget::{Exhausted, ForkUnavailable, Limits, RunBudget};
 use crate::provider::OpenAiCompatible;
 use crate::record::{CallId, Record, Recorded};
 use crate::tools::{CONTROL_TOOL, ToolCatalogue, ToolShim};
 use crate::wire::{ChatCompletionRequest, WireMessage, WireToolCall};
+
+/// A void child return is a control result, not an information-bearing value.
+/// The parent needs to know that the trajectory ended, however: an empty tool
+/// result makes it retry already-committed effects merely to obtain a reply.
+const VOID_CHILD_COMPLETION: &str = "[appa] the child trajectory ended and returned no value; no child result was admitted. This does not attest that its task or side effects succeeded. Do not repeat the delegated task merely to obtain a response.";
 
 /// The transcript's opening messages: the host's own configuration,
 /// never the policy's.
@@ -356,6 +361,7 @@ impl Run<'_> {
         match hooks::handle(&self.agent.runtime, event).await {
             HookDecision::AllowCall { spawn } => self.run_released(frame, &id, proposed, spawn).await,
             HookDecision::DenyCall { feedback } => {
+                let feedback = self.with_spawn_context(frame, feedback);
                 self.record(
                     frame,
                     Record::Blocked {
@@ -408,11 +414,20 @@ impl Run<'_> {
             };
             return self.report(frame, id, call, outcome).await.map(Answered::Reply);
         };
-        if self.budget.charge_fork(frame.depth) == Err(Exhausted) {
-            let outcome = ToolOutcome::Failure {
-                message: "no child was opened: this run's fork budget is spent".to_string(),
-            };
-            return self.report(frame, id, call, outcome).await.map(Answered::Reply);
+        match self.budget.charge_fork(frame.depth) {
+            Ok(()) => {}
+            Err(ForkUnavailable::DepthLimit) => {
+                let outcome = ToolOutcome::Failure {
+                    message: "no child was opened: this trajectory is at its child-depth limit".to_string(),
+                };
+                return self.report(frame, id, call, outcome).await.map(Answered::Reply);
+            }
+            Err(ForkUnavailable::RunLimit) => {
+                let outcome = ToolOutcome::Failure {
+                    message: "no child was opened: this run's child capacity is spent".to_string(),
+                };
+                return self.report(frame, id, call, outcome).await.map(Answered::Reply);
+            }
         }
         let child = TrajectoryId(format!("{}:c{}", self.root.0, self.budget.forks()));
         let event = HookEvent::ChildStart {
@@ -453,11 +468,12 @@ impl Run<'_> {
         };
         let id = CallId(parent.reply_to.clone());
         let call = parent.call.clone();
-        let closed = self.report(&mut parent.frame, &id, call, outcome).await?;
+        self.report(&mut parent.frame, &id, call, outcome).await?;
+        let reply = crossed.unwrap_or_else(|| VOID_CHILD_COMPLETION.to_string());
         parent
             .frame
             .transcript
-            .push(WireMessage::tool_result(&parent.reply_to, crossed.unwrap_or(closed)));
+            .push(WireMessage::tool_result(&parent.reply_to, reply));
         Ok(())
     }
 
@@ -623,10 +639,16 @@ impl Run<'_> {
         }
         let mut messages = self.agent.head.0.clone();
         messages.extend(frame.transcript.iter().cloned());
+        let unavailable_spawn = self
+            .agent
+            .spawn
+            .as_ref()
+            .filter(|_| self.budget.fork_availability(frame.depth).is_err())
+            .map(|spawn| spawn.name.0.as_str());
         let request = ChatCompletionRequest {
             model: String::new(),
             messages,
-            tools: Some(self.agent.catalogue.advertised().to_vec()),
+            tools: Some(self.agent.catalogue.advertised_without(unavailable_spawn)),
         };
         tokio::select! {
             biased;
@@ -647,6 +669,21 @@ impl Run<'_> {
             HookDecision::Refuse { detail } => Err(StopReason::Refused(detail)),
             other => Err(unexpected("a lifecycle event", &other)),
         }
+    }
+
+    fn with_spawn_context(&self, frame: &Frame, feedback: String) -> String {
+        let context = match &self.agent.spawn {
+            None => "No child-trajectory tool is available in this harness.".to_string(),
+            Some(spawn) => match self.budget.fork_availability(frame.depth) {
+                Ok(()) => format!(
+                    "A child trajectory is available through the {} tool.",
+                    spawn.name.0
+                ),
+                Err(ForkUnavailable::DepthLimit) => "This trajectory is at its child-depth limit; do not delegate again. Use a listed remedy, finish permitted work here, or return control to the parent.".to_string(),
+                Err(ForkUnavailable::RunLimit) => "No child capacity remains in this run; use a listed remedy or finish permitted work here.".to_string(),
+            },
+        };
+        format!("{feedback}\n\nHarness context:\n  - {context}")
     }
 
     fn actor(&self, frame: &Frame) -> Actor {

@@ -29,8 +29,15 @@ impl ToolCatalogue {
         ToolCatalogue { tools }
     }
 
-    pub(crate) fn advertised(&self) -> &[WireTool] {
-        &self.tools
+    /// Build one request's catalogue, omitting a host tool that cannot run in
+    /// the current frame. The control tool remains available: recovery is
+    /// trajectory-local and stays useful inside a child.
+    pub(crate) fn advertised_without(&self, excluded: Option<&str>) -> Vec<WireTool> {
+        self.tools
+            .iter()
+            .filter(|tool| excluded != Some(tool.function.name.as_str()))
+            .cloned()
+            .collect()
     }
 }
 
@@ -151,11 +158,25 @@ mod tests {
     #[test]
     fn the_catalogue_always_carries_the_control_tool() {
         let catalogue = ToolCatalogue::new(vec![WireTool::new("read_hr", "read", serde_json::json!({}))]);
-        let names: Vec<&str> = catalogue
-            .advertised()
-            .iter()
-            .map(|tool| tool.function.name.as_str())
+        let names: Vec<String> = catalogue
+            .advertised_without(None)
+            .into_iter()
+            .map(|tool| tool.function.name)
             .collect();
-        assert_eq!(names, vec!["read_hr", CONTROL_TOOL]);
+        assert_eq!(names, vec!["read_hr".to_string(), CONTROL_TOOL.to_string()]);
+    }
+
+    #[test]
+    fn one_unavailable_host_tool_can_be_hidden_without_hiding_control() {
+        let catalogue = ToolCatalogue::new(vec![
+            WireTool::new("fork", "spawn", serde_json::json!({})),
+            WireTool::new("read_hr", "read", serde_json::json!({})),
+        ]);
+        let names: Vec<String> = catalogue
+            .advertised_without(Some("fork"))
+            .into_iter()
+            .map(|tool| tool.function.name)
+            .collect();
+        assert_eq!(names, vec!["read_hr".to_string(), CONTROL_TOOL.to_string()]);
     }
 }

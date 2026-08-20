@@ -247,13 +247,13 @@ pub(crate) fn plan(
     }
     let fork_reason = match (&raw.narrowing, raw.requirement_gaps.is_empty()) {
         (Some(_), true) => {
-            "Delegate this call and all work that uses its result to a child session.\nFinish there by returning nothing, or return only a sanitized derivation. Returning the raw value applies the same change to this session."
+            "If this trajectory's harness advertises a child-session tool, delegate this call and all work that uses its result there.\nFinish there by returning nothing, or return only a sanitized derivation. Returning the raw value applies the same change to this session."
         }
         (Some(_), false) => {
-            "Delegate this call, its required remedies, and all work that uses its result to a child session.\nFinish there by returning nothing, or return only a sanitized derivation. Returning the raw value applies the same change to this session."
+            "If this trajectory's harness advertises a child-session tool, delegate this call, its required remedies, and all work that uses its result there.\nFinish there by returning nothing, or return only a sanitized derivation. Returning the raw value applies the same change to this session."
         }
         (None, _) => {
-            "Handle the work in a child session if isolation is useful.\nA child inherits the same session label, so delegation does not clear these requirements."
+            "If this trajectory's harness advertises a child-session tool, handle the work there if isolation is useful.\nA child inherits the same session label, so delegation does not clear these requirements."
         }
     };
     PlannedBlock {

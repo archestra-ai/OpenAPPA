@@ -37,6 +37,12 @@ pub(crate) struct RunBudget {
     forks: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ForkUnavailable {
+    DepthLimit,
+    RunLimit,
+}
+
 impl RunBudget {
     pub(crate) fn new(limits: Limits) -> Self {
         RunBudget {
@@ -71,12 +77,23 @@ impl RunBudget {
     /// Charge one child opened from `depth`. Both ceilings answer here,
     /// so no caller can consult one and forget the other; a refusal
     /// spends nothing.
-    pub(crate) fn charge_fork(&mut self, depth: u32) -> Result<(), Exhausted> {
-        if depth >= self.limits.max_fork_depth || self.forks >= self.limits.max_forks {
-            return Err(Exhausted);
-        }
+    pub(crate) fn charge_fork(&mut self, depth: u32) -> Result<(), ForkUnavailable> {
+        self.fork_availability(depth)?;
         self.forks += 1;
         Ok(())
+    }
+
+    /// Whether the next inference at `depth` may open a child. The model's
+    /// catalogue uses the same predicate as the eventual charge, so a spent
+    /// spawn is not advertised as an action that can only fail.
+    pub(crate) fn fork_availability(&self, depth: u32) -> Result<(), ForkUnavailable> {
+        if depth >= self.limits.max_fork_depth {
+            Err(ForkUnavailable::DepthLimit)
+        } else if self.forks >= self.limits.max_forks {
+            Err(ForkUnavailable::RunLimit)
+        } else {
+            Ok(())
+        }
     }
 
     /// How many children this run has opened. Also the child ids'
@@ -111,6 +128,7 @@ mod tests {
             ..Limits::default()
         };
         let mut budget = RunBudget::new(limits);
+        assert_eq!(budget.fork_availability(0), Ok(()));
         assert_eq!(budget.charge_inference(), Ok(()));
         assert_eq!(budget.charge_inference(), Ok(()));
         assert_eq!(budget.charge_inference(), Err(Exhausted));
@@ -123,7 +141,12 @@ mod tests {
         );
 
         assert_eq!(budget.charge_fork(0), Ok(()));
-        assert_eq!(budget.charge_fork(0), Err(Exhausted), "the count ceiling");
+        assert_eq!(budget.fork_availability(0), Err(ForkUnavailable::RunLimit));
+        assert_eq!(
+            budget.charge_fork(0),
+            Err(ForkUnavailable::RunLimit),
+            "the count ceiling"
+        );
         assert_eq!(budget.forks(), 1, "a refused charge does not consume a child id");
     }
 
@@ -134,8 +157,14 @@ mod tests {
             max_fork_depth: 2,
             ..Limits::default()
         });
+        assert_eq!(budget.fork_availability(1), Ok(()));
+        assert_eq!(budget.fork_availability(2), Err(ForkUnavailable::DepthLimit));
         assert_eq!(budget.charge_fork(1), Ok(()));
-        assert_eq!(budget.charge_fork(2), Err(Exhausted), "the ceiling is exclusive");
+        assert_eq!(
+            budget.charge_fork(2),
+            Err(ForkUnavailable::DepthLimit),
+            "the ceiling is exclusive"
+        );
         assert_eq!(budget.forks(), 1);
     }
 
