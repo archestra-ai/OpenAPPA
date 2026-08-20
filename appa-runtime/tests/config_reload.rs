@@ -1,3 +1,6 @@
+mod common;
+use common::raw;
+
 use std::sync::Arc;
 
 use appa_runtime::api::{OpenError, Runtime};
@@ -63,10 +66,6 @@ fn write_config(dir: &tempfile::TempDir, policy: &str) -> Config {
     let path = dir.path().join("appa.toml");
     std::fs::write(&path, policy).expect("the fixture writes");
     Config::load(&path).expect("the fixture validates")
-}
-
-fn raw(value: serde_json::Value) -> Box<serde_json::value::RawValue> {
-    serde_json::value::to_raw_value(&value).expect("the fixture serializes")
 }
 
 fn notes() -> ProposedCall {

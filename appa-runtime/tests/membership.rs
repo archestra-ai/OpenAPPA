@@ -1,3 +1,6 @@
+mod common;
+use common::{raw, serve};
+
 use std::sync::{Arc, Mutex};
 
 use appa_runtime::api::{RemedyOutcome, Runtime};
@@ -82,25 +85,7 @@ async fn serve_directory() -> (String, Directory) {
             }),
         )
         .with_state(directory.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("an ephemeral loopback port binds");
-    let addr = listener.local_addr().expect("the bound address is readable");
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("the stub serves");
-    });
-    (format!("http://{addr}/membership"), directory)
-}
-
-fn raw(value: serde_json::Value) -> Box<serde_json::value::RawValue> {
-    serde_json::value::to_raw_value(&value).expect("the fixture serializes")
-}
-
-fn acting() -> Actor {
-    Actor {
-        root: root(),
-        child: None,
-    }
+    (format!("{}/membership", serve(router).await), directory)
 }
 
 fn root() -> TrajectoryId {
@@ -183,7 +168,7 @@ async fn narrowed(dir: &tempfile::TempDir, membership_url: &str) -> Arc<Runtime>
         panic!("the narrowing read is offered for acceptance, got {blocked:?}");
     };
     assert!(matches!(
-        runtime.execute_remedy(&acting(), last_offer(&feedback)).await,
+        runtime.execute_remedy(&actor(), last_offer(&feedback)).await,
         RemedyOutcome::Authorized { .. }
     ));
     assert_eq!(

@@ -932,16 +932,23 @@ mod real_engine_tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// One fixture configuration, from its whole TOML text. The file has
+    /// to exist on disk because `Config::load` reads the policy file's
+    /// bytes, which the opening record keys the deployment by.
+    fn config_from(text: &str) -> Config {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, text).expect("the fixture writes");
+        Config::load(&path).expect("the fixture validates")
+    }
+
     fn config_with(policy: &str, authority_url: Option<&str>) -> Config {
         let binding = match authority_url {
             Some(url) => format!("[externals.authorities.approver]\nurl = \"{url}\"\n"),
             None => String::new(),
         };
         let text = format!("[policy]\n{policy}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n{binding}");
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let path = dir.path().join("appa.toml");
-        std::fs::write(&path, text).expect("the fixture writes");
-        Config::load(&path).expect("the fixture validates")
+        config_from(&text)
     }
 
     const FETCH_AND_SEND: &str = r#"
@@ -2333,10 +2340,7 @@ context_control = true
             "[policy]\n{policy}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n\
              [externals.sanitizers.redactor]\nbuiltin = \"redact-email\"\n{binding}"
         );
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let path = dir.path().join("appa.toml");
-        std::fs::write(&path, text).expect("the fixture writes");
-        Config::load(&path).expect("the fixture validates")
+        config_from(&text)
     }
 
     fn send(body: &str) -> ProposedCall {
@@ -2396,14 +2400,6 @@ context_control = true
 
     fn standing_release(runtime: &Runtime) -> Option<crate::engine::OpenDispatch> {
         runtime.substituted_release(&root(), &root())
-    }
-
-    fn last_offer(runtime: &Runtime) -> OfferId {
-        let quoted = runtime
-            .minted_offers(&root(), &root())
-            .pop()
-            .expect("the block surfaced an offer");
-        runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0
     }
 
     #[tokio::test]
@@ -2530,7 +2526,7 @@ context_control = true
             .on_tool_call(send("mail alice@corp.example"), false)
             .await
             .expect("the send is decided");
-        let hop = last_offer(&runtime);
+        let hop = latest_offer(&runtime);
 
         for _ in 0..2 {
             assert!(matches!(
@@ -2692,7 +2688,7 @@ context_control = true
             Ok(RemedyDecision::Declined { .. }),
         ));
         assert!(runtime.open_dispatches(&root(), &root()).is_empty());
-        let approval = last_offer(&runtime);
+        let approval = latest_offer(&runtime);
         assert_eq!(
             session.on_remedy(approval, None).await.expect("the approval executes"),
             RemedyDecision::Authorized {
@@ -2742,10 +2738,7 @@ confined_child_return = true
         };
         let text =
             format!("[policy]\n{SANITIZED_CHILD}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n{binding}");
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let path = dir.path().join("appa.toml");
-        std::fs::write(&path, text).expect("the fixture writes");
-        Config::load(&path).expect("the fixture validates")
+        config_from(&text)
     }
 
     #[tokio::test]
@@ -2876,10 +2869,7 @@ confined_child_return = true
             None => String::new(),
         };
         let text = format!("[policy]\n{policy}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n{binding}");
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let path = dir.path().join("appa.toml");
-        std::fs::write(&path, text).expect("the fixture writes");
-        Config::load(&path).expect("the fixture validates")
+        config_from(&text)
     }
 
     fn bare_externals() -> crate::config::Externals {
@@ -2997,10 +2987,7 @@ confined_results = ["leak"]
         let text = format!(
             "[policy]\n{NARROWING}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.sanitizers.scrub]\nurl = \"{url}\"\n"
         );
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let path = dir.path().join("appa.toml");
-        std::fs::write(&path, text).expect("the fixture writes");
-        Config::load(&path).expect("the fixture validates")
+        config_from(&text)
     }
 
     const EMITTING_LEAK: &str = r#"
@@ -3026,10 +3013,7 @@ confined_results = ["leak"]
         let text = format!(
             "[policy]\n{EMITTING_LEAK}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.sanitizers.scrub]\nurl = \"{url}\"\n"
         );
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let path = dir.path().join("appa.toml");
-        std::fs::write(&path, text).expect("the fixture writes");
-        Config::load(&path).expect("the fixture validates")
+        config_from(&text)
     }
 
     fn leak() -> ProposedCall {
@@ -3113,10 +3097,7 @@ confined_results = ["leak"]
         let text = format!(
             "[policy]\n{PARTLY_CLEARED}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.sanitizers.scrub]\nurl = \"{url}\"\n"
         );
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let path = dir.path().join("appa.toml");
-        std::fs::write(&path, text).expect("the fixture writes");
-        Config::load(&path).expect("the fixture validates")
+        config_from(&text)
     }
 
     #[tokio::test]
@@ -3171,17 +3152,18 @@ context_control = true
 confined_child_return = true
 "#;
 
+    fn partly_cleared_child_config(url: &str) -> Config {
+        config_from(&format!(
+            "[policy]\n{PARTLY_CLEARED_CHILD}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.sanitizers.scrub]\nurl = \"{url}\"\n"
+        ))
+    }
+
     #[tokio::test]
     async fn a_partly_cleared_child_return_is_staged_with_its_own_remedies() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let url = stub(serde_json::json!({"body": "scrubbed"})).await;
-        let text = format!(
-            "[policy]\n{PARTLY_CLEARED_CHILD}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.sanitizers.scrub]\nurl = \"{url}\"\n"
-        );
-        let path = dir.path().join("appa.toml");
-        std::fs::write(&path, text).expect("the fixture writes");
-        let config = Config::load(&path).expect("the fixture validates");
-        let runtime = Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
+        let runtime = Runtime::open(partly_cleared_child_config(&url), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let child = open_child(
             &mut session,
