@@ -210,7 +210,7 @@ Deployments migrate existing security controls into OpenAPPA by registering them
 
 Registering security controls as OpenAPPA components prevents prompt injections from bypassing policy. Because the engine evaluates structured tool dispatches at the boundary rather than model output text, a compromised model cannot talk its way past policy rules.
 
-Crucially, external components are capped by registered mandates: even if an ML classifier or third-party scanner makes a mistake, it cannot grant permissions beyond its pre-configured ceiling. A membership resolver carries no mandate — its answers are trusted directory input, and the engine refuses a malformed answer: one carrying the reserved `public` state or an unexpanded `@group` name instead of literal reader IDs. Furthermore, declaring tool bounds in contracts removes scattered guardrail scripts and imperative `if` checks from your application code.
+Crucially, authorities, sanitizers, and casts are capped by registered mandates and ceilings: even if an ML classifier or third-party scanner makes a mistake, it cannot grant permissions beyond its pre-configured limit. Resolvers carry no mandate. A membership resolver's answers are trusted directory input, and a tool-level dynamic resolver's answers are trusted classifier input over attacker-influenced arguments — the engine validates both for shape and policy vocabulary only (literal reader IDs, declared trust ranks, attended attention marks), never against a ceiling. Register a resolver only for a service you trust as part of the deployment itself. Furthermore, declaring tool bounds in contracts removes scattered guardrail scripts and imperative `if` checks from your application code.
 
 ## Operational impact: How OpenAPPA simplifies security
 
