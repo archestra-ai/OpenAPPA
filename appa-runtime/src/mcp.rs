@@ -208,7 +208,7 @@ mod tests {
             crate::api::Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
 
         let root = crate::api::TrajectoryId("cc:mcp-test".to_string());
-        let mut session = runtime.create_session(root.clone()).expect("a fresh id opens");
+        let session = runtime.create_session(root.clone()).expect("a fresh id opens");
         let denied = session
             .on_tool_call(
                 ProposedCall {

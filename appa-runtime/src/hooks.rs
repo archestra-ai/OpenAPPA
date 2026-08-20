@@ -40,7 +40,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             Err(error) => refuse(error.to_string()),
         },
         HookEvent::Prompt { actor, text } => {
-            match on_actor(runtime, &actor, |mut session| {
+            match on_actor(runtime, &actor, |session| {
                 let text = text.clone();
                 async move { session.on_prompt(text) }
             })
@@ -56,13 +56,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             // turn" on this hook, which would hold the harness in a turn
             // it has finished; a close that failed leaves the call open
             // and the next proposal refuses on its own.
-            if let Err(error) = on_actor(
-                runtime,
-                &actor,
-                |mut session| async move { session.on_turn_end().await },
-            )
-            .await
-            {
+            if let Err(error) = on_actor(runtime, &actor, |session| async move { session.on_turn_end().await }).await {
                 tracing::warn!(root = %actor.root.0, %error, "the turn end closed no abandoned call");
             }
             HookDecision::Ack
@@ -71,7 +65,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             if is_control_tool(&call.tool) {
                 return control_call(runtime, &actor, &call);
             }
-            match on_actor(runtime, &actor, |mut session| {
+            match on_actor(runtime, &actor, |session| {
                 let call = call.clone();
                 async move { session.on_tool_call(call, spawn).await }
             })
@@ -88,7 +82,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
                 tracing::debug!(trajectory = %actor.root.0, "control tool outcome absorbed");
                 return HookDecision::Ack;
             }
-            match on_actor(runtime, &actor, |mut session| {
+            match on_actor(runtime, &actor, |session| {
                 let (call, outcome) = (call.clone(), outcome.clone());
                 async move { session.on_tool_result(call, outcome).await }
             })
@@ -106,7 +100,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             value,
         } => {
             let said = value.clone();
-            match on_actor(runtime, &actor, |mut session| {
+            match on_actor(runtime, &actor, |session| {
                 let (call, outcome, child, value) = (call.clone(), outcome.clone(), child.clone(), value.clone());
                 async move { session.on_spawn_result(call, outcome, child, value).await }
             })
@@ -118,7 +112,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             }
         }
         HookEvent::ChildStart { root, child, spawn } => {
-            let mut root = match open_or_reopen(runtime, &root) {
+            let root = match open_or_reopen(runtime, &root) {
                 Ok(session) => session,
                 Err(error) => return refuse(error.to_string()),
             };
@@ -129,7 +123,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
         }
         HookEvent::ChildEnd { root, child, value } => {
             let said = value.clone();
-            match on_child(runtime, &root, &child, |mut session| {
+            match on_child(runtime, &root, &child, |session| {
                 let value = value.clone();
                 async move { session.on_child_end(value).await }
             })
@@ -216,7 +210,7 @@ async fn on_child<T, Run>(
 where
     Run: Future<Output = Result<T, EventError>>,
 {
-    let mut root_session = open_or_reopen(runtime, root)?;
+    let root_session = open_or_reopen(runtime, root)?;
     match event(runtime.session(root, child)?).await {
         Err(EventError::SpawnNotTaken) => match root_session.open_late(child.clone())? {
             LateOpen::Opened => {

@@ -588,7 +588,7 @@ impl Runtime {
                 detail: "this offer is already being executed".to_string(),
             };
         };
-        let mut session = match self.session(&root, &pursuer) {
+        let session = match self.session(&root, &pursuer) {
             Ok(session) => session,
             Err(error) => {
                 return RemedyOutcome::Refused {
