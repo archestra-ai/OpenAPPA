@@ -957,32 +957,12 @@ fn compile_stored_policy(bytes: &[u8]) -> Result<appa_policy::Config, String> {
     appa_policy::Config::from_toml_str(&text).map_err(|error| format!("the stored policy does not load: {error}"))
 }
 
-/// Plain-data helpers for tests outside this module — the adapter and
-/// MCP tests — so they can drive the test seam without naming the
-/// boundary (the source-scan structural guard holds for test
-/// code too).
+/// Plain-data fixtures for tests outside this module, so they can name
+/// a fork the way the harness carries it without naming the engine
+/// boundary (the source-scan structural guard holds for test code
+/// too).
 #[cfg(test)]
 pub(crate) mod testing {
-    use crate::engine::{EngineDecision, Feedback, Next, ReleasedCall, TestSeam};
-
-    use super::{Config, DispatchId, OfferId, ProposedCall, Runtime};
-
-    pub(crate) fn runtime(config: Config, db: std::path::PathBuf) -> Runtime {
-        Runtime::open_with_engine(config, db, TestSeam::new()).expect("a fresh test runtime opens")
-    }
-
-    pub(crate) fn fail_next_commit(runtime: &Runtime) {
-        runtime.inner.store.fail_commit_after(0);
-    }
-
-    fn enqueue(runtime: &Runtime, then: Next) {
-        runtime.inner.engine.enqueue(EngineDecision { append: None, then });
-    }
-
-    pub(crate) fn enqueue_done(runtime: &Runtime) {
-        enqueue(runtime, Next::Done);
-    }
-
     fn engine_dispatch(label: &str) -> appa_engine::value::DispatchId {
         let policy = appa_policy::Config::from_toml_str("version = 1\n[[tool]]\nname = \"Bash\"\n")
             .expect("the fixture policy compiles");
@@ -996,41 +976,5 @@ pub(crate) mod testing {
     pub(crate) fn spawn_binding(label: &str) -> super::SpawnBinding {
         let fork = appa_engine::value::ForkId::of(&engine_dispatch(label));
         super::SpawnBinding(serde_json::to_string(&fork).expect("a fork id serializes"))
-    }
-
-    fn wire_dispatch(label: &str) -> DispatchId {
-        DispatchId(serde_json::to_string(&engine_dispatch(label)).expect("an engine dispatch id serializes"))
-    }
-
-    pub(crate) fn enqueue_release(runtime: &Runtime, dispatch: &str, tool: &str, arguments: &serde_json::Value) {
-        let call = ProposedCall {
-            tool: tool.to_string(),
-            arguments: super::raw(arguments.clone()),
-        };
-        enqueue(
-            runtime,
-            Next::ModelResponse {
-                invocations: vec![ReleasedCall {
-                    dispatch: wire_dispatch(dispatch),
-                    tool: call.tool.clone(),
-                    bytes: serde_json::to_vec(&call).expect("the test call serializes"),
-                    fork: None,
-                }],
-                feedback: Vec::new(),
-            },
-        );
-    }
-
-    pub(crate) fn enqueue_deny(runtime: &Runtime, feedback: &str, offers: &[&str]) {
-        enqueue(
-            runtime,
-            Next::ModelResponse {
-                invocations: Vec::new(),
-                feedback: vec![Feedback {
-                    text: feedback.to_string(),
-                    offers: offers.iter().map(|id| OfferId(id.to_string())).collect(),
-                }],
-            },
-        );
     }
 }

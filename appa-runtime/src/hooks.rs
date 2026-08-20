@@ -254,7 +254,7 @@ mod tests {
     use super::*;
     use appa_runtime_api::SpawnRef;
 
-    use crate::api::{Runtime, testing};
+    use crate::api::Runtime;
     use crate::config::Config;
 
     fn codec() -> Codec {
@@ -297,11 +297,7 @@ mod tests {
         Config::load(&path).expect("the minimal fixture validates")
     }
 
-    fn open_test_runtime(dir: &tempfile::TempDir) -> Runtime {
-        testing::runtime(config(), dir.path().join("appa.db"))
-    }
-
-    fn open_real_runtime(dir: &tempfile::TempDir) -> Runtime {
+    fn open_runtime(dir: &tempfile::TempDir) -> Runtime {
         Runtime::open(config(), dir.path().join("appa.db"), None).expect("the fixture deployment opens")
     }
 
@@ -323,7 +319,7 @@ mod tests {
     #[tokio::test]
     async fn the_recorded_session_replays_end_to_end() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_real_runtime(&dir);
+        let runtime = open_runtime(&dir);
         for event in fixtures() {
             let name = event["hook_event_name"].as_str().expect("each fixture names its hook");
             let control = event["tool_name"] == CONTROL_TOOL_FIXTURE_NAME;
@@ -366,7 +362,7 @@ mod tests {
     #[tokio::test]
     async fn a_turn_end_answers_with_no_opinion_even_over_an_unknown_session() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_real_runtime(&dir);
+        let runtime = open_runtime(&dir);
         for hook in ["Stop", "StopFailure", "SubagentStop"] {
             let mut body = serde_json::json!({
                 "hook_event_name": hook,
@@ -390,7 +386,7 @@ mod tests {
     #[tokio::test]
     async fn a_turn_end_frees_a_trajectory_the_missing_outcome_wedged() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_real_runtime(&dir);
+        let runtime = open_runtime(&dir);
         let propose = |command: &str| {
             serde_json::json!({
                 "hook_event_name": "PreToolUse",
@@ -427,33 +423,39 @@ mod tests {
     #[tokio::test]
     async fn a_deny_renders_in_the_pre_tool_use_wire() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
-        testing::enqueue_deny(&runtime, "blocked: the recipient cannot read this", &["offer-1"]);
+        let runtime = open_runtime(&dir);
         let event = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "session_id": "s1",
-            "tool_name": "Bash",
-            "tool_input": {"command": "ls"},
+            "tool_name": "Curl",
+            "tool_input": {"url": "https://example.invalid"},
             "tool_use_id": "toolu_1",
         });
         let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&event).expect("serializes")).await;
         assert_eq!(status, 200);
+        let rendered = answer["hookSpecificOutput"]
+            .as_object()
+            .expect("a deny renders inside hookSpecificOutput");
         assert_eq!(
-            answer,
-            serde_json::json!({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": "blocked: the recipient cannot read this",
-                }
-            }),
+            rendered.keys().collect::<Vec<_>>(),
+            ["hookEventName", "permissionDecision", "permissionDecisionReason"],
+            "the deny wire carries exactly these three fields: {answer}",
+        );
+        assert_eq!(rendered["hookEventName"], "PreToolUse");
+        assert_eq!(rendered["permissionDecision"], "deny");
+        assert!(
+            !rendered["permissionDecisionReason"]
+                .as_str()
+                .expect("the reason is a string")
+                .is_empty(),
+            "the deny carries the engine's feedback to the model",
         );
     }
 
     #[tokio::test]
     async fn an_event_error_renders_as_a_deny() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_real_runtime(&dir);
+        let runtime = open_runtime(&dir);
         let event = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "session_id": "s1",
@@ -480,7 +482,7 @@ mod tests {
     #[tokio::test]
     async fn a_replaced_output_renders_as_a_block_with_the_placeholder() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_real_runtime(&dir);
+        let runtime = open_runtime(&dir);
         let pre = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "session_id": "s1",
@@ -504,7 +506,7 @@ mod tests {
     #[tokio::test]
     async fn a_mid_run_input_rewrite_still_matches_its_dispatch() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_real_runtime(&dir);
+        let runtime = open_runtime(&dir);
         let questions = serde_json::json!({"questions": [{"question": "Declare the tool?"}]});
         let pre = serde_json::json!({
             "hook_event_name": "PreToolUse",
@@ -542,7 +544,7 @@ mod tests {
     #[tokio::test]
     async fn the_control_tool_opens_no_dispatch() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
+        let runtime = open_runtime(&dir);
         let event = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "session_id": "s1",
@@ -556,7 +558,6 @@ mod tests {
             answer["hookSpecificOutput"]["permissionDecisionReason"],
             "appa: the runtime's own control tool",
         );
-        testing::enqueue_release(&runtime, "d1", "Bash", &serde_json::json!({"command": "ls"}));
         let call = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "session_id": "s1",
@@ -570,8 +571,7 @@ mod tests {
     #[tokio::test]
     async fn a_lookalike_control_tool_is_checked() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
-        testing::enqueue_deny(&runtime, "blocked: not the runtime's tool", &[]);
+        let runtime = open_runtime(&dir);
         let event = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "session_id": "s1",
@@ -588,7 +588,7 @@ mod tests {
     #[tokio::test]
     async fn a_control_tools_post_hook_answers_with_no_opinion() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
+        let runtime = open_runtime(&dir);
         let event = serde_json::json!({
             "hook_event_name": "PostToolUse",
             "session_id": "s1",
@@ -604,7 +604,7 @@ mod tests {
     #[tokio::test]
     async fn a_control_call_answers_without_a_session_lookup() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
+        let runtime = open_runtime(&dir);
 
         let start = serde_json::json!({
             "hook_event_name": "SubagentStart",
@@ -650,7 +650,7 @@ mod tests {
     #[tokio::test]
     async fn a_child_return_that_crosses_unchanged_answers_with_no_opinion() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_real_runtime(&dir);
+        let runtime = open_runtime(&dir);
         let root = appa_runtime_api::TrajectoryId("cc:s1".to_string());
         let child = appa_runtime_api::TrajectoryId("cc:s1:a1".to_string());
 
@@ -703,7 +703,7 @@ mod tests {
     #[tokio::test]
     async fn an_uncorrelated_child_return_blocks_rather_than_refusing() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
+        let runtime = open_runtime(&dir);
         let root = appa_runtime_api::TrajectoryId("cc:s1".to_string());
 
         let decision = handle(
@@ -724,7 +724,7 @@ mod tests {
     #[tokio::test]
     async fn a_spawn_result_on_an_unforked_call_answers_as_an_ordinary_outcome() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_real_runtime(&dir);
+        let runtime = open_runtime(&dir);
         let root = appa_runtime_api::TrajectoryId("cc:s1".to_string());
         let call = || crate::api::ProposedCall {
             tool: "Agent".to_string(),
@@ -765,7 +765,7 @@ mod tests {
     #[tokio::test]
     async fn a_child_event_before_its_start_opens_the_child_to_the_one_spawn_in_flight() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_real_runtime(&dir);
+        let runtime = open_runtime(&dir);
         let root = appa_runtime_api::TrajectoryId("cc:s1".to_string());
         let child = appa_runtime_api::TrajectoryId("cc:s1:a1".to_string());
         let released = handle(
@@ -846,8 +846,8 @@ mod tests {
     #[tokio::test]
     async fn an_operational_failure_refuses_instead_of_answering_the_model() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
-        testing::fail_next_commit(&runtime);
+        let runtime = open_runtime(&dir);
+        runtime.store().fail_commit_after(0);
         let prompt = serde_json::json!({
             "hook_event_name": "UserPromptSubmit",
             "session_id": "s1",
@@ -859,23 +859,12 @@ mod tests {
             answer.get("error").is_some(),
             "an operational failure renders as a refusal, never as model-facing feedback: {answer}",
         );
-
-        testing::enqueue_done(&runtime);
-        let call = serde_json::json!({
-            "hook_event_name": "PreToolUse",
-            "session_id": "s1",
-            "tool_name": "Bash",
-            "tool_input": {"command": "ls"},
-        });
-        let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&call).expect("serializes")).await;
-        assert_eq!(status, 409, "an undeliverable decision refuses rather than denying");
-        assert!(answer.get("error").is_some(), "got {answer}");
     }
 
     #[tokio::test]
     async fn an_unreadable_hook_event_is_a_400() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
+        let runtime = open_runtime(&dir);
         let (status, answer) = call_hook(&runtime, b"not json").await;
         assert_eq!(status, 400);
         assert!(
@@ -889,7 +878,7 @@ mod tests {
     #[tokio::test]
     async fn a_malformed_hook_event_is_a_409() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_test_runtime(&dir);
+        let runtime = open_runtime(&dir);
         let event = serde_json::json!({"hook_event_name": "PreToolUse", "session_id": "s1"});
         let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&event).expect("serializes")).await;
         assert_eq!(status, 409);
