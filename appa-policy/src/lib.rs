@@ -75,6 +75,18 @@ pub enum ConfigError {
     DuplicateDynamicResolver(String),
     #[error("tool {tool} dynamic binding names unregistered resolver {resolver}")]
     UnregisteredDynamicResolver { tool: String, resolver: String },
+    #[error("tool {tool} resolver {resolver} repeats returned dimension {dimension}")]
+    DuplicateResolverReturn {
+        tool: String,
+        resolver: String,
+        dimension: String,
+    },
+    #[error("tool {tool} resolver {resolver} names unknown returned dimension {dimension:?}")]
+    UnknownResolverReturn {
+        tool: String,
+        resolver: String,
+        dimension: String,
+    },
     #[error("[limits] planner_cap is 0: a tool's worst case is at least one plan, so a zero cap refuses every tool")]
     ZeroPlannerCap,
     #[error("[deployment] {field}: expected one of {expected}, found {found:?}")]
@@ -155,6 +167,14 @@ impl Config {
         }
         for tool in &tools {
             for binding in appa_engine::check::dynamic_reads(tool) {
+                if !dynamic_resolver_names.contains(&binding.resolver) {
+                    return Err(ConfigError::UnregisteredDynamicResolver {
+                        tool: tool.name.as_str().into(),
+                        resolver: binding.resolver.as_str().into(),
+                    });
+                }
+            }
+            for binding in &tool.resolvers {
                 if !dynamic_resolver_names.contains(&binding.resolver) {
                     return Err(ConfigError::UnregisteredDynamicResolver {
                         tool: tool.name.as_str().into(),
@@ -450,12 +470,21 @@ struct RawTool {
     effects: Vec<String>,
     implementation: Option<toml::Value>,
     parameters: Option<serde_json::Value>,
+    #[serde(default)]
+    resolvers: Vec<RawToolResolver>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawToolResolver {
+    resolver: String,
+    returns: Vec<String>,
 }
 
 impl RawTool {
     fn convert(self, chain: &TrustChain) -> Result<ToolContract, ConfigError> {
         let ctx = || format!("tool {}", self.name);
-        // No `delta` key at all = unannotated (results admitted at Unknown/Unknown, fail-closed);
+        // No `delta` key and no resolver-owned label field = unannotated (Unknown/Unknown);
         // `delta = {}` = the deliberate neutral annotation. The distinction is the whole point —
         // never collapse an omitted delta into the neutral one.
         let delta = self.delta.map(|d| d.convert(chain, &ctx())).transpose()?;
@@ -482,10 +511,44 @@ impl RawTool {
                 kind: duplicate.0.as_str().to_string(),
             }
         })?;
+        // Only the string-level checks live here: an unknown dimension name never parses, and a
+        // repeated one would silently collapse in the `BTreeSet`. Binding-shape and
+        // dimension-ownership refusals are the registry's (`LoadError`), surfaced via
+        // `ConfigError::Registry` when the engine opens.
+        let mut resolvers = Vec::new();
+        for raw in self.resolvers {
+            let mut returns = BTreeSet::new();
+            for dimension in raw.returns {
+                let parsed = match dimension.as_str() {
+                    "trust" => appa_engine::contract::ResolverReturn::Trust,
+                    "audience" => appa_engine::contract::ResolverReturn::Audience,
+                    "attention" => appa_engine::contract::ResolverReturn::Attention,
+                    _ => {
+                        return Err(ConfigError::UnknownResolverReturn {
+                            tool: self.name.clone(),
+                            resolver: raw.resolver.clone(),
+                            dimension,
+                        });
+                    }
+                };
+                if !returns.insert(parsed) {
+                    return Err(ConfigError::DuplicateResolverReturn {
+                        tool: self.name.clone(),
+                        resolver: raw.resolver.clone(),
+                        dimension,
+                    });
+                }
+            }
+            resolvers.push(appa_engine::contract::ToolResolverBinding {
+                resolver: DynamicResolverName::new(raw.resolver),
+                returns,
+            });
+        }
         Ok(ToolContract {
             name: ToolName::new(self.name),
             tags: self.tags.into_iter().map(TagName::new).collect(),
             parameters,
+            resolvers,
             delta,
             emits,
             requires,
@@ -1212,6 +1275,101 @@ confined_results = ["lookup"]
         assert!(matches!(
             Config::from_toml_str(&missing_name),
             Err(ConfigError::UnregisteredDynamicResolver { .. })
+        ));
+        assert!(matches!(
+            Config::from_toml_str(
+                "version = 1\n[[tool]]\nname = \"lookup\"\n\
+                 resolvers = [{ resolver = \"classifier\", returns = [\"trust\"] }]\n"
+            ),
+            Err(ConfigError::UnregisteredDynamicResolver { tool, resolver })
+                if tool == "lookup" && resolver == "classifier"
+        ));
+    }
+
+    #[test]
+    fn tool_level_resolvers_declare_disjoint_returned_fields() {
+        let policy = r#"
+version = 1
+[[dynamic_resolver]]
+name = "classifier"
+[[dynamic_resolver]]
+name = "review"
+
+[[tool]]
+name = "lookup"
+parameters = { type = "object", properties = { id = { type = "string" }, deep = { type = "boolean" } }, required = ["id"] }
+resolvers = [
+  { resolver = "classifier", returns = ["trust", "audience"] },
+  { resolver = "review", returns = ["attention"] },
+]
+"#;
+        let config = Config::from_toml_str(policy).expect("disjoint tool resolvers load");
+        let tool = config
+            .registry()
+            .tool(&ToolName::new("lookup"))
+            .expect("lookup registers");
+        assert_eq!(tool.resolvers.len(), 2);
+        assert!(
+            tool.resolvers[0]
+                .returns
+                .contains(&appa_engine::contract::ResolverReturn::Trust)
+        );
+        assert!(
+            tool.resolvers[0]
+                .returns
+                .contains(&appa_engine::contract::ResolverReturn::Audience)
+        );
+        assert!(
+            tool.resolvers[1]
+                .returns
+                .contains(&appa_engine::contract::ResolverReturn::Attention)
+        );
+    }
+
+    #[test]
+    fn tool_level_resolvers_refuse_duplicate_label_owners() {
+        let policy = |delta: &str, resolvers: &str| {
+            format!(
+                "version = 1\n[[dynamic_resolver]]\nname = \"one\"\n[[dynamic_resolver]]\nname = \"two\"\n\
+                 [[tool]]\nname = \"lookup\"\n{delta}\nresolvers = [{resolvers}]\n"
+            )
+        };
+        for text in [
+            policy(
+                "delta = { trust = \"suspicious\" }",
+                "{ resolver = \"one\", returns = [\"trust\"] }",
+            ),
+            policy(
+                "",
+                "{ resolver = \"one\", returns = [\"audience\"] }, { resolver = \"two\", returns = [\"audience\"] }",
+            ),
+        ] {
+            assert!(matches!(
+                Config::from_toml_str(&text),
+                Err(ConfigError::Registry(LoadError::DuplicateToolResolverDimension { .. }))
+            ));
+        }
+    }
+
+    #[test]
+    fn tool_level_resolver_return_lists_are_strict() {
+        let policy = |returns: &str| {
+            format!(
+                "version = 1\n[[dynamic_resolver]]\nname = \"r\"\n\
+                 [[tool]]\nname = \"lookup\"\nresolvers = [{{ resolver = \"r\", returns = {returns} }}]\n"
+            )
+        };
+        assert!(matches!(
+            Config::from_toml_str(&policy("[]")),
+            Err(ConfigError::Registry(LoadError::EmptyToolResolver { .. }))
+        ));
+        assert!(matches!(
+            Config::from_toml_str(&policy("[\"trust\", \"trust\"]")),
+            Err(ConfigError::DuplicateResolverReturn { .. })
+        ));
+        assert!(matches!(
+            Config::from_toml_str(&policy("[\"effects\"]")),
+            Err(ConfigError::UnknownResolverReturn { .. })
         ));
     }
 

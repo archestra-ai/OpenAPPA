@@ -341,6 +341,7 @@ fn identity_document(
                 "name": tool.name,
                 "tags": sorted_set(&tool.tags),
                 "parameters": tool.parameters.normalized(),
+                "resolvers": sorted_set(&tool.resolvers),
                 "delta": tool.delta,
                 "emits": tool.emits,
                 "requires": {
@@ -523,7 +524,8 @@ pub(crate) fn validate_coverage(
         } else if matches!(
             contract.delta.as_ref().and_then(|delta| delta.audience.as_ref()),
             Some(crate::contract::AudienceDelta::Dynamic(_))
-        ) {
+        ) || !contract.resolvers.is_empty()
+        {
             Some(ProviderRunConstruct::DynamicDelta)
         } else {
             None
@@ -611,6 +613,7 @@ mod tests {
 
     fn tool(name: &str) -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -1280,6 +1283,13 @@ mod tests {
             audience: None,
         });
         assert_ne!(identity(&delta_edit, &ReturnPolicy::Raw, &profile), base);
+
+        let mut resolver_edit = cfg.clone();
+        resolver_edit.tools[0].resolvers = vec![crate::contract::ToolResolverBinding {
+            resolver: crate::names::DynamicResolverName::new("classifier"),
+            returns: [crate::contract::ResolverReturn::Trust].into_iter().collect(),
+        }];
+        assert_ne!(identity(&resolver_edit, &ReturnPolicy::Raw, &profile), base);
 
         let sanitized = ReturnPolicy::Sanitized(SanitizerName::new("redactor"));
         assert_ne!(identity(&cfg, &sanitized, &profile), base);

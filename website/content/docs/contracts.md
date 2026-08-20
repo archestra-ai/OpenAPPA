@@ -50,7 +50,7 @@ A resolver that produces no answer — a timeout, an error, malformed or oversiz
 
 ### Dynamic resolvers
 
-A dynamic resolver maps one top-level string argument to literal reader IDs. It does not resolve `@group` membership.
+A dynamic resolver can resolve an audience binding or selected fields of a tool contract. It does not resolve `@group` membership.
 
 ```toml
 [[dynamic_resolver]]            # registration only; the deployment binds the endpoint
@@ -79,6 +79,51 @@ A resolver that produces no answer — a timeout, an error, an abstention, malfo
 
 The endpoint accepts a versioned JSON POST request: `{version:1,resolver,tool,argument,value}`. It returns `{version:1,readers:[...]}`. Non-2xx responses, timeouts, malformed responses, and oversized responses fail closed.
 
+A tool-level resolver reads the complete canonical argument object. Its `returns` list selects `trust`, `audience`, `attention`, or a combination.
+
+```toml
+[[dynamic_resolver]]
+name = "classify-customer"
+
+[[tool]]
+name = "get_customer"
+resolvers = [
+  { resolver = "classify-customer", returns = ["trust", "audience", "attention"] }
+]
+```
+
+The runtime sends `{version:1,resolver,tool,returns,arguments}` before it checks the call. `arguments` contains the complete schema-validated JSON object.
+
+The response places label contributions under `delta`. It places fresh authority demands under `attention`.
+
+```json
+{
+  "version": 1,
+  "delta": {
+    "trust": "suspicious",
+    "audience": ["support", "audit"]
+  },
+  "attention": ["privacy-review"]
+}
+```
+
+The response MUST contain each declared field and MUST NOT contain an undeclared field. An audience is `"public"` or an array of literal readers. An empty array is valid.
+
+Trust and audience each have one owner. A static value and a resolver cannot own the same field. Two resolvers cannot own the same field. Static and resolved attention marks combine as a set.
+
+All tool-level resolver answers are pinned to the complete argument object. Any argument substitution invalidates them. Every required resolver MUST answer before the check can complete.
+
+The deployment can bind dynamic resolution to an HTTP endpoint, or use the built-in Claude Code classifier for tool-level resolvers:
+
+```toml
+[externals.dynamic]
+builtin = "claude-code"
+```
+
+The builtin starts the locally installed and authenticated `claude` CLI in non-interactive safe mode with Sonnet, no tools, no project settings, and no session persistence. Its fixed prompt receives the resolver request, the current trajectory trust and audience (including whether either is unresolved), the configured trust ranks, and the tool's static attention marks. Canonical arguments are explicitly treated as untrusted data. Claude returns structured output under a strict schema derived from `returns`; `delta` and `attention` may appear together when both are requested.
+
+This POC supports only the tool-level `resolvers = [{ resolver, returns }]` form. The legacy single-argument audience form still requires an HTTP endpoint, and a deployment combining it with the Claude builtin is refused at startup. Claude answers have no separate ceiling: they are trusted classifier evidence and still pass the same exact-shape, trust-rank, audience, and pin validation as HTTP answers. A missing CLI, authentication/process failure, timeout, malformed result, or oversized output produces no answer and fails closed. Each resolver binding starts one Claude invocation for a new proposal; pinned rechecks and replay do not invoke it again. Set `externals.timeout_ms` high enough for a model call and remember that each invocation has latency and account cost.
+
 ### Deployment coverage
 
 The deployment declares what it covers in the policy file's `[deployment]` table — the starting label every root opens at, which tools have enforced execution, where raw results can be withheld, whether child branches are controlled. The policy loader validates the file against that declaration, and a construct that names an engine behavior the deployment cannot perform is a load error naming the missing coverage: a `tool_output` sanitizer with no covered application point, a pending-cast `delta` on a tool whose raw result the model would see anyway, a `[child]` section without child-context control, a `requires`, dynamic `delta`, or pending-cast `delta` on a provider-run tool. A weaker executor class is not a construct — it loads, and its weakness is the open vector. Writing a policy therefore starts from the deployment's coverage, not from the full feature list. What stays uncovered is an open vector the deployment names explicitly and auditably — nothing is removed or silently degraded.
@@ -100,7 +145,7 @@ A tool contract is typically four lines long. Use this checklist during policy r
 
 ## Tools
 
-A `[[tool]]` entry defines what permissions its result restricts (`delta`), what global side effects it emits (`effects`), and what conditions must hold before it dispatches (`requires`).
+A `[[tool]]` entry defines its output restrictions (`delta`), side effects (`effects`), dispatch conditions (`requires`), and dynamic `resolvers`.
 
 ```toml
 [[tool]]
@@ -126,6 +171,7 @@ attention = ["sre-signoff"]                            # Fresh per-call demand
 - **Pending-cast deltas (`delta = { trust = "unknown" }`)**: Holds a label dimension pending resolution by a registered `[[cast]]` at admission. Declaring both `requires` and `unknown` delta on the same dimension is a load error.
 - **Dynamic argument placeholders (`$arg`)**: `requires.audience = { includes = ["$recipient"] }` evaluates `$recipient` against the actual call argument at runtime, as one audience expression: an ordinary string is one literal reader ID, `public` is the Public audience — only a Public trajectory includes it — and `@name` is a group the membership resolver expands, pinned to that proposed call. Placeholders are valid only inside `includes`, and `recipient` must be a required top-level string property of the tool's `parameters` — an omitted `parameters`, an optional, non-string, or nested property is a load error. A call that omits the argument or passes a non-string fails schema validation as an `InvalidCall` before the check runs.
 - **Dynamic resolvers**: A `{ resolver = "name", argument = "arg" }` form maps a required top-level string argument to literal readers, under the same `parameters` rule. It is valid as an audience delta or as the value of `includes`.
+- **Tool-level resolvers**: A `resolvers` entry receives all arguments and returns the fields named by `returns`. Trust and audience narrow the delta. Attention adds fresh authority demands.
 - **History checks (`requires.effects`)**: `has` verifies `prior(k)` against appended effects; `has_no` verifies `no_prior(k)` against appended effects plus unsettled reservations — emits reserved at release and not yet observed to succeed or fail.
 - **Attention demands (`requires.attention`)**: Forces fresh authority sign-off on *every* call, never satisfied by execution history.
 - **Dual-gate contracts**: When a contract defines both a restrictive `delta` and a `requires` check (e.g., `search_and_share`), the engine evaluates both gates.

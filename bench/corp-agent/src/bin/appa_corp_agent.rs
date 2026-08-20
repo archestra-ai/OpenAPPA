@@ -244,11 +244,11 @@ fn bind_hosted_externals(config: &mut Config, origin: &str) -> usize {
         .authorities
         .values_mut()
         .chain(externals.sanitizers.values_mut())
+        .chain(externals.dynamic.iter_mut())
         .filter_map(|implementation| match implementation {
             Implementation::Resolver(endpoint) => Some(endpoint),
             Implementation::Builtin(_) => None,
-        })
-        .chain(externals.dynamic.iter_mut());
+        });
     let mut bound = 0;
     for endpoint in endpoints {
         let Some(path) = endpoint.url.strip_prefix(UNBOUND_ORIGIN) else {

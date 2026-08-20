@@ -34,7 +34,11 @@ OpenAPPA operates on three runtime concepts:
 
 Policy definitions remain strictly declarative TOML configurations. Instead of writing static allow or block rules for every tool interaction, developers declare tool contracts—specifying what permissions a tool requires (`requires`), how its output restricts security labels (`delta`), and what side effects it causes (`effects`). From these contracts, OpenAPPA automatically derives whether an action is permitted, blocked, or remediable across multi-step agent workflows.
 
-Dynamic judgment—such as regex filters, ML classifiers, or human approval queues—lives in registered components. Authorities and sanitizers run as HTTP endpoints (`resolver`) or in-process modules (`builtin`), are bounded by a strict `mandate`, and may carry an advisory `hint` explaining their purpose to the agent during remedy selection. Casts either declare a fixed label (`constant`) or call a classifier over HTTP (`resolver`) under a `may_cast` ceiling. Every answer is checked against the component's declared limit before it is admitted.
+Dynamic judgment—such as regex filters, ML classifiers, or human approval queues—lives in registered components. Authorities and sanitizers run as HTTP endpoints (`resolver`) or in-process modules (`builtin`). Their `mandate` bounds their power. Casts declare a fixed label or use a resolver under a `may_cast` ceiling.
+
+A tool can also run dynamic resolvers over its complete arguments before dispatch. Each resolver declares whether it returns trust, audience, attention, or a combination. Label answers narrow the tool's delta. Attention answers demand fresh authority approval for that call.
+
+Deployments may host those tool-level resolvers over HTTP or bind `[externals.dynamic] builtin = "claude-code"`. The builtin runs a fresh, tool-less Sonnet classification through the local Claude Code CLI and can return `delta` and `attention` together. It receives the canonical request plus current label and static attention context; failures produce no evidence and stop the check. This experimental classifier has no mandate or ceiling of its own, so its fixed prompt and returned evidence are part of the trusted deployment boundary.
 
 ## Labels only move one way
 
@@ -199,6 +203,7 @@ Deployments migrate existing security controls into OpenAPPA by registering them
 | Human review / HITL prompts | `builtin = "hitl"` Authority |
 | Custom approval webhooks / LLM evaluators | Authority Resolver |
 | Content scanners & trust classifiers | Cast Resolver |
+| Argument-aware trust, audience, and review classification | Tool-level Dynamic Resolver (HTTP or `builtin = "claude-code"`) |
 | Regex / ML PII scrubbers & redactors | Sanitizer (`builtin = "redact-email"`, your own builtin module, or a resolver) |
 | Directory / IAM group lookups | Membership Resolver |
 | Imperative `if/else` access checks | Tool Contracts |

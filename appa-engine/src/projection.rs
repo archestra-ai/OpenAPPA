@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::basis::SubjectKey;
 use crate::candidate::{DerivedCandidate, SanitizerLineage};
-use crate::contract::PinnedDynamicResolution;
+use crate::contract::{PinnedDynamicResolution, PinnedToolResolution};
 use crate::fact::{
     BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ForkSnapshot, ObservedResult, ReturnPolicy,
 };
@@ -474,6 +474,7 @@ impl Projection {
                     receiving,
                     proposed_effects,
                     dynamic_resolutions,
+                    tool_resolutions,
                     memberships,
                     subject,
                     resolutions,
@@ -483,6 +484,7 @@ impl Projection {
                         dispatch.clone(),
                         ResolvedCall::new(tool.clone(), arguments.clone())
                             .with_dynamic_resolutions(dynamic_resolutions.clone())
+                            .with_tool_resolutions(tool_resolutions.clone())
                             .with_memberships(memberships.clone()),
                     );
                     receiving_bounds.insert(dispatch.clone(), receiving.clone());
@@ -842,6 +844,13 @@ impl Views<'_> {
             .dispatch_calls
             .get(dispatch)
             .map(ResolvedCall::dynamic_resolutions)
+    }
+
+    pub(crate) fn tool_resolutions(&self, dispatch: &DispatchId) -> Option<&[PinnedToolResolution]> {
+        self.projection
+            .dispatch_calls
+            .get(dispatch)
+            .map(ResolvedCall::tool_resolutions)
     }
 
     pub(crate) fn trajectory(&self) -> &TrajectoryId {
@@ -1464,6 +1473,7 @@ mod tests {
                 receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 dynamic_resolutions: Vec::new(),
+                tool_resolutions: Vec::new(),
                 memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj("a")),
                 resolutions: vec![],
@@ -1494,6 +1504,7 @@ mod tests {
                 receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 dynamic_resolutions: Vec::new(),
+                tool_resolutions: Vec::new(),
                 memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj("a")),
                 resolutions: vec![],
@@ -1523,6 +1534,7 @@ mod tests {
                 receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 dynamic_resolutions: Vec::new(),
+                tool_resolutions: Vec::new(),
                 memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj("a")),
                 resolutions: vec![],
@@ -1916,6 +1928,7 @@ mod tests {
                 receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([]).unwrap(),
                 dynamic_resolutions: Vec::new(),
+                tool_resolutions: Vec::new(),
                 memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj("a")),
                 resolutions: vec![],

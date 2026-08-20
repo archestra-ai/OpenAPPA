@@ -91,6 +91,12 @@ pub enum LoadError {
     DuplicateRank(String),
     #[error("duplicate tool contract: {0}")]
     DuplicateTool(String),
+    #[error("tool {tool} resolver {resolver} declares no returned dimensions")]
+    EmptyToolResolver { tool: String, resolver: String },
+    #[error("tool {tool} binds resolver {resolver} more than once")]
+    DuplicateToolResolver { tool: String, resolver: String },
+    #[error("tool {tool} gives {dimension:?} to more than one static or dynamic owner")]
+    DuplicateToolResolverDimension { tool: String, dimension: Dimension },
     #[error("duplicate authority: {0}")]
     DuplicateAuthority(String),
     #[error("duplicate sanitizer: {0}")]
@@ -294,6 +300,23 @@ fn worst_case_plan_alternatives(
                 .count(),
         );
     }
+    if tool.resolver_owns(crate::contract::ResolverReturn::Attention) {
+        let dynamic_marks: BTreeSet<_> = authorities
+            .iter()
+            .flat_map(|authority| authority.mandate.attends.iter())
+            .filter(|mark| !seen_marks.contains(mark))
+            .cloned()
+            .collect();
+        for mark in dynamic_marks {
+            let gap = Gap::Attention(mark);
+            multiply(
+                authorities
+                    .iter()
+                    .filter(|authority| covers_gap(authority, &gap, &tool.tags, literal))
+                    .count(),
+            );
+        }
+    }
     let output = tool.output_label(literal);
     let applicable = match tool.pending_cast_dim() {
         _ if !confined => 0,
@@ -301,7 +324,9 @@ fn worst_case_plan_alternatives(
         None if matches!(
             tool.delta.as_ref().and_then(|delta| delta.audience.as_ref()),
             Some(AudienceDelta::Dynamic(_))
-        ) || tool.delta.iter().flat_map(Delta::groups).next().is_some() =>
+        ) || tool.resolver_owns(crate::contract::ResolverReturn::Trust)
+            || tool.resolver_owns(crate::contract::ResolverReturn::Audience)
+            || tool.delta.iter().flat_map(Delta::groups).next().is_some() =>
         {
             sanitizers
                 .iter()
@@ -477,6 +502,7 @@ impl Registry {
                 }
             }
             validate_pending_cast(&tool)?;
+            validate_tool_resolvers(&tool)?;
             let split = if profile.is_provider_run(&tool.name) {
                 &mut provider_run
             } else {
@@ -752,6 +778,11 @@ impl Registry {
 
 fn validate_pending_cast(tool: &ToolContract) -> Result<(), LoadError> {
     let Some(delta) = &tool.delta else {
+        if tool.resolver_owns(crate::contract::ResolverReturn::Trust)
+            || tool.resolver_owns(crate::contract::ResolverReturn::Audience)
+        {
+            return Ok(());
+        }
         let requires_label = tool.requires.label.trust_floor.is_some() || !tool.requires.label.audience.is_empty();
         return if requires_label {
             Err(LoadError::UnannotatedWithLabelRequirement(
@@ -781,6 +812,45 @@ fn validate_pending_cast(tool: &ToolContract) -> Result<(), LoadError> {
         }
         _ => Ok(()),
     }
+}
+
+fn validate_tool_resolvers(tool: &ToolContract) -> Result<(), LoadError> {
+    let mut names = BTreeSet::new();
+    let mut trust_owned = tool.delta.as_ref().is_some_and(|delta| delta.trust.is_some());
+    let mut audience_owned = tool.delta.as_ref().is_some_and(|delta| delta.audience.is_some());
+    for binding in &tool.resolvers {
+        if binding.returns.is_empty() {
+            return Err(LoadError::EmptyToolResolver {
+                tool: tool.name.as_str().to_string(),
+                resolver: binding.resolver.as_str().to_string(),
+            });
+        }
+        if !names.insert(&binding.resolver) {
+            return Err(LoadError::DuplicateToolResolver {
+                tool: tool.name.as_str().to_string(),
+                resolver: binding.resolver.as_str().to_string(),
+            });
+        }
+        if binding.returns.contains(&crate::contract::ResolverReturn::Trust) {
+            if trust_owned {
+                return Err(LoadError::DuplicateToolResolverDimension {
+                    tool: tool.name.as_str().to_string(),
+                    dimension: Dimension::Trust,
+                });
+            }
+            trust_owned = true;
+        }
+        if binding.returns.contains(&crate::contract::ResolverReturn::Audience) {
+            if audience_owned {
+                return Err(LoadError::DuplicateToolResolverDimension {
+                    tool: tool.name.as_str().to_string(),
+                    dimension: Dimension::Audience,
+                });
+            }
+            audience_owned = true;
+        }
+    }
+    Ok(())
 }
 
 fn check_audience_bindings(tool: &ToolContract) -> Result<(), LoadError> {
@@ -890,6 +960,7 @@ mod tests {
 
     fn tool(name: &str) -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -1135,6 +1206,7 @@ mod tests {
 
     fn origin(name: &str, tags: &[&str], delta: Delta) -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: tags.iter().copied().map(crate::names::TagName::new).collect(),
             delta: Some(delta),

@@ -1230,6 +1230,7 @@ mod tests {
     #[test]
     fn an_unestablished_only_block_mints_no_plan_and_a_mixed_block_keeps_its_offers() {
         let gate = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("gate"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -1290,6 +1291,7 @@ mod tests {
     #[test]
     fn an_input_hop_does_not_stand_in_for_the_redispatch_that_clears_a_prior_gap() {
         let emitter = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("backup"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -1299,6 +1301,7 @@ mod tests {
         };
         let partner = Audience::restricted([ReaderId::new("partner")]);
         let wipe = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("wipe"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -1373,6 +1376,7 @@ mod tests {
 
     fn reader(name: &str, delta: Delta) -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(delta),
@@ -1620,6 +1624,7 @@ mod tests {
     #[test]
     fn a_direct_emitter_is_offered_without_path_verification() {
         let backup = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("backup"),
             tags: vec![],
             delta: Some(Delta {
@@ -1631,6 +1636,7 @@ mod tests {
             requires: Requires::default(),
         };
         let wipe = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("wipe"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -1688,6 +1694,7 @@ mod tests {
     #[test]
     fn mixed_blocks_keep_their_prior_and_cap_redispatches_while_a_fact_is_missing() {
         let emitter = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("backup"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -1696,6 +1703,7 @@ mod tests {
             requires: Requires::default(),
         };
         let prior_target = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("wipe"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -1712,6 +1720,7 @@ mod tests {
         };
         let a = Audience::restricted([ReaderId::new("a")]);
         let narrower = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("narrow"),
             tags: vec![],
             delta: Some(Delta {
@@ -1723,6 +1732,7 @@ mod tests {
             requires: Requires::default(),
         };
         let cap_target = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -1767,6 +1777,7 @@ mod tests {
     #[test]
     fn a_reader_ceiling_authority_cannot_cover_the_masked_sentinel() {
         let send = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -1813,6 +1824,7 @@ mod tests {
         let a = || Audience::restricted([ReaderId::new("a")]);
         let ab = || Audience::restricted([ReaderId::new("a"), ReaderId::new("b")]);
         let narrowing_tool = |name: &str, to: Audience| ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(Delta {
@@ -1824,6 +1836,7 @@ mod tests {
             requires: Requires::default(),
         };
         let send = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -1862,6 +1875,7 @@ mod tests {
     fn only_an_established_static_contribution_claims_a_cap_clear() {
         let a = Audience::restricted([ReaderId::new("a")]);
         let send = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -1876,6 +1890,7 @@ mod tests {
             },
         };
         let contract = |name: &str, delta: Option<Delta>| ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta,
@@ -1926,6 +1941,7 @@ mod tests {
     fn one_tool_clearing_several_gaps_is_one_offer_with_the_complete_claim() {
         let a = Audience::restricted([ReaderId::new("a")]);
         let send = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -1944,6 +1960,7 @@ mod tests {
             },
         };
         let fixer = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("fixer"),
             tags: vec![],
             delta: Some(Delta {
@@ -1980,6 +1997,7 @@ mod tests {
     #[test]
     fn authorize_plan_clears_a_trust_floor_gap() {
         let tool = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -2022,6 +2040,7 @@ mod tests {
     #[test]
     fn alternative_authorities_yield_one_plan_per_assignment() {
         let tool = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -2112,6 +2131,7 @@ mod tests {
     #[test]
     fn a_weaker_authority_registered_later_still_leads_the_menu() {
         let tool = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -2152,6 +2172,7 @@ mod tests {
     #[test]
     fn reader_ceilings_order_by_inclusion_and_public_is_maximal() {
         let tool = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -2199,6 +2220,7 @@ mod tests {
     #[test]
     fn a_trust_floor_block_reads_no_group_a_reader_ceiling_writes() {
         let tool = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -2242,6 +2264,7 @@ mod tests {
     #[test]
     fn waiver_sets_order_by_inclusion_ignoring_vector_order_and_duplicates() {
         let tool = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -2292,6 +2315,7 @@ mod tests {
             proposed_effects: EffectSet::new(kinds.iter().copied().map(EffectKind::new))
                 .expect("distinct generated effect kinds"),
             dynamic_resolutions: vec![],
+            tool_resolutions: vec![],
             memberships: Vec::new(),
             subject: crate::basis::fixture_subject(&traj()),
             resolutions: vec![],
@@ -2301,6 +2325,7 @@ mod tests {
     #[test]
     fn a_reservation_caused_no_prior_gap_enumerates_its_waiver_plans() {
         let guard = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("guard"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -2340,6 +2365,7 @@ mod tests {
     #[test]
     fn a_reservation_at_the_emitters_own_block_does_not_suppress_the_offer() {
         let delete = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("delete_db"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -2351,6 +2377,7 @@ mod tests {
             },
         };
         let backup = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("backup"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -2389,6 +2416,7 @@ mod tests {
     #[test]
     fn crossing_ceilings_are_incomparable_and_keep_enumeration_order() {
         let tool = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -2438,6 +2466,7 @@ mod tests {
     #[test]
     fn multi_gap_dominance_orders_the_menu_and_crossing_assignments_keep_enumeration_order() {
         let tool = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -2493,6 +2522,7 @@ mod tests {
     #[test]
     fn a_hint_never_changes_the_presented_order() {
         let tool = || ToolContract {
+            resolvers: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -2552,6 +2582,7 @@ mod tests {
 
     fn two_officer_registry() -> Registry {
         let tool = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -2621,6 +2652,7 @@ mod tests {
     #[test]
     fn a_sole_denied_authority_makes_the_block_terminally_planless() {
         let tool = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -2661,6 +2693,7 @@ mod tests {
     #[test]
     fn a_target_denial_does_not_suppress_the_direct_redispatch() {
         let target = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -2676,6 +2709,7 @@ mod tests {
             },
         };
         let emitter = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("emitter"),
             tags: vec![],
             delta: None,
@@ -2712,6 +2746,7 @@ mod tests {
     #[test]
     fn a_denial_recorded_for_the_named_tools_own_call_does_not_remove_the_offer() {
         let target = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -2723,6 +2758,7 @@ mod tests {
             },
         };
         let emitter = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("emitter"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -2769,6 +2805,7 @@ mod tests {
     #[test]
     fn a_duplicated_requirement_entry_is_one_gap_and_mints_no_permuted_duplicates() {
         let tool = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -2811,6 +2848,7 @@ mod tests {
     #[test]
     fn one_authority_covering_both_gaps_is_one_grouped_ruling() {
         let tool = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -2857,6 +2895,7 @@ mod tests {
     #[test]
     fn no_competent_authority_is_terminal() {
         let tool = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -2888,6 +2927,7 @@ mod tests {
     #[test]
     fn acceptance_plan_for_pure_narrowing() {
         let tool = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("get"),
             tags: vec![],
             delta: Some(Delta {
@@ -2921,6 +2961,7 @@ mod tests {
     #[test]
     fn prior_gap_cured_by_a_redispatch() {
         let delete = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("delete_db"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -2932,6 +2973,7 @@ mod tests {
             },
         };
         let backup = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("backup"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -2959,6 +3001,7 @@ mod tests {
     #[test]
     fn prior_gap_with_multiple_emitters_surfaces_every_curative_redispatch() {
         let delete = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("delete_db"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -2970,6 +3013,7 @@ mod tests {
             },
         };
         let backup = |name: &str| ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -3005,6 +3049,7 @@ mod tests {
     #[test]
     fn an_emitters_own_unmet_static_includes_does_not_gate_the_offer() {
         let delete = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("delete_db"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -3016,6 +3061,7 @@ mod tests {
             },
         };
         let backup = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("backup"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -3053,6 +3099,7 @@ mod tests {
     #[test]
     fn a_placeholder_bearing_emitter_is_advertised_like_any_other() {
         let archive = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("archive"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -3064,6 +3111,7 @@ mod tests {
             },
         };
         let send = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -3097,6 +3145,7 @@ mod tests {
     #[test]
     fn prior_gap_without_emitter_is_terminal() {
         let delete = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("delete_db"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -3123,6 +3172,7 @@ mod tests {
     #[test]
     fn attention_gap_routes_by_mark_not_scope() {
         let tool = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("wire"),
             tags: vec![TagName::new("payments")],
             delta: Some(Delta::NONE),
@@ -3163,6 +3213,7 @@ mod tests {
     #[test]
     fn attention_with_wrong_mark_is_terminal() {
         let tool = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -3198,6 +3249,7 @@ mod tests {
     #[test]
     fn a_mutual_prerequisite_cycle_does_not_gate_the_direct_offer() {
         let a = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("a"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -3209,6 +3261,7 @@ mod tests {
             },
         };
         let b = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("b"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -3409,6 +3462,7 @@ mod tests {
                     requires.label = LabelRequirements::default();
                 }
                 ToolContract {
+                    resolvers: vec![],
                     name: name.clone(),
                     tags: vec![],
                     delta,

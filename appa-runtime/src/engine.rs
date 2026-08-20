@@ -23,8 +23,8 @@
 //! policy, which the engine deliberately does not enforce.
 //!
 //! External evidence is typed before it reaches an engine input:
-//! an authority verdict, a sanitizer derivation, a dynamic-resolver reader
-//! set. A missing or malformed answer stays runtime-side and fails closed
+//! an authority verdict, a sanitizer derivation, or a dynamic-resolver answer.
+//! A missing or malformed answer stays runtime-side and fails closed
 //! — no no-answer variant ever enters an engine operation.
 //!
 //! Offers are engine-derived remedies and engine-owned facts: the runtime
@@ -41,14 +41,14 @@ use std::sync::Mutex;
 
 use appa_engine::candidate::DerivedVia;
 use appa_engine::check::UnestablishedFact;
-use appa_engine::contract::{PinnedDynamicResolution, PinnedMembership};
+use appa_engine::contract::{PinnedDynamicResolution, PinnedMembership, PinnedToolResolution, ToolResolverBinding};
 pub(crate) use appa_engine::engine::ForkStatus;
 use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
 use appa_engine::fact::{BoundaryKind, CloseOutcome, EffectSet, Fact, ReturnDerivation};
 use appa_engine::groups::GroupExpansion;
 use appa_engine::label::{Audience, Dim, Dimension, EstablishedLabel, Label, PartialLabel, ReaderId, Trust};
-use appa_engine::names::GroupName;
+use appa_engine::names::{GroupName, MarkName};
 use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RequiredRuling};
 use appa_engine::profile::PolicyFileKey as EnginePolicyFileKey;
 use appa_engine::projection::Views;
@@ -73,7 +73,7 @@ use appa_eventlog::Log;
 
 use crate::api::OutcomeBody;
 pub(crate) use crate::api::{DispatchId, OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
-use crate::external::{CastAnswer, CastAudience};
+use crate::external::{CastAnswer, CastAudience, ToolResolutionAnswer, ToolResolutionContext};
 
 /// One fresh 256-bit random number per act that can surface offers; the
 /// runtime mixes it into every `OfferId` it mints.
@@ -119,6 +119,12 @@ pub enum ExternalRequest {
         tool: String,
         argument: String,
         value: String,
+    },
+    ToolResolution {
+        binding: ToolResolverBinding,
+        tool: String,
+        arguments: serde_json::Value,
+        context: ToolResolutionContext,
     },
     Membership {
         resolver: String,
@@ -175,6 +181,10 @@ pub enum ExternalEvidence {
         resolver: String,
         argument: String,
         readers: Option<Vec<String>>,
+    },
+    ToolResolution {
+        resolver: String,
+        answer: Option<ToolResolutionAnswer>,
     },
     Membership {
         resolver: String,
@@ -941,14 +951,16 @@ impl RuntimeEngine {
         entropy: &OfferNonce,
         spawn: bool,
     ) -> Result<EngineDecision, EngineRefusal> {
-        let (pins, memberships) = match (
-            self.resolve_dynamics(call, evidence),
-            self.resolve_memberships(call, evidence),
-        ) {
-            (Ok(pins), Ok(memberships)) => (pins, memberships),
-            (Err(Resolution::Feedback(text)), _) | (_, Err(Resolution::Feedback(text))) => return Ok(deny(text)),
-            (dynamics, memberships) => {
-                let requests = [dynamics.err(), memberships.map(|_| ()).err()]
+        let dynamics = self.resolve_dynamics(call, evidence);
+        let tools = self.resolve_tool_resolutions(view, trajectory, call, evidence);
+        let memberships = self.resolve_memberships(call, evidence);
+        let (pins, tool_pins, memberships) = match (dynamics, tools, memberships) {
+            (Ok(pins), Ok(tool_pins), Ok(memberships)) => (pins, tool_pins, memberships),
+            (Err(Resolution::Feedback(text)), _, _)
+            | (_, Err(Resolution::Feedback(text)), _)
+            | (_, _, Err(Resolution::Feedback(text))) => return Ok(deny(text)),
+            (dynamics, tools, memberships) => {
+                let requests = [dynamics.err(), tools.err(), memberships.map(|_| ()).err()]
                     .into_iter()
                     .flatten()
                     .flat_map(|missing| match missing {
@@ -963,6 +975,7 @@ impl RuntimeEngine {
             tool: ToolName::new(call.tool.clone()),
             arguments: call.arguments.get().as_bytes().to_vec(),
             dynamic_resolutions: pins,
+            tool_resolutions: tool_pins,
             memberships,
         };
         let expansions = self.membership_evidence(evidence);
@@ -1579,6 +1592,143 @@ impl RuntimeEngine {
         Ok(pins)
     }
 
+    fn resolve_tool_resolutions(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        call: &ProposedCall,
+        evidence: &[ExternalEvidence],
+    ) -> Result<Vec<PinnedToolResolution>, Resolution> {
+        let tool = ToolName::new(call.tool.clone());
+        let Some(contract) = self.engine.registry().tool(&tool) else {
+            return Err(Resolution::Feedback(format!(
+                "[appa] unknown tool {}: not in this deployment's policy",
+                call.tool
+            )));
+        };
+        if contract.resolvers.is_empty() {
+            return Ok(Vec::new());
+        }
+        let chain = self.engine.registry().trust_chain();
+        // The consult payload — the canonical arguments and the classifier context — is built
+        // only when some binding still needs an answer; the evidence-complete pass, the one
+        // every admitted call takes, skips the parse and the context assembly entirely.
+        let mut consult: Option<(ResolvedCall, ToolResolutionContext)> = None;
+        let mut pins = Vec::new();
+        let mut requests = Vec::new();
+        for binding in &contract.resolvers {
+            let answer = evidence.iter().find_map(|entry| match entry {
+                ExternalEvidence::ToolResolution { resolver, answer } if resolver == binding.resolver.as_str() => {
+                    Some(answer.clone())
+                }
+                _ => None,
+            });
+            match answer {
+                None => {
+                    if consult.is_none() {
+                        consult = Some(self.tool_resolution_payload(view, trajectory, call, contract, &tool)?);
+                    }
+                    let (resolved, context) = consult.as_ref().expect("the consult payload was just built");
+                    requests.push(ExternalRequest::ToolResolution {
+                        binding: binding.clone(),
+                        tool: call.tool.clone(),
+                        arguments: resolved.arguments().clone(),
+                        context: context.clone(),
+                    });
+                }
+                Some(None) => {
+                    return Err(Resolution::Feedback(format!(
+                        "[appa] {}: dynamic resolver {} did not return its declared fields",
+                        call.tool,
+                        binding.resolver.as_str()
+                    )));
+                }
+                Some(Some(answer)) => {
+                    let trust = answer
+                        .trust
+                        .map(|name| {
+                            chain.rank_of(&name).ok_or_else(|| {
+                                Resolution::Feedback(format!(
+                                    "[appa] {}: dynamic resolver {} returned an unknown trust rank",
+                                    call.tool,
+                                    binding.resolver.as_str()
+                                ))
+                            })
+                        })
+                        .transpose()?;
+                    let audience = answer.audience.as_ref().map(resolved_audience);
+                    let attention = answer
+                        .attention
+                        .map(|marks| marks.into_iter().map(MarkName::new).collect());
+                    match PinnedToolResolution::from_answer(binding.clone(), trust, audience, attention) {
+                        Some(pin) => pins.push(pin),
+                        None => {
+                            return Err(Resolution::Feedback(format!(
+                                "[appa] {}: dynamic resolver {} returned malformed fields",
+                                call.tool,
+                                binding.resolver.as_str()
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        if !requests.is_empty() {
+            return Err(Resolution::Consult(requests));
+        }
+        Ok(pins)
+    }
+
+    /// What a tool-resolution consult carries beside the binding: the call's canonical
+    /// argument object and the trajectory's current label context.
+    fn tool_resolution_payload(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        call: &ProposedCall,
+        contract: &appa_engine::contract::ToolContract,
+        tool: &ToolName,
+    ) -> Result<(ResolvedCall, ToolResolutionContext), Resolution> {
+        let resolved = self
+            .engine
+            .resolve_call(tool.clone(), call.arguments.get().as_bytes())
+            .map_err(|_| Resolution::Feedback(format!("[appa] {} has invalid arguments", call.tool)))?;
+        let current = view
+            .views(&engine_id(trajectory))
+            .expect("the event's trajectory was validated as open")
+            .current_label();
+        let bound = current.bound();
+        let chain = self.engine.registry().trust_chain();
+        let context = ToolResolutionContext {
+            current_trust: chain
+                .name_of(bound.trust)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("unnamed-rank-{}", bound.trust.rank())),
+            current_trust_rank: bound.trust.rank(),
+            current_audience: match &bound.audience {
+                Audience::Public => serde_json::Value::String("public".to_string()),
+                Audience::Restricted(readers) => serde_json::Value::Array(
+                    readers
+                        .iter()
+                        .map(|reader| serde_json::Value::String(reader.as_str().to_string()))
+                        .collect(),
+                ),
+            },
+            trust_unresolved: !current.is_established(Dimension::Trust),
+            audience_unresolved: !current.is_established(Dimension::Audience),
+            valid_trust_ranks: (0..chain.len())
+                .filter_map(|rank| chain.name_of(Trust::new(rank as u8)).map(str::to_string))
+                .collect(),
+            static_attention: contract
+                .requires
+                .attention
+                .iter()
+                .map(|mark| mark.as_str().to_string())
+                .collect(),
+        };
+        Ok((resolved, context))
+    }
+
     fn membership_evidence(&self, evidence: &[ExternalEvidence]) -> MembershipEvidence {
         let registry = self.engine.registry();
         let mut gathered = MembershipEvidence::default();
@@ -1733,6 +1883,7 @@ enum SanitizerAnswer {
     Derived(ValueBody),
 }
 
+#[derive(Debug)]
 enum Resolution {
     Feedback(String),
     Consult(Vec<ExternalRequest>),
@@ -1920,16 +2071,20 @@ enum CastAnswerState {
     Resolved,
 }
 
+/// The engine-side audience a classifier's wire audience resolves to.
+fn resolved_audience(audience: &CastAudience) -> Audience {
+    match audience {
+        CastAudience::Public => Audience::Public,
+        CastAudience::Readers(readers) => Audience::restricted(readers.iter().map(ReaderId::new)),
+    }
+}
+
 fn cast_label(chain: &TrustChain, verdict: &CastVerdict) -> Option<EstablishedLabel> {
     match &verdict.label {
         CastLabel::Declared(label) => Some(label.clone()),
         CastLabel::Classified(answer) => {
             let trust = chain.rank_of(&answer.trust)?;
-            let audience = match &answer.audience {
-                CastAudience::Public => Audience::Public,
-                CastAudience::Readers(readers) => Audience::restricted(readers.iter().map(ReaderId::new)),
-            };
-            Some(EstablishedLabel::new(trust, audience))
+            Some(EstablishedLabel::new(trust, resolved_audience(&answer.audience)))
         }
     }
 }
@@ -2519,9 +2674,10 @@ impl TestSeam {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExternalEvidence, ExternalRequest, OfferId, ProposedCall, Resolution, RuntimeEngine, audience_wire,
-        remedy_instruction, remedy_lines, terminal_safe,
+        ExternalEvidence, ExternalRequest, OfferId, ProposedCall, Resolution, RuntimeEngine, TrajectoryId,
+        audience_wire, remedy_instruction, remedy_lines, terminal_safe,
     };
+    use crate::external::{CastAudience, ToolResolutionAnswer};
     use appa_engine::label::{Audience, ReaderId};
     use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RemedyStep};
     use std::collections::BTreeSet;
@@ -2599,6 +2755,78 @@ mod tests {
             pinned(&[answered(Some(Vec::new()))]),
             vec![Audience::restricted([])],
             "an empty reader set is a successful answer, not the absence of one"
+        );
+    }
+
+    #[test]
+    fn one_tool_resolver_can_pin_trust_audience_and_attention_from_all_arguments() {
+        let policy = appa_policy::Config::from_toml_str(
+            r#"
+                version = 1
+                [[dynamic_resolver]]
+                name = "classifier"
+                [[tool]]
+                name = "lookup"
+                resolvers = [{ resolver = "classifier", returns = ["trust", "audience", "attention"] }]
+                requires = { attention = ["static-review"] }
+            "#,
+        )
+        .expect("the tool-level resolver policy compiles");
+        let engine = RuntimeEngine::new(policy.engine().clone());
+        let trajectory = TrajectoryId("root".to_string());
+        let view = engine
+            .validated(engine.root_opening(&trajectory, b"test policy"), &trajectory, 0)
+            .expect("the root opening builds a view");
+        let call = ProposedCall {
+            tool: "lookup".to_string(),
+            arguments: serde_json::value::RawValue::from_string(
+                serde_json::json!({"nested": {"id": 7}, "deep": true}).to_string(),
+            )
+            .expect("arguments serialize"),
+        };
+        match engine.resolve_tool_resolutions(&view, &trajectory, &call, &[]) {
+            Err(Resolution::Consult(requests)) => match requests.as_slice() {
+                [
+                    ExternalRequest::ToolResolution {
+                        binding,
+                        tool,
+                        arguments,
+                        context,
+                    },
+                ] => {
+                    assert_eq!(binding.resolver.as_str(), "classifier");
+                    assert_eq!(tool, "lookup");
+                    assert_eq!(arguments, &serde_json::json!({"nested": {"id": 7}, "deep": true}));
+                    assert_eq!(context.valid_trust_ranks, ["suspicious", "trusted"]);
+                    assert_eq!(context.static_attention, ["static-review"]);
+                }
+                other => panic!("expected one tool-resolution consult, got {other:?}"),
+            },
+            other => panic!("an unanswered tool resolver must consult, got {other:?}"),
+        }
+
+        let pins = engine
+            .resolve_tool_resolutions(
+                &view,
+                &trajectory,
+                &call,
+                &[ExternalEvidence::ToolResolution {
+                    resolver: "classifier".to_string(),
+                    answer: Some(ToolResolutionAnswer {
+                        trust: Some("suspicious".to_string()),
+                        audience: Some(CastAudience::Public),
+                        attention: Some(vec!["privacy-review".to_string(), "privacy-review".to_string()]),
+                    }),
+                }],
+            )
+            .expect("a complete answer pins");
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].trust(), Some(appa_engine::label::Trust::new(0)));
+        assert_eq!(pins[0].audience(), Some(&Audience::Public));
+        assert_eq!(
+            pins[0].attention(),
+            &[appa_engine::names::MarkName::new("privacy-review")],
+            "attention is additive set data"
         );
     }
 

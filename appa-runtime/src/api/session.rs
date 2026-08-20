@@ -8,7 +8,7 @@ use crate::engine::{
     AuthorityVerdict, CastLabel, CastVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence,
     ExternalRequest, Feedback, ForkStatus, Liveness, Next, OfferNonce, OpenDispatch, Presentation, engine_id,
 };
-use crate::external::{CastAnswer, ConsultKind, ConsultOutcome, ReadersResolution};
+use crate::external::{CastAnswer, ConsultKind, ConsultOutcome, ReadersResolution, ToolResolution};
 use appa_engine::transition::ApplicableCast;
 use appa_engine::value::ValueBody;
 
@@ -681,11 +681,22 @@ impl Session {
                 event(context, carried.clone())
             })?;
             match decision.then {
-                Next::ResolveExternal(requests) => {
-                    for request in requests {
-                        evidence.push(self.consult(request, elicitation).await);
+                // The engine batches every missing answer into one request set, and evidence
+                // is matched by resolver name, never by position. Without a reviewer the
+                // consults run concurrently — a tool-resolution consult can take a model call's
+                // seconds, and the batch should cost its slowest member, not their sum. With a
+                // reviewer they stay serial: one staged review on screen at a time.
+                Next::ResolveExternal(requests) => match elicitation {
+                    None => {
+                        let consults = requests.into_iter().map(|request| self.consult(request, None));
+                        evidence.extend(futures_util::future::join_all(consults).await);
                     }
-                }
+                    Some(_) => {
+                        for request in requests {
+                            evidence.push(self.consult(request, elicitation).await);
+                        }
+                    }
+                },
                 _ => return Ok(decision),
             }
         }
@@ -818,6 +829,26 @@ impl Session {
                     resolver: resolver.clone(),
                     argument: argument.clone(),
                     readers,
+                }
+            }
+            ExternalRequest::ToolResolution {
+                binding,
+                tool,
+                arguments,
+                context,
+            } => {
+                let answer = match self
+                    .deployment
+                    .externals
+                    .resolve_tool(binding.resolver.as_str(), tool, &binding.returns, arguments, context)
+                    .await
+                {
+                    ToolResolution::Resolved(answer) => Some(answer),
+                    ToolResolution::Unresolved(_) => None,
+                };
+                ExternalEvidence::ToolResolution {
+                    resolver: binding.resolver.as_str().to_string(),
+                    answer,
                 }
             }
             ExternalRequest::PendingCast { casts, source, body } => ExternalEvidence::PendingCast {

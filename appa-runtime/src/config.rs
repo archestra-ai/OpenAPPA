@@ -57,20 +57,23 @@ pub struct Externals {
     /// The classifiers a resolver-backed `[[cast]]` consults. Endpoint-only: a constant
     /// cast is answered from the policy and binds nothing here.
     pub casts: BTreeMap<String, Endpoint>,
-    pub dynamic: Option<Endpoint>,
+    /// The shared dynamic-resolver implementation. HTTP supports both resolver
+    /// contracts; the `claude-code` builtin is deliberately tool-level only.
+    pub dynamic: Option<Implementation>,
     /// The membership resolver the policy's `[membership]` registers.
     pub membership: Option<Endpoint>,
 }
 
-/// How a registered authority or sanitizer is implemented — `builtin`
-/// or `resolver`, a closed choice per entry. Only these two
-/// kinds have builtin implementations; the dynamic and membership
-/// resolvers stay HTTP-only.
+/// How a registered authority, sanitizer, or dynamic resolver is implemented —
+/// `builtin` or `resolver`, a closed choice per entry. Dynamic resolution has
+/// one stock builtin; membership remains HTTP-only.
 #[derive(Debug, Clone)]
 pub enum Implementation {
     Resolver(Endpoint),
     Builtin(String),
 }
+
+pub const CLAUDE_CODE_BUILTIN: &str = "claude-code";
 
 /// One external endpoint: a validated URL plus its bearer token, if
 /// the service needs one. `https` reaches anywhere; `http` only
@@ -146,7 +149,7 @@ pub enum ConfigError {
     ZeroByteCap,
     #[error("the {section} entry {name:?} must name exactly one of url or builtin, and only url takes token_env")]
     ImplementationChoice { section: &'static str, name: String },
-    #[error("the {section} entry {name:?} cannot be builtin: only authorities and sanitizers can")]
+    #[error("the {section} entry {name:?} cannot be builtin")]
     BuiltinNotAllowed { section: &'static str, name: String },
     #[error("the {section} entry {name:?} names the builtin {builtin:?}, which is not a valid implementation name")]
     InvalidBuiltinName {
@@ -246,10 +249,7 @@ impl Config {
                 dynamic: raw
                     .externals
                     .dynamic
-                    .map(|endpoint| {
-                        let raw = endpoint_only("dynamic", "dynamic", endpoint)?;
-                        resolve_endpoint("dynamic", "dynamic".to_string(), raw, &lookup)
-                    })
+                    .map(|implementation| resolve_dynamic(implementation, &lookup))
                     .transpose()?,
                 membership: raw
                     .externals
@@ -264,6 +264,16 @@ impl Config {
     }
 }
 
+fn resolve_dynamic(
+    entry: RawImplementation,
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<Implementation, ConfigError> {
+    // `claude-code` is the one dynamic builtin; modules cannot serve this section.
+    resolve_implementation("dynamic", "dynamic", entry, lookup, |builtin| {
+        builtin == CLAUDE_CODE_BUILTIN
+    })
+}
+
 fn resolve_implementations(
     section: &'static str,
     raw: BTreeMap<String, RawImplementation>,
@@ -271,42 +281,58 @@ fn resolve_implementations(
 ) -> Result<BTreeMap<String, Implementation>, ConfigError> {
     raw.into_iter()
         .map(|(name, entry)| {
-            let RawImplementation {
-                url,
-                token_env,
-                builtin,
-            } = entry;
-            let implementation = match (url, builtin) {
-                (Some(url), None) => {
-                    let endpoint = RawEndpoint { url, token_env };
-                    Implementation::Resolver(resolve_endpoint(section, name.clone(), endpoint, lookup)?)
-                }
-                (None, Some(builtin)) => {
-                    if token_env.is_some() {
-                        return Err(ConfigError::ImplementationChoice {
-                            section,
-                            name: name.clone(),
-                        });
-                    }
-                    if !crate::builtins::valid_implementation_name(&builtin) {
-                        return Err(ConfigError::InvalidBuiltinName {
-                            section,
-                            name: name.clone(),
-                            builtin,
-                        });
-                    }
-                    Implementation::Builtin(builtin)
-                }
-                _ => {
-                    return Err(ConfigError::ImplementationChoice {
-                        section,
-                        name: name.clone(),
-                    });
-                }
-            };
+            let implementation =
+                resolve_implementation(section, &name, entry, lookup, crate::builtins::valid_implementation_name)?;
             Ok((name, implementation))
         })
         .collect()
+}
+
+/// One entry's implementation choice: exactly one of `url` (with an optional token) or a
+/// `builtin` naming an implementation the section accepts.
+fn resolve_implementation(
+    section: &'static str,
+    name: &str,
+    entry: RawImplementation,
+    lookup: &impl Fn(&str) -> Option<String>,
+    valid_builtin: impl Fn(&str) -> bool,
+) -> Result<Implementation, ConfigError> {
+    let RawImplementation {
+        url,
+        token_env,
+        builtin,
+    } = entry;
+    match (url, builtin) {
+        (Some(url), None) => {
+            let endpoint = RawEndpoint { url, token_env };
+            Ok(Implementation::Resolver(resolve_endpoint(
+                section,
+                name.to_string(),
+                endpoint,
+                lookup,
+            )?))
+        }
+        (None, Some(builtin)) => {
+            if token_env.is_some() {
+                return Err(ConfigError::ImplementationChoice {
+                    section,
+                    name: name.to_string(),
+                });
+            }
+            if !valid_builtin(&builtin) {
+                return Err(ConfigError::InvalidBuiltinName {
+                    section,
+                    name: name.to_string(),
+                    builtin,
+                });
+            }
+            Ok(Implementation::Builtin(builtin))
+        }
+        _ => Err(ConfigError::ImplementationChoice {
+            section,
+            name: name.to_string(),
+        }),
+    }
 }
 
 /// A section whose every entry is an endpoint. A cast classifies content over the wire or
@@ -511,6 +537,9 @@ mod tests {
         .expect("the fixture with a set secret validates");
         assert!(!format!("{:?}", config.externals).contains("sekret"));
         let dynamic = config.externals.dynamic.expect("the dynamic endpoint is set");
+        let Implementation::Resolver(dynamic) = dynamic else {
+            panic!("the URL config selects an endpoint");
+        };
         let token = dynamic.token.expect("the token resolved");
         assert_eq!(token.reveal(), "sekret");
         assert_eq!(format!("{token:?}"), "Token(<redacted>)");
@@ -523,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn a_builtin_entry_loads_for_authorities_and_sanitizers_only() {
+    fn builtin_entries_load_only_where_supported() {
         let text = format!(
             "{MINIMAL}\n[externals.authorities.auto]\nbuiltin = \"approve\"\n\n[externals.sanitizers.pii]\nbuiltin = \"redact-email\"\n"
         );
@@ -537,8 +566,16 @@ mod tests {
             Some(Implementation::Builtin(name)) if name == "redact-email",
         ));
 
+        let text = format!("{MINIMAL}\n[externals.dynamic]\nbuiltin = \"claude-code\"\n");
+        let config = parse(&text).expect("the Claude Code dynamic builtin validates");
+        assert!(matches!(
+            config.externals.dynamic,
+            Some(Implementation::Builtin(name)) if name == CLAUDE_CODE_BUILTIN
+        ));
         let text = format!("{MINIMAL}\n[externals.dynamic]\nbuiltin = \"approve\"\n");
-        assert!(matches!(parse(&text), Err(ConfigError::BuiltinNotAllowed { .. })));
+        assert!(matches!(parse(&text), Err(ConfigError::InvalidBuiltinName { .. })));
+        let text = format!("{MINIMAL}\n[externals.dynamic]\nbuiltin = \"claude-code\"\ntoken_env = \"APPA_TOKEN\"\n");
+        assert!(matches!(parse(&text), Err(ConfigError::ImplementationChoice { .. })));
         let text = format!("{MINIMAL}\n[externals.membership]\nbuiltin = \"approve\"\n");
         assert!(matches!(parse(&text), Err(ConfigError::BuiltinNotAllowed { .. })));
         let text = format!("{MINIMAL}\n[externals.membership]\nurl = \"https://directory.internal\"\n");

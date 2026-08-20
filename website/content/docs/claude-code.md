@@ -61,6 +61,32 @@ Installing the plugin does not force every Claude Code session through OpenAPPA.
 
 :::claude-session-choice:::
 
+## Use Claude Code as a dynamic classifier
+
+OpenAPPA can also call the installed Claude Code CLI as a built-in tool-level dynamic resolver:
+
+```toml
+[[dynamic_resolver]]
+name = "classify-customer"
+
+[[tool]]
+name = "get_customer"
+resolvers = [
+  { resolver = "classify-customer", returns = ["trust", "audience", "attention"] }
+]
+
+[externals]
+timeout_ms = 60000
+max_body_bytes = 65536
+
+[externals.dynamic]
+builtin = "claude-code"
+```
+
+The runtime uses the current user's Claude Code authentication and fixed Sonnet configuration. It starts a fresh safe-mode process with no tools, hooks, project settings, or persisted session. The classifier sees the complete canonical arguments, current trust and audience, valid trust ranks, and existing static attention requirements. It may return any combination selected by `returns`, including `delta` and `attention` together.
+
+This is a POC trusted classifier rather than a sandboxed policy authority: there is no additional ceiling on its answer, and argument-level prompt-injection resistance is best-effort. Process errors, timeouts, invalid fields, and invalid rank or audience values fail closed. The older single-argument audience resolver syntax remains HTTP-only.
+
 ## Uninstall
 
 To uninstall OpenAPPA from Claude Code, remove the plugin, stop the local runtime, and remove its binaries:

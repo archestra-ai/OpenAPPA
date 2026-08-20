@@ -1461,8 +1461,11 @@ impl Engine {
             });
         };
         if let Some(registered) = self.registry.cast(&cast) {
-            let prior = contract
-                .output_label_for_resolutions(views.dynamic_resolutions(dispatch).unwrap_or_default(), expansions);
+            let prior = contract.output_label_for_resolutions(
+                views.dynamic_resolutions(dispatch).unwrap_or_default(),
+                views.tool_resolutions(dispatch).unwrap_or_default(),
+                expansions,
+            );
             expansions.require(registered.resolution.reads(&prior))?;
         }
         let candidate = crate::admit::cast_candidate(
@@ -1852,6 +1855,20 @@ impl Engine {
                     return Err(TransitionError::ForeignDynamicAnswer { argument });
                 }
             }
+            match check::validate_tool_resolutions(contract, call) {
+                Ok(()) => {}
+                Err(check::ToolResolutionRefusal::Needed(bindings)) => {
+                    return Err(TransitionError::ToolResolutionNeeded {
+                        resolvers: bindings
+                            .into_iter()
+                            .map(|binding| binding.resolver.as_str().to_string())
+                            .collect(),
+                    });
+                }
+                Err(check::ToolResolutionRefusal::Foreign(resolver)) => {
+                    return Err(TransitionError::ForeignToolResolution { resolver });
+                }
+            }
         }
         if !needed.is_empty() {
             needed.sort();
@@ -2009,6 +2026,7 @@ impl Engine {
                 self.resolve_call(proposed.tool.clone(), &proposed.arguments)
                     .map(|call| {
                         call.with_dynamic_resolutions(proposed.dynamic_resolutions.clone())
+                            .with_tool_resolutions(proposed.tool_resolutions.clone())
                             .with_memberships(proposed.memberships.clone())
                     })
                     .map_err(|error| (position, error))
@@ -2914,7 +2932,7 @@ impl Engine {
             .extend(sanitizer.clone())
             .ok_or(TransitionError::SanitizerUnapplicable)?;
         let substituted = substituted_call(contract, call, body)?;
-        if check::validate_dynamic_resolutions(contract, &substituted).is_err() {
+        if !check::resolution_pins_valid(contract, &substituted) {
             return Err(TransitionError::SanitizerUnapplicable);
         }
 
@@ -3712,6 +3730,7 @@ pub(crate) fn opened_dispatch(
         receiving: current.bound().clone(),
         proposed_effects: contract.emits.clone(),
         dynamic_resolutions: call.dynamic_resolutions().to_vec(),
+        tool_resolutions: call.tool_resolutions().to_vec(),
         memberships: call.memberships().to_vec(),
         resolutions: registry.resolutions(expansions),
         subject,
@@ -3973,6 +3992,7 @@ mod tests {
 
     fn read_tool(name: &str, delta: Option<Delta>) -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta,
@@ -4237,6 +4257,7 @@ mod tests {
             tool: call.tool().clone(),
             arguments: call.canonical_arguments().canonical_bytes().to_vec(),
             dynamic_resolutions: call.dynamic_resolutions().to_vec(),
+            tool_resolutions: call.tool_resolutions().to_vec(),
             memberships: call.memberships().to_vec(),
         }
     }
@@ -4249,6 +4270,7 @@ mod tests {
 
     fn crm_tool() -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new("get_ticket"),
             tags: vec![],
             delta: Some(Delta {
@@ -4270,6 +4292,7 @@ mod tests {
     #[test]
     fn permuted_effect_declarations_produce_byte_identical_dispatch_facts() {
         let pay = |emits: [&str; 2]| ToolContract {
+            resolvers: vec![],
             name: ToolName::new("pay"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -4523,6 +4546,7 @@ mod tests {
                 receiving: EstablishedLabel::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
                 proposed_effects: crate::fact::EffectSet::default(),
                 dynamic_resolutions: Vec::new(),
+                tool_resolutions: Vec::new(),
                 memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj()),
                 resolutions: vec![],
@@ -4633,6 +4657,7 @@ mod tests {
     #[test]
     fn pending_cast_output_dispatches_before_resolution() {
         let scan = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("scan_inbox"),
             tags: vec![],
             delta: Some(Delta {
@@ -4665,6 +4690,7 @@ mod tests {
     #[test]
     fn includes_placeholder_resolves_from_arguments() {
         let send = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("send_email"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -4697,6 +4723,7 @@ mod tests {
     #[test]
     fn history_prior_and_no_prior() {
         let del = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("delete_db"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -4724,6 +4751,7 @@ mod tests {
     fn an_includes_requirement_reads_the_committed_label() {
         let b_reader = Audience::restricted([ReaderId::new("b")]);
         let share = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("share"),
             tags: vec![],
             delta: Some(Delta {
@@ -4764,6 +4792,7 @@ mod tests {
     #[test]
     fn a_trust_floor_reads_the_committed_label() {
         let risky = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("risky"),
             tags: vec![],
             delta: Some(Delta {
@@ -4801,6 +4830,7 @@ mod tests {
     fn a_read_that_narrows_into_the_cap_passes_the_cap() {
         let a_reader = Audience::restricted([ReaderId::new("a")]);
         let scoped = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("scoped"),
             tags: vec![],
             delta: Some(Delta {
@@ -4831,6 +4861,7 @@ mod tests {
 
     fn emitting(name: &str, kind: &str) -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -4842,6 +4873,7 @@ mod tests {
 
     fn history_guarded(name: &str, requirement: HistoryRequirement) -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -5095,6 +5127,7 @@ mod tests {
             hint: None,
         };
         let fetch = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("fetch"),
             tags: vec![],
             delta: Some(Delta {
@@ -5292,6 +5325,7 @@ mod tests {
             trust_chain: TrustChain::new(vec!["secret".into(), "suspicious".into(), "trusted".into()]),
             tools: vec![
                 ToolContract {
+                    resolvers: vec![],
                     name: ToolName::new("fetch"),
                     tags: vec![],
                     delta: Some(Delta {
@@ -5747,6 +5781,7 @@ mod tests {
     fn substituting_engine(trust: Trust) -> Engine {
         let partner = Audience::restricted([ReaderId::new("partner")]);
         let post = |name: &str, tags: Vec<crate::names::TagName>| ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags,
             delta: Some(Delta::NONE),
@@ -5768,6 +5803,7 @@ mod tests {
             },
         };
         let post_to = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("post_to"),
             parameters: crate::params::ToolParameters::compile(&json!({
                 "type": "object",
@@ -7004,6 +7040,7 @@ mod tests {
 
     fn neutral_tool() -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new("read_note"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -7015,6 +7052,7 @@ mod tests {
 
     fn emitting_tool() -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new("send_note"),
             emits: EffectSet::new([EffectKind::new("email.sent")]).unwrap(),
             ..neutral_tool()
@@ -7214,6 +7252,7 @@ mod tests {
         let cfg = RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: vec![ToolContract {
+                resolvers: vec![],
                 name: ToolName::new("wire"),
                 tags: vec![],
                 delta: Some(Delta::NONE),
@@ -7295,6 +7334,7 @@ mod tests {
 
     fn open_tool(name: &str) -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: None,
@@ -8729,6 +8769,7 @@ mod tests {
                 receiving: EstablishedLabel::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
                 proposed_effects: EffectSet::default(),
                 dynamic_resolutions: Vec::new(),
+                tool_resolutions: Vec::new(),
                 memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&child),
                 resolutions: vec![],
@@ -8831,6 +8872,7 @@ mod tests {
 
     fn pending_cast_tool(name: &str, tag: &str) -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: vec![crate::names::TagName::new(tag)],
             delta: Some(Delta {
@@ -9591,6 +9633,7 @@ mod tests {
     #[test]
     fn a_calls_own_emits_never_fail_its_own_check() {
         let selfguard = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("selfguard"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -9617,6 +9660,7 @@ mod tests {
     #[test]
     fn a_success_checkpoint_settles_while_the_dispatch_stays_open() {
         let scan = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("scan"),
             tags: vec![],
             delta: Some(Delta {
@@ -9661,6 +9705,7 @@ mod tests {
     #[test]
     fn attention_is_always_a_gap() {
         let tool = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -9683,6 +9728,7 @@ mod tests {
 
     fn trusted_sink() -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -9855,6 +9901,7 @@ mod tests {
     #[test]
     fn all_three_block_slots_coexist() {
         let vault = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("vault"),
             tags: vec![],
             delta: Some(Delta {
@@ -9892,6 +9939,7 @@ mod tests {
     #[test]
     fn a_gap_and_an_unestablished_source_split_by_dimension() {
         let vault = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("vault"),
             tags: vec![],
             delta: Some(Delta {
@@ -10166,6 +10214,7 @@ mod tests {
     #[test]
     fn replay_refuses_an_out_of_scope_resolution() {
         let fetch = crate::contract::ToolContract {
+            resolvers: vec![],
             name: ToolName::new("fetch"),
             tags: vec![crate::names::TagName::new("web")],
             delta: Some(crate::contract::Delta {
@@ -10257,6 +10306,7 @@ mod tests {
 
     fn unannotated_tool(name: &str) -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: None,
@@ -10332,6 +10382,7 @@ mod tests {
     #[test]
     fn includes_missing_placeholder_is_an_invalid_call_and_still_fails_closed_underneath() {
         let send = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("send_email"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -10387,6 +10438,7 @@ mod tests {
         use crate::names::AuthorityName;
 
         let wire = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -10442,6 +10494,7 @@ mod tests {
 
     fn strict_tool(name: &str) -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: vec![],
             parameters: crate::params::ToolParameters::compile(&json!({
@@ -10520,6 +10573,7 @@ mod tests {
                     receiving: established(TRUSTED, Audience::Public),
                     proposed_effects: EffectSet::default(),
                     dynamic_resolutions: vec![],
+                    tool_resolutions: vec![],
                     memberships: Vec::new(),
                     subject: crate::basis::fixture_subject(&traj()),
                     resolutions: vec![],
@@ -10621,6 +10675,7 @@ mod tests {
 
     fn plain_tool(name: &str) -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -10973,6 +11028,7 @@ mod tests {
             tool: ToolName::new(tool),
             arguments: arguments.to_vec(),
             dynamic_resolutions: Vec::new(),
+            tool_resolutions: Vec::new(),
             memberships: Vec::new(),
         }
     }
@@ -13798,6 +13854,7 @@ mod tests {
         let e = open_engine(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: vec![ToolContract {
+                resolvers: vec![],
                 name: ToolName::new("fetch"),
                 tags: vec![],
                 delta: Some(Delta {

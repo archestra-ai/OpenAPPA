@@ -221,6 +221,8 @@ pub enum Fact {
         #[serde(default)]
         dynamic_resolutions: Vec<crate::contract::PinnedDynamicResolution>,
         #[serde(default)]
+        tool_resolutions: Vec<crate::contract::PinnedToolResolution>,
+        #[serde(default)]
         memberships: Vec<crate::contract::PinnedMembership>,
         #[serde(default)]
         resolutions: Vec<crate::groups::GroupResolution>,

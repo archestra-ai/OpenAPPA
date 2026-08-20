@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use appa_runtime::api::{OfferId, RemedyOutcome, Runtime};
-use appa_runtime::config::{Config, Endpoint, Externals};
+use appa_runtime::config::{Config, Endpoint, Externals, Implementation};
 use appa_runtime::hooks;
 use appa_runtime_api::{
     Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
@@ -193,9 +193,11 @@ impl SessionInner {
                 authorities: Default::default(),
                 sanitizers: Default::default(),
                 casts: Default::default(),
-                dynamic: parsed.dynamic.map(|e| Endpoint {
-                    url: e.url,
-                    token: None,
+                dynamic: parsed.dynamic.map(|e| {
+                    Implementation::Resolver(Endpoint {
+                        url: e.url,
+                        token: None,
+                    })
                 }),
                 membership: parsed.membership.map(|e| Endpoint {
                     url: e.url,

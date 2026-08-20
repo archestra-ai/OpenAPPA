@@ -142,8 +142,11 @@ pub(crate) fn bound_candidate(
     let registered = registry
         .sanitizer(sanitizer)
         .ok_or_else(|| AdmitError::UnknownTool(sanitizer.as_str().to_string()))?;
-    let raw_label =
-        contract.output_label_for_resolutions(views.dynamic_resolutions(dispatch).unwrap_or_default(), expansions);
+    let raw_label = contract.output_label_for_resolutions(
+        views.dynamic_resolutions(dispatch).unwrap_or_default(),
+        views.tool_resolutions(dispatch).unwrap_or_default(),
+        expansions,
+    );
     let derived = registered
         .derive_output(&raw_label, &contract.tags, expansions)
         .ok_or(AdmitError::SanitizerTransitionUnmet)?;
@@ -176,8 +179,11 @@ pub(crate) fn cast_candidate(
     resolved: &EstablishedLabel,
     expansions: &Expansions,
 ) -> Result<DerivedCandidate, AdmitError> {
-    let output_label =
-        contract.output_label_for_resolutions(views.dynamic_resolutions(dispatch).unwrap_or_default(), expansions);
+    let output_label = contract.output_label_for_resolutions(
+        views.dynamic_resolutions(dispatch).unwrap_or_default(),
+        views.tool_resolutions(dispatch).unwrap_or_default(),
+        expansions,
+    );
     validate_pending_cast(registry, contract, &output_label, cast, resolved, expansions)?;
     let receiving = views.receiving_bound(dispatch).ok_or(AdmitError::NotOpen)?;
     let label = resolved.clone().into_label();
@@ -299,8 +305,13 @@ pub(crate) fn admit_result(
     }
 
     let trajectory = views.trajectory().clone();
-    let output_label =
-        || contract.output_label_for_resolutions(views.dynamic_resolutions(dispatch).unwrap_or_default(), expansions);
+    let output_label = || {
+        contract.output_label_for_resolutions(
+            views.dynamic_resolutions(dispatch).unwrap_or_default(),
+            views.tool_resolutions(dispatch).unwrap_or_default(),
+            expansions,
+        )
+    };
     let close_success = || Fact::DispatchClosed {
         trajectory: trajectory.clone(),
         dispatch: dispatch.clone(),
@@ -541,6 +552,7 @@ mod tests {
 
     fn registry() -> Registry {
         let get = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("get_ticket"),
             tags: vec![],
             delta: Some(Delta {
@@ -596,6 +608,7 @@ mod tests {
             scope: Scope::default(),
         };
         let scan = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("scan_inbox"),
             tags: vec![],
             delta: Some(Delta {
@@ -607,6 +620,7 @@ mod tests {
             requires: Default::default(),
         };
         let poll = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("poll_room"),
             tags: vec![],
             delta: Some(Delta {
@@ -618,6 +632,7 @@ mod tests {
             requires: Default::default(),
         };
         let dynamic_scan = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("dynamic_scan"),
             tags: vec![],
             delta: Some(Delta {
@@ -658,6 +673,7 @@ mod tests {
             receiving: EstablishedLabel::top(),
             proposed_effects: EffectSet::new([EffectKind::new("read")]).unwrap(),
             dynamic_resolutions: Vec::new(),
+            tool_resolutions: Vec::new(),
             memberships: Vec::new(),
             subject: crate::basis::fixture_subject(&traj()),
             resolutions: vec![],
@@ -869,6 +885,7 @@ mod tests {
     #[test]
     fn a_scoped_cast_applies_only_to_covered_tool_results() {
         let fetch = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("fetch"),
             tags: vec![crate::names::TagName::new("web")],
             delta: Some(Delta {
@@ -880,6 +897,7 @@ mod tests {
             requires: Default::default(),
         };
         let note = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("note"),
             tags: vec![],
             delta: Some(Delta {
@@ -1192,6 +1210,7 @@ mod tests {
     #[test]
     fn a_public_resolution_is_admitted_under_a_public_cap() {
         let fetch = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("fetch_page"),
             tags: vec![],
             delta: Some(Delta {
@@ -1300,6 +1319,7 @@ mod tests {
             dynamic_resolutions: vec![
                 PinnedDynamicResolution::from_answer(binding, internal()).expect("a literal reader set pins"),
             ],
+            tool_resolutions: vec![],
             memberships: Vec::new(),
             subject: crate::basis::fixture_subject(&traj()),
             resolutions: vec![],

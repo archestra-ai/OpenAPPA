@@ -916,9 +916,14 @@ fn validate_deployment(policy: &appa_policy::Config, config: &Config) -> Result<
         }
     }
     let dynamic_binding = rc.tools.iter().find_map(|tool| {
-        appa_engine::check::dynamic_reads(tool)
+        tool.resolvers
             .first()
             .map(|binding| binding.resolver.as_str().to_string())
+            .or_else(|| {
+                appa_engine::check::dynamic_reads(tool)
+                    .first()
+                    .map(|binding| binding.resolver.as_str().to_string())
+            })
     });
     if let Some(resolver) = dynamic_binding
         && config.externals.dynamic.is_none()
@@ -927,6 +932,19 @@ fn validate_deployment(policy: &appa_policy::Config, config: &Config) -> Result<
             kind: "dynamic resolver",
             name: resolver,
         });
+    }
+    if matches!(
+        &config.externals.dynamic,
+        Some(crate::config::Implementation::Builtin(name)) if name == crate::config::CLAUDE_CODE_BUILTIN
+    ) && rc
+        .tools
+        .iter()
+        .any(|tool| !appa_engine::check::dynamic_reads(tool).is_empty())
+    {
+        return Err(OpenError::UnsupportedPolicy(
+            "[externals.dynamic] builtin = \"claude-code\" supports tool-level `resolvers = [{ resolver, returns }]` only; legacy single-argument audience resolvers require an HTTP endpoint"
+                .to_string(),
+        ));
     }
     if let Some(resolver) = &rc.membership
         && config.externals.membership.is_none()
@@ -1032,5 +1050,62 @@ pub(crate) mod testing {
                 }],
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod deployment_tests {
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    use super::*;
+    use crate::config::{CLAUDE_CODE_BUILTIN, Externals, Implementation};
+
+    fn claude_config(policy: &str) -> Config {
+        Config::embedded(
+            policy.to_string(),
+            Externals {
+                timeout: Duration::from_secs(30),
+                review_timeout: Duration::from_secs(600),
+                max_body_bytes: 65_536,
+                authorities: BTreeMap::new(),
+                sanitizers: BTreeMap::new(),
+                casts: BTreeMap::new(),
+                dynamic: Some(Implementation::Builtin(CLAUDE_CODE_BUILTIN.to_string())),
+                membership: None,
+            },
+        )
+        .expect("the embedded configuration parses")
+    }
+
+    #[test]
+    fn claude_builtin_accepts_tool_resolvers_and_refuses_legacy_dynamic_audience() {
+        let tool_level = claude_config(
+            r#"
+                version = 1
+                [[dynamic_resolver]]
+                name = "classifier"
+                [[tool]]
+                name = "lookup"
+                resolvers = [{ resolver = "classifier", returns = ["trust", "audience", "attention"] }]
+            "#,
+        );
+        assert!(Deployment::load(tool_level, &crate::builtins::ModuleRegistry::empty()).is_ok());
+
+        let legacy = claude_config(
+            r#"
+                version = 1
+                [[dynamic_resolver]]
+                name = "directory"
+                [[tool]]
+                name = "lookup"
+                parameters = { type = "object", properties = { customer = { type = "string" } }, required = ["customer"] }
+                delta = { audience = { resolver = "directory", argument = "customer" } }
+            "#,
+        );
+        assert!(matches!(
+            Deployment::load(legacy, &crate::builtins::ModuleRegistry::empty()),
+            Err(OpenError::UnsupportedPolicy(message)) if message.contains("tool-level") && message.contains("legacy")
+        ));
     }
 }

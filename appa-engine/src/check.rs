@@ -5,7 +5,9 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::candidate::CallStage;
-use crate::contract::{AudienceRequirement, DynamicAudienceBinding, HistoryRequirement, RecipientSpec, ToolContract};
+use crate::contract::{
+    AudienceRequirement, DynamicAudienceBinding, HistoryRequirement, RecipientSpec, ToolContract, ToolResolverBinding,
+};
 use crate::fact::EffectKind;
 use crate::groups::Expansions;
 use crate::label::{Adequacy, Audience, Dimension, EstablishedLabel, PartialLabel, ReaderId, Trust};
@@ -99,6 +101,12 @@ pub(crate) fn committed_label_for_call(
     {
         committed.narrow_bound(&EstablishedLabel::new(Trust::new(u8::MAX), audience.clone()));
     }
+    for resolution in call.tool_resolutions() {
+        committed.narrow_bound(&EstablishedLabel::new(
+            resolution.trust().unwrap_or(Trust::new(u8::MAX)),
+            resolution.audience().cloned().unwrap_or(Audience::Public),
+        ));
+    }
     committed
 }
 
@@ -161,7 +169,11 @@ pub(crate) fn evaluate_state(
     let mut gaps = Vec::new();
     label_gaps(contract, &committed, call, stage, expansions, &mut gaps);
     history_gaps(contract, has_committed, has_reserved, &mut gaps);
-    for mark in &contract.requires.attention {
+    for mark in contract.requires.attention.iter().chain(
+        call.tool_resolutions()
+            .iter()
+            .flat_map(|resolution| resolution.attention()),
+    ) {
         gaps.push(Gap::Attention(mark.clone()));
     }
     let mut seen = Vec::with_capacity(gaps.len());
@@ -425,6 +437,45 @@ pub(crate) fn validate_dynamic_resolutions(contract: &ToolContract, call: &Resol
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ToolResolutionRefusal {
+    #[error("the call needs tool-level resolver answers")]
+    Needed(Vec<ToolResolverBinding>),
+    #[error("the pinned tool-level answer from resolver {0} is not bound to this call")]
+    Foreign(String),
+}
+
+pub(crate) fn validate_tool_resolutions(
+    contract: &ToolContract,
+    call: &ResolvedCall,
+) -> Result<(), ToolResolutionRefusal> {
+    let reads = &contract.resolvers;
+    let mut seen: Vec<&ToolResolverBinding> = Vec::new();
+    for pinned in call.tool_resolutions() {
+        let binding = pinned.binding();
+        if !reads.contains(binding) || seen.contains(&binding) {
+            return Err(ToolResolutionRefusal::Foreign(binding.resolver.as_str().to_string()));
+        }
+        seen.push(binding);
+    }
+    let missing: Vec<ToolResolverBinding> = reads
+        .iter()
+        .filter(|binding| !seen.contains(binding))
+        .cloned()
+        .collect();
+    match missing.is_empty() {
+        true => Ok(()),
+        false => Err(ToolResolutionRefusal::Needed(missing)),
+    }
+}
+
+/// Whether every resolver answer this call carries — dynamic and tool-level — is one its
+/// contract spells, completely. The one-invariant form for the choke points that fold both
+/// families into a single refusal; the proposal boundary keeps the discriminated validators.
+pub(crate) fn resolution_pins_valid(contract: &ToolContract, call: &ResolvedCall) -> bool {
+    validate_dynamic_resolutions(contract, call).is_ok() && validate_tool_resolutions(contract, call).is_ok()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum MembershipRefusal {
     #[error("the call names groups its check needs expansions for")]
     Needed(Vec<GroupRead>),
@@ -492,4 +543,85 @@ pub(crate) fn pins_agree(
 
 fn unresolved_recipient(key: &str) -> Audience {
     Audience::restricted([ReaderId::new(format!("<unresolved:{key}>"))])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::candidate::CallStage;
+    use crate::contract::{PinnedToolResolution, ResolverReturn, ToolResolverBinding};
+    use crate::fact::EffectSet;
+    use crate::label::{Dim, Label};
+    use crate::names::{DynamicResolverName, MarkName};
+    use crate::params::ToolParameters;
+    use crate::value::ToolName;
+
+    #[test]
+    fn tool_resolution_narrows_both_dimensions_and_adds_fresh_attention() {
+        let binding = ToolResolverBinding {
+            resolver: DynamicResolverName::new("classifier"),
+            returns: [
+                ResolverReturn::Trust,
+                ResolverReturn::Audience,
+                ResolverReturn::Attention,
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let contract = ToolContract {
+            name: ToolName::new("lookup"),
+            tags: vec![],
+            parameters: ToolParameters::open(),
+            resolvers: vec![binding.clone()],
+            delta: None,
+            emits: EffectSet::default(),
+            requires: crate::contract::Requires {
+                attention: vec![MarkName::new("static-review")],
+                ..Default::default()
+            },
+        };
+        assert_eq!(
+            contract.output_label(&Expansions::default()),
+            Label::new(Dim::Unknown, Dim::Unknown)
+        );
+        let call = ResolvedCall::new(
+            ToolName::new("lookup"),
+            crate::params::CanonicalArguments::from_value(&serde_json::json!({"id": 7}), &ToolParameters::open())
+                .expect("arguments compile"),
+        )
+        .with_tool_resolutions(vec![
+            PinnedToolResolution::from_answer(
+                binding,
+                Some(Trust::new(0)),
+                Some(Audience::restricted([ReaderId::new("support")])),
+                Some(vec![MarkName::new("dynamic-review")]),
+            )
+            .expect("the declared fields pin"),
+        ]);
+        let current = PartialLabel::established(EstablishedLabel::top());
+        let outcome = evaluate_state(
+            &contract,
+            &current,
+            &|_| false,
+            &|_| false,
+            &call,
+            &CallStage::default(),
+            &Expansions::default(),
+        );
+        assert_eq!(
+            outcome.narrowing.expect("both resolved fields narrow").to,
+            EstablishedLabel::new(Trust::new(0), Audience::restricted([ReaderId::new("support")]))
+        );
+        assert_eq!(outcome.requirement_gaps.len(), 2);
+        assert!(
+            outcome
+                .requirement_gaps
+                .contains(&Gap::Attention(MarkName::new("dynamic-review")))
+        );
+        assert!(
+            outcome
+                .requirement_gaps
+                .contains(&Gap::Attention(MarkName::new("static-review")))
+        );
+    }
 }

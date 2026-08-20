@@ -199,6 +199,7 @@ mod tests {
 
     fn read_tool() -> crate::contract::ToolContract {
         crate::contract::ToolContract {
+            resolvers: vec![],
             name: ToolName::new("read"),
             tags: vec![],
             delta: Some(crate::contract::Delta::NONE),
@@ -229,6 +230,7 @@ mod tests {
             receiving: EstablishedLabel::top(),
             proposed_effects: EffectSet::default(),
             dynamic_resolutions: Vec::new(),
+            tool_resolutions: Vec::new(),
             memberships: Vec::new(),
             subject: crate::basis::fixture_subject(&trajectory),
             resolutions: vec![],
@@ -738,6 +740,7 @@ mod tests {
             receiving: EstablishedLabel::top(),
             proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
             dynamic_resolutions: Vec::new(),
+            tool_resolutions: Vec::new(),
             memberships: Vec::new(),
             subject: crate::basis::fixture_subject(&child()),
             resolutions: vec![],
@@ -944,6 +947,7 @@ mod tests {
             receiving: EstablishedLabel::top(),
             proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
             dynamic_resolutions: Vec::new(),
+            tool_resolutions: Vec::new(),
             memberships: Vec::new(),
             subject: crate::basis::fixture_subject(&child()),
             resolutions: vec![],

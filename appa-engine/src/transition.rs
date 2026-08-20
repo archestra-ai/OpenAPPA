@@ -78,6 +78,8 @@ pub struct ProposedCall {
     /// They are payload, not decoration: the same tool and arguments under
     /// different resolved recipients is a different act.
     pub dynamic_resolutions: Vec<crate::contract::PinnedDynamicResolution>,
+    /// The answers to this tool's complete-argument resolver bindings.
+    pub tool_resolutions: Vec<crate::contract::PinnedToolResolution>,
     /// The membership expansions the runtime resolved for this call's `@group` placeholder
     /// arguments. Payload on the same terms as the dynamic answers.
     pub memberships: Vec<crate::contract::PinnedMembership>,
@@ -432,6 +434,10 @@ pub enum TransitionError {
     },
     #[error("dynamic answer for argument {argument} is not one this call reads")]
     ForeignDynamicAnswer { argument: String },
+    #[error("the act reads tool-level resolver bindings without answers: {resolvers:?}")]
+    ToolResolutionNeeded { resolvers: Vec<String> },
+    #[error("tool-level resolver answer from {resolver} is not one this call reads")]
+    ForeignToolResolution { resolver: String },
     #[error("the act's membership expansions are not evidence for it: {0}")]
     ForeignExpansion(#[from] crate::groups::ExpansionRefusal),
     #[error(transparent)]
@@ -1154,14 +1160,19 @@ impl<'a> Sequence<'a> {
                 receiving,
                 proposed_effects,
                 dynamic_resolutions,
+                tool_resolutions,
                 memberships,
                 subject,
                 resolutions,
             } => {
                 let call = ResolvedCall::new(tool.clone(), arguments.clone())
                     .with_dynamic_resolutions(dynamic_resolutions.clone())
+                    .with_tool_resolutions(tool_resolutions.clone())
                     .with_memberships(memberships.clone());
                 if call.dynamic_resolutions() != dynamic_resolutions.as_slice() {
+                    return Err(TransitionRefusal::ForgedLabel);
+                }
+                if call.tool_resolutions() != tool_resolutions.as_slice() {
                     return Err(TransitionRefusal::ForgedLabel);
                 }
                 if call.memberships() != memberships.as_slice() {
@@ -1179,8 +1190,8 @@ impl<'a> Sequence<'a> {
                 {
                     return Err(TransitionRefusal::ForgedMembership);
                 }
-                // And its dynamic answers, one per binding the contract spells.
-                if crate::check::validate_dynamic_resolutions(contract, &call).is_err() {
+                // And its resolver answers, one per binding the contract spells.
+                if !crate::check::resolution_pins_valid(contract, &call) {
                     return Err(TransitionRefusal::ForgedResolution);
                 }
                 if proposed_effects != &contract.emits {
@@ -2093,6 +2104,7 @@ impl<'a> Sequence<'a> {
                     tool,
                     arguments,
                     dynamic_resolutions,
+                    tool_resolutions,
                     memberships,
                     subject,
                     resolutions,
@@ -2101,6 +2113,7 @@ impl<'a> Sequence<'a> {
             ) if dispatch == &next.dispatch => {
                 let opened = ResolvedCall::new(tool.clone(), arguments.clone())
                     .with_dynamic_resolutions(dynamic_resolutions.clone())
+                    .with_tool_resolutions(tool_resolutions.clone())
                     .with_memberships(memberships.clone());
                 if opened != next.call || subject != &next.subject {
                     return Err(TransitionRefusal::UnbackedDecision);
@@ -2245,7 +2258,7 @@ impl<'a> Sequence<'a> {
             if crate::check::validate_memberships(contract, call).is_err() {
                 return Err(TransitionRefusal::ForgedMembership);
             }
-            if crate::check::validate_dynamic_resolutions(contract, call).is_err() {
+            if !crate::check::resolution_pins_valid(contract, call) {
                 return Err(TransitionRefusal::ForgedResolution);
             }
         }
@@ -3335,7 +3348,7 @@ impl<'a> Sequence<'a> {
         if call != &predecessor.substituting(call.canonical_arguments().clone()) {
             return Err(TransitionRefusal::ForgedLabel);
         }
-        if crate::check::validate_dynamic_resolutions(contract, call).is_err() {
+        if !crate::check::resolution_pins_valid(contract, call) {
             return Err(TransitionRefusal::SanitizerUnapplicable);
         }
 
@@ -3435,6 +3448,7 @@ impl<'a> Sequence<'a> {
         let views = self.projection.view(trajectory);
         contract.output_label_for_resolutions(
             views.dynamic_resolutions(dispatch).unwrap_or_default(),
+            views.tool_resolutions(dispatch).unwrap_or_default(),
             &self.dispatch_expansions(trajectory, dispatch),
         )
     }
@@ -3634,6 +3648,7 @@ mod tests {
 
     fn note_tool() -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new("note"),
             tags: vec![],
             delta: Some(crate::contract::Delta::NONE),
@@ -3699,6 +3714,7 @@ mod tests {
                         tool: call.tool().clone(),
                         arguments: call.canonical_arguments().canonical_bytes().to_vec(),
                         dynamic_resolutions: Vec::new(),
+                        tool_resolutions: Vec::new(),
                         memberships: Vec::new(),
                     }],
                     spawn: None,

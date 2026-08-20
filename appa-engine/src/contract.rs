@@ -16,9 +16,9 @@ use crate::value::ToolName;
 /// result's actual state is established by a registered cast at admission (RP5), so the raw result
 /// is confined until then.
 ///
-/// A contract may carry no delta at all ([`ToolContract::delta`] is `None`): the tool is
-/// **unannotated** — the deployment never described its output, which is not the same as declaring
-/// it neutral. An unannotated tool's result is admitted at `Unknown` in both dimensions
+/// A contract may carry no delta and no resolver-owned label field: the tool is **unannotated** —
+/// the deployment never described its output, which is not the same as declaring it neutral. An
+/// unannotated tool's result is admitted at `Unknown` in both dimensions
 /// (fail-closed: the fold absorbs Unknown, and any later check whose requirement consumes the
 /// dimension names the values a cast must resolve). The deliberate "this result carries nothing"
 /// annotation is the empty declared delta ([`Delta::NONE`], `delta = {}` on the config surface).
@@ -32,6 +32,108 @@ pub struct Delta {
 pub struct DynamicAudienceBinding {
     pub resolver: DynamicResolverName,
     pub argument: String,
+}
+
+/// One part of a tool contract a tool-level dynamic resolver establishes from the complete
+/// canonical call arguments. Label dimensions have one owner; attention is additive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolverReturn {
+    Trust,
+    Audience,
+    Attention,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ToolResolverBinding {
+    pub resolver: DynamicResolverName,
+    pub returns: BTreeSet<ResolverReturn>,
+}
+
+/// One successful tool-level resolver answer pinned to the call it classified. The constructor
+/// accepts exactly the fields the binding declares and canonicalizes additive attention marks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PinnedToolResolution {
+    binding: ToolResolverBinding,
+    trust: Option<Trust>,
+    audience: Option<Audience>,
+    attention: Vec<MarkName>,
+}
+
+impl PinnedToolResolution {
+    pub fn from_answer(
+        binding: ToolResolverBinding,
+        trust: Option<Trust>,
+        audience: Option<Audience>,
+        attention: Option<Vec<MarkName>>,
+    ) -> Option<Self> {
+        if binding.returns.is_empty()
+            || binding.returns.contains(&ResolverReturn::Trust) != trust.is_some()
+            || binding.returns.contains(&ResolverReturn::Audience) != audience.is_some()
+            || binding.returns.contains(&ResolverReturn::Attention) != attention.is_some()
+        {
+            return None;
+        }
+        if matches!(&audience, Some(Audience::Restricted(readers)) if !readers.iter().all(ReaderId::is_literal)) {
+            return None;
+        }
+        let mut attention = attention.unwrap_or_default();
+        attention.sort();
+        attention.dedup();
+        Some(PinnedToolResolution {
+            binding,
+            trust,
+            audience,
+            attention,
+        })
+    }
+
+    pub fn binding(&self) -> &ToolResolverBinding {
+        &self.binding
+    }
+
+    pub fn trust(&self) -> Option<Trust> {
+        self.trust
+    }
+
+    pub fn audience(&self) -> Option<&Audience> {
+        self.audience.as_ref()
+    }
+
+    pub fn attention(&self) -> &[MarkName] {
+        &self.attention
+    }
+}
+
+impl<'de> Deserialize<'de> for PinnedToolResolution {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            binding: ToolResolverBinding,
+            trust: Option<Trust>,
+            audience: Option<Audience>,
+            attention: Vec<MarkName>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let original_attention = wire.attention.clone();
+        let returned_attention = wire
+            .binding
+            .returns
+            .contains(&ResolverReturn::Attention)
+            .then_some(wire.attention);
+        let answer = PinnedToolResolution::from_answer(wire.binding, wire.trust, wire.audience, returned_attention)
+            .ok_or_else(|| serde::de::Error::custom("a pinned tool resolution must match its declared returns"))?;
+        if answer.attention != original_attention {
+            return Err(serde::de::Error::custom(
+                "pinned tool-resolution attention is not in canonical order",
+            ));
+        }
+        Ok(answer)
+    }
 }
 
 /// The declared audience contribution: a written reader set — literal readers and groups an
@@ -277,9 +379,12 @@ pub struct ToolContract {
     /// Omitted `parameters` normalizes to the permissive open object.
     #[serde(default = "crate::params::ToolParameters::open")]
     pub parameters: crate::params::ToolParameters,
-    /// The declared output contribution, or `None`: **unannotated** — results are admitted at
-    /// `Unknown` in both dimensions (see [`Delta`]). `Some(Delta::NONE)` is the deliberate neutral
-    /// annotation; the two are not interchangeable.
+    /// Dynamic parts of this tool's contract, resolved from its complete canonical arguments
+    /// before the call is checked.
+    #[serde(default)]
+    pub resolvers: Vec<ToolResolverBinding>,
+    /// The static output contribution. `None` is unannotated only when no tool-level resolver owns
+    /// trust or audience. `Some(Delta::NONE)` is the deliberate neutral annotation.
     #[serde(default)]
     pub delta: Option<Delta>,
     pub emits: EffectSet,
@@ -287,14 +392,30 @@ pub struct ToolContract {
 }
 
 impl ToolContract {
-    /// The label a raw admitted result of this tool carries: the declared delta as a label, or —
-    /// unannotated — `Unknown` in both dimensions. A written group reads as the operation resolved
-    /// it.
+    /// Whether a tool-level resolver binding owns this returned field — the one definition of
+    /// "resolver-owned" every load check and label derivation reads.
+    pub(crate) fn resolver_owns(&self, field: ResolverReturn) -> bool {
+        self.resolvers.iter().any(|binding| binding.returns.contains(&field))
+    }
+
+    /// The unresolved output shape before call-pinned answers are applied. Resolver-owned fields
+    /// are `Unknown`; static or identity fields retain their declared value. A wholly unannotated
+    /// tool is `Unknown` in both dimensions.
     pub fn output_label(&self, expansions: &Expansions) -> Label {
-        match &self.delta {
+        let mut label = match &self.delta {
             Some(delta) => delta.output_label(expansions),
+            None if self.resolver_owns(ResolverReturn::Trust) || self.resolver_owns(ResolverReturn::Audience) => {
+                Label::top()
+            }
             None => Label::new(Dim::Unknown, Dim::Unknown),
+        };
+        if self.resolver_owns(ResolverReturn::Trust) {
+            label.trust = Dim::Unknown;
         }
+        if self.resolver_owns(ResolverReturn::Audience) {
+            label.audience = Dim::Unknown;
+        }
+        label
     }
 
     /// The groups this contract's check reads: its delta's, its static recipients' and
@@ -321,6 +442,7 @@ impl ToolContract {
                 .expect("a checked call carries an answer for every dynamic binding its contract spells");
             label.audience = Dim::Known(answer.clone());
         }
+        apply_tool_resolutions(&mut label, call.tool_resolutions());
         label
     }
 
@@ -330,6 +452,7 @@ impl ToolContract {
     pub fn output_label_for_resolutions(
         &self,
         resolutions: &[PinnedDynamicResolution],
+        tool_resolutions: &[PinnedToolResolution],
         expansions: &Expansions,
     ) -> Label {
         let mut label = self.output_label(expansions);
@@ -340,6 +463,7 @@ impl ToolContract {
                 _ => Dim::Unknown,
             };
         }
+        apply_tool_resolutions(&mut label, tool_resolutions);
         label
     }
 
@@ -347,6 +471,18 @@ impl ToolContract {
     /// declares none: its Unknown output is admitted as-is, not confined awaiting a cast.
     pub fn pending_cast_dim(&self) -> Option<Dimension> {
         self.delta.as_ref().and_then(Delta::pending_cast_dim)
+    }
+}
+
+/// Pin a call's tool-level resolver answers into a label: each answered field becomes `Known`.
+fn apply_tool_resolutions(label: &mut Label, resolutions: &[PinnedToolResolution]) {
+    for resolution in resolutions {
+        if let Some(trust) = resolution.trust() {
+            label.trust = Dim::Known(trust);
+        }
+        if let Some(audience) = resolution.audience() {
+            label.audience = Dim::Known(audience.clone());
+        }
     }
 }
 
