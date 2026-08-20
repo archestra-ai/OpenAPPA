@@ -3099,6 +3099,159 @@ confined_results = ["leak"]
         assert!(runtime.open_dispatches(&root(), &root()).pop().is_none());
     }
 
+    /// A tool whose result narrows on two dimensions with a sanitizer
+    /// that clears only one: the derivation is admitted and staged, and
+    /// the residual narrowing is what the model is told about.
+    const PARTLY_CLEARED: &str = r#"
+version = 1
+
+[[policy.tool]]
+name = "leak"
+parameters = { type = "object", properties = { q = { type = "string" } } }
+delta = { audience = { exactly = ["internal"] }, trust = "suspicious" }
+
+[[policy.sanitizer]]
+name = "scrub"
+on = ["tool_output"]
+[policy.sanitizer.mandate]
+audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+
+[policy.deployment]
+confined_results = ["leak"]
+"#;
+
+    fn partly_cleared_config(url: &str) -> Config {
+        let text = format!(
+            "[policy]\n{PARTLY_CLEARED}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.sanitizers.scrub]\nurl = \"{url}\"\n"
+        );
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, text).expect("the fixture writes");
+        Config::load(&path).expect("the fixture validates")
+    }
+
+    #[tokio::test]
+    async fn a_partly_cleared_derivation_is_staged_with_its_own_remedies() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let url = stub(serde_json::json!({"body": "scrubbed"})).await;
+        let runtime =
+            Runtime::open(partly_cleared_config(&url), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        assert!(matches!(
+            session
+                .on_tool_call(leak(), false)
+                .await
+                .expect("the block is delivered"),
+            ToolCallDecision::Deny { .. },
+        ));
+        let before = runtime.minted_offers(&root(), &root()).len();
+        let ToolResultDecision::Replace { placeholder } = run_sanitize_offer(&runtime, &mut session).await else {
+            panic!("a staged derivation is delivered as a replacement, not kept");
+        };
+        assert!(
+            !placeholder.contains("raw with pii"),
+            "the raw body never reaches the model: {placeholder}",
+        );
+        assert!(
+            runtime.minted_offers(&root(), &root()).len() > before,
+            "the stage surfaced its own remedy for the narrowing the sanitizer left",
+        );
+    }
+
+    const PARTLY_CLEARED_CHILD: &str = r#"
+version = 1
+
+[[policy.tool]]
+name = "fetch"
+
+[[policy.tool]]
+name = "browse"
+delta = { trust = "suspicious" }
+
+[[policy.sanitizer]]
+name = "scrub"
+on = ["tool_output"]
+[policy.sanitizer.mandate]
+audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+
+[policy.child]
+return_sanitizer = "scrub"
+
+[policy.deployment]
+context_control = true
+confined_child_return = true
+"#;
+
+    #[tokio::test]
+    async fn a_partly_cleared_child_return_is_staged_with_its_own_remedies() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let url = stub(serde_json::json!({"body": "scrubbed"})).await;
+        let text = format!(
+            "[policy]\n{PARTLY_CLEARED_CHILD}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.sanitizers.scrub]\nurl = \"{url}\"\n"
+        );
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, text).expect("the fixture writes");
+        let config = Config::load(&path).expect("the fixture validates");
+        let runtime = Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut child = open_child(
+            &mut session,
+            fetch(serde_json::json!({})),
+            TrajectoryId("cc:child".to_string()),
+        )
+        .await;
+        let browse = ProposedCall {
+            tool: "browse".to_string(),
+            arguments: raw(serde_json::json!({})),
+        };
+        let child_id = TrajectoryId("cc:child".to_string());
+        assert!(matches!(
+            child.on_tool_call(browse.clone(), false).await,
+            Ok(ToolCallDecision::Deny { .. })
+        ));
+        let offer = surfaced_offer_for(&runtime, &root(), &child_id);
+        assert!(matches!(
+            child.on_remedy(offer, None).await,
+            Ok(RemedyDecision::Authorized { .. })
+        ));
+        assert_eq!(
+            child
+                .on_tool_call(browse.clone(), false)
+                .await
+                .expect("the accepted narrowing releases the call"),
+            ToolCallDecision::Allow { spawn: None },
+        );
+        assert_eq!(
+            child
+                .on_tool_result(
+                    browse,
+                    ToolOutcome::Success {
+                        body: OutcomeBody::Available("web page".to_string()),
+                    },
+                )
+                .await
+                .expect("the result admits into the child"),
+            ToolResultDecision::Keep,
+        );
+
+        let before = runtime.minted_offers(&root(), &root()).len();
+        let crossing = child
+            .on_child_end(Some("raw with pii".to_string()))
+            .await
+            .expect("the staged return is delivered");
+        let crate::api::ChildReturnDecision::Blocked { feedback } = crossing else {
+            panic!("a return the sanitizer only partly cleared is staged, not crossed: {crossing:?}");
+        };
+        assert!(
+            !feedback.contains("raw with pii"),
+            "the raw return never reaches the parent: {feedback}",
+        );
+        assert!(
+            runtime.minted_offers(&root(), &root()).len() > before,
+            "the stage surfaced the parent's own remedy for the residual narrowing",
+        );
+    }
+
     #[tokio::test]
     async fn a_bound_sanitizer_no_answer_withholds_and_stays_retryable() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
