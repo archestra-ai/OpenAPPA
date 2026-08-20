@@ -363,6 +363,8 @@ Audience is either `public` or literal reader identifiers. Never emit `public` i
 Requirements constrain whether the proposed call may run. `requires.trust` is a minimum trust rank.
 Each `requires.audience` entry is either `includes` (the current audience must cover those readers) or `cap` (the current audience must stay within that audience); both may be returned together.
 `attention_marks` lists the only fresh human-review marks you may return in `requires.attention`; do not repeat static attention marks. If it is empty, return an empty attention array.
+`context` describes the flow as it stands; it is never the answer — do not echo its current audience back.
+For a command that sends data to a destination outside the session (a push, upload, publish, or send), `requires.audience.includes` names the destination's readers: a destination readable beyond a known reader set — a hosted repository, a site, a paste service, a mailing list — is `public` unless the command itself proves a narrower readership.
 Classify conservatively when the arguments do not justify a permissive answer."#;
 
 #[derive(Debug, serde::Deserialize)]
