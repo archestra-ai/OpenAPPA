@@ -269,7 +269,6 @@ impl Session {
                 ([released], []) => {
                     tracing::debug!(
                         trajectory = %self.trajectory.0,
-                        dispatch = %released.dispatch.0,
                         tool = %released.tool,
                         spawn = released.fork.is_some(),
                         "call released"
@@ -621,14 +620,7 @@ impl Session {
             )
             .await?;
 
-        match decision.then {
-            Next::PresentToModel(Presentation::Value { value }) => Ok(ChildReturnDecision::Returned { value }),
-            Next::PresentToModel(Presentation::NoValue) => Ok(ChildReturnDecision::NoValue),
-            Next::PresentToModel(Presentation::Blocked { feedback, .. }) => {
-                Ok(ChildReturnDecision::Blocked { feedback })
-            }
-            _ => Err(EventError::UnexpectedDecision),
-        }
+        return_decision(decision)
     }
 
     fn cap_outcome(&self, outcome: ToolOutcome) -> ToolOutcome {

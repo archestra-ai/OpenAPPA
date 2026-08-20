@@ -21,13 +21,6 @@ use crate::engine::{EngineRefusal, Liveness, PolicyEngine, RuntimeEngine};
 use crate::external::ExternalServices;
 use appa_eventlog::{Backend, Log, LogStore};
 
-/// Identity of one open dispatch: a released call the harness is
-/// executing. Runtime-internal: outcomes correlate by the
-/// call's canonical bytes, never by an id an adapter
-/// carries.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct DispatchId(pub String);
-
 /// One remedy offer as it is quoted and carried.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OfferId(pub String);
@@ -665,6 +658,25 @@ impl Runtime {
         })
     }
 
+    /// One root's rebuilt view and the engine that decides for it, for
+    /// the test accessors that read a family the public surface does not
+    /// expose. Panics where production would refuse: a test that reaches
+    /// an unreadable log has already failed.
+    #[cfg(test)]
+    fn rebuilt<'a>(
+        &self,
+        deployment: &'a Deployment,
+        root: &TrajectoryId,
+    ) -> (PolicyEngine<'a>, crate::engine::EngineView) {
+        let log = self.inner.log(root).expect("the log reads");
+        let policy = self
+            .inner
+            .resolve_policy(deployment, &log)
+            .expect("the opening policy resolves");
+        let view = policy.engine().rebuild_view(&log).expect("the log rebuilds");
+        (policy, view)
+    }
+
     #[cfg(test)]
     pub(crate) fn log_facts(&self, root: &TrajectoryId) -> Vec<appa_engine::fact::Fact> {
         self.inner.log(root).expect("the log reads").facts().to_vec()
@@ -681,13 +693,8 @@ impl Runtime {
         root: &TrajectoryId,
         trajectory: &TrajectoryId,
     ) -> Vec<crate::engine::OpenDispatch> {
-        let log = self.inner.log(root).expect("the log reads");
         let deployment = self.inner.deployment();
-        let policy = self
-            .inner
-            .resolve_policy(&deployment, &log)
-            .expect("the opening policy resolves");
-        let view = policy.engine().rebuild_view(&log).expect("the log rebuilds");
+        let (policy, view) = self.rebuilt(&deployment, root);
         policy.engine().open_dispatches(&view, trajectory)
     }
 
@@ -695,13 +702,8 @@ impl Runtime {
     /// assert on whether a child opened.
     #[cfg(test)]
     pub(crate) fn names_trajectory(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> bool {
-        let log = self.inner.log(root).expect("the log reads");
         let deployment = self.inner.deployment();
-        let policy = self
-            .inner
-            .resolve_policy(&deployment, &log)
-            .expect("the opening policy resolves");
-        let view = policy.engine().rebuild_view(&log).expect("the log rebuilds");
+        let (policy, view) = self.rebuilt(&deployment, root);
         policy.engine().liveness(&view, trajectory) != Liveness::Unopened
     }
 
@@ -713,13 +715,8 @@ impl Runtime {
         root: &TrajectoryId,
         trajectory: &TrajectoryId,
     ) -> Option<crate::engine::OpenDispatch> {
-        let log = self.inner.log(root).expect("the log reads");
         let deployment = self.inner.deployment();
-        let policy = self
-            .inner
-            .resolve_policy(&deployment, &log)
-            .expect("the opening policy resolves");
-        let view = policy.engine().rebuild_view(&log).expect("the log rebuilds");
+        let (policy, view) = self.rebuilt(&deployment, root);
         policy.engine().substituted_release(&view, trajectory)
     }
 
@@ -727,13 +724,8 @@ impl Runtime {
     /// that read a branch the root-only public surface does not expose.
     #[cfg(test)]
     pub(crate) fn branch_status(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> Option<TrajectoryStatus> {
-        let log = self.inner.log(root).expect("the log reads");
         let deployment = self.inner.deployment();
-        let policy = self
-            .inner
-            .resolve_policy(&deployment, &log)
-            .expect("the policy resolves");
-        let view = policy.engine().rebuild_view(&log).expect("the log rebuilds");
+        let (policy, view) = self.rebuilt(&deployment, root);
         policy.engine().trajectory_status(&view, trajectory)
     }
 
@@ -746,13 +738,8 @@ impl Runtime {
         trajectory: &TrajectoryId,
         event: crate::engine::EngineEvent,
     ) -> EventError {
-        let log = self.inner.log(root).expect("the log reads");
         let deployment = self.inner.deployment();
-        let policy = self
-            .inner
-            .resolve_policy(&deployment, &log)
-            .expect("the policy resolves");
-        let view = policy.engine().rebuild_view(&log).expect("the log rebuilds");
+        let (policy, view) = self.rebuilt(&deployment, root);
         EventError::from(
             policy
                 .engine()

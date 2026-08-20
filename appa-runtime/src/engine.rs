@@ -68,7 +68,7 @@ use appa_eventlog::Log;
 use std::collections::BTreeMap;
 
 use crate::api::OutcomeBody;
-pub(crate) use crate::api::{DispatchId, OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
+pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
 use crate::external::{CastAnswer, CastAudience};
 
 /// One fresh 256-bit random number per act that can surface offers; the
@@ -80,7 +80,6 @@ pub struct OfferNonce(pub [u8; 32]);
 /// execute, delivered verbatim.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReleasedCall {
-    pub dispatch: DispatchId,
     pub tool: String,
     pub bytes: Vec<u8>,
     /// The spawn binding, when this release prepared a fork: the
@@ -1702,13 +1701,6 @@ fn batch_id(entropy: &OfferNonce) -> ProposalBatchId {
     ProposalBatchId::new(hex(&entropy.0))
 }
 
-/// One engine dispatch id as the harness carries it (`T31`): the released call
-/// quotes it so the harness can name the call it is reporting. Nothing reads it
-/// back — an outcome is matched against the dispatches the log shows open.
-pub(crate) fn dispatch_wire(dispatch: &EngineDispatchId) -> String {
-    serde_json::to_string(dispatch).expect("an engine dispatch id serializes")
-}
-
 fn fork_binding(fork: &ForkId) -> SpawnBinding {
     SpawnBinding(serde_json::to_string(fork).expect("a fork id serializes"))
 }
@@ -1774,7 +1766,6 @@ pub(crate) fn minted_offers(log: &Log, trajectory: &TrajectoryId) -> Vec<OfferId
 
 fn released(release: &Released) -> ReleasedCall {
     ReleasedCall {
-        dispatch: DispatchId(dispatch_wire(&release.dispatch)),
         tool: release.call.tool().as_str().to_string(),
         bytes: release.call.canonical_arguments().canonical_bytes().to_vec(),
         fork: release.fork.as_ref().map(fork_binding),
