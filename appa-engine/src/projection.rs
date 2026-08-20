@@ -184,7 +184,6 @@ pub struct Projection {
     dispatch_resolutions: BTreeMap<DispatchId, Vec<GroupResolution>>,
     subject_dispatches: BTreeMap<crate::basis::SubjectKey, DispatchId>,
     observations: BTreeMap<DispatchId, ObservedResult>,
-    boundaries: Vec<TrajectoryId>,
     prepared: BTreeMap<ForkId, PreparedFork>,
     bound: BTreeMap<ForkId, TrajectoryId>,
     fork_of: BTreeMap<TrajectoryId, ForkId>,
@@ -232,7 +231,6 @@ impl Projection {
             dispatch_resolutions: BTreeMap::new(),
             subject_dispatches: BTreeMap::new(),
             observations: BTreeMap::new(),
-            boundaries: Vec::new(),
             prepared: BTreeMap::new(),
             bound: BTreeMap::new(),
             fork_of: BTreeMap::new(),
@@ -318,7 +316,6 @@ impl Projection {
             dispatch_resolutions,
             subject_dispatches,
             observations,
-            boundaries,
             prepared,
             bound,
             fork_of,
@@ -651,22 +648,19 @@ impl Projection {
                         },
                     );
                 }
-                Fact::Boundary { trajectory, kind } => {
-                    boundaries.push(trajectory.clone());
-                    match kind {
-                        BoundaryKind::Merge { .. } => {
-                            if !merge_absorption.is_empty() {
-                                let table = absorbed.entry(trajectory.clone()).or_default();
-                                for (id, dim) in &merge_absorption {
-                                    table.entry(*id).or_default().insert(*dim);
-                                }
+                Fact::Boundary { trajectory, kind } => match kind {
+                    BoundaryKind::Merge { .. } => {
+                        if !merge_absorption.is_empty() {
+                            let table = absorbed.entry(trajectory.clone()).or_default();
+                            for (id, dim) in &merge_absorption {
+                                table.entry(*id).or_default().insert(*dim);
                             }
                         }
-                        BoundaryKind::VoidReturn => {
-                            ended.insert(trajectory.clone());
-                        }
                     }
-                }
+                    BoundaryKind::VoidReturn => {
+                        ended.insert(trajectory.clone());
+                    }
+                },
             }
         }
     }
@@ -1315,17 +1309,6 @@ impl Views<'_> {
         self.projection.subject_dispatches.get(subject)
     }
 
-    /// How many boundaries this trajectory has recorded. Punctuation is counted for the tests
-    /// that pin it; no decision reads it.
-    #[cfg(test)]
-    pub(crate) fn boundary_count(&self) -> usize {
-        self.projection
-            .boundaries
-            .iter()
-            .filter(|t| *t == self.trajectory)
-            .count()
-    }
-
     /// The authorities denied for this rendered call in this trajectory's scope:
     /// recorded here, or inherited from an ancestor at fork time. Plan enumeration is the one
     /// sanctioned consumer (the denial-exclusion consultation), so this stays crate-only.
@@ -1621,7 +1604,7 @@ mod tests {
             },
         ];
         assert_eq!(build(&log), build(&log));
-        assert_eq!(build(&log).view(&traj("a")).boundary_count(), 1);
+        assert!(build(&log).view(&traj("a")).has_ended(&traj("a")));
 
         let crossing = [
             vec![opened("root"), admit("root", labeled(2, Audience::Public))],

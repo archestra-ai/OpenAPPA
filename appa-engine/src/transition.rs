@@ -49,8 +49,8 @@ pub struct ProposalBatch {
     /// They are admitted before any sibling is checked, because the model has already read them.
     pub provider_results: Vec<ProviderResult>,
     pub proposals: Vec<ProposedCall>,
-    /// Which proposal, if any, the runtime marks as the deployment's context-controlled spawn
-    /// (`Q27`). Runtime names it — no configuration surface does — and the marked call is checked
+    /// Which proposal, if any, the runtime marks as the deployment's context-controlled spawn.
+    /// Runtime names it — no configuration surface does — and the marked call is checked
     /// and released like any other. The engine refuses the mark where the deployment declares no
     /// context control.
     pub spawn: Option<SpawnMark>,
@@ -111,9 +111,8 @@ impl SpawnMark {
 /// One act the engine decides. A closed enum: an external operational failure is not an
 /// event, and neither is a request, user turn, transcript, or host run.
 ///
-/// Tool outcome, offer execution and child return join it as they move off the composed
-/// operations; forking joins as `T39`'s `BindFork`, in its final shape rather than an interim
-/// child-start variant this boundary would have to unpublish.
+/// Tool outcome, offer execution, child return and fork binding join it as they move off the
+/// composed operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EngineEvent {
     Proposals(ProposalBatch),
@@ -345,7 +344,7 @@ pub enum OutcomeFollowUp {
 }
 
 /// One released call: the dispatch the engine opened for it, and the canonical call to invoke.
-/// The runtime never re-derives the identity — deriving it twice is what `T31` removes.
+/// The runtime never re-derives the identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Released {
     pub dispatch: DispatchId,
@@ -355,7 +354,7 @@ pub struct Released {
     pub fork: Option<ForkId>,
 }
 
-/// One proposal of a repeated batch whose dispatch has already been invoked (`Q24`). It cannot be
+/// One proposal of a repeated batch whose dispatch has already been invoked. It cannot be
 /// re-released — that would run the tool a second time — so the repeat hears what the log records
 /// for it instead of hearing nothing at all.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -396,7 +395,6 @@ pub enum FollowUp {
     Proposals {
         released: Vec<Released>,
         blocked: Vec<Blocked>,
-        forks: Vec<ForkId>,
         spent: Vec<ResolvedCall>,
         settled: Vec<Settled>,
     },

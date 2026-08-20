@@ -417,7 +417,7 @@ impl Engine {
         }];
         let batch = self.declaring(
             crate::basis::DecidedAct::Binding(binding.fork.clone()),
-            advance_of(self, view, &batch),
+            Sequence::advance_of(self, view, &batch),
             batch,
         );
         Ok(EngineDecision {
@@ -452,7 +452,7 @@ impl Engine {
         let body = match &report.submission {
             ChildSubmission::Void => {
                 let batch = branch::submit_void_return(&views, child).map_err(branch_refusal)?;
-                let batch = self.declaring(return_act(child), advance_of(self, view, &batch), batch);
+                let batch = self.declaring(return_act(child), Sequence::advance_of(self, view, &batch), batch);
                 return Ok(EngineDecision {
                     append: Some(self.seal(view, batch)?),
                     follow_up: FollowUp::Child(ChildFollowUp::Ended),
@@ -587,7 +587,7 @@ impl Engine {
             branch::RawCrossing::Merged(crossing) => {
                 facts.extend(crossing);
                 let batch = facts;
-                let batch = self.declaring(return_act(child), advance_of(self, view, &batch), batch);
+                let batch = self.declaring(return_act(child), Sequence::advance_of(self, view, &batch), batch);
                 Ok(EngineDecision {
                     append: Some(self.seal(view, batch)?),
                     follow_up: FollowUp::Child(ChildFollowUp::Merged { admitted: body }),
@@ -746,7 +746,7 @@ impl Engine {
         });
         let Some(derived) = derived else {
             let batch = facts;
-            let batch = self.declaring(return_act(child), advance_of(self, view, &batch), batch);
+            let batch = self.declaring(return_act(child), Sequence::advance_of(self, view, &batch), batch);
             return Ok(EngineDecision {
                 append: Some(self.seal(view, batch)?),
                 follow_up: FollowUp::Child(ChildFollowUp::Resolve(EvidenceRequest::Sanitizer {
@@ -823,7 +823,7 @@ impl Engine {
                 self.registry.resolutions(expansions),
             ));
             let batch = facts;
-            let batch = self.declaring(return_act(child), advance_of(self, view, &batch), batch);
+            let batch = self.declaring(return_act(child), Sequence::advance_of(self, view, &batch), batch);
             return Ok(EngineDecision {
                 append: Some(self.seal(view, batch)?),
                 follow_up: FollowUp::Child(ChildFollowUp::Merged { admitted: derived }),
@@ -886,7 +886,7 @@ impl Engine {
             resolutions: self.registry.resolutions(expansions),
         });
         let batch = facts;
-        let batch = self.declaring(return_act(child), advance_of(self, view, &batch), batch);
+        let batch = self.declaring(return_act(child), Sequence::advance_of(self, view, &batch), batch);
         Ok(EngineDecision {
             append: Some(self.seal(view, batch)?),
             follow_up: FollowUp::Child(ChildFollowUp::Rejected { reason }),
@@ -912,7 +912,7 @@ impl Engine {
             true => None,
             false => {
                 let batch = facts;
-                let batch = self.declaring(act, advance_of(self, view, &batch), batch);
+                let batch = self.declaring(act, Sequence::advance_of(self, view, &batch), batch);
                 Some(self.seal(view, batch)?)
             }
         };
@@ -1062,7 +1062,8 @@ impl Engine {
                             true => None,
                             false => {
                                 let batch = cast_facts;
-                                let batch = self.declaring(return_act(child), advance_of(self, view, &batch), batch);
+                                let batch =
+                                    self.declaring(return_act(child), Sequence::advance_of(self, view, &batch), batch);
                                 Some(self.seal(view, batch)?)
                             }
                         };
@@ -1303,10 +1304,15 @@ impl Engine {
                             let append = match checkpointed {
                                 Some(_) => None,
                                 None => {
-                                    let checkpoint = self
-                                        .observe_success(&views, dispatch, &call, ObservedResult::Available(raw_digest))
-                                        .expect("an open, unreported dispatch checkpoints its observed success");
-                                    let advance = advance_of(self, view, &checkpoint);
+                                    let checkpoint = admit::observe_success(
+                                        &self.registry,
+                                        &views,
+                                        dispatch,
+                                        &call,
+                                        ObservedResult::Available(raw_digest),
+                                    )
+                                    .expect("an open, unreported dispatch checkpoints its observed success");
+                                    let advance = Sequence::advance_of(self, view, &checkpoint);
                                     let batch = self.declaring(
                                         crate::basis::DecidedAct::Outcome(dispatch.clone()),
                                         advance,
@@ -1442,10 +1448,15 @@ impl Engine {
             let append = match checkpointed {
                 true => None,
                 false => {
-                    let checkpoint = self
-                        .observe_success(views, dispatch, call, ObservedResult::Available(raw_digest))
-                        .expect("an open, unreported dispatch checkpoints its observed success");
-                    let advance = advance_of(self, view, &checkpoint);
+                    let checkpoint = admit::observe_success(
+                        &self.registry,
+                        views,
+                        dispatch,
+                        call,
+                        ObservedResult::Available(raw_digest),
+                    )
+                    .expect("an open, unreported dispatch checkpoints its observed success");
+                    let advance = Sequence::advance_of(self, view, &checkpoint);
                     let batch =
                         self.declaring(crate::basis::DecidedAct::Outcome(dispatch.clone()), advance, checkpoint);
                     Some(self.seal(view, batch)?)
@@ -1518,13 +1529,14 @@ impl Engine {
         admission: ResultAdmission,
         expansions: &Expansions,
     ) -> Result<EngineDecision, TransitionError> {
-        let batch = self
-            .admit_result(views, dispatch, call, admission, expansions)
-            .map_err(|error| match error {
-                AdmitError::SanitizerTransitionUnmet | AdmitError::SanitizerBindingMismatch => {
-                    TransitionError::SanitizerUnapplicable
+        let batch =
+            admit::admit_result(&self.registry, views, dispatch, call, admission, expansions).map_err(|error| {
+                match error {
+                    AdmitError::SanitizerTransitionUnmet | AdmitError::SanitizerBindingMismatch => {
+                        TransitionError::SanitizerUnapplicable
+                    }
+                    other => unreachable!("the outcome path admits what the log already proved: {other}"),
                 }
-                other => unreachable!("the outcome path admits what the log already proved: {other}"),
             })?;
         let admitted = batch.iter().find_map(|fact| match fact {
             Fact::ValueAdmitted { value, .. } => Some(value.body.clone()),
@@ -1532,7 +1544,7 @@ impl Engine {
         });
         let batch = self.declaring(
             crate::basis::DecidedAct::Outcome(dispatch.clone()),
-            advance_of(self, view, &batch),
+            Sequence::advance_of(self, view, &batch),
             batch,
         );
         Ok(EngineDecision {
@@ -1563,7 +1575,7 @@ impl Engine {
                 _ => unreachable!("a staged record is a derived candidate"),
             };
             facts.extend(
-                self.observe_success(views, dispatch, call, ObservedResult::Available(source))
+                admit::observe_success(&self.registry, views, dispatch, call, ObservedResult::Available(source))
                     .expect("an open, unreported dispatch checkpoints its observed success"),
             );
         }
@@ -1993,7 +2005,6 @@ impl Engine {
             follow_up: FollowUp::Proposals {
                 released,
                 blocked,
-                forks: Vec::new(),
                 spent: Vec::new(),
                 settled: Vec::new(),
             },
@@ -2204,7 +2215,6 @@ impl Engine {
         )?;
         let mut released = Vec::new();
         let mut blocked = Vec::new();
-        let mut forks = Vec::new();
         let mut spent = Vec::new();
         let mut settled = Vec::new();
         let mut next = recorded.iter().peekable();
@@ -2218,7 +2228,6 @@ impl Engine {
                     fork: prepared_fork(views, dispatch),
                 }),
                 Some(dispatch) => {
-                    forks.extend(prepared_fork(views, dispatch));
                     settled.push(Settled {
                         dispatch: dispatch.clone(),
                         call: call.clone(),
@@ -2280,7 +2289,6 @@ impl Engine {
         Ok(FollowUp::Proposals {
             released,
             blocked,
-            forks,
             spent,
             settled,
         })
@@ -2440,15 +2448,15 @@ impl Engine {
         mut facts: Vec<Fact>,
         expansions: &Expansions,
     ) -> Result<EngineDecision, TransitionError> {
-        let admitted = self
-            .admit_result(
-                views,
-                dispatch,
-                call,
-                ResultAdmission::CandidateAccepted { offer: execution.offer },
-                expansions,
-            )
-            .unwrap_or_else(|error| unreachable!("the confined stage admits what the log already proved: {error}"));
+        let admitted = admit::admit_result(
+            &self.registry,
+            views,
+            dispatch,
+            call,
+            ResultAdmission::CandidateAccepted { offer: execution.offer },
+            expansions,
+        )
+        .unwrap_or_else(|error| unreachable!("the confined stage admits what the log already proved: {error}"));
         facts.extend(admitted);
         let value = crossed(&facts);
         let advance = Sequence::advance_of(self, view, &facts);
@@ -2541,15 +2549,15 @@ impl Engine {
         for fact in &facts {
             after.fold(fact);
         }
-        let admitted = self
-            .admit_result(
-                &after.view(views.trajectory()),
-                dispatch,
-                call,
-                ResultAdmission::CandidateAdmissible,
-                expansions,
-            )
-            .unwrap_or_else(|error| unreachable!("the confined stage admits what this act just derived: {error}"));
+        let admitted = admit::admit_result(
+            &self.registry,
+            &after.view(views.trajectory()),
+            dispatch,
+            call,
+            ResultAdmission::CandidateAdmissible,
+            expansions,
+        )
+        .unwrap_or_else(|error| unreachable!("the confined stage admits what this act just derived: {error}"));
         facts.extend(admitted);
         let value = crossed(&facts);
         let advance = Sequence::advance_of(self, view, &facts);
@@ -3426,33 +3434,6 @@ impl Engine {
         ))
     }
 
-    /// Close a dispatch and admit its result — raw, cast-resolved, or withheld. The label folds only
-    /// from an admitted value, never from the close.
-    pub(crate) fn admit_result(
-        &self,
-        views: &Views,
-        dispatch: &DispatchId,
-        call: &ResolvedCall,
-        admission: ResultAdmission,
-        expansions: &Expansions,
-    ) -> Result<Vec<Fact>, AdmitError> {
-        admit::admit_result(&self.registry, views, dispatch, call, admission, expansions)
-    }
-
-    /// Record observed success for a still-open dispatch: its declared effects commit now, at the
-    /// one append point the spec puts at success, while any value finalization — an
-    /// output sanitizer derivation, a pending-cast resolution — is still in flight. See
-    /// [`crate::admit::observe_success`].
-    pub(crate) fn observe_success(
-        &self,
-        views: &Views,
-        dispatch: &DispatchId,
-        call: &ResolvedCall,
-        observed: crate::fact::ObservedResult,
-    ) -> Result<Vec<Fact>, AdmitError> {
-        admit::observe_success(&self.registry, views, dispatch, call, observed)
-    }
-
     /// Attach the sound remedies to a raw block: executable plans and prose recommendations. An empty
     /// result (no plans, no curative recommendation) is a proof the block is unliftable over the
     /// implemented remedy subset — see [`crate::plan`].
@@ -3501,12 +3482,8 @@ impl Engine {
         contract_for(&self.registry, tool)
     }
 
-    fn contract(&self, call: &ResolvedCall) -> Result<&ToolContract, EngineError> {
-        self.checkable_contract(call.tool())
-    }
-
     fn validated_contract(&self, call: &ResolvedCall) -> Result<&ToolContract, EngineError> {
-        let contract = self.contract(call)?;
+        let contract = self.checkable_contract(call.tool())?;
         contract
             .parameters
             .validate(call.arguments())
@@ -3562,10 +3539,6 @@ fn settled_outcome(views: &Views, dispatch: &DispatchId) -> SettledOutcome {
             admitted: views.admitted_body(dispatch).cloned(),
         },
     }
-}
-
-fn advance_of(engine: &Engine, view: &EngineView, facts: &[Fact]) -> crate::basis::BasisAdvance {
-    Sequence::advance_of(engine, view, facts)
 }
 
 fn approved_release(
@@ -4875,9 +4848,15 @@ mod tests {
         admission: crate::admit::ResultAdmission,
     ) {
         let p = Projection::build(log, log.len() as u64);
-        let batch = e
-            .admit_result(&p.view(&traj()), dispatch, c, admission, &Expansions::default())
-            .unwrap();
+        let batch = admit::admit_result(
+            &e.registry,
+            &p.view(&traj()),
+            dispatch,
+            c,
+            admission,
+            &Expansions::default(),
+        )
+        .unwrap();
         log.extend(batch);
     }
 
@@ -6572,9 +6551,13 @@ mod tests {
             .expect("the repeat answers from the record");
         assert_eq!(repeat.append, None);
         match repeat.follow_up {
-            FollowUp::Proposals { released, forks, .. } => {
+            FollowUp::Proposals { released, .. } => {
                 assert!(released.is_empty(), "an invoked call is not re-released");
-                assert_eq!(forks, vec![fork.clone()], "its fork still awaits a child");
+                assert_eq!(
+                    e.fork_status(&after_run, &fork),
+                    ForkStatus::Prepared,
+                    "its fork still awaits a child"
+                );
             }
             other => panic!("expected a proposal answer, got {other:?}"),
         }
@@ -8746,19 +8729,20 @@ mod tests {
         let mut log = vec![opened(&e)];
         let dispatch = open(&e, &mut log, &call);
         let body = ValueBody::new("the ticket");
-        let checkpoint = e
-            .observe_success(
-                &Projection::build(&log, log.len() as u64).view(&traj()),
-                &dispatch,
-                &call,
-                crate::fact::ObservedResult::Available(crate::value::RawResultDigest::of(body.as_str().as_bytes())),
-            )
-            .expect("an open dispatch checkpoints");
+        let checkpoint = admit::observe_success(
+            &e.registry,
+            &Projection::build(&log, log.len() as u64).view(&traj()),
+            &dispatch,
+            &call,
+            crate::fact::ObservedResult::Available(crate::value::RawResultDigest::of(body.as_str().as_bytes())),
+        )
+        .expect("an open dispatch checkpoints");
         log.extend(checkpoint);
         let views = Projection::build(&log, log.len() as u64);
 
         assert_eq!(
-            e.admit_result(
+            admit::admit_result(
+                &e.registry,
                 &views.view(&traj()),
                 &dispatch,
                 &call,
@@ -8771,7 +8755,8 @@ mod tests {
             crate::admit::AdmitError::ObservationMismatch
         );
         assert!(
-            e.admit_result(
+            admit::admit_result(
+                &e.registry,
                 &views.view(&traj()),
                 &dispatch,
                 &call,
@@ -9645,9 +9630,14 @@ mod tests {
             CheckOutcome::Block(_)
         ));
         let p = Projection::build(&log, log.len() as u64);
-        let batch = e
-            .observe_success(&p.view(&traj()), &dispatch, &scan_call, ObservedResult::Unavailable)
-            .unwrap();
+        let batch = admit::observe_success(
+            &e.registry,
+            &p.view(&traj()),
+            &dispatch,
+            &scan_call,
+            ObservedResult::Unavailable,
+        )
+        .unwrap();
         log.extend(batch);
         let p = Projection::build(&log, log.len() as u64);
         assert!(p.view(&traj()).is_open(&dispatch));
@@ -10276,17 +10266,17 @@ mod tests {
         let t = traj();
         let dispatch = open(&e, &mut log, &proposed);
         let p = Projection::build(&log, log.len() as u64);
-        let batch = e
-            .admit_result(
-                &p.view(&t),
-                &dispatch,
-                &proposed,
-                ResultAdmission::SuccessRaw {
-                    body: ValueBody::new("raw"),
-                },
-                &Expansions::default(),
-            )
-            .unwrap();
+        let batch = admit::admit_result(
+            &e.registry,
+            &p.view(&t),
+            &dispatch,
+            &proposed,
+            ResultAdmission::SuccessRaw {
+                body: ValueBody::new("raw"),
+            },
+            &Expansions::default(),
+        )
+        .unwrap();
         log.extend(batch);
         let p = Projection::build(&log, log.len() as u64);
         let current = p.view(&t).current_label();

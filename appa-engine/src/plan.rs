@@ -34,9 +34,9 @@
 //! (narrowing), `Sanitize` (an output sanitizer's relabel standing in for the raw crossing),
 //! `Derive` (an input sanitizer's substitution of the whole argument set), and `Redispatch` over direct `prior(k)` emitters and static cap-narrowing tools, in
 //! name order — the agent picks, and each redispatch is separately checked for real.
-//! **De-scoped, and spec-marked so the claim and the spec's enumeration coincide:** cast
-//! resolution of an Unknown (spec: attempted by the harness itself at check and at admission,
-//! never surfaced as a plan object). The empty-proof is complete over exactly this subset.
+//! Cast resolution of an Unknown is outside the subset: the harness attempts it itself at
+//! check and at admission, and it is never surfaced as a plan object. The empty-proof is
+//! complete over exactly this subset.
 //!
 //! **A sanitize step settles a narrowing and never a requirement gap**. The gaps are
 //! evaluated on the raw committed label even in a plan that sanitizes: a requirement gates the
