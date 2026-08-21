@@ -38,7 +38,7 @@ Dynamic judgment—such as regex filters, ML classifiers, or human approval queu
 
 A tool can also attach dynamic resolvers that classify each proposed call before dispatch. A binding shows its resolver the complete canonical arguments, or exactly one declared argument, and names the fields the resolver must return: output `delta` values that establish the owned trust or audience dimension, and call-time `requires` values — a trust floor, audience `includes`/`cap` constraints, and fresh attention marks. Ownership is per dimension and exclusive; requirements are additive. The validated answer is pinned to what the resolver read, travels with the call into the record, and is revalidated — never re-asked — on replay.
 
-One `[externals.dynamic]` HTTP endpoint serves every dynamic resolver without an inline implementation; the request carries the resolver name. A resolver may instead declare `builtin = "claude-code"`: a fresh, tool-less classification through the local Claude Code CLI, tuned per deployment in `[externals.claude_code]`. Every request carries the policy's trust chain and the attention marks named by authority mandates. Trust answers must select a rank from that chain, and attention answers must select literal marks from that attended set, preserving per-mark authority routing. A resolver failure or an out-of-policy value produces no evidence and stops the check operationally — never a policy denial. The classifier has no mandate or ceiling of its own, so its returned evidence is part of the trusted deployment boundary.
+A resolver is implemented either by an HTTP endpoint or by an in-process builtin — the same choice authorities and sanitizers offer. Whichever it is, every request carries the policy's trust chain and the attention marks named by authority mandates: trust answers must select a rank from that chain, and attention answers must select literal marks from that attended set, preserving per-mark authority routing. A resolver failure or an out-of-policy value produces no evidence and stops the check operationally — never a policy denial. A resolver has no mandate or ceiling of its own, so its returned evidence is part of the trusted deployment boundary.
 
 ## Labels only move one way
 
@@ -203,7 +203,7 @@ Deployments migrate existing security controls into OpenAPPA by registering them
 | Human review / HITL prompts | `builtin = "hitl"` Authority |
 | Custom approval webhooks / LLM evaluators | Authority Resolver |
 | Content scanners & trust classifiers | Cast Resolver |
-| Argument-aware trust, audience, and review classification | Tool-level Dynamic Resolver (HTTP or `builtin = "claude-code"`) |
+| Argument-aware trust, audience, and review classification | Tool-level Dynamic Resolver (an HTTP endpoint or an in-process builtin) |
 | Regex / ML PII scrubbers & redactors | Sanitizer (`builtin = "redact-email"`, your own builtin module, or a resolver) |
 | Directory / IAM group lookups | Membership Resolver |
 | Imperative `if/else` access checks | Tool Contracts |
