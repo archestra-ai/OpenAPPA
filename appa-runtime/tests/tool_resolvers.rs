@@ -1,0 +1,521 @@
+//! Tool-level dynamic resolvers over real boundaries: a loopback HTTP classifier, a fake
+//! `claude` executable behind the command override, a real store, the real hook path.
+
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use appa_runtime::api::Runtime;
+use appa_runtime::{config::Config, hooks};
+use appa_runtime_api::{Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
+use axum::Router;
+use axum::extract::State;
+use axum::routing::post;
+
+#[derive(Clone)]
+enum Answer {
+    Wire(serde_json::Value),
+    Down,
+    Malformed,
+}
+
+#[derive(Clone)]
+struct Classifier {
+    answers: Arc<Mutex<std::collections::BTreeMap<String, Answer>>>,
+    requests: Arc<Mutex<Vec<serde_json::Value>>>,
+    delays: Arc<Mutex<std::collections::BTreeMap<String, Duration>>>,
+}
+
+impl Classifier {
+    fn set(&self, resolver: &str, answer: Answer) {
+        self.answers.lock().unwrap().insert(resolver.to_string(), answer);
+    }
+
+    fn delay(&self, resolver: &str, delay: Duration) {
+        self.delays.lock().unwrap().insert(resolver.to_string(), delay);
+    }
+
+    fn requests(&self) -> Vec<serde_json::Value> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+async fn serve_classifier() -> (String, Classifier) {
+    let classifier = Classifier {
+        answers: Arc::new(Mutex::new(Default::default())),
+        requests: Arc::new(Mutex::new(Vec::new())),
+        delays: Arc::new(Mutex::new(Default::default())),
+    };
+    let router = Router::new()
+        .route(
+            "/resolve",
+            post(|State(classifier): State<Classifier>, body: String| async move {
+                let request: serde_json::Value = serde_json::from_str(&body).expect("the request is JSON");
+                let resolver = request["resolver"].as_str().unwrap_or_default().to_string();
+                classifier.requests.lock().unwrap().push(request);
+                let delay = classifier.delays.lock().unwrap().get(&resolver).copied();
+                if let Some(delay) = delay {
+                    tokio::time::sleep(delay).await;
+                }
+                let answer = classifier.answers.lock().unwrap().get(&resolver).cloned();
+                match answer {
+                    Some(Answer::Wire(value)) => (axum::http::StatusCode::OK, value.to_string()),
+                    Some(Answer::Malformed) => (axum::http::StatusCode::OK, "not json".to_string()),
+                    Some(Answer::Down) | None => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom".to_string()),
+                }
+            }),
+        )
+        .with_state(classifier.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("an ephemeral loopback port binds");
+    let addr = listener.local_addr().expect("the bound address is readable");
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("the stub serves");
+    });
+    (format!("http://{addr}/resolve"), classifier)
+}
+
+fn raw(value: serde_json::Value) -> Box<serde_json::value::RawValue> {
+    serde_json::value::to_raw_value(&value).expect("the fixture serializes")
+}
+
+fn root() -> TrajectoryId {
+    TrajectoryId("tool-resolvers-test".to_string())
+}
+
+fn actor() -> Actor {
+    Actor {
+        root: root(),
+        child: None,
+    }
+}
+
+fn fetch(url: &str) -> ProposedCall {
+    ProposedCall {
+        tool: "fetch".to_string(),
+        arguments: raw(serde_json::json!({ "url": url })),
+    }
+}
+
+async fn propose(runtime: &Arc<Runtime>, call: ProposedCall) -> HookDecision {
+    hooks::handle(
+        runtime,
+        HookEvent::ToolCall {
+            actor: actor(),
+            call,
+            spawn: false,
+        },
+    )
+    .await
+}
+
+async fn ran(runtime: &Arc<Runtime>, call: ProposedCall) {
+    assert_eq!(
+        hooks::handle(
+            runtime,
+            HookEvent::ToolResult {
+                actor: actor(),
+                call,
+                outcome: ToolOutcome::Success {
+                    body: OutcomeBody::Available("done".to_string()),
+                },
+            },
+        )
+        .await,
+        HookDecision::Ack
+    );
+}
+
+async fn open_runtime(dir: &tempfile::TempDir, config_toml: &str) -> Arc<Runtime> {
+    let path = dir.path().join("appa.toml");
+    std::fs::write(&path, config_toml).expect("the fixture writes");
+    let config = Config::load(&path).expect("the fixture validates");
+    let runtime = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens"));
+    assert_eq!(
+        hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
+        HookDecision::Ack
+    );
+    runtime
+}
+
+fn audit_len(runtime: &Runtime) -> usize {
+    runtime.audit(&root()).expect("the audit reads").len()
+}
+
+fn http_policy(url: &str) -> String {
+    format!(
+        r#"
+[policy]
+version = 1
+
+[[policy.dynamic_resolver]]
+name = "classifier"
+
+[[policy.tool]]
+name = "fetch"
+parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
+resolvers = [{{ resolver = "classifier", returns = {{ delta = ["trust"] }} }}]
+delta = {{}}
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+
+[externals.dynamic]
+url = "{url}"
+"#
+    )
+}
+
+#[tokio::test]
+async fn an_http_resolver_classifies_the_whole_call_and_a_fresh_proposal_consults_again() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, classifier) = serve_classifier().await;
+    classifier.set(
+        "classifier",
+        Answer::Wire(serde_json::json!({ "version": 1, "delta": { "trust": "trusted" } })),
+    );
+    let runtime = open_runtime(&dir, &http_policy(&url)).await;
+
+    assert_eq!(
+        propose(&runtime, fetch("https://a.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, fetch("https://a.example")).await;
+
+    let requests = classifier.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request["version"], 1);
+    assert_eq!(request["resolver"], "classifier");
+    assert_eq!(request["tool"], "fetch");
+    assert_eq!(request["input"]["scope"], "call");
+    assert_eq!(
+        request["input"]["arguments"],
+        serde_json::json!({ "url": "https://a.example" })
+    );
+    assert_eq!(
+        request["returns"],
+        serde_json::json!({ "delta": ["trust"], "requires": [] })
+    );
+    assert_eq!(request["trust_ranks"], serde_json::json!(["suspicious", "trusted"]));
+    assert!(request["context"]["current_trust"].is_string());
+
+    // Different canonical arguments are a different classification subject.
+    assert_eq!(
+        propose(&runtime, fetch("https://b.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, fetch("https://b.example")).await;
+    assert_eq!(classifier.requests().len(), 2);
+
+    // And a fresh proposal of the first call is a new act: nothing durable answers for
+    // it, so the resolver is consulted again.
+    assert_eq!(
+        propose(&runtime, fetch("https://a.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert_eq!(classifier.requests().len(), 3);
+}
+
+#[tokio::test]
+async fn a_scoped_binding_shows_the_resolver_one_argument() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, classifier) = serve_classifier().await;
+    classifier.set(
+        "classifier",
+        Answer::Wire(serde_json::json!({ "version": 1, "delta": { "trust": "trusted" } })),
+    );
+    let config = http_policy(&url).replace(
+        r#"resolvers = [{ resolver = "classifier", returns = { delta = ["trust"] } }]"#,
+        r#"resolvers = [{ resolver = "classifier", argument = "url", returns = { delta = ["trust"] } }]"#,
+    );
+    let runtime = open_runtime(&dir, &config).await;
+
+    assert_eq!(
+        propose(&runtime, fetch("https://a.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    let requests = classifier.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]["input"],
+        serde_json::json!({ "scope": "argument", "argument": "url", "value": "https://a.example" })
+    );
+}
+
+#[tokio::test]
+async fn every_resolver_failure_refuses_the_hook_and_appends_nothing() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, classifier) = serve_classifier().await;
+    let runtime = open_runtime(&dir, &http_policy(&url)).await;
+    let baseline = audit_len(&runtime);
+
+    for failure in [
+        Answer::Down,
+        Answer::Malformed,
+        // Undeclared fields are exactly as unusable as transport failures.
+        Answer::Wire(serde_json::json!({ "version": 1 })),
+        Answer::Wire(serde_json::json!({ "version": 7, "delta": { "trust": "trusted" } })),
+        Answer::Wire(serde_json::json!({ "version": 1, "delta": { "trust": "invented" } })),
+    ] {
+        classifier.set("classifier", failure);
+        let decision = propose(&runtime, fetch("https://a.example")).await;
+        let HookDecision::Refuse { detail } = decision else {
+            panic!("a resolver failure is an operational refusal, got {decision:?}");
+        };
+        assert!(
+            detail.contains("classifier"),
+            "the refusal names the resolver: {detail}"
+        );
+        assert_eq!(
+            audit_len(&runtime),
+            baseline,
+            "a no-answer appends nothing to the trajectory"
+        );
+    }
+
+    // The deployment recovering makes the same proposal succeed: nothing durable recorded
+    // the failures, and the fresh invocation consults again.
+    classifier.set(
+        "classifier",
+        Answer::Wire(serde_json::json!({ "version": 1, "delta": { "trust": "trusted" } })),
+    );
+    assert_eq!(
+        propose(&runtime, fetch("https://a.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert!(audit_len(&runtime) > baseline);
+}
+
+fn two_resolver_policy(url: &str) -> String {
+    format!(
+        r#"
+[policy]
+version = 1
+
+[[policy.dynamic_resolver]]
+name = "alpha"
+[[policy.dynamic_resolver]]
+name = "beta"
+
+[[policy.tool]]
+name = "fetch"
+parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
+resolvers = [
+  {{ resolver = "alpha", returns = {{ delta = ["trust"] }} }},
+  {{ resolver = "beta", returns = {{ requires = ["trust"] }} }},
+]
+delta = {{}}
+
+[externals]
+timeout_ms = 5000
+max_body_bytes = 65536
+
+[externals.dynamic]
+url = "{url}"
+"#
+    )
+}
+
+#[tokio::test]
+async fn independent_consults_overlap_and_completion_order_never_moves_the_record() {
+    let run = |slow: &'static str| async move {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let (url, classifier) = serve_classifier().await;
+        classifier.set(
+            "alpha",
+            Answer::Wire(serde_json::json!({ "version": 1, "delta": { "trust": "trusted" } })),
+        );
+        classifier.set(
+            "beta",
+            Answer::Wire(serde_json::json!({ "version": 1, "requires": { "trust": "suspicious" } })),
+        );
+        // Both consults sleep: sequential execution would cost ~600ms, concurrent ~300ms.
+        classifier.delay("alpha", Duration::from_millis(300));
+        classifier.delay("beta", Duration::from_millis(300));
+        classifier.delay(slow, Duration::from_millis(320));
+        let runtime = open_runtime(&dir, &two_resolver_policy(&url)).await;
+        let started = Instant::now();
+        assert_eq!(
+            propose(&runtime, fetch("https://a.example")).await,
+            HookDecision::AllowCall { spawn: None }
+        );
+        let elapsed = started.elapsed();
+        // Concurrent: the batch costs its slowest member, not the sum of both.
+        assert!(
+            elapsed < Duration::from_millis(550),
+            "the two consults did not overlap: {elapsed:?}"
+        );
+        ran(&runtime, fetch("https://a.example")).await;
+        format!("{:?}", runtime.audit(&root()).expect("the audit reads"))
+    };
+    let alpha_slow = run("alpha").await;
+    let beta_slow = run("beta").await;
+    assert_eq!(
+        alpha_slow, beta_slow,
+        "which consult finished first must not move the recorded trajectory"
+    );
+}
+
+fn fake_claude(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("fake-claude");
+    std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("the fake claude writes");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("the fake claude is executable");
+    path
+}
+
+fn builtin_policy(command: &std::path::Path, extra: &str) -> String {
+    format!(
+        r#"
+[policy]
+version = 1
+
+[[policy.dynamic_resolver]]
+name = "classifier"
+builtin = "claude-code"
+
+[[policy.tool]]
+name = "fetch"
+parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
+resolvers = [{{ resolver = "classifier", returns = {{ delta = ["trust"] }} }}]
+delta = {{}}
+
+[externals]
+timeout_ms = 5000
+max_body_bytes = 65536
+
+[externals.claude_code]
+command = "{command}"
+{extra}
+"#,
+        command = command.display(),
+    )
+}
+
+#[tokio::test]
+async fn the_claude_builtin_runs_the_configured_command_and_model() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let args_path = dir.path().join("args.txt");
+    let command = fake_claude(
+        dir.path(),
+        &format!(
+            "printf '%s\\n' \"$@\" > {args}\ncat > /dev/null\nprintf '%s' '{{\"structured_output\":{{\"version\":1,\"delta\":{{\"trust\":\"trusted\"}}}}}}'",
+            args = args_path.display(),
+        ),
+    );
+    let runtime = open_runtime(&dir, &builtin_policy(&command, "model = \"pinned-model\"")).await;
+
+    assert_eq!(
+        propose(&runtime, fetch("https://a.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    let args = std::fs::read_to_string(&args_path).expect("the fake captured its arguments");
+    let args: Vec<&str> = args.lines().collect();
+    let model = args
+        .iter()
+        .position(|arg| *arg == "--model")
+        .map(|index| args[index + 1]);
+    assert_eq!(model, Some("pinned-model"), "the deployment's model rides the argv");
+    for expected in [
+        "-p",
+        "--safe-mode",
+        "--disable-slash-commands",
+        "--tools",
+        "--permission-mode",
+        "--no-session-persistence",
+        "--output-format",
+        "--json-schema",
+        "--system-prompt",
+    ] {
+        assert!(args.contains(&expected), "missing claude argument {expected}");
+    }
+}
+
+#[tokio::test]
+async fn the_builtin_timeout_is_its_own_budget_and_a_slow_consult_refuses_fast() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let command = fake_claude(dir.path(), "cat > /dev/null\nsleep 5");
+    let runtime = open_runtime(&dir, &builtin_policy(&command, "timeout_ms = 150")).await;
+
+    let started = Instant::now();
+    let decision = propose(&runtime, fetch("https://a.example")).await;
+    assert!(matches!(decision, HookDecision::Refuse { .. }), "got {decision:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the consult budget is the builtin's own timeout, not the shared 5s"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_claude_consults_are_gated_by_the_runtime_permit_pool() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let command = fake_claude(
+        dir.path(),
+        "cat > /dev/null\nsleep 0.3\nprintf '%s' '{\"structured_output\":{\"version\":1,\"requires\":{\"attention\":[]}}}'",
+    );
+    let resolvers: String = (0..6)
+        .map(|index| format!("[[policy.dynamic_resolver]]\nname = \"classifier-{index}\"\nbuiltin = \"claude-code\"\n"))
+        .collect();
+    let bindings: Vec<String> = (0..6)
+        .map(|index| format!("{{ resolver = \"classifier-{index}\", returns = {{ requires = [\"attention\"] }} }}"))
+        .collect();
+    let config = format!(
+        r#"
+[policy]
+version = 1
+
+{resolvers}
+[[policy.tool]]
+name = "fetch"
+parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
+resolvers = [{bindings}]
+delta = {{}}
+
+[externals]
+timeout_ms = 10000
+max_body_bytes = 65536
+
+[externals.claude_code]
+command = "{command}"
+"#,
+        bindings = bindings.join(", "),
+        command = command.display(),
+    );
+    let runtime = open_runtime(&dir, &config).await;
+    let started = Instant::now();
+    assert_eq!(
+        propose(&runtime, fetch("https://a.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    // Six 300ms consults through a four-permit gate take at least two waves.
+    assert!(
+        started.elapsed() >= Duration::from_millis(450),
+        "six subprocess consults must not all run at once: {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn a_builtin_resolver_never_touches_the_shared_endpoint() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, classifier) = serve_classifier().await;
+    let command = fake_claude(
+        dir.path(),
+        "cat > /dev/null\nprintf '%s' '{\"structured_output\":{\"version\":1,\"delta\":{\"trust\":\"trusted\"}}}'",
+    );
+    let config = builtin_policy(&command, "").replace(
+        "[externals.claude_code]",
+        &format!("[externals.dynamic]\nurl = \"{url}\"\n\n[externals.claude_code]"),
+    );
+    let runtime = open_runtime(&dir, &config).await;
+    assert_eq!(
+        propose(&runtime, fetch("https://a.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert!(
+        classifier.requests().is_empty(),
+        "the builtin resolver answered; the endpoint saw no request"
+    );
+}

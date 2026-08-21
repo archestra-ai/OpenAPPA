@@ -159,15 +159,23 @@ def _serve_external_fixtures(
             if isinstance(request, dict) and self.path == "/dynamic-resolver":
                 kind = "dynamic_resolver"
                 name = str(request.get("resolver", ""))
+                supplied = request.get("input") or {}
                 key = (
                     request.get("resolver"),
                     request.get("tool"),
-                    request.get("argument"),
-                    request.get("value"),
+                    supplied.get("argument"),
+                    supplied.get("value"),
                 )
-                readers = dynamic_by_request.get(key) if request.get("version") == 1 else None
+                scoped = request.get("version") == 1 and supplied.get("scope") == "argument"
+                readers = dynamic_by_request.get(key) if scoped else None
                 if readers is not None:
-                    response = {"version": 1, "readers": list(readers)}
+                    # The answer carries exactly the binding's declared returned fields.
+                    returns = request.get("returns") or {}
+                    response = {"version": 1}
+                    if "audience" in (returns.get("delta") or []):
+                        response["delta"] = {"audience": list(readers)}
+                    if "audience" in (returns.get("requires") or []):
+                        response["requires"] = {"audience": {"includes": list(readers)}}
             elif isinstance(request, dict) and self.path.startswith("/authority/"):
                 kind = "authority"
                 name = self.path.removeprefix("/authority/")

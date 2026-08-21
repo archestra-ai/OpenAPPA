@@ -1012,8 +1012,8 @@ impl Engine {
             let ChildSubmission::Value { body } = &report.submission else {
                 return Err(TransitionError::BranchEnded);
             };
-            if !comparable(body)
-                .is_some_and(|canonical| RawResultDigest::of(canonical.as_str().as_bytes()) == submitted.digest)
+            if comparable(body)
+                .is_none_or(|canonical| RawResultDigest::of(canonical.as_str().as_bytes()) != submitted.digest)
             {
                 return Err(TransitionError::BranchEnded);
             }
@@ -1460,8 +1460,8 @@ impl Engine {
             });
         };
         if let Some(registered) = self.registry.cast(&cast) {
-            let prior = contract
-                .output_label_for_resolutions(views.dynamic_resolutions(dispatch).unwrap_or_default(), expansions);
+            let prior =
+                contract.output_label_for_resolutions(views.tool_resolutions(dispatch).unwrap_or_default(), expansions);
             expansions.require(registered.resolution.reads(&prior))?;
         }
         let candidate = crate::admit::cast_candidate(
@@ -1863,7 +1863,7 @@ impl Engine {
     /// the runtime's to fill before the batch can be composed; a foreign claim is a refusal.
     fn answered_proposals(&self, proposals: &[ResolvedCall]) -> Result<(), TransitionError> {
         let mut needed = Vec::new();
-        let mut unanswered = Vec::new();
+        let mut unresolved = Vec::new();
         for call in proposals {
             let contract = self
                 .registry
@@ -1876,17 +1876,21 @@ impl Engine {
                     return Err(TransitionError::ForeignMembership { argument });
                 }
             }
-            match check::validate_dynamic_resolutions(contract, call) {
+            match check::validate_tool_resolutions(&self.registry, contract, call) {
                 Ok(()) => {}
-                Err(check::DynamicRefusal::Needed(bindings)) => {
+                Err(check::ToolResolutionRefusal::Needed(bindings)) => {
                     for binding in bindings {
-                        if !unanswered.contains(&binding) {
-                            unanswered.push(binding);
+                        let resolver = binding.resolver.as_str().to_string();
+                        if !unresolved.contains(&resolver) {
+                            unresolved.push(resolver);
                         }
                     }
                 }
-                Err(check::DynamicRefusal::Foreign(argument)) => {
-                    return Err(TransitionError::ForeignDynamicAnswer { argument });
+                Err(check::ToolResolutionRefusal::Foreign(resolver)) => {
+                    return Err(TransitionError::ForeignToolResolution { resolver });
+                }
+                Err(check::ToolResolutionRefusal::OutsidePolicy(resolver)) => {
+                    return Err(TransitionError::InvalidToolResolution { resolver });
                 }
             }
         }
@@ -1895,8 +1899,8 @@ impl Engine {
             needed.dedup();
             return Err(TransitionError::MembershipNeeded { needed });
         }
-        if !unanswered.is_empty() {
-            return Err(TransitionError::DynamicAnswerNeeded { needed: unanswered });
+        if !unresolved.is_empty() {
+            return Err(TransitionError::ToolResolutionNeeded { resolvers: unresolved });
         }
         Ok(())
     }
@@ -2103,7 +2107,7 @@ impl Engine {
             .map(|(position, proposed)| {
                 self.resolve_call(proposed.tool.clone(), &proposed.arguments)
                     .map(|call| {
-                        call.with_dynamic_resolutions(proposed.dynamic_resolutions.clone())
+                        call.with_tool_resolutions(proposed.tool_resolutions.clone())
                             .with_memberships(proposed.memberships.clone())
                     })
                     .map_err(|error| (position, error))
@@ -2984,7 +2988,7 @@ impl Engine {
             .extend(sanitizer.clone())
             .ok_or(TransitionError::SanitizerUnapplicable)?;
         let substituted = substituted_call(contract, call, body)?;
-        if check::validate_dynamic_resolutions(contract, &substituted).is_err() {
+        if check::validate_tool_resolutions(&self.registry, contract, &substituted).is_err() {
             return Err(TransitionError::SanitizerUnapplicable);
         }
 
@@ -3748,7 +3752,7 @@ pub(crate) fn opened_dispatch(
             .clone(),
         receiving: current.bound().clone(),
         proposed_effects: contract.emits.clone(),
-        dynamic_resolutions: call.dynamic_resolutions().to_vec(),
+        tool_resolutions: call.tool_resolutions().to_vec(),
         memberships: call.memberships().to_vec(),
         resolutions: registry.resolutions(expansions),
         subject,
@@ -4010,6 +4014,7 @@ mod tests {
 
     fn read_tool(name: &str, delta: Option<Delta>) -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta,
@@ -4273,7 +4278,7 @@ mod tests {
         crate::transition::ProposedCall {
             tool: call.tool().clone(),
             arguments: call.canonical_arguments().canonical_bytes().to_vec(),
-            dynamic_resolutions: call.dynamic_resolutions().to_vec(),
+            tool_resolutions: call.tool_resolutions().to_vec(),
             memberships: call.memberships().to_vec(),
         }
     }
@@ -4286,6 +4291,7 @@ mod tests {
 
     fn crm_tool() -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new("get_ticket"),
             tags: vec![],
             delta: Some(Delta {
@@ -4307,6 +4313,7 @@ mod tests {
     #[test]
     fn permuted_effect_declarations_produce_byte_identical_dispatch_facts() {
         let pay = |emits: [&str; 2]| ToolContract {
+            resolvers: vec![],
             name: ToolName::new("pay"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -4559,7 +4566,7 @@ mod tests {
                 proposed_label: EstablishedLabel::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
                 receiving: EstablishedLabel::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
                 proposed_effects: crate::fact::EffectSet::default(),
-                dynamic_resolutions: Vec::new(),
+                tool_resolutions: Vec::new(),
                 memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj()),
                 resolutions: vec![],
@@ -4670,6 +4677,7 @@ mod tests {
     #[test]
     fn pending_cast_output_dispatches_before_resolution() {
         let scan = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("scan_inbox"),
             tags: vec![],
             delta: Some(Delta {
@@ -4702,6 +4710,7 @@ mod tests {
     #[test]
     fn includes_placeholder_resolves_from_arguments() {
         let send = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("send_email"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -4734,6 +4743,7 @@ mod tests {
     #[test]
     fn history_prior_and_no_prior() {
         let del = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("delete_db"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -4761,6 +4771,7 @@ mod tests {
     fn an_includes_requirement_reads_the_committed_label() {
         let b_reader = Audience::restricted([ReaderId::new("b")]);
         let share = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("share"),
             tags: vec![],
             delta: Some(Delta {
@@ -4801,6 +4812,7 @@ mod tests {
     #[test]
     fn a_trust_floor_reads_the_committed_label() {
         let risky = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("risky"),
             tags: vec![],
             delta: Some(Delta {
@@ -4838,6 +4850,7 @@ mod tests {
     fn a_read_that_narrows_into_the_cap_passes_the_cap() {
         let a_reader = Audience::restricted([ReaderId::new("a")]);
         let scoped = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("scoped"),
             tags: vec![],
             delta: Some(Delta {
@@ -4868,6 +4881,7 @@ mod tests {
 
     fn emitting(name: &str, kind: &str) -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -4879,6 +4893,7 @@ mod tests {
 
     fn history_guarded(name: &str, requirement: HistoryRequirement) -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -5138,6 +5153,7 @@ mod tests {
             hint: None,
         };
         let fetch = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("fetch"),
             tags: vec![],
             delta: Some(Delta {
@@ -5335,6 +5351,7 @@ mod tests {
             trust_chain: TrustChain::new(vec!["secret".into(), "suspicious".into(), "trusted".into()]),
             tools: vec![
                 ToolContract {
+                    resolvers: vec![],
                     name: ToolName::new("fetch"),
                     tags: vec![],
                     delta: Some(Delta {
@@ -5790,6 +5807,7 @@ mod tests {
     fn substituting_engine(trust: Trust) -> Engine {
         let partner = Audience::restricted([ReaderId::new("partner")]);
         let post = |name: &str, tags: Vec<crate::names::TagName>| ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags,
             delta: Some(Delta::NONE),
@@ -5820,8 +5838,9 @@ mod tests {
             .unwrap(),
             delta: Some(Delta {
                 trust: None,
-                audience: Some(crate::contract::AudienceDelta::Dynamic(dynamic_who())),
+                audience: None,
             }),
+            resolvers: vec![dynamic_who()],
             ..post("post_to", vec![crate::names::TagName::new("outbound")])
         };
         open_engine_at(
@@ -5872,11 +5891,24 @@ mod tests {
         vec![opened(e)]
     }
 
-    fn dynamic_who() -> crate::contract::DynamicAudienceBinding {
-        crate::contract::DynamicAudienceBinding {
+    fn dynamic_who() -> crate::contract::ToolResolverBinding {
+        crate::contract::ToolResolverBinding {
             resolver: crate::names::DynamicResolverName::new("acl"),
-            argument: "who".to_string(),
+            argument: Some("who".to_string()),
+            returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
         }
+    }
+
+    fn who_pin(reader: &str) -> crate::contract::PinnedToolResolution {
+        crate::contract::PinnedToolResolution::from_answer(
+            dynamic_who(),
+            None,
+            Some(Audience::restricted([ReaderId::new(reader)])),
+            None,
+            None,
+            None,
+        )
+        .expect("a literal reader set pins")
     }
 
     fn substitution(call: &ResolvedCall, replacement: &str) -> OfferOutcome {
@@ -6066,12 +6098,17 @@ mod tests {
         assert_eq!(e.validate_replay(&log), Ok(()));
 
         let answer = || {
-            crate::contract::PinnedDynamicResolution::from_answer(
-                crate::contract::DynamicAudienceBinding {
+            crate::contract::PinnedToolResolution::from_answer(
+                crate::contract::ToolResolverBinding {
                     resolver: crate::names::DynamicResolverName::new("acl"),
-                    argument: "body".to_string(),
+                    argument: Some("body".to_string()),
+                    returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
                 },
-                Audience::restricted([ReaderId::new("partner")]),
+                None,
+                Some(Audience::restricted([ReaderId::new("partner")])),
+                None,
+                None,
+                None,
             )
             .expect("a literal reader set pins")
         };
@@ -6085,7 +6122,7 @@ mod tests {
         else {
             panic!("the hop's batch records its candidate before the opening")
         };
-        *call = call.clone().with_dynamic_resolutions(vec![answer()]);
+        *call = call.clone().with_tool_resolutions(vec![answer()]);
         assert_eq!(
             e.validate_replay(&forged),
             Err(crate::transition::TransitionRefusal::ForgedLabel),
@@ -6093,13 +6130,12 @@ mod tests {
         );
 
         let mut forged = log.clone();
-        let Fact::DispatchOpened {
-            dynamic_resolutions, ..
-        } = forged.last_mut().expect("the opening is the batch's last record")
+        let Fact::DispatchOpened { tool_resolutions, .. } =
+            forged.last_mut().expect("the opening is the batch's last record")
         else {
             panic!("the hop's batch ends with its opening")
         };
-        *dynamic_resolutions = vec![answer()];
+        *tool_resolutions = vec![answer()];
         assert_eq!(
             e.validate_replay(&forged),
             Err(crate::transition::TransitionRefusal::UnbackedDecision),
@@ -6325,42 +6361,29 @@ mod tests {
                 &viewing(&e, &log),
                 batch_on(&traj(), "b1", Vec::new(), vec![raw(&unpinned), raw(&unpinned)], None)
             ),
-            Err(TransitionError::DynamicAnswerNeeded {
-                needed: vec![dynamic_who()]
+            Err(TransitionError::ToolResolutionNeeded {
+                resolvers: vec!["acl".to_string()]
             })
         );
-        let foreign = call("post", json!({ "body": "ssn 123" })).with_dynamic_resolutions(vec![
-            crate::contract::PinnedDynamicResolution::from_answer(
-                dynamic_who(),
-                Audience::restricted([ReaderId::new("partner")]),
-            )
-            .expect("a literal reader set pins"),
-        ]);
+        let foreign = call("post", json!({ "body": "ssn 123" })).with_tool_resolutions(vec![who_pin("partner")]);
         assert_eq!(
             e.handle(
                 &viewing(&e, &log),
                 batch_on(&traj(), "b2", Vec::new(), vec![raw(&foreign)], None)
             ),
-            Err(TransitionError::ForeignDynamicAnswer {
-                argument: "who".to_string()
+            Err(TransitionError::ForeignToolResolution {
+                resolver: "acl".to_string()
             })
         );
-        let answer = |reader: &str| {
-            crate::contract::PinnedDynamicResolution::from_answer(
-                dynamic_who(),
-                Audience::restricted([ReaderId::new(reader)]),
-            )
-            .expect("a literal reader set pins")
-        };
         let conflicting = call("post_to", json!({ "body": "ssn 123", "who": "desk" }))
-            .with_dynamic_resolutions(vec![answer("partner"), answer("internal")]);
+            .with_tool_resolutions(vec![who_pin("partner"), who_pin("internal")]);
         assert_eq!(
             e.handle(
                 &viewing(&e, &log),
                 batch_on(&traj(), "b3", Vec::new(), vec![raw(&conflicting)], None)
             ),
-            Err(TransitionError::ForeignDynamicAnswer {
-                argument: "who".to_string()
+            Err(TransitionError::ForeignToolResolution {
+                resolver: "acl".to_string()
             })
         );
     }
@@ -6368,13 +6391,8 @@ mod tests {
     #[test]
     fn a_substitution_that_rewrites_a_dynamically_bound_argument_is_unapplicable() {
         let e = substituting_engine(TRUSTED);
-        let proposal = call("post_to", json!({ "body": "ssn 123", "who": "desk" })).with_dynamic_resolutions(vec![
-            crate::contract::PinnedDynamicResolution::from_answer(
-                dynamic_who(),
-                Audience::restricted([ReaderId::new("partner")]),
-            )
-            .expect("a literal reader set pins"),
-        ]);
+        let proposal = call("post_to", json!({ "body": "ssn 123", "who": "desk" }))
+            .with_tool_resolutions(vec![who_pin("partner")]);
         let log = internal_log(&e);
         let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
         let hop = opened_offers(&facts)[0].0;
@@ -7051,6 +7069,7 @@ mod tests {
 
     fn neutral_tool() -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new("read_note"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -7062,6 +7081,7 @@ mod tests {
 
     fn emitting_tool() -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new("send_note"),
             emits: EffectSet::new([EffectKind::new("email.sent")]).unwrap(),
             ..neutral_tool()
@@ -7261,6 +7281,7 @@ mod tests {
         let cfg = RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: vec![ToolContract {
+                resolvers: vec![],
                 name: ToolName::new("wire"),
                 tags: vec![],
                 delta: Some(Delta::NONE),
@@ -7342,6 +7363,7 @@ mod tests {
 
     fn open_tool(name: &str) -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: None,
@@ -8617,20 +8639,8 @@ mod tests {
         };
         assert_eq!(
             tampered(&|fact| {
-                if let Fact::DispatchOpened {
-                    dynamic_resolutions, ..
-                } = fact
-                {
-                    dynamic_resolutions.push(
-                        crate::contract::PinnedDynamicResolution::from_answer(
-                            crate::contract::DynamicAudienceBinding {
-                                resolver: crate::names::DynamicResolverName::new("acl"),
-                                argument: "who".to_string(),
-                            },
-                            Audience::restricted([ReaderId::new("anyone")]),
-                        )
-                        .expect("a literal reader set pins"),
-                    );
+                if let Fact::DispatchOpened { tool_resolutions, .. } = fact {
+                    tool_resolutions.push(who_pin("anyone"));
                 }
             }),
             Err(TransitionRefusal::UnbackedDecision)
@@ -8775,7 +8785,7 @@ mod tests {
                 proposed_label: EstablishedLabel::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
                 receiving: EstablishedLabel::new(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
                 proposed_effects: EffectSet::default(),
-                dynamic_resolutions: Vec::new(),
+                tool_resolutions: Vec::new(),
                 memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&child),
                 resolutions: vec![],
@@ -8880,6 +8890,7 @@ mod tests {
 
     fn pending_cast_tool(name: &str, tag: &str) -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: vec![crate::names::TagName::new(tag)],
             delta: Some(Delta {
@@ -9640,6 +9651,7 @@ mod tests {
     #[test]
     fn a_calls_own_emits_never_fail_its_own_check() {
         let selfguard = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("selfguard"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -9666,6 +9678,7 @@ mod tests {
     #[test]
     fn a_success_checkpoint_settles_while_the_dispatch_stays_open() {
         let scan = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("scan"),
             tags: vec![],
             delta: Some(Delta {
@@ -9715,6 +9728,7 @@ mod tests {
     #[test]
     fn attention_is_always_a_gap() {
         let tool = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -9737,6 +9751,7 @@ mod tests {
 
     fn trusted_sink() -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new("send"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -9909,6 +9924,7 @@ mod tests {
     #[test]
     fn all_three_block_slots_coexist() {
         let vault = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("vault"),
             tags: vec![],
             delta: Some(Delta {
@@ -9946,6 +9962,7 @@ mod tests {
     #[test]
     fn a_gap_and_an_unestablished_source_split_by_dimension() {
         let vault = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("vault"),
             tags: vec![],
             delta: Some(Delta {
@@ -10220,6 +10237,7 @@ mod tests {
     #[test]
     fn replay_refuses_an_out_of_scope_resolution() {
         let fetch = crate::contract::ToolContract {
+            resolvers: vec![],
             name: ToolName::new("fetch"),
             tags: vec![crate::names::TagName::new("web")],
             delta: Some(crate::contract::Delta {
@@ -10311,6 +10329,7 @@ mod tests {
 
     fn unannotated_tool(name: &str) -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: None,
@@ -10386,6 +10405,7 @@ mod tests {
     #[test]
     fn includes_missing_placeholder_is_an_invalid_call_and_still_fails_closed_underneath() {
         let send = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("send_email"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -10441,6 +10461,7 @@ mod tests {
         use crate::names::AuthorityName;
 
         let wire = ToolContract {
+            resolvers: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -10496,6 +10517,7 @@ mod tests {
 
     fn strict_tool(name: &str) -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: vec![],
             parameters: crate::params::ToolParameters::compile(&json!({
@@ -10573,7 +10595,7 @@ mod tests {
                     proposed_label: established(TRUSTED, Audience::Public),
                     receiving: established(TRUSTED, Audience::Public),
                     proposed_effects: EffectSet::default(),
-                    dynamic_resolutions: vec![],
+                    tool_resolutions: vec![],
                     memberships: Vec::new(),
                     subject: crate::basis::fixture_subject(&traj()),
                     resolutions: vec![],
@@ -10675,6 +10697,7 @@ mod tests {
 
     fn plain_tool(name: &str) -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -11026,7 +11049,7 @@ mod tests {
         crate::transition::ProposedCall {
             tool: ToolName::new(tool),
             arguments: arguments.to_vec(),
-            dynamic_resolutions: Vec::new(),
+            tool_resolutions: Vec::new(),
             memberships: Vec::new(),
         }
     }
@@ -11691,29 +11714,34 @@ mod tests {
 
     #[test]
     fn a_repeat_matches_each_sibling_to_the_dispatch_its_own_answers_opened() {
-        let binding = crate::contract::DynamicAudienceBinding {
+        let binding = crate::contract::ToolResolverBinding {
             resolver: crate::names::DynamicResolverName::new("acl"),
-            argument: "room".to_string(),
+            argument: Some("room".to_string()),
+            returns: [crate::contract::ResolverReturn::RequiredAudience]
+                .into_iter()
+                .collect(),
         };
         let mut notify = plain_tool("notify");
         notify.parameters = crate::params::test_string_argument_schema("room");
-        notify.requires = Requires {
-            label: LabelRequirements {
-                trust_floor: None,
-                audience: vec![AudienceRequirement::Includes(RecipientSpec::Dynamic(binding.clone()))],
-            },
-            ..Requires::default()
-        };
+        notify.resolvers = vec![binding.clone()];
         let internal = Audience::restricted([ReaderId::new("internal")]);
         let e = engine_at(vec![notify], known(TRUSTED, internal.clone()));
         let log = vec![opened(&e)];
         let pinned = |audience: &Audience| {
-            raw(
-                &call("notify", json!({ "room": "lobby" })).with_dynamic_resolutions(vec![
-                    crate::contract::PinnedDynamicResolution::from_answer(binding.clone(), audience.clone())
-                        .expect("a literal reader set pins"),
-                ]),
-            )
+            raw(&call("notify", json!({ "room": "lobby" })).with_tool_resolutions(vec![
+                crate::contract::PinnedToolResolution::from_answer(
+                    binding.clone(),
+                    None,
+                    None,
+                    None,
+                    Some(crate::contract::RequiredAudience {
+                        includes: Some(audience.clone()),
+                        cap: None,
+                    }),
+                    None,
+                )
+                .expect("a literal reader set pins"),
+            ]))
         };
         let outsider = Audience::restricted([ReaderId::new("outsider")]);
         let proposals = || vec![pinned(&outsider), pinned(&internal)];
@@ -11725,7 +11753,12 @@ mod tests {
         assert_eq!(released.len(), 1);
         assert_eq!(blocked.len(), 1);
         let ran = released[0].dispatch.clone();
-        assert_eq!(released[0].call.dynamic_resolution(&binding), Some(&internal));
+        let required_includes = |call: &ResolvedCall| {
+            call.tool_resolutions()[0]
+                .required_audience()
+                .and_then(|required| required.includes.clone())
+        };
+        assert_eq!(required_includes(&released[0].call), Some(internal.clone()));
         let log = [log, appended_facts(first)].concat();
 
         let repeat = e
@@ -11736,12 +11769,12 @@ mod tests {
         assert_eq!(released.len(), 1);
         assert_eq!(released[0].dispatch, ran);
         assert_eq!(
-            released[0].call.dynamic_resolution(&binding),
-            Some(&internal),
+            required_includes(&released[0].call),
+            Some(internal.clone()),
             "the repeat names the sibling that actually ran"
         );
         assert_eq!(blocked.len(), 1);
-        assert_eq!(blocked[0].call.dynamic_resolution(&binding), Some(&outsider));
+        assert_eq!(required_includes(&blocked[0].call), Some(outsider.clone()));
     }
 
     fn membership_engine(authorities: Vec<crate::authority::Authority>, starting: Label) -> Engine {
@@ -13852,6 +13885,7 @@ mod tests {
         let e = open_engine(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: vec![ToolContract {
+                resolvers: vec![],
                 name: ToolName::new("fetch"),
                 tags: vec![],
                 delta: Some(Delta {

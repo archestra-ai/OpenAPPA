@@ -16,9 +16,9 @@ use crate::value::ToolName;
 /// result's actual state is established by a registered cast at admission, so the raw result
 /// is confined until then.
 ///
-/// A contract may carry no delta at all ([`ToolContract::delta`] is `None`): the tool is
-/// **unannotated** — the deployment never described its output, which is not the same as declaring
-/// it neutral. An unannotated tool's result is admitted at `Unknown` in both dimensions
+/// A contract may carry no delta and no resolver-owned label field: the tool is **unannotated** —
+/// the deployment never described its output, which is not the same as declaring it neutral. An
+/// unannotated tool's result is admitted at `Unknown` in both dimensions
 /// (fail-closed: the fold absorbs Unknown, and any later check whose requirement consumes the
 /// dimension names the values a cast must resolve). The deliberate "this result carries nothing"
 /// annotation is the empty declared delta ([`Delta::NONE`], `delta = {}` on the config surface).
@@ -28,19 +28,220 @@ pub struct Delta {
     pub audience: Option<AudienceDelta>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct DynamicAudienceBinding {
+/// One part of a tool contract a tool-level dynamic resolver establishes from the complete
+/// canonical call arguments. Label dimensions have one owner; attention is additive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolverReturn {
+    /// Output-label trust (`delta.trust`).
+    Trust,
+    /// Output-label audience (`delta.audience`).
+    Audience,
+    /// A call-time trust floor (`requires.trust`).
+    RequiredTrust,
+    /// Call-time audience constraints (`requires.audience`).
+    RequiredAudience,
+    /// Fresh call-time review marks (`requires.attention`).
+    Attention,
+}
+
+/// The wire scope one returned field lives in: the output `delta` or the call-time `requires`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReturnScope {
+    Delta,
+    Requires,
+}
+
+impl ReturnScope {
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            ReturnScope::Delta => "delta",
+            ReturnScope::Requires => "requires",
+        }
+    }
+}
+
+impl ResolverReturn {
+    pub const ALL: [ResolverReturn; 5] = [
+        ResolverReturn::Trust,
+        ResolverReturn::Audience,
+        ResolverReturn::RequiredTrust,
+        ResolverReturn::RequiredAudience,
+        ResolverReturn::Attention,
+    ];
+
+    /// The one scope/name map every wire surface reads — the policy's `returns` table, the
+    /// resolver request, and the response shape all agree through it.
+    pub fn scope(self) -> ReturnScope {
+        match self {
+            ResolverReturn::Trust | ResolverReturn::Audience => ReturnScope::Delta,
+            ResolverReturn::RequiredTrust | ResolverReturn::RequiredAudience | ResolverReturn::Attention => {
+                ReturnScope::Requires
+            }
+        }
+    }
+
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            ResolverReturn::Trust | ResolverReturn::RequiredTrust => "trust",
+            ResolverReturn::Audience | ResolverReturn::RequiredAudience => "audience",
+            ResolverReturn::Attention => "attention",
+        }
+    }
+}
+
+/// One resolver attached to a tool: which registered resolver, what it reads, and the exact
+/// scoped fields it must return. A binding without `argument` shows the resolver the complete
+/// canonical argument object; with `argument = "field"` it shows exactly that declared required
+/// top-level string value, and its pin survives argument substitution while that field's value
+/// is unchanged.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ToolResolverBinding {
     pub resolver: DynamicResolverName,
-    pub argument: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument: Option<String>,
+    pub returns: BTreeSet<ResolverReturn>,
+}
+
+/// The audience half of a `requires` answer: an `includes` floor, a `cap` ceiling, or both.
+/// Dynamic answers may not contain groups: the exact literal audiences are pinned with the
+/// call and replayed verbatim.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequiredAudience {
+    pub includes: Option<Audience>,
+    pub cap: Option<Audience>,
+}
+
+impl RequiredAudience {
+    fn is_literal(&self) -> bool {
+        self.includes.iter().chain(self.cap.iter()).all(
+            |audience| !matches!(audience, Audience::Restricted(readers) if !readers.iter().all(ReaderId::is_literal)),
+        )
+    }
+}
+
+/// One successful tool-level resolver answer pinned to the call it classified. The constructor
+/// accepts exactly the fields the binding declares and canonicalizes additive attention marks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PinnedToolResolution {
+    binding: ToolResolverBinding,
+    trust: Option<Trust>,
+    audience: Option<Audience>,
+    required_trust: Option<Trust>,
+    required_audience: Option<RequiredAudience>,
+    attention: Vec<MarkName>,
+}
+
+impl PinnedToolResolution {
+    pub fn from_answer(
+        binding: ToolResolverBinding,
+        trust: Option<Trust>,
+        audience: Option<Audience>,
+        required_trust: Option<Trust>,
+        required_audience: Option<RequiredAudience>,
+        attention: Option<Vec<MarkName>>,
+    ) -> Option<Self> {
+        if binding.returns.is_empty()
+            || binding.returns.contains(&ResolverReturn::Trust) != trust.is_some()
+            || binding.returns.contains(&ResolverReturn::Audience) != audience.is_some()
+            || binding.returns.contains(&ResolverReturn::RequiredTrust) != required_trust.is_some()
+            || binding.returns.contains(&ResolverReturn::RequiredAudience) != required_audience.is_some()
+            || binding.returns.contains(&ResolverReturn::Attention) != attention.is_some()
+        {
+            return None;
+        }
+        if matches!(&audience, Some(Audience::Restricted(readers)) if !readers.iter().all(ReaderId::is_literal)) {
+            return None;
+        }
+        if let Some(required) = &required_audience
+            && (!required.is_literal() || (required.includes.is_none() && required.cap.is_none()))
+        {
+            return None;
+        }
+        let mut attention = attention.unwrap_or_default();
+        attention.sort();
+        attention.dedup();
+        Some(PinnedToolResolution {
+            binding,
+            trust,
+            audience,
+            required_trust,
+            required_audience,
+            attention,
+        })
+    }
+
+    pub fn binding(&self) -> &ToolResolverBinding {
+        &self.binding
+    }
+
+    pub fn trust(&self) -> Option<Trust> {
+        self.trust
+    }
+
+    pub fn audience(&self) -> Option<&Audience> {
+        self.audience.as_ref()
+    }
+
+    pub fn required_trust(&self) -> Option<Trust> {
+        self.required_trust
+    }
+
+    pub fn required_audience(&self) -> Option<&RequiredAudience> {
+        self.required_audience.as_ref()
+    }
+
+    pub fn attention(&self) -> &[MarkName] {
+        &self.attention
+    }
+}
+
+impl<'de> Deserialize<'de> for PinnedToolResolution {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            binding: ToolResolverBinding,
+            trust: Option<Trust>,
+            audience: Option<Audience>,
+            required_trust: Option<Trust>,
+            required_audience: Option<RequiredAudience>,
+            attention: Vec<MarkName>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let original_attention = wire.attention.clone();
+        let returned_attention = wire
+            .binding
+            .returns
+            .contains(&ResolverReturn::Attention)
+            .then_some(wire.attention);
+        let answer = PinnedToolResolution::from_answer(
+            wire.binding,
+            wire.trust,
+            wire.audience,
+            wire.required_trust,
+            wire.required_audience,
+            returned_attention,
+        )
+        .ok_or_else(|| serde::de::Error::custom("a pinned tool resolution must match its declared returns"))?;
+        if answer.attention != original_attention {
+            return Err(serde::de::Error::custom(
+                "pinned tool-resolution attention is not in canonical order",
+            ));
+        }
+        Ok(answer)
+    }
 }
 
 /// The declared audience contribution: a written reader set — literal readers and groups an
-/// operation resolves when it reads them — a pending cast, or a dynamic binding.
+/// operation resolves when it reads them — or a pending cast.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AudienceDelta {
     Static(DeclaredAudience),
     PendingCast,
-    Dynamic(DynamicAudienceBinding),
 }
 
 impl From<Dim<Audience>> for AudienceDelta {
@@ -49,55 +250,6 @@ impl From<Dim<Audience>> for AudienceDelta {
             Dim::Known(audience) => Self::Static(DeclaredAudience::literal(audience)),
             Dim::Unknown => Self::PendingCast,
         }
-    }
-}
-
-/// One successful dynamic answer pinned to a proposed call: the literal reader set the
-/// deployment's resolver returned for the argument this binding names. Only a successful answer
-/// exists here — no answer is the absence of a pin, which the boundary refuses before any fact
-/// ([`crate::check::validate_dynamic_resolutions`]), never a pin that carries none.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct PinnedDynamicResolution {
-    binding: DynamicAudienceBinding,
-    audience: Audience,
-}
-
-impl PinnedDynamicResolution {
-    /// Pin one resolver answer, or refuse it as malformed: `public` is not a literal
-    /// reader set, and an `@group` must go through membership resolution. An empty reader set is a
-    /// valid answer.
-    pub fn from_answer(binding: DynamicAudienceBinding, audience: Audience) -> Option<Self> {
-        match &audience {
-            Audience::Public => None,
-            Audience::Restricted(readers) if !readers.iter().all(ReaderId::is_literal) => None,
-            Audience::Restricted(_) => Some(PinnedDynamicResolution { binding, audience }),
-        }
-    }
-
-    pub fn binding(&self) -> &DynamicAudienceBinding {
-        &self.binding
-    }
-
-    pub fn audience(&self) -> &Audience {
-        &self.audience
-    }
-}
-
-impl<'de> Deserialize<'de> for PinnedDynamicResolution {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct WireResolution {
-            binding: DynamicAudienceBinding,
-            audience: Audience,
-        }
-
-        let wire = WireResolution::deserialize(deserializer)?;
-        PinnedDynamicResolution::from_answer(wire.binding, wire.audience).ok_or_else(|| {
-            serde::de::Error::custom("a dynamic answer is a literal reader set, never public or a group")
-        })
     }
 }
 
@@ -172,7 +324,7 @@ impl Delta {
             self.trust.clone().unwrap_or(Dim::Known(Trust::new(u8::MAX))),
             match &self.audience {
                 Some(AudienceDelta::Static(a)) => Dim::Known(a.resolve(expansions)),
-                Some(AudienceDelta::PendingCast | AudienceDelta::Dynamic(_)) => Dim::Unknown,
+                Some(AudienceDelta::PendingCast) => Dim::Unknown,
                 None => Dim::Known(Audience::Public),
             },
         )
@@ -192,7 +344,7 @@ impl Delta {
             },
             match &self.audience {
                 Some(AudienceDelta::Static(a)) => a.resolve(expansions),
-                Some(AudienceDelta::PendingCast | AudienceDelta::Dynamic(_)) | None => Audience::Public,
+                Some(AudienceDelta::PendingCast) | None => Audience::Public,
             },
         )
     }
@@ -225,7 +377,6 @@ impl Delta {
 pub enum RecipientSpec {
     Static(DeclaredAudience),
     Placeholder(String),
-    Dynamic(DynamicAudienceBinding),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,7 +392,7 @@ impl AudienceRequirement {
         match self {
             AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => Some(recipients.groups()),
             AudienceRequirement::Cap(cap) => Some(cap.groups()),
-            AudienceRequirement::Includes(RecipientSpec::Placeholder(_) | RecipientSpec::Dynamic(_)) => None,
+            AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => None,
         }
         .into_iter()
         .flatten()
@@ -277,9 +428,12 @@ pub struct ToolContract {
     /// Omitted `parameters` normalizes to the permissive open object.
     #[serde(default = "crate::params::ToolParameters::open")]
     pub parameters: crate::params::ToolParameters,
-    /// The declared output contribution, or `None`: **unannotated** — results are admitted at
-    /// `Unknown` in both dimensions (see [`Delta`]). `Some(Delta::NONE)` is the deliberate neutral
-    /// annotation; the two are not interchangeable.
+    /// Dynamic parts of this tool's contract, resolved from its complete canonical arguments
+    /// before the call is checked.
+    #[serde(default)]
+    pub resolvers: Vec<ToolResolverBinding>,
+    /// The static output contribution. `None` is unannotated only when no tool-level resolver owns
+    /// trust or audience. `Some(Delta::NONE)` is the deliberate neutral annotation.
     #[serde(default)]
     pub delta: Option<Delta>,
     pub emits: EffectSet,
@@ -287,14 +441,29 @@ pub struct ToolContract {
 }
 
 impl ToolContract {
-    /// The label a raw admitted result of this tool carries: the declared delta as a label, or —
-    /// unannotated — `Unknown` in both dimensions. A written group reads as the operation resolved
-    /// it.
+    /// Whether a tool-level resolver binding owns this returned field — the one definition of
+    /// "resolver-owned" every load check and label derivation reads.
+    pub(crate) fn resolver_owns(&self, field: ResolverReturn) -> bool {
+        self.resolvers.iter().any(|binding| binding.returns.contains(&field))
+    }
+
+    /// The unresolved output shape before call-pinned answers are applied. Each dimension is
+    /// derived independently: resolver-owned fields are `Unknown` until their pin applies, and
+    /// every other dimension is exactly what the static contract describes — its declared delta
+    /// value, or `Unknown` on an unannotated tool. Resolver ownership of one dimension never
+    /// establishes the other.
     pub fn output_label(&self, expansions: &Expansions) -> Label {
-        match &self.delta {
+        let mut label = match &self.delta {
             Some(delta) => delta.output_label(expansions),
             None => Label::new(Dim::Unknown, Dim::Unknown),
+        };
+        if self.resolver_owns(ResolverReturn::Trust) {
+            label.trust = Dim::Unknown;
         }
+        if self.resolver_owns(ResolverReturn::Audience) {
+            label.audience = Dim::Unknown;
+        }
+        label
     }
 
     /// The groups this contract's check reads: its delta's, its static recipients' and
@@ -309,37 +478,26 @@ impl ToolContract {
         )
     }
 
-    /// The output label with a proposed call's dynamic audience answer pinned into it.
+    /// The output label with a proposed call's pinned resolver answers applied.
     /// Only a successful answer enters the engine, and every binding a contract spells carries one
-    /// by the time a call is checked — [`crate::check::validate_dynamic_resolutions`] refuses the
+    /// by the time a call is checked — [`crate::check::validate_tool_resolutions`] refuses the
     /// proposal otherwise, before any fact, and replay holds a persisted call to the same rule.
     pub(crate) fn output_label_for_call(&self, call: &crate::value::ResolvedCall, expansions: &Expansions) -> Label {
         let mut label = self.output_label(expansions);
-        if let Some(AudienceDelta::Dynamic(binding)) = self.delta.as_ref().and_then(|delta| delta.audience.as_ref()) {
-            let answer = call
-                .dynamic_resolution(binding)
-                .expect("a checked call carries an answer for every dynamic binding its contract spells");
-            label.audience = Dim::Known(answer.clone());
-        }
+        apply_tool_resolutions(&mut label, call.tool_resolutions());
         label
     }
 
-    /// The output label recovered from the dynamic answer persisted on a dispatch. Admission —
+    /// The output label recovered from the resolver answers persisted on a dispatch. Admission —
     /// and the runtime composing a whole-source pending-cast answer against it — uses
     /// this form, never the caller's in-memory resolution.
     pub fn output_label_for_resolutions(
         &self,
-        resolutions: &[PinnedDynamicResolution],
+        tool_resolutions: &[PinnedToolResolution],
         expansions: &Expansions,
     ) -> Label {
         let mut label = self.output_label(expansions);
-        if let Some(AudienceDelta::Dynamic(binding)) = self.delta.as_ref().and_then(|delta| delta.audience.as_ref()) {
-            let mut matching = resolutions.iter().filter(|resolution| resolution.binding() == binding);
-            label.audience = match (matching.next(), matching.next()) {
-                (Some(pinned), None) => Dim::Known(pinned.audience().clone()),
-                _ => Dim::Unknown,
-            };
-        }
+        apply_tool_resolutions(&mut label, tool_resolutions);
         label
     }
 
@@ -350,25 +508,90 @@ impl ToolContract {
     }
 }
 
+/// Pin a call's tool-level resolver answers into a label: each answered field becomes `Known`.
+fn apply_tool_resolutions(label: &mut Label, resolutions: &[PinnedToolResolution]) {
+    for resolution in resolutions {
+        if let Some(trust) = resolution.trust() {
+            label.trust = Dim::Known(trust);
+        }
+        if let Some(audience) = resolution.audience() {
+            label.audience = Dim::Known(audience.clone());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::names::DynamicResolverName;
 
-    fn binding() -> DynamicAudienceBinding {
-        DynamicAudienceBinding {
+    fn binding() -> ToolResolverBinding {
+        ToolResolverBinding {
             resolver: DynamicResolverName::new("crm-acl"),
-            argument: "customer_id".to_string(),
+            argument: Some("customer_id".to_string()),
+            returns: BTreeSet::from([ResolverReturn::Audience]),
         }
     }
 
     #[test]
-    fn a_dynamic_answer_keeps_only_literal_reader_sets() {
-        let pinned =
-            |audience| PinnedDynamicResolution::from_answer(binding(), audience).map(|pin| pin.audience().clone());
+    fn resolver_ownership_leaves_the_other_dimension_fail_closed() {
+        use crate::groups::Expansions;
 
-        assert_eq!(pinned(Audience::Public), None);
-        assert_eq!(pinned(Audience::restricted([ReaderId::new("public")])), None);
+        let owner = |field: ResolverReturn| ToolContract {
+            name: ToolName::new("lookup"),
+            tags: vec![],
+            parameters: crate::params::ToolParameters::open(),
+            resolvers: vec![ToolResolverBinding {
+                resolver: DynamicResolverName::new("classifier"),
+                argument: None,
+                returns: BTreeSet::from([field]),
+            }],
+            delta: None,
+            emits: crate::fact::EffectSet::default(),
+            requires: Requires::default(),
+        };
+
+        // An unannotated dimension stays Unknown whatever the resolver owns: ownership of
+        // the audience never promotes trust off the fail-closed floor, and vice versa.
+        let label = owner(ResolverReturn::Audience).output_label(&Expansions::default());
+        assert_eq!(label.trust, Dim::Unknown, "trust was never described");
+        assert_eq!(label.audience, Dim::Unknown, "the pin has not applied yet");
+
+        let label = owner(ResolverReturn::Trust).output_label(&Expansions::default());
+        assert_eq!(label.trust, Dim::Unknown, "the pin has not applied yet");
+        assert_eq!(label.audience, Dim::Unknown, "audience was never described");
+
+        // With the pin applied, exactly the owned dimension resolves.
+        let binding = ToolResolverBinding {
+            resolver: DynamicResolverName::new("classifier"),
+            argument: None,
+            returns: BTreeSet::from([ResolverReturn::Audience]),
+        };
+        let pin = PinnedToolResolution::from_answer(
+            binding,
+            None,
+            Some(Audience::restricted([ReaderId::new("alice")])),
+            None,
+            None,
+            None,
+        )
+        .expect("a literal reader set pins");
+        let label = owner(ResolverReturn::Audience)
+            .output_label_for_resolutions(std::slice::from_ref(&pin), &Expansions::default());
+        assert_eq!(
+            label.audience,
+            Dim::Known(Audience::restricted([ReaderId::new("alice")]))
+        );
+        assert_eq!(label.trust, Dim::Unknown, "the undescribed dimension stays fail-closed");
+    }
+
+    #[test]
+    fn a_resolver_audience_answer_keeps_only_literal_reader_sets() {
+        let pinned = |audience| {
+            PinnedToolResolution::from_answer(binding(), None, Some(audience), None, None, None)
+                .map(|pin| pin.audience().cloned().expect("audience is the declared return"))
+        };
+
         assert_eq!(pinned(Audience::restricted([ReaderId::new("@hr")])), None);
         assert_eq!(
             pinned(Audience::restricted([ReaderId::new("finance"), ReaderId::new("@hr")])),
@@ -380,6 +603,11 @@ mod tests {
         assert_eq!(pinned(empty.clone()), Some(empty), "no readers is a valid answer");
         let email = Audience::restricted([ReaderId::new("ap@corp.example")]);
         assert_eq!(pinned(email.clone()), Some(email), "`@` mid-ID is an ordinary reader");
+        assert_eq!(
+            pinned(Audience::Public),
+            Some(Audience::Public),
+            "an owned output dimension may resolve to the public state"
+        );
     }
 
     #[test]

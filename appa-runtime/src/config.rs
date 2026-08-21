@@ -57,20 +57,49 @@ pub struct Externals {
     /// The classifiers a resolver-backed `[[cast]]` consults. Endpoint-only: a constant
     /// cast is answered from the policy and binds nothing here.
     pub casts: BTreeMap<String, Endpoint>,
+    /// The shared HTTP implementation for every dynamic resolver that does not
+    /// declare an inline builtin.
     pub dynamic: Option<Endpoint>,
     /// The membership resolver the policy's `[membership]` registers.
     pub membership: Option<Endpoint>,
+    /// Deployment knobs for the stock `claude-code` dynamic resolver.
+    pub claude_code: ClaudeCode,
 }
 
-/// How a registered authority or sanitizer is implemented — `builtin`
-/// or `resolver`, a closed choice per entry. Only these two
-/// kinds have builtin implementations; the dynamic and membership
-/// resolvers stay HTTP-only.
+/// How this deployment runs the stock `claude-code` classifier. `command` overrides the
+/// executable (a service environment often strips `PATH`); `model` pins the model the
+/// consult runs on; `timeout` bounds one consult on its own budget instead of the shared
+/// machine-consult `timeout`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeCode {
+    pub command: std::path::PathBuf,
+    pub model: String,
+    pub timeout: Option<Duration>,
+}
+
+impl Default for ClaudeCode {
+    /// The usable defaults every construction path shares — an embedded host building
+    /// `Externals` by hand gets the same `claude` on `PATH` and `sonnet` alias the file
+    /// loader fills in, never an empty command.
+    fn default() -> ClaudeCode {
+        ClaudeCode {
+            command: "claude".into(),
+            model: "sonnet".to_string(),
+            timeout: None,
+        }
+    }
+}
+
+/// How a registered authority or sanitizer is implemented — `builtin` or
+/// `resolver`, a closed choice per entry. Dynamic HTTP resolution uses the
+/// shared endpoint above; its stock builtin is selected in the policy.
 #[derive(Debug, Clone)]
 pub enum Implementation {
     Resolver(Endpoint),
     Builtin(String),
 }
+
+pub const CLAUDE_CODE_BUILTIN: &str = "claude-code";
 
 /// One external endpoint: a validated URL plus its bearer token, if
 /// the service needs one. `https` reaches anywhere; `http` only
@@ -146,7 +175,7 @@ pub enum ConfigError {
     ZeroByteCap,
     #[error("the {section} entry {name:?} must name exactly one of url or builtin, and only url takes token_env")]
     ImplementationChoice { section: &'static str, name: String },
-    #[error("the {section} entry {name:?} cannot be builtin: only authorities and sanitizers can")]
+    #[error("the {section} entry {name:?} cannot be builtin")]
     BuiltinNotAllowed { section: &'static str, name: String },
     #[error("the {section} entry {name:?} names the builtin {builtin:?}, which is not a valid implementation name")]
     InvalidBuiltinName {
@@ -178,6 +207,15 @@ struct RawExternals {
     casts: BTreeMap<String, RawImplementation>,
     dynamic: Option<RawImplementation>,
     membership: Option<RawImplementation>,
+    claude_code: Option<RawClaudeCode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawClaudeCode {
+    command: Option<String>,
+    model: Option<String>,
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -240,8 +278,18 @@ impl Config {
                 timeout: Duration::from_millis(raw.externals.timeout_ms),
                 review_timeout: Duration::from_millis(raw.externals.review_timeout_ms),
                 max_body_bytes: raw.externals.max_body_bytes,
-                authorities: resolve_implementations("authorities", raw.externals.authorities, &lookup)?,
-                sanitizers: resolve_implementations("sanitizers", raw.externals.sanitizers, &lookup)?,
+                authorities: resolve_implementations(
+                    "authorities",
+                    raw.externals.authorities,
+                    &lookup,
+                    crate::builtins::valid_implementation_name,
+                )?,
+                sanitizers: resolve_implementations(
+                    "sanitizers",
+                    raw.externals.sanitizers,
+                    &lookup,
+                    crate::builtins::valid_implementation_name,
+                )?,
                 casts: resolve_endpoints("casts", raw.externals.casts, &lookup)?,
                 dynamic: raw
                     .externals
@@ -259,6 +307,7 @@ impl Config {
                         resolve_endpoint("membership", "membership".to_string(), raw, &lookup)
                     })
                     .transpose()?,
+                claude_code: resolve_claude_code(raw.externals.claude_code)?,
             },
         })
     }
@@ -268,49 +317,87 @@ fn resolve_implementations(
     section: &'static str,
     raw: BTreeMap<String, RawImplementation>,
     lookup: &impl Fn(&str) -> Option<String>,
+    valid_builtin: fn(&str) -> bool,
 ) -> Result<BTreeMap<String, Implementation>, ConfigError> {
     raw.into_iter()
         .map(|(name, entry)| {
-            let RawImplementation {
-                url,
-                token_env,
-                builtin,
-            } = entry;
-            let implementation = match (url, builtin) {
-                (Some(url), None) => {
-                    let endpoint = RawEndpoint { url, token_env };
-                    Implementation::Resolver(resolve_endpoint(section, name.clone(), endpoint, lookup)?)
-                }
-                (None, Some(builtin)) => {
-                    if token_env.is_some() {
-                        return Err(ConfigError::ImplementationChoice {
-                            section,
-                            name: name.clone(),
-                        });
-                    }
-                    if !crate::builtins::valid_implementation_name(&builtin) {
-                        return Err(ConfigError::InvalidBuiltinName {
-                            section,
-                            name: name.clone(),
-                            builtin,
-                        });
-                    }
-                    Implementation::Builtin(builtin)
-                }
-                _ => {
-                    return Err(ConfigError::ImplementationChoice {
-                        section,
-                        name: name.clone(),
-                    });
-                }
-            };
+            let implementation = resolve_implementation(section, &name, entry, lookup, valid_builtin)?;
             Ok((name, implementation))
         })
         .collect()
 }
 
+/// One entry's implementation choice: exactly one of `url` (with an optional token) or a
+/// `builtin` naming an implementation the section accepts.
+fn resolve_implementation(
+    section: &'static str,
+    name: &str,
+    entry: RawImplementation,
+    lookup: &impl Fn(&str) -> Option<String>,
+    valid_builtin: impl Fn(&str) -> bool,
+) -> Result<Implementation, ConfigError> {
+    let RawImplementation {
+        url,
+        token_env,
+        builtin,
+    } = entry;
+    match (url, builtin) {
+        (Some(url), None) => {
+            let endpoint = RawEndpoint { url, token_env };
+            Ok(Implementation::Resolver(resolve_endpoint(
+                section,
+                name.to_string(),
+                endpoint,
+                lookup,
+            )?))
+        }
+        (None, Some(builtin)) => {
+            if token_env.is_some() {
+                return Err(ConfigError::ImplementationChoice {
+                    section,
+                    name: name.to_string(),
+                });
+            }
+            if !valid_builtin(&builtin) {
+                return Err(ConfigError::InvalidBuiltinName {
+                    section,
+                    name: name.to_string(),
+                    builtin,
+                });
+            }
+            Ok(Implementation::Builtin(builtin))
+        }
+        _ => Err(ConfigError::ImplementationChoice {
+            section,
+            name: name.to_string(),
+        }),
+    }
+}
+
 /// A section whose every entry is an endpoint. A cast classifies content over the wire or
 /// resolves to a declared constant the engine reads itself, so there is no builtin to name.
+/// The `[externals.claude_code]` table with its defaults filled: bare `claude` on `PATH`,
+/// the `sonnet` alias, and the shared machine-consult timeout. A zero `timeout_ms` is a
+/// refusal like the shared one.
+fn resolve_claude_code(raw: Option<RawClaudeCode>) -> Result<ClaudeCode, ConfigError> {
+    let raw = raw.unwrap_or(RawClaudeCode {
+        command: None,
+        model: None,
+        timeout_ms: None,
+    });
+    if raw.timeout_ms == Some(0) {
+        return Err(ConfigError::ZeroTimeout);
+    }
+    Ok(ClaudeCode {
+        command: raw
+            .command
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| "claude".into()),
+        model: raw.model.unwrap_or_else(|| "sonnet".to_string()),
+        timeout: raw.timeout_ms.map(Duration::from_millis),
+    })
+}
+
 fn resolve_endpoints(
     section: &'static str,
     raw: BTreeMap<String, RawImplementation>,
@@ -510,8 +597,8 @@ mod tests {
         })
         .expect("the fixture with a set secret validates");
         assert!(!format!("{:?}", config.externals).contains("sekret"));
-        let dynamic = config.externals.dynamic.expect("the dynamic endpoint is set");
-        let token = dynamic.token.expect("the token resolved");
+        let dynamic = config.externals.dynamic.expect("the shared dynamic endpoint is set");
+        let token = dynamic.token.as_ref().expect("the token resolved");
         assert_eq!(token.reveal(), "sekret");
         assert_eq!(format!("{token:?}"), "Token(<redacted>)");
     }
@@ -523,7 +610,34 @@ mod tests {
     }
 
     #[test]
-    fn a_builtin_entry_loads_for_authorities_and_sanitizers_only() {
+    fn the_claude_code_table_fills_its_defaults_and_refuses_junk() {
+        let config = parse(MINIMAL).expect("no claude table is the default");
+        assert_eq!(config.externals.claude_code.command, std::path::PathBuf::from("claude"));
+        assert_eq!(config.externals.claude_code.model, "sonnet");
+        assert_eq!(config.externals.claude_code.timeout, None);
+
+        let text = format!(
+            "{MINIMAL}\n[externals.claude_code]\ncommand = \"/opt/claude/bin/claude\"\nmodel = \"pinned\"\ntimeout_ms = 60000\n"
+        );
+        let config = parse(&text).expect("the claude table validates");
+        assert_eq!(
+            config.externals.claude_code.command,
+            std::path::PathBuf::from("/opt/claude/bin/claude")
+        );
+        assert_eq!(config.externals.claude_code.model, "pinned");
+        assert_eq!(config.externals.claude_code.timeout, Some(Duration::from_secs(60)));
+
+        let text = format!("{MINIMAL}\n[externals.claude_code]\ntimeout_ms = 0\n");
+        assert!(matches!(parse(&text), Err(ConfigError::ZeroTimeout)));
+        let text = format!("{MINIMAL}\n[externals.claude_code]\nurl = \"https://x.example\"\n");
+        assert!(
+            toml::from_str::<RawConfig>(&text).is_err(),
+            "a typo cannot silently weaken the deployment"
+        );
+    }
+
+    #[test]
+    fn builtin_entries_load_only_where_supported() {
         let text = format!(
             "{MINIMAL}\n[externals.authorities.auto]\nbuiltin = \"approve\"\n\n[externals.sanitizers.pii]\nbuiltin = \"redact-email\"\n"
         );
@@ -537,7 +651,7 @@ mod tests {
             Some(Implementation::Builtin(name)) if name == "redact-email",
         ));
 
-        let text = format!("{MINIMAL}\n[externals.dynamic]\nbuiltin = \"approve\"\n");
+        let text = format!("{MINIMAL}\n[externals.dynamic]\nbuiltin = \"claude-code\"\n");
         assert!(matches!(parse(&text), Err(ConfigError::BuiltinNotAllowed { .. })));
         let text = format!("{MINIMAL}\n[externals.membership]\nbuiltin = \"approve\"\n");
         assert!(matches!(parse(&text), Err(ConfigError::BuiltinNotAllowed { .. })));

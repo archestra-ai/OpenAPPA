@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::basis::SubjectKey;
 use crate::candidate::{DerivedCandidate, SanitizerLineage};
-use crate::contract::PinnedDynamicResolution;
+use crate::contract::PinnedToolResolution;
 use crate::fact::{
     BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ForkSnapshot, ObservedResult, ReturnPolicy,
 };
@@ -470,7 +470,7 @@ impl Projection {
                     arguments,
                     receiving,
                     proposed_effects,
-                    dynamic_resolutions,
+                    tool_resolutions,
                     memberships,
                     subject,
                     resolutions,
@@ -479,7 +479,7 @@ impl Projection {
                     dispatch_calls.insert(
                         dispatch.clone(),
                         ResolvedCall::new(tool.clone(), arguments.clone())
-                            .with_dynamic_resolutions(dynamic_resolutions.clone())
+                            .with_tool_resolutions(tool_resolutions.clone())
                             .with_memberships(memberships.clone()),
                     );
                     receiving_bounds.insert(dispatch.clone(), receiving.clone());
@@ -829,13 +829,13 @@ pub struct Views<'a> {
 }
 
 impl Views<'_> {
-    /// The dynamic answers a dispatch pinned, read off the canonical call the opening
+    /// The resolver answers a dispatch pinned, read off the canonical call the opening
     /// recorded — the one representation the validator held that record to.
-    pub(crate) fn dynamic_resolutions(&self, dispatch: &DispatchId) -> Option<&[PinnedDynamicResolution]> {
+    pub(crate) fn tool_resolutions(&self, dispatch: &DispatchId) -> Option<&[PinnedToolResolution]> {
         self.projection
             .dispatch_calls
             .get(dispatch)
-            .map(ResolvedCall::dynamic_resolutions)
+            .map(ResolvedCall::tool_resolutions)
     }
 
     pub(crate) fn trajectory(&self) -> &TrajectoryId {
@@ -1446,7 +1446,7 @@ mod tests {
                 proposed_label: EstablishedLabel::top(),
                 receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
-                dynamic_resolutions: Vec::new(),
+                tool_resolutions: Vec::new(),
                 memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj("a")),
                 resolutions: vec![],
@@ -1476,7 +1476,7 @@ mod tests {
                 proposed_label: EstablishedLabel::top(),
                 receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
-                dynamic_resolutions: Vec::new(),
+                tool_resolutions: Vec::new(),
                 memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj("a")),
                 resolutions: vec![],
@@ -1505,7 +1505,7 @@ mod tests {
                 proposed_label: EstablishedLabel::top(),
                 receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
-                dynamic_resolutions: Vec::new(),
+                tool_resolutions: Vec::new(),
                 memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj("a")),
                 resolutions: vec![],
@@ -1898,7 +1898,7 @@ mod tests {
                 proposed_label: EstablishedLabel::top(),
                 receiving: EstablishedLabel::top(),
                 proposed_effects: EffectSet::new([]).unwrap(),
-                dynamic_resolutions: Vec::new(),
+                tool_resolutions: Vec::new(),
                 memberships: Vec::new(),
                 subject: crate::basis::fixture_subject(&traj("a")),
                 resolutions: vec![],

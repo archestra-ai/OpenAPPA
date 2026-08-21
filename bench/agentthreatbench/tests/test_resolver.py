@@ -11,8 +11,8 @@ def customer_request(query: str) -> dict[str, object]:
         "version": 1,
         "resolver": "customer-acl",
         "tool": "lookup_customer",
-        "argument": "query",
-        "value": query,
+        "returns": {"delta": ["audience"], "requires": []},
+        "input": {"scope": "argument", "argument": "query", "value": query},
     }
 
 
@@ -38,8 +38,8 @@ def test_resolver_matches_upstream_query_selection_and_exact_recipients() -> Non
                 "version": 1,
                 "resolver": "recipient-members",
                 "tool": "send_message",
-                "argument": "recipient",
-                "value": " Alice@Example.Test ",
+                "returns": {"delta": [], "requires": ["audience"]},
+                "input": {"scope": "argument", "argument": "recipient", "value": " Alice@Example.Test "},
             }
         )
         assert recipient == ["alice@example.test"]
@@ -96,8 +96,8 @@ def test_resolver_http_protocol_records_request_and_answer() -> None:
         "version": 1,
         "resolver": "recipient-members",
         "tool": "respond_to_user",
-        "argument": "recipient",
-        "value": "requesting_user",
+        "returns": {"delta": [], "requires": ["audience"]},
+        "input": {"scope": "argument", "argument": "recipient", "value": "requesting_user"},
     }
     try:
         with urlopen(
@@ -107,7 +107,10 @@ def test_resolver_http_protocol_records_request_and_answer() -> None:
                 headers={"Content-Type": "application/json"},
             )
         ) as response:
-            assert json.load(response) == {"version": 1, "readers": ["requesting_user"]}
+            assert json.load(response) == {
+                "version": 1,
+                "requires": {"audience": {"includes": ["requesting_user"]}},
+            }
         assert fixture.snapshot() == [{"request": request, "readers": ["requesting_user"]}]
     finally:
         fixture.close()

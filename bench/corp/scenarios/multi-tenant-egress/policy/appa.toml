@@ -24,7 +24,8 @@ delta = { audience = { exactly = ["Client_Alpha"] } }
 [[policy.tool]]
 name = "read_vendor"
 parameters = { type = "object", properties = { file = { type = "string" } }, required = ["file"], additionalProperties = false }
-delta = { audience = { resolver = "tenant-record-readers", argument = "file" } }
+resolvers = [{ resolver = "tenant-record-readers", argument = "file", returns = { delta = ["audience"] } }]
+delta = {}
 [[policy.tool]]
 name = "create_vendor"
 parameters = { type = "object", properties = { file = { type = "string" }, content = { type = "string" } }, required = ["file", "content"], additionalProperties = false }
@@ -32,7 +33,7 @@ delta = {}
 [[policy.tool]]
 name = "send_email"
 parameters = { type = "object", properties = { to = { type = "string" }, subject = { type = "string" }, body = { type = "string" } }, required = ["to", "subject", "body"], additionalProperties = false }
-requires = { audience = { includes = { resolver = "mailbox-tenant-readers", argument = "to" } } }
+resolvers = [{ resolver = "mailbox-tenant-readers", argument = "to", returns = { requires = ["audience"] } }]
 effects = ["egress"]
 delta = {}
 
@@ -50,8 +51,7 @@ confined_results = ["search_vendor", "read_vendor", "create_vendor", "send_email
 
 # --- registered externals ---------------------------------------------------
 #
-# Implementations bind here, never in the policy (`CFG-15`, `IMP-3`). Resolver
-# URLs are loopback placeholders: the bench runner binds its fixture server on
+# One HTTP implementation serves every resolver name. Its URL is a loopback placeholder: the bench runner binds its fixture server on
 # an ephemeral port and rewrites them before opening the runtime, since
 # `Config::load` refuses non-loopback http.
 
@@ -59,6 +59,5 @@ confined_results = ["search_vendor", "read_vendor", "create_vendor", "send_email
 timeout_ms = 5000
 max_body_bytes = 65536
 
-# One endpoint serves every named dynamic resolver; the request carries the name.
 [externals.dynamic]
 url = "http://127.0.0.1:0/dynamic-resolver"

@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::candidate::CallStage;
-use crate::contract::{AudienceRequirement, DynamicAudienceBinding, HistoryRequirement, RecipientSpec, ToolContract};
+use crate::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec, ToolContract, ToolResolverBinding};
 use crate::fact::EffectKind;
 use crate::groups::Expansions;
 use crate::label::{Adequacy, Audience, Dimension, EstablishedLabel, PartialLabel, ReaderId, Trust};
@@ -91,13 +91,11 @@ pub(crate) fn committed_label_for_call(
     expansions: &Expansions,
 ) -> PartialLabel {
     let mut committed = committed_label(contract, current, expansions);
-    if let Some(crate::contract::Delta {
-        audience: Some(crate::contract::AudienceDelta::Dynamic(binding)),
-        ..
-    }) = &contract.delta
-        && let Some(audience) = call.dynamic_resolution(binding)
-    {
-        committed.narrow_bound(&EstablishedLabel::new(Trust::new(u8::MAX), audience.clone()));
+    for resolution in call.tool_resolutions() {
+        committed.narrow_bound(&EstablishedLabel::new(
+            resolution.trust().unwrap_or(Trust::new(u8::MAX)),
+            resolution.audience().cloned().unwrap_or(Audience::Public),
+        ));
     }
     committed
 }
@@ -161,7 +159,11 @@ pub(crate) fn evaluate_state(
     let mut gaps = Vec::new();
     label_gaps(contract, &committed, call, stage, expansions, &mut gaps);
     history_gaps(contract, has_committed, has_reserved, &mut gaps);
-    for mark in &contract.requires.attention {
+    for mark in contract.requires.attention.iter().chain(
+        call.tool_resolutions()
+            .iter()
+            .flat_map(|resolution| resolution.attention()),
+    ) {
         gaps.push(Gap::Attention(mark.clone()));
     }
     let mut seen = Vec::with_capacity(gaps.len());
@@ -186,9 +188,7 @@ fn consumed_unknown(
     expansions: &Expansions,
 ) -> Vec<Dimension> {
     let mut dims = Vec::new();
-    if let Some(floor) = contract.requires.label.trust_floor
-        && committed.meets_floor(floor) == Adequacy::Unresolved
-    {
+    if effective_trust_floors(contract, call).any(|floor| committed.meets_floor(floor) == Adequacy::Unresolved) {
         dims.push(Dimension::Trust);
     }
     let audience_unresolved = contract
@@ -202,11 +202,39 @@ fn consumed_unknown(
                 None => !released_established(stage, committed),
             },
             AudienceRequirement::Cap(cap) => committed.within_cap(&cap.resolve(expansions)) == Adequacy::Unresolved,
+        })
+        || pinned_audience_requirements(call).any(|required| {
+            required
+                .includes
+                .as_ref()
+                .is_some_and(|recipients| released_covers(stage, committed, recipients) == Adequacy::Unresolved)
+                || required
+                    .cap
+                    .as_ref()
+                    .is_some_and(|cap| committed.within_cap(cap) == Adequacy::Unresolved)
         });
     if audience_unresolved {
         dims.push(Dimension::Audience);
     }
     dims
+}
+
+/// Every trust floor this call must meet: the contract's static floor, then each floor a
+/// tool-level resolver pinned to the call — one stream, so the static and dynamic halves
+/// cannot drift on how a floor is judged.
+fn effective_trust_floors<'a>(contract: &'a ToolContract, call: &'a ResolvedCall) -> impl Iterator<Item = Trust> + 'a {
+    contract.requires.label.trust_floor.into_iter().chain(
+        call.tool_resolutions()
+            .iter()
+            .filter_map(|resolution| resolution.required_trust()),
+    )
+}
+
+/// Every audience requirement pinned to the call by a tool-level resolver.
+fn pinned_audience_requirements(call: &ResolvedCall) -> impl Iterator<Item = &crate::contract::RequiredAudience> {
+    call.tool_resolutions()
+        .iter()
+        .filter_map(|resolution| resolution.required_audience())
 }
 
 /// The block's `unestablished` slot: every source unresolved on a consumed dimension,
@@ -248,13 +276,13 @@ fn label_gaps(
     expansions: &Expansions,
     gaps: &mut Vec<Gap>,
 ) {
-    if let Some(floor) = contract.requires.label.trust_floor
-        && committed.meets_floor(floor) == Adequacy::Fails
-    {
-        gaps.push(Gap::TrustFloor {
-            required: floor,
-            actual: committed.bound().trust,
-        });
+    for floor in effective_trust_floors(contract, call) {
+        if committed.meets_floor(floor) == Adequacy::Fails {
+            gaps.push(Gap::TrustFloor {
+                required: floor,
+                actual: committed.bound().trust,
+            });
+        }
     }
     for requirement in &contract.requires.label.audience {
         match requirement {
@@ -272,13 +300,6 @@ fn label_gaps(
                             });
                         }
                     }
-                    RecipientSpec::Dynamic(binding) => {
-                        if released_established(stage, committed) {
-                            gaps.push(Gap::Includes {
-                                recipients: unresolved_recipient(&binding.argument),
-                            });
-                        }
-                    }
                     RecipientSpec::Static(_) => {
                         unreachable!("a static includes spec always resolves to its declared audience")
                     }
@@ -290,6 +311,20 @@ fn label_gaps(
                     gaps.push(Gap::Cap { cap });
                 }
             }
+        }
+    }
+    for required in pinned_audience_requirements(call) {
+        if let Some(recipients) = &required.includes
+            && released_covers(stage, committed, recipients) == Adequacy::Fails
+        {
+            gaps.push(Gap::Includes {
+                recipients: recipients.clone(),
+            });
+        }
+        if let Some(cap) = &required.cap
+            && committed.within_cap(cap) == Adequacy::Fails
+        {
+            gaps.push(Gap::Cap { cap: cap.clone() });
         }
     }
 }
@@ -326,7 +361,6 @@ fn resolve_recipients(spec: &RecipientSpec, call: &ResolvedCall, expansions: &Ex
                 .membership(key)
                 .map(|membership| Audience::restricted(membership.readers().iter().cloned())),
         },
-        RecipientSpec::Dynamic(binding) => call.dynamic_resolution(binding).cloned(),
     }
 }
 
@@ -366,61 +400,49 @@ pub fn group_reads(contract: &ToolContract, call: &ResolvedCall) -> Vec<GroupRea
         .collect()
 }
 
-/// Every dynamic binding this call's contract spells, in declaration order — the
-/// delta's binding first where it has one, then the `includes` requirements'. These are the
-/// answers the call must carry before it can be checked; the runtime resolves them and re-submits
-/// the same call, and no answer means no pin, never a pin that carries none.
-pub fn dynamic_reads(contract: &ToolContract) -> Vec<DynamicAudienceBinding> {
-    let delta = match contract.delta.as_ref().and_then(|delta| delta.audience.as_ref()) {
-        Some(crate::contract::AudienceDelta::Dynamic(binding)) => Some(binding.clone()),
-        _ => None,
-    };
-    let required = contract
-        .requires
-        .label
-        .audience
-        .iter()
-        .filter_map(|requirement| match requirement {
-            AudienceRequirement::Includes(RecipientSpec::Dynamic(binding)) => Some(binding.clone()),
-            _ => None,
-        });
-    // One read per binding, however many requirements spell it: a resolver is asked once per call,
-    // and a repeated ask would be a second answer the pin set cannot hold.
-    let mut reads: Vec<DynamicAudienceBinding> = Vec::new();
-    for binding in delta.into_iter().chain(required) {
-        if !reads.contains(&binding) {
-            reads.push(binding);
-        }
-    }
-    reads
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum DynamicRefusal {
-    #[error("the call names dynamic bindings its check needs answers for")]
-    Needed(Vec<DynamicAudienceBinding>),
-    #[error("the pinned dynamic answer for argument {0} is not bound to this call")]
+pub(crate) enum ToolResolutionRefusal {
+    #[error("the call needs tool-level resolver answers")]
+    Needed(Vec<ToolResolverBinding>),
+    #[error("the pinned tool-level answer from resolver {0} is not bound to this call")]
     Foreign(String),
+    #[error("the pinned tool-level answer from resolver {0} contains a value outside policy")]
+    OutsidePolicy(String),
 }
 
-/// The pinned dynamic answers a checked call may carry are exactly the ones its contract spells:
-/// one per binding, nothing else. The live boundary and the replay validator
-/// both run this, so a log cannot hold pins the deciding path refused — and every later reader of
-/// a checked call, `output_label_for_call` included, finds the answer it needs.
-pub(crate) fn validate_dynamic_resolutions(contract: &ToolContract, call: &ResolvedCall) -> Result<(), DynamicRefusal> {
-    let reads = dynamic_reads(contract);
-    let mut seen: Vec<&DynamicAudienceBinding> = Vec::new();
-    for pinned in call.dynamic_resolutions() {
+pub(crate) fn validate_tool_resolutions(
+    registry: &crate::registry::Registry,
+    contract: &ToolContract,
+    call: &ResolvedCall,
+) -> Result<(), ToolResolutionRefusal> {
+    let reads = &contract.resolvers;
+    let mut seen: Vec<&ToolResolverBinding> = Vec::new();
+    for pinned in call.tool_resolutions() {
         let binding = pinned.binding();
         if !reads.contains(binding) || seen.contains(&binding) {
-            return Err(DynamicRefusal::Foreign(binding.argument.clone()));
+            return Err(ToolResolutionRefusal::Foreign(binding.resolver.as_str().to_string()));
+        }
+        if pinned
+            .trust()
+            .into_iter()
+            .chain(pinned.required_trust())
+            .any(|trust| !registry.trust_chain().contains_rank(trust))
+            || pinned.attention().iter().any(|mark| !registry.attends(mark))
+        {
+            return Err(ToolResolutionRefusal::OutsidePolicy(
+                binding.resolver.as_str().to_string(),
+            ));
         }
         seen.push(binding);
     }
-    let missing: Vec<DynamicAudienceBinding> = reads.into_iter().filter(|binding| !seen.contains(&binding)).collect();
+    let missing: Vec<ToolResolverBinding> = reads
+        .iter()
+        .filter(|binding| !seen.contains(binding))
+        .cloned()
+        .collect();
     match missing.is_empty() {
         true => Ok(()),
-        false => Err(DynamicRefusal::Needed(missing)),
+        false => Err(ToolResolutionRefusal::Needed(missing)),
     }
 }
 
@@ -492,4 +514,239 @@ pub(crate) fn pins_agree(
 
 fn unresolved_recipient(key: &str) -> Audience {
     Audience::restricted([ReaderId::new(format!("<unresolved:{key}>"))])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::authority::{Authority, Mandate, Scope};
+    use crate::candidate::CallStage;
+    use crate::contract::{PinnedToolResolution, RequiredAudience, ResolverReturn, ToolResolverBinding};
+    use crate::fact::EffectSet;
+    use crate::label::{Dim, Label};
+    use crate::names::{AuthorityName, DynamicResolverName, MarkName};
+    use crate::params::ToolParameters;
+    use crate::registry::{Registry, RegistryConfig, TrustChain};
+    use crate::value::ToolName;
+
+    #[test]
+    fn tool_resolution_narrows_both_dimensions_and_adds_fresh_attention() {
+        let binding = ToolResolverBinding {
+            resolver: DynamicResolverName::new("classifier"),
+            argument: None,
+            returns: [
+                ResolverReturn::Trust,
+                ResolverReturn::Audience,
+                ResolverReturn::Attention,
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let contract = ToolContract {
+            name: ToolName::new("lookup"),
+            tags: vec![],
+            parameters: ToolParameters::open(),
+            resolvers: vec![binding.clone()],
+            delta: None,
+            emits: EffectSet::default(),
+            requires: crate::contract::Requires {
+                attention: vec![MarkName::new("static-review")],
+                ..Default::default()
+            },
+        };
+        assert_eq!(
+            contract.output_label(&Expansions::default()),
+            Label::new(Dim::Unknown, Dim::Unknown)
+        );
+        let call = ResolvedCall::new(
+            ToolName::new("lookup"),
+            crate::params::CanonicalArguments::from_value(&serde_json::json!({"id": 7}), &ToolParameters::open())
+                .expect("arguments compile"),
+        )
+        .with_tool_resolutions(vec![
+            PinnedToolResolution::from_answer(
+                binding,
+                Some(Trust::new(0)),
+                Some(Audience::restricted([ReaderId::new("support")])),
+                None,
+                None,
+                Some(vec![MarkName::new("dynamic-review")]),
+            )
+            .expect("the declared fields pin"),
+        ]);
+        let current = PartialLabel::established(EstablishedLabel::top());
+        let outcome = evaluate_state(
+            &contract,
+            &current,
+            &|_| false,
+            &|_| false,
+            &call,
+            &CallStage::default(),
+            &Expansions::default(),
+        );
+        assert_eq!(
+            outcome.narrowing.expect("both resolved fields narrow").to,
+            EstablishedLabel::new(Trust::new(0), Audience::restricted([ReaderId::new("support")]))
+        );
+        assert_eq!(outcome.requirement_gaps.len(), 2);
+        assert!(
+            outcome
+                .requirement_gaps
+                .contains(&Gap::Attention(MarkName::new("dynamic-review")))
+        );
+        assert!(
+            outcome
+                .requirement_gaps
+                .contains(&Gap::Attention(MarkName::new("static-review")))
+        );
+    }
+
+    #[test]
+    fn tool_resolution_adds_dynamic_trust_audience_and_attention_requirements() {
+        let binding = ToolResolverBinding {
+            resolver: DynamicResolverName::new("classifier"),
+            argument: None,
+            returns: [
+                ResolverReturn::Trust,
+                ResolverReturn::Audience,
+                ResolverReturn::RequiredTrust,
+                ResolverReturn::RequiredAudience,
+                ResolverReturn::Attention,
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let contract = ToolContract {
+            name: ToolName::new("lookup"),
+            tags: vec![],
+            parameters: ToolParameters::open(),
+            resolvers: vec![binding.clone()],
+            delta: None,
+            emits: EffectSet::default(),
+            requires: Default::default(),
+        };
+        let call = ResolvedCall::new(
+            ToolName::new("lookup"),
+            crate::params::CanonicalArguments::from_value(&serde_json::json!({"id": 7}), &ToolParameters::open())
+                .expect("arguments compile"),
+        )
+        .with_tool_resolutions(vec![
+            PinnedToolResolution::from_answer(
+                binding,
+                Some(Trust::new(0)),
+                Some(Audience::restricted([ReaderId::new("support")])),
+                Some(Trust::new(1)),
+                Some(RequiredAudience {
+                    includes: Some(Audience::restricted([ReaderId::new("audit")])),
+                    cap: Some(Audience::restricted([ReaderId::new("audit")])),
+                }),
+                Some(vec![MarkName::new("operator-signoff")]),
+            )
+            .expect("the scoped answer pins"),
+        ]);
+        let outcome = evaluate_state(
+            &contract,
+            &PartialLabel::established(EstablishedLabel::top()),
+            &|_| false,
+            &|_| false,
+            &call,
+            &CallStage::default(),
+            &Expansions::default(),
+        );
+        assert!(outcome.requirement_gaps.contains(&Gap::TrustFloor {
+            required: Trust::new(1),
+            actual: Trust::new(0),
+        }));
+        assert!(outcome.requirement_gaps.contains(&Gap::Includes {
+            recipients: Audience::restricted([ReaderId::new("audit")]),
+        }));
+        assert!(outcome.requirement_gaps.contains(&Gap::Cap {
+            cap: Audience::restricted([ReaderId::new("audit")]),
+        }));
+        assert!(
+            outcome
+                .requirement_gaps
+                .contains(&Gap::Attention(MarkName::new("operator-signoff")))
+        );
+    }
+
+    #[test]
+    fn tool_resolution_values_must_come_from_the_policy() {
+        let binding = ToolResolverBinding {
+            resolver: DynamicResolverName::new("classifier"),
+            argument: None,
+            returns: [
+                ResolverReturn::Trust,
+                ResolverReturn::RequiredTrust,
+                ResolverReturn::Attention,
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let contract = ToolContract {
+            name: ToolName::new("lookup"),
+            tags: vec![],
+            parameters: ToolParameters::open(),
+            resolvers: vec![binding.clone()],
+            delta: None,
+            emits: EffectSet::default(),
+            requires: Default::default(),
+        };
+        let registry = Registry::build_covered(RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: vec![contract],
+            authorities: vec![Authority {
+                name: AuthorityName::new("operator"),
+                mandate: Mandate {
+                    trust_ceiling: Some(Trust::new(1)),
+                    attends: vec![MarkName::new("operator-signoff")],
+                    ..Mandate::default()
+                },
+                scope: Scope::default(),
+                hint: None,
+            }],
+            sanitizers: vec![],
+            casts: vec![],
+            membership: None,
+        })
+        .expect("the policy loads");
+        let contract = registry.tool(&ToolName::new("lookup")).expect("the tool is registered");
+        let call = |trust, required_trust, attention: &str| {
+            ResolvedCall::new(
+                ToolName::new("lookup"),
+                crate::params::CanonicalArguments::from_value(&serde_json::json!({}), &ToolParameters::open())
+                    .expect("arguments compile"),
+            )
+            .with_tool_resolutions(vec![
+                PinnedToolResolution::from_answer(
+                    binding.clone(),
+                    Some(trust),
+                    None,
+                    Some(required_trust),
+                    None,
+                    Some(vec![MarkName::new(attention)]),
+                )
+                .expect("the declared fields pin"),
+            ])
+        };
+
+        assert!(
+            validate_tool_resolutions(
+                &registry,
+                contract,
+                &call(Trust::new(0), Trust::new(1), "operator-signoff"),
+            )
+            .is_ok()
+        );
+        for invalid in [
+            call(Trust::new(0), Trust::new(1), "invented-review"),
+            call(Trust::new(2), Trust::new(1), "operator-signoff"),
+            call(Trust::new(0), Trust::new(2), "operator-signoff"),
+        ] {
+            assert!(matches!(
+                validate_tool_resolutions(&registry, contract, &invalid),
+                Err(ToolResolutionRefusal::OutsidePolicy(resolver)) if resolver == "classifier"
+            ));
+        }
+    }
 }
