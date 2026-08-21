@@ -92,8 +92,7 @@ const TERMS = {
   may_add:
     "The audience cover ceiling of an authority: the readers its rulings may cover.",
   can_waive: "The effect kinds an authority ruling may waive for one dispatch.",
-  attends:
-    "The attention marks an authority's rulings satisfy. Tool-level dynamic resolvers can demand only marks present in at least one authority mandate.",
+  attends: "The attention marks an authority's rulings satisfy.",
   scope:
     "The tags a registered component (authority, cast, or sanitizer) has jurisdiction over.",
   attention: "Named marks demanding a fresh ruling on every dispatch.",
