@@ -335,12 +335,14 @@ def test_command_routes_staged_policy_by_typed_target(tmp_path: Path) -> None:
         assert command[command.index("--status-file") + 1] == str((episode_dir / "agent-status.json").resolve())
         assert "--profile" not in command
 
-    for name in ("fides", "fides-open"):
+    for name in ("fides-middleware", "fides-native", "fides-open"):
         command = command_for(AGENTS[name], policy_path=policy_path, **arguments)
         assert command[command.index("--profile") + 1] == str(policy_path.resolve())
         assert "--policy" not in command
 
-    assert "--profile" not in command_for(AGENTS["fides"], policy_path=None, **arguments)
+    assert "--no-auto-hide" in command_for(AGENTS["fides-middleware"], policy_path=policy_path, **arguments)
+    assert "--no-auto-hide" not in command_for(AGENTS["fides-native"], policy_path=policy_path, **arguments)
+    assert "--profile" not in command_for(AGENTS["fides-native"], policy_path=None, **arguments)
     with pytest.raises(ValueError, match="staged policy"):
         command_for(AGENTS["appa"], policy_path=None, **arguments)
 
@@ -362,7 +364,8 @@ def test_scenario_policies_are_staged_before_launch(tmp_path: Path) -> None:
     agents = [
         Agent("guarded", script, PolicyTarget.APPA_GUARDED, policy_file=AGENTS["appa"].policy_file),
         Agent("open", script, PolicyTarget.APPA_OPEN, policy_file=AGENTS["appa-open"].policy_file),
-        Agent("fides", script, PolicyTarget.FIDES),
+        Agent("fides-middleware", script, PolicyTarget.FIDES, extra_args=("--no-auto-hide",)),
+        Agent("fides-native", script, PolicyTarget.FIDES),
         Agent("fides-open", script, PolicyTarget.FIDES, extra_args=("--no-defense",)),
     ]
 
@@ -383,7 +386,7 @@ def test_scenario_policies_are_staged_before_launch(tmp_path: Path) -> None:
     assert open_artifact.read_text() == prune_policy(AGENTS["appa-open"].policy_file.read_text(), scenario.systems)
     assert "scenario" not in tomllib.loads(open_artifact.read_text())["policy"]["trust_chain"]
 
-    for name in ("fides", "fides-open"):
+    for name in ("fides-middleware", "fides-native", "fides-open"):
         episode_dir = tmp_path / f"episode-{name}"
         artifact = episode_dir / "fides.json"
         assert artifact.read_bytes() == scenario.policy_profile.fides.read_bytes()

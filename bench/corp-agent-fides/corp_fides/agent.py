@@ -76,6 +76,7 @@ def build_agent(
     tools: list[Any],
     sink_root: Path,
     defend: bool = True,
+    auto_hide_untrusted: bool = True,
     quarantine_model: str | None = None,
     system_prompt_addendum: str = "",
 ) -> BuiltAgent:
@@ -96,15 +97,17 @@ def build_agent(
         agent = Agent(client, instructions=instructions, name="corp_assistant_fides", tools=tools)
         return BuiltAgent(agent=agent, config=None, sink_root=sink_root)
 
-    # A second, tool-less client processes untrusted content in isolation.
-    quarantine = make_chat_client(quarantine_model or model, api_key)
+    # Native FIDES uses a second, tool-less client to process hidden untrusted
+    # content. The middleware-only comparison deliberately keeps the same label
+    # tracking and policy enforcement while exposing the raw result.
+    quarantine = make_chat_client(quarantine_model or model, api_key) if auto_hide_untrusted else None
     allow_untrusted_tools = {
         candidate.name
         for candidate in tools
         if (candidate.additional_properties or {}).get("accepts_untrusted") is True
     }
     config = SecureAgentConfig(
-        auto_hide_untrusted=True,
+        auto_hide_untrusted=auto_hide_untrusted,
         allow_untrusted_tools=allow_untrusted_tools,
         block_on_violation=True,
         enable_policy_enforcement=True,

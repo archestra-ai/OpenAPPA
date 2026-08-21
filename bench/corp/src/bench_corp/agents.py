@@ -83,8 +83,18 @@ AGENTS: dict[str, Agent] = {
         policy_target=PolicyTarget.APPA_OPEN,
         policy_file=POLICIES_DIR / "open.toml",
     ),
-    "fides": Agent(
-        name="fides", executable=FIDES_BIN, policy_target=PolicyTarget.FIDES, mcp_server=CORP_SYSTEMS_BIN
+    "fides-middleware": Agent(
+        name="fides-middleware",
+        executable=FIDES_BIN,
+        policy_target=PolicyTarget.FIDES,
+        mcp_server=CORP_SYSTEMS_BIN,
+        extra_args=("--no-auto-hide",),
+    ),
+    "fides-native": Agent(
+        name="fides-native",
+        executable=FIDES_BIN,
+        policy_target=PolicyTarget.FIDES,
+        mcp_server=CORP_SYSTEMS_BIN,
     ),
     "fides-open": Agent(
         name="fides-open",

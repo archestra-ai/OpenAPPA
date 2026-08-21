@@ -126,6 +126,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_false",
         help="Disable FIDES — the unmediated contrast (the leak).",
     )
+    parser.add_argument(
+        "--no-auto-hide",
+        dest="auto_hide_untrusted",
+        action="store_false",
+        help="Keep FIDES label tracking and policy enforcement, but expose untrusted results to the main model.",
+    )
     parser.add_argument("--model", default=os.environ.get("FIDES_DEMO_MODEL", "anthropic/claude-sonnet-5"))
     parser.add_argument("--quarantine-model", default=os.environ.get("FIDES_QUARANTINE_MODEL") or None)
     parser.add_argument("--api-key", default=os.environ.get("OPENROUTER_API_KEY"))
@@ -160,7 +166,12 @@ def main(argv: list[str] | None = None) -> int:
     corpus_root = resolve_corpus_root(args.data_root)
     sink_root = resolve_sink_root(args.sink_root)
     if not args.quiet:
-        state = "FIDES ON" if args.defend else "NO DEFENSE (contrast)"
+        if not args.defend:
+            state = "NO DEFENSE (contrast)"
+        elif args.auto_hide_untrusted:
+            state = "FIDES ON (native auto-hide)"
+        else:
+            state = "FIDES ON (middleware-only)"
         print(
             f"corpus {corpus_root} — sink {sink_root} — model {args.model} — {state}",
             file=sys.stderr,
@@ -183,6 +194,7 @@ def main(argv: list[str] | None = None) -> int:
                 tools=build_tools(client, available, profile=args.profile),
                 sink_root=sink_root,
                 defend=args.defend,
+                auto_hide_untrusted=args.auto_hide_untrusted,
                 quarantine_model=args.quarantine_model,
                 system_prompt_addendum=os.environ.get("APPA_AGENT_PROMPT_ADDENDUM", ""),
             )

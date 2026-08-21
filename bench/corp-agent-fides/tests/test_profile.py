@@ -121,11 +121,24 @@ def test_enforcement_stays_fixed_and_uses_profile_metadata(tmp_path: Path) -> No
         sink_root=tmp_path,
     )
     assert defended.config is not None
+    assert defended.config.label_tracker.auto_hide_untrusted is True
     assert defended.config.enable_policy_enforcement is True
     assert defended.config.policy_enforcer is not None
     assert defended.config.policy_enforcer.block_on_violation is True
     assert "read_hr" not in defended.config.policy_enforcer.allow_untrusted_tools
     assert "send_email" in defended.config.policy_enforcer.allow_untrusted_tools
+
+    middleware_only = build_agent(
+        api_key="unused",
+        model="openai/gpt-4o-mini",
+        tools=tools,
+        sink_root=tmp_path,
+        auto_hide_untrusted=False,
+    )
+    assert middleware_only.config is not None
+    assert middleware_only.config.label_tracker.auto_hide_untrusted is False
+    assert middleware_only.config.enable_policy_enforcement is True
+    assert middleware_only.config.get_quarantine_client() is None
 
     no_defense = build_agent(
         api_key="unused",
