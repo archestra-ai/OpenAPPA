@@ -195,7 +195,7 @@ export function ReaderPing() {
         role="dialog"
         aria-modal="true"
         aria-labelledby="ping-title"
-        aria-describedby="ping-lede"
+        aria-describedby="ping-fine"
       >
         {/* Matches the badge beside the wordmark in the header, so the prompt
             reads as part of the project rather than a bolted-on capture form. */}
@@ -203,11 +203,6 @@ export function ReaderPing() {
         <h2 className="ping-title" id="ping-title">
           Say hello before you read
         </h2>
-        <p className="ping-lede" id="ping-lede">
-          OpenAPPA is in preview and the model is still open for argument. We would love to know who
-          is checking it out.
-        </p>
-
         <form className="ping-form" onSubmit={onSubmit}>
           <label className="ping-label" htmlFor="ping-email">
             Email address
@@ -235,6 +230,15 @@ export function ReaderPing() {
             </button>
           </div>
         </form>
+
+        {/* The promise the route in `app/api/reader-ping/route.ts` keeps: the
+            address is posted to one Slack channel and never written down. It
+            sits under the field, where a reader decides whether to type, and
+            is the dialog's description — there is no other prose. */}
+        <p className="ping-fine" id="ping-fine">
+          Not saved, and not used for a mailing list. Your address is posted to the OpenAPPA core
+          team&rsquo;s Slack channel, and that is it.
+        </p>
 
         {/* Reserves its line so the dialog does not jump when a result lands. */}
         <p
