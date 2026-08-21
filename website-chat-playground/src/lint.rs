@@ -22,6 +22,11 @@ pub enum PolicyError {
          sanitizer could never derive anything"
     )]
     SanitizerWithoutHint { name: String },
+    #[error(
+        "dynamic resolver {name:?} declares a builtin: this playground answers every resolver \
+         through its own hosted directory, and a builtin would run on the demo host itself"
+    )]
+    BuiltinResolver { name: String },
 }
 
 #[derive(Debug)]
@@ -49,6 +54,14 @@ pub fn check_policy(policy: &str, enabled: &BTreeSet<System>) -> Result<CheckedP
         }
     }
 
+    // A visitor's policy never selects an implementation on this host: a builtin resolver
+    // would start a claude process under the demo service's own account.
+    if let Some((name, _)) = config.dynamic_resolver_builtins().next() {
+        return Err(PolicyError::BuiltinResolver {
+            name: name.as_str().to_string(),
+        });
+    }
+
     let tool_count = config.registry_config().tools.len();
     Ok(CheckedPolicy {
         config,
@@ -64,7 +77,7 @@ mod tests {
     use super::*;
 
     use appa_engine::authority::DeclaredTransition;
-    use appa_engine::contract::{AudienceDelta, AudienceRequirement, RecipientSpec};
+    use appa_engine::contract::AudienceDelta;
     use appa_engine::groups::DeclaredAudience;
     use appa_engine::label::ReaderId;
     use appa_engine::value::ToolName;
@@ -101,9 +114,10 @@ mod tests {
             .tool(&ToolName::new("send_email"))
             .expect("the email system provides send_email");
         assert!(matches!(
-            email.requires.label.audience.as_slice(),
-            [AudienceRequirement::Includes(RecipientSpec::Dynamic(binding))]
-                if binding.resolver.as_str() == "email-recipient-readers" && binding.argument == "to"
+            email.resolvers.as_slice(),
+            [binding]
+                if binding.resolver.as_str() == "email-recipient-readers"
+                    && binding.argument.as_deref() == Some("to")
         ));
         let sanitizers = &checked.config.registry_config().sanitizers;
         assert_eq!(sanitizers.len(), 2);
@@ -118,6 +132,24 @@ mod tests {
                 .iter()
                 .any(|sanitizer| matches!(sanitizer.transition, DeclaredTransition::Trust { .. }))
         );
+    }
+
+    #[test]
+    fn a_builtin_resolver_declaration_is_refused() {
+        let policy = r#"
+version = 1
+[[dynamic_resolver]]
+name = "classify"
+builtin = "claude-code"
+[[tool]]
+name = "list_customers"
+resolvers = [{ resolver = "classify", returns = { delta = ["trust"] } }]
+delta = {}
+"#;
+        assert!(matches!(
+            check_policy(policy, &systems("crm")),
+            Err(PolicyError::BuiltinResolver { name }) if name == "classify"
+        ));
     }
 
     #[test]

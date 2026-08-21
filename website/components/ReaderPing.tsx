@@ -39,6 +39,34 @@ function forcedOpen(): boolean {
   return new URLSearchParams(window.location.search).get("reader-ping") === "1";
 }
 
+/* A link you can share without the prompt greeting whoever opens it: append
+   ?popup=no. Suppression is sticky, so a reader who arrives through such a
+   link is not asked on the pages they visit afterwards either — the person
+   who shared it already decided on their behalf, and re-asking one click
+   later would undo that decision.
+
+   A cookie rather than the localStorage key above: this is a property of how
+   the reader arrived, it has to survive independently of whether they were
+   ever shown and dismissed the prompt, and a cookie is the one browser store
+   a future server-rendered variant could read before first paint. */
+const OFF_COOKIE = "openappa-reader-ping-off";
+const OFF_MAX_AGE_S = 60 * 60 * 24 * 365;
+
+function suppressionRequested(): boolean {
+  return new URLSearchParams(window.location.search).get("popup") === "no";
+}
+
+function suppressedByCookie(): boolean {
+  return document.cookie.split("; ").some((entry) => entry === `${OFF_COOKIE}=1`);
+}
+
+function rememberSuppression() {
+  // `Secure` only where it can hold: setting it over plain http silently
+  // drops the cookie, which would break local preview.
+  const secure = window.location.protocol === "https:" ? "; Secure" : "";
+  document.cookie = `${OFF_COOKIE}=1; Max-Age=${OFF_MAX_AGE_S}; Path=/; SameSite=Lax${secure}`;
+}
+
 function remember(outcome: "sent" | "skipped") {
   try {
     localStorage.setItem(SEEN_KEY, outcome);
@@ -58,8 +86,15 @@ export function ReaderPing() {
   const restoreFocusTo = useRef<Element | null>(null);
 
   useEffect(() => {
+    /* Checked before the preview override: ?popup=no is a reader's explicit
+       "not this time", and it outranks a param whose only job is to make the
+       dialog easy to look at. */
+    if (suppressionRequested()) {
+      rememberSuppression();
+      return;
+    }
     const forced = forcedOpen();
-    if (!forced && alreadySeen()) return;
+    if (!forced && (alreadySeen() || suppressedByCookie())) return;
     // Forced previews skip the arrival delay: whoever added the param wants
     // to see the dialog, not wait for it.
     const timer = setTimeout(() => setOpen(true), forced ? 0 : APPEAR_DELAY_MS);
@@ -160,7 +195,7 @@ export function ReaderPing() {
         role="dialog"
         aria-modal="true"
         aria-labelledby="ping-title"
-        aria-describedby="ping-lede"
+        aria-describedby="ping-fine"
       >
         {/* Matches the badge beside the wordmark in the header, so the prompt
             reads as part of the project rather than a bolted-on capture form. */}
@@ -168,11 +203,6 @@ export function ReaderPing() {
         <h2 className="ping-title" id="ping-title">
           Say hello before you read
         </h2>
-        <p className="ping-lede" id="ping-lede">
-          OpenAPPA is in preview and the model is still open for argument. We would love to know who
-          is checking it out.
-        </p>
-
         <form className="ping-form" onSubmit={onSubmit}>
           <label className="ping-label" htmlFor="ping-email">
             Email address
@@ -200,6 +230,15 @@ export function ReaderPing() {
             </button>
           </div>
         </form>
+
+        {/* The promise the route in `app/api/reader-ping/route.ts` keeps: the
+            address is posted to one Slack channel and never written down. It
+            sits under the field, where a reader decides whether to type, and
+            is the dialog's description — there is no other prose. */}
+        <p className="ping-fine" id="ping-fine">
+          Not saved, and not used for a mailing list. Your address is posted to the OpenAPPA core
+          team&rsquo;s Slack channel, and that is it.
+        </p>
 
         {/* Reserves its line so the dialog does not jump when a result lands. */}
         <p

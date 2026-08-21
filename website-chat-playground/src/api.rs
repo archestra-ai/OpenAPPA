@@ -369,6 +369,10 @@ async fn session_message(
         let _ = pump.drain().await;
         let final_event = match outcome {
             Ok(Outcome::Answer(text)) => WireEvent::Answer { text },
+            Ok(Outcome::BudgetFinalized { answer: Some(text) }) => WireEvent::Answer { text },
+            Ok(Outcome::BudgetFinalized { answer: None }) => WireEvent::Stopped {
+                text: "the execution budget was reached before a final answer".to_string(),
+            },
             Ok(Outcome::Stopped(reason)) => WireEvent::Stopped {
                 text: reason.to_string(),
             },

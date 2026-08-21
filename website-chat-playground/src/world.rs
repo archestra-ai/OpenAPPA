@@ -160,7 +160,9 @@ pub fn externals_for(policy: &appa_policy::Config, base: &str) -> Externals {
         // The playground serves no classifier route, so a resolver-backed cast stays
         // unbound and refuses the policy at open. Constant casts need no binding.
         casts: std::collections::BTreeMap::new(),
-        dynamic: Some(Endpoint {
+        // One HTTP endpoint serves every declared resolver; the policy gate refused any
+        // inline builtin before this world was built.
+        dynamic: policy.dynamic_resolver_names().next().is_some().then(|| Endpoint {
             url: format!("{base}{DYNAMIC_RESOLVER_PATH}"),
             token: None,
         }),
@@ -168,6 +170,7 @@ pub fn externals_for(policy: &appa_policy::Config, base: &str) -> Externals {
             url: format!("{base}{MEMBERSHIP_PATH}"),
             token: None,
         }),
+        claude_code: Default::default(),
     }
 }
 

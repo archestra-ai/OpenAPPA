@@ -24,7 +24,8 @@ delta = { audience = { exactly = ["elena.morris@northwind.example", "marcus.lee@
 [[policy.tool]]
 name = "read_hr"
 parameters = { type = "object", properties = { file = { type = "string" } }, required = ["file"], additionalProperties = false }
-delta = { audience = { resolver = "personal-file-readers", argument = "file" } }
+resolvers = [{ resolver = "personal-file-readers", argument = "file", returns = { delta = ["audience"] } }]
+delta = {}
 [[policy.tool]]
 name = "create_hr"
 parameters = { type = "object", properties = { file = { type = "string" }, content = { type = "string" } }, required = ["file", "content"], additionalProperties = false }
@@ -44,7 +45,7 @@ delta = {}
 [[policy.tool]]
 name = "send_email"
 parameters = { type = "object", properties = { to = { type = "string" }, subject = { type = "string" }, body = { type = "string" } }, required = ["to", "subject", "body"], additionalProperties = false }
-requires = { audience = { includes = { resolver = "mailbox-readers", argument = "to" } } }
+resolvers = [{ resolver = "mailbox-readers", argument = "to", returns = { requires = ["audience"] } }]
 effects = ["egress"]
 delta = {}
 
@@ -62,8 +63,7 @@ confined_results = ["search_hr", "read_hr", "create_hr", "search_task_tracker", 
 
 # --- registered externals ---------------------------------------------------
 #
-# Implementations bind here, never in the policy (`CFG-15`, `IMP-3`). Resolver
-# URLs are loopback placeholders: the bench runner binds its fixture server on
+# One HTTP implementation serves every resolver name. Its URL is a loopback placeholder: the bench runner binds its fixture server on
 # an ephemeral port and rewrites them before opening the runtime, since
 # `Config::load` refuses non-loopback http.
 
@@ -71,6 +71,5 @@ confined_results = ["search_hr", "read_hr", "create_hr", "search_task_tracker", 
 timeout_ms = 5000
 max_body_bytes = 65536
 
-# One endpoint serves every named dynamic resolver; the request carries the name.
 [externals.dynamic]
 url = "http://127.0.0.1:0/dynamic-resolver"

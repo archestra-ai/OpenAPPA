@@ -74,10 +74,10 @@ pub struct ProposalBatch {
 pub struct ProposedCall {
     pub tool: crate::value::ToolName,
     pub arguments: Vec<u8>,
-    /// The answers the runtime resolved for this call's dynamic audience bindings, if any.
-    /// They are payload, not decoration: the same tool and arguments under
-    /// different resolved recipients is a different act.
-    pub dynamic_resolutions: Vec<crate::contract::PinnedDynamicResolution>,
+    /// The answers the runtime resolved for this tool's resolver bindings. They are payload,
+    /// not decoration: the same tool and arguments under different resolved answers is a
+    /// different act.
+    pub tool_resolutions: Vec<crate::contract::PinnedToolResolution>,
     /// The membership expansions the runtime resolved for this call's `@group` placeholder
     /// arguments. Payload on the same terms as the dynamic answers.
     pub memberships: Vec<crate::contract::PinnedMembership>,
@@ -424,12 +424,12 @@ pub enum TransitionError {
     MembershipNeeded { needed: Vec<crate::names::GroupName> },
     #[error("membership pin for argument {argument} is not one this call reads")]
     ForeignMembership { argument: String },
-    #[error("the act reads dynamic bindings without answers: {}", needed.iter().map(|binding: &crate::contract::DynamicAudienceBinding| binding.argument.clone()).collect::<Vec<_>>().join(", "))]
-    DynamicAnswerNeeded {
-        needed: Vec<crate::contract::DynamicAudienceBinding>,
-    },
-    #[error("dynamic answer for argument {argument} is not one this call reads")]
-    ForeignDynamicAnswer { argument: String },
+    #[error("the act reads tool-level resolver bindings without answers: {resolvers:?}")]
+    ToolResolutionNeeded { resolvers: Vec<String> },
+    #[error("tool-level resolver answer from {resolver} is not one this call reads")]
+    ForeignToolResolution { resolver: String },
+    #[error("tool-level resolver answer from {resolver} contains a value outside policy")]
+    InvalidToolResolution { resolver: String },
     #[error("the act's membership expansions are not evidence for it: {0}")]
     ForeignExpansion(#[from] crate::groups::ExpansionRefusal),
     #[error(transparent)]
@@ -1151,15 +1151,15 @@ impl<'a> Sequence<'a> {
                 proposed_label,
                 receiving,
                 proposed_effects,
-                dynamic_resolutions,
+                tool_resolutions,
                 memberships,
                 subject,
                 resolutions,
             } => {
                 let call = ResolvedCall::new(tool.clone(), arguments.clone())
-                    .with_dynamic_resolutions(dynamic_resolutions.clone())
+                    .with_tool_resolutions(tool_resolutions.clone())
                     .with_memberships(memberships.clone());
-                if call.dynamic_resolutions() != dynamic_resolutions.as_slice() {
+                if call.tool_resolutions() != tool_resolutions.as_slice() {
                     return Err(TransitionRefusal::ForgedLabel);
                 }
                 if call.memberships() != memberships.as_slice() {
@@ -1177,8 +1177,8 @@ impl<'a> Sequence<'a> {
                 {
                     return Err(TransitionRefusal::ForgedMembership);
                 }
-                // And its dynamic answers, one per binding the contract spells.
-                if crate::check::validate_dynamic_resolutions(contract, &call).is_err() {
+                // And its resolver answers, one per binding the contract spells.
+                if crate::check::validate_tool_resolutions(self.engine.registry(), contract, &call).is_err() {
                     return Err(TransitionRefusal::ForgedResolution);
                 }
                 if proposed_effects != &contract.emits {
@@ -1838,13 +1838,13 @@ impl<'a> Sequence<'a> {
             return Ok(());
         };
         if implied.family {
-            if !declaration.owed.family && !(own_act && declaration.declared.family) {
+            if !(declaration.owed.family || own_act && declaration.declared.family) {
                 return Err(TransitionRefusal::UndeclaredAdvance);
             }
             declaration.owed.family = false;
         }
         for flow in &implied.flows {
-            if !declaration.owed.flows.remove(flow) && !(own_act && declaration.declared.flows.contains(flow)) {
+            if !(declaration.owed.flows.remove(flow) || own_act && declaration.declared.flows.contains(flow)) {
                 return Err(TransitionRefusal::UndeclaredAdvance);
             }
         }
@@ -2090,7 +2090,7 @@ impl<'a> Sequence<'a> {
                     dispatch,
                     tool,
                     arguments,
-                    dynamic_resolutions,
+                    tool_resolutions,
                     memberships,
                     subject,
                     resolutions,
@@ -2098,7 +2098,7 @@ impl<'a> Sequence<'a> {
                 },
             ) if dispatch == &next.dispatch => {
                 let opened = ResolvedCall::new(tool.clone(), arguments.clone())
-                    .with_dynamic_resolutions(dynamic_resolutions.clone())
+                    .with_tool_resolutions(tool_resolutions.clone())
                     .with_memberships(memberships.clone());
                 if opened != next.call || subject != &next.subject {
                     return Err(TransitionRefusal::UnbackedDecision);
@@ -2243,7 +2243,7 @@ impl<'a> Sequence<'a> {
             if crate::check::validate_memberships(contract, call).is_err() {
                 return Err(TransitionRefusal::ForgedMembership);
             }
-            if crate::check::validate_dynamic_resolutions(contract, call).is_err() {
+            if crate::check::validate_tool_resolutions(self.engine.registry(), contract, call).is_err() {
                 return Err(TransitionRefusal::ForgedResolution);
             }
         }
@@ -3333,7 +3333,7 @@ impl<'a> Sequence<'a> {
         if call != &predecessor.substituting(call.canonical_arguments().clone()) {
             return Err(TransitionRefusal::ForgedLabel);
         }
-        if crate::check::validate_dynamic_resolutions(contract, call).is_err() {
+        if crate::check::validate_tool_resolutions(self.engine.registry(), contract, call).is_err() {
             return Err(TransitionRefusal::SanitizerUnapplicable);
         }
 
@@ -3432,7 +3432,7 @@ impl<'a> Sequence<'a> {
     fn output_label(&self, trajectory: &TrajectoryId, dispatch: &DispatchId, contract: &ToolContract) -> Label {
         let views = self.projection.view(trajectory);
         contract.output_label_for_resolutions(
-            views.dynamic_resolutions(dispatch).unwrap_or_default(),
+            views.tool_resolutions(dispatch).unwrap_or_default(),
             &self.dispatch_expansions(trajectory, dispatch),
         )
     }
@@ -3632,6 +3632,7 @@ mod tests {
 
     fn note_tool() -> ToolContract {
         ToolContract {
+            resolvers: vec![],
             name: ToolName::new("note"),
             tags: vec![],
             delta: Some(crate::contract::Delta::NONE),
@@ -3696,7 +3697,7 @@ mod tests {
                     proposals: vec![ProposedCall {
                         tool: call.tool().clone(),
                         arguments: call.canonical_arguments().canonical_bytes().to_vec(),
-                        dynamic_resolutions: Vec::new(),
+                        tool_resolutions: Vec::new(),
                         memberships: Vec::new(),
                     }],
                     spawn: None,

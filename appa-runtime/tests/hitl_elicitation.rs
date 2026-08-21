@@ -176,6 +176,121 @@ async fn deployment_with(review_timeout_ms: u64) -> Deployment {
     }
 }
 
+async fn dynamic_deployment() -> Deployment {
+    let resolver_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a resolver loopback port is available");
+    let resolver_url = format!(
+        "http://{}",
+        resolver_listener
+            .local_addr()
+            .expect("the resolver socket has an address")
+    );
+    let resolver = axum::Router::new().route(
+        "/",
+        axum::routing::post(|| async {
+            r#"{"version":1,"delta":{"trust":"suspicious"},"requires":{"trust":"trusted","attention":["operator-signoff"]}}"#
+        }),
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(resolver_listener, resolver).await;
+    });
+
+    let policy = format!(
+        r#"
+[policy]
+version = 1
+
+[[policy.dynamic_resolver]]
+name = "classifier"
+
+[policy.deployment]
+starting_label = {{ trust = "suspicious" }}
+
+[[policy.tool]]
+name = "Bash"
+delta = {{}}
+resolvers = [{{ resolver = "classifier", returns = {{ delta = ["trust"], requires = ["trust", "attention"] }} }}]
+
+[[policy.authority]]
+name = "operator"
+hint = "The person at the keyboard."
+
+[policy.authority.mandate]
+can_cover_trust_to = "trusted"
+attends = ["operator-signoff"]
+
+[externals]
+timeout_ms = 1000
+review_timeout_ms = 5000
+max_body_bytes = 4096
+
+[externals.dynamic]
+url = "{resolver_url}"
+
+[externals.authorities.operator]
+builtin = "hitl"
+"#,
+    );
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let path = dir.path().join("appa.toml");
+    std::fs::write(&path, policy).expect("the fixture writes");
+    let config = Config::load(&path).expect("the fixture validates");
+    let runtime = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens"));
+
+    let root = TrajectoryId("cc:dynamic-hitl-test".to_string());
+    let acked = hooks::handle(&runtime, HookEvent::SessionStart { root: root.clone() }).await;
+    assert!(matches!(acked, HookDecision::Ack), "the session opens: {acked:?}");
+
+    let blocked = hooks::handle(
+        &runtime,
+        HookEvent::ToolCall {
+            actor: Actor {
+                root: root.clone(),
+                child: None,
+            },
+            call: ProposedCall {
+                tool: "Bash".to_string(),
+                arguments: raw(serde_json::json!({"command": "cat .env"})),
+            },
+            spawn: false,
+        },
+    )
+    .await;
+    let HookDecision::DenyCall { feedback } = blocked else {
+        panic!("the dynamic trust and attention requirements must block: {blocked:?}");
+    };
+    assert!(
+        feedback.contains("operator-signoff"),
+        "the dynamic attention gap surfaces: {feedback}"
+    );
+    assert!(
+        feedback.contains("below the required floor"),
+        "the dynamic trust gap surfaces: {feedback}"
+    );
+    let offer = offer_id(&feedback);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a loopback port is available");
+    let url = format!(
+        "http://{}/mcp",
+        listener.local_addr().expect("the socket has an address")
+    );
+    let app = axum::Router::new().nest_service("/mcp", mcp::service(Arc::clone(&runtime)));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    Deployment {
+        url,
+        offer,
+        runtime,
+        root,
+        _dir: dir,
+    }
+}
+
 fn offer_id(feedback: &str) -> String {
     let after = feedback
         .split("offer_id:")
@@ -239,6 +354,33 @@ async fn accepting_authorizes_the_exact_call() {
     assert!(
         review.contains("signoff"),
         "the review states the gap the ruling would cover: {review}",
+    );
+}
+
+#[tokio::test]
+async fn one_hitl_ruling_clears_dynamic_trust_and_attention() {
+    let deployment = dynamic_deployment().await;
+    let reviewer = Reviewer::new(ElicitationAction::Accept);
+    let answer = execute(&deployment, reviewer.clone()).await;
+    assert!(
+        answer.contains("Authorized"),
+        "the ruling authorizes the call: {answer}"
+    );
+
+    let reviews = reviewer.reviews();
+    assert_eq!(reviews.len(), 1, "one authority clears both dynamic gaps in one ruling");
+    let review = &reviews[0];
+    assert!(
+        review.contains("operator-signoff"),
+        "the review names the attention mark: {review}"
+    );
+    assert!(
+        review.contains("below the required floor"),
+        "the review names the trust floor: {review}"
+    );
+    assert!(
+        review.contains("cat .env"),
+        "the review carries the exact classified call: {review}"
     );
 }
 

@@ -156,7 +156,12 @@ def command_for(
         case PolicyTarget.APPA_GUARDED | PolicyTarget.APPA_OPEN:
             if policy_path is None:
                 raise ValueError(f"{agent.name}: APPA agents require a staged policy")
-            command += ["--policy", str(policy_path.resolve())]
+            command += [
+                "--policy",
+                str(policy_path.resolve()),
+                "--status-file",
+                str((episode_dir / "agent-status.json").resolve()),
+            ]
         case PolicyTarget.FIDES:
             if policy_path is not None:
                 command += ["--profile", str(policy_path.resolve())]

@@ -219,7 +219,7 @@ pub enum Fact {
         receiving: EstablishedLabel,
         proposed_effects: EffectSet,
         #[serde(default)]
-        dynamic_resolutions: Vec<crate::contract::PinnedDynamicResolution>,
+        tool_resolutions: Vec<crate::contract::PinnedToolResolution>,
         #[serde(default)]
         memberships: Vec<crate::contract::PinnedMembership>,
         #[serde(default)]

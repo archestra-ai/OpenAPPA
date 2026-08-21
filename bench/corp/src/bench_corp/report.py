@@ -2,8 +2,9 @@
 
 Utility is averaged over episodes of scenarios that declare utility checks;
 ASR over episodes of scenarios that declare security checks. Episodes that
-errored still contribute (their end state is what it is); the error count is
-reported alongside so a low utility from crashes is visible as such.
+errored or finalized at their budget still contribute (their end state is what
+it is). Both counts are reported, so reliability costs remain visible instead
+of being selected out of the scores.
 
 The per-agent rates compress away the thing that usually matters — *which*
 scenarios moved. A scenario every arm passes (or every arm fails) hands each
@@ -32,6 +33,7 @@ class AgentSummary:
     agent: str
     episodes: int
     errors: int
+    budget_finalized: int
     utility_passed: int
     utility_total: int
     attacks_succeeded: int
@@ -39,6 +41,7 @@ class AgentSummary:
     mean_duration_s: float
     policy_events: int
     remedy_calls: int
+    provider_retries: int
 
 
 def summarize(results: list[EpisodeResult]) -> list[AgentSummary]:
@@ -54,6 +57,7 @@ def summarize(results: list[EpisodeResult]) -> list[AgentSummary]:
                 agent=agent,
                 episodes=len(episodes),
                 errors=sum(1 for r in episodes if r.error),
+                budget_finalized=sum(1 for r in episodes if r.terminal_status == "budget_finalized"),
                 utility_passed=sum(utility),
                 utility_total=len(utility),
                 attacks_succeeded=sum(security),
@@ -61,6 +65,7 @@ def summarize(results: list[EpisodeResult]) -> list[AgentSummary]:
                 mean_duration_s=round(sum(r.duration_s for r in episodes) / len(episodes), 1),
                 policy_events=sum(r.policy_events for r in episodes),
                 remedy_calls=sum(r.remedy_calls for r in episodes),
+                provider_retries=sum(r.provider_retries for r in episodes),
             )
         )
     return summaries
@@ -108,13 +113,17 @@ def print_scenario_table(results: list[EpisodeResult]) -> None:
 
 
 def print_table(summaries: list[AgentSummary]) -> None:
-    header = f"{'agent':<12} {'utility':>9} {'ASR':>9} {'errors':>7} {'mean s':>7} {'events':>8} {'remedies':>9}"
+    header = (
+        f"{'agent':<12} {'utility':>9} {'ASR':>9} {'errors':>7} {'budget':>7} "
+        f"{'retries':>7} {'mean s':>7} {'events':>8} {'remedies':>9}"
+    )
     print(header)
     print("-" * len(header))
     for s in summaries:
         print(
             f"{s.agent:<12} {_rate(s.utility_passed, s.utility_total):>9} "
             f"{_rate(s.attacks_succeeded, s.attacks_total):>9} {s.errors:>7} "
+            f"{s.budget_finalized:>7} {s.provider_retries:>7} "
             f"{s.mean_duration_s:>7} {s.policy_events:>8} {s.remedy_calls:>9}"
         )
 

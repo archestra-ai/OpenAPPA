@@ -61,6 +61,45 @@ Installing the plugin does not force every Claude Code session through OpenAPPA.
 
 :::claude-session-choice:::
 
+## Use Claude Code as a dynamic classifier
+
+OpenAPPA can also call the installed Claude Code CLI as a built-in tool-level dynamic resolver:
+
+```toml
+[[dynamic_resolver]]
+name = "classify-customer"
+builtin = "claude-code"
+
+[[tool]]
+name = "get_customer"
+resolvers = [
+  { resolver = "classify-customer", returns = { delta = ["trust", "audience"], requires = ["trust", "audience", "attention"] } }
+]
+
+[[authority]]
+name = "operator"
+
+[authority.mandate]
+can_cover_trust_to = "trusted"
+attends = ["privacy-review"]
+
+[externals]
+timeout_ms = 5000
+max_body_bytes = 65536
+
+[externals.claude_code]
+command = "/usr/local/bin/claude"   # the executable; a service environment often strips PATH
+model = "sonnet"                    # pin a model id here for stable classifications
+timeout_ms = 60000                  # the consult's own budget — a model call is slower than an endpoint
+
+[externals.authorities.operator]
+builtin = "hitl"
+```
+
+The runtime uses the current user's Claude Code authentication. It starts one fresh safe-mode process per consult with no tools, hooks, project settings, or persisted session, in a temporary working directory, with every `APPA_*` environment variable removed. The classifier sees what the binding shows it — the complete canonical arguments, or one declared argument — plus current trust and audience, the policy trust chain, the attention marks named by authority mandates, and existing static attention requirements. It may return output `delta` and call-time `requires` together. Dynamic requirements support a trust floor, an audience `includes` floor and `cap` ceiling, and a fresh attention mark selected from that policy-provided list; history remains static. If no authority attends any mark, the only valid dynamic attention answer is an empty list. At most four Claude consults run at once.
+
+This is a trusted classifier rather than a sandboxed policy authority: there is no additional ceiling on its answer, and argument-level prompt-injection resistance is best-effort. Process errors, timeouts, invalid fields, and trust or attention values outside policy produce no answer: the call is not checked, nothing is recorded, and the failure surfaces operationally — never as a policy denial.
+
 ## Uninstall
 
 To uninstall OpenAPPA from Claude Code, remove the plugin, stop the local runtime, and remove its binaries:

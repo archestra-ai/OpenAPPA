@@ -37,6 +37,12 @@ pub(crate) struct RunBudget {
     forks: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ForkUnavailable {
+    DepthLimit,
+    RunLimit,
+}
+
 impl RunBudget {
     pub(crate) fn new(limits: Limits) -> Self {
         RunBudget {
@@ -48,9 +54,19 @@ impl RunBudget {
         }
     }
 
-    /// Charge one provider call. `Err` means the round ceiling is
-    /// reached and no call may be made.
+    /// Charge one tool-using provider call while preserving the single
+    /// finalization round.
     pub(crate) fn charge_inference(&mut self) -> Result<(), Exhausted> {
+        if self.rounds >= self.limits.max_inference_rounds.saturating_sub(1) {
+            return Err(Exhausted);
+        }
+        self.rounds += 1;
+        Ok(())
+    }
+
+    /// Charge the final tool-free completion. It may spend the reserve but
+    /// can never exceed the run's total inference ceiling.
+    pub(crate) fn charge_finalization(&mut self) -> Result<(), Exhausted> {
         if self.rounds >= self.limits.max_inference_rounds {
             return Err(Exhausted);
         }
@@ -71,12 +87,23 @@ impl RunBudget {
     /// Charge one child opened from `depth`. Both ceilings answer here,
     /// so no caller can consult one and forget the other; a refusal
     /// spends nothing.
-    pub(crate) fn charge_fork(&mut self, depth: u32) -> Result<(), Exhausted> {
-        if depth >= self.limits.max_fork_depth || self.forks >= self.limits.max_forks {
-            return Err(Exhausted);
-        }
+    pub(crate) fn charge_fork(&mut self, depth: u32) -> Result<(), ForkUnavailable> {
+        self.fork_availability(depth)?;
         self.forks += 1;
         Ok(())
+    }
+
+    /// Whether the next inference at `depth` may open a child. The model's
+    /// catalogue uses the same predicate as the eventual charge, so a spent
+    /// spawn is not advertised as an action that can only fail.
+    pub(crate) fn fork_availability(&self, depth: u32) -> Result<(), ForkUnavailable> {
+        if depth >= self.limits.max_fork_depth {
+            Err(ForkUnavailable::DepthLimit)
+        } else if self.forks >= self.limits.max_forks {
+            Err(ForkUnavailable::RunLimit)
+        } else {
+            Ok(())
+        }
     }
 
     /// How many children this run has opened. Also the child ids'
@@ -104,13 +131,14 @@ mod tests {
     #[test]
     fn each_ceiling_stops_its_own_charge() {
         let limits = Limits {
-            max_inference_rounds: 2,
+            max_inference_rounds: 3,
             max_tool_calls: 1,
             max_forks: 1,
             max_fork_depth: 2,
             ..Limits::default()
         };
         let mut budget = RunBudget::new(limits);
+        assert_eq!(budget.fork_availability(0), Ok(()));
         assert_eq!(budget.charge_inference(), Ok(()));
         assert_eq!(budget.charge_inference(), Ok(()));
         assert_eq!(budget.charge_inference(), Err(Exhausted));
@@ -123,8 +151,26 @@ mod tests {
         );
 
         assert_eq!(budget.charge_fork(0), Ok(()));
-        assert_eq!(budget.charge_fork(0), Err(Exhausted), "the count ceiling");
+        assert_eq!(budget.fork_availability(0), Err(ForkUnavailable::RunLimit));
+        assert_eq!(
+            budget.charge_fork(0),
+            Err(ForkUnavailable::RunLimit),
+            "the count ceiling"
+        );
         assert_eq!(budget.forks(), 1, "a refused charge does not consume a child id");
+    }
+
+    #[test]
+    fn execution_preserves_one_round_for_finalization() {
+        let mut budget = RunBudget::new(Limits {
+            max_inference_rounds: 3,
+            ..Limits::default()
+        });
+        assert_eq!(budget.charge_inference(), Ok(()));
+        assert_eq!(budget.charge_inference(), Ok(()));
+        assert_eq!(budget.charge_inference(), Err(Exhausted));
+        assert_eq!(budget.charge_finalization(), Ok(()));
+        assert_eq!(budget.charge_finalization(), Err(Exhausted));
     }
 
     #[test]
@@ -134,8 +180,14 @@ mod tests {
             max_fork_depth: 2,
             ..Limits::default()
         });
+        assert_eq!(budget.fork_availability(1), Ok(()));
+        assert_eq!(budget.fork_availability(2), Err(ForkUnavailable::DepthLimit));
         assert_eq!(budget.charge_fork(1), Ok(()));
-        assert_eq!(budget.charge_fork(2), Err(Exhausted), "the ceiling is exclusive");
+        assert_eq!(
+            budget.charge_fork(2),
+            Err(ForkUnavailable::DepthLimit),
+            "the ceiling is exclusive"
+        );
         assert_eq!(budget.forks(), 1);
     }
 

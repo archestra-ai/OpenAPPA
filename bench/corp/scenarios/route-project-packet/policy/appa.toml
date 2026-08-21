@@ -25,12 +25,14 @@ parameters = { type = "object", properties = { task = { type = "string", descrip
 [[policy.tool]]
 name = "search_finance"
 parameters = { type = "object", properties = { query = { type = "string", description = "Keyword or phrase to match against file names and contents." } }, required = ["query"], additionalProperties = false }
-delta = { audience = { resolver = "document-acl", argument = "query" } }
+resolvers = [{ resolver = "document-acl", argument = "query", returns = { delta = ["audience"] } }]
+delta = {}
 
 [[policy.tool]]
 name = "read_finance"
 parameters = { type = "object", properties = { file = { type = "string", description = "The exact file name to read." } }, required = ["file"], additionalProperties = false }
-delta = { audience = { resolver = "document-acl", argument = "file" } }
+resolvers = [{ resolver = "document-acl", argument = "file", returns = { delta = ["audience"] } }]
+delta = {}
 
 [[policy.tool]]
 name = "create_finance"
@@ -40,7 +42,7 @@ delta = {}
 [[policy.tool]]
 name = "send_email"
 parameters = { type = "object", properties = { to = { type = "string", description = "Recipient email address." }, subject = { type = "string", description = "Subject line." }, body = { type = "string", description = "Message body." } }, required = ["to", "subject", "body"], additionalProperties = false }
-requires = { audience = { includes = { resolver = "distribution-list-members", argument = "to" } } }
+resolvers = [{ resolver = "distribution-list-members", argument = "to", returns = { requires = ["audience"] } }]
 effects = ["egress"]
 delta = {}
 
@@ -49,9 +51,12 @@ delta = {}
 [[policy.tool]]
 name = "share_legal_packet"
 parameters = { type = "object", properties = { file = { type = "string", description = "The exact finance file name to share." }, to = { type = "string", description = "Recipient distribution list." } }, required = ["file", "to"], additionalProperties = false }
-requires = { audience = { includes = { resolver = "distribution-list-members", argument = "to" } } }
+resolvers = [
+  { resolver = "document-acl", argument = "file", returns = { delta = ["audience"] } },
+  { resolver = "distribution-list-members", argument = "to", returns = { requires = ["audience"] } },
+]
 effects = ["egress"]
-delta = { audience = { resolver = "document-acl", argument = "file" } }
+delta = {}
 
 # --- deployment coverage -----------------------------------------------------
 #
@@ -67,8 +72,7 @@ confined_results = ["search_finance", "read_finance", "create_finance", "send_em
 
 # --- registered externals ---------------------------------------------------
 #
-# Implementations bind here, never in the policy (`CFG-15`, `IMP-3`). Resolver
-# URLs are loopback placeholders: the bench runner binds its fixture server on
+# One HTTP implementation serves every resolver name. Its URL is a loopback placeholder: the bench runner binds its fixture server on
 # an ephemeral port and rewrites them before opening the runtime, since
 # `Config::load` refuses non-loopback http.
 
@@ -76,6 +80,5 @@ confined_results = ["search_finance", "read_finance", "create_finance", "send_em
 timeout_ms = 5000
 max_body_bytes = 65536
 
-# One endpoint serves every named dynamic resolver; the request carries the name.
 [externals.dynamic]
 url = "http://127.0.0.1:0/dynamic-resolver"

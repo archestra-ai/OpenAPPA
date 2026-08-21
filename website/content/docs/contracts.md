@@ -50,34 +50,217 @@ A resolver that produces no answer — a timeout, an error, malformed or oversiz
 
 ### Dynamic resolvers
 
-A dynamic resolver maps one top-level string argument to literal reader IDs. It does not resolve `@group` membership.
+A dynamic resolver classifies a proposed tool call before the engine checks it. It returns selected fields of the tool's contract: output-label values under `delta`, and call-time constraints under `requires`. It does not resolve `@group` membership.
+
+A tool attaches resolvers with a `resolvers` list. Each binding names a registered resolver and declares, in a scoped `returns` table, exactly the fields that resolver must return. A binding without `argument` shows the resolver the complete schema-validated argument object. A binding with `argument = "field"` shows it exactly that one argument's string value; the field must be a required top-level string in the tool's `parameters`, or the policy does not load. A call that omits that argument or supplies a non-string value fails schema validation as an `InvalidCall` before any resolution runs.
 
 ```toml
-[[dynamic_resolver]]            # registration only; the deployment binds the endpoint
-name = "crm-acl"
+[[dynamic_resolver]]            # registration only; the deployment binds the implementation endpoint
+name = "classify-call"
 
 [[dynamic_resolver]]
-name = "channel-members"
+name = "crm-acl"
 
 [[tool]]
-name = "lookup_customer"
+name = "get_customer"
 parameters = { type = "object", properties = { customer_id = { type = "string" } }, required = ["customer_id"] }
-delta = { audience = { resolver = "crm-acl", argument = "customer_id" } }
+resolvers = [
+  { resolver = "classify-call", returns = { delta = ["trust"], requires = ["attention"] } },
+  { resolver = "crm-acl", argument = "customer_id", returns = { delta = ["audience"] } },
+]
+# Both output dimensions are resolver-owned (classify-call: trust, crm-acl:
+# audience), so there is no static `delta` to write.
 
-[[tool]]
-name = "send_message"
-parameters = { type = "object", properties = { channel = { type = "string" } }, required = ["channel"] }
-requires = { audience = { includes = { resolver = "channel-members", argument = "channel" } } }
-delta = {}
+[[authority]]
+name = "operator"
+
+[authority.mandate]
+can_cover_trust_to = "trusted"
+attends = ["privacy-review"]
+
+[externals.dynamic]
+url = "https://resolver.internal/classify"
 ```
 
-The tool's parameter schema must declare the argument as a required top-level string. A call that omits the argument or supplies a non-string value fails schema validation as an `InvalidCall` before any resolution runs. Answers may contain many readers or none. They may not contain `public` or an `@group`.
+The runtime sends a versioned JSON POST request before it checks the call:
 
-Resolution occurs when a proposed call first checks. Its answer remains pinned through rechecks, remedy plans, rulings, dispatch, and admission. A new proposal resolves again. The dispatch record stores the answer. Blocks and rulings store the resulting literal readers.
+```json
+{
+  "version": 1,
+  "resolver": "crm-acl",
+  "tool": "get_customer",
+  "returns": { "delta": ["audience"], "requires": [] },
+  "input": { "scope": "argument", "argument": "customer_id", "value": "cust-7" },
+  "context": { "current_trust": "trusted", "current_trust_rank": 1, "current_audience": "public",
+               "trust_unresolved": false, "audience_unresolved": false, "static_attention": [] },
+  "trust_ranks": ["suspicious", "trusted"],
+  "attention_marks": ["privacy-review"]
+}
+```
 
-A resolver that produces no answer — a timeout, an error, an abstention, malformed or oversized data — resumes nothing: the check does not complete, no recipient gap or Unknown delta is created, and no engine fact is appended. Runtime may retry or show operational feedback outside the log. A successful answer with an empty reader set is ordinary evidence, distinct from no answer.
+A whole-call binding sends `"input": { "scope": "call", "arguments": { ... } }` instead. `context` carries the trajectory's current label state. `trust_ranks` is the policy's complete trust chain. `attention_marks` is the de-duplicated union of the marks named by authority mandates; attention routing is global and remains a literal mark-name match, never a scope match. Both implementations — the HTTP endpoint and the built-in classifier — receive this same request and answer under the same validation.
 
-The endpoint accepts a versioned JSON POST request: `{version:1,resolver,tool,argument,value}`. It returns `{version:1,readers:[...]}`. Non-2xx responses, timeouts, malformed responses, and oversized responses fail closed.
+The response mirrors the declared scopes. A dynamic audience requirement is an object with an `includes` floor, a `cap` ceiling, or both.
+
+```json
+{
+  "version": 1,
+  "delta": {
+    "trust": "suspicious",
+    "audience": ["support", "audit"]
+  },
+  "requires": {
+    "trust": "trusted",
+    "audience": {
+      "includes": ["support"],
+      "cap": ["support", "audit"]
+    },
+    "attention": ["privacy-review"]
+  }
+}
+```
+
+The response MUST contain each declared field and MUST NOT contain an undeclared field. A returned trust value MUST name an entry in `trust_ranks`, and every returned attention mark MUST name an entry in `attention_marks`. An audience is `"public"` or an array of literal readers — never `public` inside an array, never an `@group`. A reader array may name many readers or none: an empty array is a valid, maximally-restrictive answer (readable by no one), distinct from giving no answer at all. An empty attention array is valid; when `attention_marks` is empty it is the only valid attention answer. An empty `requires.audience` object is not valid.
+
+Output trust and audience each have exactly one owner. A static delta and a resolver cannot own the same output-label field, and two resolvers cannot own the same output-label field — the policy refuses to load. Ownership is per dimension: a resolver that owns the audience says nothing about trust, and an undescribed dimension stays fail-closed `Unknown`. Requirements are additive: static requirements and requirements from several resolvers all apply. History requirements remain static.
+
+Resolution occurs when a proposed call first checks. The validated answer is pinned to what the binding read: a whole-call pin is invalidated by any change to the canonical arguments, and an argument-scoped pin survives a substitution that leaves its argument's value unchanged. The pin holds through rechecks, remedy plans, rulings, dispatch, and admission; the dispatch record stores the answer, and a replay revalidates the stored pins without consulting again. A new proposal resolves again. Because a whole-call pin cannot survive any argument substitution, the engine does not offer input-substitution remedies on a tool with a whole-call binding.
+
+A resolver that produces no answer — an unbound or unreachable implementation, a timeout, a process failure, a malformed, out-of-policy, unsupported-version, or oversized response — resumes nothing: the call was not checked, no engine fact is appended, and the answer is not a policy denial. The hook fails operationally and the reason lands in the runtime's own log; the next proposal consults again.
+
+One `[externals.dynamic]` HTTP endpoint serves every resolver that does not declare a builtin; each request carries the resolver name. A resolver can instead name an in-process builtin on its declaration — the one implementation choice the policy itself may carry. The builtin available today is the Claude Code classifier (`builtin = "claude-code"`); it is one implementation, not the definition of how resolvers work.
+
+```toml
+[[dynamic_resolver]]
+name = "classify-call"
+builtin = "claude-code"
+```
+
+A resolver with `builtin = "claude-code"` never uses the endpoint. The builtin starts one isolated `claude` process per consult: non-interactive safe mode, no tools, no project settings, no session persistence, a fresh temporary working directory, and an environment with every `APPA_*` variable removed. The process receives the same request the HTTP wire carries on stdin and answers under a strict structured-output schema derived from `returns`, the trust chain, and the attended marks; the request is explicitly treated as untrusted data, never as instructions. Claude answers have no separate ceiling: they are trusted classifier evidence and pass the same exact-shape, policy-vocabulary, audience, and pin validation as HTTP answers. The prompt and the raw model output are never persisted — only the validated answer is.
+
+The deployment tunes the builtin in `[externals.claude_code]`: `command` sets the executable path (a service environment often strips `PATH`), `model` pins the model, and `timeout_ms` gives the consult its own budget instead of the shared machine-consult `timeout_ms` — a model call is slower than an ordinary endpoint. At most four Claude consults run at once per runtime. Each consult has model latency and account cost; a pinned recheck and a replay never invoke it again.
+
+### 🚧 Proposed resolver envelope
+
+This section describes a proposed resolver interface. The policy syntax and version 2 wire format are not implemented yet.
+
+A resolver declares the dimensions it can return. When it omits `inputs`, it receives the complete validated tool argument object.
+
+```toml
+[[dynamic_resolver]]
+name = "classify-command"
+builtin = "claude-code"
+returns = ["trust", "audience"]
+
+[[tool]]
+name = "Bash"
+uses = [{ resolver = "classify-command" }]
+delta = { trust = { resolver = "classify-command" }, audience = { resolver = "classify-command" } }
+```
+
+The runtime sends the same envelope to an HTTP implementation and the Claude Code builtin:
+
+```json
+{
+  "version": 2,
+  "resolver": "classify-command",
+  "tool": "Bash",
+  "input": {
+    "scope": "call",
+    "arguments": {
+      "command": "git push origin main",
+      "timeout": 60000
+    }
+  },
+  "returns": {
+    "delta": ["trust", "audience"],
+    "requires": []
+  },
+  "context": {
+    "current_trust": "trusted",
+    "current_trust_rank": 1,
+    "current_audience": "public",
+    "trust_unresolved": false,
+    "audience_unresolved": false,
+    "static_attention": ["security-review"]
+  },
+  "trust_ranks": ["suspicious", "trusted"],
+  "attention_marks": ["security-review", "privacy-review"]
+}
+```
+
+`input` contains only tool-supplied data. OpenAPPA always supplies `context`, `trust_ranks`, and `attention_marks` independently of the input declaration.
+
+A resolver can instead declare named inputs. Each tool `uses` entry supplies every declared input from its own arguments.
+
+```toml
+[[dynamic_resolver]]
+name = "classify-customer"
+inputs = ["subject", "destination"]
+returns = ["trust", "audience"]
+
+[[tool]]
+name = "send_customer_record"
+uses = [
+  { resolver = "classify-customer", inputs = { subject = "$record", destination = "$recipient" } }
+]
+delta = { trust = { resolver = "classify-customer" } }
+requires = { audience = { resolver = "classify-customer" } }
+```
+
+Named inputs use an explicit scope:
+
+```json
+{
+  "version": 2,
+  "resolver": "classify-customer",
+  "tool": "send_customer_record",
+  "input": {
+    "scope": "named",
+    "values": {
+      "subject": {
+        "customer_id": "cust-7",
+        "balance": 1200
+      },
+      "destination": "audit@example.com"
+    }
+  },
+  "returns": {
+    "delta": ["trust"],
+    "requires": ["audience"]
+  },
+  "context": {
+    "current_trust": "trusted",
+    "current_trust_rank": 1,
+    "current_audience": ["finance", "audit@example.com"],
+    "trust_unresolved": false,
+    "audience_unresolved": false,
+    "static_attention": []
+  },
+  "trust_ranks": ["suspicious", "trusted"],
+  "attention_marks": ["privacy-review"]
+}
+```
+
+The response mirrors the requested scopes. It contains every requested field and no unrequested field.
+
+```json
+{
+  "version": 2,
+  "delta": {
+    "trust": "suspicious"
+  },
+  "requires": {
+    "audience": {
+      "includes": ["audit@example.com"]
+    }
+  }
+}
+```
+
+The runtime omits an empty response scope. It refuses explicit `null` values, undeclared fields, unknown trust ranks, and unknown attention marks.
+
+The `uses` list is optional. A tool that omits `uses` does not consult a dynamic resolver.
 
 ### Deployment coverage
 
@@ -93,6 +276,7 @@ A tool contract is typically four lines long. Use this checklist during policy r
 | **Unannotated Tools** | Omitting `delta` while declaring `requires`. | Use `delta = {}` if output carries no labels, or separate unannotated tools. | Loader refuses `requires` on unannotated tools; unannotated output enters as `Unknown`. |
 | **`effects` Completeness** | Mutation or deployment tool omits `effects`. | Declare all side effects, e.g., `effects = ["migration.applied", "mutation"]`. | Under-declared effects pass `no_prior` checks silently without triggering history constraints. |
 | **Dynamic Recipients** | Static readers when an ACL depends on an argument. | Use a placeholder for a recipient the call names — a literal reader, `public`, or an `@group` — or a dynamic resolver for an argument-derived reader set. | Static readers can ignore the proposed argument; placeholder groups and dynamic resolution pin their answer to the call. |
+| **Resolver / `delta` Overlap** | A trailing `delta = {}` beside resolvers that already fill every output dimension, or a static `delta.audience` next to a resolver returning `delta = ["audience"]`. | Let resolvers own the dimensions they fill and write no static `delta` for those; use a static `delta` only for a dimension no resolver owns. | Each output dimension has exactly one owner — two owners is a load error; a redundant `delta = {}` is harmless but misleads review into thinking a static label applies. |
 | **Combined Read & Release** | Single tool `share_doc(doc, recipient)` fetching and releasing in one step. | Split into `fetch_doc` (read) and `grant_doc_access` (release). | Combined tools force authorities to approve releases before content is fetched. |
 | **Authority Mandates** | Overly permissive mandates like `can_cover_readers = { may_add = ["public"] }`. | Restrict authority `mandate` and `scope.tags` to the minimum necessary desk. | Authorities cannot exceed mandates, but overly broad mandates weaken review gates. |
 | **Auto-Approval Wiring** | `builtin = "approve"` behind a wide mandate — an automated yes across everything the mandate covers. | Keep auto-approval mandates narrow; reserve wide mandates for `hitl` or a reviewed resolver. | Mandate powers do not depend on the implementation behind them: the open gate is legitimate, deliberate, and visible in review. |
@@ -100,7 +284,7 @@ A tool contract is typically four lines long. Use this checklist during policy r
 
 ## Tools
 
-A `[[tool]]` entry defines what permissions its result restricts (`delta`), what global side effects it emits (`effects`), and what conditions must hold before it dispatches (`requires`).
+A `[[tool]]` entry defines its output restrictions (`delta`), side effects (`effects`), dispatch conditions (`requires`), and dynamic `resolvers`.
 
 ```toml
 [[tool]]
@@ -125,7 +309,8 @@ attention = ["sre-signoff"]                            # Fresh per-call demand
 - **`delta` is strictly restrictive**: A tool's delta can only narrow the audience or lower trust. Within an annotated `delta`, an omitted dimension defaults to identity.
 - **Pending-cast deltas (`delta = { trust = "unknown" }`)**: Holds a label dimension pending resolution by a registered `[[cast]]` at admission. Declaring both `requires` and `unknown` delta on the same dimension is a load error.
 - **Dynamic argument placeholders (`$arg`)**: `requires.audience = { includes = ["$recipient"] }` evaluates `$recipient` against the actual call argument at runtime, as one audience expression: an ordinary string is one literal reader ID, `public` is the Public audience — only a Public trajectory includes it — and `@name` is a group the membership resolver expands, pinned to that proposed call. Placeholders are valid only inside `includes`, and `recipient` must be a required top-level string property of the tool's `parameters` — an omitted `parameters`, an optional, non-string, or nested property is a load error. A call that omits the argument or passes a non-string fails schema validation as an `InvalidCall` before the check runs.
-- **Dynamic resolvers**: A `{ resolver = "name", argument = "arg" }` form maps a required top-level string argument to literal readers, under the same `parameters` rule. It is valid as an audience delta or as the value of `includes`.
+- **Dynamic resolvers (`resolvers`)**: Each binding names a registered resolver and the exact scoped fields it returns. Without `argument` it reads the complete argument object; with `argument = "field"` it reads that one required top-level string, under the same `parameters` rule as placeholders. `delta` returns establish the owned output-label fields; `requires` returns add call-time constraints and fresh attention demands.
+- **Resolvers and the static `delta` never overlap**: Each output dimension (trust, audience) has exactly one owner, and a static `delta` and a resolver naming the same dimension is a load error. So when resolvers fill every output dimension you care about, write **no** static `delta` — a trailing `delta = {}` there is redundant. Write a static `delta` only for a dimension **no** resolver owns: a concrete value (`delta = { trust = "trusted" }`), `delta = {}` to make that dimension neutral (pass-through), or omit `delta` to leave it `Unknown` (fail-closed — the safe default). The bare `delta = {}` is only for the deliberate-neutral case, not something to write beside resolvers that already own the label.
 - **History checks (`requires.effects`)**: `has` verifies `prior(k)` against appended effects; `has_no` verifies `no_prior(k)` against appended effects plus unsettled reservations — emits reserved at release and not yet observed to succeed or fail.
 - **Attention demands (`requires.attention`)**: Forces fresh authority sign-off on *every* call, never satisfied by execution history.
 - **Dual-gate contracts**: When a contract defines both a restrictive `delta` and a `requires` check (e.g., `search_and_share`), the engine evaluates both gates.

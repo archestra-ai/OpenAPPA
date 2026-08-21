@@ -2410,18 +2410,11 @@ samp {
   color: var(--text-strong);
 }
 
-.ping-lede {
-  margin: 8px 0 0;
-  font-size: 13.5px;
-  line-height: 1.65;
-  color: var(--text-weak);
-}
-
 .ping-form {
   margin-top: 18px;
 }
 
-/* The lede and placeholder already name the field; a control still needs a
+/* The placeholder already names the field on screen; a control still needs a
    real label for assistive technology. */
 .ping-label {
   position: absolute;
@@ -2484,6 +2477,15 @@ samp {
 .ping-button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+/* Quieter than the title: the reader should be able to skip it and lose
+   nothing, but find it where they decide whether to type. */
+.ping-fine {
+  margin: 12px 0 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-weak);
 }
 
 /* Reserves its line so the dialog does not resize when a result arrives. */
