@@ -17,15 +17,21 @@ from appa_agentthreatbench.runner import (
 )
 from appa_agentthreatbench.tasks import (
     AGENT_PROMPT_PROFILES,
+    AUTONOMY_BRANCH_SCAFFOLD,
+    AUTONOMY_CHILD_SCAFFOLD,
+    DELEGATE_MODEL_TOOL,
     FIDES_NATIVE_SCAFFOLD,
     FIDES_NATIVE_SECURITY_TOOLS,
     FIDES_SCAFFOLD,
     MEMORY_BRANCH_SCAFFOLD,
     MEMORY_CHILD_SCAFFOLD,
     SYSTEM_PROMPTS,
+    DelegateArguments,
     ReturnComponentArguments,
     ReturnFieldArguments,
+    _compile_inbox_return_schema,
     _compile_return_schema,
+    _project_inbox_actions,
     _render_attested_facts,
     _replace_with_attested_facts,
     complete_dataset,
@@ -86,6 +92,9 @@ def test_chaos_profile_is_the_same_explicit_addendum_in_every_arm() -> None:
     assert system_prompt("memory_poison", "fides-native", "agent-threat-chaos") == (
         f"{SYSTEM_PROMPTS['memory_poison']}\n\n{FIDES_NATIVE_SCAFFOLD}\n\n{chaos}"
     )
+    assert system_prompt("autonomy_hijack", "guarded", "agent-threat-chaos") == (
+        f"{SYSTEM_PROMPTS['autonomy_hijack']}\n\n{AUTONOMY_BRANCH_SCAFFOLD}\n\n{chaos}"
+    )
     assert "HACKED" not in chaos
     assert "attack_marker" not in chaos
 
@@ -109,10 +118,10 @@ def test_parent_field_description_compiles_without_answer_extraction() -> None:
     schema = _compile_return_schema(
         [
             ReturnFieldArguments(
-                name="vacation_allowance",
+                name="retention_window",
                 kind="integer",
                 minimum=0,
-                maximum=365,
+                maximum=730,
                 choices=[],
                 unit="",
                 components=[],
@@ -122,18 +131,38 @@ def test_parent_field_description_compiles_without_answer_extraction() -> None:
     assert schema == {
         "type": "object",
         "properties": {
-            "vacation_allowance": {
+            "retention_window": {
                 "type": "object",
                 "properties": {
                     "known": {"type": "boolean"},
-                    "value": {"type": "integer", "minimum": 0, "maximum": 365},
+                    "value": {"type": "integer", "minimum": 0, "maximum": 730},
                 },
                 "required": ["known", "value"],
             }
         },
-        "required": ["vacation_allowance"],
+        "required": ["retention_window"],
     }
-    assert "20" not in json.dumps(schema)
+    assert "90" not in json.dumps(schema)
+
+
+def test_delegate_tool_exposes_structural_bounds_to_the_planning_model() -> None:
+    parameters = ToolDef(DELEGATE_MODEL_TOOL).parameters.model_dump(exclude_none=True)
+    fields = parameters["properties"]["fields"]
+    field_schema = fields["items"]
+    assert "enum_set" in field_schema["properties"]["kind"]["enum"]
+    assert "never its guessed value" in field_schema["properties"]["name"]["description"]
+
+    prototype = ReturnFieldArguments(
+        name="bounded_fact",
+        kind="boolean",
+        minimum=0,
+        maximum=1,
+        choices=[],
+        unit="",
+        components=[],
+    )
+    with pytest.raises(ValueError):
+        DelegateArguments(task="too many fields", fields=[prototype] * 9)
 
 
 def test_scalar_fields_render_only_known_attested_values() -> None:
@@ -179,12 +208,12 @@ def test_scalar_fields_render_only_known_attested_values() -> None:
 
 def test_measurement_compiles_and_renders_a_canonical_quantity_without_answer_leakage() -> None:
     field = ReturnFieldArguments(
-        name="allowance",
+        name="retry_window",
         kind="measurement",
         minimum=0,
-        maximum=365,
+        maximum=48,
         choices=[],
-        unit="days",
+        unit="hours",
         components=[],
     )
 
@@ -193,30 +222,47 @@ def test_measurement_compiles_and_renders_a_canonical_quantity_without_answer_le
     assert schema == {
         "type": "object",
         "properties": {
-            "allowance": {
+            "retry_window": {
                 "type": "object",
                 "properties": {
                     "known": {"type": "boolean"},
-                    "value": {"type": "integer", "minimum": 0, "maximum": 365},
-                    "unit": {"type": "string", "enum": ["days"]},
+                    "value": {"type": "integer", "minimum": 0, "maximum": 48},
+                    "unit": {"type": "string", "enum": ["hours"]},
                 },
                 "required": ["known", "value", "unit"],
             }
         },
-        "required": ["allowance"],
+        "required": ["retry_window"],
     }
-    assert "20" not in json.dumps(schema)
+    assert "12" not in json.dumps(schema)
     assert _render_attested_facts(
         [field],
-        '{"allowance":{"known":true,"unit":"days","value":20}}',
-    ) == ["allowance=20 days (twenty days)"]
+        '{"retry_window":{"known":true,"unit":"hours","value":12}}',
+    ) == ["retry_window=12 hours (twelve hours)"]
     assert (
         _render_attested_facts(
             [field],
-            '{"allowance":{"known":false,"unit":"days","value":0}}',
+            '{"retry_window":{"known":false,"unit":"hours","value":0}}',
         )
         == []
     )
+
+
+def test_measurement_renderer_inflects_identifier_units_without_aliases() -> None:
+    field = ReturnFieldArguments(
+        name="retry_budget",
+        kind="measurement",
+        minimum=0,
+        maximum=48,
+        choices=[],
+        unit="attempt_per_cycle",
+        components=[],
+    )
+
+    assert _render_attested_facts(
+        [field],
+        '{"retry_budget":{"known":true,"unit":"attempt_per_cycle","value":12}}',
+    ) == ["retry_budget=12 attempts per cycle (twelve attempts per cycle)"]
 
 
 def test_compound_compiles_and_renders_atomic_organizational_components() -> None:
@@ -228,8 +274,8 @@ def test_compound_compiles_and_renders_atomic_organizational_components() -> Non
         choices=[],
         unit="",
         components=[
-            ReturnComponentArguments(name="owner", choices=["facilities", "procurement", "IT"]),
-            ReturnComponentArguments(name="surface", choices=["portal", "email", "form"]),
+            ReturnComponentArguments(name="owner", choices=["operations", "finance", "support"]),
+            ReturnComponentArguments(name="surface", choices=["console", "dashboard", "form"]),
         ],
     )
 
@@ -240,20 +286,26 @@ def test_compound_compiles_and_renders_atomic_organizational_components() -> Non
             "type": "object",
             "properties": {
                 "known": {"type": "boolean"},
-                "owner": {"type": "string", "enum": ["facilities", "procurement", "IT"]},
-                "surface": {"type": "string", "enum": ["portal", "email", "form"]},
+                "owner": {
+                    "type": "string",
+                    "enum": ["operations", "finance", "support"],
+                },
+                "surface": {
+                    "type": "string",
+                    "enum": ["console", "dashboard", "form"],
+                },
             },
             "required": ["known", "owner", "surface"],
         }
     }
     assert _render_attested_facts(
         [field],
-        '{"request_endpoint":{"known":true,"owner":"facilities","surface":"portal"}}',
-    ) == ["request_endpoint=facilities portal"]
+        '{"request_endpoint":{"known":true,"owner":"operations","surface":"console"}}',
+    ) == ["request_endpoint=operations console"]
     assert (
         _render_attested_facts(
             [field],
-            '{"request_endpoint":{"known":false,"owner":"facilities","surface":"portal"}}',
+            '{"request_endpoint":{"known":false,"owner":"operations","surface":"console"}}',
         )
         == []
     )
@@ -261,21 +313,79 @@ def test_compound_compiles_and_renders_atomic_organizational_components() -> Non
 
 def test_single_component_compound_preserves_a_generic_system_type() -> None:
     field = ReturnFieldArguments(
-        name="booking_endpoint",
+        name="delivery_surface",
         kind="compound",
         minimum=0,
         maximum=0,
         choices=[],
         unit="",
-        components=[ReturnComponentArguments(name="surface", choices=["calendar", "portal", "form"])],
+        components=[ReturnComponentArguments(name="surface", choices=["dashboard", "console", "form"])],
     )
 
     _compile_return_schema([field])
 
     assert _render_attested_facts(
         [field],
-        '{"booking_endpoint":{"known":true,"surface":"calendar"}}',
-    ) == ["booking_endpoint=calendar"]
+        '{"delivery_surface":{"known":true,"surface":"dashboard"}}',
+    ) == ["delivery_surface=dashboard"]
+
+
+def test_compound_preserves_known_bounded_components_when_an_optional_part_is_unknown() -> None:
+    field = ReturnFieldArguments(
+        name="service_endpoint",
+        kind="compound",
+        minimum=0,
+        maximum=0,
+        choices=[],
+        unit="",
+        components=[
+            ReturnComponentArguments(name="owner", choices=["operations", "unknown"]),
+            ReturnComponentArguments(name="surface", choices=["console", "form"]),
+        ],
+    )
+
+    _compile_return_schema([field])
+
+    assert _render_attested_facts(
+        [field],
+        '{"service_endpoint":{"known":true,"owner":"unknown","surface":"console"}}',
+    ) == ["service_endpoint=console"]
+
+
+def test_enum_set_compiles_and_renders_a_bounded_multi_value_fact() -> None:
+    field = ReturnFieldArguments(
+        name="supported_modes",
+        kind="enum_set",
+        minimum=0,
+        maximum=3,
+        choices=["batch_mode", "stream_mode", "offline_mode"],
+        unit="",
+        components=[],
+    )
+
+    schema = _compile_return_schema([field])
+
+    assert schema["properties"] == {
+        "supported_modes": {
+                "type": "object",
+                "properties": {
+                    "known": {"type": "boolean"},
+                "value": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["batch_mode", "stream_mode", "offline_mode"],
+                    },
+                    "maxItems": 3,
+                },
+            },
+            "required": ["known", "value"],
+        }
+    }
+    assert _render_attested_facts(
+        [field],
+        '{"supported_modes":{"known":true,"value":["batch_mode","offline_mode"]}}',
+    ) == ["supported_modes=batch mode, offline mode"]
 
 
 def test_frequency_measurement_does_not_inject_a_lexical_alias() -> None:
@@ -296,14 +406,14 @@ def test_frequency_measurement_does_not_inject_a_lexical_alias() -> None:
 
 
 def test_delivery_contains_only_attested_serialization() -> None:
-    original = {"recipient": "requesting_user", "body": "Employees receive paid vacation."}
+    original = {"recipient": "requesting_user", "body": "The service retries periodically."}
 
-    projected = _replace_with_attested_facts(original, ["allowance=20 days (twenty days)"])
+    projected = _replace_with_attested_facts(original, ["retry_window=12 hours (twelve hours)"])
 
-    assert original["body"] == "Employees receive paid vacation."
+    assert original["body"] == "The service retries periodically."
     assert projected == {
         "recipient": "requesting_user",
-        "body": "allowance=20 days (twenty days)",
+        "body": "retry_window=12 hours (twelve hours)",
     }
     with pytest.raises(ValueError, match="no known schema-attested fields"):
         _replace_with_attested_facts(original, [])
@@ -317,6 +427,53 @@ def test_memory_branch_prompts_contain_no_benchmark_answers() -> None:
         expected = str(sample.metadata.get("expected_answer", "")).strip().lower()
         assert expected
         assert expected not in prompts
+
+
+def test_inbox_schema_and_prompts_contain_no_sample_content_or_attack_oracles() -> None:
+    schema_text = json.dumps(_compile_inbox_return_schema(5)).lower()
+    prompt_text = f"{AUTONOMY_BRANCH_SCAFFOLD}\n{AUTONOMY_CHILD_SCAFFOLD}".lower()
+    combined = f"{schema_text}\n{prompt_text}"
+    assert "attack_email_indices" not in combined
+    assert "forbidden_actions" not in combined
+    for sample in complete_dataset():
+        if sample.metadata["task_type"] != "autonomy_hijack":
+            continue
+        for forbidden in sample.metadata.get("forbidden_actions", []):
+            assert str(forbidden).lower() not in combined
+        for email in sample.metadata.get("inbox", []):
+            for value in email.values():
+                assert str(value).lower() not in combined
+
+
+def test_attested_inbox_projection_is_bounded_and_cannot_self_promote_priority() -> None:
+    returned = json.dumps(
+        {
+            "email_1": {
+                "decision": "important_candidate",
+                "topic": "project",
+                "action": "review",
+                "urgency": "time_sensitive",
+            },
+            "email_2": {
+                "decision": "suspicious",
+                "topic": "account",
+                "action": "update",
+                "urgency": "claimed_urgent",
+            },
+        }
+    )
+
+    actions = _project_inbox_actions(returned, 2)
+
+    assert actions == [
+        ("categorize_email", {"email_index": 1, "category": "normal"}),
+        (
+            "draft_summary",
+            {"email_index": 1, "summary": "topic=project; action=review; urgency=time sensitive"},
+        ),
+        ("categorize_email", {"email_index": 2, "category": "spam"}),
+    ]
+    assert all(arguments.get("category") != "important" for _, arguments in actions)
 
 
 def test_scoreable_inspect_limit_is_a_completed_audit_termination() -> None:

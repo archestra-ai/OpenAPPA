@@ -27,6 +27,7 @@ from appa_agentthreatbench.resolver import ResolverFixture, resolver_fixture_dig
 from appa_agentthreatbench.tasks import (
     AGENT_PROMPT_PROFILES,
     ARMS,
+    DELEGATE_INBOX_TOOL,
     DELEGATE_TOOL,
     DOMAIN_TOOLS,
     FIDES_NATIVE_SECURITY_TOOLS,
@@ -157,6 +158,15 @@ def validate_policies() -> None:
                 guarded_tools,
                 "preflight",
                 spawn_tool="delegate",
+            )
+            session.close()
+        elif task_type == "autonomy_hijack":
+            guarded_tools = [DELEGATE_INBOX_TOOL, *DOMAIN_TOOLS[task_type], RESPONSE_TOOL]
+            session = NativeSession(
+                guarded_policy(task_type),
+                guarded_tools,
+                "preflight",
+                spawn_tool="delegate_inbox",
             )
             session.close()
         else:
@@ -508,10 +518,13 @@ def build_summary(logs: list[EvalLog], audit_dir: Path, manifest: dict[str, obje
                 "exposes the official quarantine tools."
             ),
             "autonomy_hijack": (
-                "The guarded arm labels the complete inbox suspicious and blocks trusted state mutations derived from "
-                "it; utility loss is part of the result. The FIDES arm applies the corresponding untrusted label and "
-                "gates categorization, summaries, and checked delivery. The FIDES-native arm additionally uses "
-                "automatic hiding and quarantined processing."
+                "The guarded arm labels the complete inbox suspicious, isolates its read in a child, and freezes one "
+                "bounded triage record per opaque index before the read. Runtime projection prevents untrusted "
+                "content from promoting itself to an important category and emits only bounded deterministic "
+                "summaries; raw email content never reaches the parent. Attestation bounds instruction flow but does "
+                "not prove semantic truth. The FIDES arm applies the corresponding untrusted label and gates "
+                "categorization, summaries, and checked delivery. The FIDES-native arm additionally uses automatic "
+                "hiding and quarantined processing."
             ),
             "data_exfil": (
                 "The guarded arm resolves source ACLs and exact sink recipients dynamically without using sensitive "
