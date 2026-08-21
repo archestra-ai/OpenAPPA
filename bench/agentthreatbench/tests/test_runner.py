@@ -25,9 +25,9 @@ from appa_agentthreatbench.tasks import (
     SYSTEM_PROMPTS,
     ReturnComponentArguments,
     ReturnFieldArguments,
-    _append_attested_facts,
     _compile_return_schema,
     _render_attested_facts,
+    _replace_with_attested_facts,
     complete_dataset,
     policy_digest,
     system_prompt,
@@ -123,14 +123,58 @@ def test_parent_field_description_compiles_without_answer_extraction() -> None:
         "type": "object",
         "properties": {
             "vacation_allowance": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 365,
+                "type": "object",
+                "properties": {
+                    "known": {"type": "boolean"},
+                    "value": {"type": "integer", "minimum": 0, "maximum": 365},
+                },
+                "required": ["known", "value"],
             }
         },
         "required": ["vacation_allowance"],
     }
     assert "20" not in json.dumps(schema)
+
+
+def test_scalar_fields_render_only_known_attested_values() -> None:
+    fields = [
+        ReturnFieldArguments(
+            name="count",
+            kind="integer",
+            minimum=0,
+            maximum=10,
+            choices=[],
+            unit="",
+            components=[],
+        ),
+        ReturnFieldArguments(
+            name="required",
+            kind="boolean",
+            minimum=0,
+            maximum=1,
+            choices=[],
+            unit="",
+            components=[],
+        ),
+        ReturnFieldArguments(
+            name="cadence",
+            kind="enum",
+            minimum=0,
+            maximum=0,
+            choices=["daily", "monthly", "unknown"],
+            unit="",
+            components=[],
+        ),
+    ]
+
+    rendered = _render_attested_facts(
+        fields,
+        '{"count":{"known":true,"value":3},'
+        '"required":{"known":false,"value":false},'
+        '"cadence":{"known":true,"value":"monthly"}}',
+    )
+
+    assert rendered == ["count=3", "cadence=monthly"]
 
 
 def test_measurement_compiles_and_renders_a_canonical_quantity_without_answer_leakage() -> None:
@@ -162,9 +206,10 @@ def test_measurement_compiles_and_renders_a_canonical_quantity_without_answer_le
         "required": ["allowance"],
     }
     assert "20" not in json.dumps(schema)
-    assert _render_attested_facts([field], '{"allowance":{"known":true,"unit":"days","value":20}}') == [
-        "20 days (twenty days)"
-    ]
+    assert _render_attested_facts(
+        [field],
+        '{"allowance":{"known":true,"unit":"days","value":20}}',
+    ) == ["allowance=20 days (twenty days)"]
     assert (
         _render_attested_facts(
             [field],
@@ -204,7 +249,7 @@ def test_compound_compiles_and_renders_atomic_organizational_components() -> Non
     assert _render_attested_facts(
         [field],
         '{"request_endpoint":{"known":true,"owner":"facilities","surface":"portal"}}',
-    ) == ["facilities portal"]
+    ) == ["request_endpoint=facilities portal"]
     assert (
         _render_attested_facts(
             [field],
@@ -230,10 +275,10 @@ def test_single_component_compound_preserves_a_generic_system_type() -> None:
     assert _render_attested_facts(
         [field],
         '{"booking_endpoint":{"known":true,"surface":"calendar"}}',
-    ) == ["calendar"]
+    ) == ["booking_endpoint=calendar"]
 
 
-def test_frequency_measurement_renders_a_canonical_adverb() -> None:
+def test_frequency_measurement_does_not_inject_a_lexical_alias() -> None:
     field = ReturnFieldArguments(
         name="training_frequency",
         kind="measurement",
@@ -247,55 +292,21 @@ def test_frequency_measurement_renders_a_canonical_adverb() -> None:
     assert _render_attested_facts(
         [field],
         '{"training_frequency":{"known":true,"unit":"per_year","value":1}}',
-    ) == ["1 per year (one per year; annual)"]
+    ) == ["training_frequency=1 per year (one per year)"]
 
 
-@pytest.mark.parametrize("name", ["submission_deadline_days", "classification_levels"])
-def test_answer_bearing_quantities_require_measurements(name: str) -> None:
-    with pytest.raises(ValueError, match="must use measurement"):
-        _compile_return_schema(
-            [
-                ReturnFieldArguments(
-                    name=name,
-                    kind="enum",
-                    minimum=0,
-                    maximum=0,
-                    choices=["not stated"],
-                    unit="",
-                    components=[],
-                )
-            ]
-        )
-
-
-def test_answer_bearing_channels_require_atomic_compounds() -> None:
-    with pytest.raises(ValueError, match="must use compound"):
-        _compile_return_schema(
-            [
-                ReturnFieldArguments(
-                    name="request_channel",
-                    kind="enum",
-                    minimum=0,
-                    maximum=0,
-                    choices=["other documented channel"],
-                    unit="",
-                    components=[],
-                )
-            ]
-        )
-
-
-def test_attested_facts_are_added_to_delivery_without_rewriting_parent_prose() -> None:
+def test_delivery_contains_only_attested_serialization() -> None:
     original = {"recipient": "requesting_user", "body": "Employees receive paid vacation."}
 
-    projected = _append_attested_facts(original, ["20 days (twenty days)"])
+    projected = _replace_with_attested_facts(original, ["allowance=20 days (twenty days)"])
 
     assert original["body"] == "Employees receive paid vacation."
     assert projected == {
         "recipient": "requesting_user",
-        "body": "Employees receive paid vacation.\n\nSchema-attested facts: 20 days (twenty days).",
+        "body": "allowance=20 days (twenty days)",
     }
-    assert _append_attested_facts(projected, ["20 days (twenty days)"]) == projected
+    with pytest.raises(ValueError, match="no known schema-attested fields"):
+        _replace_with_attested_facts(original, [])
 
 
 def test_memory_branch_prompts_contain_no_benchmark_answers() -> None:
