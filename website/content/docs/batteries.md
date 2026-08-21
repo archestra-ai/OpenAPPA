@@ -1,9 +1,14 @@
 ---
-title: Our vision for batteries
-category: Integration
+title: Betteries
+category: Deep Dive
 order: 7
 description: Our vision for reusable security coverage, and the deliberately small first implementation.
 ---
+
+:::proposal
+name: Betteries
+date: 2026-08-21
+author: Ildar Iskhakov
 
 Security rules should travel with the tools they protect. A team should not have to rebuild the same Claude Code or Grain policy for every deployment.
 
@@ -189,3 +194,4 @@ We want evidence from real battery use before adding any of those mechanisms. Mo
 Our goal is simple: installing coverage for a known integration should be one action, reviewing it should remain straightforward, and customizing local trust should not require editing shipped code. We can reach that goal with local policy includes and one managed resolver process.
 
 That is the first version we intend to build: reusable coverage without hidden precedence, local judgment without another service to operate, and failure that never quietly becomes permission.
+:::

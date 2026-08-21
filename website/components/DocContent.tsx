@@ -24,7 +24,9 @@ import { PolicyStackFigure } from "@/components/figures/PolicyStackFigure";
 import { RemedyPlanFigure } from "@/components/figures/RemedyPlanFigure";
 import { TwoEndingsFigure } from "@/components/figures/TwoEndingsFigure";
 import { MascotBoard } from "@/components/MascotBoard";
+import { ProposalBlock } from "@/components/ProposalBlock";
 import { Term } from "@/components/Term";
+import { parseProposal, PROPOSAL_SPLIT } from "@/lib/proposals";
 import { termDefinition } from "@/lib/terms";
 
 /* Block directives: a line of the form :::name::: in the markdown renders
@@ -104,6 +106,13 @@ function MarkdownCode({ children, ...props }: HTMLAttributes<HTMLElement> & { ch
   return <code {...props}>{children}</code>;
 }
 
+/* A proposal may reuse an implemented key with a different meaning, and the
+   glossary defines the implemented one. Popovers stay off inside a proposal
+   rather than contradicting the text they annotate. */
+function PlainCode({ children, ...props }: HTMLAttributes<HTMLElement> & { children?: ReactNode }) {
+  return <code {...props}>{children}</code>;
+}
+
 function MarkdownLink({ href, children, ...props }: AnchorHTMLAttributes<HTMLAnchorElement>) {
   const isExternal = href?.startsWith("http");
   return (
@@ -117,14 +126,14 @@ function MarkdownLink({ href, children, ...props }: AnchorHTMLAttributes<HTMLAnc
   );
 }
 
-function Markdown({ content }: { content: string }) {
+function Markdown({ content, terms = true }: { content: string; terms?: boolean }) {
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
       rehypePlugins={[rehypeSlug, rehypeHighlight]}
       components={{
         pre: (props) => <CodeBlock {...props} />,
-        code: MarkdownCode,
+        code: terms ? MarkdownCode : PlainCode,
         a: MarkdownLink,
         // A table's min-content width can exceed a phone viewport; without a
         // scroll container of its own it widens the whole page instead.
@@ -143,11 +152,11 @@ function Markdown({ content }: { content: string }) {
   );
 }
 
-export function DocContent({ content }: { content: string }) {
+function MarkdownWithDirectives({ content }: { content: string }) {
   // split() with a captured group interleaves markdown chunks and directive names
   const parts = content.split(DIRECTIVE_SPLIT);
   return (
-    <div className="prose">
+    <>
       {parts.map((part, index) =>
         index % 2 === 1 ? (
           <Fragment key={index}>{DIRECTIVES[part]?.()}</Fragment>
@@ -155,6 +164,24 @@ export function DocContent({ content }: { content: string }) {
           <Markdown key={index} content={part} />
         ),
       )}
+    </>
+  );
+}
+
+export function DocContent({ content }: { content: string }) {
+  // proposals split first, so a directive inside one still renders in place
+  const blocks = content.split(PROPOSAL_SPLIT);
+  return (
+    <div className="prose">
+      {blocks.map((block, index) => {
+        if (index % 2 === 0) return <MarkdownWithDirectives key={index} content={block} />;
+        const proposal = parseProposal(block);
+        return (
+          <ProposalBlock key={index} proposal={proposal}>
+            <Markdown content={proposal.body} terms={false} />
+          </ProposalBlock>
+        );
+      })}
     </div>
   );
 }

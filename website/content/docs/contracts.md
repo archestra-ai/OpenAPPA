@@ -1,6 +1,6 @@
 ---
 title: Policy reference
-category: Get started
+category: Deep Dive
 order: 3
 description: Declarations, syntax, and rules for OpenAPPA policy TOML files.
 ---
@@ -140,9 +140,10 @@ A resolver with `builtin = "claude-code"` never uses the endpoint. The builtin s
 
 The deployment tunes the builtin in `[externals.claude_code]`: `command` sets the executable path (a service environment often strips `PATH`), `model` pins the model, and `timeout_ms` gives the consult its own budget instead of the shared machine-consult `timeout_ms` — a model call is slower than an ordinary endpoint. At most four Claude consults run at once per runtime. Each consult has model latency and account cost; a pinned recheck and a replay never invoke it again.
 
-### 🚧 Proposed resolver syntax
-
-This proposal is not implemented. It keeps request version `1`.
+:::proposal
+name: Resolver syntax
+date: 2026-08-21
+author: Innokentii Konstantinov
 
 #### Example: pass one argument
 
@@ -314,6 +315,7 @@ Response:
 ```
 
 OpenAPPA rejects missing, extra, or `null` results. Trust and attention values must come from the lists in the request. Audience is `"public"` or a list of reader names.
+:::
 
 ### Deployment coverage
 

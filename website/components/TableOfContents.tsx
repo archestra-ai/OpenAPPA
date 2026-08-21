@@ -106,6 +106,7 @@ export function TableOfContents({ items }: { items: TocItem[] }) {
                   className={[
                     item.level === 3 ? "depth-3" : "",
                     activeId === item.id ? "active" : "",
+                    item.proposal ? "toc-proposal" : "",
                   ]
                     .filter(Boolean)
                     .join(" ")}

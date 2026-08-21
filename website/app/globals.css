@@ -594,6 +594,12 @@ samp {
   font-weight: 600;
 }
 
+.sidebar-proposal {
+  margin-left: 0.45em;
+  font-size: 10px;
+  vertical-align: 0.05em;
+}
+
 /* ————————————————————————————————————————————————
    Main column
    ———————————————————————————————————————————————— */
@@ -859,6 +865,102 @@ samp {
   background: var(--bg-weak);
   color: var(--text-strong);
   font-weight: 500;
+}
+
+/* ————————————————————————————————————————————————
+   Proposals — material that is not true of the current model yet
+   ———————————————————————————————————————————————— */
+.proposal {
+  margin: 2.5rem 0;
+  margin-left: -1.25rem;
+  padding: 0.125rem 0 0.25rem calc(1.25rem - 2px);
+  border-left: 2px solid var(--warn);
+  scroll-margin-top: calc(var(--header-h) + 1.5rem);
+}
+
+/* Compact editorial header: one quiet rule instead of a card-within-a-page. */
+.proposal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  padding: 0 0 0.7rem;
+  border-bottom: 1px solid var(--border-weak);
+}
+
+.proposal-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--warn);
+}
+
+.proposal-badge::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  background: currentColor;
+  transform: rotate(45deg);
+}
+
+.prose .proposal-meta {
+  flex: none;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-weak);
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.prose .proposal-body > :first-child {
+  margin-top: 1rem;
+}
+
+.prose .proposal-body > :last-child {
+  margin-bottom: 0;
+}
+
+/* Headings inside a proposal stay subordinate to its compact header and drop
+   the rule that separates top-level sections of the page. */
+.prose .proposal-body :is(h2, h3, h4) {
+  border-top: none;
+  padding-top: 0;
+  font-size: 15px;
+  margin: 1.5rem 0 0.5rem;
+}
+
+.prose .proposal-body :is(h2, h3, h4)[id] {
+  scroll-margin-top: calc(var(--header-h) + 5rem);
+}
+
+/* A proposal is marked in the rail too, so its entry is not read as another
+   section of the reference. */
+.toc-proposal::after {
+  content: "🚧";
+  margin-left: 0.45em;
+  font-size: 10px;
+  vertical-align: 0.05em;
+}
+
+@media (max-width: 640px) {
+  .proposal {
+    margin-left: -1rem;
+    padding-left: calc(1rem - 2px);
+  }
+
+  .proposal-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }
 
 /* heading anchor links */
