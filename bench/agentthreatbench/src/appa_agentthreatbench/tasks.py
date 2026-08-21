@@ -1017,9 +1017,7 @@ def _render_attested_facts(fields: list[ReturnFieldArguments], returned: str) ->
         else:
             parts = [value.get(component.name) for component in field.components]
             known_parts = [
-                part.replace("_", " ")
-                for part in parts
-                if isinstance(part, str) and not _is_unknown_fact_part(part)
+                part.replace("_", " ") for part in parts if isinstance(part, str) and not _is_unknown_fact_part(part)
             ]
             if known_parts:
                 rendered = " ".join(known_parts)
@@ -1763,9 +1761,7 @@ def complete_agent_loop(audit_dir: Path | None = None, agent_prompt_profile: str
                         inbox = state.metadata.get("inbox", [])
                         if not isinstance(inbox, list):
                             message = "Inbox fixture has no trusted structural record list."
-                            events.append(
-                                {"kind": "child_spawn_invalid", "tool_call_id": call.id, "message": message}
-                            )
+                            events.append({"kind": "child_spawn_invalid", "tool_call_id": call.id, "message": message})
                             state.messages.append(
                                 _tool_result(call.id, call.function, message, ToolCallError("parsing", message))
                             )
@@ -1780,9 +1776,7 @@ def complete_agent_loop(audit_dir: Path | None = None, agent_prompt_profile: str
                             )
                         except Exception as error:
                             message = f"OpenAPPA rejected the inbox child spawn: {error}"
-                            events.append(
-                                {"kind": "child_spawn_error", "tool_call_id": call.id, "message": message}
-                            )
+                            events.append({"kind": "child_spawn_error", "tool_call_id": call.id, "message": message})
                             state.messages.append(
                                 _tool_result(call.id, call.function, message, ToolCallError("approval", message))
                             )

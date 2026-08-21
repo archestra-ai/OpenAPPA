@@ -367,9 +367,9 @@ def test_enum_set_compiles_and_renders_a_bounded_multi_value_fact() -> None:
 
     assert schema["properties"] == {
         "supported_modes": {
-                "type": "object",
-                "properties": {
-                    "known": {"type": "boolean"},
+            "type": "object",
+            "properties": {
+                "known": {"type": "boolean"},
                 "value": {
                     "type": "array",
                     "items": {
