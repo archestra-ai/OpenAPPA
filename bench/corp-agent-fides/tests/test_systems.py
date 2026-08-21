@@ -19,20 +19,21 @@ def _call(server_bin: Path, corpus: Path, sink: Path, tool: str, args: dict) -> 
     return asyncio.run(run())
 
 
-def test_advertises_seventeen_tools(server_bin: Path, corpus: Path, sink: Path) -> None:
+def test_advertises_eighteen_tools(server_bin: Path, corpus: Path, sink: Path) -> None:
     async def run() -> list[str]:
         async with CorpSystemsClient(corpus, sink, server_bin) as client:
             return await client.list_tool_names()
 
     names = asyncio.run(run())
-    assert len(names) == 17
+    assert len(names) == 18
     for system in System:
-        if system is System.EMAIL:
+        if system in (System.EMAIL, System.WIRE):
             continue
         for verb in ("search", "read", "create"):
             assert f"{verb}_{system.dir_name}" in names
     assert "send_email" in names
     assert "share_legal_packet" in names
+    assert "execute_wire" in names
 
 
 def test_search_matches_name_and_body(server_bin: Path, corpus: Path, sink: Path) -> None:

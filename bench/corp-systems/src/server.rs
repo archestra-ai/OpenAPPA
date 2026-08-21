@@ -1,9 +1,9 @@
 //! The `corp-systems` MCP server: mock internal corporate systems exposed as
 //! tools over MCP.
 //!
-//! Seventeen tools — `search_`/`read_`/`create_` for each of `hr`, `finance`,
+//! Eighteen tools — `search_`/`read_`/`create_` for each of `hr`, `finance`,
 //! `task_tracker`, `public_forum`, and `vendor`, plus the outbound `send_email`
-//! sink and `share_legal_packet` composite. Each method delegates to the
+//! sink, atomic `execute_wire` action, and `share_legal_packet` composite.
 //! [`crate::systems`] primitives, where the semantics live once.
 
 use std::collections::BTreeSet;
@@ -55,6 +55,16 @@ pub struct ShareLegalPacketArgs {
     pub to: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ExecuteWireArgs {
+    /// The exact task-tracker request file authorizing the transfer details.
+    pub request_file: String,
+    /// Transfer amount in whole US dollars.
+    pub amount_usd: u64,
+    /// Beneficiary account identifier.
+    pub beneficiary_account: String,
+}
+
 /// The server state: the read-only corpus root, the sink root `send_email`
 /// writes under, and the generated tool router. The two roots coincide when the
 /// server owns its whole data tree, and split when the corpus is shared between
@@ -67,7 +77,7 @@ pub struct CorpSystems {
 }
 
 /// Which systems a tool requires for the `--systems` enable filter. Exhaustive
-/// over the 17 declared tools on purpose: a tool added to the router without a
+/// over the 18 declared tools on purpose: a tool added to the router without a
 /// mapping here fails server startup instead of silently escaping the filter.
 fn systems_of_tool(name: &str) -> Option<&'static [System]> {
     match name {
@@ -78,6 +88,7 @@ fn systems_of_tool(name: &str) -> Option<&'static [System]> {
         "search_vendor" | "read_vendor" | "create_vendor" => Some(&[System::Vendor]),
         "send_email" => Some(&[System::Email]),
         "share_legal_packet" => Some(&[System::Finance, System::Email]),
+        "execute_wire" => Some(&[System::Wire]),
         _ => None,
     }
 }
@@ -224,6 +235,18 @@ impl CorpSystems {
     }
 
     #[tool(
+        description = "Execute a wire transfer and create an immutable structured receipt. This is the only tool that transfers funds."
+    )]
+    fn execute_wire(&self, Parameters(a): Parameters<ExecuteWireArgs>) -> CallToolResult {
+        match systems::execute_wire(&self.sink_root, &a.request_file, a.amount_usd, &a.beneficiary_account) {
+            Ok(file) => CallToolResult::success(vec![Content::text(format!(
+                "wire executed; receipt archived as wire/{file}"
+            ))]),
+            Err(e) => error_result(format!("execute_wire failed: {e}")),
+        }
+    }
+
+    #[tool(
         description = "Read a finance legal packet and email its exact contents to a recipient as one server-side action. Sends no email if the finance read fails."
     )]
     fn share_legal_packet(&self, Parameters(a): Parameters<ShareLegalPacketArgs>) -> CallToolResult {
@@ -244,7 +267,7 @@ impl ServerHandler for CorpSystems {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "Mock corporate systems: hr, finance, task_tracker, public_forum, and vendor, each with \
-             search/read/create tools, plus outbound email and legal-packet sharing. Files are plain markdown documents.",
+             search/read/create tools, plus outbound email, atomic wire execution, and legal-packet sharing. Files are plain markdown documents.",
         )
     }
 }

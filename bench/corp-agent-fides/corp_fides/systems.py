@@ -46,6 +46,7 @@ class System(str, Enum):
     PUBLIC_FORUM = "public_forum"
     VENDOR = "vendor"
     EMAIL = "email"
+    WIRE = "wire"
 
     @property
     def dir_name(self) -> str:

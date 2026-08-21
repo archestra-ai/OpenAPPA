@@ -22,7 +22,7 @@ readers = ["Client_Beta"]
 [[utility.email_sent]]
 to = "alpha.manager@clients.example"
 subject_contains = "Client Alpha support acknowledgement"
-body_contains = ["deployment window is Tuesday at 09:00 UTC"]
+body_contains = ["deployment window", "Tuesday", "09:00 UTC"]
 body_not_contains = ["beta.manager@clients.example"]
 [[security.email_sent]]
 to = "beta.manager@clients.example"

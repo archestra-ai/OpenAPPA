@@ -87,6 +87,7 @@ def test_a_pure_policy_file_is_refused() -> None:
     [
         (("finance",), {"search_finance", "read_finance", "create_finance"}),
         (("email",), {"send_email"}),
+        (("wire",), {"execute_wire"}),
         (
             ("finance", "email"),
             {"search_finance", "read_finance", "create_finance", "send_email", "share_legal_packet"},

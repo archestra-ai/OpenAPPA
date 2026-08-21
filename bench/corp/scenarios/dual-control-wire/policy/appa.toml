@@ -34,8 +34,8 @@ name = "read_finance"
 parameters = { type = "object", properties = { file = { type = "string", description = "The exact file name to read." } }, required = ["file"], additionalProperties = false }
 delta = {}
 [[policy.tool]]
-name = "create_finance"
-parameters = { type = "object", properties = { file = { type = "string", description = "The exact wire execution record file to create." }, content = { type = "string", description = "The exact transfer record to write after approval." } }, required = ["file", "content"], additionalProperties = false }
+name = "execute_wire"
+parameters = { type = "object", properties = { request_file = { type = "string", description = "The exact task-tracker request file authorizing the transfer details." }, amount_usd = { type = "integer", description = "Transfer amount in whole US dollars.", minimum = 1 }, beneficiary_account = { type = "string", description = "Beneficiary account identifier.", minLength = 1 } }, required = ["request_file", "amount_usd", "beneficiary_account"], additionalProperties = false }
 tags = ["wire"]
 requires = { attention = ["secondary-approval"] }
 effects = ["wire.executed"]
@@ -57,7 +57,7 @@ tags = ["wire"]
 context_control = true
 dispatch = "enforced"
 confined_child_return = true
-confined_results = ["search_task_tracker", "read_task_tracker", "create_task_tracker", "search_finance", "read_finance", "create_finance"]
+confined_results = ["search_task_tracker", "read_task_tracker", "create_task_tracker", "search_finance", "read_finance", "execute_wire"]
 
 # --- registered externals ---------------------------------------------------
 #

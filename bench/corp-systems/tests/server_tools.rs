@@ -104,12 +104,12 @@ async fn call(
 }
 
 #[tokio::test]
-async fn advertises_seventeen_tools() {
+async fn advertises_eighteen_tools() {
     let data = TempData::new("list");
     let server = spawn_server(data.path()).await;
     let tools = server.peer().list_all_tools().await.expect("list tools");
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
-    assert_eq!(names.len(), 17, "expected 17 tools, got: {names:?}");
+    assert_eq!(names.len(), 18, "expected 18 tools, got: {names:?}");
     for expected in [
         "search_hr",
         "read_hr",
@@ -128,9 +128,37 @@ async fn advertises_seventeen_tools() {
         "create_vendor",
         "send_email",
         "share_legal_packet",
+        "execute_wire",
     ] {
         assert!(names.contains(&expected), "missing tool {expected}; have {names:?}");
     }
+    server.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn execute_wire_creates_a_structured_receipt_in_the_dedicated_sink() {
+    let data = TempData::new("wire-data");
+    let sink = TempData::new("wire-sink");
+    let server = spawn_server_with(data.path(), sink.path(), Some("wire")).await;
+
+    let result = call(
+        &server,
+        "execute_wire",
+        serde_json::json!({
+            "request_file": "WIRE-REQUEST-880.md",
+            "amount_usd": 72500,
+            "beneficiary_account": "NW-ACCT-4408"
+        }),
+    )
+    .await;
+    assert_ne!(result.is_error, Some(true));
+    let receipt: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sink.path().join("wire/WIRE-REQUEST-880.md.json")).unwrap())
+            .unwrap();
+    assert_eq!(receipt["status"], "executed");
+    assert_eq!(receipt["amount_usd"], 72500);
+    assert!(!data.path().join("wire").exists());
+
     server.cancel().await.ok();
 }
 

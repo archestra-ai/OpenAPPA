@@ -19,14 +19,20 @@ def _tools_by_name():
     return {t.name: t for t in build_tools(_OFFLINE_CLIENT)}
 
 
-def test_seventeen_tools_with_expected_names() -> None:
+def test_eighteen_tools_with_expected_names() -> None:
     tools = _tools_by_name()
-    assert len(tools) == 17
+    assert len(tools) == 18
     for system in ("hr", "finance", "task_tracker", "public_forum", "vendor"):
         for verb in ("search", "read", "create"):
             assert f"{verb}_{system}" in tools
     assert "send_email" in tools
     assert "share_legal_packet" in tools
+    assert "execute_wire" in tools
+
+
+def test_execute_wire_refuses_tainted_context_but_has_no_authority_primitive() -> None:
+    props = _tools_by_name()["execute_wire"].additional_properties
+    assert props == {"accepts_untrusted": False}
 
 
 def test_send_email_is_the_gated_egress_sink() -> None:
