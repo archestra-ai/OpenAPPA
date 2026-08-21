@@ -155,9 +155,8 @@ parameters = { type = "object", properties = { to = { type = "string" }, body = 
 delta = {}
 effects = ["egress"]
 
-[tool.match]
-argument = "to"
-cases = [
+match.argument = "to"
+match.cases = [
   ["*@archestra.ai", "internal"],
   ["*@arseny.info", "internal"],
   ["_", "public"],
@@ -175,6 +174,27 @@ Each row contains a pattern and its result. OpenAPPA reads the rows from top to 
 `*` matches any text. `_` matches anything that the earlier rows did not match. `_` must be the final row.
 
 The selected result becomes the audience required by this call. An internal conversation can go to an internal address. Sending it to a public address still needs the usual approval or cleanup step.
+
+The same form can give a Bash tool a small list of exact internal commands:
+
+```toml
+[[tool]]
+name = "Bash"
+parameters = { type = "object", properties = { command = { type = "string" } }, required = ["command"] }
+delta = {}
+
+match.argument = "command"
+match.cases = [
+  ["git status", "internal"],
+  ["git diff", "internal"],
+  ["git log --oneline", "internal"],
+  ["_", "public"],
+]
+```
+
+The listed commands are internal destinations. `_` treats every other command as public. Internal data therefore needs approval before it reaches an unknown command.
+
+Broad Bash patterns are unsafe. A command can contain redirects, variables, or several commands. The first version should use exact Bash commands only.
 
 This rule runs inside OpenAPPA. It needs no `[[dynamic_resolver]]`, server, command, or model call.
 
