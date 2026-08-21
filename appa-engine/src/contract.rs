@@ -93,8 +93,10 @@ impl ResolverReturn {
 /// One resolver attached to a tool: which registered resolver, what it reads, and the exact
 /// scoped fields it must return. A binding without `argument` shows the resolver the complete
 /// canonical argument object; with `argument = "field"` it shows exactly that declared required
-/// top-level string value, and its pin survives argument substitution while that field's value
-/// is unchanged.
+/// top-level string value. Either way the validated answer is pinned to the proposed call and
+/// survives a sanitizer's input substitution — the substituted call is a registered sanitizer's
+/// rewrite of the call the resolver ruled on, so the ruling stands and the resolver is not
+/// asked again.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ToolResolverBinding {
     pub resolver: DynamicResolverName,

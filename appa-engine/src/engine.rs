@@ -5843,6 +5843,17 @@ mod tests {
             resolvers: vec![dynamic_who()],
             ..post("post_to", vec![crate::names::TagName::new("outbound")])
         };
+        let post_call = ToolContract {
+            resolvers: vec![dynamic_call()],
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(TRUSTED),
+                    audience: vec![],
+                },
+                ..Requires::default()
+            },
+            ..post("post_call", vec![crate::names::TagName::new("outbound")])
+        };
         open_engine_at(
             RegistryConfig {
                 trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
@@ -5850,6 +5861,7 @@ mod tests {
                     post("post", vec![crate::names::TagName::new("outbound")]),
                     post("post_untagged", vec![]),
                     post_to,
+                    post_call,
                     open_tool("ping"),
                 ],
                 authorities: vec![crate::authority::Authority {
@@ -5897,6 +5909,31 @@ mod tests {
             argument: Some("who".to_string()),
             returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
         }
+    }
+
+    fn dynamic_call() -> crate::contract::ToolResolverBinding {
+        crate::contract::ToolResolverBinding {
+            resolver: crate::names::DynamicResolverName::new("classify"),
+            argument: None,
+            returns: [crate::contract::ResolverReturn::RequiredAudience]
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    fn call_pin(reader: &str) -> crate::contract::PinnedToolResolution {
+        crate::contract::PinnedToolResolution::from_answer(
+            dynamic_call(),
+            None,
+            None,
+            None,
+            Some(crate::contract::RequiredAudience {
+                includes: Some(Audience::restricted([ReaderId::new(reader)])),
+                cap: None,
+            }),
+            None,
+        )
+        .expect("a literal required audience pins")
     }
 
     fn who_pin(reader: &str) -> crate::contract::PinnedToolResolution {
@@ -6389,7 +6426,37 @@ mod tests {
     }
 
     #[test]
-    fn a_substitution_that_rewrites_a_dynamically_bound_argument_is_unapplicable() {
+    fn a_whole_call_ruling_keeps_its_hop_and_rides_through_the_substitution() {
+        let e = substituting_engine(TRUSTED);
+        let proposal = call("post_call", json!({ "body": "ssn 123" })).with_tool_resolutions(vec![call_pin("partner")]);
+        let log = internal_log(&e);
+        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
+        let offers = opened_offers(&facts);
+        assert_eq!(
+            offers[0].1.hop(),
+            Some(&crate::names::SanitizerName::new("redact")),
+            "the includes gap the ruling pinned offers the input hop"
+        );
+        let log = [log, facts].concat();
+
+        let hopped = execute_offer(&e, &log, offers[0].0, substitution(&proposal, REDACTED)).expect("the hop runs");
+        match offer_answer(&hopped) {
+            OfferFollowUp::Released(released) => {
+                assert_eq!(released.call.canonical_arguments().canonical_text(), REDACTED);
+                assert_eq!(
+                    released.call.tool_resolutions(),
+                    proposal.tool_resolutions(),
+                    "the ruling rides through the rewrite; the resolver is not asked again"
+                );
+            }
+            other => panic!("the substitution clears the pinned includes gap and dispatches, got {other:?}"),
+        }
+        let log = [log, appended_facts(hopped)].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+    }
+
+    #[test]
+    fn a_substitution_keeps_the_ruling_even_where_it_rewrites_the_bound_argument() {
         let e = substituting_engine(TRUSTED);
         let proposal = call("post_to", json!({ "body": "ssn 123", "who": "desk" }))
             .with_tool_resolutions(vec![who_pin("partner")]);
@@ -6398,26 +6465,29 @@ mod tests {
         let hop = opened_offers(&facts)[0].0;
         let log = [log, facts].concat();
 
-        assert_eq!(
-            execute_offer(
-                &e,
-                &log,
-                hop,
-                substitution(&proposal, r#"{"body":"[redacted]","who":"someone else"}"#)
-            )
-            .map(|_| ()),
-            Err(TransitionError::SanitizerUnapplicable)
-        );
-        assert!(
-            execute_offer(
-                &e,
-                &log,
-                hop,
-                substitution(&proposal, r#"{"body":"[redacted]","who":"desk"}"#)
-            )
-            .is_ok(),
-            "a replacement that leaves the bound argument alone keeps its answer"
-        );
+        let hopped = execute_offer(
+            &e,
+            &log,
+            hop,
+            substitution(&proposal, r#"{"body":"[redacted]","who":"someone else"}"#),
+        )
+        .expect("the hop runs: the substituted call is the sanitizer's rewrite of the resolved call");
+        match offer_answer(&hopped) {
+            OfferFollowUp::Substituted { block } => {
+                assert_eq!(
+                    block.call.tool_resolutions(),
+                    proposal.tool_resolutions(),
+                    "the ruling rides through the rewrite; the resolver is not asked again"
+                );
+                assert!(
+                    block.block.raw.requirement_gaps.is_empty(),
+                    "the substitution cleared the includes gap; only the ruling's own narrowing remains"
+                );
+            }
+            other => panic!("the substituted candidate stands at its remaining narrowing, got {other:?}"),
+        }
+        let log = [log, appended_facts(hopped)].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
     }
 
     #[test]
