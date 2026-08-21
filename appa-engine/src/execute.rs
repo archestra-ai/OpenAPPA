@@ -105,7 +105,8 @@ mod tests {
 
     fn wire() -> ToolContract {
         ToolContract {
-            resolvers: vec![],
+            description: Some("A test tool.".to_string()),
+            uses: vec![],
             name: ToolName::new("wire"),
             tags: vec![],
             delta: Some(Delta::NONE),

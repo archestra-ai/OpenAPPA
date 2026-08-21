@@ -150,12 +150,14 @@ version = 1
 
 [[policy.dynamic_resolver]]
 name = "classifier"
+returns = ["delta.trust"]
 
 [[policy.tool]]
 name = "fetch"
+description = "Fetches one URL and returns its body."
 parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
-resolvers = [{{ resolver = "classifier", returns = {{ delta = ["trust"] }} }}]
-delta = {{}}
+uses = [{{ resolver = "classifier" }}]
+delta = {{ trust = "resolver.classifier.trust" }}
 
 [externals]
 timeout_ms = 2000
@@ -173,7 +175,7 @@ async fn an_http_resolver_classifies_the_whole_call_and_a_fresh_proposal_consult
     let (url, classifier) = serve_classifier().await;
     classifier.set(
         "classifier",
-        Answer::Wire(serde_json::json!({ "version": 1, "delta": { "trust": "trusted" } })),
+        Answer::Wire(serde_json::json!({ "version": 1, "result": { "delta.trust": "trusted" } })),
     );
     let runtime = open_runtime(&dir, &http_policy(&url)).await;
 
@@ -188,16 +190,18 @@ async fn an_http_resolver_classifies_the_whole_call_and_a_fresh_proposal_consult
     let request = &requests[0];
     assert_eq!(request["version"], 1);
     assert_eq!(request["resolver"], "classifier");
-    assert_eq!(request["tool"], "fetch");
-    assert_eq!(request["input"]["scope"], "call");
+    // The resolver declares no inputs, so `args` is the complete call.
     assert_eq!(
-        request["input"]["arguments"],
-        serde_json::json!({ "url": "https://a.example" })
+        request["args"],
+        serde_json::json!({
+            "name": "fetch",
+            "description": "Fetches one URL and returns its body.",
+            "arguments": { "url": "https://a.example" }
+        })
     );
-    assert_eq!(
-        request["returns"],
-        serde_json::json!({ "delta": ["trust"], "requires": [] })
-    );
+    for absent in ["tool", "input", "scope", "returns", "expects"] {
+        assert!(request.get(absent).is_none(), "the request carries no {absent:?} key");
+    }
     assert_eq!(request["trust_ranks"], serde_json::json!(["suspicious", "trusted"]));
     assert!(request["context"]["current_trust"].is_string());
 
@@ -219,17 +223,25 @@ async fn an_http_resolver_classifies_the_whole_call_and_a_fresh_proposal_consult
 }
 
 #[tokio::test]
-async fn a_scoped_binding_shows_the_resolver_one_argument() {
+async fn a_mapped_input_shows_the_resolver_one_argument() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (url, classifier) = serve_classifier().await;
     classifier.set(
         "classifier",
-        Answer::Wire(serde_json::json!({ "version": 1, "delta": { "trust": "trusted" } })),
+        Answer::Wire(serde_json::json!({ "version": 1, "result": { "delta.trust": "trusted" } })),
     );
-    let config = http_policy(&url).replace(
-        r#"resolvers = [{ resolver = "classifier", returns = { delta = ["trust"] } }]"#,
-        r#"resolvers = [{ resolver = "classifier", argument = "url", returns = { delta = ["trust"] } }]"#,
-    );
+    let config = http_policy(&url)
+        .replace(
+            r#"name = "classifier"
+returns = ["delta.trust"]"#,
+            r#"name = "classifier"
+inputs = ["subject"]
+returns = ["delta.trust"]"#,
+        )
+        .replace(
+            r#"uses = [{ resolver = "classifier" }]"#,
+            r#"uses = [{ resolver = "classifier", inputs = { subject = "$tool_call.arguments.url" } }]"#,
+        );
     let runtime = open_runtime(&dir, &config).await;
 
     assert_eq!(
@@ -239,8 +251,8 @@ async fn a_scoped_binding_shows_the_resolver_one_argument() {
     let requests = classifier.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(
-        requests[0]["input"],
-        serde_json::json!({ "scope": "argument", "argument": "url", "value": "https://a.example" })
+        requests[0]["args"],
+        serde_json::json!({ "subject": "https://a.example" })
     );
 }
 
@@ -279,7 +291,7 @@ async fn every_resolver_failure_refuses_the_hook_and_appends_nothing() {
     // the failures, and the fresh invocation consults again.
     classifier.set(
         "classifier",
-        Answer::Wire(serde_json::json!({ "version": 1, "delta": { "trust": "trusted" } })),
+        Answer::Wire(serde_json::json!({ "version": 1, "result": { "delta.trust": "trusted" } })),
     );
     assert_eq!(
         propose(&runtime, fetch("https://a.example")).await,
@@ -296,17 +308,22 @@ version = 1
 
 [[policy.dynamic_resolver]]
 name = "alpha"
+returns = ["delta.trust"]
 [[policy.dynamic_resolver]]
 name = "beta"
+inputs = ["subject"]
+returns = ["requires.trust"]
 
 [[policy.tool]]
 name = "fetch"
+description = "Fetches one URL and returns its body."
 parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
-resolvers = [
-  {{ resolver = "alpha", returns = {{ delta = ["trust"] }} }},
-  {{ resolver = "beta", returns = {{ requires = ["trust"] }} }},
+uses = [
+  {{ resolver = "alpha" }},
+  {{ resolver = "beta", inputs = {{ subject = "$tool_call.arguments.url" }} }},
 ]
-delta = {{}}
+delta = {{ trust = "resolver.alpha.trust" }}
+requires = {{ trust = "resolver.beta.trust" }}
 
 [externals]
 timeout_ms = 5000
@@ -325,11 +342,11 @@ async fn independent_consults_overlap_and_completion_order_never_moves_the_recor
         let (url, classifier) = serve_classifier().await;
         classifier.set(
             "alpha",
-            Answer::Wire(serde_json::json!({ "version": 1, "delta": { "trust": "trusted" } })),
+            Answer::Wire(serde_json::json!({ "version": 1, "result": { "delta.trust": "trusted" } })),
         );
         classifier.set(
             "beta",
-            Answer::Wire(serde_json::json!({ "version": 1, "requires": { "trust": "suspicious" } })),
+            Answer::Wire(serde_json::json!({ "version": 1, "result": { "requires.trust": "suspicious" } })),
         );
         // Both consults sleep: sequential execution would cost ~600ms, concurrent ~300ms.
         classifier.delay("alpha", Duration::from_millis(300));
@@ -375,12 +392,14 @@ version = 1
 [[policy.dynamic_resolver]]
 name = "classifier"
 builtin = "claude-code"
+returns = ["delta.trust"]
 
 [[policy.tool]]
 name = "fetch"
+description = "Fetches one URL and returns its body."
 parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
-resolvers = [{{ resolver = "classifier", returns = {{ delta = ["trust"] }} }}]
-delta = {{}}
+uses = [{{ resolver = "classifier" }}]
+delta = {{ trust = "resolver.classifier.trust" }}
 
 [externals]
 timeout_ms = 5000
@@ -401,7 +420,7 @@ async fn the_claude_builtin_runs_the_configured_command_and_model() {
     let command = fake_claude(
         dir.path(),
         &format!(
-            "printf '%s\\n' \"$@\" > {args}\ncat > /dev/null\nprintf '%s' '{{\"structured_output\":{{\"version\":1,\"delta\":{{\"trust\":\"trusted\"}}}}}}'",
+            "printf '%s\\n' \"$@\" > {args}\ncat > /dev/null\nprintf '%s' '{{\"structured_output\":{{\"version\":1,\"result\":{{\"delta.trust\":\"trusted\"}}}}}}'",
             args = args_path.display(),
         ),
     );
@@ -451,15 +470,40 @@ async fn the_builtin_timeout_is_its_own_budget_and_a_slow_consult_refuses_fast()
 #[tokio::test]
 async fn concurrent_claude_consults_are_gated_by_the_runtime_permit_pool() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    // One destination has one owner, so a tool takes at most five resolvers, one per result.
+    // Five 300ms consults through a four-permit gate are still two waves. Each resolver
+    // declares a different result, so the fake answers by the name it reads on stdin.
     let command = fake_claude(
         dir.path(),
-        "cat > /dev/null\nsleep 0.3\nprintf '%s' '{\"structured_output\":{\"version\":1,\"requires\":{\"attention\":[]}}}'",
+        r#"request=$(cat)
+sleep 0.3
+case "$request" in
+  *classifier-0*) printf '%s' '{"structured_output":{"version":1,"result":{"delta.trust":"trusted"}}}' ;;
+  *classifier-1*) printf '%s' '{"structured_output":{"version":1,"result":{"delta.audience":"public"}}}' ;;
+  *classifier-2*) printf '%s' '{"structured_output":{"version":1,"result":{"requires.trust":"suspicious"}}}' ;;
+  *classifier-3*) printf '%s' '{"structured_output":{"version":1,"result":{"requires.audience":{"cap":"public"}}}}' ;;
+  *) printf '%s' '{"structured_output":{"version":1,"result":{"requires.attention":[]}}}' ;;
+esac
+"#,
     );
-    let resolvers: String = (0..6)
-        .map(|index| format!("[[policy.dynamic_resolver]]\nname = \"classifier-{index}\"\nbuiltin = \"claude-code\"\n"))
+    let results = [
+        "delta.trust",
+        "delta.audience",
+        "requires.trust",
+        "requires.audience",
+        "requires.attention",
+    ];
+    let resolvers: String = results
+        .iter()
+        .enumerate()
+        .map(|(index, result)| {
+            format!(
+                "[[policy.dynamic_resolver]]\nname = \"classifier-{index}\"\nbuiltin = \"claude-code\"\nreturns = [\"{result}\"]\n"
+            )
+        })
         .collect();
-    let bindings: Vec<String> = (0..6)
-        .map(|index| format!("{{ resolver = \"classifier-{index}\", returns = {{ requires = [\"attention\"] }} }}"))
+    let bindings: Vec<String> = (0..results.len())
+        .map(|index| format!("{{ resolver = \"classifier-{index}\" }}"))
         .collect();
     let config = format!(
         r#"
@@ -469,9 +513,11 @@ version = 1
 {resolvers}
 [[policy.tool]]
 name = "fetch"
+description = "Fetches one URL and returns its body."
 parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
-resolvers = [{bindings}]
-delta = {{}}
+uses = [{bindings}]
+delta = {{ trust = "resolver.classifier-0.trust", audience = "resolver.classifier-1.audience" }}
+requires = {{ trust = "resolver.classifier-2.trust", audience = "resolver.classifier-3.audience", attention = "resolver.classifier-4.attention" }}
 
 [externals]
 timeout_ms = 10000
@@ -489,10 +535,9 @@ command = "{command}"
         propose(&runtime, fetch("https://a.example")).await,
         HookDecision::AllowCall { spawn: None }
     );
-    // Six 300ms consults through a four-permit gate take at least two waves.
     assert!(
         started.elapsed() >= Duration::from_millis(450),
-        "six subprocess consults must not all run at once: {:?}",
+        "five subprocess consults must not all run at once: {:?}",
         started.elapsed()
     );
 }
@@ -503,7 +548,7 @@ async fn a_builtin_resolver_never_touches_the_shared_endpoint() {
     let (url, classifier) = serve_classifier().await;
     let command = fake_claude(
         dir.path(),
-        "cat > /dev/null\nprintf '%s' '{\"structured_output\":{\"version\":1,\"delta\":{\"trust\":\"trusted\"}}}'",
+        "cat > /dev/null\nprintf '%s' '{\"structured_output\":{\"version\":1,\"result\":{\"delta.trust\":\"trusted\"}}}'",
     );
     let config = builtin_policy(&command, "").replace(
         "[externals.claude_code]",

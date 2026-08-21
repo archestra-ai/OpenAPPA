@@ -1,6 +1,6 @@
 //! Tool contracts: what a call commits (`delta`, `emits`) and what it requires (`requires`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -28,8 +28,10 @@ pub struct Delta {
     pub audience: Option<AudienceDelta>,
 }
 
-/// One part of a tool contract a tool-level dynamic resolver establishes from the complete
-/// canonical call arguments. Label dimensions have one owner; attention is additive.
+/// One result a dynamic resolver returns, named by the single contract field it establishes.
+/// A resolver declares its results and returns every one of them; a tool reads the ones its
+/// fields reference. The output and the requirement on one dimension are separate results, so a
+/// resolver can classify a call's output and demand a floor for it in the same answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResolverReturn {
@@ -45,22 +47,6 @@ pub enum ResolverReturn {
     Attention,
 }
 
-/// The wire scope one returned field lives in: the output `delta` or the call-time `requires`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReturnScope {
-    Delta,
-    Requires,
-}
-
-impl ReturnScope {
-    pub fn wire_name(self) -> &'static str {
-        match self {
-            ReturnScope::Delta => "delta",
-            ReturnScope::Requires => "requires",
-        }
-    }
-}
-
 impl ResolverReturn {
     pub const ALL: [ResolverReturn; 5] = [
         ResolverReturn::Trust,
@@ -70,18 +56,23 @@ impl ResolverReturn {
         ResolverReturn::Attention,
     ];
 
-    /// The one scope/name map every wire surface reads — the policy's `returns` table, the
-    /// resolver request, and the response shape all agree through it.
-    pub fn scope(self) -> ReturnScope {
+    /// The name a resolver declares and answers under — the `returns` list and the response's
+    /// `result` object agree through it. A result has exactly one destination, so the name is
+    /// that destination's path.
+    pub fn wire_name(self) -> &'static str {
         match self {
-            ResolverReturn::Trust | ResolverReturn::Audience => ReturnScope::Delta,
-            ResolverReturn::RequiredTrust | ResolverReturn::RequiredAudience | ResolverReturn::Attention => {
-                ReturnScope::Requires
-            }
+            ResolverReturn::Trust => "delta.trust",
+            ResolverReturn::Audience => "delta.audience",
+            ResolverReturn::RequiredTrust => "requires.trust",
+            ResolverReturn::RequiredAudience => "requires.audience",
+            ResolverReturn::Attention => "requires.attention",
         }
     }
 
-    pub fn wire_name(self) -> &'static str {
+    /// The last component a tool field's reference spells. The destination supplies the scope,
+    /// so `resolver.classify.trust` reads [`Self::Trust`] under `delta` and [`Self::RequiredTrust`]
+    /// under `requires` — the reference never repeats what its position already states.
+    pub fn short_name(self) -> &'static str {
         match self {
             ResolverReturn::Trust | ResolverReturn::RequiredTrust => "trust",
             ResolverReturn::Audience | ResolverReturn::RequiredAudience => "audience",
@@ -90,17 +81,117 @@ impl ResolverReturn {
     }
 }
 
-/// One resolver attached to a tool: which registered resolver, what it reads, and the exact
-/// scoped fields it must return. A binding without `argument` shows the resolver the complete
-/// canonical argument object; with `argument = "field"` it shows exactly that declared required
-/// top-level string value, and its pin survives argument substitution while that field's value
-/// is unchanged.
+/// The root of the one special source a `uses` entry may read.
+pub const TOOL_CALL_ROOT: &str = "$tool_call";
+
+/// Where a `uses` entry reads one input value. `$tool_call` is the only source, and these are
+/// its five forms.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct ToolResolverBinding {
+#[serde(try_from = "String", into = "String")]
+pub enum ToolCallSource {
+    /// `$tool_call` — the complete call: its name, description, and arguments.
+    Call,
+    /// `$tool_call.name`
+    Name,
+    /// `$tool_call.description`
+    Description,
+    /// `$tool_call.arguments` — the complete argument object.
+    Arguments,
+    /// `$tool_call.arguments.<name>` — one top-level argument.
+    Argument(String),
+}
+
+/// A source spelling outside the five supported forms.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "{spelling:?} is not a tool-call value: a `uses` input reads `$tool_call`, `$tool_call.name`, \
+     `$tool_call.description`, `$tool_call.arguments`, or `$tool_call.arguments.<name>`"
+)]
+pub struct UnknownCallSource {
+    pub spelling: String,
+}
+
+impl ToolCallSource {
+    pub fn parse(spelling: &str) -> Option<ToolCallSource> {
+        match spelling {
+            "$tool_call" => Some(ToolCallSource::Call),
+            "$tool_call.name" => Some(ToolCallSource::Name),
+            "$tool_call.description" => Some(ToolCallSource::Description),
+            "$tool_call.arguments" => Some(ToolCallSource::Arguments),
+            // One top-level argument only: an empty name and a nested path are both outside the
+            // five forms, and neither has a value the schema can pin.
+            _ => match spelling.strip_prefix("$tool_call.arguments.") {
+                Some(argument) if !argument.is_empty() && !argument.contains('.') => {
+                    Some(ToolCallSource::Argument(argument.to_string()))
+                }
+                _ => None,
+            },
+        }
+    }
+
+    pub fn spelling(&self) -> String {
+        match self {
+            ToolCallSource::Call => TOOL_CALL_ROOT.to_string(),
+            ToolCallSource::Name => format!("{TOOL_CALL_ROOT}.name"),
+            ToolCallSource::Description => format!("{TOOL_CALL_ROOT}.description"),
+            ToolCallSource::Arguments => format!("{TOOL_CALL_ROOT}.arguments"),
+            ToolCallSource::Argument(argument) => format!("{TOOL_CALL_ROOT}.arguments.{argument}"),
+        }
+    }
+
+    /// Whether this source carries the complete argument object, so any substitution changes it.
+    pub fn reads_all_arguments(&self) -> bool {
+        matches!(self, ToolCallSource::Call | ToolCallSource::Arguments)
+    }
+
+    /// Whether this source carries the tool's description, which the policy must then declare.
+    pub fn reads_description(&self) -> bool {
+        matches!(self, ToolCallSource::Call | ToolCallSource::Description)
+    }
+}
+
+impl TryFrom<String> for ToolCallSource {
+    type Error = UnknownCallSource;
+
+    fn try_from(spelling: String) -> Result<Self, Self::Error> {
+        ToolCallSource::parse(&spelling).ok_or(UnknownCallSource { spelling })
+    }
+}
+
+impl From<ToolCallSource> for String {
+    fn from(source: ToolCallSource) -> String {
+        source.spelling()
+    }
+}
+
+/// One resolver a tool uses: which registered resolver, the call value it reads for each input
+/// that resolver declares, every result that resolver returns, and the results this tool's own
+/// fields reference. An empty `inputs` map is the complete-call form — the resolver declared no
+/// inputs, so its `args` is the whole call.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ToolResolverUse {
     pub resolver: DynamicResolverName,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub argument: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub inputs: BTreeMap<String, ToolCallSource>,
+    /// Every result the resolver declares. An answer must carry exactly these, whether or not
+    /// this tool reads them.
     pub returns: BTreeSet<ResolverReturn>,
+    /// The subset this tool's fields reference. Never empty: a use no field reads is a load error.
+    pub reads: BTreeSet<ResolverReturn>,
+}
+
+impl ToolResolverUse {
+    /// Whether this use reads the complete argument object, through the complete-call form or
+    /// through an explicit whole-arguments source. Any substitution changes what it read, so the
+    /// planner never offers an input-substitution hop on such a tool.
+    pub fn reads_complete_call(&self) -> bool {
+        self.inputs.is_empty() || self.inputs.values().any(ToolCallSource::reads_all_arguments)
+    }
+
+    /// Whether this use shows its resolver the tool's description.
+    pub fn reads_description(&self) -> bool {
+        self.inputs.is_empty() || self.inputs.values().any(ToolCallSource::reads_description)
+    }
 }
 
 /// The audience half of a `requires` answer: an `includes` floor, a `cap` ceiling, or both.
@@ -121,10 +212,16 @@ impl RequiredAudience {
 }
 
 /// One successful tool-level resolver answer pinned to the call it classified. The constructor
-/// accepts exactly the fields the binding declares and canonicalizes additive attention marks.
+/// accepts exactly the results the resolver declares and canonicalizes additive attention marks.
+///
+/// The pin carries the canonical `args` it was answered for. That is what binds it to one call:
+/// an answer given for other arguments is not evidence here, and
+/// [`crate::check::validate_tool_resolutions`] rebuilds the value and compares it, at the check
+/// and again on replay.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PinnedToolResolution {
-    binding: ToolResolverBinding,
+    uses: ToolResolverUse,
+    args: String,
     trust: Option<Trust>,
     audience: Option<Audience>,
     required_trust: Option<Trust>,
@@ -134,19 +231,23 @@ pub struct PinnedToolResolution {
 
 impl PinnedToolResolution {
     pub fn from_answer(
-        binding: ToolResolverBinding,
+        uses: ToolResolverUse,
+        args: String,
         trust: Option<Trust>,
         audience: Option<Audience>,
         required_trust: Option<Trust>,
         required_audience: Option<RequiredAudience>,
         attention: Option<Vec<MarkName>>,
     ) -> Option<Self> {
-        if binding.returns.is_empty()
-            || binding.returns.contains(&ResolverReturn::Trust) != trust.is_some()
-            || binding.returns.contains(&ResolverReturn::Audience) != audience.is_some()
-            || binding.returns.contains(&ResolverReturn::RequiredTrust) != required_trust.is_some()
-            || binding.returns.contains(&ResolverReturn::RequiredAudience) != required_audience.is_some()
-            || binding.returns.contains(&ResolverReturn::Attention) != attention.is_some()
+        // The resolver answers its own declared results, not the subset this tool reads.
+        if uses.returns.is_empty()
+            || uses.reads.is_empty()
+            || !uses.reads.is_subset(&uses.returns)
+            || uses.returns.contains(&ResolverReturn::Trust) != trust.is_some()
+            || uses.returns.contains(&ResolverReturn::Audience) != audience.is_some()
+            || uses.returns.contains(&ResolverReturn::RequiredTrust) != required_trust.is_some()
+            || uses.returns.contains(&ResolverReturn::RequiredAudience) != required_audience.is_some()
+            || uses.returns.contains(&ResolverReturn::Attention) != attention.is_some()
         {
             return None;
         }
@@ -162,7 +263,8 @@ impl PinnedToolResolution {
         attention.sort();
         attention.dedup();
         Some(PinnedToolResolution {
-            binding,
+            uses,
+            args,
             trust,
             audience,
             required_trust,
@@ -171,28 +273,48 @@ impl PinnedToolResolution {
         })
     }
 
-    pub fn binding(&self) -> &ToolResolverBinding {
-        &self.binding
+    pub fn uses(&self) -> &ToolResolverUse {
+        &self.uses
+    }
+
+    /// The canonical `args` this answer was given for.
+    pub fn args(&self) -> &str {
+        &self.args
+    }
+
+    /// A result the answer carries **and** this tool reads. Every consumer of a resolver value
+    /// goes through this: a declared result no field references establishes nothing.
+    fn read(&self, result: ResolverReturn) -> bool {
+        self.uses.reads.contains(&result)
     }
 
     pub fn trust(&self) -> Option<Trust> {
-        self.trust
+        self.read(ResolverReturn::Trust).then_some(self.trust).flatten()
     }
 
     pub fn audience(&self) -> Option<&Audience> {
-        self.audience.as_ref()
+        self.read(ResolverReturn::Audience)
+            .then_some(self.audience.as_ref())
+            .flatten()
     }
 
     pub fn required_trust(&self) -> Option<Trust> {
-        self.required_trust
+        self.read(ResolverReturn::RequiredTrust)
+            .then_some(self.required_trust)
+            .flatten()
     }
 
     pub fn required_audience(&self) -> Option<&RequiredAudience> {
-        self.required_audience.as_ref()
+        self.read(ResolverReturn::RequiredAudience)
+            .then_some(self.required_audience.as_ref())
+            .flatten()
     }
 
     pub fn attention(&self) -> &[MarkName] {
-        &self.attention
+        match self.read(ResolverReturn::Attention) {
+            true => &self.attention,
+            false => &[],
+        }
     }
 }
 
@@ -203,7 +325,8 @@ impl<'de> Deserialize<'de> for PinnedToolResolution {
     {
         #[derive(Deserialize)]
         struct Wire {
-            binding: ToolResolverBinding,
+            uses: ToolResolverUse,
+            args: String,
             trust: Option<Trust>,
             audience: Option<Audience>,
             required_trust: Option<Trust>,
@@ -214,12 +337,13 @@ impl<'de> Deserialize<'de> for PinnedToolResolution {
         let wire = Wire::deserialize(deserializer)?;
         let original_attention = wire.attention.clone();
         let returned_attention = wire
-            .binding
+            .uses
             .returns
             .contains(&ResolverReturn::Attention)
             .then_some(wire.attention);
         let answer = PinnedToolResolution::from_answer(
-            wire.binding,
+            wire.uses,
+            wire.args,
             wire.trust,
             wire.audience,
             wire.required_trust,
@@ -424,14 +548,17 @@ pub struct Requires {
 pub struct ToolContract {
     pub name: ToolName,
     pub tags: Vec<TagName>,
+    /// What this tool does, in the policy's words. Part of policy identity, because a resolver
+    /// may read it: load validation requires it wherever a `uses` entry does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// The compiled, normalized `APPA Tool Parameters v1` schema — part of policy identity.
     /// Omitted `parameters` normalizes to the permissive open object.
     #[serde(default = "crate::params::ToolParameters::open")]
     pub parameters: crate::params::ToolParameters,
-    /// Dynamic parts of this tool's contract, resolved from its complete canonical arguments
-    /// before the call is checked.
+    /// The resolvers this tool uses, each classifying a proposed call before the call is checked.
     #[serde(default)]
-    pub resolvers: Vec<ToolResolverBinding>,
+    pub uses: Vec<ToolResolverUse>,
     /// The static output contribution. `None` is unannotated only when no tool-level resolver owns
     /// trust or audience. `Some(Delta::NONE)` is the deliberate neutral annotation.
     #[serde(default)]
@@ -441,10 +568,63 @@ pub struct ToolContract {
 }
 
 impl ToolContract {
-    /// Whether a tool-level resolver binding owns this returned field — the one definition of
-    /// "resolver-owned" every load check and label derivation reads.
+    /// Whether one of this tool's fields reads this result from a resolver — the one definition
+    /// of "resolver-owned" every load check and label derivation reads. A resolver may *return* a
+    /// result this tool never references; that establishes nothing here.
     pub(crate) fn resolver_owns(&self, field: ResolverReturn) -> bool {
-        self.resolvers.iter().any(|binding| binding.returns.contains(&field))
+        self.uses.iter().any(|uses| uses.reads.contains(&field))
+    }
+
+    /// The description a resolver reads, which load validation guarantees is present wherever
+    /// one is read.
+    fn described(&self) -> &str {
+        self.description
+            .as_deref()
+            .expect("load validation refuses a `uses` entry that reads a description the tool does not declare")
+    }
+
+    /// The complete call a resolver reads: exactly the three keys the wire carries.
+    fn complete_call(&self, arguments: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "name": self.name.as_str(),
+            "description": self.described(),
+            "arguments": arguments,
+        })
+    }
+
+    fn source_value(&self, source: &ToolCallSource, arguments: &serde_json::Value) -> serde_json::Value {
+        match source {
+            ToolCallSource::Call => self.complete_call(arguments),
+            ToolCallSource::Name => serde_json::Value::String(self.name.as_str().to_string()),
+            ToolCallSource::Description => serde_json::Value::String(self.described().to_string()),
+            ToolCallSource::Arguments => arguments.clone(),
+            ToolCallSource::Argument(argument) => arguments
+                .get(argument)
+                .cloned()
+                .expect("load validation pins a mapped argument to a required top-level property, and every proposal is schema-validated before resolution"),
+        }
+    }
+
+    /// The `args` value one use sends: the complete call when the resolver declares no inputs,
+    /// otherwise one entry per declared input. The single definition — the runtime builds the
+    /// request through it, and the check rebuilds the pinned value through it.
+    pub fn resolver_args(&self, uses: &ToolResolverUse, arguments: &serde_json::Value) -> serde_json::Value {
+        match uses.inputs.is_empty() {
+            true => self.complete_call(arguments),
+            false => serde_json::Value::Object(
+                uses.inputs
+                    .iter()
+                    .map(|(input, source)| (input.clone(), self.source_value(source, arguments)))
+                    .collect(),
+            ),
+        }
+    }
+
+    /// [`Self::resolver_args`] in its canonical spelling — what a pin stores and what a
+    /// re-derivation is compared against.
+    pub fn canonical_resolver_args(&self, uses: &ToolResolverUse, arguments: &serde_json::Value) -> String {
+        String::from_utf8(crate::params::canonical_bytes(&self.resolver_args(uses, arguments)))
+            .expect("canonical JSON is UTF-8")
     }
 
     /// The unresolved output shape before call-pinned answers are applied. Each dimension is
@@ -525,11 +705,15 @@ mod tests {
     use super::*;
     use crate::names::DynamicResolverName;
 
-    fn binding() -> ToolResolverBinding {
-        ToolResolverBinding {
+    fn binding() -> ToolResolverUse {
+        ToolResolverUse {
             resolver: DynamicResolverName::new("crm-acl"),
-            argument: Some("customer_id".to_string()),
+            inputs: BTreeMap::from([(
+                "customer_id".to_string(),
+                ToolCallSource::Argument("customer_id".to_string()),
+            )]),
             returns: BTreeSet::from([ResolverReturn::Audience]),
+            reads: BTreeSet::from([ResolverReturn::Audience]),
         }
     }
 
@@ -541,10 +725,12 @@ mod tests {
             name: ToolName::new("lookup"),
             tags: vec![],
             parameters: crate::params::ToolParameters::open(),
-            resolvers: vec![ToolResolverBinding {
+            description: Some("A test tool.".to_string()),
+            uses: vec![ToolResolverUse {
                 resolver: DynamicResolverName::new("classifier"),
-                argument: None,
+                inputs: std::collections::BTreeMap::new(),
                 returns: BTreeSet::from([field]),
+                reads: BTreeSet::from([field]),
             }],
             delta: None,
             emits: crate::fact::EffectSet::default(),
@@ -562,13 +748,15 @@ mod tests {
         assert_eq!(label.audience, Dim::Unknown, "audience was never described");
 
         // With the pin applied, exactly the owned dimension resolves.
-        let binding = ToolResolverBinding {
+        let binding = ToolResolverUse {
             resolver: DynamicResolverName::new("classifier"),
-            argument: None,
+            inputs: std::collections::BTreeMap::new(),
             returns: BTreeSet::from([ResolverReturn::Audience]),
+            reads: BTreeSet::from([ResolverReturn::Audience]),
         };
         let pin = PinnedToolResolution::from_answer(
             binding,
+            String::new(),
             None,
             Some(Audience::restricted([ReaderId::new("alice")])),
             None,
@@ -588,7 +776,7 @@ mod tests {
     #[test]
     fn a_resolver_audience_answer_keeps_only_literal_reader_sets() {
         let pinned = |audience| {
-            PinnedToolResolution::from_answer(binding(), None, Some(audience), None, None, None)
+            PinnedToolResolution::from_answer(binding(), String::new(), None, Some(audience), None, None, None)
                 .map(|pin| pin.audience().cloned().expect("audience is the declared return"))
         };
 
@@ -608,6 +796,90 @@ mod tests {
             Some(Audience::Public),
             "an owned output dimension may resolve to the public state"
         );
+    }
+
+    fn described(uses: Vec<ToolResolverUse>) -> ToolContract {
+        ToolContract {
+            name: ToolName::new("Bash"),
+            tags: vec![],
+            description: Some("Runs one shell command and returns its output.".to_string()),
+            parameters: crate::params::ToolParameters::open(),
+            uses,
+            delta: Some(Delta::NONE),
+            emits: EffectSet::default(),
+            requires: Requires::default(),
+        }
+    }
+
+    #[test]
+    fn each_call_value_selects_exactly_what_the_wire_carries() {
+        let arguments = serde_json::json!({ "command": "git push origin main", "timeout": 60_000 });
+        let complete = serde_json::json!({
+            "name": "Bash",
+            "description": "Runs one shell command and returns its output.",
+            "arguments": { "command": "git push origin main", "timeout": 60_000 },
+        });
+
+        let mapped = ToolResolverUse {
+            resolver: DynamicResolverName::new("classify"),
+            inputs: BTreeMap::from([
+                ("whole".to_string(), ToolCallSource::Call),
+                ("tool".to_string(), ToolCallSource::Name),
+                ("purpose".to_string(), ToolCallSource::Description),
+                ("every".to_string(), ToolCallSource::Arguments),
+                ("one".to_string(), ToolCallSource::Argument("timeout".to_string())),
+            ]),
+            returns: BTreeSet::from([ResolverReturn::Trust]),
+            reads: BTreeSet::from([ResolverReturn::Trust]),
+        };
+        let contract = described(vec![mapped.clone()]);
+        assert_eq!(
+            contract.resolver_args(&mapped, &arguments),
+            serde_json::json!({
+                "whole": complete,
+                "tool": "Bash",
+                "purpose": "Runs one shell command and returns its output.",
+                "every": { "command": "git push origin main", "timeout": 60_000 },
+                // A mapped argument reaches the resolver as the JSON value the call carries,
+                // not as text.
+                "one": 60_000,
+            })
+        );
+
+        // A resolver declaring no inputs receives the complete call as `args` itself, not
+        // wrapped under a name.
+        let whole = ToolResolverUse {
+            inputs: BTreeMap::new(),
+            ..mapped
+        };
+        assert_eq!(
+            described(vec![whole.clone()]).resolver_args(&whole, &arguments),
+            complete
+        );
+    }
+
+    #[test]
+    fn a_pin_round_trips_through_its_persisted_form() {
+        let uses = binding();
+        let contract = ToolContract {
+            parameters: crate::params::ToolParameters::open(),
+            ..described(vec![uses.clone()])
+        };
+        let arguments = serde_json::json!({ "customer_id": "cust-7" });
+        let pin = PinnedToolResolution::from_answer(
+            uses.clone(),
+            contract.canonical_resolver_args(&uses, &arguments),
+            None,
+            Some(Audience::restricted([ReaderId::new("support")])),
+            None,
+            None,
+            None,
+        )
+        .expect("the declared audience answer pins");
+        let bytes = serde_json::to_vec(&pin).expect("a pin serializes");
+        let read: PinnedToolResolution = serde_json::from_slice(&bytes).expect("a pin reads back");
+        assert_eq!(read, pin);
+        assert_eq!(read.args(), r#"{"customer_id":"cust-7"}"#);
     }
 
     #[test]

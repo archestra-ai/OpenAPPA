@@ -12,7 +12,9 @@ audience = { exactly = ["public"] }
 # behind it. There is no URL to write here, and none you write would be
 # called.
 [[dynamic_resolver]]
-name = "email-recipient-readers"
+name    = "email-recipient-readers"
+inputs  = ["to"]
+returns = ["requires.audience"]
 
 # --- CRM: customer records are confidential -------------
 
@@ -45,10 +47,10 @@ delta    = {}
 # current members. The flow must cover every resolved
 # reader and must not derive from an untrusted source.
 [[tool]]
-name      = "send_email"
-requires  = { trust = "trusted" }
-resolvers = [{ resolver = "email-recipient-readers", argument = "to", returns = { requires = ["audience"] } }]
-delta     = {}
+name     = "send_email"
+uses     = [{ resolver = "email-recipient-readers", inputs = { to = "$tool_call.arguments.to" } }]
+requires = { trust = "trusted", audience = "resolver.email-recipient-readers.audience" }
+delta    = {}
 
 # --- Finance: confidential books, human sign-off --------
 

@@ -199,7 +199,8 @@ mod tests {
 
     fn read_tool() -> crate::contract::ToolContract {
         crate::contract::ToolContract {
-            resolvers: vec![],
+            description: Some("A test tool.".to_string()),
+            uses: vec![],
             name: ToolName::new("read"),
             tags: vec![],
             delta: Some(crate::contract::Delta::NONE),

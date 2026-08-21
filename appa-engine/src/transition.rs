@@ -3330,7 +3330,7 @@ impl<'a> Sequence<'a> {
             .parameters
             .validate(call.arguments())
             .map_err(TransitionRefusal::InvalidPayload)?;
-        if call != &predecessor.substituting(call.canonical_arguments().clone()) {
+        if call != &predecessor.substituting(contract, call.canonical_arguments().clone()) {
             return Err(TransitionRefusal::ForgedLabel);
         }
         if crate::check::validate_tool_resolutions(self.engine.registry(), contract, call).is_err() {
@@ -3632,7 +3632,8 @@ mod tests {
 
     fn note_tool() -> ToolContract {
         ToolContract {
-            resolvers: vec![],
+            description: Some("A test tool.".to_string()),
+            uses: vec![],
             name: ToolName::new("note"),
             tags: vec![],
             delta: Some(crate::contract::Delta::NONE),

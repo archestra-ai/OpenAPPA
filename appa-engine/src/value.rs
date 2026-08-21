@@ -535,17 +535,20 @@ impl ResolvedCall {
 
     /// The call a substitution of this one's arguments renders: the same callee, the
     /// replacement arguments, and only those pinned answers the replacement leaves standing.
-    pub(crate) fn substituting(&self, arguments: CanonicalArguments) -> ResolvedCall {
+    pub(crate) fn substituting(
+        &self,
+        contract: &crate::contract::ToolContract,
+        arguments: CanonicalArguments,
+    ) -> ResolvedCall {
         let unchanged = |argument: &str| arguments.value().get(argument) == self.arguments.value().get(argument);
-        // A whole-call pin answers for the complete argument object, so any substitution
-        // invalidates it; an argument-scoped pin answers for one field and survives while
-        // that field's value is unchanged.
+        // A pin answers for the exact value its resolver was sent, so it stands only while the
+        // replacement arguments rebuild that same value: a use that read the complete call dies on
+        // any substitution, and a use that read named arguments survives while those are unchanged.
         let tool_resolutions = self
             .tool_resolutions
             .iter()
-            .filter(|resolution| match &resolution.binding().argument {
-                None => arguments == self.arguments,
-                Some(argument) => unchanged(argument),
+            .filter(|resolution| {
+                resolution.args() == contract.canonical_resolver_args(resolution.uses(), arguments.value())
             })
             .cloned()
             .collect();
@@ -573,6 +576,41 @@ mod tests {
 
     fn call(tool: &str, value: serde_json::Value) -> ResolvedCall {
         ResolvedCall::new(ToolName::new(tool), args(value))
+    }
+
+    /// A described tool whose `uses` the pin tests resolve against. The description matters:
+    /// a complete-call read carries it, so the args a pin stores depend on it.
+    fn described(tool: &str, uses: Vec<crate::contract::ToolResolverUse>) -> crate::contract::ToolContract {
+        crate::contract::ToolContract {
+            name: ToolName::new(tool),
+            tags: vec![],
+            description: Some(format!("{tool} does one thing.")),
+            parameters: crate::params::ToolParameters::open(),
+            uses,
+            delta: Some(crate::contract::Delta::NONE),
+            emits: Default::default(),
+            requires: Default::default(),
+        }
+    }
+
+    /// A pin carrying the args the contract would actually have sent for this call.
+    fn pin_for(
+        contract: &crate::contract::ToolContract,
+        uses: &crate::contract::ToolResolverUse,
+        call: &ResolvedCall,
+        trust: Option<crate::label::Trust>,
+        audience: Option<crate::label::Audience>,
+    ) -> PinnedToolResolution {
+        PinnedToolResolution::from_answer(
+            uses.clone(),
+            contract.canonical_resolver_args(uses, call.canonical_arguments().value()),
+            trust,
+            audience,
+            None,
+            None,
+            None,
+        )
+        .expect("the declared answer pins")
     }
 
     #[test]
@@ -609,16 +647,21 @@ mod tests {
 
     #[test]
     fn tool_resolution_is_pinned_to_the_complete_argument_object() {
-        let binding = crate::contract::ToolResolverBinding {
+        let uses = crate::contract::ToolResolverUse {
             resolver: crate::names::DynamicResolverName::new("classifier"),
-            argument: None,
+            inputs: std::collections::BTreeMap::new(),
             returns: [crate::contract::ResolverReturn::Trust].into_iter().collect(),
+            reads: [crate::contract::ResolverReturn::Trust].into_iter().collect(),
         };
+        let contract = described("lookup", vec![uses.clone()]);
         let base = call("lookup", json!({ "id": 7, "deep": true }));
-        let resolved = base.clone().with_tool_resolutions(vec![
-            PinnedToolResolution::from_answer(binding, Some(crate::label::Trust::new(0)), None, None, None, None)
-                .expect("the declared trust answer pins"),
-        ]);
+        let resolved = base.clone().with_tool_resolutions(vec![pin_for(
+            &contract,
+            &uses,
+            &base,
+            Some(crate::label::Trust::new(0)),
+            None,
+        )]);
         assert_eq!(
             base.digest(),
             resolved.digest(),
@@ -626,7 +669,7 @@ mod tests {
         );
         assert_eq!(
             resolved
-                .substituting(args(json!({ "deep": true, "id": 7 })))
+                .substituting(&contract, args(json!({ "deep": true, "id": 7 })))
                 .tool_resolutions()
                 .len(),
             1,
@@ -634,7 +677,7 @@ mod tests {
         );
         assert!(
             resolved
-                .substituting(args(json!({ "id": 8, "deep": true })))
+                .substituting(&contract, args(json!({ "id": 8, "deep": true })))
                 .tool_resolutions()
                 .is_empty(),
             "a change anywhere in the arguments invalidates the whole-object pin"
@@ -643,28 +686,29 @@ mod tests {
 
     #[test]
     fn an_argument_scoped_pin_survives_unrelated_substitution() {
-        let binding = crate::contract::ToolResolverBinding {
+        let uses = crate::contract::ToolResolverUse {
             resolver: crate::names::DynamicResolverName::new("classifier"),
-            argument: Some("id".into()),
+            inputs: std::collections::BTreeMap::from([(
+                "id".to_string(),
+                crate::contract::ToolCallSource::Argument("id".to_string()),
+            )]),
             returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
+            reads: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
         };
+        let contract = described("lookup", vec![uses.clone()]);
         let base = call("lookup", json!({ "id": "7", "deep": true }));
-        let resolved = base.with_tool_resolutions(vec![
-            PinnedToolResolution::from_answer(
-                binding,
-                None,
-                Some(crate::label::Audience::restricted([crate::label::ReaderId::new(
-                    "alice",
-                )])),
-                None,
-                None,
-                None,
-            )
-            .expect("the declared audience answer pins"),
-        ]);
+        let resolved = base.clone().with_tool_resolutions(vec![pin_for(
+            &contract,
+            &uses,
+            &base,
+            None,
+            Some(crate::label::Audience::restricted([crate::label::ReaderId::new(
+                "alice",
+            )])),
+        )]);
         assert_eq!(
             resolved
-                .substituting(args(json!({ "id": "7", "deep": false })))
+                .substituting(&contract, args(json!({ "id": "7", "deep": false })))
                 .tool_resolutions()
                 .len(),
             1,
@@ -672,7 +716,7 @@ mod tests {
         );
         assert!(
             resolved
-                .substituting(args(json!({ "id": "8", "deep": true })))
+                .substituting(&contract, args(json!({ "id": "8", "deep": true })))
                 .tool_resolutions()
                 .is_empty(),
             "a changed scoped argument invalidates the pin"
@@ -693,11 +737,16 @@ mod tests {
     fn pinned_answers_are_a_set_whatever_order_they_arrive_in() {
         let answer = |resolver: &str, reader: &str| {
             PinnedToolResolution::from_answer(
-                crate::contract::ToolResolverBinding {
+                crate::contract::ToolResolverUse {
                     resolver: crate::names::DynamicResolverName::new(resolver),
-                    argument: Some("recipient".into()),
+                    inputs: std::collections::BTreeMap::from([(
+                        "recipient".to_string(),
+                        crate::contract::ToolCallSource::Argument("recipient".to_string()),
+                    )]),
                     returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
+                    reads: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
                 },
+                String::new(),
                 None,
                 Some(crate::label::Audience::restricted([crate::label::ReaderId::new(
                     reader,
@@ -724,11 +773,16 @@ mod tests {
     fn persisted_pinned_answers_refuse_a_non_canonical_spelling() {
         let answer = |resolver: &str| {
             PinnedToolResolution::from_answer(
-                crate::contract::ToolResolverBinding {
+                crate::contract::ToolResolverUse {
                     resolver: crate::names::DynamicResolverName::new(resolver),
-                    argument: Some("recipient".into()),
+                    inputs: std::collections::BTreeMap::from([(
+                        "recipient".to_string(),
+                        crate::contract::ToolCallSource::Argument("recipient".to_string()),
+                    )]),
                     returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
+                    reads: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
                 },
+                String::new(),
                 None,
                 Some(crate::label::Audience::restricted([crate::label::ReaderId::new(
                     "alice",

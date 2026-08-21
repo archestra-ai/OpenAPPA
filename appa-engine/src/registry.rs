@@ -91,12 +91,16 @@ pub enum LoadError {
     DuplicateRank(String),
     #[error("duplicate tool contract: {0}")]
     DuplicateTool(String),
-    #[error("tool {tool} resolver {resolver} declares no returned dimensions")]
-    EmptyToolResolver { tool: String, resolver: String },
-    #[error("tool {tool} binds resolver {resolver} more than once")]
+    #[error("tool {tool} uses resolver {resolver}, but no field of the tool reads a result of it")]
+    UnreadToolResolver { tool: String, resolver: String },
+    #[error("tool {tool} reads a result resolver {resolver} does not return")]
+    UndeclaredResolverResult { tool: String, resolver: String },
+    #[error("tool {tool} uses resolver {resolver} more than once")]
     DuplicateToolResolver { tool: String, resolver: String },
-    #[error("tool {tool} gives {dimension:?} to more than one static or dynamic owner")]
-    DuplicateToolResolverDimension { tool: String, dimension: Dimension },
+    #[error("tool {tool} gives {destination} to more than one static or resolver owner")]
+    DuplicateResolverDestination { tool: String, destination: String },
+    #[error("tool {tool} uses resolver {resolver}, which reads a description the tool does not declare")]
+    ResolverReadsMissingDescription { tool: String, resolver: String },
     #[error("duplicate authority: {0}")]
     DuplicateAuthority(String),
     #[error("duplicate sanitizer: {0}")]
@@ -188,9 +192,17 @@ pub enum LoadError {
         construct: crate::profile::ProviderRunConstruct,
     },
     #[error(
-        "{context} binds audience argument {argument:?}, which {fault}: a placeholder or dynamic binding names a required top-level string property of the tool's `parameters`"
+        "{context} binds audience argument {argument:?}, which {fault}: a placeholder names a required top-level string property of the tool's `parameters`"
     )]
     AudienceBindingSchema {
+        context: String,
+        argument: String,
+        fault: crate::params::PropertyFault,
+    },
+    #[error(
+        "{context} maps an input from argument {argument:?}, which {fault}: `$tool_call.arguments.<name>` names a required top-level property of the tool's `parameters`"
+    )]
+    ResolverInputSchema {
         context: String,
         argument: String,
         fault: crate::params::PropertyFault,
@@ -267,11 +279,11 @@ fn worst_case_plan_alternatives(
                 .count(),
         );
     }
-    for binding in &tool.resolvers {
-        if binding.returns.contains(&ResolverReturn::RequiredTrust) {
+    for uses in &tool.uses {
+        if uses.reads.contains(&ResolverReturn::RequiredTrust) {
             multiply(trust_cap_competent());
         }
-        if binding.returns.contains(&ResolverReturn::RequiredAudience) {
+        if uses.reads.contains(&ResolverReturn::RequiredAudience) {
             multiply(reader_cap_competent());
         }
     }
@@ -850,49 +862,78 @@ fn validate_pending_cast(tool: &ToolContract) -> Result<(), LoadError> {
     }
 }
 
+/// Every rule a tool's `uses` list answers to: each entry is read by at least one field, each
+/// resolver appears once, each mapped argument is a required top-level property, a description is
+/// declared wherever one is read, and every destination has exactly one owner.
 fn validate_tool_resolvers(tool: &ToolContract) -> Result<(), LoadError> {
+    use crate::contract::ResolverReturn;
+
     let mut names = BTreeSet::new();
-    let mut trust_owned = tool.delta.as_ref().is_some_and(|delta| delta.trust.is_some());
-    let mut audience_owned = tool.delta.as_ref().is_some_and(|delta| delta.audience.is_some());
-    for binding in &tool.resolvers {
-        if binding.returns.is_empty() {
-            return Err(LoadError::EmptyToolResolver {
+    let refuse = |result: ResolverReturn| LoadError::DuplicateResolverDestination {
+        tool: tool.name.as_str().to_string(),
+        destination: result.wire_name().to_string(),
+    };
+    // A destination holds one value: a static one the policy wrote, or one resolver result.
+    let mut owned: BTreeSet<ResolverReturn> = BTreeSet::new();
+    if tool.delta.as_ref().is_some_and(|delta| delta.trust.is_some()) {
+        owned.insert(ResolverReturn::Trust);
+    }
+    if tool.delta.as_ref().is_some_and(|delta| delta.audience.is_some()) {
+        owned.insert(ResolverReturn::Audience);
+    }
+    if tool.requires.label.trust_floor.is_some() {
+        owned.insert(ResolverReturn::RequiredTrust);
+    }
+    if !tool.requires.label.audience.is_empty() {
+        owned.insert(ResolverReturn::RequiredAudience);
+    }
+    if !tool.requires.attention.is_empty() {
+        owned.insert(ResolverReturn::Attention);
+    }
+
+    for uses in &tool.uses {
+        let context = || format!("tool {} resolver {}", tool.name.as_str(), uses.resolver.as_str());
+        if uses.reads.is_empty() {
+            return Err(LoadError::UnreadToolResolver {
                 tool: tool.name.as_str().to_string(),
-                resolver: binding.resolver.as_str().to_string(),
+                resolver: uses.resolver.as_str().to_string(),
             });
         }
-        if !names.insert(&binding.resolver) {
+        if !uses.reads.is_subset(&uses.returns) {
+            return Err(LoadError::UndeclaredResolverResult {
+                tool: tool.name.as_str().to_string(),
+                resolver: uses.resolver.as_str().to_string(),
+            });
+        }
+        // The result path names a resolver, not one attachment of it, so a tool binds each
+        // resolver once.
+        if !names.insert(&uses.resolver) {
             return Err(LoadError::DuplicateToolResolver {
                 tool: tool.name.as_str().to_string(),
-                resolver: binding.resolver.as_str().to_string(),
+                resolver: uses.resolver.as_str().to_string(),
             });
         }
-        if let Some(argument) = &binding.argument {
-            tool.parameters
-                .required_string_property(argument)
-                .map_err(|fault| LoadError::AudienceBindingSchema {
-                    context: format!("tool {} resolver {}", tool.name.as_str(), binding.resolver.as_str()),
-                    argument: argument.clone(),
-                    fault,
-                })?;
+        if uses.reads_description() && tool.description.is_none() {
+            return Err(LoadError::ResolverReadsMissingDescription {
+                tool: tool.name.as_str().to_string(),
+                resolver: uses.resolver.as_str().to_string(),
+            });
         }
-        if binding.returns.contains(&crate::contract::ResolverReturn::Trust) {
-            if trust_owned {
-                return Err(LoadError::DuplicateToolResolverDimension {
-                    tool: tool.name.as_str().to_string(),
-                    dimension: Dimension::Trust,
-                });
+        for source in uses.inputs.values() {
+            if let crate::contract::ToolCallSource::Argument(argument) = source {
+                tool.parameters
+                    .required_property(argument)
+                    .map_err(|fault| LoadError::ResolverInputSchema {
+                        context: context(),
+                        argument: argument.clone(),
+                        fault,
+                    })?;
             }
-            trust_owned = true;
         }
-        if binding.returns.contains(&crate::contract::ResolverReturn::Audience) {
-            if audience_owned {
-                return Err(LoadError::DuplicateToolResolverDimension {
-                    tool: tool.name.as_str().to_string(),
-                    dimension: Dimension::Audience,
-                });
+        for result in &uses.reads {
+            if !owned.insert(*result) {
+                return Err(refuse(*result));
             }
-            audience_owned = true;
         }
     }
     Ok(())
@@ -977,8 +1018,7 @@ mod tests {
     use crate::authority::SanitizerPoints;
     use crate::authority::{CastCeiling, DeclaredLabel, Mandate, Scope};
     use crate::contract::{
-        AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, Requires, ResolverReturn,
-        ToolResolverBinding,
+        AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, Requires, ResolverReturn, ToolResolverUse,
     };
     use crate::fact::{EffectKind, EffectSet};
     use crate::label::EstablishedLabel;
@@ -1002,7 +1042,8 @@ mod tests {
 
     fn tool(name: &str) -> ToolContract {
         ToolContract {
-            resolvers: vec![],
+            description: Some("A test tool.".to_string()),
+            uses: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -1248,7 +1289,8 @@ mod tests {
 
     fn origin(name: &str, tags: &[&str], delta: Delta) -> ToolContract {
         ToolContract {
-            resolvers: vec![],
+            description: Some("A test tool.".to_string()),
+            uses: vec![],
             name: ToolName::new(name),
             tags: tags.iter().copied().map(crate::names::TagName::new).collect(),
             delta: Some(delta),
@@ -1423,7 +1465,7 @@ mod tests {
                 audience: None,
             },
         );
-        feed.resolvers = vec![audience_resolver("room")];
+        feed.uses = vec![audience_resolver("room")];
         feed.parameters = crate::params::test_string_argument_schema("room");
         cfg.tools = vec![feed];
         cfg.casts = vec![
@@ -1634,34 +1676,37 @@ mod tests {
         assert!(Registry::build_covered(cfg).is_ok());
     }
 
-    fn audience_resolver(argument: &str) -> ToolResolverBinding {
-        ToolResolverBinding {
+    fn audience_resolver(argument: &str) -> ToolResolverUse {
+        ToolResolverUse {
             resolver: crate::names::DynamicResolverName::new("directory"),
-            argument: Some(argument.into()),
+            inputs: std::collections::BTreeMap::from([(
+                argument.to_string(),
+                crate::contract::ToolCallSource::Argument(argument.to_string()),
+            )]),
             returns: [ResolverReturn::Audience].into_iter().collect(),
+            reads: [ResolverReturn::Audience].into_iter().collect(),
         }
     }
     fn binding_sites(parameters: &crate::params::ToolParameters) -> Vec<(&'static str, RegistryConfig)> {
-        let mut emitter = tool("emit");
-        emitter.parameters = parameters.clone();
-
-        let mut placeholder = emitter.clone();
+        let mut placeholder = tool("emit");
+        placeholder.parameters = parameters.clone();
         placeholder.requires.label.audience =
             vec![AudienceRequirement::Includes(RecipientSpec::Placeholder("to".into()))];
-        let mut scoped_resolver = emitter;
-        scoped_resolver.resolvers = vec![audience_resolver("to")];
+        let mut cfg = base();
+        cfg.tools = vec![placeholder];
+        vec![("tool emit includes", cfg)]
+    }
 
-        [
-            ("tool emit includes", placeholder),
-            ("tool emit resolver directory", scoped_resolver),
-        ]
-        .into_iter()
-        .map(|(context, tool)| {
-            let mut cfg = base();
-            cfg.tools = vec![tool];
-            (context, cfg)
-        })
-        .collect()
+    /// The site a `uses` input maps from. It answers to a weaker rule than the `$arg`
+    /// placeholder: the resolver receives whatever JSON value the argument holds, so only
+    /// presence has to be guaranteed, never a string type.
+    fn resolver_input_site(parameters: &crate::params::ToolParameters) -> RegistryConfig {
+        let mut emitter = tool("emit");
+        emitter.parameters = parameters.clone();
+        emitter.uses = vec![audience_resolver("to")];
+        let mut cfg = base();
+        cfg.tools = vec![emitter];
+        cfg
     }
 
     #[test]
@@ -1762,14 +1807,88 @@ mod tests {
     }
 
     #[test]
+    fn a_resolver_input_names_a_required_top_level_argument_of_any_type() {
+        use crate::params::{PropertyFault, ToolParameters};
+        let schema = |value: serde_json::Value| ToolParameters::compile(&value).unwrap();
+
+        let refused = [
+            (ToolParameters::open(), PropertyFault::Undeclared),
+            (
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": { "cc": { "type": "string" } },
+                    "required": ["cc"],
+                })),
+                PropertyFault::Undeclared,
+            ),
+            // Nesting does not count: only the root object's own properties are read.
+            (
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "envelope": {
+                            "type": "object",
+                            "properties": { "to": { "type": "string" } },
+                            "required": ["to"],
+                        }
+                    },
+                    "required": ["envelope"],
+                })),
+                PropertyFault::Undeclared,
+            ),
+            (
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": { "to": { "type": "string" } },
+                })),
+                PropertyFault::Optional,
+            ),
+        ];
+        for (parameters, expected) in refused {
+            match Registry::build_covered(resolver_input_site(&parameters)) {
+                Err(LoadError::ResolverInputSchema {
+                    context,
+                    argument,
+                    fault,
+                }) => {
+                    assert_eq!(context, "tool emit resolver directory");
+                    assert_eq!(argument, "to");
+                    assert_eq!(fault, expected, "under {parameters:?}");
+                }
+                other => panic!("{parameters:?} must refuse with {expected:?}, got {other:?}"),
+            }
+        }
+
+        // A required argument of any type is a legal input: the resolver receives the value the
+        // call carries, so an array, a number, and an object all reach it as they stand.
+        let accepted = [
+            serde_json::json!({ "type": "object", "properties": { "to": { "type": "string" } }, "required": ["to"] }),
+            serde_json::json!({
+                "type": "object",
+                "properties": { "to": { "type": "array", "items": { "type": "string" } } },
+                "required": ["to"],
+            }),
+            serde_json::json!({ "type": "object", "properties": { "to": { "type": "integer" } }, "required": ["to"] }),
+        ];
+        for parameters in accepted {
+            let compiled = schema(parameters.clone());
+            assert!(
+                Registry::build_covered(resolver_input_site(&compiled)).is_ok(),
+                "a required {parameters} must load"
+            );
+        }
+    }
+
+    #[test]
     fn resolver_ownership_of_one_dimension_describes_only_that_dimension() {
-        use crate::contract::{LabelRequirements, Requires, ResolverReturn, ToolResolverBinding};
+        use crate::contract::{LabelRequirements, Requires, ResolverReturn, ToolResolverUse};
 
         let owner = |field: ResolverReturn| {
-            vec![ToolResolverBinding {
+            vec![ToolResolverUse {
                 resolver: crate::names::DynamicResolverName::new("classifier"),
-                argument: None,
+                inputs: std::collections::BTreeMap::new(),
                 returns: [field].into_iter().collect(),
+                reads: [field].into_iter().collect(),
             }]
         };
         let trust_floor = Requires {
@@ -1795,7 +1914,8 @@ mod tests {
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
             delta: None,
-            resolvers: owner(ResolverReturn::Audience),
+            description: Some("A test tool.".to_string()),
+            uses: owner(ResolverReturn::Audience),
             requires: trust_floor.clone(),
             ..tool("send")
         }];
@@ -1808,7 +1928,8 @@ mod tests {
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
             delta: None,
-            resolvers: owner(ResolverReturn::Trust),
+            description: Some("A test tool.".to_string()),
+            uses: owner(ResolverReturn::Trust),
             requires: includes.clone(),
             ..tool("send")
         }];
@@ -1822,7 +1943,8 @@ mod tests {
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
             delta: None,
-            resolvers: owner(ResolverReturn::Trust),
+            description: Some("A test tool.".to_string()),
+            uses: owner(ResolverReturn::Trust),
             requires: trust_floor,
             ..tool("send")
         }];
@@ -1831,7 +1953,8 @@ mod tests {
         let mut cfg = base();
         cfg.tools = vec![ToolContract {
             delta: None,
-            resolvers: owner(ResolverReturn::Audience),
+            description: Some("A test tool.".to_string()),
+            uses: owner(ResolverReturn::Audience),
             requires: includes,
             ..tool("send")
         }];
@@ -1840,7 +1963,7 @@ mod tests {
 
     #[test]
     fn a_pending_cast_dimension_loads_beside_a_resolver_owning_the_other() {
-        use crate::contract::{ResolverReturn, ToolResolverBinding};
+        use crate::contract::{ResolverReturn, ToolResolverUse};
 
         // Pending trust plus resolver-owned audience: two independent descriptions, one per
         // dimension — this is the shape the shadowing guard and admission tests exercise.
@@ -1850,10 +1973,12 @@ mod tests {
                 trust: Some(Dim::Unknown),
                 audience: None,
             }),
-            resolvers: vec![ToolResolverBinding {
+            description: Some("A test tool.".to_string()),
+            uses: vec![ToolResolverUse {
                 resolver: crate::names::DynamicResolverName::new("classifier"),
-                argument: None,
+                inputs: std::collections::BTreeMap::new(),
                 returns: [ResolverReturn::Audience].into_iter().collect(),
+                reads: [ResolverReturn::Audience].into_iter().collect(),
             }],
             ..tool("send")
         }];
@@ -1872,19 +1997,19 @@ mod tests {
                 trust: Some(Dim::Unknown),
                 audience: None,
             }),
-            resolvers: vec![ToolResolverBinding {
+            description: Some("A test tool.".to_string()),
+            uses: vec![ToolResolverUse {
                 resolver: crate::names::DynamicResolverName::new("classifier"),
-                argument: None,
+                inputs: std::collections::BTreeMap::new(),
                 returns: [ResolverReturn::Trust].into_iter().collect(),
+                reads: [ResolverReturn::Trust].into_iter().collect(),
             }],
             ..tool("send")
         }];
         assert!(matches!(
             Registry::build_covered(cfg),
-            Err(LoadError::DuplicateToolResolverDimension {
-                dimension: Dimension::Trust,
-                ..
-            })
+            Err(LoadError::DuplicateResolverDestination { destination, .. })
+                if destination == "delta.trust"
         ));
     }
 
@@ -1986,7 +2111,7 @@ mod tests {
         let mut dynamic = tool("lookup");
         dynamic.parameters = crate::params::test_string_argument_schema("customer");
         dynamic.delta.as_mut().unwrap().audience = None;
-        dynamic.resolvers = vec![audience_resolver("customer")];
+        dynamic.uses = vec![audience_resolver("customer")];
         let sanitizer = |index| Sanitizer {
             name: SanitizerName::new(format!("sanitizer-{index}")),
             on: SanitizerPoints {
@@ -2143,7 +2268,7 @@ mod tests {
         let mut dynamic = tool("dynamic-delta");
         dynamic.parameters = crate::params::test_string_argument_schema("to");
         dynamic.delta.as_mut().unwrap().audience = None;
-        dynamic.resolvers = vec![audience_resolver("to")];
+        dynamic.uses = vec![audience_resolver("to")];
         let mut pending = tool("pending-delta");
         pending.delta.as_mut().unwrap().audience = Some(AudienceDelta::PendingCast);
         let neutral = tool("neutral");
