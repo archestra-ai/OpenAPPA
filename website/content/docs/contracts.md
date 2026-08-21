@@ -52,7 +52,7 @@ A resolver that produces no answer — a timeout, an error, malformed or oversiz
 
 A dynamic resolver classifies a proposed tool call before the engine checks it. It returns selected fields of the tool's contract: output-label values under `delta`, and call-time constraints under `requires`. It does not resolve `@group` membership.
 
-A tool attaches resolvers with a `resolvers` list. Each binding names a registered resolver and declares, in a scoped `returns` table, exactly the fields that resolver must return. A binding without `argument` shows the resolver the complete schema-validated argument object. A binding with `argument = "field"` shows it exactly that one argument's string value; the field must be a required top-level string in the tool's `parameters`, or the policy does not load.
+A tool attaches resolvers with a `resolvers` list. Each binding names a registered resolver and declares, in a scoped `returns` table, exactly the fields that resolver must return. A binding without `argument` shows the resolver the complete schema-validated argument object. A binding with `argument = "field"` shows it exactly that one argument's string value; the field must be a required top-level string in the tool's `parameters`, or the policy does not load. A call that omits that argument or supplies a non-string value fails schema validation as an `InvalidCall` before any resolution runs.
 
 ```toml
 [[dynamic_resolver]]            # registration only; the deployment binds the implementation endpoint
@@ -119,7 +119,7 @@ The response mirrors the declared scopes. A dynamic audience requirement is an o
 }
 ```
 
-The response MUST contain each declared field and MUST NOT contain an undeclared field. A returned trust value MUST name an entry in `trust_ranks`, and every returned attention mark MUST name an entry in `attention_marks`. An audience is `"public"` or an array of literal readers — never `public` inside an array, never an `@group`. An empty attention array is valid; when `attention_marks` is empty it is the only valid attention answer. An empty `requires.audience` object is not valid.
+The response MUST contain each declared field and MUST NOT contain an undeclared field. A returned trust value MUST name an entry in `trust_ranks`, and every returned attention mark MUST name an entry in `attention_marks`. An audience is `"public"` or an array of literal readers — never `public` inside an array, never an `@group`. A reader array may name many readers or none: an empty array is a valid, maximally-restrictive answer (readable by no one), distinct from giving no answer at all. An empty attention array is valid; when `attention_marks` is empty it is the only valid attention answer. An empty `requires.audience` object is not valid.
 
 Output trust and audience each have exactly one owner. A static delta and a resolver cannot own the same output-label field, and two resolvers cannot own the same output-label field — the policy refuses to load. Ownership is per dimension: a resolver that owns the audience says nothing about trust, and an undescribed dimension stays fail-closed `Unknown`. Requirements are additive: static requirements and requirements from several resolvers all apply. History requirements remain static.
 
