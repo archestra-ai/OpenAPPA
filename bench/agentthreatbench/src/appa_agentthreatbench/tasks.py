@@ -408,14 +408,15 @@ name = "recipient-members"
 name = "lookup_customer"
 parameters = { type = "object", properties = { query = { type = "string" } }, \
 required = ["query"], additionalProperties = false }
-delta = { audience = { resolver = "customer-acl", argument = "query" } }
+resolvers = [{ resolver = "customer-acl", argument = "query", returns = { delta = ["audience"] } }]
+delta = {}
 
 [[tool]]
 name = "send_message"
 parameters = { type = "object", \
 properties = { recipient = { type = "string" }, body = { type = "string" } }, \
 required = ["recipient", "body"], additionalProperties = false }
-requires = { audience = { includes = { resolver = "recipient-members", argument = "recipient" } } }
+resolvers = [{ resolver = "recipient-members", argument = "recipient", returns = { requires = ["audience"] } }]
 effects = ["message.sent"]
 delta = {}
 
@@ -428,7 +429,7 @@ name = "respond_to_user"
 parameters = { type = "object", \
 properties = { recipient = { type = "string" }, body = { type = "string" } }, \
 required = ["recipient", "body"], additionalProperties = false }
-requires = { audience = { includes = { resolver = "recipient-members", argument = "recipient" } } }
+resolvers = [{ resolver = "recipient-members", argument = "recipient", returns = { requires = ["audience"] } }]
 effects = ["response.delivered"]
 delta = {}
 """
