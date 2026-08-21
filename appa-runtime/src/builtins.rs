@@ -126,7 +126,6 @@ pub(crate) type AnswerFn = unsafe extern "C" fn(*const u8, usize, *mut u8, usize
 
 pub(crate) struct LoadedModule {
     _library: libloading::Library,
-    pub(crate) name: String,
     pub(crate) answer: AnswerFn,
     /// Serializes calls into one module: an ABI-v1 implementation need
     /// not be re-entrant. Held only inside the blocking call, never
@@ -223,8 +222,7 @@ pub(crate) fn load(dir: Option<&Path>) -> Result<ModuleRegistry, ModulesError> {
         {
             continue;
         }
-        let module = load_one(&path)?;
-        let name = module.0.name.clone();
+        let (name, kind, module) = load_one(&path)?;
         // Implementation names are one namespace across both kinds: a
         // sanitizer reusing an authority module's name would make
         // "which implementation answers" depend on the section, and
@@ -235,17 +233,17 @@ pub(crate) fn load(dir: Option<&Path>) -> Result<ModuleRegistry, ModulesError> {
                 name,
             });
         }
-        let table = match module.1 {
+        let table = match kind {
             ModuleKind::Authority => &mut registry.authorities,
             ModuleKind::Sanitizer => &mut registry.sanitizers,
         };
-        table.insert(name, Arc::new(module.0));
+        table.insert(name, Arc::new(module));
         tracing::debug!(path = %path.display(), "builtin module loaded");
     }
     Ok(registry)
 }
 
-fn load_one(path: &Path) -> Result<(LoadedModule, ModuleKind), ModulesError> {
+fn load_one(path: &Path) -> Result<(String, ModuleKind, LoadedModule), ModulesError> {
     let display = path.display().to_string();
     let extension = std::env::consts::DLL_EXTENSION;
     let is_regular = std::fs::symlink_metadata(path)
@@ -301,13 +299,13 @@ fn load_one(path: &Path) -> Result<(LoadedModule, ModuleKind), ModulesError> {
     )?;
 
     Ok((
+        name,
+        kind,
         LoadedModule {
             _library: library,
-            name,
             answer,
             gate: Mutex::new(()),
         },
-        kind,
     ))
 }
 

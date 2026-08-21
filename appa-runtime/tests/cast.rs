@@ -1,3 +1,6 @@
+mod common;
+use common::{raw, serve};
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -155,18 +158,7 @@ async fn serve_classifier() -> (String, Classifier) {
             }),
         )
         .with_state(classifier.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("an ephemeral loopback port binds");
-    let addr = listener.local_addr().expect("the bound address is readable");
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("the stub serves");
-    });
-    (format!("http://{addr}/classify"), classifier)
-}
-
-fn raw(value: serde_json::Value) -> Box<serde_json::value::RawValue> {
-    serde_json::value::to_raw_value(&value).expect("the fixture serializes")
+    (format!("{}/classify", serve(router).await), classifier)
 }
 
 fn root() -> TrajectoryId {

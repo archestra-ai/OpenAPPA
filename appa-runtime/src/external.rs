@@ -457,18 +457,21 @@ impl ExternalServices {
             name,
             payload,
         };
-        let body = match self.post(endpoint, &request).await {
-            Ok(body) => body,
-            Err(reason) => return ConsultOutcome::NoAnswer(reason),
+        let reason = match self.post(endpoint, &request).await {
+            Err(reason) => reason,
+            Ok(body) => match serde_json::from_slice::<ConsultResponse>(&body) {
+                Err(_) => NoAnswerReason::Malformed,
+                Ok(response) if response.version != 1 => NoAnswerReason::UnsupportedVersion,
+                Ok(response) => return ConsultOutcome::Answer(response.answer),
+            },
         };
-        let response: ConsultResponse = match serde_json::from_slice(&body) {
-            Ok(response) => response,
-            Err(_) => return ConsultOutcome::NoAnswer(NoAnswerReason::Malformed),
-        };
-        if response.version != 1 {
-            return ConsultOutcome::NoAnswer(NoAnswerReason::UnsupportedVersion);
-        }
-        ConsultOutcome::Answer(response.answer)
+        tracing::debug!(
+            kind = kind.wire_name(),
+            name,
+            ?reason,
+            "endpoint consult produced no answer"
+        );
+        ConsultOutcome::NoAnswer(reason)
     }
 
     async fn call_module(
@@ -563,19 +566,15 @@ impl ExternalServices {
             trust_ranks: &context.trust_ranks,
             attention_marks: &context.attention_marks,
         };
-        let raw = match self.dynamic_builtins.get(resolver) {
+        let answered = match self.dynamic_builtins.get(resolver) {
             None => {
                 let Some(endpoint) = &self.dynamic else {
                     tracing::debug!(resolver, "tool resolution without a configured implementation");
                     return ToolResolution::Unresolved(NoAnswerReason::Unregistered);
                 };
-                let body = match self.post(endpoint, &request).await {
-                    Ok(body) => body,
-                    Err(reason) => return ToolResolution::Unresolved(reason),
-                };
-                match serde_json::from_slice(&body) {
-                    Ok(response) => response,
-                    Err(_) => return ToolResolution::Unresolved(NoAnswerReason::Malformed),
+                match self.post(endpoint, &request).await {
+                    Ok(body) => serde_json::from_slice(&body).map_err(|_| NoAnswerReason::Malformed),
+                    Err(reason) => Err(reason),
                 }
             }
             Some(claude) => {
@@ -595,10 +594,14 @@ impl ExternalServices {
                 };
                 let answered = claude.resolve(&request, deadline).await;
                 drop(permit);
-                match answered {
-                    Ok(response) => response,
-                    Err(reason) => return ToolResolution::Unresolved(reason),
-                }
+                answered
+            }
+        };
+        let raw = match answered {
+            Ok(raw) => raw,
+            Err(reason) => {
+                tracing::debug!(resolver, tool, ?reason, "tool resolution produced no answer");
+                return ToolResolution::Unresolved(reason);
             }
         };
         parse_tool_resolution(raw, returns, &context.trust_ranks, &context.attention_marks)
@@ -618,7 +621,10 @@ impl ExternalServices {
         };
         match self.literal_readers(endpoint, &request).await {
             Ok(readers) => ReadersResolution::Resolved { readers },
-            Err(reason) => ReadersResolution::Unresolved(reason),
+            Err(reason) => {
+                tracing::debug!(resolver, group, ?reason, "membership resolution produced no answer");
+                ReadersResolution::Unresolved(reason)
+            }
         }
     }
 

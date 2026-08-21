@@ -1,3 +1,6 @@
+mod common;
+use common::raw;
+
 use std::sync::Arc;
 
 use appa_runtime::api::Runtime;
@@ -6,10 +9,6 @@ use appa_runtime_api::{Actor, HookDecision, HookEvent, ProposedCall, TrajectoryI
 use rmcp::model::{ElicitRequestParams, ElicitResult, ElicitationAction};
 use rmcp::service::{RequestContext, RoleClient};
 use rmcp::{ClientHandler, ServiceExt};
-
-fn raw(value: serde_json::Value) -> Box<serde_json::value::RawValue> {
-    serde_json::value::to_raw_value(&value).expect("the fixture serializes")
-}
 
 fn policy(review_timeout_ms: u64) -> String {
     POLICY.replace("REVIEW_TIMEOUT_MS", &review_timeout_ms.to_string())

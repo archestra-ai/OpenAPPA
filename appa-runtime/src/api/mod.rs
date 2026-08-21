@@ -18,16 +18,9 @@ pub(crate) use session::{LateOpen, Session, is_control_tool};
 
 use crate::config::Config;
 use crate::elicit::Elicitation;
-use crate::engine::{EngineRefusal, EngineSeam, Liveness, PolicyEngine, RuntimeEngine};
+use crate::engine::{EngineRefusal, Liveness, PolicyEngine, RuntimeEngine};
 use crate::external::ExternalServices;
 use appa_eventlog::{Backend, Log, LogStore};
-
-/// Identity of one open dispatch: a released call the harness is
-/// executing. Runtime-internal: outcomes correlate by the
-/// call's canonical bytes, never by an id an adapter
-/// carries.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct DispatchId(pub String);
 
 /// One remedy offer as it is quoted and carried.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -318,7 +311,6 @@ struct Inner {
     deployment: std::sync::RwLock<Arc<Deployment>>,
     retired: std::sync::Mutex<std::collections::BTreeMap<String, Arc<RuntimeEngine>>>,
     store: LogStore,
-    engine: EngineSeam,
     modules: crate::builtins::ModuleRegistry,
     executing: std::sync::Mutex<std::collections::BTreeSet<String>>,
     permits: std::sync::Mutex<std::collections::BTreeMap<String, Vec<Actor>>>,
@@ -342,7 +334,7 @@ impl Inner {
         deployment: &'a Deployment,
         log: &Log,
     ) -> Result<PolicyEngine<'a>, EventError> {
-        let opened = self.engine.opened_under(log).ok_or_else(|| {
+        let opened = crate::engine::opened_under(log).ok_or_else(|| {
             EventError::PolicyUnavailable(format!(
                 "the log of {} does not open with its opening record",
                 log.root().as_str()
@@ -408,27 +400,6 @@ impl Runtime {
     /// a policy this deployment cannot honor is refused before
     /// anything opens.
     pub fn open(config: Config, db: PathBuf, modules: Option<PathBuf>) -> Result<Runtime, OpenError> {
-        Runtime::with_engine(config, db, modules, EngineSeam::Real)
-    }
-
-    /// The tests' entry: the same runtime with decisions from the
-    /// enqueued queue and no modules directory. Every gate `open` runs
-    /// runs here too — only the decisions are fake.
-    #[cfg(test)]
-    pub(crate) fn open_with_engine(
-        config: Config,
-        db: PathBuf,
-        seam: crate::engine::TestSeam,
-    ) -> Result<Runtime, OpenError> {
-        Runtime::with_engine(config, db, None, EngineSeam::Test(seam))
-    }
-
-    fn with_engine(
-        config: Config,
-        db: PathBuf,
-        modules: Option<PathBuf>,
-        engine: EngineSeam,
-    ) -> Result<Runtime, OpenError> {
         let modules =
             crate::builtins::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
         let claude_permits = Arc::new(tokio::sync::Semaphore::new(CLAUDE_CONSULT_PERMITS));
@@ -443,7 +414,6 @@ impl Runtime {
                 deployment: std::sync::RwLock::new(Arc::new(deployment)),
                 retired: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 store,
-                engine,
                 modules,
                 executing: std::sync::Mutex::new(std::collections::BTreeSet::new()),
                 permits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
@@ -538,12 +508,11 @@ impl Runtime {
             .inner
             .resolve_policy(&deployment, &log)
             .map_err(|error| SessionError::Storage(error.to_string()))?;
-        let view = self
-            .inner
-            .engine
-            .rebuild_view(&policy, &log)
+        let view = policy
+            .engine()
+            .rebuild_view(&log)
             .map_err(|refusal| SessionError::Storage(refusal.to_string()))?;
-        match self.inner.engine.liveness(&view, trajectory) {
+        match policy.engine().liveness(&view, trajectory) {
             Liveness::Unopened => Err(SessionError::Unknown),
             Liveness::Ended => Err(SessionError::Ended),
             Liveness::Live => Ok(()),
@@ -553,14 +522,14 @@ impl Runtime {
     pub fn status(&self, id: &TrajectoryId) -> Option<TrajectoryStatus> {
         let deployment = self.inner.deployment();
         let (policy, log) = self.root_log(&deployment, id, "status")?;
-        let view = match self.inner.engine.rebuild_view(&policy, &log) {
+        let view = match policy.engine().rebuild_view(&log) {
             Ok(view) => view,
             Err(refusal) => {
                 tracing::warn!(trajectory = %id.0, %refusal, "status read refused the persisted log");
                 return None;
             }
         };
-        self.inner.engine.trajectory_status(&policy, &view, id)
+        policy.engine().trajectory_status(&view, id)
     }
 
     /// Every decision this family's log recorded, in log order.
@@ -571,7 +540,7 @@ impl Runtime {
     pub fn audit(&self, id: &TrajectoryId) -> Option<Vec<AuditEntry>> {
         let deployment = self.inner.deployment();
         let (policy, log) = self.root_log(&deployment, id, "audit")?;
-        match self.inner.engine.audit(&policy, &log) {
+        match policy.engine().audit(&log) {
             Ok(entries) => entries,
             Err(refusal) => {
                 tracing::warn!(trajectory = %id.0, %refusal, "audit read refused the persisted log");
@@ -633,7 +602,7 @@ impl Runtime {
                 detail: "this offer is already being executed".to_string(),
             };
         };
-        let mut session = match self.session(&root, &pursuer) {
+        let session = match self.session(&root, &pursuer) {
             Ok(session) => session,
             Err(error) => {
                 return RemedyOutcome::Refused {
@@ -660,8 +629,8 @@ impl Runtime {
         let offer = crate::engine::resolve_rendered(&log, quoted)?;
         let deployment = self.inner.deployment();
         let policy = self.inner.resolve_policy(&deployment, &log).ok()?;
-        let view = self.inner.engine.rebuild_view(&policy, &log).ok()?;
-        let pursuer = self.inner.engine.offer_pursuer(&view, &offer)?;
+        let view = policy.engine().rebuild_view(&log).ok()?;
+        let pursuer = policy.engine().offer_pursuer(&view, &offer)?;
         Some((offer, pursuer))
     }
 
@@ -710,6 +679,25 @@ impl Runtime {
         })
     }
 
+    /// One root's rebuilt view and the engine that decides for it, for
+    /// the test accessors that read a family the public surface does not
+    /// expose. Panics where production would refuse: a test that reaches
+    /// an unreadable log has already failed.
+    #[cfg(test)]
+    fn rebuilt<'a>(
+        &self,
+        deployment: &'a Deployment,
+        root: &TrajectoryId,
+    ) -> (PolicyEngine<'a>, crate::engine::EngineView) {
+        let log = self.inner.log(root).expect("the log reads");
+        let policy = self
+            .inner
+            .resolve_policy(deployment, &log)
+            .expect("the opening policy resolves");
+        let view = policy.engine().rebuild_view(&log).expect("the log rebuilds");
+        (policy, view)
+    }
+
     #[cfg(test)]
     pub(crate) fn log_facts(&self, root: &TrajectoryId) -> Vec<appa_engine::fact::Fact> {
         self.inner.log(root).expect("the log reads").facts().to_vec()
@@ -726,28 +714,18 @@ impl Runtime {
         root: &TrajectoryId,
         trajectory: &TrajectoryId,
     ) -> Vec<crate::engine::OpenDispatch> {
-        let log = self.inner.log(root).expect("the log reads");
         let deployment = self.inner.deployment();
-        let policy = self
-            .inner
-            .resolve_policy(&deployment, &log)
-            .expect("the opening policy resolves");
-        let view = self.inner.engine.rebuild_view(&policy, &log).expect("the log rebuilds");
-        self.inner.engine.open_dispatches(&view, trajectory)
+        let (policy, view) = self.rebuilt(&deployment, root);
+        policy.engine().open_dispatches(&view, trajectory)
     }
 
     /// Does the root's log name this trajectory, for the tests that
     /// assert on whether a child opened.
     #[cfg(test)]
     pub(crate) fn names_trajectory(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> bool {
-        let log = self.inner.log(root).expect("the log reads");
         let deployment = self.inner.deployment();
-        let policy = self
-            .inner
-            .resolve_policy(&deployment, &log)
-            .expect("the opening policy resolves");
-        let view = self.inner.engine.rebuild_view(&policy, &log).expect("the log rebuilds");
-        self.inner.engine.liveness(&view, trajectory) != Liveness::Unopened
+        let (policy, view) = self.rebuilt(&deployment, root);
+        policy.engine().liveness(&view, trajectory) != Liveness::Unopened
     }
 
     /// The substituted call a trajectory has standing, for the tests
@@ -758,29 +736,18 @@ impl Runtime {
         root: &TrajectoryId,
         trajectory: &TrajectoryId,
     ) -> Option<crate::engine::OpenDispatch> {
-        let log = self.inner.log(root).expect("the log reads");
         let deployment = self.inner.deployment();
-        let policy = self
-            .inner
-            .resolve_policy(&deployment, &log)
-            .expect("the opening policy resolves");
-        let view = self.inner.engine.rebuild_view(&policy, &log).expect("the log rebuilds");
-        self.inner.engine.substituted_release(&view, trajectory)
+        let (policy, view) = self.rebuilt(&deployment, root);
+        policy.engine().substituted_release(&view, trajectory)
     }
 
     /// Rebuild one root's view, scoped to a trajectory in it, for the tests
-    /// that read a branch through the seam the root-only public surface does
-    /// not expose.
+    /// that read a branch the root-only public surface does not expose.
     #[cfg(test)]
     pub(crate) fn branch_status(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> Option<TrajectoryStatus> {
-        let log = self.inner.log(root).expect("the log reads");
         let deployment = self.inner.deployment();
-        let policy = self
-            .inner
-            .resolve_policy(&deployment, &log)
-            .expect("the policy resolves");
-        let view = self.inner.engine.rebuild_view(&policy, &log).expect("the log rebuilds");
-        self.inner.engine.trajectory_status(&policy, &view, trajectory)
+        let (policy, view) = self.rebuilt(&deployment, root);
+        policy.engine().trajectory_status(&view, trajectory)
     }
 
     /// Drive one event straight at the engine and take its refusal, for the
@@ -792,17 +759,12 @@ impl Runtime {
         trajectory: &TrajectoryId,
         event: crate::engine::EngineEvent,
     ) -> EventError {
-        let log = self.inner.log(root).expect("the log reads");
         let deployment = self.inner.deployment();
-        let policy = self
-            .inner
-            .resolve_policy(&deployment, &log)
-            .expect("the policy resolves");
-        let view = self.inner.engine.rebuild_view(&policy, &log).expect("the log rebuilds");
+        let (policy, view) = self.rebuilt(&deployment, root);
         EventError::from(
-            self.inner
-                .engine
-                .handle(&policy, &view, trajectory, event)
+            policy
+                .engine()
+                .handle(&view, trajectory, event)
                 .expect_err("the moved subject refuses the event"),
         )
     }
@@ -822,16 +784,6 @@ impl Runtime {
     #[cfg(test)]
     pub(crate) fn minted_offers(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> Vec<OfferId> {
         crate::engine::minted_offers(&self.inner.log(root).expect("the log reads"), trajectory)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn enqueue(&self, decision: crate::engine::EngineDecision) {
-        self.inner.engine.enqueue(decision);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn engine_seen(&self) -> Vec<crate::engine::EngineEvent> {
-        self.inner.engine.seen()
     }
 
     /// How long a human review may stay open before the runtime treats
@@ -981,32 +933,12 @@ fn compile_stored_policy(bytes: &[u8]) -> Result<appa_policy::Config, String> {
     appa_policy::Config::from_toml_str(&text).map_err(|error| format!("the stored policy does not load: {error}"))
 }
 
-/// Plain-data helpers for tests outside this module — the adapter and
-/// MCP tests — so they can drive the test seam without naming the
-/// boundary (the source-scan structural guard holds for test
-/// code too).
+/// Plain-data fixtures for tests outside this module, so they can name
+/// a fork the way the harness carries it without naming the engine
+/// boundary (the source-scan structural guard holds for test code
+/// too).
 #[cfg(test)]
 pub(crate) mod testing {
-    use crate::engine::{EngineDecision, Feedback, Next, ReleasedCall, TestSeam};
-
-    use super::{Config, DispatchId, OfferId, ProposedCall, Runtime};
-
-    pub(crate) fn runtime(config: Config, db: std::path::PathBuf) -> Runtime {
-        Runtime::open_with_engine(config, db, TestSeam::new()).expect("a fresh test runtime opens")
-    }
-
-    pub(crate) fn fail_next_commit(runtime: &Runtime) {
-        runtime.inner.store.fail_commit_after(0);
-    }
-
-    fn enqueue(runtime: &Runtime, then: Next) {
-        runtime.inner.engine.enqueue(EngineDecision { append: None, then });
-    }
-
-    pub(crate) fn enqueue_done(runtime: &Runtime) {
-        enqueue(runtime, Next::Done);
-    }
-
     fn engine_dispatch(label: &str) -> appa_engine::value::DispatchId {
         let policy = appa_policy::Config::from_toml_str("version = 1\n[[tool]]\nname = \"Bash\"\n")
             .expect("the fixture policy compiles");
@@ -1020,42 +952,6 @@ pub(crate) mod testing {
     pub(crate) fn spawn_binding(label: &str) -> super::SpawnBinding {
         let fork = appa_engine::value::ForkId::of(&engine_dispatch(label));
         super::SpawnBinding(serde_json::to_string(&fork).expect("a fork id serializes"))
-    }
-
-    fn wire_dispatch(label: &str) -> DispatchId {
-        DispatchId(serde_json::to_string(&engine_dispatch(label)).expect("an engine dispatch id serializes"))
-    }
-
-    pub(crate) fn enqueue_release(runtime: &Runtime, dispatch: &str, tool: &str, arguments: &serde_json::Value) {
-        let call = ProposedCall {
-            tool: tool.to_string(),
-            arguments: super::raw(arguments.clone()),
-        };
-        enqueue(
-            runtime,
-            Next::ModelResponse {
-                invocations: vec![ReleasedCall {
-                    dispatch: wire_dispatch(dispatch),
-                    tool: call.tool.clone(),
-                    bytes: serde_json::to_vec(&call).expect("the test call serializes"),
-                    fork: None,
-                }],
-                feedback: Vec::new(),
-            },
-        );
-    }
-
-    pub(crate) fn enqueue_deny(runtime: &Runtime, feedback: &str, offers: &[&str]) {
-        enqueue(
-            runtime,
-            Next::ModelResponse {
-                invocations: Vec::new(),
-                feedback: vec![Feedback {
-                    text: feedback.to_string(),
-                    offers: offers.iter().map(|id| OfferId(id.to_string())).collect(),
-                }],
-            },
-        );
     }
 }
 

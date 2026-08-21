@@ -23,9 +23,10 @@ one at the repository root:
   the `hooks` dispatcher, the HTTP server, the MCP endpoint, the
   externals, the builtin modules (`builtins.rs` — stock implementations
   plus the `--modules-dir` loader over the `appa-builtin` ABI crate at
-  the repo root), and the engine boundary (`src/engine.rs`, the one
-  module that names `appa-engine`). It keeps no durable state of its
-  own beside the log.
+  the repo root), and the engine boundary (`src/engine.rs`, which
+  translates and presents every engine decision; `api/mod.rs` and
+  `api/session.rs` also name `appa-engine`). It keeps no durable state
+  of its own beside the log.
 
 The Claude Code plugin, the marketplace manifest, and the example
 policies are not code and live in `integrations/claude-code/` at the

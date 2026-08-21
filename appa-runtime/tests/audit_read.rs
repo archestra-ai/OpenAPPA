@@ -1,3 +1,6 @@
+mod common;
+use common::raw;
+
 use std::sync::Arc;
 
 use appa_runtime::api::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, OfferId, RemedyOutcome, Runtime};
@@ -41,10 +44,6 @@ max_body_bytes = 4096
 [externals.sanitizers.redactor]
 builtin = "redact-email"
 "#;
-
-fn raw(value: serde_json::Value) -> Box<serde_json::value::RawValue> {
-    serde_json::value::to_raw_value(&value).expect("the fixture serializes")
-}
 
 fn call(tool: &str) -> ProposedCall {
     ProposedCall {
