@@ -140,6 +140,55 @@ A resolver with `builtin = "claude-code"` never uses the endpoint. The builtin s
 
 The deployment tunes the builtin in `[externals.claude_code]`: `command` sets the executable path (a service environment often strips `PATH`), `model` pins the model, and `timeout_ms` gives the consult its own budget instead of the shared machine-consult `timeout_ms` — a model call is slower than an ordinary endpoint. At most four Claude consults run at once per runtime. Each consult has model latency and account cost; a pinned recheck and a replay never invoke it again.
 
+### 🚧 Proposed tool pattern matching
+
+This proposal is not implemented.
+
+Some tools need a small rule based on one argument. Sending email is a common example. Company addresses are internal destinations. Other addresses are public destinations.
+
+The tool could contain the rule directly:
+
+```toml
+[[tool]]
+name = "send_email"
+parameters = { type = "object", properties = { to = { type = "string" }, body = { type = "string" } }, required = ["to", "body"] }
+delta = {}
+effects = ["egress"]
+
+[tool.match]
+argument = "to"
+cases = [
+  ["*@archestra.ai", "internal"],
+  ["*@arseny.info", "internal"],
+  ["_", "public"],
+]
+```
+
+Each row contains a pattern and its result. OpenAPPA reads the rows from top to bottom and uses the first match.
+
+| `to` value | Result |
+|---|---|
+| `alice@archestra.ai` | `internal` |
+| `arseny@arseny.info` | `internal` |
+| `alice@example.com` | `public` |
+
+`*` matches any text. `_` matches anything that the earlier rows did not match. `_` must be the final row.
+
+The selected result becomes the audience required by this call. An internal conversation can go to an internal address. Sending it to a public address still needs the usual approval or cleanup step.
+
+This rule runs inside OpenAPPA. It needs no `[[dynamic_resolver]]`, server, command, or model call.
+
+The first version would have these limits:
+
+- A tool can have one `match` block.
+- `argument` must name a required string in the tool's `parameters`.
+- A case can use literal text and `*` only.
+- Cases are checked in the written order.
+- The final `_` case is required, so every value has a result.
+- A result can be `public`, `internal`, or another reader name used by the policy.
+
+The meaning of the proposed built-in `internal` audience is a separate decision. Pattern matching does not itself define who counts as internal.
+
 ### 🚧 Proposed resolver syntax
 
 This proposal is not implemented. It keeps request version `1`.
