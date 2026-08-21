@@ -140,25 +140,11 @@ A resolver with `builtin = "claude-code"` never uses the endpoint. The builtin s
 
 The deployment tunes the builtin in `[externals.claude_code]`: `command` sets the executable path (a service environment often strips `PATH`), `model` pins the model, and `timeout_ms` gives the consult its own budget instead of the shared machine-consult `timeout_ms` — a model call is slower than an ordinary endpoint. At most four Claude consults run at once per runtime. Each consult has model latency and account cost; a pinned recheck and a replay never invoke it again.
 
-### 🚧 Proposed resolver interface
+### 🚧 Proposed resolver syntax
 
-This section describes a proposal. The policy syntax and request format are not implemented yet. The request keeps version `1`.
+This proposal is not implemented. It keeps request version `1`.
 
-#### Resolver and tool rules
-
-A resolver declares the arguments it needs and the results it returns. These declarations stay the same for every tool.
-
-A tool lists each resolver in `uses`. The tool supplies the declared resolver arguments from its own arguments.
-
-The resolver always returns every declared result. The tool can use all results or only some results.
-
-The request does not tell the resolver how the tool uses a result. Result placement stays in the tool policy.
-
-A tool can omit `uses`. Such a tool does not call a resolver.
-
-#### One resolver argument
-
-This resolver needs one argument named `subject`. It always returns both `trust` and `audience`.
+#### Example: pass one argument
 
 ```toml
 [[dynamic_resolver]]
@@ -169,150 +155,49 @@ returns = ["trust", "audience"]
 [[tool]]
 name = "get_customer"
 parameters = { type = "object", properties = { customer_id = { type = "string" } }, required = ["customer_id"] }
-uses = [{ resolver = "classify-customer", inputs = { subject = "$customer_id" } }]
+uses = [{ resolver = "classify-customer", inputs = { subject = "$tool_call.arguments.customer_id" } }]
 
 # This tool uses only the resolver's trust result.
 delta = { trust = "resolver.classify-customer.trust" }
 requires = { trust = "trusted" }
 ```
 
-A result reference uses `resolver.<name>.<result>`. The value is quoted because a bare dotted value is not valid TOML.
+The resolver receives only `customer_id`, under the name `subject`. It returns `trust` and `audience`. This tool uses only `trust`.
 
-A call can contain other tool arguments:
+The result path is `resolver.<resolver name>.<result name>`. It is a string because an unquoted dotted value is not valid TOML.
 
-```json
-{
-  "customer_id": "cust-7",
-  "include_history": true,
-  "internal_note": "priority account"
-}
-```
+#### Example: pass the complete tool call
 
-OpenAPPA sends only `customer_id`. It sends that value under the resolver argument name `subject`.
-
-#### Request body template
-
-The next block uses JSON with comments. The comments explain the keys. OpenAPPA sends ordinary JSON without comments.
-
-```jsonc
-{
-  // WHY: The version tells OpenAPPA how to read the request. This proposal keeps version 1.
-  "version": 1,
-
-  // WHY: One service URL can handle several resolvers.
-  "resolver": "classify-customer",
-
-  // WHY: The same resolver can apply different rules to different tools.
-  "tool": "get_customer",
-
-  // WHY: This object contains the call data that the resolver may inspect.
-  "args": {
-    // WHY: The tool maps customer_id to the resolver argument named subject.
-    "subject": "cust-7"
-  },
-
-  // WHY: The resolver can judge the call against the current flow state.
-  "context": {
-    // WHY: This name tells the resolver the current trust level.
-    "current_trust": "trusted",
-
-    // WHY: This number gives the exact position in the ordered trust chain.
-    "current_trust_rank": 1,
-
-    // WHY: This value tells the resolver who can currently read the flow.
-    "current_audience": "public",
-
-    // WHY: This flag distinguishes an unresolved trust value from a declared trust rank.
-    "trust_unresolved": false,
-
-    // WHY: This flag distinguishes an unresolved audience from a declared audience.
-    "audience_unresolved": false,
-
-    // WHY: The resolver must not return attention marks that the tool already requires.
-    "static_attention": []
-  },
-
-  // WHY: These are the only trust names that a resolver can return.
-  "trust_ranks": ["suspicious", "trusted"],
-
-  // WHY: These are the only attention marks that a resolver can return.
-  "attention_marks": ["privacy-review"]
-}
-```
-
-The request has no `input`, `scope`, `returns`, or `expects` key. The resolver declaration already defines its complete result set.
-
-#### Response body template
-
-The resolver returns all declared results. This tool ignores `audience`, but the resolver still returns it.
-
-```jsonc
-{
-  // WHY: The response version must match the request version.
-  "version": 1,
-
-  // WHY: This object contains every result declared by the resolver.
-  "result": {
-    // WHY: The resolver declared trust, so it must return one allowed trust name.
-    "trust": "trusted",
-
-    // WHY: The resolver declared audience, so it must return literal readers or public.
-    "audience": ["finance"]
-  }
-}
-```
-
-OpenAPPA rejects a response with a missing result, an extra result, or an explicit `null` value.
-
-A trust result must use a name from `trust_ranks`. An attention result must use a name from `attention_marks`.
-
-An audience result is `"public"` or an array of literal reader names. It cannot contain a group name.
-
-#### Complete tool arguments
-
-A resolver can omit `inputs`. OpenAPPA then sends the complete validated tool argument object in `args`.
+Omit `inputs` to pass the complete call:
 
 ```toml
 [[dynamic_resolver]]
 name = "classify-command"
-builtin = "claude-code"
 returns = ["trust", "audience"]
 
 [[tool]]
 name = "Bash"
+description = "Runs one shell command and returns its output."
 uses = [{ resolver = "classify-command" }]
 delta = { trust = "resolver.classify-command.trust", audience = "resolver.classify-command.audience" }
 ```
 
+The resolver receives this value in `args`:
+
 ```json
 {
-  "version": 1,
-  "resolver": "classify-command",
-  "tool": "Bash",
-  "args": {
+  "name": "Bash",
+  "description": "Runs one shell command and returns its output.",
+  "arguments": {
     "command": "git push origin main",
     "timeout": 60000
-  },
-  "context": {
-    "current_trust": "trusted",
-    "current_trust_rank": 1,
-    "current_audience": "public",
-    "trust_unresolved": false,
-    "audience_unresolved": false,
-    "static_attention": []
-  },
-  "trust_ranks": ["suspicious", "trusted"],
-  "attention_marks": []
+  }
 }
 ```
 
-An omitted tool parameter schema permits this complete-object form. OpenAPPA still checks the JSON type and size limit.
+This form does not need a tool parameter schema.
 
-A mapped argument needs a tool parameter schema. The schema must declare that source argument as a required top-level property.
-
-#### Several resolvers on one tool
-
-A tool can use several resolvers. Each resolver receives a separate request with its own declared arguments.
+#### Example: use several resolvers
 
 ```toml
 [[dynamic_resolver]]
@@ -329,25 +214,106 @@ returns = ["audience"]
 name = "get_customer"
 parameters = { type = "object", properties = { customer_id = { type = "string" } }, required = ["customer_id"] }
 uses = [
-  { resolver = "trust-classifier", inputs = { subject = "$customer_id" } },
-  { resolver = "record-acl", inputs = { record = "$customer_id" } }
+  { resolver = "trust-classifier", inputs = { subject = "$tool_call.arguments.customer_id" } },
+  { resolver = "record-acl", inputs = { record = "$tool_call.arguments.customer_id" } }
 ]
 delta = { trust = "resolver.trust-classifier.trust", audience = "resolver.record-acl.audience" }
 ```
 
-OpenAPPA can send both requests at the same time. Both requests carry the same flow context.
+OpenAPPA sends one request to each resolver. Both requests use the same current state.
 
-Each resolver returns all results from its own declaration. Two resolvers cannot supply the same tool field.
+#### Available call values
 
-If a used resolver gives no valid answer, OpenAPPA does not check or run the tool call.
+`$tool_call` is the only special source.
 
-#### Claude Code and HTTP
+| Value | Meaning |
+|---|---|
+| `$tool_call` | Complete tool call |
+| `$tool_call.name` | Tool name |
+| `$tool_call.description` | Tool description from the policy |
+| `$tool_call.arguments` | Complete argument object |
+| `$tool_call.arguments.<name>` | One top-level argument |
 
-HTTP resolvers receive the request as a JSON body. The Claude Code resolver receives the same JSON through standard input.
+`$tool_call.description` needs a tool description. A single argument needs a tool parameter schema. The schema must mark that top-level argument as required.
 
-OpenAPPA builds the Claude output schema from the resolver's complete `returns` declaration. A tool's selected fields do not change that schema.
+#### Rules
 
-The request does not contain the policy file, the event log, or tool arguments that the mapping did not select.
+- A resolver declares its inputs and all results it returns.
+- A tool can use zero or more resolvers. Omit `uses` when it uses none.
+- A resolver always returns every declared result. A tool can use any part of that result.
+- A tool field can use only one resolver result.
+- If a resolver fails or returns an invalid result, OpenAPPA does not run the tool.
+
+#### Wire format
+
+The comments below explain each key. They are not sent.
+
+Request with one mapped argument:
+
+```jsonc
+{
+  // WHY: Identifies the request shape. This proposal keeps version 1.
+  "version": 1,
+
+  // WHY: Selects the resolver when one service handles several resolvers.
+  "resolver": "classify-customer",
+
+  // WHY: Contains only the data selected by the resolver input mapping.
+  "args": {
+    // WHY: Gives the resolver's subject input the selected customer ID.
+    "subject": "cust-7"
+  },
+
+  // WHY: Gives the resolver the current state before this tool call.
+  "context": {
+    // WHY: Gives the current trust name.
+    "current_trust": "trusted",
+
+    // WHY: Gives the current trust position in the ordered trust list.
+    "current_trust_rank": 1,
+
+    // WHY: Gives the current readers.
+    "current_audience": "public",
+
+    // WHY: Says whether trust is still unknown.
+    "trust_unresolved": false,
+
+    // WHY: Says whether audience is still unknown.
+    "audience_unresolved": false,
+
+    // WHY: Lists attention marks already required by the tool policy.
+    "static_attention": []
+  },
+
+  // WHY: Limits trust results to names defined by the policy.
+  "trust_ranks": ["suspicious", "trusted"],
+
+  // WHY: Limits attention results to names defined by the policy.
+  "attention_marks": ["privacy-review"]
+}
+```
+
+The request has no `input`, `scope`, `returns`, or `expects` key.
+
+Response:
+
+```jsonc
+{
+  // WHY: Identifies the response shape. It must match the request version.
+  "version": 1,
+
+  // WHY: Holds every result declared by this resolver.
+  "result": {
+    // WHY: Supplies the declared trust result.
+    "trust": "trusted",
+
+    // WHY: Supplies the declared audience result, even if this tool does not use it.
+    "audience": ["finance"]
+  }
+}
+```
+
+OpenAPPA rejects missing, extra, or `null` results. Trust and attention values must come from the lists in the request. Audience is `"public"` or a list of reader names.
 
 ### Deployment coverage
 
