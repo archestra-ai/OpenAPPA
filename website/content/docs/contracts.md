@@ -68,7 +68,8 @@ resolvers = [
   { resolver = "classify-call", returns = { delta = ["trust"], requires = ["attention"] } },
   { resolver = "crm-acl", argument = "customer_id", returns = { delta = ["audience"] } },
 ]
-delta = {}
+# Both output dimensions are resolver-owned (classify-call: trust, crm-acl:
+# audience), so there is no static `delta` to write.
 
 [[authority]]
 name = "operator"
