@@ -650,14 +650,6 @@ pub(crate) fn input_hops(
     if role == CallRole::MarkedSpawn {
         return Vec::new();
     }
-    // A whole-call resolver pin is invalidated by any substitution, so a hop on such a tool
-    // could never execute; the plan is not offered. An argument-scoped pin survives a
-    // substitution that leaves its argument alone, so those tools keep their hops.
-    // TODO: re-consult the resolver on the substituted arguments instead, restoring the
-    // remedy for whole-call bindings.
-    if contract.resolvers.iter().any(|binding| binding.argument.is_none()) {
-        return Vec::new();
-    }
     if !gaps.iter().any(|gap| matches!(gap, Gap::Includes { .. })) {
         return Vec::new();
     }
@@ -1370,7 +1362,7 @@ mod tests {
     }
 
     #[test]
-    fn a_whole_call_resolver_binding_suppresses_input_substitution_hops() {
+    fn a_resolver_binding_keeps_its_input_substitution_hops() {
         let partner = Audience::restricted([ReaderId::new("partner")]);
         let internal = Audience::restricted([ReaderId::new("internal")]);
         let contract = |resolvers| ToolContract {
@@ -1439,12 +1431,12 @@ mod tests {
         };
 
         assert!(
-            !offers_hop(vec![binding(None)]),
-            "a whole-call pin cannot survive any substitution, so the hop is not offered"
+            offers_hop(vec![binding(None)]),
+            "a whole-call ruling rides through the substitution, so the hop stands"
         );
         assert!(
             offers_hop(vec![binding(Some("to"))]),
-            "an argument-scoped pin survives a substitution that leaves its argument alone, so the hop stands"
+            "an argument-scoped ruling rides through the substitution, so the hop stands"
         );
     }
 

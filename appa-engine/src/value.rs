@@ -534,21 +534,15 @@ impl ResolvedCall {
     }
 
     /// The call a substitution of this one's arguments renders: the same callee, the
-    /// replacement arguments, and only those pinned answers the replacement leaves standing.
+    /// replacement arguments, the resolver answers pinned to the call it replaces, and only
+    /// those membership answers the replacement leaves standing.
     pub(crate) fn substituting(&self, arguments: CanonicalArguments) -> ResolvedCall {
         let unchanged = |argument: &str| arguments.value().get(argument) == self.arguments.value().get(argument);
-        // A whole-call pin answers for the complete argument object, so any substitution
-        // invalidates it; an argument-scoped pin answers for one field and survives while
-        // that field's value is unchanged.
-        let tool_resolutions = self
-            .tool_resolutions
-            .iter()
-            .filter(|resolution| match &resolution.binding().argument {
-                None => arguments == self.arguments,
-                Some(argument) => unchanged(argument),
-            })
-            .cloned()
-            .collect();
+        // A resolver ruled on the call the agent proposed. A substitution only ever happens as
+        // a registered sanitizer's rewrite of that resolved call, recorded in the derived
+        // candidate's lineage, so the ruling rides along and the resolver is not asked again.
+        // A membership pin expands the group one argument names, so it survives only while
+        // that argument's value is unchanged.
         let memberships = self
             .memberships
             .iter()
@@ -556,7 +550,7 @@ impl ResolvedCall {
             .cloned()
             .collect();
         ResolvedCall::new(self.tool.clone(), arguments)
-            .with_tool_resolutions(tool_resolutions)
+            .with_tool_resolutions(self.tool_resolutions.clone())
             .with_memberships(memberships)
     }
 }
@@ -608,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_resolution_is_pinned_to_the_complete_argument_object() {
+    fn a_whole_call_resolution_survives_argument_substitution() {
         let binding = crate::contract::ToolResolverBinding {
             resolver: crate::names::DynamicResolverName::new("classifier"),
             argument: None,
@@ -632,17 +626,18 @@ mod tests {
             1,
             "an equivalent canonical object keeps the pin"
         );
-        assert!(
+        assert_eq!(
             resolved
                 .substituting(args(json!({ "id": 8, "deep": true })))
                 .tool_resolutions()
-                .is_empty(),
-            "a change anywhere in the arguments invalidates the whole-object pin"
+                .len(),
+            1,
+            "a substitution rewrites the resolved call, so the ruling rides along"
         );
     }
 
     #[test]
-    fn an_argument_scoped_pin_survives_unrelated_substitution() {
+    fn an_argument_scoped_resolution_survives_any_substitution() {
         let binding = crate::contract::ToolResolverBinding {
             resolver: crate::names::DynamicResolverName::new("classifier"),
             argument: Some("id".into()),
@@ -670,12 +665,13 @@ mod tests {
             1,
             "the scoped argument is unchanged, so the pin stands"
         );
-        assert!(
+        assert_eq!(
             resolved
                 .substituting(args(json!({ "id": "8", "deep": true })))
                 .tool_resolutions()
-                .is_empty(),
-            "a changed scoped argument invalidates the pin"
+                .len(),
+            1,
+            "a rewrite of the scoped argument is still the sanitizer's rewrite of the resolved call, so the ruling rides along"
         );
     }
 
