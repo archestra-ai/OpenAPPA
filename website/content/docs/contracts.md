@@ -172,9 +172,11 @@ parameters = { type = "object", properties = { customer_id = { type = "string" }
 uses = [{ resolver = "classify-customer", inputs = { subject = "$customer_id" } }]
 
 # This tool uses only the resolver's trust result.
-delta = { trust = { resolver = "classify-customer" } }
+delta = { trust = "resolver.classify-customer.trust" }
 requires = { trust = "trusted" }
 ```
+
+A result reference uses `resolver.<name>.<result>`. The value is quoted because a bare dotted value is not valid TOML.
 
 A call can contain other tool arguments:
 
@@ -279,7 +281,7 @@ returns = ["trust", "audience"]
 [[tool]]
 name = "Bash"
 uses = [{ resolver = "classify-command" }]
-delta = { trust = { resolver = "classify-command" }, audience = { resolver = "classify-command" } }
+delta = { trust = "resolver.classify-command.trust", audience = "resolver.classify-command.audience" }
 ```
 
 ```json
@@ -330,7 +332,7 @@ uses = [
   { resolver = "trust-classifier", inputs = { subject = "$customer_id" } },
   { resolver = "record-acl", inputs = { record = "$customer_id" } }
 ]
-delta = { trust = { resolver = "trust-classifier" }, audience = { resolver = "record-acl" } }
+delta = { trust = "resolver.trust-classifier.trust", audience = "resolver.record-acl.audience" }
 ```
 
 OpenAPPA can send both requests at the same time. Both requests carry the same flow context.
