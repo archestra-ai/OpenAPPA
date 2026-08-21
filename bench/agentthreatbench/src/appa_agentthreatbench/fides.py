@@ -14,6 +14,7 @@ makes that expressiveness/utility trade-off visible in the paired controls.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping
@@ -21,10 +22,24 @@ from dataclasses import dataclass
 from importlib.metadata import version
 
 from agent_framework import Content, FunctionInvocationContext, FunctionTool, MiddlewareTermination
-from agent_framework.security import ConfidentialityLabel, IntegrityLabel, SecureAgentConfig
+from agent_framework.security import (
+    SECURITY_TOOL_INSTRUCTIONS,
+    ConfidentialityLabel,
+    IntegrityLabel,
+    SecureAgentConfig,
+)
 
 FIDES_BINDING_IDENTITY = "agent-framework-fides-agentthreatbench-v1"
+FIDES_NATIVE_BINDING_IDENTITY = "agent-framework-fides-native-agentthreatbench-v1"
 FIDES_VERSION = version("agent-framework-core")
+
+# Agent Framework 1.13 stores the currently executing label tracker in a
+# thread-local during every middleware invocation. Inspect executes many
+# samples as asyncio tasks on one thread, and the official security tools yield
+# before consulting that thread-local. All FIDES invocations must therefore be
+# serialized: a middleware-only call could otherwise clear a native sample's
+# active variable store just as readily as another native call.
+_FIDES_TOOL_LOCK = asyncio.Lock()
 
 
 @dataclass(frozen=True)
@@ -128,6 +143,13 @@ def fides_policy(task_type: str, names: set[str]) -> FidesPolicy:
     raise ValueError(f"unsupported AgentThreatBench task type for FIDES: {task_type!r}")
 
 
+def fides_policy_digest(policy: FidesPolicy, *, native: bool) -> str:
+    mode = "native-auto-hide" if native else "middleware-only"
+    security = SECURITY_TOOL_INSTRUCTIONS if native else ""
+    payload = f"{mode}\0{policy.serialize()}\0{security}"
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
 @dataclass(frozen=True)
 class FidesBlocked:
     detail: str
@@ -137,6 +159,7 @@ class FidesBlocked:
 class FidesAllowed:
     content: str
     execution_error: str | None
+    dispatched_arguments: dict[str, object]
 
 
 type FidesResult = FidesBlocked | FidesAllowed
@@ -145,40 +168,61 @@ type FidesResult = FidesBlocked | FidesAllowed
 class FidesSession:
     """One fresh official FIDES trajectory for one Inspect sample."""
 
-    def __init__(self, policy: FidesPolicy) -> None:
+    def __init__(
+        self,
+        policy: FidesPolicy,
+        *,
+        native: bool = False,
+        quarantine_chat_client: object | None = None,
+    ) -> None:
         self.policy = policy
+        self.native = native
         self.config = SecureAgentConfig(
-            auto_hide_untrusted=False,
+            auto_hide_untrusted=native,
             block_on_violation=True,
             approval_on_violation=False,
             enable_audit_log=True,
             enable_policy_enforcement=True,
+            quarantine_chat_client=quarantine_chat_client if native else None,
         )
+        self.security_tools = {tool.name: tool for tool in self.config.get_tools()} if native else {}
         self._turn = 0
         self._closed = False
+
+    @property
+    def binding_identity(self) -> str:
+        return FIDES_NATIVE_BINDING_IDENTITY if self.native else FIDES_BINDING_IDENTITY
+
+    def digest(self) -> str:
+        return fides_policy_digest(self.policy, native=self.native)
 
     async def invoke(
         self,
         tool: str,
         arguments: dict[str, object],
-        dispatch: Callable[[], Awaitable[object]],
+        dispatch: Callable[[dict[str, object]], Awaitable[object]] | None,
     ) -> FidesResult:
         if self._closed:
             raise RuntimeError("the FIDES episode is closed")
         policy = self.policy.tools.get(tool)
-        if policy is None:
+        security_tool = self.security_tools.get(tool)
+        if policy is None and security_tool is None:
             raise RuntimeError(f"FIDES policy does not declare AgentThreatBench tool {tool!r}")
-        function = FunctionTool(
-            name=tool,
-            additional_properties={
-                "source_integrity": policy.result_integrity.value,
-                "confidentiality": policy.result_confidentiality.value,
-                "accepts_untrusted": policy.accepts_untrusted,
-                "max_allowed_confidentiality": (
-                    None if policy.max_allowed_confidentiality is None else policy.max_allowed_confidentiality.value
-                ),
-            },
-        )
+        if security_tool is not None:
+            function = security_tool
+        else:
+            assert policy is not None
+            function = FunctionTool(
+                name=tool,
+                additional_properties={
+                    "source_integrity": policy.result_integrity.value,
+                    "confidentiality": policy.result_confidentiality.value,
+                    "accepts_untrusted": policy.accepts_untrusted,
+                    "max_allowed_confidentiality": (
+                        None if policy.max_allowed_confidentiality is None else policy.max_allowed_confidentiality.value
+                    ),
+                },
+            )
         context = FunctionInvocationContext(
             function=function,
             arguments=arguments,
@@ -189,13 +233,33 @@ class FidesSession:
         async def execute() -> None:
             nonlocal execution_error
             try:
-                raw_result = await dispatch()
+                if security_tool is not None:
+                    context.result = await security_tool.invoke(arguments=context.arguments)
+                    return
+                if dispatch is None:
+                    raise RuntimeError(f"no dispatch callback for AgentThreatBench tool {tool!r}")
+                assert policy is not None
+                raw_result = await dispatch(dict(context.arguments))
                 content = str(raw_result)
                 integrity = policy.result_integrity
             except Exception as error:
                 content = ""
                 integrity = IntegrityLabel.TRUSTED
                 execution_error = f"Tool failed: {type(error).__name__}: {error}"
+                confidentiality = ConfidentialityLabel.PUBLIC if policy is None else policy.result_confidentiality
+                context.result = [
+                    Content.from_text(
+                        content,
+                        additional_properties={
+                            "security_label": {
+                                "integrity": integrity.value,
+                                "confidentiality": confidentiality.value,
+                            }
+                        },
+                    )
+                ]
+                return
+            assert policy is not None
             context.result = [
                 Content.from_text(
                     content,
@@ -213,20 +277,25 @@ class FidesSession:
                 raise RuntimeError("FIDES policy enforcement is disabled")
             await self.config.policy_enforcer.process(context, execute)
 
-        try:
+        async def mediate() -> FidesResult:
             if self.config.label_tracker is None:
                 raise RuntimeError("FIDES label tracking is disabled")
-            await self.config.label_tracker.process(context, enforce)
-        except MiddlewareTermination:
-            detail = context.result.get("error") if isinstance(context.result, dict) else str(context.result)
-            result: FidesResult = FidesBlocked(str(detail))
-        else:
+            try:
+                await self.config.label_tracker.process(context, enforce)
+            except MiddlewareTermination:
+                detail = context.result.get("error") if isinstance(context.result, dict) else str(context.result)
+                return FidesBlocked(str(detail))
             if not isinstance(context.result, list) or not all(isinstance(item, Content) for item in context.result):
                 raise RuntimeError("FIDES returned an invalid AgentThreatBench tool result")
-            result = FidesAllowed(
+            return FidesAllowed(
                 "\n".join(item.text or "" for item in context.result),
                 execution_error,
+                dict(context.arguments),
             )
+
+        try:
+            async with _FIDES_TOOL_LOCK:
+                result = await mediate()
         finally:
             self._turn += 1
         return result

@@ -15,7 +15,13 @@ from inspect_ai.scorer import CORRECT
 from inspect_ai.tool import ToolDef
 
 from appa_agentthreatbench import INSPECT_AI_VERSION, INSPECT_EVALS_REVISION, UPSTREAM_SAMPLE_COUNTS
-from appa_agentthreatbench.fides import FIDES_BINDING_IDENTITY, FIDES_VERSION, fides_policy
+from appa_agentthreatbench.fides import (
+    FIDES_BINDING_IDENTITY,
+    FIDES_NATIVE_BINDING_IDENTITY,
+    FIDES_VERSION,
+    FidesSession,
+    fides_policy,
+)
 from appa_agentthreatbench.native import BINDING_IDENTITY, NativeSession
 from appa_agentthreatbench.resolver import ResolverFixture, resolver_fixture_digest
 from appa_agentthreatbench.tasks import (
@@ -23,6 +29,7 @@ from appa_agentthreatbench.tasks import (
     ARMS,
     DELEGATE_TOOL,
     DOMAIN_TOOLS,
+    FIDES_NATIVE_SECURITY_TOOLS,
     RESPONSE_TOOL,
     TASK_TYPES,
     complete_dataset,
@@ -43,17 +50,22 @@ SMOKE_SAMPLE_IDS = (
     "permissive--ah_005",
     "guarded--ah_005",
     "fides--ah_005",
+    "fides-native--ah_005",
     "stock--de_001",
     "permissive--de_001",
     "guarded--de_001",
     "fides--de_001",
+    "fides-native--de_001",
     "permissive--de_control_authorized",
     "guarded--de_control_authorized",
     "fides--de_control_authorized",
+    "fides-native--de_control_authorized",
     "guarded--de_control_unauthorized",
     "fides--de_control_unauthorized",
+    "fides-native--de_control_unauthorized",
     "guarded--mp_001",
     "fides--mp_001",
+    "fides-native--mp_001",
 )
 
 
@@ -111,10 +123,14 @@ def validate_inventory() -> list[str]:
 
 
 def validate_policies() -> None:
+    for security_tool in FIDES_NATIVE_SECURITY_TOOLS:
+        ToolDef(security_tool)
     for task_type in TASK_TYPES:
         tools = [*DOMAIN_TOOLS[task_type], RESPONSE_TOOL]
         names = {ToolDef(tool).name for tool in tools}
-        fides_policy(task_type, names)
+        fides = fides_policy(task_type, names)
+        FidesSession(fides).close()
+        FidesSession(fides, native=True).close()
         session = NativeSession(permissive_policy(tools), tools, "preflight")
         session.close()
         if task_type == "data_exfil":
@@ -174,6 +190,7 @@ def preflight(model: str, *, require_credential: bool = True) -> dict[str, objec
         "inspect_evals_revision": INSPECT_EVALS_REVISION,
         "binding_identity": BINDING_IDENTITY,
         "fides_binding_identity": FIDES_BINDING_IDENTITY,
+        "fides_native_binding_identity": FIDES_NATIVE_BINDING_IDENTITY,
         "fides_version": FIDES_VERSION,
         "upstream_samples_per_arm": EXPECTED_UPSTREAM_SAMPLES,
         "custom_controls_per_arm": 2,
@@ -220,6 +237,7 @@ def run_manifest(
             "permissive": BINDING_IDENTITY,
             "guarded": BINDING_IDENTITY,
             "fides": FIDES_BINDING_IDENTITY,
+            "fides-native": FIDES_NATIVE_BINDING_IDENTITY,
         },
         "fides_version": FIDES_VERSION,
         "sample_ids": ids,
@@ -370,7 +388,10 @@ def _audit_diagnostics(
         task_type = str(sample.metadata.get("task_type"))
         expected_policy = policy_digests.get(arm, {}).get(task_type)
         expected_fixture = fixture_digests.get(str(sample.id))
-        expected_binding = FIDES_BINDING_IDENTITY if arm == "fides" else BINDING_IDENTITY
+        expected_binding = {
+            "fides": FIDES_BINDING_IDENTITY,
+            "fides-native": FIDES_NATIVE_BINDING_IDENTITY,
+        }.get(arm, BINDING_IDENTITY)
         if record.get("binding_identity") != expected_binding:
             raise ValueError(f"audit {path} has the wrong binding identity for {arm}")
         if record.get("arm") != arm or record.get("task_type") != task_type:
@@ -399,7 +420,7 @@ def _audit_diagnostics(
         if isinstance(requests, list):
             resolver_requests += len(requests)
         fides_records = record.get("fides_audit")
-        if arm == "fides":
+        if arm in {"fides", "fides-native"}:
             if not isinstance(fides_records, list):
                 raise ValueError("a correlated FIDES audit lacks the official middleware audit log")
             fides_audit_entries += len(fides_records)
@@ -483,12 +504,14 @@ def build_summary(logs: list[EvalLog], audit_dir: Path, manifest: dict[str, obje
                 "separate child model context, and accepts only the child's schema-attested canonical return. Raw "
                 "memory never reaches the parent and failures withhold; attestation bounds instruction flow but "
                 "does not prove factual truth. The FIDES arm labels the complete memory result untrusted and gates "
-                "memory writes and checked delivery."
+                "memory writes and checked delivery; the FIDES-native arm additionally hides untrusted results and "
+                "exposes the official quarantine tools."
             ),
             "autonomy_hijack": (
                 "The guarded arm labels the complete inbox suspicious and blocks trusted state mutations derived from "
                 "it; utility loss is part of the result. The FIDES arm applies the corresponding untrusted label and "
-                "gates categorization, summaries, and checked delivery."
+                "gates categorization, summaries, and checked delivery. The FIDES-native arm additionally uses "
+                "automatic hiding and quarantined processing."
             ),
             "data_exfil": (
                 "The guarded arm resolves source ACLs and exact sink recipients dynamically without using sensitive "

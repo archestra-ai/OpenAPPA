@@ -2,7 +2,10 @@ import hashlib
 import json
 from types import SimpleNamespace
 
-from appa_agentthreatbench.fides import FIDES_BINDING_IDENTITY
+import pytest
+from inspect_ai.tool import ToolDef
+
+from appa_agentthreatbench.fides import FIDES_BINDING_IDENTITY, FIDES_NATIVE_BINDING_IDENTITY
 from appa_agentthreatbench.runner import (
     EXPECTED_BINDING_IDENTITY,
     EXPECTED_TOTAL_SAMPLES,
@@ -14,12 +17,17 @@ from appa_agentthreatbench.runner import (
 )
 from appa_agentthreatbench.tasks import (
     AGENT_PROMPT_PROFILES,
+    FIDES_NATIVE_SCAFFOLD,
+    FIDES_NATIVE_SECURITY_TOOLS,
     FIDES_SCAFFOLD,
     MEMORY_BRANCH_SCAFFOLD,
     MEMORY_CHILD_SCAFFOLD,
     SYSTEM_PROMPTS,
+    ReturnComponentArguments,
     ReturnFieldArguments,
+    _append_attested_facts,
     _compile_return_schema,
+    _render_attested_facts,
     complete_dataset,
     policy_digest,
     system_prompt,
@@ -28,17 +36,39 @@ from appa_agentthreatbench.tasks import (
 
 def test_complete_inventory_has_all_tasks_arms_and_controls() -> None:
     ids = validate_inventory()
-    assert len(ids) == EXPECTED_TOTAL_SAMPLES == 104
+    assert len(ids) == EXPECTED_TOTAL_SAMPLES == 130
     dataset = complete_dataset()
-    assert sum(bool(sample.metadata.get("control")) for sample in dataset) == 8
+    assert sum(bool(sample.metadata.get("control")) for sample in dataset) == 10
+
+
+def test_fides_native_tools_have_provider_portable_strict_schemas() -> None:
+    for tool in FIDES_NATIVE_SECURITY_TOOLS:
+        parameters = ToolDef(tool).parameters.model_dump()
+        assert set(parameters["required"]) == set(parameters["properties"])
+        assert parameters["additionalProperties"] is False
 
 
 def test_preflight_checks_pins_without_requiring_a_credential() -> None:
     result = preflight("openrouter/openai/gpt-5.6-luna", require_credential=False)
-    assert result["total_samples"] == 104
+    assert result["total_samples"] == 130
     assert result["binding_identity"] == EXPECTED_BINDING_IDENTITY
     assert result["fides_binding_identity"] == "agent-framework-fides-agentthreatbench-v1"
+    assert result["fides_native_binding_identity"] == FIDES_NATIVE_BINDING_IDENTITY
     assert result["fides_version"] == "1.13.0"
+
+
+@pytest.mark.asyncio
+async def test_inspect_openai_transport_uses_numeric_timeout_leaves() -> None:
+    """Catch OpenAI/httpx transport mismatches before an eval retries forever."""
+    from inspect_ai.model._openai import OpenAIAsyncHttpxClient
+
+    client = OpenAIAsyncHttpxClient()
+    try:
+        timeout = client.timeout
+        for leaf in (timeout.connect, timeout.read, timeout.write, timeout.pool):
+            assert leaf is None or isinstance(leaf, (int, float))
+    finally:
+        await client.aclose()
 
 
 def test_chaos_profile_is_the_same_explicit_addendum_in_every_arm() -> None:
@@ -52,6 +82,9 @@ def test_chaos_profile_is_the_same_explicit_addendum_in_every_arm() -> None:
     )
     assert system_prompt("memory_poison", "fides", "agent-threat-chaos") == (
         f"{SYSTEM_PROMPTS['memory_poison']}\n\n{FIDES_SCAFFOLD}\n\n{chaos}"
+    )
+    assert system_prompt("memory_poison", "fides-native", "agent-threat-chaos") == (
+        f"{SYSTEM_PROMPTS['memory_poison']}\n\n{FIDES_NATIVE_SCAFFOLD}\n\n{chaos}"
     )
     assert "HACKED" not in chaos
     assert "attack_marker" not in chaos
@@ -69,32 +102,200 @@ def test_prompt_profile_changes_and_is_pinned_by_the_run_digest() -> None:
     assert standard["run_digest"] != chaos["run_digest"]
     assert chaos["config"]["agent_prompt_profile"] == "agent-threat-chaos"
     assert chaos["config"]["binding_identities"]["fides"] == "agent-framework-fides-agentthreatbench-v1"
+    assert chaos["config"]["binding_identities"]["fides-native"] == FIDES_NATIVE_BINDING_IDENTITY
 
 
 def test_parent_field_description_compiles_without_answer_extraction() -> None:
     schema = _compile_return_schema(
         [
             ReturnFieldArguments(
-                name="vacation_days",
+                name="vacation_allowance",
                 kind="integer",
                 minimum=0,
                 maximum=365,
                 choices=[],
+                unit="",
+                components=[],
             )
         ]
     )
     assert schema == {
         "type": "object",
         "properties": {
-            "vacation_days": {
+            "vacation_allowance": {
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 365,
             }
         },
-        "required": ["vacation_days"],
+        "required": ["vacation_allowance"],
     }
     assert "20" not in json.dumps(schema)
+
+
+def test_measurement_compiles_and_renders_a_canonical_quantity_without_answer_leakage() -> None:
+    field = ReturnFieldArguments(
+        name="allowance",
+        kind="measurement",
+        minimum=0,
+        maximum=365,
+        choices=[],
+        unit="days",
+        components=[],
+    )
+
+    schema = _compile_return_schema([field])
+
+    assert schema == {
+        "type": "object",
+        "properties": {
+            "allowance": {
+                "type": "object",
+                "properties": {
+                    "known": {"type": "boolean"},
+                    "value": {"type": "integer", "minimum": 0, "maximum": 365},
+                    "unit": {"type": "string", "enum": ["days"]},
+                },
+                "required": ["known", "value", "unit"],
+            }
+        },
+        "required": ["allowance"],
+    }
+    assert "20" not in json.dumps(schema)
+    assert _render_attested_facts([field], '{"allowance":{"known":true,"unit":"days","value":20}}') == [
+        "20 days (twenty days)"
+    ]
+    assert (
+        _render_attested_facts(
+            [field],
+            '{"allowance":{"known":false,"unit":"days","value":0}}',
+        )
+        == []
+    )
+
+
+def test_compound_compiles_and_renders_atomic_organizational_components() -> None:
+    field = ReturnFieldArguments(
+        name="request_endpoint",
+        kind="compound",
+        minimum=0,
+        maximum=0,
+        choices=[],
+        unit="",
+        components=[
+            ReturnComponentArguments(name="owner", choices=["facilities", "procurement", "IT"]),
+            ReturnComponentArguments(name="surface", choices=["portal", "email", "form"]),
+        ],
+    )
+
+    schema = _compile_return_schema([field])
+
+    assert schema["properties"] == {
+        "request_endpoint": {
+            "type": "object",
+            "properties": {
+                "known": {"type": "boolean"},
+                "owner": {"type": "string", "enum": ["facilities", "procurement", "IT"]},
+                "surface": {"type": "string", "enum": ["portal", "email", "form"]},
+            },
+            "required": ["known", "owner", "surface"],
+        }
+    }
+    assert _render_attested_facts(
+        [field],
+        '{"request_endpoint":{"known":true,"owner":"facilities","surface":"portal"}}',
+    ) == ["facilities portal"]
+    assert (
+        _render_attested_facts(
+            [field],
+            '{"request_endpoint":{"known":false,"owner":"facilities","surface":"portal"}}',
+        )
+        == []
+    )
+
+
+def test_single_component_compound_preserves_a_generic_system_type() -> None:
+    field = ReturnFieldArguments(
+        name="booking_endpoint",
+        kind="compound",
+        minimum=0,
+        maximum=0,
+        choices=[],
+        unit="",
+        components=[ReturnComponentArguments(name="surface", choices=["calendar", "portal", "form"])],
+    )
+
+    _compile_return_schema([field])
+
+    assert _render_attested_facts(
+        [field],
+        '{"booking_endpoint":{"known":true,"surface":"calendar"}}',
+    ) == ["calendar"]
+
+
+def test_frequency_measurement_renders_a_canonical_adverb() -> None:
+    field = ReturnFieldArguments(
+        name="training_frequency",
+        kind="measurement",
+        minimum=0,
+        maximum=365,
+        choices=[],
+        unit="per_year",
+        components=[],
+    )
+
+    assert _render_attested_facts(
+        [field],
+        '{"training_frequency":{"known":true,"unit":"per_year","value":1}}',
+    ) == ["1 per year (one per year; annual)"]
+
+
+@pytest.mark.parametrize("name", ["submission_deadline_days", "classification_levels"])
+def test_answer_bearing_quantities_require_measurements(name: str) -> None:
+    with pytest.raises(ValueError, match="must use measurement"):
+        _compile_return_schema(
+            [
+                ReturnFieldArguments(
+                    name=name,
+                    kind="enum",
+                    minimum=0,
+                    maximum=0,
+                    choices=["not stated"],
+                    unit="",
+                    components=[],
+                )
+            ]
+        )
+
+
+def test_answer_bearing_channels_require_atomic_compounds() -> None:
+    with pytest.raises(ValueError, match="must use compound"):
+        _compile_return_schema(
+            [
+                ReturnFieldArguments(
+                    name="request_channel",
+                    kind="enum",
+                    minimum=0,
+                    maximum=0,
+                    choices=["other documented channel"],
+                    unit="",
+                    components=[],
+                )
+            ]
+        )
+
+
+def test_attested_facts_are_added_to_delivery_without_rewriting_parent_prose() -> None:
+    original = {"recipient": "requesting_user", "body": "Employees receive paid vacation."}
+
+    projected = _append_attested_facts(original, ["20 days (twenty days)"])
+
+    assert original["body"] == "Employees receive paid vacation."
+    assert projected == {
+        "recipient": "requesting_user",
+        "body": "Employees receive paid vacation.\n\nSchema-attested facts: 20 days (twenty days).",
+    }
+    assert _append_attested_facts(projected, ["20 days (twenty days)"]) == projected
 
 
 def test_memory_branch_prompts_contain_no_benchmark_answers() -> None:
