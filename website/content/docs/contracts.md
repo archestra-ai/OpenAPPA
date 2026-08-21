@@ -140,6 +140,128 @@ A resolver with `builtin = "claude-code"` never uses the endpoint. The builtin s
 
 The deployment tunes the builtin in `[externals.claude_code]`: `command` sets the executable path (a service environment often strips `PATH`), `model` pins the model, and `timeout_ms` gives the consult its own budget instead of the shared machine-consult `timeout_ms` — a model call is slower than an ordinary endpoint. At most four Claude consults run at once per runtime. Each consult has model latency and account cost; a pinned recheck and a replay never invoke it again.
 
+### 🚧 Proposed resolver envelope
+
+This section describes a proposed resolver interface. The policy syntax and version 2 wire format are not implemented yet.
+
+A resolver declares the dimensions it can return. When it omits `inputs`, it receives the complete validated tool argument object.
+
+```toml
+[[dynamic_resolver]]
+name = "classify-command"
+builtin = "claude-code"
+returns = ["trust", "audience"]
+
+[[tool]]
+name = "Bash"
+uses = [{ resolver = "classify-command" }]
+delta = { trust = { resolver = "classify-command" }, audience = { resolver = "classify-command" } }
+```
+
+The runtime sends the same envelope to an HTTP implementation and the Claude Code builtin:
+
+```json
+{
+  "version": 2,
+  "resolver": "classify-command",
+  "tool": "Bash",
+  "input": {
+    "scope": "call",
+    "arguments": {
+      "command": "git push origin main",
+      "timeout": 60000
+    }
+  },
+  "returns": {
+    "delta": ["trust", "audience"],
+    "requires": []
+  },
+  "context": {
+    "current_trust": "trusted",
+    "current_trust_rank": 1,
+    "current_audience": "public",
+    "trust_unresolved": false,
+    "audience_unresolved": false,
+    "static_attention": ["security-review"]
+  },
+  "trust_ranks": ["suspicious", "trusted"],
+  "attention_marks": ["security-review", "privacy-review"]
+}
+```
+
+`input` contains only tool-supplied data. OpenAPPA always supplies `context`, `trust_ranks`, and `attention_marks` independently of the input declaration.
+
+A resolver can instead declare named inputs. Each tool `uses` entry supplies every declared input from its own arguments.
+
+```toml
+[[dynamic_resolver]]
+name = "classify-customer"
+inputs = ["subject", "destination"]
+returns = ["trust", "audience"]
+
+[[tool]]
+name = "send_customer_record"
+uses = [
+  { resolver = "classify-customer", inputs = { subject = "$record", destination = "$recipient" } }
+]
+delta = { trust = { resolver = "classify-customer" } }
+requires = { audience = { resolver = "classify-customer" } }
+```
+
+Named inputs use an explicit scope:
+
+```json
+{
+  "version": 2,
+  "resolver": "classify-customer",
+  "tool": "send_customer_record",
+  "input": {
+    "scope": "named",
+    "values": {
+      "subject": {
+        "customer_id": "cust-7",
+        "balance": 1200
+      },
+      "destination": "audit@example.com"
+    }
+  },
+  "returns": {
+    "delta": ["trust"],
+    "requires": ["audience"]
+  },
+  "context": {
+    "current_trust": "trusted",
+    "current_trust_rank": 1,
+    "current_audience": ["finance", "audit@example.com"],
+    "trust_unresolved": false,
+    "audience_unresolved": false,
+    "static_attention": []
+  },
+  "trust_ranks": ["suspicious", "trusted"],
+  "attention_marks": ["privacy-review"]
+}
+```
+
+The response mirrors the requested scopes. It contains every requested field and no unrequested field.
+
+```json
+{
+  "version": 2,
+  "delta": {
+    "trust": "suspicious"
+  },
+  "requires": {
+    "audience": {
+      "includes": ["audit@example.com"]
+    }
+  }
+}
+```
+
+The runtime omits an empty response scope. It refuses explicit `null` values, undeclared fields, unknown trust ranks, and unknown attention marks.
+
+The `uses` list is optional. A tool that omits `uses` does not consult a dynamic resolver.
+
 ### Deployment coverage
 
 The deployment declares what it covers in the policy file's `[deployment]` table — the starting label every root opens at, which tools have enforced execution, where raw results can be withheld, whether child branches are controlled. The policy loader validates the file against that declaration, and a construct that names an engine behavior the deployment cannot perform is a load error naming the missing coverage: a `tool_output` sanitizer with no covered application point, a pending-cast `delta` on a tool whose raw result the model would see anyway, a `[child]` section without child-context control, a `requires`, dynamic `delta`, or pending-cast `delta` on a provider-run tool. A weaker executor class is not a construct — it loads, and its weakness is the open vector. Writing a policy therefore starts from the deployment's coverage, not from the full feature list. What stays uncovered is an open vector the deployment names explicitly and auditably — nothing is removed or silently degraded.
