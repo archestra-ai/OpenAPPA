@@ -33,11 +33,11 @@ const TERMS = {
 
   /* Tool contracts */
   delta:
-    "The label contribution of an admitted call result. A delta never expands permissions: it intersects reader sets, lowers the trust rank, or leaves the trajectory label unchanged.",
+    "The label contribution of an admitted call result. A delta never expands permissions: it narrows the audience to the stricter state — intersecting reader sets where both name one — lowers the trust rank, or leaves the trajectory label unchanged.",
   requires:
     "The prerequisites for executing a tool call: rules on allowed readers, trust levels, and required history.",
   audience:
-    "Who is allowed to see data. In a delta, it restricts who can receive the tool's result; in requires, it checks who the agent can send data to.",
+    "Who is allowed to see data, as one of four shapes ordered widest to narrowest: public, private, a named reader set, or nobody. In a delta, it restricts who can receive the tool's result; in requires, it checks who the agent can send data to.",
   trust:
     "Whether data comes from a vetted source. In a delta, it marks tool output as trusted or suspicious; in requires, it sets the minimum trust level a tool demands.",
   trusted:
@@ -46,6 +46,8 @@ const TERMS = {
     "Data from an unvetted source, like external web content. Once ingested, the run stays suspicious.",
   public:
     "The reserved unrestricted audience state, not a reader ID: no audience restriction applies. An agent with public reach can send data to any outbound destination. As a placeholder argument it names the Public audience, which only a Public trajectory includes. Never a group member.",
+  private:
+    "The reserved audience state between public and a named reader set, not a reader ID: any destination that is not public and that the policy does not name. Private data still reaches a specifically addressed recipient; a public destination stays closed. As a requirement it asks for an audience at least this wide, so a named reader set — which is stricter — does not satisfy it. Distinct from the empty audience, which reaches nobody. Stands alone in its list, and never a group member.",
   "@name":
     "A group: a directory-held reader set. The membership resolver turns the name into literal reader IDs when the engine reads it; the algebra never stores the name.",
   "@auditors":
@@ -67,7 +69,7 @@ const TERMS = {
   "[externals.dynamic]":
     "The shared HTTP endpoint for every dynamic resolver without an inline builtin. Requests carry the resolver name.",
   internal:
-    "An example reader for restricted internal data. Reading internal data closes off public destinations.",
+    "An example reader ID a policy may choose for internal data — an ordinary name, not a reserved state like public or private. A named reader set is stricter than private: it reaches those readers and no one else.",
   "{public, trusted}":
     "The neutral starting label before reading any data: unrestricted outbound reach and the trust chain's top rank — trusted under the default chain.",
   egress:
@@ -83,8 +85,9 @@ const TERMS = {
   emits:
     "What a successful tool call appends to the log, declared as effects = [...] in the contract.",
   exactly: "In an audience condition: the allowed reader set becomes precisely this list.",
-  includes: "In a requires condition: the run's allowed readers must contain these.",
-  cap: "In a requires condition: the run's allowed readers must stay within this set. In may_cast: the ceiling a resolved audience must stay within; only a public cap admits a public resolution.",
+  includes:
+    "In a requires condition: the run's audience must be at least this wide. A named reader set does not satisfy an includes of private, because it is stricter, not wider.",
+  cap: "In a requires condition: the run's audience must stay within this ceiling. In may_cast: the ceiling a resolved audience must stay within; only a public cap admits a public resolution, and a private cap admits every named reader set but never public.",
   tags: "Routing names with no algebraic life; the currency of authority, cast, and sanitizer scope.",
 
   /* Authorities */

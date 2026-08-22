@@ -4,10 +4,12 @@ import { Figure } from "@/components/figures/Figure";
 import { chip, drawCard, drawEnvelope, ease, lerp, roundRect, seg, type Theme } from "@/components/figures/lib";
 
 /* Tutorial figure: one fetch, two endings. Ending one — accept the
-   narrowing, go internal, and the auditor mail waits on a ruling. Ending
-   two — fetch in a child, return through remove_pii, and the parent stays
-   public with GitHub open. The slider's first half plays ending one, the
-   second half ending two; finished states persist. */
+   narrowing, go private: the auditor mail goes through, because a named
+   reader is within a private audience, and the public GitHub issue is the
+   one that waits on a ruling. Ending two — fetch in a child, return through
+   remove_pii, and the parent stays public with GitHub open. The slider's
+   first half plays ending one, the second half ending two; finished states
+   persist. */
 
 const W = 900;
 const H = 520;
@@ -173,7 +175,7 @@ function draw(ctx: CanvasRenderingContext2D, t: number, th: Theme) {
   if (stopA > 0) {
     ctx.save();
     ctx.globalAlpha = stopA;
-    chip(ctx, haltA.x, haltA.y - 30, "narrowing → internal?", th.warn, th.warnBg, th.mono);
+    chip(ctx, haltA.x, haltA.y - 30, "narrowing → private?", th.warn, th.warnBg, th.mono);
     ctx.restore();
   }
   label("accepted on the record", haltA.x, haltA.y + 28, ease(seg(t, 0.19, 0.22)) * (1 - seg(t, 0.26, 0.3)));
@@ -184,42 +186,48 @@ function draw(ctx: CanvasRenderingContext2D, t: number, th: Theme) {
     ctx,
     A.chip.x,
     A.chip.y,
-    flippedA ? "internal · trusted" : "public · trusted",
+    flippedA ? "private · trusted" : "public · trusted",
     flippedA ? th.warn : th.accent,
     flippedA ? th.warnBg : th.accentBg,
     th.mono,
   );
 
-  const closedA = ease(seg(t, 0.32, 0.36));
-  badge(ctx, th, A.github.x - 12, center(A.github).y, false, closedA);
-  label("closed for this run", center(A.github).x, A.github.y + A.github.h + 14, closedA);
-
+  /* The named auditor is within a private audience, so the mail simply goes. */
   const mailFrom: Point = { x: A.agent.x + A.agent.w, y: 112 };
   const mailTo: Point = { x: A.mail.x - 44, y: center(A.mail).y };
-  const haltMail = onLine(mailFrom, mailTo, 0.55);
-  const depart = ease(seg(t, 0.38, 0.44));
-  const release = ease(seg(t, 0.54, 0.6));
+  const depart = ease(seg(t, 0.32, 0.38));
+  const release = ease(seg(t, 0.38, 0.44));
   if (depart > 0) {
     const f = release > 0 ? lerp(0.55, 1, release) : 0.55 * depart;
     const p = onLine(mailFrom, mailTo, f);
     drawEnvelope(ctx, th, p.x, p.y, [th.warn], 1, release >= 1 ? 0.9 : 1);
   }
-  const blockA = ease(seg(t, 0.44, 0.47));
+  const mailed = ease(seg(t, 0.44, 0.48));
+  badge(ctx, th, A.mail.x - 12, center(A.mail).y, true, mailed);
+  label("a named reader is within private", center(A.mail).x, A.mail.y + A.mail.h + 14, mailed);
+
+  /* A public destination is not, so this is the call that waits on a ruling. */
+  const issueFrom: Point = { x: A.agent.x + A.agent.w, y: 96 };
+  const issueTo: Point = { x: A.github.x - 44, y: center(A.github).y };
+  const haltIssue = onLine(issueFrom, issueTo, 0.55);
+  const blockA = ease(seg(t, 0.5, 0.53));
   if (blockA > 0) {
     ctx.save();
     ctx.globalAlpha = blockA;
-    chip(ctx, haltMail.x, haltMail.y - 28, "auditor ∉ readers", th.danger, th.dangerBg, th.mono);
+    chip(ctx, haltIssue.x, haltIssue.y - 30, "public ⊄ private", th.danger, th.dangerBg, th.mono);
     ctx.restore();
   }
-  const ruling = ease(seg(t, 0.5, 0.53));
+  const ruling = ease(seg(t, 0.56, 0.59));
   if (ruling > 0) {
     ctx.save();
     ctx.globalAlpha = ruling;
-    chip(ctx, haltMail.x, haltMail.y + 64, "user ✓", th.accent, th.accentBg, th.mono);
+    chip(ctx, haltIssue.x, haltIssue.y + 34, "user ✓", th.accent, th.accentBg, th.mono);
     ctx.restore();
   }
-  badge(ctx, th, A.mail.x - 12, center(A.mail).y, true, ease(seg(t, 0.6, 0.64)));
-  label("egress ▸ log", center(A.mail).x, A.mail.y + A.mail.h + 14, ease(seg(t, 0.6, 0.64)));
+  const approved = ease(seg(t, 0.62, 0.66));
+  badge(ctx, th, A.github.x - 12, center(A.github).y, false, blockA * (1 - seg(t, 0.62, 0.66)));
+  badge(ctx, th, A.github.x - 12, center(A.github).y, true, approved);
+  label("approved for this call", center(A.github).x, A.github.y + A.github.h + 14, approved);
 
   /* ---- ending two ---- */
   const bubble = ease(seg(t, 0.62, 0.66));
@@ -262,7 +270,7 @@ function draw(ctx: CanvasRenderingContext2D, t: number, th: Theme) {
   if (childNarrowed > 0) {
     ctx.save();
     ctx.globalAlpha = childNarrowed;
-    chip(ctx, 380, 502, "child · internal · trusted", th.warn, th.warnBg, th.mono);
+    chip(ctx, 380, 502, "child · private · trusted", th.warn, th.warnBg, th.mono);
     ctx.restore();
   }
 

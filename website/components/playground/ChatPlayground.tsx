@@ -189,8 +189,8 @@ type Ruling = { plans: ParsedPlan[]; summary: string; detail?: string } & (
   | {
       kind: "narrowing";
       dimension: "trust" | "audience" | "both";
-      /** The readers left, when the shrunk audience is a concrete set. */
-      readers?: string[];
+      /** The audience the narrowing lands on, rendered: a state name, the readers left, or "nobody". */
+      audience?: string;
       /** The target trust rank — an index into the policy's trust chain. */
       toTrustRank?: number;
     }
@@ -369,21 +369,36 @@ function splitRuling(text: string): Ruling {
     if (!narrowing || parsed.requirement_gaps?.length) return { kind: "refusal", summary, detail: pretty, plans };
     const moved = (dim: string) => JSON.stringify(narrowing.from?.[dim]) !== JSON.stringify(narrowing.to?.[dim]);
     const dimension = moved("trust") && moved("audience") ? "both" : moved("audience") ? "audience" : "trust";
-    // A concrete reader set arrives either wrapped — `{"Known": {"Restricted":
-    // [...]}}` — or bare, `{"Restricted": [...]}`, which is what the service
-    // sends today; a trust rank likewise as `{"Known": 0}` or a plain `0`.
-    // Read both: missing either shape is what made these sentences fall back
-    // to "fewer readers" and "less trusted" instead of naming the real thing.
-    const audience = narrowing.to?.audience as { Known?: { Restricted?: unknown }; Restricted?: unknown } | undefined;
-    const restricted = audience?.Known?.Restricted ?? audience?.Restricted;
-    const readers = Array.isArray(restricted) ? restricted.map(String) : undefined;
+    // An audience arrives either wrapped — `{"Known": …}` — or bare, which is
+    // what the service sends today; a trust rank likewise as `{"Known": 0}` or
+    // a plain `0`. Read both: missing either shape is what made these sentences
+    // fall back to "fewer readers" and "less trusted" instead of naming the real
+    // thing. Unwrapped, it is one of the three states: `"Public"`, `"Private"`,
+    // or `{"Restricted": [...]}` — an empty set there is nobody, not a state.
+    const wrapped = narrowing.to?.audience as unknown;
+    const state =
+      typeof wrapped === "object" && wrapped !== null && "Known" in wrapped
+        ? (wrapped as { Known: unknown }).Known
+        : wrapped;
+    const restricted =
+      typeof state === "object" && state !== null && "Restricted" in state
+        ? (state as { Restricted: unknown }).Restricted
+        : undefined;
+    const audience =
+      state === "Public"
+        ? "public"
+        : state === "Private"
+          ? "private"
+          : Array.isArray(restricted)
+            ? restricted.map(String).join(", ") || "nobody"
+            : undefined;
     const trustValue = narrowing.to?.trust as { Known?: unknown } | number | undefined;
     const rank = typeof trustValue === "number" ? trustValue : trustValue?.Known;
     const toTrustRank = typeof rank === "number" ? rank : undefined;
     return {
       kind: "narrowing",
       dimension,
-      readers,
+      audience,
       toTrustRank,
       summary,
       detail: pretty,
@@ -1189,9 +1204,8 @@ export function ChatPlayground() {
   const narrowedTrust = (ruling: Extract<Ruling, { kind: "narrowing" }>) =>
     ruling.toTrustRank !== undefined ? (trustChain[ruling.toTrustRank] ?? `rank ${ruling.toTrustRank}`) : null;
 
-  /** The readers left, when the engine resolved them to a concrete set. */
-  const narrowedReaders = (ruling: Extract<Ruling, { kind: "narrowing" }>) =>
-    ruling.readers ? ruling.readers.join(", ") || "nobody" : null;
+  /** The audience left, when the engine resolved it. */
+  const narrowedAudience = (ruling: Extract<Ruling, { kind: "narrowing" }>) => ruling.audience ?? null;
 
   /** The dimension a narrowing lands on, for sentences that name it. */
   const narrowedDimension = (ruling: Extract<Ruling, { kind: "narrowing" }>) =>
@@ -1213,7 +1227,7 @@ export function ChatPlayground() {
       moves.push(<span key="trust">lowers this chat&apos;s trust{to ? <> to {termPill(to)}</> : null}</span>);
     }
     if (ruling.dimension !== "trust") {
-      const to = narrowedReaders(ruling);
+      const to = narrowedAudience(ruling);
       moves.push(<span key="audience">narrows this chat&apos;s audience{to ? <> to {termPill(to)}</> : null}</span>);
     }
     return moves.map((move, index) => (
@@ -1316,7 +1330,7 @@ export function ChatPlayground() {
       // sentence stands on its own when read out of the stream.
       const tool = item.tool;
       const subject = tool ? entityPill(tool) : <>This call</>;
-      const readers = ruling.kind === "narrowing" ? narrowedReaders(ruling) : null;
+      const readers = ruling.kind === "narrowing" ? narrowedAudience(ruling) : null;
       const rank = ruling.kind === "narrowing" ? narrowedTrust(ruling) : null;
       const caption =
         ruling.kind === "refusal" ? (

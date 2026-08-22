@@ -65,6 +65,7 @@ export const GLOSSARY_TERMS = [
   "trusted",
   "suspicious",
   "public",
+  "private",
   "internal",
   "egress",
   "mutation",

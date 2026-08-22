@@ -17,6 +17,37 @@ version = 1
 trust_chain = ["suspicious", "trusted"]
 ```
 
+### Audience states
+
+An audience is one of four shapes, ordered from widest to narrowest. Named reader sets are ordered among themselves by set inclusion.
+
+| Shape | Written | Means |
+|---|---|---|
+| **Public** | `["public"]` | Every destination. The neutral state, and the identity of the label fold. |
+| **Private** | `["private"]` | Any destination that is not public and that the policy does not name. |
+| **Named reader set** | `["hr", "legal@corp"]` | Exactly these readers. |
+| **Empty** | `[]` from a resolver | Nobody. What two disjoint reader sets leave behind. |
+
+`public` and `private` are reserved states, not reader IDs. Each stands alone in its list: written beside a name, a group, or each other, the declaration is refused at load. A group may not be named `public` or `private` in a directory answer either.
+
+`private` is not the empty audience. Private data still reaches a specifically addressed recipient; an empty audience reaches no one. An empty list is a load error in a policy; an empty array from a resolver is a valid answer meaning Empty.
+
+Reading narrows: the label takes the stricter of the two states, and where both name reader sets, their intersection.
+
+| Trajectory audience | → public sink | → private sink | → named sink |
+|---|---|---|---|
+| Public | allow | allow | allow |
+| Private | **block** | allow | allow |
+| `["alice"]` | **block** | **block** | allow to `alice`, block to anyone else |
+| Empty | **block** | **block** | **block** |
+
+A tool that declares no audience requirement is unaffected by any of this.
+
+The two directions read differently, and the difference matters when reviewing a policy:
+
+- `includes = ["private"]` describes a broadly private sink. It asks the trajectory for an audience **at least as wide as** Private, so Public and Private satisfy it and a named reader set does **not**. A named restriction is stricter than `private`, not a special case of it.
+- `cap = ["private"]` excludes Public but admits Private and every narrower reader set.
+
 ### Set operators
 
 Every set specification in a policy requires an explicit **operator** to prevent ambiguity between exact matches and lower/upper bounds:
@@ -24,15 +55,15 @@ Every set specification in a policy requires an explicit **operator** to prevent
 | Operator | Meaning | Example Use |
 |---|---|---|
 | **`exactly`** | Fixes the set to these exact members. | `delta = { audience = { exactly = ["support"] } }` |
-| **`includes`** | Requires at least these members (`audience ⊇ recipients`). | `requires = { audience = { includes = ["$recipient"] } }` |
-| **`cap`** | Bounds the allowed audience from above (`audience ⊆ C`). | `requires = { audience = { cap = ["internal"] } }` |
+| **`includes`** | Requires an audience at least this wide (`audience ⊇ recipients`). | `requires = { audience = { includes = ["$recipient"] } }` |
+| **`cap`** | Bounds the audience from above (`audience ⊆ C`). | `requires = { audience = { cap = ["private"] } }` |
 | **`may_add`** | Bounds the readers an authority is permitted to cover. | `can_cover_readers = { may_add = ["public"] }` |
 
 A set declaration without an explicit operator causes a policy load error.
 
 ### Groups
 
-A reader list may name a **group**, written `@name`, and so may the actual argument an `includes($arg)` placeholder reads. The registered membership resolver turns the name into its literal reader set at the moment the engine first reads it for an operation — at the admission of an exposed provider-run result, at the pre-dispatch check, at mandate validation, at sanitizer application, at cast selection and the validation of a cast's answer. A name without the mark is a literal reader ID. A reader ID starting with `@` is a load error, as is a group mention in a policy with no `[membership]` registration.
+A reader list may name a **group**, written `@name`, and so may the actual argument an `includes($arg)` placeholder reads. The registered membership resolver turns the name into its literal reader set at the moment the engine first reads it for an operation — at the admission of an exposed provider-run result, at the pre-dispatch check, at mandate validation, at sanitizer application, at cast selection and the validation of a cast's answer. A name without the mark is a literal reader ID, except the reserved states `public` and `private`. A reader ID starting with `@` is a load error, as is a group mention in a policy with no `[membership]` registration.
 
 ```toml
 [membership]                    # one per deployment; every @group resolves here
@@ -44,7 +75,7 @@ requires = { audience = { cap = ["finance", "@auditors"] } }  # group in a cap
 delta    = {}
 ```
 
-Resolution is fresh per operation, and pinned within one: the set resolved at a call's check is the set its block, its plan offers, its release and its admission use, and a written list means its literal readers plus the current members of each group it names. Directory updates take effect on the next policy check without a reload. Once resolved for a specific tool call, reader sets stay pinned to that call. Records keep the resolved readers, never the group name. `public` is reserved and never a group member; a directory answer containing it is malformed.
+Resolution is fresh per operation, and pinned within one: the set resolved at a call's check is the set its block, its plan offers, its release and its admission use, and a written list means its literal readers plus the current members of each group it names. Directory updates take effect on the next policy check without a reload. Once resolved for a specific tool call, reader sets stay pinned to that call. Records keep the resolved readers, never the group name. `public` and `private` are reserved and never group members; a directory answer containing either is malformed.
 
 A resolver that produces no answer — a timeout, an error, malformed or oversized data — resumes nothing: the check does not complete and no engine fact is appended. An empty reader set is a successful answer. The endpoint accepts a versioned JSON POST request: `{version:1,resolver,group}`, with `group` the name without its `@` mark. It returns `{version:1,readers:[...]}`.
 
@@ -263,7 +294,7 @@ Response:
 }
 ```
 
-OpenAPPA rejects a missing result, an extra result, and a `null` result. It rejects an extra key beside `version` and `result`. Trust and attention values must come from the lists in the request, whether or not the tool reads them: a result no field reads establishes nothing, but the record keeps it, so it answers to the same vocabulary. `delta.audience` is `"public"` or a list of reader names, and never a group. `requires.audience` is an object with an `includes` floor, a `cap` ceiling, or both. An empty reader list is a valid, maximally restrictive answer. An empty attention list is valid, and it is the only valid attention answer when `attention_marks` is empty.
+OpenAPPA rejects a missing result, an extra result, and a `null` result. It rejects an extra key beside `version` and `result`. Trust and attention values must come from the lists in the request, whether or not the tool reads them: a result no field reads establishes nothing, but the record keeps it, so it answers to the same vocabulary. `delta.audience` is `"public"`, `"private"`, or a list of reader names — never a state inside the list, never a group. `requires.audience` is an object with an `includes` floor, a `cap` ceiling, or both. An empty reader list is a valid, maximally restrictive answer. An empty attention list is valid, and it is the only valid attention answer when `attention_marks` is empty.
 
 ### Deployment coverage
 
@@ -278,7 +309,7 @@ A tool contract is typically four lines long. Use this checklist during policy r
 | **`delta` Accuracy** | Tool reads sensitive customer data but declares `delta = {}` or omits `delta`. | Declare explicit restriction, e.g. `delta = { audience = { exactly = ["support"] } }`. | Undermines downstream checks; over-restricting is safe (costs reach, doesn't leak). |
 | **Unannotated Tools** | Omitting `delta` while declaring `requires`. | Use `delta = {}` if output carries no labels, or separate unannotated tools. | Loader refuses `requires` on unannotated tools; unannotated output enters as `Unknown`. |
 | **`effects` Completeness** | Mutation or deployment tool omits `effects`. | Declare all side effects, e.g., `effects = ["migration.applied", "mutation"]`. | Under-declared effects pass `no_prior` checks silently without triggering history constraints. |
-| **Dynamic Recipients** | Static readers when an ACL depends on an argument. | Use a placeholder for a recipient the call names — a literal reader, `public`, or an `@group` — or a dynamic resolver for an argument-derived reader set. | Static readers can ignore the proposed argument; placeholder groups and dynamic resolution pin their answer to the call. |
+| **Dynamic Recipients** | Static readers when an ACL depends on an argument. | Use a placeholder for a recipient the call names — a literal reader, `public`, `private`, or an `@group` — or a dynamic resolver for an argument-derived reader set. | Static readers can ignore the proposed argument; placeholder groups and dynamic resolution pin their answer to the call. |
 | **Unread resolver** | A `uses` entry whose results no field of the tool reads. | Remove the entry, or point a field at one of its results. | It does not load. A consult that changes nothing but blocks the tool on failure is a policy mistake, and it costs a request on every call. |
 | **Combined Read & Release** | Single tool `share_doc(doc, recipient)` fetching and releasing in one step. | Split into `fetch_doc` (read) and `grant_doc_access` (release). | Combined tools force authorities to approve releases before content is fetched. |
 | **Authority Mandates** | Overly permissive mandates like `can_cover_readers = { may_add = ["public"] }`. | Restrict authority `mandate` and `scope.tags` to the minimum necessary desk. | Authorities cannot exceed mandates, but overly broad mandates weaken review gates. |
@@ -311,7 +342,7 @@ attention = ["sre-signoff"]                            # Fresh per-call demand
 
 - **`delta` is strictly restrictive**: A tool's delta can only narrow the audience or lower trust. Within an annotated `delta`, an omitted dimension defaults to identity.
 - **Pending-cast deltas (`delta = { trust = "unknown" }`)**: Holds a label dimension pending resolution by a registered `[[cast]]` at admission. Declaring both `requires` and `unknown` delta on the same dimension is a load error.
-- **Dynamic argument placeholders (`$arg`)**: `requires.audience = { includes = ["$recipient"] }` evaluates `$recipient` against the actual call argument at runtime, as one audience expression: an ordinary string is one literal reader ID, `public` is the Public audience — only a Public trajectory includes it — and `@name` is a group the membership resolver expands, pinned to that proposed call. Placeholders are valid only inside `includes`, and `recipient` must be a required top-level string property of the tool's `parameters` — an omitted `parameters`, an optional, non-string, or nested property is a load error. A call that omits the argument or passes a non-string fails schema validation as an `InvalidCall` before the check runs.
+- **Dynamic argument placeholders (`$arg`)**: `requires.audience = { includes = ["$recipient"] }` evaluates `$recipient` against the actual call argument at runtime, as one audience expression: an ordinary string is one literal reader ID, `public` is the Public audience — only a Public trajectory includes it — `private` is the Private audience, which a Public or Private trajectory includes but a named reader set does not, and `@name` is a group the membership resolver expands, pinned to that proposed call. Placeholders are valid only inside `includes`, and `recipient` must be a required top-level string property of the tool's `parameters` — an omitted `parameters`, an optional, non-string, or nested property is a load error. A call that omits the argument or passes a non-string fails schema validation as an `InvalidCall` before the check runs.
 - **Dynamic resolvers (`uses`)**: Each entry names a registered resolver and maps every input that resolver declares from `$tool_call`. The tool's own fields then read results by name. A mapped `$tool_call.arguments.<name>` must be a required top-level property of the tool's `parameters`, at any type; a resolver that declares no inputs reads the complete call and needs no `parameters`, but does need a `description`.
 - **A field has one owner**: `delta.trust` holds a written value or one resolver result, never both — the TOML key takes one value, so the two cannot be spelled together. Write a value for a field no resolver reads: a concrete one (`delta = { trust = "trusted" }`), `delta = {}` to make the output neutral (pass-through), or omit `delta` to leave it `Unknown` (fail-closed — the safe default). Because each field takes one result, requirements do not combine across resolvers, and a tool uses at most five.
 - **History checks (`requires.effects`)**: `has` verifies `prior(k)` against appended effects; `has_no` verifies `no_prior(k)` against appended effects plus unsettled reservations — emits reserved at release and not yet observed to succeed or fail.
@@ -453,6 +484,6 @@ A resolver is the only implementation a cast takes: the answer is a label the `m
 
 Applicable casts — matched by scope tags — evaluate in registration order until one answers. A resolver that cannot answer — unreachable, timed out, malformed — is skipped, which is what makes a trailing constant the deployment's declared fallback. Register constant casts last: a cast placed after a constant that covers it can never run, and the loader refuses it.
 
-The engine validates every resolver response against its declared `may_cast` ceiling before admitting the value. An answer over the ceiling is refused outright and falls through to nothing: a classifier answering wider than its policy allows is misbehaving, not silent, and the result stays withheld. A `public` audience cap is an open gate: it lets a single resolver answer resolve a value to `public` and lift its audience restriction entirely — review it like any covering mandate.
+The engine validates every resolver response against its declared `may_cast` ceiling before admitting the value. An answer over the ceiling is refused outright and falls through to nothing: a classifier answering wider than its policy allows is misbehaving, not silent, and the result stays withheld. A `public` audience cap is an open gate: it lets a single resolver answer resolve a value to `public` and lift its audience restriction entirely — review it like any covering mandate. A `private` cap is the narrower gate to reach for: the classifier may still name any reader set it can justify, but it can never hand the value a public audience.
 
 A tool that declares its own pending dimension — `delta = { trust = "unknown" }` — is held rather than annotated late: the deployment lists it in `confined_results`, the runtime keeps the raw result from the model, and the cast reads it first. A restricting answer reaches the agent as a narrowing offer, and the bytes are delivered only if it accepts.

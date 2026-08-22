@@ -187,6 +187,7 @@ impl DeclaredTransition {
             DeclaredTransition::Audience { from_includes, .. } => {
                 let widest = match from_includes {
                     DeclaredAudience::Public => Audience::Public,
+                    DeclaredAudience::Private => Audience::Private,
                     DeclaredAudience::Restricted { readers, .. } => Audience::restricted(readers.iter().cloned()),
                 };
                 raw.audience.covers(&widest) == Adequacy::Holds
@@ -321,10 +322,10 @@ impl CastResolution {
         answer: &EstablishedLabel,
         expansions: &Expansions,
     ) -> Result<(), CastRefusal> {
-        let literal_ids = match &answer.audience {
-            Audience::Public => true,
-            Audience::Restricted(readers) => readers.iter().all(ReaderId::is_literal),
-        };
+        let literal_ids = answer
+            .audience
+            .readers()
+            .is_none_or(|readers| readers.iter().all(ReaderId::is_literal));
         if !literal_ids {
             return Err(CastRefusal::NonLiteralReader);
         }

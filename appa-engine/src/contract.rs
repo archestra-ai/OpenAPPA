@@ -11,7 +11,7 @@ use crate::names::{DynamicResolverName, MarkName, TagName};
 use crate::value::ToolName;
 
 /// A **declared** restrictive label contribution: what a successful call folds into the trajectory.
-/// Every delta only ever narrows — minimum trust, intersect audience — so a permissive delta is
+/// Every delta only ever narrows — minimum trust, audience meet — so a permissive delta is
 /// unrepresentable. A dimension may also be declared [`Dim::Unknown`]: **pending-cast** — the
 /// result's actual state is established by a registered cast at admission, so the raw result
 /// is confined until then.
@@ -248,9 +248,11 @@ pub struct RequiredAudience {
 
 impl RequiredAudience {
     fn is_literal(&self) -> bool {
-        self.includes.iter().chain(self.cap.iter()).all(
-            |audience| !matches!(audience, Audience::Restricted(readers) if !readers.iter().all(ReaderId::is_literal)),
-        )
+        self.includes.iter().chain(self.cap.iter()).all(|audience| {
+            audience
+                .readers()
+                .is_none_or(|readers| readers.iter().all(ReaderId::is_literal))
+        })
     }
 }
 
@@ -294,7 +296,11 @@ impl PinnedToolResolution {
         {
             return None;
         }
-        if matches!(&audience, Some(Audience::Restricted(readers)) if !readers.iter().all(ReaderId::is_literal)) {
+        if audience
+            .as_ref()
+            .and_then(Audience::readers)
+            .is_some_and(|readers| !readers.iter().all(ReaderId::is_literal))
+        {
             return None;
         }
         if let Some(required) = &required_audience

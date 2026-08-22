@@ -431,11 +431,15 @@ impl RawDeployment {
                 };
                 let audience = match label.audience {
                     None => Audience::Public,
-                    Some(RawStartingAudience::Token(token)) if token == "public" => Audience::Public,
+                    // A bare token spells a state; the list form spells readers. Both states are
+                    // available here, and `parse_audience` reads them identically from `exactly`.
+                    Some(RawStartingAudience::Token(token)) if audience_state(&token).is_some() => {
+                        parse_audience(&[token], "deployment starting_label audience")?
+                    }
                     Some(RawStartingAudience::Token(token)) => {
                         return Err(ConfigError::BadDeploymentToken {
                             field: "starting_label audience",
-                            expected: r#""public" or { exactly = [...] }"#,
+                            expected: r#""public", "private", or { exactly = [...] }"#,
                             found: token,
                         });
                     }
@@ -1222,6 +1226,7 @@ fn parse_trust(name: &str, chain: &TrustChain, context: &str) -> Result<Trust, C
 fn parse_audience(list: &[String], context: &str) -> Result<Audience, ConfigError> {
     match parse_declared_audience(list, context)? {
         DeclaredAudience::Public => Ok(Audience::Public),
+        DeclaredAudience::Private => Ok(Audience::Private),
         DeclaredAudience::Restricted { readers, groups } => match groups.into_iter().next() {
             None => Ok(Audience::Restricted(readers)),
             Some(group) => Err(ConfigError::BadAudience {
@@ -1234,14 +1239,29 @@ fn parse_audience(list: &[String], context: &str) -> Result<Audience, ConfigErro
     }
 }
 
+/// The audience state a reserved spelling names, where it names one. Both are states rather than
+/// readers, so neither is representable inside a reader set.
+fn audience_state(spelling: &str) -> Option<DeclaredAudience> {
+    match spelling {
+        "public" => Some(DeclaredAudience::Public),
+        "private" => Some(DeclaredAudience::Private),
+        _ => None,
+    }
+}
+
 fn parse_declared_audience(list: &[String], context: &str) -> Result<DeclaredAudience, ConfigError> {
-    if list.iter().any(|r| r == "public") {
+    // A state is the whole audience, so it stands alone: written beside a reader, a group, or the
+    // other state, the list says two different things at once and means neither.
+    if let Some((spelling, state)) = list
+        .iter()
+        .find_map(|entry| audience_state(entry).map(|state| (entry, state)))
+    {
         return if list.len() == 1 {
-            Ok(DeclaredAudience::Public)
+            Ok(state)
         } else {
             Err(ConfigError::BadAudience {
                 context: context.to_string(),
-                reason: "`public` is the whole universe and cannot be combined with named readers".to_string(),
+                reason: format!("`{spelling}` is an audience state and stands alone: it names no reader to combine"),
             })
         };
     }
@@ -1422,6 +1442,147 @@ confined_results = ["lookup"]
             }
             other => panic!("expected a resolver ceiling, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn every_declaration_site_reads_private_as_the_state_and_refuses_it_beside_anything() {
+        // One spelling, one meaning, wherever an audience is written.
+        let sites = |audience: &str| {
+            [
+                (
+                    "delta",
+                    format!(
+                        "version = 1\n[[tool]]\nname = \"read\"\ndelta = {{ audience = {{ exactly = {audience} }} }}\n"
+                    ),
+                ),
+                (
+                    "requires cap",
+                    format!(
+                        "version = 1\n[[tool]]\nname = \"send\"\ndelta = {{}}\nrequires = {{ audience = {{ cap = {audience} }} }}\n"
+                    ),
+                ),
+                (
+                    "requires includes",
+                    format!(
+                        "version = 1\n[[tool]]\nname = \"send\"\ndelta = {{}}\nrequires = {{ audience = {{ includes = {audience} }} }}\n"
+                    ),
+                ),
+                (
+                    "authority may_add",
+                    format!(
+                        "version = 1\n[[tool]]\nname = \"t\"\ndelta = {{}}\n[[authority]]\nname = \"user\"\n[authority.mandate]\ncan_cover_readers = {{ may_add = {audience} }}\n"
+                    ),
+                ),
+                (
+                    "cast may_cast",
+                    format!(
+                        "version = 1\n[[tool]]\nname = \"fetch\"\ndelta = {{ audience = \"unknown\" }}\n[[cast]]\nname = \"c\"\nresolver = {{ may_cast = {{ audience = {{ cap = {audience} }} }} }}\n[deployment]\nconfined_results = [\"fetch\"]\n"
+                    ),
+                ),
+                (
+                    "boundary",
+                    format!(
+                        "version = 1\n[[tool]]\nname = \"t\"\ndelta = {{}}\n[boundary]\naudience = {{ exactly = {audience} }}\n"
+                    ),
+                ),
+                (
+                    "starting label",
+                    format!(
+                        "version = 1\n[[tool]]\nname = \"t\"\ndelta = {{}}\n[deployment]\nstarting_label = {{ audience = {{ exactly = {audience} }} }}\n"
+                    ),
+                ),
+            ]
+        };
+
+        for (site, policy) in sites("[\"private\"]") {
+            assert!(
+                Config::from_toml_str(&policy).is_ok(),
+                "{site} refused a private audience"
+            );
+        }
+        for mixed in [
+            "[\"private\", \"alice\"]",
+            "[\"private\", \"@team\"]",
+            "[\"public\", \"private\"]",
+        ] {
+            for (site, policy) in sites(mixed) {
+                assert!(
+                    matches!(Config::from_toml_str(&policy), Err(ConfigError::BadAudience { .. })),
+                    "{site} accepted {mixed} — a state stands alone",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_private_declaration_compiles_to_the_private_state_wherever_it_is_written() {
+        let policy = "version = 1\n\
+             [[tool]]\nname = \"read\"\ndelta = { audience = { exactly = [\"private\"] } }\n\
+             [[tool]]\nname = \"send\"\ndelta = {}\nrequires = { audience = { cap = [\"private\"] } }\n\
+             [[cast]]\nname = \"c\"\nresolver = { may_cast = { audience = { cap = [\"private\"] } } }\n\
+             [deployment]\nstarting_label = { audience = \"private\" }\n";
+        let config = Config::from_toml_str(policy).expect("a private policy loads");
+
+        let read = config.registry().tool(&ToolName::new("read")).expect("read registers");
+        assert!(matches!(
+            read.delta.as_ref().and_then(|delta| delta.audience.as_ref()),
+            Some(AudienceDelta::Static(DeclaredAudience::Private)),
+        ));
+
+        let send = config.registry().tool(&ToolName::new("send")).expect("send registers");
+        assert_eq!(
+            send.requires.label.audience,
+            vec![AudienceRequirement::Cap(DeclaredAudience::Private)],
+        );
+
+        match &config
+            .registry()
+            .cast(&CastName::new("c"))
+            .expect("c registers")
+            .resolution
+        {
+            CastResolution::Resolver { may_cast } => assert_eq!(may_cast.audience, DeclaredAudience::Private),
+            other => panic!("expected a resolver ceiling, got {other:?}"),
+        }
+
+        // The bare token and the list form are the same state, and neither moves the default.
+        assert_eq!(
+            config.engine().profile().starting_label().audience,
+            Dim::Known(Audience::Private),
+        );
+        let listed = policy.replace("audience = \"private\"", "audience = { exactly = [\"private\"] }");
+        assert_eq!(
+            Config::from_toml_str(&listed)
+                .expect("the list form loads")
+                .engine()
+                .profile()
+                .starting_label(),
+            config.engine().profile().starting_label(),
+        );
+    }
+
+    #[test]
+    fn public_stays_the_default_starting_audience() {
+        let policy = "version = 1\n[[tool]]\nname = \"t\"\ndelta = {}\n";
+        let config = Config::from_toml_str(policy).expect("a bare policy loads");
+        assert_eq!(
+            config.engine().profile().starting_label(),
+            &neutral_starting_label(config.registry().trust_chain()),
+            "adding a state below public must not move where a trajectory opens",
+        );
+        assert_eq!(
+            config.engine().profile().starting_label().audience,
+            Dim::Known(Audience::Public),
+        );
+    }
+
+    #[test]
+    fn an_empty_reader_list_stays_a_load_error_and_never_reads_as_private() {
+        let policy = "version = 1\n[[tool]]\nname = \"read\"\ndelta = { audience = { exactly = [] } }\n";
+        assert!(matches!(
+            Config::from_toml_str(policy),
+            Err(ConfigError::BadAudience { ref reason, .. }) if reason.contains("empty")
+        ));
     }
 
     #[test]

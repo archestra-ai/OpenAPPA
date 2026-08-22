@@ -47,12 +47,13 @@ impl std::fmt::Display for GroupName {
 }
 
 /// How an `includes($arg)` placeholder reads its actual string argument: the
-/// reserved word `public` is the Public audience itself, an `@`-marked name is a group for the
-/// membership resolver, and any other string is one literal reader ID. `@` with no name after
-/// it is malformed and reads as nothing.
+/// reserved words `public` and `private` are those audience states themselves, an `@`-marked name
+/// is a group for the membership resolver, and any other string is one literal reader ID. `@` with
+/// no name after it is malformed and reads as nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum AudienceArgument {
     Public,
+    Private,
     Group(GroupName),
     Reader(crate::label::ReaderId),
 }
@@ -61,6 +62,7 @@ impl AudienceArgument {
     pub(crate) fn parse(value: &str) -> Option<AudienceArgument> {
         match value {
             "public" => Some(AudienceArgument::Public),
+            "private" => Some(AudienceArgument::Private),
             _ => match value.strip_prefix('@') {
                 Some("") => None,
                 Some(group) => Some(AudienceArgument::Group(GroupName::new(group))),
@@ -81,6 +83,12 @@ mod tests {
     #[test]
     fn a_placeholder_argument_spells_public_a_group_or_one_reader() {
         assert_eq!(AudienceArgument::parse("public"), Some(AudienceArgument::Public));
+        assert_eq!(AudienceArgument::parse("private"), Some(AudienceArgument::Private));
+        assert_eq!(
+            AudienceArgument::parse("Private"),
+            Some(AudienceArgument::Reader(crate::label::ReaderId::new("Private"))),
+            "the reserved word is exact"
+        );
         assert_eq!(
             AudienceArgument::parse("@auditors"),
             Some(AudienceArgument::Group(GroupName::new("auditors")))

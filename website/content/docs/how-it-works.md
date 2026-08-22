@@ -18,7 +18,7 @@ Because policy checks happen prospectively (before actions execute), sensitive d
 OpenAPPA operates on three runtime concepts:
 
 1. **Security Labels** (`label`)  
-   Attached to every running trajectory. A label tracks audience (which reader IDs are authorized to receive the trajectory's data) and trust rank (whether data comes from a vetted internal source or unvetted web content).
+   Attached to every running trajectory. A label tracks audience (who may receive the trajectory's data — everyone, any non-public destination, or a named reader set) and trust rank (whether data comes from a vetted internal source or unvetted web content).
 
 2. **Tool Contracts** (`delta` & `requires`)  
    Declarative rules configured per tool. Reading data restricts the trajectory's label (`delta`), while invoking an outbound tool verifies that the destination is permitted by the trajectory's current label (`requires`).
@@ -42,9 +42,20 @@ A resolver is implemented either by an HTTP endpoint or by an in-process builtin
 
 ## Labels only move one way
 
-A tool contract declares a `delta` to define how fetching its result restricts the agent's current security label. A `delta` can only restrict permissions—it intersects allowed readers, lowers trust levels, or leaves the label unchanged.
+A tool contract declares a `delta` to define how fetching its result restricts the agent's current security label. A `delta` can only restrict permissions—it narrows the audience, lowers trust levels, or leaves the label unchanged. Narrowing the audience takes the stricter of the two states, and where both name reader sets, their intersection.
 
-Because permissions only tighten over time, data cannot be laundered by passing it through intermediate steps or LLM calls. Reading internal system records permanently marks the execution context as internal, and ingesting unvetted web content permanently drops its trust level.
+The audience has four shapes, ordered from widest to narrowest:
+
+| Shape | Written | Means |
+|---|---|---|
+| Public | `["public"]` | Every destination. The neutral state a trajectory starts in. |
+| Private | `["private"]` | Any destination that is not public and that the policy does not name. |
+| Named reader set | `["hr", "legal@corp"]` | Exactly these readers, and no one else. |
+| Empty | — | Nobody. What two disjoint reader sets leave behind. |
+
+`private` is a state, not a reader ID, and it is never a member of a reader list. It is also not the empty audience: private data still reaches a specifically addressed recipient, while an empty audience reaches no one.
+
+Because permissions only tighten over time, data cannot be laundered by passing it through intermediate steps or LLM calls. Reading private system records permanently closes public destinations to the execution context, and ingesting unvetted web content permanently drops its trust level.
 
 Restricting permissions doesn't mean blocking external work: a component named `authority` can approve a specific outbound call without changing the overall label, or the agent can spin off a child execution to isolate sensitive reads from its main workflow.
 
@@ -58,7 +69,7 @@ label = admittedLabels.reduce(narrow, startingLabel)   // narrow only ever restr
 
 ## Reading data limits future actions
 
-OpenAPPA evaluates tools *proactively before dispatch*, informing the agent of lost reach before data enters its context. Reading internal data restricts future steps to internal context, making public destinations unavailable unless explicitly approved or sanitized.
+OpenAPPA evaluates tools *proactively before dispatch*, informing the agent of lost reach before data enters its context. Reading private data restricts future steps to private destinations, making public ones unavailable unless explicitly approved or sanitized. Reading data addressed to a named reader set restricts them further still.
 
 This pre-fetch choice is presented as a **narrowing** stop. If the agent accepts the narrowing, the choice is logged and the call proceeds. Subsequent steps at the same restriction level proceed without repeating prompts. Alternatively, a registered **sanitizer** (such as a PII scrubber) can derive a clean output to preserve public reach.
 
@@ -68,12 +79,12 @@ Child trajectories isolate label modifications within host-managed sub-execution
 
 ## Worked example: preserve reach or approve the exact call
 
-To illustrate policy enforcement, consider an agent configured with three tools: `get_ticket_from_crm`, `send_email`, and `file_github_issue`. The CRM tool contract declares a `delta` that restricts the trajectory to internal reach, `send_email` requires the recipient to match the trajectory audience, and `file_github_issue` requires public reach.
+To illustrate policy enforcement, consider an agent configured with three tools: `get_ticket_from_crm`, `send_email`, and `file_github_issue`. The CRM tool contract declares a `delta` that restricts the trajectory to private reach, `send_email` requires the recipient to match the trajectory audience, and `file_github_issue` requires public reach.
 
 ```toml
 [[tool]]
 name  = "get_ticket_from_crm"
-delta = { audience = { exactly = ["internal"] } }   # "internal" is a single reader id
+delta = { audience = { exactly = ["private"] } }   # `private` is a built-in state, not a reader id
 
 [[tool]]
 name       = "send_email"                  # send_email(body, recipient)
@@ -94,9 +105,9 @@ on   = ["tool_output"]
 hint = "Removes customer identities from a CRM record."   # advisory; grants nothing
 
 [sanitizer.mandate]
-audience = { from = { includes = ["internal"] }, to = { exactly = ["public"] } }
+audience = { from = { includes = ["private"] }, to = { exactly = ["public"] } }
 
-[[authority]]                              # who can approve the auditor mail
+[[authority]]                              # who can approve the public issue
 name    = "user"
 
 [authority.mandate]
@@ -119,15 +130,17 @@ The trajectory begins at the deployment's starting label — `{public, trusted}`
 
 | Execution Path | Trajectory Label Impact | Downstream Dispatch Impact |
 |---|---|---|
-| **Accept Narrowing** | Parent becomes `internal`. | `file_github_issue` is blocked; `send_email` requires authority approval. |
+| **Accept Narrowing** | Parent becomes `private`. | `file_github_issue` is blocked and offers approval; `send_email` to a named recipient proceeds. |
 | **Sanitize the Result** | Parent remains `{public, trusted}`. | The raw ticket is withheld from the model; `remove_pii`'s derivation is admitted in its place. |
-| **Child Branch + Sanitizer** | Parent remains `{public, trusted}`; child narrows to `internal`. | The child reads the raw ticket and returns the sanitized derivation across the merge. |
+| **Child Branch + Sanitizer** | Parent remains `{public, trusted}`; child narrows to `private`. | The child reads the raw ticket and returns the sanitized derivation across the merge. |
 
 :::fig-two-endings:::
 
 **Result Sanitization** keeps raw data out of model context by deriving a clean output before ingestion. **Child Branching** lets a sub-execution read and reason over raw content, sanitizing only what crosses back into the parent trajectory.
 
-If emailing raw CRM data to an external auditor is required, the agent accepts the narrowing to `internal`. When `send_email(ticket, auditor@…)` subsequently runs, OpenAPPA detects that `auditor@…` is not in the `internal` audience, blocks dispatch, and generates a human approval (`user`) remedy plan. Once approved, the email dispatches and the event is logged.
+If emailing raw CRM data to a named auditor is required, the agent accepts the narrowing to `private`. `send_email(ticket, auditor@…)` then dispatches without further ceremony: a specifically addressed recipient is within a private audience, which is what `private` is for. When `file_github_issue()` runs, OpenAPPA detects that a public destination is not within `private`, blocks dispatch, and generates a human approval (`user`) remedy plan. Once approved, the issue is filed and the event is logged.
+
+Narrowing to a named reader set instead of `private` is stricter, not looser. Had the CRM tool declared `exactly = ["crm-support"]`, the auditor mail would be blocked too: `auditor@…` is not in that set.
 
 ## Engine refusals enumerate every valid remedy
 

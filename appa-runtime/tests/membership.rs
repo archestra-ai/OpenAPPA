@@ -29,6 +29,10 @@ effects = ["egress"]
 delta = {}
 
 [[policy.tool]]
+name = "read_private"
+delta = { audience = { exactly = ["private"] } }
+
+[[policy.tool]]
 name = "send_capped"
 requires = { audience = { cap = ["alice", "@team"] } }
 effects = ["egress"]
@@ -102,6 +106,13 @@ fn actor() -> Actor {
 fn read_hr() -> ProposedCall {
     ProposedCall {
         tool: "read_hr".to_string(),
+        arguments: raw(serde_json::json!({})),
+    }
+}
+
+fn read_private() -> ProposedCall {
+    ProposedCall {
+        tool: "read_private".to_string(),
         arguments: raw(serde_json::json!({})),
     }
 }
@@ -259,7 +270,84 @@ async fn public_and_literal_arguments_never_consult_the_directory() {
         propose(&runtime, send("mallory")).await,
         HookDecision::DenyCall { .. }
     ));
-    assert!(directory.requests().is_empty(), "neither spelling names a group");
+    assert!(
+        matches!(propose(&runtime, send("private")).await, HookDecision::DenyCall { .. }),
+        "a named reader set is narrower than the private audience and does not cover it",
+    );
+    assert!(directory.requests().is_empty(), "no spelling here names a group");
+}
+
+/// The flow matrix, driven end to end through the runtime: a trajectory that has read private data
+/// still reaches a specifically addressed recipient, and stops at a public one.
+#[tokio::test]
+async fn private_data_reaches_a_named_recipient_and_stops_at_a_public_one() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, directory) = serve_directory().await;
+    let path = dir.path().join("appa.toml");
+    std::fs::write(&path, POLICY.replace("MEMBERSHIP_URL", &url)).expect("the fixture writes");
+    let config = Config::load(&path).expect("the fixture validates");
+    let runtime = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens"));
+    assert_eq!(
+        hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
+        HookDecision::Ack
+    );
+
+    let blocked = propose(&runtime, read_private()).await;
+    let HookDecision::DenyCall { feedback } = blocked else {
+        panic!("the narrowing read is offered for acceptance, got {blocked:?}");
+    };
+    assert!(matches!(
+        runtime.execute_remedy(&actor(), last_offer(&feedback)).await,
+        RemedyOutcome::Authorized { .. }
+    ));
+    assert_eq!(
+        propose(&runtime, read_private()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, read_private()).await;
+
+    assert_eq!(
+        propose(&runtime, send("alice")).await,
+        HookDecision::AllowCall { spawn: None },
+        "private data reaches a specifically addressed recipient",
+    );
+    ran(&runtime, send("alice")).await;
+    assert!(
+        matches!(propose(&runtime, send("public")).await, HookDecision::DenyCall { .. }),
+        "private data does not reach a public destination",
+    );
+    assert_eq!(
+        propose(&runtime, send("private")).await,
+        HookDecision::AllowCall { spawn: None },
+        "the private audience covers a private sink",
+    );
+    ran(&runtime, send("private")).await;
+    assert!(
+        directory.requests().is_empty(),
+        "no reserved spelling is ever sent to the directory",
+    );
+
+    // The state survives the process: a reopened deployment replays the same facts and lands on the
+    // same audience, so the same recipients are still open and the same one is still closed.
+    drop(runtime);
+    let config = Config::load(&path).expect("the fixture validates");
+    let reopened = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment reopens"));
+    let replayed = propose(&reopened, send("alice")).await;
+    assert_eq!(
+        replayed,
+        HookDecision::AllowCall { spawn: None },
+        "the replayed trajectory is still private, not reset to public: {replayed:?}",
+    );
+    ran(&reopened, send("alice")).await;
+    assert!(
+        matches!(propose(&reopened, send("public")).await, HookDecision::DenyCall { .. }),
+        "and still closed to a public destination",
+    );
+    assert_eq!(
+        propose(&reopened, read_private()).await,
+        HookDecision::AllowCall { spawn: None },
+        "the accepted narrowing replays too: the same read costs nothing a second time",
+    );
 }
 
 #[test]

@@ -22,7 +22,7 @@ const FIGURE_DESCRIPTIONS: Record<string, string> = {
   "fig-guardrail":
     "[Animated figure: the agent runs inside a policy boundary; labeled data crosses in, and outbound flows are checked against contracts before dispatch.]",
   "fig-label-fold":
-    "[Animated figure: labels fold as the agent reads — audience intersects, trust takes the minimum.]",
+    "[Animated figure: labels fold as the agent reads — the audience takes the stricter state, trust takes the minimum.]",
   "fig-negotiation":
     "[Animated figure: a blocked flow comes back with remedy plans; the agent picks one and completes the task.]",
   "fig-remedy-plan":
