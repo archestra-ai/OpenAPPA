@@ -5928,7 +5928,7 @@ mod tests {
         };
         crate::contract::PinnedToolResolution::from_answer(
             uses.clone(),
-            contract.canonical_resolver_args(&uses, &json!({ "who": who })),
+            contract.resolver_args_digest(&uses, &json!({ "who": who })),
             None,
             Some(Audience::restricted([ReaderId::new(reader)])),
             None,
@@ -6135,7 +6135,7 @@ mod tests {
                     returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
                     reads: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
                 },
-                String::new(),
+                crate::contract::ResolverArgsDigest::of(b""),
                 None,
                 Some(Audience::restricted([ReaderId::new("partner")])),
                 None,
@@ -11788,12 +11788,12 @@ mod tests {
             .registry()
             .tool(&ToolName::new("notify"))
             .expect("notify is registered")
-            .canonical_resolver_args(&binding, &arguments);
+            .resolver_args_digest(&binding, &arguments);
         let pinned = |audience: &Audience| {
             raw(&call("notify", arguments.clone()).with_tool_resolutions(vec![
                 crate::contract::PinnedToolResolution::from_answer(
                     binding.clone(),
-                    args.clone(),
+                    args,
                     None,
                     None,
                     None,

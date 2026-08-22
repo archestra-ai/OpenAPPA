@@ -548,7 +548,7 @@ impl ResolvedCall {
             .tool_resolutions
             .iter()
             .filter(|resolution| {
-                resolution.args() == contract.canonical_resolver_args(resolution.uses(), arguments.value())
+                resolution.args() == contract.resolver_args_digest(resolution.uses(), arguments.value())
             })
             .cloned()
             .collect();
@@ -603,7 +603,7 @@ mod tests {
     ) -> PinnedToolResolution {
         PinnedToolResolution::from_answer(
             uses.clone(),
-            contract.canonical_resolver_args(uses, call.canonical_arguments().value()),
+            contract.resolver_args_digest(uses, call.canonical_arguments().value()),
             trust,
             audience,
             None,
@@ -746,7 +746,7 @@ mod tests {
                     returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
                     reads: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
                 },
-                String::new(),
+                crate::contract::ResolverArgsDigest::of(b""),
                 None,
                 Some(crate::label::Audience::restricted([crate::label::ReaderId::new(
                     reader,
@@ -782,7 +782,7 @@ mod tests {
                     returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
                     reads: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
                 },
-                String::new(),
+                crate::contract::ResolverArgsDigest::of(b""),
                 None,
                 Some(crate::label::Audience::restricted([crate::label::ReaderId::new(
                     "alice",

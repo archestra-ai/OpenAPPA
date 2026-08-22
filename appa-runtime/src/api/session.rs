@@ -821,8 +821,7 @@ impl Session {
                     resolver: uses.resolver.as_str().to_string(),
                     // The evidence names the exact value it answered for, so a sibling call with
                     // other arguments cannot consume it.
-                    args: String::from_utf8(appa_engine::params::canonical_bytes(args))
-                        .expect("canonical JSON is UTF-8"),
+                    args: appa_engine::contract::ResolverArgsDigest::of(&appa_engine::params::canonical_bytes(args)),
                     answer,
                     context: context.clone(),
                 }

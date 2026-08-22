@@ -424,7 +424,7 @@ pub(crate) fn validate_tool_resolutions(
         // one call's answer from standing in for another's.
         if !declared.contains(uses)
             || seen.contains(&uses)
-            || pinned.args() != contract.canonical_resolver_args(uses, call.canonical_arguments().value())
+            || pinned.args() != contract.resolver_args_digest(uses, call.canonical_arguments().value())
         {
             return Err(ToolResolutionRefusal::Foreign(uses.resolver.as_str().to_string()));
         }
@@ -574,7 +574,7 @@ mod tests {
         .with_tool_resolutions(vec![
             PinnedToolResolution::from_answer(
                 binding,
-                String::new(),
+                crate::contract::ResolverArgsDigest::of(b""),
                 Some(Trust::new(0)),
                 Some(Audience::restricted([ReaderId::new("support")])),
                 None,
@@ -652,7 +652,7 @@ mod tests {
         .with_tool_resolutions(vec![
             PinnedToolResolution::from_answer(
                 binding,
-                String::new(),
+                crate::contract::ResolverArgsDigest::of(b""),
                 Some(Trust::new(0)),
                 Some(Audience::restricted([ReaderId::new("support")])),
                 Some(Trust::new(1)),
@@ -740,7 +740,7 @@ mod tests {
         .expect("the policy loads");
         let contract = registry.tool(&ToolName::new("lookup")).expect("the tool is registered");
         let arguments = serde_json::json!({});
-        let args = contract.canonical_resolver_args(&binding, &arguments);
+        let args = contract.resolver_args_digest(&binding, &arguments);
         let call = |trust, required_trust, attention: &str| {
             ResolvedCall::new(
                 ToolName::new("lookup"),
@@ -750,7 +750,7 @@ mod tests {
             .with_tool_resolutions(vec![
                 PinnedToolResolution::from_answer(
                     binding.clone(),
-                    args.clone(),
+                    args,
                     Some(trust),
                     None,
                     Some(required_trust),
@@ -834,7 +834,7 @@ mod tests {
         let answer_for = |file: &str| {
             PinnedToolResolution::from_answer(
                 uses.clone(),
-                contract.canonical_resolver_args(&uses, &serde_json::json!({ "file": file })),
+                contract.resolver_args_digest(&uses, &serde_json::json!({ "file": file })),
                 None,
                 Some(Audience::restricted([ReaderId::new("hr-lead")])),
                 None,

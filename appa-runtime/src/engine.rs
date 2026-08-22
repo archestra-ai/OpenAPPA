@@ -168,9 +168,9 @@ pub enum ExternalEvidence {
     },
     ToolResolution {
         resolver: String,
-        /// The canonical `args` the classifier answered for. Evidence matches that value only,
+        /// The `args` the classifier answered for, by digest. Evidence matches that value only,
         /// so two calls sharing a resolver and a context never take each other's answer.
-        args: String,
+        args: appa_engine::contract::ResolverArgsDigest,
         answer: ToolResolutionAnswer,
         /// The label context the classifier answered under. Evidence matches only while the
         /// call's current context is the one it described; a moved trajectory consults again.
@@ -1454,17 +1454,14 @@ impl RuntimeEngine {
         let mut requests = Vec::new();
         for uses in &contract.uses {
             let args = contract.resolver_args(uses, resolved.arguments());
-            let canonical = contract.canonical_resolver_args(uses, resolved.arguments());
+            let asked = contract.resolver_args_digest(uses, resolved.arguments());
             let answer = evidence.iter().find_map(|entry| match entry {
                 ExternalEvidence::ToolResolution {
                     resolver,
                     args: answered_for,
                     answer,
                     context,
-                } if resolver == uses.resolver.as_str()
-                    && *answered_for == canonical
-                    && *context == current_context =>
-                {
+                } if resolver == uses.resolver.as_str() && *answered_for == asked && *context == current_context => {
                     Some(answer.clone())
                 }
                 _ => None,
@@ -1507,7 +1504,7 @@ impl RuntimeEngine {
                         .map(|marks| marks.into_iter().map(MarkName::new).collect());
                     match PinnedToolResolution::from_answer(
                         uses.clone(),
-                        canonical.clone(),
+                        asked,
                         trust,
                         audience,
                         required_trust,
@@ -2541,7 +2538,7 @@ mod tests {
                     assert_eq!(context.attention_marks, ["privacy-review"]);
                     assert_eq!(context.static_attention, ["static-review"]);
                     (
-                        String::from_utf8(appa_engine::params::canonical_bytes(args)).expect("canonical JSON is UTF-8"),
+                        appa_engine::contract::ResolverArgsDigest::of(&appa_engine::params::canonical_bytes(args)),
                         context.clone(),
                     )
                 }
@@ -2564,7 +2561,7 @@ mod tests {
                 &call,
                 &[ExternalEvidence::ToolResolution {
                     resolver: "classifier".to_string(),
-                    args: consulted_args.clone(),
+                    args: consulted_args,
                     answer: ToolResolutionAnswer {
                         trust: Some("suspicious".to_string()),
                         audience: Some(CastAudience::Public),
@@ -2588,7 +2585,7 @@ mod tests {
                 &call,
                 &[ExternalEvidence::ToolResolution {
                     resolver: "classifier".to_string(),
-                    args: consulted_args.clone(),
+                    args: consulted_args,
                     answer: ToolResolutionAnswer {
                         trust: Some("suspicious".to_string()),
                         audience: Some(CastAudience::Public),
@@ -2635,7 +2632,7 @@ mod tests {
                 &other_call,
                 &[ExternalEvidence::ToolResolution {
                     resolver: "classifier".to_string(),
-                    args: consulted_args.clone(),
+                    args: consulted_args,
                     answer: ToolResolutionAnswer {
                         trust: Some("suspicious".to_string()),
                         audience: Some(CastAudience::Public),

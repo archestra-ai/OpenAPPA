@@ -534,8 +534,16 @@ mod tests {
     }
 
     fn audience_pin(audience: Audience) -> PinnedToolResolution {
-        PinnedToolResolution::from_answer(dynamic_binding(), String::new(), None, Some(audience), None, None, None)
-            .expect("a literal reader set pins")
+        PinnedToolResolution::from_answer(
+            dynamic_binding(),
+            crate::contract::ResolverArgsDigest::of(b""),
+            None,
+            Some(audience),
+            None,
+            None,
+            None,
+        )
+        .expect("a literal reader set pins")
     }
 
     fn traj() -> TrajectoryId {

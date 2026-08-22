@@ -44,6 +44,7 @@ class DynamicResolverAnswer:
 
     resolver: str
     args: str
+    result: str
     readers: tuple[str, ...]
 
     @property
@@ -177,7 +178,33 @@ def _policy_requires_of(name: str, table: dict) -> dict[str, dict[str, dict]]:
     return parsed
 
 
-def _dynamic_resolver_answers_of(name: str, declarations: object) -> tuple[DynamicResolverAnswer, ...]:
+def _declared_results(name: str, policy: Path) -> dict[str, str]:
+    """The one result each resolver in this scenario's APPA policy declares.
+
+    Reading it here keeps the fixture from holding a second copy of the contract: a scenario
+    that renames a resolver, or answers for one the policy never declares, fails at load
+    instead of at the first request.
+    """
+    try:
+        document = tomllib.loads(policy.read_text())
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise ScenarioError(f"{name}: cannot read {policy}: {error}") from error
+    section = document.get("policy", document)
+    results = {}
+    for declaration in section.get("dynamic_resolver", []):
+        returns = declaration.get("returns", [])
+        if len(returns) != 1:
+            raise ScenarioError(
+                f"{name}: resolver {declaration.get('name')!r} declares {len(returns)} results; "
+                "the loopback fixture answers resolvers that declare exactly one"
+            )
+        results[declaration["name"]] = returns[0]
+    return results
+
+
+def _dynamic_resolver_answers_of(
+    name: str, declarations: object, declared_results: dict[str, str]
+) -> tuple[DynamicResolverAnswer, ...]:
     """Parse the exact wire answers served to this scenario's APPA episodes."""
     if not isinstance(declarations, list):
         raise ScenarioError(f"{name}: 'dynamic_resolver_answer' must be an array of tables")
@@ -201,9 +228,12 @@ def _dynamic_resolver_answers_of(name: str, declarations: object) -> tuple[Dynam
             raise ScenarioError(f"{name}: {location}.readers must be a list of strings")
         if any(reader == "public" or reader.startswith("@") for reader in readers):
             raise ScenarioError(f"{name}: {location}.readers must contain literal reader IDs")
+        if resolver not in declared_results:
+            raise ScenarioError(f"{name}: {location}.resolver {resolver!r} is not declared by the scenario's policy")
         answer = DynamicResolverAnswer(
             resolver=resolver,
             args=canonical_args(args),
+            result=declared_results[resolver],
             readers=tuple(readers),
         )
         if answer.request_key in seen:
@@ -291,11 +321,13 @@ def load_scenario(root: Path) -> Scenario:
     if "policy_profile" in data:
         policy_profile = _load_policy_profile(name, root, data["policy_profile"])
 
-    dynamic_resolver_answers = _dynamic_resolver_answers_of(name, data.get("dynamic_resolver_answer", []))
+    raw_dynamic = data.get("dynamic_resolver_answer", [])
     authority_answers = _authority_answers_of(name, data.get("authority_answer", []))
     sanitizer_answers = _sanitizer_answers_of(name, data.get("sanitizer_answer", []))
-    if (dynamic_resolver_answers or authority_answers or sanitizer_answers) and policy_profile is None:
+    if (raw_dynamic or authority_answers or sanitizer_answers) and policy_profile is None:
         raise ScenarioError(f"{name}: external fixture answers require a policy_profile")
+    declared_results = _declared_results(name, policy_profile.appa) if policy_profile else {}
+    dynamic_resolver_answers = _dynamic_resolver_answers_of(name, raw_dynamic, declared_results)
 
     utility = _checks_of(name, "utility", data.get("utility", {}))
     security = _checks_of(name, "security", data.get("security", {}))

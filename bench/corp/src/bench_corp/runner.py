@@ -35,17 +35,6 @@ from .checks import CheckResult, evaluate_check, parse_emails
 from .policy import apply_tool_requires, bind_external_urls, prune_policy
 from .scenario import AuthorityAnswer, DynamicResolverAnswer, SanitizerAnswer, Scenario, canonical_args
 
-# The one result each scenario resolver declares. A document ACL establishes the output
-# audience; a mailing-list directory demands one.
-_DYNAMIC_RESULT_BY_RESOLVER = {
-    "document-acl": "delta.audience",
-    "personal-file-readers": "delta.audience",
-    "tenant-record-readers": "delta.audience",
-    "distribution-list-members": "requires.audience",
-    "mailbox-readers": "requires.audience",
-    "mailbox-tenant-readers": "requires.audience",
-}
-
 # Best-effort stderr diagnostics (never score inputs): the APPA hook's
 # mediation log lines, the FIDES audit log's BLOCKED lines, and executed
 # remedies on the APPA side. Anchored to the exact log wording (pinned by a
@@ -146,7 +135,9 @@ def _serve_external_fixtures(
         yield None
         return
 
-    dynamic_by_request = {answer.request_key: answer.readers for answer in dynamic_answers}
+    # Each answer carries the result its scenario's policy declares for that resolver, read at
+    # scenario load — the fixture keeps no second copy of the contract.
+    dynamic_by_request = {answer.request_key: (answer.result, answer.readers) for answer in dynamic_answers}
     authority_by_request = {
         (answer.authority, answer.tool): answer.ruling for answer in authority_answers
     }
@@ -173,14 +164,10 @@ def _serve_external_fixtures(
                 # The request carries no tool name: the resolver and the exact `args` it was
                 # sent are the whole key.
                 key = (request.get("resolver"), canonical_args(request.get("args")))
-                readers = dynamic_by_request.get(key) if request.get("version") == 1 else None
-                if readers is not None:
-                    # Each of these scenarios' resolvers declares one result, named for the
-                    # field it establishes.
-                    result_name = _DYNAMIC_RESULT_BY_RESOLVER[str(request.get("resolver"))]
-                    value: object = (
-                        list(readers) if result_name == "delta.audience" else {"includes": list(readers)}
-                    )
+                answer = dynamic_by_request.get(key) if request.get("version") == 1 else None
+                if answer is not None:
+                    result_name, readers = answer
+                    value: object = list(readers) if result_name == "delta.audience" else {"includes": list(readers)}
                     response = {"version": 1, "result": {result_name: value}}
             elif isinstance(request, dict) and self.path.startswith("/authority/"):
                 kind = "authority"

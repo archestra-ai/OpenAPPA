@@ -141,7 +141,7 @@ pub struct Config {
     engine: Engine,
     registry_config: RegistryConfig,
     boundary_label: Label,
-    dynamic_resolver_names: BTreeSet<DynamicResolverName>,
+    declarations: BTreeMap<DynamicResolverName, ResolverDeclaration>,
     dynamic_resolver_builtins: BTreeMap<DynamicResolverName, String>,
 }
 
@@ -170,7 +170,6 @@ impl Config {
             None => default_boundary_label(&trust_chain),
         };
 
-        let mut dynamic_resolver_names = BTreeSet::new();
         let mut dynamic_resolver_builtins = BTreeMap::new();
         let mut declarations: BTreeMap<DynamicResolverName, ResolverDeclaration> = BTreeMap::new();
         for resolver in raw.dynamic_resolver {
@@ -186,9 +185,7 @@ impl Config {
                     name: name.as_str().to_string(),
                 });
             }
-            if !dynamic_resolver_names.insert(name.clone()) {
-                return Err(ConfigError::DuplicateDynamicResolver(name.as_str().to_string()));
-            }
+
             let mut inputs = BTreeSet::new();
             for input in resolver.inputs {
                 if !inputs.insert(input.clone()) {
@@ -219,7 +216,12 @@ impl Config {
             if returns.is_empty() {
                 return Err(ConfigError::EmptyResolverReturns(name.as_str().to_string()));
             }
-            declarations.insert(name.clone(), ResolverDeclaration { inputs, returns });
+            if declarations
+                .insert(name.clone(), ResolverDeclaration { inputs, returns })
+                .is_some()
+            {
+                return Err(ConfigError::DuplicateDynamicResolver(name.as_str().to_string()));
+            }
             if let Some(builtin) = resolver.builtin {
                 if builtin != "claude-code" {
                     return Err(ConfigError::UnknownDynamicBuiltin {
@@ -325,7 +327,7 @@ impl Config {
             engine,
             registry_config,
             boundary_label,
-            dynamic_resolver_names,
+            declarations,
             dynamic_resolver_builtins,
         })
     }
@@ -351,7 +353,7 @@ impl Config {
     /// Every `[[dynamic_resolver]]` the policy registers — the validated superset of every
     /// resolver name a tool binding or dynamic read references.
     pub fn dynamic_resolver_names(&self) -> impl Iterator<Item = &DynamicResolverName> {
-        self.dynamic_resolver_names.iter()
+        self.declarations.keys()
     }
 
     /// Inline builtin implementations attached to individual dynamic resolver
@@ -574,7 +576,7 @@ struct RawToolUse {
 /// What a `[[dynamic_resolver]]` declares: the inputs a `uses` entry must map, and the results
 /// it always returns. Compiled once and copied into every use, so the engine validates an answer
 /// without consulting a table.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct ResolverDeclaration {
     inputs: BTreeSet<String>,
     returns: BTreeSet<ResolverReturn>,

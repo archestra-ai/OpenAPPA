@@ -1441,7 +1441,7 @@ mod tests {
             let arguments = json!({ "to": "internal" });
             let pin = PinnedToolResolution::from_answer(
                 uses.clone(),
-                wire.canonical_resolver_args(&uses, &arguments),
+                wire.resolver_args_digest(&uses, &arguments),
                 None,
                 None,
                 None,
@@ -1618,8 +1618,16 @@ mod tests {
         });
         let log = vec![opened(known(TRUSTED, Audience::Public))];
         let call = call("lookup", json!({ "room": "internal" })).with_tool_resolutions(vec![
-            PinnedToolResolution::from_answer(binding, String::new(), None, Some(internal()), None, None, None)
-                .expect("a literal reader set pins"),
+            PinnedToolResolution::from_answer(
+                binding,
+                crate::contract::ResolverArgsDigest::of(b""),
+                None,
+                Some(internal()),
+                None,
+                None,
+                None,
+            )
+            .expect("a literal reader set pins"),
         ]);
 
         let planned = plan_of(&registry, &log, &call);
@@ -1656,7 +1664,7 @@ mod tests {
         let empty = call("send", json!({ "channel": "empty" })).with_tool_resolutions(vec![
             PinnedToolResolution::from_answer(
                 binding,
-                String::new(),
+                crate::contract::ResolverArgsDigest::of(b""),
                 None,
                 None,
                 None,

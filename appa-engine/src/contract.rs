@@ -164,6 +164,26 @@ impl From<ToolCallSource> for String {
     }
 }
 
+/// A digest of the canonical `args` one consult was given. The pin carries this rather than the
+/// value itself: the arguments and the `uses` entry are both already on the record, so the value
+/// is re-derivable, and a tool with several resolvers would otherwise persist a copy per resolver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ResolverArgsDigest([u8; 32]);
+
+impl ResolverArgsDigest {
+    pub fn of(canonical: &[u8]) -> Self {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"appa.resolver-args.v1");
+        hasher.update(canonical);
+        ResolverArgsDigest(hasher.finalize().into())
+    }
+
+    pub fn bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 /// One resolver a tool uses: which registered resolver, the call value it reads for each input
 /// that resolver declares, every result that resolver returns, and the results this tool's own
 /// fields reference. An empty `inputs` map is the complete-call form — the resolver declared no
@@ -221,7 +241,7 @@ impl RequiredAudience {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PinnedToolResolution {
     uses: ToolResolverUse,
-    args: String,
+    args: ResolverArgsDigest,
     trust: Option<Trust>,
     audience: Option<Audience>,
     required_trust: Option<Trust>,
@@ -232,7 +252,7 @@ pub struct PinnedToolResolution {
 impl PinnedToolResolution {
     pub fn from_answer(
         uses: ToolResolverUse,
-        args: String,
+        args: ResolverArgsDigest,
         trust: Option<Trust>,
         audience: Option<Audience>,
         required_trust: Option<Trust>,
@@ -277,9 +297,9 @@ impl PinnedToolResolution {
         &self.uses
     }
 
-    /// The canonical `args` this answer was given for.
-    pub fn args(&self) -> &str {
-        &self.args
+    /// The digest of the canonical `args` this answer was given for.
+    pub fn args(&self) -> ResolverArgsDigest {
+        self.args
     }
 
     /// A result the answer carries **and** this tool reads. Every consumer of a resolver value
@@ -326,7 +346,7 @@ impl<'de> Deserialize<'de> for PinnedToolResolution {
         #[derive(Deserialize)]
         struct Wire {
             uses: ToolResolverUse,
-            args: String,
+            args: ResolverArgsDigest,
             trust: Option<Trust>,
             audience: Option<Audience>,
             required_trust: Option<Trust>,
@@ -620,11 +640,14 @@ impl ToolContract {
         }
     }
 
-    /// [`Self::resolver_args`] in its canonical spelling — what a pin stores and what a
-    /// re-derivation is compared against.
-    pub fn canonical_resolver_args(&self, uses: &ToolResolverUse, arguments: &serde_json::Value) -> String {
-        String::from_utf8(crate::params::canonical_bytes(&self.resolver_args(uses, arguments)))
-            .expect("canonical JSON is UTF-8")
+    /// [`Self::resolver_args`] in its canonical spelling — the exact bytes a consult carries.
+    pub fn canonical_resolver_args(&self, uses: &ToolResolverUse, arguments: &serde_json::Value) -> Vec<u8> {
+        crate::params::canonical_bytes(&self.resolver_args(uses, arguments))
+    }
+
+    /// What a pin stores, and what a re-derivation is compared against.
+    pub fn resolver_args_digest(&self, uses: &ToolResolverUse, arguments: &serde_json::Value) -> ResolverArgsDigest {
+        ResolverArgsDigest::of(&self.canonical_resolver_args(uses, arguments))
     }
 
     /// The unresolved output shape before call-pinned answers are applied. Each dimension is
@@ -756,7 +779,7 @@ mod tests {
         };
         let pin = PinnedToolResolution::from_answer(
             binding,
-            String::new(),
+            crate::contract::ResolverArgsDigest::of(b""),
             None,
             Some(Audience::restricted([ReaderId::new("alice")])),
             None,
@@ -776,8 +799,16 @@ mod tests {
     #[test]
     fn a_resolver_audience_answer_keeps_only_literal_reader_sets() {
         let pinned = |audience| {
-            PinnedToolResolution::from_answer(binding(), String::new(), None, Some(audience), None, None, None)
-                .map(|pin| pin.audience().cloned().expect("audience is the declared return"))
+            PinnedToolResolution::from_answer(
+                binding(),
+                crate::contract::ResolverArgsDigest::of(b""),
+                None,
+                Some(audience),
+                None,
+                None,
+                None,
+            )
+            .map(|pin| pin.audience().cloned().expect("audience is the declared return"))
         };
 
         assert_eq!(pinned(Audience::restricted([ReaderId::new("@hr")])), None);
@@ -868,7 +899,7 @@ mod tests {
         let arguments = serde_json::json!({ "customer_id": "cust-7" });
         let pin = PinnedToolResolution::from_answer(
             uses.clone(),
-            contract.canonical_resolver_args(&uses, &arguments),
+            contract.resolver_args_digest(&uses, &arguments),
             None,
             Some(Audience::restricted([ReaderId::new("support")])),
             None,
@@ -879,7 +910,11 @@ mod tests {
         let bytes = serde_json::to_vec(&pin).expect("a pin serializes");
         let read: PinnedToolResolution = serde_json::from_slice(&bytes).expect("a pin reads back");
         assert_eq!(read, pin);
-        assert_eq!(read.args(), r#"{"customer_id":"cust-7"}"#);
+        assert_eq!(
+            read.args(),
+            crate::contract::ResolverArgsDigest::of(br#"{"customer_id":"cust-7"}"#),
+            "the pin binds to the exact value its resolver was sent"
+        );
     }
 
     #[test]
