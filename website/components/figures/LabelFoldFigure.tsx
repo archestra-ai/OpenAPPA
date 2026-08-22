@@ -4,8 +4,9 @@ import { Figure } from "@/components/figures/Figure";
 import { chip, drawCard, ease, lerp, seg, type Theme } from "@/components/figures/lib";
 
 /* Tutorial figure: labels only move one way. Three reads fold into the run's
-   label — a neutral read leaves it alone, the CRM intersects the audience, a
-   fetched page drops the trust — and the way back up does not exist. */
+   label — a neutral read leaves it alone, the CRM narrows the audience to
+   private, a fetched page drops the trust — and the way back up does not
+   exist. */
 
 const W = 900;
 const H = 340;
@@ -20,11 +21,11 @@ const CARD = { w: 168, h: 52, y: 40 };
 
 const READS = [
   { source: "public docs", colorKey: "accent" as const, tag: "delta = {}", pop: 0.04 },
-  { source: "internal CRM", colorKey: "warn" as const, tag: "audience ∩", pop: 0.3 },
+  { source: "private CRM", colorKey: "warn" as const, tag: "audience ↓", pop: 0.3 },
   { source: "fetched webpage", colorKey: "danger" as const, tag: "trust ↓", pop: 0.56 },
 ];
 
-const LABELS = ["public · trusted", "internal · trusted", "internal · suspicious"];
+const LABELS = ["public · trusted", "private · trusted", "private · suspicious"];
 const TAG_AT = [0.23, 0.48, 0.72];
 
 function chipStyle(th: Theme, idx: number): { color: string; bg: string } {
