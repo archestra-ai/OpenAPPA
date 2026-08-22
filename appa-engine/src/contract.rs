@@ -308,6 +308,18 @@ impl PinnedToolResolution {
         self.uses.reads.contains(&result)
     }
 
+    /// Every trust rank the answer carries, read or not. A result no field references
+    /// establishes nothing, but it is still persisted, so the check holds all of them to the
+    /// policy's vocabulary rather than only the ones that happen to be used.
+    pub(crate) fn every_trust(&self) -> impl Iterator<Item = Trust> + '_ {
+        self.trust.into_iter().chain(self.required_trust)
+    }
+
+    /// Every attention mark the answer carries, read or not.
+    pub(crate) fn every_mark(&self) -> &[MarkName] {
+        &self.attention
+    }
+
     pub fn trust(&self) -> Option<Trust> {
         self.read(ResolverReturn::Trust).then_some(self.trust).flatten()
     }

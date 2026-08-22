@@ -428,12 +428,12 @@ pub(crate) fn validate_tool_resolutions(
         {
             return Err(ToolResolutionRefusal::Foreign(uses.resolver.as_str().to_string()));
         }
+        // Every value the pin carries, not only the ones this tool reads: an unread result
+        // establishes nothing, but it is persisted, so it answers to the policy's vocabulary too.
         if pinned
-            .trust()
-            .into_iter()
-            .chain(pinned.required_trust())
+            .every_trust()
             .any(|trust| !registry.trust_chain().contains_rank(trust))
-            || pinned.attention().iter().any(|mark| !registry.attends(mark))
+            || pinned.every_mark().iter().any(|mark| !registry.attends(mark))
         {
             return Err(ToolResolutionRefusal::OutsidePolicy(uses.resolver.as_str().to_string()));
         }
@@ -779,6 +779,71 @@ mod tests {
                 Err(ToolResolutionRefusal::OutsidePolicy(resolver)) if resolver == "classifier"
             ));
         }
+    }
+
+    #[test]
+    fn a_result_the_tool_never_reads_still_answers_to_the_policy_vocabulary() {
+        use crate::names::DynamicResolverName;
+        use crate::registry::{Registry, RegistryConfig};
+        use crate::value::ToolName;
+
+        // The resolver returns both trusts; the tool reads only the output one.
+        let uses = ToolResolverUse {
+            resolver: DynamicResolverName::new("classifier"),
+            inputs: std::collections::BTreeMap::new(),
+            returns: [ResolverReturn::Trust, ResolverReturn::RequiredTrust]
+                .into_iter()
+                .collect(),
+            reads: [ResolverReturn::Trust].into_iter().collect(),
+        };
+        let registry = Registry::build_covered(RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: vec![ToolContract {
+                name: ToolName::new("lookup"),
+                tags: vec![],
+                description: Some("A test tool.".to_string()),
+                parameters: ToolParameters::open(),
+                uses: vec![uses.clone()],
+                delta: None,
+                emits: EffectSet::default(),
+                requires: Default::default(),
+            }],
+            authorities: vec![],
+            sanitizers: vec![],
+            casts: vec![],
+            membership: None,
+        })
+        .expect("the policy loads");
+        let contract = registry.tool(&ToolName::new("lookup")).expect("lookup is registered");
+        let arguments = serde_json::json!({});
+        let call = |required_trust| {
+            ResolvedCall::new(
+                ToolName::new("lookup"),
+                crate::params::CanonicalArguments::from_value(&arguments, &ToolParameters::open())
+                    .expect("arguments compile"),
+            )
+            .with_tool_resolutions(vec![
+                PinnedToolResolution::from_answer(
+                    uses.clone(),
+                    contract.resolver_args_digest(&uses, &arguments),
+                    Some(Trust::new(0)),
+                    None,
+                    Some(required_trust),
+                    None,
+                    None,
+                )
+                .expect("the declared fields pin"),
+            ])
+        };
+
+        assert!(validate_tool_resolutions(&registry, contract, &call(Trust::new(1))).is_ok());
+        assert!(
+            matches!(
+                validate_tool_resolutions(&registry, contract, &call(Trust::new(9))),
+                Err(ToolResolutionRefusal::OutsidePolicy(resolver)) if resolver == "classifier"
+            ),
+            "a rank outside the chain is refused even where no field reads it"
+        );
     }
 
     #[test]
