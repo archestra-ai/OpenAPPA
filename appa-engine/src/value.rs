@@ -534,24 +534,17 @@ impl ResolvedCall {
     }
 
     /// The call a substitution of this one's arguments renders: the same callee, the
-    /// replacement arguments, and only those pinned answers the replacement leaves standing.
-    pub(crate) fn substituting(
-        &self,
-        contract: &crate::contract::ToolContract,
-        arguments: CanonicalArguments,
-    ) -> ResolvedCall {
+    /// replacement arguments, the resolver answers this call carries, and only those membership
+    /// answers the replacement leaves standing.
+    ///
+    /// A resolver answers about the call the agent proposed, and a substitution is a registered
+    /// sanitizer's rewrite of that proposal, so the answers ride along here rather than being
+    /// dropped. Riding along is not standing: whether a carried answer is admissible on the
+    /// rewritten call is [`crate::check::validate_tool_resolutions`]'s to decide, against the
+    /// proposal on the record. A membership answer expands the group one argument names, so it
+    /// survives only while that argument's value is unchanged.
+    pub(crate) fn substituting(&self, arguments: CanonicalArguments) -> ResolvedCall {
         let unchanged = |argument: &str| arguments.value().get(argument) == self.arguments.value().get(argument);
-        // A pin answers for the exact value its resolver was sent, so it stands only while the
-        // replacement arguments rebuild that same value: a use that read the complete call dies on
-        // any substitution, and a use that read named arguments survives while those are unchanged.
-        let tool_resolutions = self
-            .tool_resolutions
-            .iter()
-            .filter(|resolution| {
-                resolution.args() == contract.resolver_args_digest(resolution.uses(), arguments.value())
-            })
-            .cloned()
-            .collect();
         let memberships = self
             .memberships
             .iter()
@@ -559,7 +552,7 @@ impl ResolvedCall {
             .cloned()
             .collect();
         ResolvedCall::new(self.tool.clone(), arguments)
-            .with_tool_resolutions(tool_resolutions)
+            .with_tool_resolutions(self.tool_resolutions.clone())
             .with_memberships(memberships)
     }
 }
@@ -646,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_resolution_is_pinned_to_the_complete_argument_object() {
+    fn a_complete_call_answer_rides_through_an_argument_substitution() {
         let uses = crate::contract::ToolResolverUse {
             resolver: crate::names::DynamicResolverName::new("classifier"),
             inputs: std::collections::BTreeMap::new(),
@@ -669,23 +662,22 @@ mod tests {
         );
         assert_eq!(
             resolved
-                .substituting(&contract, args(json!({ "deep": true, "id": 7 })))
-                .tool_resolutions()
-                .len(),
-            1,
-            "an equivalent canonical object keeps the pin"
+                .substituting(args(json!({ "deep": true, "id": 7 })))
+                .tool_resolutions(),
+            resolved.tool_resolutions(),
+            "an equivalent canonical object renders the same call, answers included"
         );
-        assert!(
+        assert_eq!(
             resolved
-                .substituting(&contract, args(json!({ "id": 8, "deep": true })))
-                .tool_resolutions()
-                .is_empty(),
-            "a change anywhere in the arguments invalidates the whole-object pin"
+                .substituting(args(json!({ "id": 8, "deep": true })))
+                .tool_resolutions(),
+            resolved.tool_resolutions(),
+            "a rewrite of what the resolver read still renders the answer it gave about this proposal"
         );
     }
 
     #[test]
-    fn an_argument_scoped_pin_survives_unrelated_substitution() {
+    fn a_named_argument_answer_rides_through_a_rewrite_of_that_argument() {
         let uses = crate::contract::ToolResolverUse {
             resolver: crate::names::DynamicResolverName::new("classifier"),
             inputs: std::collections::BTreeMap::from([(
@@ -708,18 +700,17 @@ mod tests {
         )]);
         assert_eq!(
             resolved
-                .substituting(&contract, args(json!({ "id": "7", "deep": false })))
-                .tool_resolutions()
-                .len(),
-            1,
-            "the scoped argument is unchanged, so the pin stands"
+                .substituting(args(json!({ "id": "7", "deep": false })))
+                .tool_resolutions(),
+            resolved.tool_resolutions(),
+            "a rewrite elsewhere leaves the argument the resolver read alone"
         );
-        assert!(
+        assert_eq!(
             resolved
-                .substituting(&contract, args(json!({ "id": "8", "deep": true })))
-                .tool_resolutions()
-                .is_empty(),
-            "a changed scoped argument invalidates the pin"
+                .substituting(args(json!({ "id": "8", "deep": true })))
+                .tool_resolutions(),
+            resolved.tool_resolutions(),
+            "a rewrite of the argument the resolver read renders the same answer; the gate, not this, decides it"
         );
     }
 

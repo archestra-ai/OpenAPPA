@@ -1177,14 +1177,23 @@ impl<'a> Sequence<'a> {
                 {
                     return Err(TransitionRefusal::ForgedMembership);
                 }
-                // And its resolver answers, one per binding the contract spells.
-                if crate::check::validate_tool_resolutions(self.engine.registry(), contract, &call).is_err() {
+                let views = self.projection.view(trajectory);
+                // And its resolver answers, one per binding the contract spells. An opening whose
+                // call an input hop rewrote carries the answers given about the proposal it
+                // descends from, so that proposal is the second call they may be about.
+                if crate::check::validate_tool_resolutions(
+                    self.engine.registry(),
+                    contract,
+                    &call,
+                    crate::check::AnsweredFor::Proposal(views.proposed_call(subject)),
+                )
+                .is_err()
+                {
                     return Err(TransitionRefusal::ForgedResolution);
                 }
                 if proposed_effects != &contract.emits {
                     return Err(TransitionRefusal::EffectsMismatch);
                 }
-                let views = self.projection.view(trajectory);
                 let current = views.current_label();
                 if proposed_label
                     != crate::check::committed_label_for_call(contract, &current, &call, &expansions).bound()
@@ -2243,7 +2252,14 @@ impl<'a> Sequence<'a> {
             if crate::check::validate_memberships(contract, call).is_err() {
                 return Err(TransitionRefusal::ForgedMembership);
             }
-            if crate::check::validate_tool_resolutions(self.engine.registry(), contract, call).is_err() {
+            if crate::check::validate_tool_resolutions(
+                self.engine.registry(),
+                contract,
+                call,
+                crate::check::AnsweredFor::ThisCall,
+            )
+            .is_err()
+            {
                 return Err(TransitionRefusal::ForgedResolution);
             }
         }
@@ -3330,10 +3346,19 @@ impl<'a> Sequence<'a> {
             .parameters
             .validate(call.arguments())
             .map_err(TransitionRefusal::InvalidPayload)?;
-        if call != &predecessor.substituting(contract, call.canonical_arguments().clone()) {
+        if call != &predecessor.substituting(call.canonical_arguments().clone()) {
             return Err(TransitionRefusal::ForgedLabel);
         }
-        if crate::check::validate_tool_resolutions(self.engine.registry(), contract, call).is_err() {
+        // The predecessor comparison binds *which* answers this rewrite carries; this binds what
+        // they may be about — the proposal a resolver was asked about, on the record.
+        if crate::check::validate_tool_resolutions(
+            self.engine.registry(),
+            contract,
+            call,
+            crate::check::AnsweredFor::Proposal(views.proposed_call(subject)),
+        )
+        .is_err()
+        {
             return Err(TransitionRefusal::SanitizerUnapplicable);
         }
 
@@ -3476,17 +3501,13 @@ fn taken_offer<'v>(
     Ok(recorded)
 }
 
+/// The call this subject stands on now: the candidate an input hop derived, or the proposal
+/// where no hop has run.
 fn subject_call(views: &Views<'_>, subject: &crate::basis::SubjectKey) -> Option<ResolvedCall> {
-    if let Some(candidate) = views.call_candidate(subject) {
-        return Some(candidate.clone());
-    }
-    let crate::basis::SubjectKey::Call { batch, position, .. } = subject else {
-        return None;
-    };
-    let decided = views.decided_batch(batch)?;
-    (&decided.trajectory == views.trajectory())
-        .then(|| decided.proposals.get(*position as usize).cloned())
-        .flatten()
+    views
+        .call_candidate(subject)
+        .or_else(|| views.proposed_call(subject))
+        .cloned()
 }
 
 fn confines(sequence: &Sequence<'_>, offer: &crate::value::OfferId, dispatch: &DispatchId) -> bool {

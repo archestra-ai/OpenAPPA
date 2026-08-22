@@ -162,11 +162,6 @@ impl ToolCallSource {
         }
     }
 
-    /// Whether this source carries the complete argument object, so any substitution changes it.
-    pub fn reads_all_arguments(&self) -> bool {
-        matches!(self, ToolCallSource::Call | ToolCallSource::Arguments)
-    }
-
     /// Whether this source carries the tool's description, which the policy must then declare.
     pub fn reads_description(&self) -> bool {
         matches!(self, ToolCallSource::Call | ToolCallSource::Description)
@@ -224,13 +219,6 @@ pub struct ToolResolverUse {
 }
 
 impl ToolResolverUse {
-    /// Whether this use reads the complete argument object, through the complete-call form or
-    /// through an explicit whole-arguments source. Any substitution changes what it read, so the
-    /// planner never offers an input-substitution hop on such a tool.
-    pub fn reads_complete_call(&self) -> bool {
-        self.inputs.is_empty() || self.inputs.values().any(ToolCallSource::reads_all_arguments)
-    }
-
     /// Whether this use shows its resolver the tool's description.
     pub fn reads_description(&self) -> bool {
         self.inputs.is_empty() || self.inputs.values().any(ToolCallSource::reads_description)

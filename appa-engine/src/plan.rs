@@ -58,7 +58,7 @@ use serde::{Deserialize, Serialize};
 use crate::authority::{Authority, DeclaredTransition, Mandate, Sanitizer};
 use crate::candidate::{CallStage, SanitizerLineage};
 use crate::check::{self, Gap, Narrowing, RawBlock};
-use crate::contract::{ToolContract, ToolResolverUse};
+use crate::contract::ToolContract;
 use crate::fact::EffectKind;
 use crate::groups::Expansions;
 use crate::label::{Adequacy, Audience, EstablishedLabel, Label, PartialLabel};
@@ -648,14 +648,6 @@ pub(crate) fn input_hops(
     expansions: &Expansions,
 ) -> Vec<SanitizerName> {
     if role == CallRole::MarkedSpawn {
-        return Vec::new();
-    }
-    // A pin that read the complete call is invalidated by any substitution, so a hop on such a
-    // tool could never execute; the plan is not offered. A pin that read named arguments survives
-    // a substitution that leaves those arguments alone, so those tools keep their hops.
-    // TODO: re-consult the resolver on the substituted arguments instead, restoring the
-    // remedy for complete-call reads.
-    if contract.uses.iter().any(ToolResolverUse::reads_complete_call) {
         return Vec::new();
     }
     if !gaps.iter().any(|gap| matches!(gap, Gap::Includes { .. })) {
@@ -1373,7 +1365,7 @@ mod tests {
     }
 
     #[test]
-    fn a_whole_call_resolver_binding_suppresses_input_substitution_hops() {
+    fn a_resolver_backed_tool_keeps_its_input_substitution_hops() {
         let partner = Audience::restricted([ReaderId::new("partner")]);
         let internal = Audience::restricted([ReaderId::new("internal")]);
         let contract = |uses| ToolContract {
@@ -1455,12 +1447,12 @@ mod tests {
         };
 
         assert!(
-            !offers_hop(vec![binding(None)]),
-            "a whole-call pin cannot survive any substitution, so the hop is not offered"
+            offers_hop(vec![binding(None)]),
+            "a complete-call answer is about the proposal the rewrite lands on, so the hop is offered"
         );
         assert!(
             offers_hop(vec![binding(Some("to"))]),
-            "an argument-scoped pin survives a substitution that leaves its argument alone, so the hop stands"
+            "so is a named-argument answer, whichever argument the rewrite touches"
         );
     }
 

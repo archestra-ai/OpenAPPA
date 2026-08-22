@@ -108,7 +108,7 @@ const TERMS = {
   /* Sanitizers and Casts */
   on: "Where a sanitizer may apply: tool_output at an admission the host can withhold — a child return, or a tool result at a confined application point; tool_input as whole-argument substitution at dispatch.",
   tool_input:
-    "A sanitizer application point: the sanitizer derives a replacement for the whole argument set of one call, and the harness dispatches exactly the substituted bytes.",
+    "A sanitizer application point: the sanitizer derives a replacement for the whole argument set of one call, and the harness dispatches exactly the substituted bytes. The rewritten call keeps the resolver answers pinned to the proposal it replaces; the resolver is not consulted again.",
   tool_output:
     "A sanitizer application point: an admission the host can withhold — the child-return crossing, or a tool result at an application point the deployment confines. The derivation is admitted; the raw value is withheld.",
   from: "In a sanitizer mandate: the required source label state before the transition applies.",

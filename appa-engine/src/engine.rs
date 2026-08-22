@@ -1876,7 +1876,7 @@ impl Engine {
                     return Err(TransitionError::ForeignMembership { argument });
                 }
             }
-            match check::validate_tool_resolutions(&self.registry, contract, call) {
+            match check::validate_tool_resolutions(&self.registry, contract, call, check::AnsweredFor::ThisCall) {
                 Ok(()) => {}
                 Err(check::ToolResolutionRefusal::Needed(bindings)) => {
                     for binding in bindings {
@@ -2988,7 +2988,16 @@ impl Engine {
             .extend(sanitizer.clone())
             .ok_or(TransitionError::SanitizerUnapplicable)?;
         let substituted = substituted_call(contract, call, body)?;
-        if check::validate_tool_resolutions(&self.registry, contract, &substituted).is_err() {
+        // The rewrite carries the answers a resolver gave about the proposal this subject stands
+        // on; they are admissible here because that proposal is on the record.
+        if check::validate_tool_resolutions(
+            &self.registry,
+            contract,
+            &substituted,
+            check::AnsweredFor::Proposal(views.proposed_call(&recorded.subject)),
+        )
+        .is_err()
+        {
             return Err(TransitionError::SanitizerUnapplicable);
         }
 
@@ -3107,16 +3116,10 @@ impl Engine {
     }
 
     fn offer_call(&self, views: &Views, recorded: &crate::projection::RecordedOffer) -> ResolvedCall {
-        if let Some(candidate) = views.call_candidate(&recorded.subject) {
-            return candidate.clone();
-        }
-        let crate::basis::SubjectKey::Call { batch, position, .. } = &recorded.subject else {
-            unreachable!("an opened offer's subject is a call candidate")
-        };
         views
-            .decided_batch(batch)
-            .and_then(|decided| decided.proposals.get(*position as usize))
-            .expect("an opened offer names a proposal of a decided batch")
+            .call_candidate(&recorded.subject)
+            .or_else(|| views.proposed_call(&recorded.subject))
+            .expect("an opened offer names a proposal of a decided batch, or the candidate that replaced it")
             .clone()
     }
 
@@ -3577,7 +3580,7 @@ fn substituted_call(
 ) -> Result<ResolvedCall, TransitionError> {
     let arguments = crate::params::CanonicalArguments::from_raw(body.as_str().as_bytes(), &contract.parameters)
         .map_err(|error| TransitionError::Call(EngineError::InvalidCall(error)))?;
-    Ok(call.substituting(contract, arguments))
+    Ok(call.substituting(arguments))
 }
 
 fn invalidated_siblings(
@@ -5858,6 +5861,19 @@ mod tests {
             uses: vec![dynamic_who()],
             ..post("post_to", vec![crate::names::TagName::new("outbound")])
         };
+        // Its resolver declares no inputs, so it reads the complete call: every rewrite changes
+        // what it was shown. The recipients it requires are the answer's, not the policy's.
+        let post_call = ToolContract {
+            uses: vec![dynamic_call()],
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(TRUSTED),
+                    audience: vec![],
+                },
+                ..Requires::default()
+            },
+            ..post("post_call", vec![crate::names::TagName::new("outbound")])
+        };
         open_engine_at(
             RegistryConfig {
                 trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
@@ -5865,6 +5881,7 @@ mod tests {
                     post("post", vec![crate::names::TagName::new("outbound")]),
                     post("post_untagged", vec![]),
                     post_to,
+                    post_call,
                     open_tool("ping"),
                 ],
                 authorities: vec![crate::authority::Authority {
@@ -5916,6 +5933,46 @@ mod tests {
             returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
             reads: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
         }
+    }
+
+    fn dynamic_call() -> crate::contract::ToolResolverUse {
+        crate::contract::ToolResolverUse {
+            resolver: crate::names::DynamicResolverName::new("classify"),
+            inputs: std::collections::BTreeMap::new(),
+            returns: [crate::contract::ResolverReturn::RequiredAudience]
+                .into_iter()
+                .collect(),
+            reads: [crate::contract::ResolverReturn::RequiredAudience]
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    /// A pin for the call on `post_call` whose `body` argument holds `body`. Its args are the
+    /// complete call that tool would have sent, so any rewrite of `body` changes them.
+    fn call_pin_for(body: &str) -> crate::contract::PinnedToolResolution {
+        call_pin_for_reader(body, "partner")
+    }
+
+    fn call_pin_for_reader(body: &str, reader: &str) -> crate::contract::PinnedToolResolution {
+        let uses = dynamic_call();
+        let contract = crate::contract::ToolContract {
+            uses: vec![uses.clone()],
+            ..plain_tool("post_call")
+        };
+        crate::contract::PinnedToolResolution::from_answer(
+            uses.clone(),
+            contract.resolver_args_digest(&uses, &json!({ "body": body })),
+            None,
+            None,
+            None,
+            Some(crate::contract::RequiredAudience {
+                includes: Some(Audience::restricted([ReaderId::new(reader)])),
+                cap: None,
+            }),
+            None,
+        )
+        .expect("a literal required audience pins")
     }
 
     /// A pin for a call on `post` whose `who` argument holds `who`. The args it stores are the
@@ -6422,7 +6479,7 @@ mod tests {
     }
 
     #[test]
-    fn a_substitution_that_rewrites_a_dynamically_bound_argument_is_unapplicable() {
+    fn a_substitution_that_rewrites_a_dynamically_read_argument_keeps_its_answer() {
         let e = substituting_engine(TRUSTED);
         let proposal = call("post_to", json!({ "body": "ssn 123", "who": "desk" }))
             .with_tool_resolutions(vec![who_pin_for("desk", "partner")]);
@@ -6431,26 +6488,122 @@ mod tests {
         let hop = opened_offers(&facts)[0].0;
         let log = [log, facts].concat();
 
+        // `who` is exactly what the resolver read, and the rewrite replaces it. The answer was
+        // given about the proposal this rewrite lands on, so it still stands.
+        let hopped = execute_offer(
+            &e,
+            &log,
+            hop,
+            substitution(&proposal, r#"{"body":"[redacted]","who":"someone else"}"#),
+        )
+        .expect("the hop runs over the argument its resolver read");
+        match offer_answer(&hopped) {
+            OfferFollowUp::Substituted { block } => {
+                assert_eq!(
+                    block.call.canonical_arguments().canonical_text(),
+                    r#"{"body":"[redacted]","who":"someone else"}"#
+                );
+                assert_eq!(
+                    block.call.tool_resolutions(),
+                    proposal.tool_resolutions(),
+                    "the answer rides through the rewrite; the resolver is not asked again"
+                );
+                assert!(
+                    block.block.raw.requirement_gaps.is_empty(),
+                    "the rewrite cleared the includes gap; only the answer's own narrowing remains"
+                );
+            }
+            other => panic!("the substitution re-plans over the derived call, got {other:?}"),
+        }
+        let log = [log, appended_facts(hopped)].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+    }
+
+    #[test]
+    fn a_complete_call_answer_keeps_its_hop_and_rides_through_the_substitution() {
+        let e = substituting_engine(TRUSTED);
+        let proposal =
+            call("post_call", json!({ "body": "ssn 123" })).with_tool_resolutions(vec![call_pin_for("ssn 123")]);
+        let log = internal_log(&e);
+        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
+        let offers = opened_offers(&facts);
         assert_eq!(
-            execute_offer(
-                &e,
-                &log,
-                hop,
-                substitution(&proposal, r#"{"body":"[redacted]","who":"someone else"}"#)
-            )
-            .map(|_| ()),
-            Err(TransitionError::SanitizerUnapplicable)
+            offers[0].1.hop(),
+            Some(&crate::names::SanitizerName::new("redact")),
+            "a resolver that reads the complete call is offered the input hop"
         );
+        let log = [log, facts].concat();
+
+        let hopped = execute_offer(&e, &log, offers[0].0, substitution(&proposal, REDACTED)).expect("the hop runs");
+        let released = match offer_answer(&hopped) {
+            OfferFollowUp::Released(released) => (**released).clone(),
+            other => panic!("the substitution clears the last gap and dispatches, got {other:?}"),
+        };
+        assert_eq!(released.call.canonical_arguments().canonical_text(), REDACTED);
+        assert_eq!(
+            released.call.tool_resolutions(),
+            proposal.tool_resolutions(),
+            "the answer rides through the rewrite; the resolver is not asked again"
+        );
+        let facts = appended_facts(hopped);
         assert!(
-            execute_offer(
-                &e,
-                &log,
-                hop,
-                substitution(&proposal, r#"{"body":"[redacted]","who":"desk"}"#)
-            )
-            .is_ok(),
-            "a replacement that leaves the bound argument alone keeps its answer"
+            matches!(
+                facts.as_slice(),
+                [
+                    Fact::BasisAdvanced { .. },
+                    Fact::OfferAccepted { .. },
+                    Fact::OfferInvalidated { .. },
+                    Fact::CandidateDerived {
+                        derived: DerivedCandidate::Call { call, .. },
+                        ..
+                    },
+                    Fact::DispatchOpened { tool_resolutions, .. },
+                ] if call == &released.call && tool_resolutions == proposal.tool_resolutions()
+            ),
+            "the derived candidate and the opening both carry the answers: {facts:?}"
         );
+        let log = [log, facts].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+    }
+
+    #[test]
+    fn a_carried_answer_may_not_be_restated_on_the_record() {
+        let e = substituting_engine(TRUSTED);
+        let proposal =
+            call("post_call", json!({ "body": "ssn 123" })).with_tool_resolutions(vec![call_pin_for("ssn 123")]);
+        let log = internal_log(&e);
+        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
+        let offer = opened_offers(&facts)[0].0;
+        let log = [log, facts].concat();
+        let hopped =
+            appended_facts(execute_offer(&e, &log, offer, substitution(&proposal, REDACTED)).expect("the hop runs"));
+        assert_eq!(e.validate_replay(&[log.clone(), hopped.clone()].concat()), Ok(()));
+
+        // The rewrite carries the proposal's answer. Restating it with a wider audience keeps the
+        // resolver, the declared use and the `args` digest the proposal's — only what the answer
+        // says moves. The record refuses it: the digest binds what an answer is about, and the
+        // complete-call comparison binds what it says.
+        for (position, refusal) in [
+            (3usize, TransitionRefusal::ForgedLabel),
+            (4, TransitionRefusal::UnbackedDecision),
+        ] {
+            let mut forged = hopped.clone();
+            match &mut forged[position] {
+                Fact::CandidateDerived {
+                    derived: DerivedCandidate::Call { call, .. },
+                    ..
+                } => {
+                    *call = call
+                        .clone()
+                        .with_tool_resolutions(vec![call_pin_for_reader("ssn 123", "public-desk")])
+                }
+                Fact::DispatchOpened { tool_resolutions, .. } => {
+                    *tool_resolutions = vec![call_pin_for_reader("ssn 123", "public-desk")]
+                }
+                other => panic!("the hop's batch derives then opens, got {other:?}"),
+            }
+            assert_eq!(e.validate_replay(&[log.clone(), forged].concat()), Err(refusal));
+        }
     }
 
     #[test]
@@ -12184,17 +12337,9 @@ mod tests {
     fn a_substitution_keeps_a_membership_pin_only_for_an_unchanged_argument() {
         let pinned =
             call("send", json!({ "to": "@team", "body": "hi" })).with_memberships(vec![expansion("to", &["alice"])]);
-        let contract = plain_tool("send");
-        let contract = &contract;
-        let same_to = pinned.substituting(
-            contract,
-            crate::params::test_arguments(&json!({ "to": "@team", "body": "bye" })),
-        );
+        let same_to = pinned.substituting(crate::params::test_arguments(&json!({ "to": "@team", "body": "bye" })));
         assert_eq!(same_to.memberships(), pinned.memberships());
-        let other_to = pinned.substituting(
-            contract,
-            crate::params::test_arguments(&json!({ "to": "@other", "body": "hi" })),
-        );
+        let other_to = pinned.substituting(crate::params::test_arguments(&json!({ "to": "@other", "body": "hi" })));
         assert!(other_to.memberships().is_empty());
     }
 
