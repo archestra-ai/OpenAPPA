@@ -1180,12 +1180,17 @@ impl<'a> Sequence<'a> {
                 let views = self.projection.view(trajectory);
                 // And its resolver answers, one per binding the contract spells. An opening whose
                 // call an input hop rewrote carries the answers given about the proposal it
-                // descends from, so that proposal is the second call they may be about.
+                // descends from, so that proposal is the second call they may be about. Every
+                // opening names the call subject its decision released it for, so a record with
+                // no readable proposal is refused rather than judged on the call alone.
+                let proposal = views
+                    .proposed_call(subject)
+                    .ok_or(TransitionRefusal::ForgedResolution)?;
                 if crate::check::validate_tool_resolutions(
                     self.engine.registry(),
                     contract,
                     &call,
-                    crate::check::AnsweredFor::Proposal(views.proposed_call(subject)),
+                    crate::check::AnsweredFor::Proposal(proposal),
                 )
                 .is_err()
                 {
@@ -3351,11 +3356,12 @@ impl<'a> Sequence<'a> {
         }
         // The predecessor comparison binds *which* answers this rewrite carries; this binds what
         // they may be about — the proposal a resolver was asked about, on the record.
+        let proposal = views.proposed_call(subject).ok_or(TransitionRefusal::UnbackedOffer)?;
         if crate::check::validate_tool_resolutions(
             self.engine.registry(),
             contract,
             call,
-            crate::check::AnsweredFor::Proposal(views.proposed_call(subject)),
+            crate::check::AnsweredFor::Proposal(proposal),
         )
         .is_err()
         {
@@ -3501,13 +3507,8 @@ fn taken_offer<'v>(
     Ok(recorded)
 }
 
-/// The call this subject stands on now: the candidate an input hop derived, or the proposal
-/// where no hop has run.
 fn subject_call(views: &Views<'_>, subject: &crate::basis::SubjectKey) -> Option<ResolvedCall> {
-    views
-        .call_candidate(subject)
-        .or_else(|| views.proposed_call(subject))
-        .cloned()
+    views.standing_call(subject).cloned()
 }
 
 fn confines(sequence: &Sequence<'_>, offer: &crate::value::OfferId, dispatch: &DispatchId) -> bool {

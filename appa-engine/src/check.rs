@@ -421,13 +421,16 @@ pub(crate) enum ToolResolutionRefusal {
 pub(crate) enum AnsweredFor<'a> {
     /// The call is the proposal. Every pin rebuilds this call's own arguments or it is foreign.
     ThisCall,
-    /// The proposal on the record this call descends from, where the record names one — `None`
-    /// fails the pin closed. A pin rebuilds either call's arguments.
-    Proposal(Option<&'a ResolvedCall>),
+    /// The proposal on the record this call descends from. A pin rebuilds either call's
+    /// arguments. A caller that cannot read the proposal refuses its own record rather than
+    /// falling back here.
+    Proposal(&'a ResolvedCall),
 }
 
 impl AnsweredFor<'_> {
-    /// Is this pin an answer about one of the calls it may have been given for?
+    /// Is this pin an answer about one of the calls it may have been given for? A rewritten call
+    /// is the uncommon one, so the proposal is tried first: where the two are the same call the
+    /// order costs nothing, and where they differ it saves rebuilding the rewrite's own value.
     fn admits(
         &self,
         contract: &ToolContract,
@@ -437,11 +440,10 @@ impl AnsweredFor<'_> {
         let rebuilds = |candidate: &ResolvedCall| {
             pinned.args() == contract.resolver_args_digest(pinned.uses(), candidate.canonical_arguments().value())
         };
-        rebuilds(call)
-            || match self {
-                AnsweredFor::ThisCall => false,
-                AnsweredFor::Proposal(proposal) => proposal.is_some_and(rebuilds),
-            }
+        match self {
+            AnsweredFor::ThisCall => rebuilds(call),
+            AnsweredFor::Proposal(proposal) => rebuilds(proposal) || rebuilds(call),
+        }
     }
 }
 
@@ -974,7 +976,7 @@ mod tests {
                 &registry,
                 contract,
                 &packet.clone().with_tool_resolutions(vec![answer_for("payroll.md")]),
-                AnsweredFor::Proposal(Some(&payroll)),
+                AnsweredFor::Proposal(&payroll),
             )
             .is_ok()
         );
@@ -984,18 +986,8 @@ mod tests {
             validate_tool_resolutions(
                 &registry,
                 contract,
-                &packet.clone().with_tool_resolutions(vec![answer_for("ledger.md")]),
-                AnsweredFor::Proposal(Some(&payroll)),
-            ),
-            Err(ToolResolutionRefusal::Foreign(resolver)) if resolver == "acl"
-        ));
-        // And a record that names no proposal fails the answer closed.
-        assert!(matches!(
-            validate_tool_resolutions(
-                &registry,
-                contract,
-                &packet.with_tool_resolutions(vec![answer_for("payroll.md")]),
-                AnsweredFor::Proposal(None),
+                &packet.with_tool_resolutions(vec![answer_for("ledger.md")]),
+                AnsweredFor::Proposal(&payroll),
             ),
             Err(ToolResolutionRefusal::Foreign(resolver)) if resolver == "acl"
         ));

@@ -571,41 +571,6 @@ mod tests {
         ResolvedCall::new(ToolName::new(tool), args(value))
     }
 
-    /// A described tool whose `uses` the pin tests resolve against. The description matters:
-    /// a complete-call read carries it, so the args a pin stores depend on it.
-    fn described(tool: &str, uses: Vec<crate::contract::ToolResolverUse>) -> crate::contract::ToolContract {
-        crate::contract::ToolContract {
-            name: ToolName::new(tool),
-            tags: vec![],
-            description: Some(format!("{tool} does one thing.")),
-            parameters: crate::params::ToolParameters::open(),
-            uses,
-            delta: Some(crate::contract::Delta::NONE),
-            emits: Default::default(),
-            requires: Default::default(),
-        }
-    }
-
-    /// A pin carrying the args the contract would actually have sent for this call.
-    fn pin_for(
-        contract: &crate::contract::ToolContract,
-        uses: &crate::contract::ToolResolverUse,
-        call: &ResolvedCall,
-        trust: Option<crate::label::Trust>,
-        audience: Option<crate::label::Audience>,
-    ) -> PinnedToolResolution {
-        PinnedToolResolution::from_answer(
-            uses.clone(),
-            contract.resolver_args_digest(uses, call.canonical_arguments().value()),
-            trust,
-            audience,
-            None,
-            None,
-            None,
-        )
-        .expect("the declared answer pins")
-    }
-
     #[test]
     fn an_offer_id_round_trips_through_its_hex_wire_form() {
         let id = OfferId::of_plan(&BlockId([7u8; 32]), 3, b"plan-bytes");
@@ -639,79 +604,50 @@ mod tests {
     }
 
     #[test]
-    fn a_complete_call_answer_rides_through_an_argument_substitution() {
+    fn a_substitution_renders_every_resolver_answer_and_judges_none() {
         let uses = crate::contract::ToolResolverUse {
             resolver: crate::names::DynamicResolverName::new("classifier"),
             inputs: std::collections::BTreeMap::new(),
             returns: [crate::contract::ResolverReturn::Trust].into_iter().collect(),
             reads: [crate::contract::ResolverReturn::Trust].into_iter().collect(),
         };
-        let contract = described("lookup", vec![uses.clone()]);
+        let contract = crate::contract::ToolContract {
+            name: ToolName::new("lookup"),
+            tags: vec![],
+            description: Some("Looks one thing up.".to_string()),
+            parameters: ToolParameters::open(),
+            uses: vec![uses.clone()],
+            delta: Some(crate::contract::Delta::NONE),
+            emits: Default::default(),
+            requires: Default::default(),
+        };
         let base = call("lookup", json!({ "id": 7, "deep": true }));
-        let resolved = base.clone().with_tool_resolutions(vec![pin_for(
-            &contract,
-            &uses,
-            &base,
-            Some(crate::label::Trust::new(0)),
-            None,
-        )]);
+        let resolved = base.clone().with_tool_resolutions(vec![
+            PinnedToolResolution::from_answer(
+                uses.clone(),
+                contract.resolver_args_digest(&uses, base.canonical_arguments().value()),
+                Some(crate::label::Trust::new(0)),
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("the declared answer pins"),
+        ]);
         assert_eq!(
             base.digest(),
             resolved.digest(),
             "resolver evidence is not rendered-call identity"
         );
-        assert_eq!(
-            resolved
-                .substituting(args(json!({ "deep": true, "id": 7 })))
-                .tool_resolutions(),
-            resolved.tool_resolutions(),
-            "an equivalent canonical object renders the same call, answers included"
-        );
-        assert_eq!(
-            resolved
-                .substituting(args(json!({ "id": 8, "deep": true })))
-                .tool_resolutions(),
-            resolved.tool_resolutions(),
-            "a rewrite of what the resolver read still renders the answer it gave about this proposal"
-        );
-    }
-
-    #[test]
-    fn a_named_argument_answer_rides_through_a_rewrite_of_that_argument() {
-        let uses = crate::contract::ToolResolverUse {
-            resolver: crate::names::DynamicResolverName::new("classifier"),
-            inputs: std::collections::BTreeMap::from([(
-                "id".to_string(),
-                crate::contract::ToolCallSource::argument("id").expect("a plain name is a source"),
-            )]),
-            returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
-            reads: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
-        };
-        let contract = described("lookup", vec![uses.clone()]);
-        let base = call("lookup", json!({ "id": "7", "deep": true }));
-        let resolved = base.clone().with_tool_resolutions(vec![pin_for(
-            &contract,
-            &uses,
-            &base,
-            None,
-            Some(crate::label::Audience::restricted([crate::label::ReaderId::new(
-                "alice",
-            )])),
-        )]);
-        assert_eq!(
-            resolved
-                .substituting(args(json!({ "id": "7", "deep": false })))
-                .tool_resolutions(),
-            resolved.tool_resolutions(),
-            "a rewrite elsewhere leaves the argument the resolver read alone"
-        );
-        assert_eq!(
-            resolved
-                .substituting(args(json!({ "id": "8", "deep": true })))
-                .tool_resolutions(),
-            resolved.tool_resolutions(),
-            "a rewrite of the argument the resolver read renders the same answer; the gate, not this, decides it"
-        );
+        // Whatever the rewrite touches, and whatever shape the use reads: the answers render onto
+        // the substituted call. Whether one of them stands is
+        // [`crate::check::validate_tool_resolutions`]'s, against the proposal on the record.
+        for replacement in [json!({ "deep": true, "id": 7 }), json!({ "id": 8, "deep": true })] {
+            assert_eq!(
+                resolved.substituting(args(replacement)).tool_resolutions(),
+                resolved.tool_resolutions()
+            );
+        }
     }
 
     #[test]

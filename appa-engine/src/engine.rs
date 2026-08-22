@@ -2990,11 +2990,14 @@ impl Engine {
         let substituted = substituted_call(contract, call, body)?;
         // The rewrite carries the answers a resolver gave about the proposal this subject stands
         // on; they are admissible here because that proposal is on the record.
+        let proposal = views
+            .proposed_call(&recorded.subject)
+            .ok_or(TransitionError::SanitizerUnapplicable)?;
         if check::validate_tool_resolutions(
             &self.registry,
             contract,
             &substituted,
-            check::AnsweredFor::Proposal(views.proposed_call(&recorded.subject)),
+            check::AnsweredFor::Proposal(proposal),
         )
         .is_err()
         {
@@ -3117,8 +3120,7 @@ impl Engine {
 
     fn offer_call(&self, views: &Views, recorded: &crate::projection::RecordedOffer) -> ResolvedCall {
         views
-            .call_candidate(&recorded.subject)
-            .or_else(|| views.proposed_call(&recorded.subject))
+            .standing_call(&recorded.subject)
             .expect("an opened offer names a proposal of a decided batch, or the candidate that replaced it")
             .clone()
     }

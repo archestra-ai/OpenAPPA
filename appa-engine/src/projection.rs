@@ -1305,6 +1305,13 @@ impl Views<'_> {
             .flatten()
     }
 
+    /// The call this subject stands on now: the candidate an input hop derived, or the proposal
+    /// where no hop has run. The one home of that precedence — every read of "the call this
+    /// subject is about" goes through it.
+    pub(crate) fn standing_call(&self, subject: &SubjectKey) -> Option<&ResolvedCall> {
+        self.call_candidate(subject).or_else(|| self.proposed_call(subject))
+    }
+
     /// The sanitizers this subject's chain has already spent. Empty for a subject no
     /// hop has touched, so a first hop and an unspent chain read alike.
     pub(crate) fn lineage(&self, subject: &SubjectKey) -> SanitizerLineage {
