@@ -428,21 +428,13 @@ pub(crate) enum AnsweredFor<'a> {
 }
 
 impl AnsweredFor<'_> {
-    /// Is this pin an answer about one of the calls it may have been given for? A rewritten call
-    /// is the uncommon one, so the proposal is tried first: where the two are the same call the
-    /// order costs nothing, and where they differ it saves rebuilding the rewrite's own value.
-    fn admits(
-        &self,
-        contract: &ToolContract,
-        call: &ResolvedCall,
-        pinned: &crate::contract::PinnedToolResolution,
-    ) -> bool {
-        let rebuilds = |candidate: &ResolvedCall| {
-            pinned.args() == contract.resolver_args_digest(pinned.uses(), candidate.canonical_arguments().value())
-        };
+    /// The call a pin must rebuild the `args` of. One call, not a set: a pin is only ever created
+    /// about a proposal, so where a proposal is on the record it is the whole test — a rewritten
+    /// call that happens to rebuild its own `args` rebuilds the proposal's too.
+    fn reference<'a>(&'a self, call: &'a ResolvedCall) -> &'a ResolvedCall {
         match self {
-            AnsweredFor::ThisCall => rebuilds(call),
-            AnsweredFor::Proposal(proposal) => rebuilds(proposal) || rebuilds(call),
+            AnsweredFor::ThisCall => call,
+            AnsweredFor::Proposal(proposal) => proposal,
         }
     }
 }
@@ -454,13 +446,17 @@ pub(crate) fn validate_tool_resolutions(
     answered_for: AnsweredFor<'_>,
 ) -> Result<(), ToolResolutionRefusal> {
     let declared = &contract.uses;
+    let answered_for = answered_for.reference(call);
     let mut seen: Vec<&ToolResolverUse> = Vec::new();
     for pinned in call.tool_resolutions() {
         let uses = pinned.uses();
         // An answer belongs here only if the tool declares that use *and* the answer was given for
-        // the exact value one of the calls it may be about would send it. Rebuilding the payload is
-        // what keeps one call's answer from standing in for an unrelated call's.
-        if !declared.contains(uses) || seen.contains(&uses) || !answered_for.admits(contract, call, pinned) {
+        // the exact value the call it is about would send it. Rebuilding the payload is what keeps
+        // one call's answer from standing in for an unrelated call's.
+        if !declared.contains(uses)
+            || seen.contains(&uses)
+            || pinned.args() != contract.resolver_args_digest(uses, answered_for.canonical_arguments().value())
+        {
             return Err(ToolResolutionRefusal::Foreign(uses.resolver.as_str().to_string()));
         }
         // Every value the pin carries, not only the ones this tool reads: an unread result
@@ -986,7 +982,19 @@ mod tests {
             validate_tool_resolutions(
                 &registry,
                 contract,
-                &packet.with_tool_resolutions(vec![answer_for("ledger.md")]),
+                &packet.clone().with_tool_resolutions(vec![answer_for("ledger.md")]),
+                AnsweredFor::Proposal(&payroll),
+            ),
+            Err(ToolResolutionRefusal::Foreign(resolver)) if resolver == "acl"
+        ));
+        // Nor an answer about the rewrite itself. A resolver is asked about a proposal and never
+        // about a rewrite of one, so an answer that rebuilds only the rewrite came from nowhere
+        // this record names.
+        assert!(matches!(
+            validate_tool_resolutions(
+                &registry,
+                contract,
+                &packet.with_tool_resolutions(vec![answer_for("packet.md")]),
                 AnsweredFor::Proposal(&payroll),
             ),
             Err(ToolResolutionRefusal::Foreign(resolver)) if resolver == "acl"
