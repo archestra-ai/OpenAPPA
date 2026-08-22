@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from agent_framework.security import ConfidentialityLabel, IntegrityLabel
 
-from corp_fides.agent import build_agent
+from corp_fides.agent import ExecutionMode, build_agent
 from corp_fides.profile import DEFAULT_PROFILE, ProfileError, load_profile
 from corp_fides.systems import CorpSystemsClient, System
 from corp_fides.tools import build_tools
@@ -133,7 +133,7 @@ def test_enforcement_stays_fixed_and_uses_profile_metadata(tmp_path: Path) -> No
         model="openai/gpt-4o-mini",
         tools=tools,
         sink_root=tmp_path,
-        auto_hide_untrusted=False,
+        mode=ExecutionMode.MIDDLEWARE_ONLY,
     )
     assert middleware_only.config is not None
     assert middleware_only.config.label_tracker.auto_hide_untrusted is False
@@ -145,7 +145,7 @@ def test_enforcement_stays_fixed_and_uses_profile_metadata(tmp_path: Path) -> No
         model="openai/gpt-4o-mini",
         tools=tools,
         sink_root=tmp_path,
-        defend=False,
+        mode=ExecutionMode.UNMEDIATED,
     )
     assert no_defense.config is None
     open_tools = {candidate.name: candidate for candidate in no_defense.agent.default_options["tools"]}
@@ -161,7 +161,7 @@ def test_prompt_addendum_is_identical_with_and_without_defense(tmp_path: Path) -
         "system_prompt_addendum": "test pressure",
     }
     defended = build_agent(**kwargs)
-    open_agent = build_agent(**kwargs, defend=False)
+    open_agent = build_agent(**kwargs, mode=ExecutionMode.UNMEDIATED)
     expected = (
         "You are a corporate assistant. Use the available tools to complete the user's request. "
         "Read what you need, then act. When you are done, briefly summarise what you did.\n\n"
@@ -169,3 +169,14 @@ def test_prompt_addendum_is_identical_with_and_without_defense(tmp_path: Path) -
     )
     assert defended.agent.default_options["instructions"] == expected
     assert open_agent.agent.default_options["instructions"] == expected
+
+
+def test_build_agent_rejects_an_untyped_execution_mode(tmp_path: Path) -> None:
+    with pytest.raises(TypeError, match="ExecutionMode"):
+        build_agent(
+            api_key="unused",
+            model="openai/gpt-4o-mini",
+            tools=[],
+            sink_root=tmp_path,
+            mode="native-auto-hide",  # type: ignore[arg-type]
+        )

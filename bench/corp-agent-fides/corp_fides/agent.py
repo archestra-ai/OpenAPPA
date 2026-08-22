@@ -12,7 +12,7 @@ around the loop:
   tool that has not opted in, and refuses writing higher-confidentiality data
   to a lower-confidentiality destination (exfiltration).
 
-With ``auto_hide_untrusted=True`` the untrusted forum content is also hidden
+In ``native-auto-hide`` mode the untrusted forum content is also hidden
 from the main model and routed to a separate *quarantine* client, so the
 planted instruction never reaches the planner in the first place. The
 ``send_email`` block is the deterministic backstop underneath that.
@@ -26,6 +26,7 @@ instead — swap :func:`make_chat_client` and nothing else changes.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -65,8 +66,14 @@ def make_chat_client(model: str, api_key: str) -> OpenAIChatCompletionClient:
 @dataclass
 class BuiltAgent:
     agent: Agent
-    config: SecureAgentConfig | None  # None in the no-defense contrast
+    config: SecureAgentConfig | None  # None in the unmediated contrast
     sink_root: Path
+
+
+class ExecutionMode(StrEnum):
+    UNMEDIATED = "unmediated"
+    MIDDLEWARE_ONLY = "middleware-only"
+    NATIVE_AUTO_HIDE = "native-auto-hide"
 
 
 def build_agent(
@@ -75,31 +82,32 @@ def build_agent(
     model: str,
     tools: list[Any],
     sink_root: Path,
-    defend: bool = True,
-    auto_hide_untrusted: bool = True,
+    mode: ExecutionMode = ExecutionMode.NATIVE_AUTO_HIDE,
     quarantine_model: str | None = None,
     system_prompt_addendum: str = "",
 ) -> BuiltAgent:
     """Assemble the corporate agent over the FIDES-labeled tools (built by
     :func:`~.tools.build_tools` over a live :class:`~.systems.CorpSystemsClient`).
 
-    ``defend=True`` installs FIDES via :class:`SecureAgentConfig`; ``defend=False``
-    is the unmediated contrast — the same binary, same loop, same prompt — that
-    lets the planted injection reach ``send_email`` and leak, exactly like the
-    APPA demo's open policy (``bench/corp/policies/open.toml``).
+    The closed execution mode selects unmediated, middleware-only, or native
+    auto-hide behavior. This prevents meaningless flag combinations from
+    silently collapsing to another mode.
     """
+    if not isinstance(mode, ExecutionMode):
+        raise TypeError("mode must be an ExecutionMode")
     client = make_chat_client(model, api_key)
     instructions = PREAMBLE
     if system_prompt_addendum.strip():
         instructions = f"{instructions}\n\n{system_prompt_addendum.strip()}"
 
-    if not defend:
+    if mode is ExecutionMode.UNMEDIATED:
         agent = Agent(client, instructions=instructions, name="corp_assistant_fides", tools=tools)
         return BuiltAgent(agent=agent, config=None, sink_root=sink_root)
 
     # Native FIDES uses a second, tool-less client to process hidden untrusted
     # content. The middleware-only comparison deliberately keeps the same label
     # tracking and policy enforcement while exposing the raw result.
+    auto_hide_untrusted = mode is ExecutionMode.NATIVE_AUTO_HIDE
     quarantine = make_chat_client(quarantine_model or model, api_key) if auto_hide_untrusted else None
     allow_untrusted_tools = {
         candidate.name

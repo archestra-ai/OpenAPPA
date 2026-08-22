@@ -3,7 +3,7 @@
 Fixed configurations, all driven through the demos' existing CLIs — the bench
 adds no flags of its own. One shared model (``--model``) keeps the comparison
 defense-vs-defense: the appa agent guarded, branching-disabled (the ablation),
-and open, plus FIDES with and without its defense.
+and open, plus FIDES middleware-only, native auto-hide, and unmediated modes.
 """
 
 from __future__ import annotations
@@ -88,20 +88,21 @@ AGENTS: dict[str, Agent] = {
         executable=FIDES_BIN,
         policy_target=PolicyTarget.FIDES,
         mcp_server=CORP_SYSTEMS_BIN,
-        extra_args=("--no-auto-hide",),
+        extra_args=("--mode", "middleware-only"),
     ),
     "fides-native": Agent(
         name="fides-native",
         executable=FIDES_BIN,
         policy_target=PolicyTarget.FIDES,
         mcp_server=CORP_SYSTEMS_BIN,
+        extra_args=("--mode", "native-auto-hide"),
     ),
     "fides-open": Agent(
         name="fides-open",
         executable=FIDES_BIN,
         policy_target=PolicyTarget.FIDES,
         mcp_server=CORP_SYSTEMS_BIN,
-        extra_args=("--no-defense",),
+        extra_args=("--mode", "unmediated"),
     ),
 }
 

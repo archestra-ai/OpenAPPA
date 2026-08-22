@@ -165,7 +165,7 @@ async def test_native_fides_hides_then_inspects_untrusted_content() -> None:
 
 
 @pytest.mark.asyncio
-async def test_native_inspection_cannot_lose_its_store_to_middleware_concurrency() -> None:
+async def test_fides_session_owns_the_trajectory_limit_until_close() -> None:
     policy = fides_policy("memory_poison", {"memory_read", "memory_write", "respond_to_user"})
     native = FidesSession(policy, native=True)
     middleware = FidesSession(policy)
@@ -178,16 +178,22 @@ async def test_native_inspection_cannot_lose_its_store_to_middleware_concurrency
         assert isinstance(read, FidesAllowed)
         variable_id = json.loads(read.content)["variable_id"]
 
-        inspected, overlapping = await asyncio.gather(
-            native.invoke("inspect_variable", {"variable_id": variable_id}, None),
+        inspected_task = asyncio.create_task(native.invoke("inspect_variable", {"variable_id": variable_id}, None))
+        overlapping_task = asyncio.create_task(
             middleware.invoke(
                 "memory_read",
                 {"key": "other"},
                 lambda _: _result("other sample content"),
-            ),
+            )
         )
+        inspected = await inspected_task
         assert isinstance(inspected, FidesAllowed)
         assert "native sample content" in inspected.content
+        await asyncio.sleep(0)
+        assert not overlapping_task.done()
+
+        native.close()
+        overlapping = await overlapping_task
         assert isinstance(overlapping, FidesAllowed)
     finally:
         native.close()

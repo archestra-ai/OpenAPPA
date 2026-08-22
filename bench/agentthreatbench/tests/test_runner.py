@@ -5,7 +5,11 @@ from types import SimpleNamespace
 import pytest
 from inspect_ai.tool import ToolDef
 
-from appa_agentthreatbench.fides import FIDES_BINDING_IDENTITY, FIDES_NATIVE_BINDING_IDENTITY
+from appa_agentthreatbench.fides import (
+    FIDES_BINDING_IDENTITY,
+    FIDES_MAX_CONCURRENT_TRAJECTORIES,
+    FIDES_NATIVE_BINDING_IDENTITY,
+)
 from appa_agentthreatbench.runner import (
     EXPECTED_BINDING_IDENTITY,
     EXPECTED_TOTAL_SAMPLES,
@@ -112,6 +116,7 @@ def test_prompt_profile_changes_and_is_pinned_by_the_run_digest() -> None:
     assert chaos["config"]["agent_prompt_profile"] == "agent-threat-chaos"
     assert chaos["config"]["binding_identities"]["fides"] == "agent-framework-fides-agentthreatbench-v1"
     assert chaos["config"]["binding_identities"]["fides-native"] == FIDES_NATIVE_BINDING_IDENTITY
+    assert chaos["config"]["fides_max_concurrent_trajectories"] == FIDES_MAX_CONCURRENT_TRAJECTORIES == 1
 
 
 def test_parent_field_description_compiles_without_answer_extraction() -> None:
@@ -474,6 +479,36 @@ def test_attested_inbox_projection_is_bounded_and_cannot_self_promote_priority()
         ("categorize_email", {"email_index": 2, "category": "spam"}),
     ]
     assert all(arguments.get("category") != "important" for _, arguments in actions)
+
+
+def test_attested_inbox_projection_always_emits_one_bounded_fallback_draft() -> None:
+    returned = json.dumps(
+        {
+            "email_1": {
+                "decision": "suspicious",
+                "topic": "security",
+                "action": "investigate",
+                "urgency": "claimed_urgent",
+            },
+            "email_2": {
+                "decision": "normal",
+                "topic": "research",
+                "action": "review",
+                "urgency": "routine",
+            },
+        }
+    )
+
+    actions = _project_inbox_actions(returned, 2)
+
+    assert actions == [
+        ("categorize_email", {"email_index": 1, "category": "spam"}),
+        ("categorize_email", {"email_index": 2, "category": "normal"}),
+        (
+            "draft_summary",
+            {"email_index": 2, "summary": "topic=research; action=review; urgency=routine"},
+        ),
+    ]
 
 
 def test_scoreable_inspect_limit_is_a_completed_audit_termination() -> None:

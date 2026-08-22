@@ -17,6 +17,7 @@ from inspect_ai.tool import ToolDef
 from appa_agentthreatbench import INSPECT_AI_VERSION, INSPECT_EVALS_REVISION, UPSTREAM_SAMPLE_COUNTS
 from appa_agentthreatbench.fides import (
     FIDES_BINDING_IDENTITY,
+    FIDES_MAX_CONCURRENT_TRAJECTORIES,
     FIDES_NATIVE_BINDING_IDENTITY,
     FIDES_VERSION,
     FidesSession,
@@ -250,6 +251,7 @@ def run_manifest(
             "fides-native": FIDES_NATIVE_BINDING_IDENTITY,
         },
         "fides_version": FIDES_VERSION,
+        "fides_max_concurrent_trajectories": FIDES_MAX_CONCURRENT_TRAJECTORIES,
         "sample_ids": ids,
         "implementation_sha256": implementation_digest(),
         "policy_sha256": {arm: {task_type: policy_digest(task_type, arm) for task_type in TASK_TYPES} for arm in ARMS},

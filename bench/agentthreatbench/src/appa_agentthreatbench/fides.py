@@ -36,10 +36,12 @@ FIDES_VERSION = version("agent-framework-core")
 # Agent Framework 1.13 stores the currently executing label tracker in a
 # thread-local during every middleware invocation. Inspect executes many
 # samples as asyncio tasks on one thread, and the official security tools yield
-# before consulting that thread-local. All FIDES invocations must therefore be
-# serialized: a middleware-only call could otherwise clear a native sample's
-# active variable store just as readily as another native call.
-_FIDES_TOOL_LOCK = asyncio.Lock()
+# before consulting that thread-local. Keep one complete FIDES trajectory in
+# flight per process so samples cannot interleave tracker state. The lock is
+# acquired by a session's first mediated call and released only by close(); it
+# deliberately does not serialize and re-queue every individual tool call.
+FIDES_MAX_CONCURRENT_TRAJECTORIES = 1
+_FIDES_TRAJECTORY_LOCK = asyncio.Lock()
 
 
 @dataclass(frozen=True)
@@ -79,9 +81,6 @@ class FidesPolicy:
     def serialize(self) -> str:
         payload = {name: policy.payload() for name, policy in sorted(self.tools.items())}
         return json.dumps(payload, sort_keys=True, separators=(",", ":"))
-
-    def digest(self) -> str:
-        return hashlib.sha256(self.serialize().encode()).hexdigest()
 
 
 def _policy(
@@ -188,6 +187,7 @@ class FidesSession:
         self.security_tools = {tool.name: tool for tool in self.config.get_tools()} if native else {}
         self._turn = 0
         self._closed = False
+        self._owns_trajectory = False
 
     @property
     def binding_identity(self) -> str:
@@ -195,6 +195,14 @@ class FidesSession:
 
     def digest(self) -> str:
         return fides_policy_digest(self.policy, native=self.native)
+
+    async def start(self) -> None:
+        """Own the one in-process FIDES trajectory slot until ``close``."""
+        if self._closed:
+            raise RuntimeError("the FIDES episode is closed")
+        if not self._owns_trajectory:
+            await _FIDES_TRAJECTORY_LOCK.acquire()
+            self._owns_trajectory = True
 
     async def invoke(
         self,
@@ -204,6 +212,7 @@ class FidesSession:
     ) -> FidesResult:
         if self._closed:
             raise RuntimeError("the FIDES episode is closed")
+        await self.start()
         policy = self.policy.tools.get(tool)
         security_tool = self.security_tools.get(tool)
         if policy is None and security_tool is None:
@@ -294,14 +303,17 @@ class FidesSession:
             )
 
         try:
-            async with _FIDES_TOOL_LOCK:
-                result = await mediate()
+            return await mediate()
         finally:
             self._turn += 1
-        return result
 
     def close(self) -> list[dict[str, object]]:
         if self._closed:
             return []
         self._closed = True
-        return list(self.config.get_audit_log())
+        try:
+            return list(self.config.get_audit_log())
+        finally:
+            if self._owns_trajectory:
+                self._owns_trajectory = False
+                _FIDES_TRAJECTORY_LOCK.release()

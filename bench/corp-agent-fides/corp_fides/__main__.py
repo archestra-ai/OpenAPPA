@@ -2,7 +2,7 @@
 mediated by FIDES.
 
     corp-agent-fides "Summarise Alice Chen's HR record"      # FIDES on (default)
-    corp-agent-fides --no-defense "<injection prompt>"       # the unmediated leak
+    corp-agent-fides --mode unmediated "<injection prompt>"  # the unmediated leak
     corp-agent-fides --chat
 
 Needs an OpenRouter key: ``--api-key``, ``$OPENROUTER_API_KEY``, or a ``.env``
@@ -17,7 +17,7 @@ import os
 import sys
 from pathlib import Path
 
-from .agent import build_agent
+from .agent import ExecutionMode, build_agent
 from .profile import DEFAULT_PROFILE, Profile, ProfileError, load_profile
 from .systems import CorpSystemsClient, System, resolve_corpus_root, resolve_sink_root
 from .tools import build_tools
@@ -121,16 +121,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("prompt", nargs="?", help="The task for the agent. Omit with --chat for a REPL.")
     parser.add_argument("--chat", action="store_true", help="Interactive REPL instead of a one-shot task.")
     parser.add_argument(
-        "--no-defense",
-        dest="defend",
-        action="store_false",
-        help="Disable FIDES — the unmediated contrast (the leak).",
-    )
-    parser.add_argument(
-        "--no-auto-hide",
-        dest="auto_hide_untrusted",
-        action="store_false",
-        help="Keep FIDES label tracking and policy enforcement, but expose untrusted results to the main model.",
+        "--mode",
+        type=ExecutionMode,
+        choices=list(ExecutionMode),
+        default=ExecutionMode.NATIVE_AUTO_HIDE,
+        help="Execution mode (default: native-auto-hide).",
     )
     parser.add_argument("--model", default=os.environ.get("FIDES_DEMO_MODEL", "anthropic/claude-sonnet-5"))
     parser.add_argument("--quarantine-model", default=os.environ.get("FIDES_QUARANTINE_MODEL") or None)
@@ -166,12 +161,11 @@ def main(argv: list[str] | None = None) -> int:
     corpus_root = resolve_corpus_root(args.data_root)
     sink_root = resolve_sink_root(args.sink_root)
     if not args.quiet:
-        if not args.defend:
-            state = "NO DEFENSE (contrast)"
-        elif args.auto_hide_untrusted:
-            state = "FIDES ON (native auto-hide)"
-        else:
-            state = "FIDES ON (middleware-only)"
+        state = {
+            ExecutionMode.UNMEDIATED: "NO DEFENSE (contrast)",
+            ExecutionMode.MIDDLEWARE_ONLY: "FIDES ON (middleware-only)",
+            ExecutionMode.NATIVE_AUTO_HIDE: "FIDES ON (native auto-hide)",
+        }[args.mode]
         print(
             f"corpus {corpus_root} — sink {sink_root} — model {args.model} — {state}",
             file=sys.stderr,
@@ -193,8 +187,7 @@ def main(argv: list[str] | None = None) -> int:
                 model=args.model,
                 tools=build_tools(client, available, profile=args.profile),
                 sink_root=sink_root,
-                defend=args.defend,
-                auto_hide_untrusted=args.auto_hide_untrusted,
+                mode=args.mode,
                 quarantine_model=args.quarantine_model,
                 system_prompt_addendum=os.environ.get("APPA_AGENT_PROMPT_ADDENDUM", ""),
             )
