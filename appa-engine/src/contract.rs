@@ -248,9 +248,11 @@ pub struct RequiredAudience {
 
 impl RequiredAudience {
     fn is_literal(&self) -> bool {
-        self.includes.iter().chain(self.cap.iter()).all(
-            |audience| !matches!(audience, Audience::Restricted(readers) if !readers.iter().all(ReaderId::is_literal)),
-        )
+        self.includes.iter().chain(self.cap.iter()).all(|audience| {
+            audience
+                .readers()
+                .is_none_or(|readers| readers.iter().all(ReaderId::is_literal))
+        })
     }
 }
 
@@ -294,7 +296,11 @@ impl PinnedToolResolution {
         {
             return None;
         }
-        if matches!(&audience, Some(Audience::Restricted(readers)) if !readers.iter().all(ReaderId::is_literal)) {
+        if audience
+            .as_ref()
+            .and_then(Audience::readers)
+            .is_some_and(|readers| !readers.iter().all(ReaderId::is_literal))
+        {
             return None;
         }
         if let Some(required) = &required_audience

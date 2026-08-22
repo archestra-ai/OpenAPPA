@@ -3580,6 +3580,9 @@ mod tests {
             Just(Audience::Public),
             Just(Audience::restricted([ReaderId::new("r0")])),
             Just(Audience::restricted([ReaderId::new("r0"), ReaderId::new("r1")])),
+            // The bottom: an audience nothing can be released to. Reachable at runtime whenever two
+            // disjoint reader sets fold together, so the planner must be exercised against it.
+            Just(Audience::restricted([])),
         ]
     }
 

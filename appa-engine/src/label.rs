@@ -100,6 +100,16 @@ impl Audience {
         Audience::Restricted(readers.into_iter().collect())
     }
 
+    /// The reader IDs this audience names, where it names any. A non-list state holds no reader, so
+    /// every literalness check reads this instead of matching one variant and letting the rest fall
+    /// through — a state that names nobody in particular has no reader to spell wrongly.
+    pub(crate) fn readers(&self) -> Option<&BTreeSet<ReaderId>> {
+        match self {
+            Audience::Public => None,
+            Audience::Restricted(readers) => Some(readers),
+        }
+    }
+
     fn combine(&self, other: &Self) -> Self {
         match (self, other) {
             (Audience::Public, x) | (x, Audience::Public) => x.clone(),
@@ -109,18 +119,17 @@ impl Audience {
         }
     }
 
-    /// `self ⊇ recipients` — the trajectory's readers include every named recipient.
+    /// `self ⊇ recipients` — the trajectory's audience covers every named recipient. This is
+    /// [`within`](Audience::within) read from the other end, and it is *derived* from it rather
+    /// than written out a second time: one order, stated once, so the two directions cannot drift.
     /// Crate-visible because mandate-power comparison asks it of a substitution's
     /// declared `to`, which is a plain audience rather than one value's dimension.
     pub(crate) fn includes(&self, recipients: &Audience) -> bool {
-        match (self, recipients) {
-            (Audience::Public, _) => true,
-            (Audience::Restricted(_), Audience::Public) => false,
-            (Audience::Restricted(a), Audience::Restricted(r)) => r.is_subset(a),
-        }
+        recipients.within(self)
     }
 
-    /// `self ⊆ cap` — the trajectory's readers stay within the tool's declared cap. Crate-visible
+    /// `self ⊆ cap` — the trajectory's audience stays within the tool's declared cap. This is *the*
+    /// order on audiences; every other comparison is written in terms of it. Crate-visible
     /// because mandate-power comparison orders reader ceilings by this same inclusion.
     pub(crate) fn within(&self, cap: &Audience) -> bool {
         match (self, cap) {
@@ -416,6 +425,54 @@ mod tests {
     }
 
     proptest! {
+        // The audience order itself. Every audience comparison in the engine is written in terms of
+        // `within`, so these five laws are what the rest of the algebra stands on: a check that
+        // ranks two reader ceilings, a planner that orders remedies, and the fold all read the same
+        // relation, and would all be wrong together if it were not an order whose meet is `combine`.
+
+        #[test]
+        fn the_audience_order_is_reflexive(a in audience_strategy()) {
+            prop_assert!(a.within(&a));
+        }
+
+        #[test]
+        fn the_audience_order_is_antisymmetric(a in audience_strategy(), b in audience_strategy()) {
+            prop_assume!(a.within(&b) && b.within(&a));
+            prop_assert_eq!(a, b);
+        }
+
+        #[test]
+        fn the_audience_order_is_transitive(
+            a in audience_strategy(),
+            b in audience_strategy(),
+            c in audience_strategy(),
+        ) {
+            prop_assume!(a.within(&b) && b.within(&c));
+            prop_assert!(a.within(&c));
+        }
+
+        #[test]
+        fn combine_is_the_greatest_lower_bound(
+            a in audience_strategy(),
+            b in audience_strategy(),
+            c in audience_strategy(),
+        ) {
+            let meet = a.combine(&b);
+            prop_assert!(meet.within(&a), "the meet lies below its left operand");
+            prop_assert!(meet.within(&b), "the meet lies below its right operand");
+            if c.within(&a) && c.within(&b) {
+                prop_assert!(c.within(&meet), "every common lower bound lies below the meet");
+            }
+        }
+
+        #[test]
+        fn the_meet_is_the_left_operand_exactly_when_it_is_the_lower_one(
+            a in audience_strategy(),
+            b in audience_strategy(),
+        ) {
+            prop_assert_eq!(a.combine(&b) == a, a.within(&b));
+        }
+
         #[test]
         fn combine_is_commutative(a in partial_strategy(), b in partial_strategy()) {
             prop_assert_eq!(a.combine(&b), b.combine(&a));

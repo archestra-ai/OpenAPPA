@@ -377,12 +377,16 @@ fn worst_case_plan_alternatives(
             HistoryRequirement::NoPrior(_) => None,
         })
         .collect();
-    let has_cap = tool.requires.label.audience.iter().any(|requirement| {
-        matches!(
-            requirement,
-            AudienceRequirement::Cap(DeclaredAudience::Restricted { .. })
-        )
-    }) || tool.resolver_owns(crate::contract::ResolverReturn::RequiredAudience);
+    let has_cap = tool
+        .requires
+        .label
+        .audience
+        .iter()
+        .any(|requirement| match requirement {
+            AudienceRequirement::Cap(cap) => cap.narrows(),
+            AudienceRequirement::Includes(_) => false,
+        })
+        || tool.resolver_owns(crate::contract::ResolverReturn::RequiredAudience);
     let redispatches = tools
         .values()
         .filter(|candidate| {
@@ -390,7 +394,7 @@ fn worst_case_plan_alternatives(
                 || (has_cap
                     && matches!(
                         candidate.delta.as_ref().and_then(|delta| delta.audience.as_ref()),
-                        Some(AudienceDelta::Static(DeclaredAudience::Restricted { .. }))
+                        Some(AudienceDelta::Static(audience)) if audience.narrows()
                     ))
         })
         .count() as u128;
@@ -978,17 +982,17 @@ pub(crate) fn check_rank(
 /// member of a restricted set — and the `@` mark names a group only a membership resolver may
 /// expand. The deployment starting label is an [`Audience`] because no operation ever resolves it.
 pub(crate) fn check_readers(audience: &Audience, context: impl Fn() -> String) -> Result<(), LoadError> {
-    let Audience::Restricted(readers) = audience else {
-        return Ok(());
-    };
-    check_literal(readers, context)
+    match audience.readers() {
+        Some(readers) => check_literal(readers, context),
+        None => Ok(()),
+    }
 }
 
 fn check_declared_readers(audience: &DeclaredAudience, context: impl Fn() -> String) -> Result<(), LoadError> {
-    let DeclaredAudience::Restricted { readers, .. } = audience else {
-        return Ok(());
-    };
-    check_literal(readers, context)
+    match audience.readers() {
+        Some(readers) => check_literal(readers, context),
+        None => Ok(()),
+    }
 }
 
 fn check_literal(readers: &BTreeSet<ReaderId>, context: impl Fn() -> String) -> Result<(), LoadError> {

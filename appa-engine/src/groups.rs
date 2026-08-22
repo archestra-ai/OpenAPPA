@@ -72,6 +72,27 @@ impl DeclaredAudience {
         .flatten()
     }
 
+    /// The literal reader IDs this declaration writes, where it writes any. The configuration-side
+    /// counterpart of the runtime accessor, read for the same reason: a state that names nobody in
+    /// particular has no reader to spell wrongly.
+    pub(crate) fn readers(&self) -> Option<&BTreeSet<ReaderId>> {
+        match self {
+            DeclaredAudience::Public => None,
+            DeclaredAudience::Restricted { readers, .. } => Some(readers),
+        }
+    }
+
+    /// Does resolving this declaration restrict the audience at all? `Public` is the fold identity
+    /// and moves nothing; every other state moves it. The load lints that size the planner ask
+    /// exactly this — never whether the declaration happens to name concrete readers, which is a
+    /// different question with the same answer only for the two states that existed first.
+    pub(crate) fn narrows(&self) -> bool {
+        match self {
+            DeclaredAudience::Public => false,
+            DeclaredAudience::Restricted { .. } => true,
+        }
+    }
+
     /// The reader set this declaration means under the operation's answers: the literal
     /// readers plus every named group's members. The operation's driver required each group before
     /// anything read it, so a missing answer is an engine fault, not a directory state.
