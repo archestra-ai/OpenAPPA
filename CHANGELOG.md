@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.3.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.2.0...v0.3.0) (2026-08-22)
+
+
+### Features
+
+* add first-visit reader-ping prompt ([#33](https://github.com/archestra-ai/OpenAPPA/issues/33)) ([de8d686](https://github.com/archestra-ai/OpenAPPA/commit/de8d686584eab3a58f9a50470c02d51757b77cf4))
+* add proposal docs UI ([#55](https://github.com/archestra-ai/OpenAPPA/issues/55)) ([2ddfbd4](https://github.com/archestra-ai/OpenAPPA/commit/2ddfbd4b5ea005549fdb9d2c013aa2a6a7a0761d))
+* **bench:** add AgentThreatBench harness with OpenAPPA and FIDES comparison arms ([#40](https://github.com/archestra-ai/OpenAPPA/issues/40)) ([e031ab3](https://github.com/archestra-ai/OpenAPPA/commit/e031ab318b24eec2e9ee1ea5657e097adbeb63c8))
+* **bench:** add bench-corp suite and reflect 20-scenario empirical results on website ([#31](https://github.com/archestra-ai/OpenAPPA/issues/31)) ([5b3cc34](https://github.com/archestra-ai/OpenAPPA/commit/5b3cc34562f1a30a3ab21d051b14705b6155acd8))
+* dynamic resolvers declare inputs and results, tools use them ([#57](https://github.com/archestra-ai/OpenAPPA/issues/57)) ([7d8ce6b](https://github.com/archestra-ai/OpenAPPA/commit/7d8ce6b5977540d98a2559e4a0fd31775d486465))
+* **plugin:** forbid tool-switch detours around blocks, and have tool-sync offer a demo prompt ([#26](https://github.com/archestra-ai/OpenAPPA/issues/26)) ([4f40262](https://github.com/archestra-ai/OpenAPPA/commit/4f40262ce0b501732fd8a31d3be6e24f09970cc3))
+* **plugin:** tool-sync leads the demo offer with a bold new-session warning ([#27](https://github.com/archestra-ai/OpenAPPA/issues/27)) ([1d75280](https://github.com/archestra-ai/OpenAPPA/commit/1d752801569d4aac94d1279e9ae323c03e7d9732))
+* **python:** child branches and schema-attested returns ([#36](https://github.com/archestra-ai/OpenAPPA/issues/36)) ([c2ea1b0](https://github.com/archestra-ai/OpenAPPA/commit/c2ea1b0dece7e72c2a2ce9b721f7e3d98e6e7794))
+* suppress reader-ping via ?popup=no ([#42](https://github.com/archestra-ai/OpenAPPA/issues/42)) ([7da41a7](https://github.com/archestra-ai/OpenAPPA/commit/7da41a7a5814cfecfd5310176aa49ab260328e3a))
+* unified tool-level dynamic resolvers with a hardened claude-code classifier ([#45](https://github.com/archestra-ai/OpenAPPA/issues/45)) ([e248b96](https://github.com/archestra-ai/OpenAPPA/commit/e248b96298ede5d2055b49cec8808ffa8c79bee7))
+
+
+### Bug Fixes
+
+* **agent:** make branch and inference limits explicit ([#39](https://github.com/archestra-ai/OpenAPPA/issues/39)) ([52906eb](https://github.com/archestra-ai/OpenAPPA/commit/52906eb275a9f08106bfaf86a322f8b078be3dbd))
+* **website:** state what happens to the reader-ping address ([#48](https://github.com/archestra-ai/OpenAPPA/issues/48)) ([4ed796e](https://github.com/archestra-ai/OpenAPPA/commit/4ed796e7265ecc2a3381423e52b9e3a2a73d09a0))
+
+
+### Documentation
+
+* 🚧 propose resolver envelope v2 ([#49](https://github.com/archestra-ai/OpenAPPA/issues/49)) ([b7e74c1](https://github.com/archestra-ai/OpenAPPA/commit/b7e74c149bcad9cdb52413ae34db86bc073b9f86))
+* **bench:** report 5-rep baseline and redteam-chaos benchmark evaluation ([#32](https://github.com/archestra-ai/OpenAPPA/issues/32)) ([06affe5](https://github.com/archestra-ai/OpenAPPA/commit/06affe5f7ce0a87e0ba0896fb929c2148c076a29))
+* clarify headings and technical copy in how-it-works and contracts ([#29](https://github.com/archestra-ai/OpenAPPA/issues/29)) ([3bca9b6](https://github.com/archestra-ai/OpenAPPA/commit/3bca9b632c22b5794badd7950f690d196076f42b))
+* drop the duplicated merge-commit entries from the 0.2.0 changelog ([#23](https://github.com/archestra-ai/OpenAPPA/issues/23)) ([306a91d](https://github.com/archestra-ai/OpenAPPA/commit/306a91d4bc4323d1afe92a8a356006e17736ec6d))
+* invite readers to the Discord server ([#30](https://github.com/archestra-ai/OpenAPPA/issues/30)) ([27d87a8](https://github.com/archestra-ai/OpenAPPA/commit/27d87a87d3a769e66ec30c31001eaef6f00becf2))
+* propose resolver envelope v2 ([b7e74c1](https://github.com/archestra-ai/OpenAPPA/commit/b7e74c149bcad9cdb52413ae34db86bc073b9f86))
+* refine OpenAPPA onboarding ([#28](https://github.com/archestra-ai/OpenAPPA/issues/28)) ([5e89421](https://github.com/archestra-ai/OpenAPPA/commit/5e894216ece4cf643f4dc4845b15674fea7ce23f))
+* refine proposed resolver interface ([#51](https://github.com/archestra-ai/OpenAPPA/issues/51)) ([9dcd7d4](https://github.com/archestra-ai/OpenAPPA/commit/9dcd7d447874f0ceffb77521c8b46d31c056d392))
+* simplify proposed resolver syntax ([#54](https://github.com/archestra-ai/OpenAPPA/issues/54)) ([039b701](https://github.com/archestra-ai/OpenAPPA/commit/039b70166eba7d5d756d1c3c45e786ddb2712ca3))
+* the uninstall removes the statusline entry it wrote ([#25](https://github.com/archestra-ai/OpenAPPA/issues/25)) ([e3d0f6c](https://github.com/archestra-ai/OpenAPPA/commit/e3d0f6c8b878dc5a635f876ec813962f90c9bf57))
+* use resolver result paths ([#53](https://github.com/archestra-ai/OpenAPPA/issues/53)) ([279f5fd](https://github.com/archestra-ai/OpenAPPA/commit/279f5fd6d8dd3ad624c304209b6da40e8a82c53b))
+
+
+### Code Refactoring
+
+* rename runtime-v2 to runtime and flatten its crates ([#34](https://github.com/archestra-ai/OpenAPPA/issues/34)) ([e65427e](https://github.com/archestra-ai/OpenAPPA/commit/e65427ec8a1773848bb320bd7c04b86134028822))
+* **runtime:** collapse the engine test seam and the accretion around it ([#44](https://github.com/archestra-ai/OpenAPPA/issues/44)) ([6934442](https://github.com/archestra-ai/OpenAPPA/commit/6934442b084d543dc39e16d9195604bf027aeb21))
+
 ## [0.2.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.1.0...v0.2.0) (2026-08-18)
 
 
