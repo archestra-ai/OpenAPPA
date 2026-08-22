@@ -526,7 +526,7 @@ mod tests {
             resolver: crate::names::DynamicResolverName::new("directory"),
             inputs: std::collections::BTreeMap::from([(
                 "room".to_string(),
-                crate::contract::ToolCallSource::Argument("room".to_string()),
+                crate::contract::ToolCallSource::argument("room").expect("a plain name is a source"),
             )]),
             returns: [ResolverReturn::Audience].into_iter().collect(),
             reads: [ResolverReturn::Audience].into_iter().collect(),

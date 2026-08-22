@@ -98,7 +98,26 @@ pub enum ToolCallSource {
     /// `$tool_call.arguments` — the complete argument object.
     Arguments,
     /// `$tool_call.arguments.<name>` — one top-level argument.
-    Argument(String),
+    Argument(ArgumentName),
+}
+
+/// A top-level argument name a source can spell: non-empty and dot-free, so a source always
+/// serializes into a spelling that parses back. The inner string is private, so an argument
+/// source that would strand a persisted trajectory cannot be built at all.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ArgumentName(String);
+
+impl ArgumentName {
+    pub fn new(name: &str) -> Option<ArgumentName> {
+        match name.is_empty() || name.contains('.') {
+            true => None,
+            false => Some(ArgumentName(name.to_string())),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// A source spelling outside the five supported forms.
@@ -120,20 +139,17 @@ impl ToolCallSource {
             "$tool_call.arguments" => Some(ToolCallSource::Arguments),
             // One top-level argument only: an empty name and a nested path are both outside the
             // five forms, and neither has a value the schema can pin.
-            _ => match spelling.strip_prefix("$tool_call.arguments.") {
-                Some(argument) if !argument.is_empty() && !argument.contains('.') => {
-                    Some(ToolCallSource::Argument(argument.to_string()))
-                }
-                _ => None,
-            },
+            _ => spelling
+                .strip_prefix("$tool_call.arguments.")
+                .and_then(ArgumentName::new)
+                .map(ToolCallSource::Argument),
         }
     }
 
     /// The source reading one top-level argument, or `None` when the name is not one a
-    /// spelling can carry. Constructing [`ToolCallSource::Argument`] directly with an empty or
-    /// dotted name would serialize into a spelling that no longer parses.
+    /// spelling can carry.
     pub fn argument(name: &str) -> Option<ToolCallSource> {
-        ToolCallSource::parse(&format!("{TOOL_CALL_ROOT}.arguments.{name}"))
+        ArgumentName::new(name).map(ToolCallSource::Argument)
     }
 
     pub fn spelling(&self) -> String {
@@ -142,7 +158,7 @@ impl ToolCallSource {
             ToolCallSource::Name => format!("{TOOL_CALL_ROOT}.name"),
             ToolCallSource::Description => format!("{TOOL_CALL_ROOT}.description"),
             ToolCallSource::Arguments => format!("{TOOL_CALL_ROOT}.arguments"),
-            ToolCallSource::Argument(argument) => format!("{TOOL_CALL_ROOT}.arguments.{argument}"),
+            ToolCallSource::Argument(argument) => format!("{TOOL_CALL_ROOT}.arguments.{}", argument.as_str()),
         }
     }
 
@@ -638,7 +654,7 @@ impl ToolContract {
             ToolCallSource::Description => serde_json::Value::String(self.described().to_string()),
             ToolCallSource::Arguments => arguments.clone(),
             ToolCallSource::Argument(argument) => arguments
-                .get(argument)
+                .get(argument.as_str())
                 .cloned()
                 .expect("load validation pins a mapped argument to a required top-level property, and every proposal is schema-validated before resolution"),
         }
@@ -752,7 +768,7 @@ mod tests {
             resolver: DynamicResolverName::new("crm-acl"),
             inputs: BTreeMap::from([(
                 "customer_id".to_string(),
-                ToolCallSource::Argument("customer_id".to_string()),
+                ToolCallSource::argument("customer_id").expect("a plain name is a source"),
             )]),
             returns: BTreeSet::from([ResolverReturn::Audience]),
             reads: BTreeSet::from([ResolverReturn::Audience]),
@@ -897,7 +913,10 @@ mod tests {
                 ("tool".to_string(), ToolCallSource::Name),
                 ("purpose".to_string(), ToolCallSource::Description),
                 ("every".to_string(), ToolCallSource::Arguments),
-                ("one".to_string(), ToolCallSource::Argument("timeout".to_string())),
+                (
+                    "one".to_string(),
+                    ToolCallSource::argument("timeout").expect("a plain name is a source"),
+                ),
             ]),
             returns: BTreeSet::from([ResolverReturn::Trust]),
             reads: BTreeSet::from([ResolverReturn::Trust]),

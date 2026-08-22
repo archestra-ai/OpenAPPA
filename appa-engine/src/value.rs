@@ -690,7 +690,7 @@ mod tests {
             resolver: crate::names::DynamicResolverName::new("classifier"),
             inputs: std::collections::BTreeMap::from([(
                 "id".to_string(),
-                crate::contract::ToolCallSource::Argument("id".to_string()),
+                crate::contract::ToolCallSource::argument("id").expect("a plain name is a source"),
             )]),
             returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
             reads: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
@@ -741,7 +741,7 @@ mod tests {
                     resolver: crate::names::DynamicResolverName::new(resolver),
                     inputs: std::collections::BTreeMap::from([(
                         "recipient".to_string(),
-                        crate::contract::ToolCallSource::Argument("recipient".to_string()),
+                        crate::contract::ToolCallSource::argument("recipient").expect("a plain name is a source"),
                     )]),
                     returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
                     reads: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
@@ -777,7 +777,7 @@ mod tests {
                     resolver: crate::names::DynamicResolverName::new(resolver),
                     inputs: std::collections::BTreeMap::from([(
                         "recipient".to_string(),
-                        crate::contract::ToolCallSource::Argument("recipient".to_string()),
+                        crate::contract::ToolCallSource::argument("recipient").expect("a plain name is a source"),
                     )]),
                     returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
                     reads: [crate::contract::ResolverReturn::Audience].into_iter().collect(),

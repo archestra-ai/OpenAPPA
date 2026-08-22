@@ -1416,7 +1416,7 @@ mod tests {
                 .map(|argument| {
                     std::collections::BTreeMap::from([(
                         argument.to_string(),
-                        crate::contract::ToolCallSource::Argument(argument.to_string()),
+                        crate::contract::ToolCallSource::argument(argument).expect("a plain name is a source"),
                     )])
                 })
                 .unwrap_or_default(),
@@ -1578,7 +1578,7 @@ mod tests {
             resolver: crate::names::DynamicResolverName::new("directory"),
             inputs: std::collections::BTreeMap::from([(
                 "room".to_string(),
-                crate::contract::ToolCallSource::Argument("room".to_string()),
+                crate::contract::ToolCallSource::argument("room").expect("a plain name is a source"),
             )]),
             returns: [ResolverReturn::Audience].into_iter().collect(),
             reads: [ResolverReturn::Audience].into_iter().collect(),
@@ -1644,7 +1644,7 @@ mod tests {
             resolver: crate::names::DynamicResolverName::new("channel-members"),
             inputs: std::collections::BTreeMap::from([(
                 "channel".to_string(),
-                crate::contract::ToolCallSource::Argument("channel".to_string()),
+                crate::contract::ToolCallSource::argument("channel").expect("a plain name is a source"),
             )]),
             returns: [ResolverReturn::RequiredAudience].into_iter().collect(),
             reads: [ResolverReturn::RequiredAudience].into_iter().collect(),
@@ -2061,7 +2061,7 @@ mod tests {
                         resolver: crate::names::DynamicResolverName::new("acl"),
                         inputs: std::collections::BTreeMap::from([(
                             "to".to_string(),
-                            crate::contract::ToolCallSource::Argument("to".to_string()),
+                            crate::contract::ToolCallSource::argument("to").expect("a plain name is a source"),
                         )]),
                         returns: [ResolverReturn::Audience].into_iter().collect(),
                         reads: [ResolverReturn::Audience].into_iter().collect(),

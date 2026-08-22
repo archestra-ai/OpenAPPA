@@ -118,7 +118,7 @@ mod tests {
             [uses]
                 if uses.resolver.as_str() == "email-recipient-readers"
                     && uses.inputs.get("to")
-                        == Some(&appa_engine::contract::ToolCallSource::Argument("to".to_string()))
+                        == Some(&appa_engine::contract::ToolCallSource::argument("to").expect("a plain name is a source"))
         ));
         let sanitizers = &checked.config.registry_config().sanitizers;
         assert_eq!(sanitizers.len(), 2);

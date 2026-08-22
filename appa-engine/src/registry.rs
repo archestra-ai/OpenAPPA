@@ -921,13 +921,13 @@ fn validate_tool_resolvers(tool: &ToolContract) -> Result<(), LoadError> {
         }
         for source in uses.inputs.values() {
             if let crate::contract::ToolCallSource::Argument(argument) = source {
-                tool.parameters
-                    .required_property(argument)
-                    .map_err(|fault| LoadError::ResolverInputSchema {
+                tool.parameters.required_property(argument.as_str()).map_err(|fault| {
+                    LoadError::ResolverInputSchema {
                         context: context(),
-                        argument: argument.clone(),
+                        argument: argument.as_str().to_string(),
                         fault,
-                    })?;
+                    }
+                })?;
             }
         }
         for result in &uses.reads {
@@ -1681,7 +1681,7 @@ mod tests {
             resolver: crate::names::DynamicResolverName::new("directory"),
             inputs: std::collections::BTreeMap::from([(
                 argument.to_string(),
-                crate::contract::ToolCallSource::Argument(argument.to_string()),
+                crate::contract::ToolCallSource::argument(argument).expect("a plain name is a source"),
             )]),
             returns: [ResolverReturn::Audience].into_iter().collect(),
             reads: [ResolverReturn::Audience].into_iter().collect(),

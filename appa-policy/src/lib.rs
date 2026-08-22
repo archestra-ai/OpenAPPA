@@ -1591,7 +1591,7 @@ requires = { trust = "resolver.classifier.trust", attention = "resolver.review.a
         );
         assert_eq!(
             classifier.inputs.get("subject"),
-            Some(&appa_engine::contract::ToolCallSource::Argument("id".to_string()))
+            Some(&appa_engine::contract::ToolCallSource::argument("id").expect("a plain name is a source"))
         );
         let review = &tool.uses[1];
         assert!(

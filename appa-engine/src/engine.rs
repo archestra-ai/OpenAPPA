@@ -5911,7 +5911,7 @@ mod tests {
             resolver: crate::names::DynamicResolverName::new("acl"),
             inputs: std::collections::BTreeMap::from([(
                 "who".to_string(),
-                crate::contract::ToolCallSource::Argument("who".to_string()),
+                crate::contract::ToolCallSource::argument("who").expect("a plain name is a source"),
             )]),
             returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
             reads: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
@@ -6130,7 +6130,7 @@ mod tests {
                     resolver: crate::names::DynamicResolverName::new("acl"),
                     inputs: std::collections::BTreeMap::from([(
                         "body".to_string(),
-                        crate::contract::ToolCallSource::Argument("body".to_string()),
+                        crate::contract::ToolCallSource::argument("body").expect("a plain name is a source"),
                     )]),
                     returns: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
                     reads: [crate::contract::ResolverReturn::Audience].into_iter().collect(),
@@ -11768,7 +11768,7 @@ mod tests {
             resolver: crate::names::DynamicResolverName::new("acl"),
             inputs: std::collections::BTreeMap::from([(
                 "room".to_string(),
-                crate::contract::ToolCallSource::Argument("room".to_string()),
+                crate::contract::ToolCallSource::argument("room").expect("a plain name is a source"),
             )]),
             returns: [crate::contract::ResolverReturn::RequiredAudience]
                 .into_iter()

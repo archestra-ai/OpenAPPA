@@ -856,7 +856,7 @@ mod tests {
             resolver: DynamicResolverName::new("acl"),
             inputs: std::collections::BTreeMap::from([(
                 "subject".to_string(),
-                crate::contract::ToolCallSource::Argument("file".to_string()),
+                crate::contract::ToolCallSource::argument("file").expect("a plain name is a source"),
             )]),
             returns: [ResolverReturn::Audience].into_iter().collect(),
             reads: [ResolverReturn::Audience].into_iter().collect(),
