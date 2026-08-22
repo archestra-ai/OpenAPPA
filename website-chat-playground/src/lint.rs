@@ -222,10 +222,13 @@ version = 1
 [[dynamic_resolver]]
 name = "directory"
 resolver = { url = "http://169.254.169.254/readers" }
+inputs = ["to"]
+returns = ["requires.audience"]
 
 [[tool]]
 name = "send_email"
-requires = { audience = { includes = { resolver = "directory", argument = "to" } } }
+uses = [{ resolver = "directory", inputs = { to = "$tool_call.arguments.to" } }]
+requires = { audience = "resolver.directory.audience" }
 delta = {}
 "#,
                 systems("email"),
