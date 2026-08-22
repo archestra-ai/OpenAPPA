@@ -83,37 +83,30 @@ class ResolverFixture:
         return f"http://{host}:{port}/{self._capability}"
 
     def resolve(self, request: object) -> list[str]:
-        if not isinstance(request, dict) or not {"version", "resolver", "tool", "input", "returns"} <= set(request):
+        """The readers this request is about. The request carries no tool name, so the
+        resolver name and its own declared input are the whole key."""
+        if not isinstance(request, dict) or not {"version", "resolver", "args"} <= set(request):
             raise ValueError("invalid dynamic resolver request")
-        supplied = request["input"]
-        if (
-            request["version"] != 1
-            or not isinstance(supplied, dict)
-            or supplied.get("scope") != "argument"
-            or not isinstance(supplied.get("value"), str)
-        ):
-            raise ValueError("invalid dynamic resolver version or input")
-        binding = (request["resolver"], request["tool"], supplied.get("argument"))
-        if binding == ("customer-acl", "lookup_customer", "query"):
-            return self._customer_readers(supplied["value"])
-        if binding in {
-            ("recipient-members", "send_message", "recipient"),
-            ("recipient-members", "respond_to_user", "recipient"),
-        }:
-            return self._literal_readers([supplied["value"]])
-        raise ValueError("unknown dynamic resolver binding")
+        args = request["args"]
+        if request["version"] != 1 or not isinstance(args, dict) or not isinstance(args.get("subject"), str):
+            raise ValueError("invalid dynamic resolver version or args")
+        subject = args["subject"]
+        if request["resolver"] == "customer-acl":
+            return self._customer_readers(subject)
+        if request["resolver"] == "recipient-members":
+            return self._literal_readers([subject])
+        raise ValueError("unknown dynamic resolver")
 
     @staticmethod
     def scoped_answer(request: dict[str, object], readers: list[str]) -> dict[str, object]:
-        """Return only the fields the binding declared: an audience delta, or an
-        includes requirement, matching the tool's `returns` table."""
-        returns = request.get("returns") or {}
-        answer: dict[str, object] = {"version": 1}
-        if "audience" in (returns.get("delta") or []):
-            answer["delta"] = {"audience": readers}
-        if "audience" in (returns.get("requires") or []):
-            answer["requires"] = {"audience": {"includes": readers}}
-        return answer
+        """Exactly the one result the named resolver declares: the customer directory
+        establishes an output audience, the recipient directory demands one."""
+        result_name = {
+            "customer-acl": "delta.audience",
+            "recipient-members": "requires.audience",
+        }[str(request["resolver"])]
+        value: object = readers if result_name == "delta.audience" else {"includes": readers}
+        return {"version": 1, "result": {result_name: value}}
 
     def snapshot(self) -> list[dict[str, object]]:
         with self._lock:

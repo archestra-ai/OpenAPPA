@@ -189,7 +189,7 @@ async fn dynamic_deployment() -> Deployment {
     let resolver = axum::Router::new().route(
         "/",
         axum::routing::post(|| async {
-            r#"{"version":1,"delta":{"trust":"suspicious"},"requires":{"trust":"trusted","attention":["operator-signoff"]}}"#
+            r#"{"version":1,"result":{"delta.trust":"suspicious","requires.trust":"trusted","requires.attention":["operator-signoff"]}}"#
         }),
     );
     tokio::spawn(async move {
@@ -203,14 +203,19 @@ version = 1
 
 [[policy.dynamic_resolver]]
 name = "classifier"
+inputs = ["command"]
+returns = ["delta.trust", "requires.trust", "requires.attention"]
 
 [policy.deployment]
 starting_label = {{ trust = "suspicious" }}
 
 [[policy.tool]]
 name = "Bash"
-delta = {{}}
-resolvers = [{{ resolver = "classifier", returns = {{ delta = ["trust"], requires = ["trust", "attention"] }} }}]
+description = "Runs one shell command and returns its output."
+parameters = {{ type = "object", properties = {{ command = {{ type = "string" }} }}, required = ["command"] }}
+uses = [{{ resolver = "classifier", inputs = {{ command = "$tool_call.arguments.command" }} }}]
+delta = {{ trust = "resolver.classifier.trust" }}
+requires = {{ trust = "resolver.classifier.trust", attention = "resolver.classifier.attention" }}
 
 [[policy.authority]]
 name = "operator"

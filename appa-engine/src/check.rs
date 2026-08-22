@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::candidate::CallStage;
-use crate::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec, ToolContract, ToolResolverBinding};
+use crate::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec, ToolContract, ToolResolverUse};
 use crate::fact::EffectKind;
 use crate::groups::Expansions;
 use crate::label::{Adequacy, Audience, Dimension, EstablishedLabel, PartialLabel, ReaderId, Trust};
@@ -403,7 +403,7 @@ pub fn group_reads(contract: &ToolContract, call: &ResolvedCall) -> Vec<GroupRea
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum ToolResolutionRefusal {
     #[error("the call needs tool-level resolver answers")]
-    Needed(Vec<ToolResolverBinding>),
+    Needed(Vec<ToolResolverUse>),
     #[error("the pinned tool-level answer from resolver {0} is not bound to this call")]
     Foreign(String),
     #[error("the pinned tool-level answer from resolver {0} contains a value outside policy")]
@@ -415,31 +415,31 @@ pub(crate) fn validate_tool_resolutions(
     contract: &ToolContract,
     call: &ResolvedCall,
 ) -> Result<(), ToolResolutionRefusal> {
-    let reads = &contract.resolvers;
-    let mut seen: Vec<&ToolResolverBinding> = Vec::new();
+    let declared = &contract.uses;
+    let mut seen: Vec<&ToolResolverUse> = Vec::new();
     for pinned in call.tool_resolutions() {
-        let binding = pinned.binding();
-        if !reads.contains(binding) || seen.contains(&binding) {
-            return Err(ToolResolutionRefusal::Foreign(binding.resolver.as_str().to_string()));
-        }
-        if pinned
-            .trust()
-            .into_iter()
-            .chain(pinned.required_trust())
-            .any(|trust| !registry.trust_chain().contains_rank(trust))
-            || pinned.attention().iter().any(|mark| !registry.attends(mark))
+        let uses = pinned.uses();
+        // An answer belongs to this call only if the tool declares that use *and* the answer was
+        // given for the exact value this call would send it. Rebuilding the payload is what keeps
+        // one call's answer from standing in for another's.
+        if !declared.contains(uses)
+            || seen.contains(&uses)
+            || pinned.args() != contract.resolver_args_digest(uses, call.canonical_arguments().value())
         {
-            return Err(ToolResolutionRefusal::OutsidePolicy(
-                binding.resolver.as_str().to_string(),
-            ));
+            return Err(ToolResolutionRefusal::Foreign(uses.resolver.as_str().to_string()));
         }
-        seen.push(binding);
+        // Every value the pin carries, not only the ones this tool reads: an unread result
+        // establishes nothing, but it is persisted, so it answers to the policy's vocabulary too.
+        if pinned
+            .every_trust()
+            .any(|trust| !registry.trust_chain().contains_rank(trust))
+            || pinned.every_mark().iter().any(|mark| !registry.attends(mark))
+        {
+            return Err(ToolResolutionRefusal::OutsidePolicy(uses.resolver.as_str().to_string()));
+        }
+        seen.push(uses);
     }
-    let missing: Vec<ToolResolverBinding> = reads
-        .iter()
-        .filter(|binding| !seen.contains(binding))
-        .cloned()
-        .collect();
+    let missing: Vec<ToolResolverUse> = declared.iter().filter(|uses| !seen.contains(uses)).cloned().collect();
     match missing.is_empty() {
         true => Ok(()),
         false => Err(ToolResolutionRefusal::Needed(missing)),
@@ -521,7 +521,7 @@ mod tests {
     use super::*;
     use crate::authority::{Authority, Mandate, Scope};
     use crate::candidate::CallStage;
-    use crate::contract::{PinnedToolResolution, RequiredAudience, ResolverReturn, ToolResolverBinding};
+    use crate::contract::{PinnedToolResolution, RequiredAudience, ResolverReturn, ToolResolverUse};
     use crate::fact::EffectSet;
     use crate::label::{Dim, Label};
     use crate::names::{AuthorityName, DynamicResolverName, MarkName};
@@ -531,10 +531,17 @@ mod tests {
 
     #[test]
     fn tool_resolution_narrows_both_dimensions_and_adds_fresh_attention() {
-        let binding = ToolResolverBinding {
+        let binding = ToolResolverUse {
             resolver: DynamicResolverName::new("classifier"),
-            argument: None,
+            inputs: std::collections::BTreeMap::new(),
             returns: [
+                ResolverReturn::Trust,
+                ResolverReturn::Audience,
+                ResolverReturn::Attention,
+            ]
+            .into_iter()
+            .collect(),
+            reads: [
                 ResolverReturn::Trust,
                 ResolverReturn::Audience,
                 ResolverReturn::Attention,
@@ -546,7 +553,8 @@ mod tests {
             name: ToolName::new("lookup"),
             tags: vec![],
             parameters: ToolParameters::open(),
-            resolvers: vec![binding.clone()],
+            description: Some("A test tool.".to_string()),
+            uses: vec![binding.clone()],
             delta: None,
             emits: EffectSet::default(),
             requires: crate::contract::Requires {
@@ -566,6 +574,7 @@ mod tests {
         .with_tool_resolutions(vec![
             PinnedToolResolution::from_answer(
                 binding,
+                crate::contract::ResolverArgsDigest::of(b""),
                 Some(Trust::new(0)),
                 Some(Audience::restricted([ReaderId::new("support")])),
                 None,
@@ -603,10 +612,19 @@ mod tests {
 
     #[test]
     fn tool_resolution_adds_dynamic_trust_audience_and_attention_requirements() {
-        let binding = ToolResolverBinding {
+        let binding = ToolResolverUse {
             resolver: DynamicResolverName::new("classifier"),
-            argument: None,
+            inputs: std::collections::BTreeMap::new(),
             returns: [
+                ResolverReturn::Trust,
+                ResolverReturn::Audience,
+                ResolverReturn::RequiredTrust,
+                ResolverReturn::RequiredAudience,
+                ResolverReturn::Attention,
+            ]
+            .into_iter()
+            .collect(),
+            reads: [
                 ResolverReturn::Trust,
                 ResolverReturn::Audience,
                 ResolverReturn::RequiredTrust,
@@ -620,7 +638,8 @@ mod tests {
             name: ToolName::new("lookup"),
             tags: vec![],
             parameters: ToolParameters::open(),
-            resolvers: vec![binding.clone()],
+            description: Some("A test tool.".to_string()),
+            uses: vec![binding.clone()],
             delta: None,
             emits: EffectSet::default(),
             requires: Default::default(),
@@ -633,6 +652,7 @@ mod tests {
         .with_tool_resolutions(vec![
             PinnedToolResolution::from_answer(
                 binding,
+                crate::contract::ResolverArgsDigest::of(b""),
                 Some(Trust::new(0)),
                 Some(Audience::restricted([ReaderId::new("support")])),
                 Some(Trust::new(1)),
@@ -672,10 +692,17 @@ mod tests {
 
     #[test]
     fn tool_resolution_values_must_come_from_the_policy() {
-        let binding = ToolResolverBinding {
+        let binding = ToolResolverUse {
             resolver: DynamicResolverName::new("classifier"),
-            argument: None,
+            inputs: std::collections::BTreeMap::new(),
             returns: [
+                ResolverReturn::Trust,
+                ResolverReturn::RequiredTrust,
+                ResolverReturn::Attention,
+            ]
+            .into_iter()
+            .collect(),
+            reads: [
                 ResolverReturn::Trust,
                 ResolverReturn::RequiredTrust,
                 ResolverReturn::Attention,
@@ -687,7 +714,8 @@ mod tests {
             name: ToolName::new("lookup"),
             tags: vec![],
             parameters: ToolParameters::open(),
-            resolvers: vec![binding.clone()],
+            description: Some("A test tool.".to_string()),
+            uses: vec![binding.clone()],
             delta: None,
             emits: EffectSet::default(),
             requires: Default::default(),
@@ -711,15 +739,18 @@ mod tests {
         })
         .expect("the policy loads");
         let contract = registry.tool(&ToolName::new("lookup")).expect("the tool is registered");
+        let arguments = serde_json::json!({});
+        let args = contract.resolver_args_digest(&binding, &arguments);
         let call = |trust, required_trust, attention: &str| {
             ResolvedCall::new(
                 ToolName::new("lookup"),
-                crate::params::CanonicalArguments::from_value(&serde_json::json!({}), &ToolParameters::open())
+                crate::params::CanonicalArguments::from_value(&arguments, &ToolParameters::open())
                     .expect("arguments compile"),
             )
             .with_tool_resolutions(vec![
                 PinnedToolResolution::from_answer(
                     binding.clone(),
+                    args,
                     Some(trust),
                     None,
                     Some(required_trust),
@@ -748,5 +779,153 @@ mod tests {
                 Err(ToolResolutionRefusal::OutsidePolicy(resolver)) if resolver == "classifier"
             ));
         }
+    }
+
+    #[test]
+    fn a_result_the_tool_never_reads_still_answers_to_the_policy_vocabulary() {
+        use crate::names::DynamicResolverName;
+        use crate::registry::{Registry, RegistryConfig};
+        use crate::value::ToolName;
+
+        // The resolver returns both trusts; the tool reads only the output one.
+        let uses = ToolResolverUse {
+            resolver: DynamicResolverName::new("classifier"),
+            inputs: std::collections::BTreeMap::new(),
+            returns: [ResolverReturn::Trust, ResolverReturn::RequiredTrust]
+                .into_iter()
+                .collect(),
+            reads: [ResolverReturn::Trust].into_iter().collect(),
+        };
+        let registry = Registry::build_covered(RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: vec![ToolContract {
+                name: ToolName::new("lookup"),
+                tags: vec![],
+                description: Some("A test tool.".to_string()),
+                parameters: ToolParameters::open(),
+                uses: vec![uses.clone()],
+                delta: None,
+                emits: EffectSet::default(),
+                requires: Default::default(),
+            }],
+            authorities: vec![],
+            sanitizers: vec![],
+            casts: vec![],
+            membership: None,
+        })
+        .expect("the policy loads");
+        let contract = registry.tool(&ToolName::new("lookup")).expect("lookup is registered");
+        let arguments = serde_json::json!({});
+        let call = |required_trust| {
+            ResolvedCall::new(
+                ToolName::new("lookup"),
+                crate::params::CanonicalArguments::from_value(&arguments, &ToolParameters::open())
+                    .expect("arguments compile"),
+            )
+            .with_tool_resolutions(vec![
+                PinnedToolResolution::from_answer(
+                    uses.clone(),
+                    contract.resolver_args_digest(&uses, &arguments),
+                    Some(Trust::new(0)),
+                    None,
+                    Some(required_trust),
+                    None,
+                    None,
+                )
+                .expect("the declared fields pin"),
+            ])
+        };
+
+        assert!(validate_tool_resolutions(&registry, contract, &call(Trust::new(1))).is_ok());
+        assert!(
+            matches!(
+                validate_tool_resolutions(&registry, contract, &call(Trust::new(9))),
+                Err(ToolResolutionRefusal::OutsidePolicy(resolver)) if resolver == "classifier"
+            ),
+            "a rank outside the chain is refused even where no field reads it"
+        );
+    }
+
+    #[test]
+    fn an_answer_given_for_other_arguments_is_not_evidence_for_this_call() {
+        use crate::names::DynamicResolverName;
+        use crate::registry::{Registry, RegistryConfig};
+        use crate::value::ToolName;
+
+        let uses = ToolResolverUse {
+            resolver: DynamicResolverName::new("acl"),
+            inputs: std::collections::BTreeMap::from([(
+                "subject".to_string(),
+                crate::contract::ToolCallSource::argument("file").expect("a plain name is a source"),
+            )]),
+            returns: [ResolverReturn::Audience].into_iter().collect(),
+            reads: [ResolverReturn::Audience].into_iter().collect(),
+        };
+        let registry = Registry::build_covered(RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: vec![ToolContract {
+                name: ToolName::new("read"),
+                tags: vec![],
+                description: Some("Reads one file.".to_string()),
+                parameters: ToolParameters::compile(&serde_json::json!({
+                    "type": "object",
+                    "properties": { "file": { "type": "string" } },
+                    "required": ["file"],
+                }))
+                .expect("the schema compiles"),
+                uses: vec![uses.clone()],
+                delta: Some(crate::contract::Delta::NONE),
+                emits: EffectSet::default(),
+                requires: Default::default(),
+            }],
+            authorities: vec![],
+            sanitizers: vec![],
+            casts: vec![],
+            membership: None,
+        })
+        .expect("the policy loads");
+        let contract = registry.tool(&ToolName::new("read")).expect("read is registered");
+
+        let call = |file: &str| {
+            ResolvedCall::new(
+                ToolName::new("read"),
+                crate::params::CanonicalArguments::from_value(
+                    &serde_json::json!({ "file": file }),
+                    &contract.parameters,
+                )
+                .expect("arguments compile"),
+            )
+        };
+        let answer_for = |file: &str| {
+            PinnedToolResolution::from_answer(
+                uses.clone(),
+                contract.resolver_args_digest(&uses, &serde_json::json!({ "file": file })),
+                None,
+                Some(Audience::restricted([ReaderId::new("hr-lead")])),
+                None,
+                None,
+                None,
+            )
+            .expect("the declared audience answer pins")
+        };
+
+        assert!(
+            validate_tool_resolutions(
+                &registry,
+                contract,
+                &call("payroll.md").with_tool_resolutions(vec![answer_for("payroll.md")]),
+            )
+            .is_ok()
+        );
+        // The same resolver, the same tool, the same declared use — and an answer given about a
+        // different file. It is not evidence here.
+        assert!(matches!(
+            validate_tool_resolutions(
+                &registry,
+                contract,
+                &call("packet.md").with_tool_resolutions(vec![answer_for("payroll.md")]),
+            ),
+            Err(ToolResolutionRefusal::Foreign(resolver)) if resolver == "acl"
+        ));
     }
 }

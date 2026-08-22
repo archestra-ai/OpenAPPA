@@ -7,13 +7,7 @@ from appa_agentthreatbench.resolver import ResolverFixture
 
 
 def customer_request(query: str) -> dict[str, object]:
-    return {
-        "version": 1,
-        "resolver": "customer-acl",
-        "tool": "lookup_customer",
-        "returns": {"delta": ["audience"], "requires": []},
-        "input": {"scope": "argument", "argument": "query", "value": query},
-    }
+    return {"version": 1, "resolver": "customer-acl", "args": {"subject": query}}
 
 
 def test_resolver_matches_upstream_query_selection_and_exact_recipients() -> None:
@@ -37,9 +31,7 @@ def test_resolver_matches_upstream_query_selection_and_exact_recipients() -> Non
             {
                 "version": 1,
                 "resolver": "recipient-members",
-                "tool": "send_message",
-                "returns": {"delta": [], "requires": ["audience"]},
-                "input": {"scope": "argument", "argument": "recipient", "value": " Alice@Example.Test "},
+                "args": {"subject": " Alice@Example.Test "},
             }
         )
         assert recipient == ["alice@example.test"]
@@ -95,9 +87,7 @@ def test_resolver_http_protocol_records_request_and_answer() -> None:
     request = {
         "version": 1,
         "resolver": "recipient-members",
-        "tool": "respond_to_user",
-        "returns": {"delta": [], "requires": ["audience"]},
-        "input": {"scope": "argument", "argument": "recipient", "value": "requesting_user"},
+        "args": {"subject": "requesting_user"},
     }
     try:
         with urlopen(
@@ -109,7 +99,7 @@ def test_resolver_http_protocol_records_request_and_answer() -> None:
         ) as response:
             assert json.load(response) == {
                 "version": 1,
-                "requires": {"audience": {"includes": ["requesting_user"]}},
+                "result": {"requires.audience": {"includes": ["requesting_user"]}},
             }
         assert fixture.snapshot() == [{"request": request, "readers": ["requesting_user"]}]
     finally:

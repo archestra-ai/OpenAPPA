@@ -800,21 +800,11 @@ impl Session {
                     derived,
                 }
             }
-            ExternalRequest::ToolResolution {
-                binding,
-                tool,
-                arguments,
-                context,
-            } => {
-                let answer = match self
-                    .deployment
-                    .externals
-                    .resolve_tool(binding, tool, arguments, context)
-                    .await
-                {
+            ExternalRequest::ToolResolution { uses, args, context } => {
+                let answer = match self.deployment.externals.resolve_tool(uses, args, context).await {
                     ToolResolution::Resolved(answer) => answer,
                     ToolResolution::Unresolved(reason) => {
-                        let resolver = binding.resolver.as_str();
+                        let resolver = uses.resolver.as_str();
                         match reason {
                             crate::external::NoAnswerReason::Unreachable | crate::external::NoAnswerReason::Timeout => {
                                 tracing::warn!(resolver, ?reason, "a tool-resolution consult produced no answer")
@@ -828,7 +818,10 @@ impl Session {
                     }
                 };
                 ExternalEvidence::ToolResolution {
-                    resolver: binding.resolver.as_str().to_string(),
+                    resolver: uses.resolver.as_str().to_string(),
+                    // The evidence names the exact value it answered for, so a sibling call with
+                    // other arguments cannot consume it.
+                    args: appa_engine::contract::ResolverArgsDigest::of(&appa_engine::params::canonical_bytes(args)),
                     answer,
                     context: context.clone(),
                 }

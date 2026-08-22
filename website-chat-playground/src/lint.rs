@@ -114,10 +114,11 @@ mod tests {
             .tool(&ToolName::new("send_email"))
             .expect("the email system provides send_email");
         assert!(matches!(
-            email.resolvers.as_slice(),
-            [binding]
-                if binding.resolver.as_str() == "email-recipient-readers"
-                    && binding.argument.as_deref() == Some("to")
+            email.uses.as_slice(),
+            [uses]
+                if uses.resolver.as_str() == "email-recipient-readers"
+                    && uses.inputs.get("to")
+                        == Some(&appa_engine::contract::ToolCallSource::argument("to").expect("a plain name is a source"))
         ));
         let sanitizers = &checked.config.registry_config().sanitizers;
         assert_eq!(sanitizers.len(), 2);
@@ -141,10 +142,12 @@ version = 1
 [[dynamic_resolver]]
 name = "classify"
 builtin = "claude-code"
+returns = ["delta.trust"]
 [[tool]]
 name = "list_customers"
-resolvers = [{ resolver = "classify", returns = { delta = ["trust"] } }]
-delta = {}
+description = "Lists the customer records."
+uses = [{ resolver = "classify" }]
+delta = { trust = "resolver.classify.trust" }
 "#;
         assert!(matches!(
             check_policy(policy, &systems("crm")),
@@ -219,10 +222,13 @@ version = 1
 [[dynamic_resolver]]
 name = "directory"
 resolver = { url = "http://169.254.169.254/readers" }
+inputs = ["to"]
+returns = ["requires.audience"]
 
 [[tool]]
 name = "send_email"
-requires = { audience = { includes = { resolver = "directory", argument = "to" } } }
+uses = [{ resolver = "directory", inputs = { to = "$tool_call.arguments.to" } }]
+requires = { audience = "resolver.directory.audience" }
 delta = {}
 "#,
                 systems("email"),

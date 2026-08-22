@@ -506,7 +506,7 @@ mod tests {
     use crate::authority::{
         Cast, CastCeiling, CastResolution, DeclaredLabel, DeclaredTransition, Sanitizer, SanitizerPoints, Scope,
     };
-    use crate::contract::{Delta, PinnedToolResolution, ResolverReturn, ToolContract, ToolResolverBinding};
+    use crate::contract::{Delta, PinnedToolResolution, ResolverReturn, ToolContract, ToolResolverUse};
     use crate::fact::EffectKind;
     use crate::groups::DeclaredAudience;
     use crate::label::{Audience, Dim, ReaderId, Trust};
@@ -521,17 +521,29 @@ mod tests {
         Audience::restricted([ReaderId::new("internal")])
     }
 
-    fn dynamic_binding() -> ToolResolverBinding {
-        ToolResolverBinding {
+    fn dynamic_binding() -> ToolResolverUse {
+        ToolResolverUse {
             resolver: crate::names::DynamicResolverName::new("directory"),
-            argument: Some("room".into()),
+            inputs: std::collections::BTreeMap::from([(
+                "room".to_string(),
+                crate::contract::ToolCallSource::argument("room").expect("a plain name is a source"),
+            )]),
             returns: [ResolverReturn::Audience].into_iter().collect(),
+            reads: [ResolverReturn::Audience].into_iter().collect(),
         }
     }
 
     fn audience_pin(audience: Audience) -> PinnedToolResolution {
-        PinnedToolResolution::from_answer(dynamic_binding(), None, Some(audience), None, None, None)
-            .expect("a literal reader set pins")
+        PinnedToolResolution::from_answer(
+            dynamic_binding(),
+            crate::contract::ResolverArgsDigest::of(b""),
+            None,
+            Some(audience),
+            None,
+            None,
+            None,
+        )
+        .expect("a literal reader set pins")
     }
 
     fn traj() -> TrajectoryId {
@@ -547,7 +559,8 @@ mod tests {
 
     fn registry() -> Registry {
         let get = ToolContract {
-            resolvers: vec![],
+            description: Some("A test tool.".to_string()),
+            uses: vec![],
             name: ToolName::new("get_ticket"),
             tags: vec![],
             delta: Some(Delta {
@@ -603,7 +616,8 @@ mod tests {
             scope: Scope::default(),
         };
         let scan = ToolContract {
-            resolvers: vec![],
+            description: Some("A test tool.".to_string()),
+            uses: vec![],
             name: ToolName::new("scan_inbox"),
             tags: vec![],
             delta: Some(Delta {
@@ -615,7 +629,8 @@ mod tests {
             requires: Default::default(),
         };
         let poll = ToolContract {
-            resolvers: vec![],
+            description: Some("A test tool.".to_string()),
+            uses: vec![],
             name: ToolName::new("poll_room"),
             tags: vec![],
             delta: Some(Delta {
@@ -627,7 +642,8 @@ mod tests {
             requires: Default::default(),
         };
         let dynamic_scan = ToolContract {
-            resolvers: vec![dynamic_binding()],
+            description: Some("A test tool.".to_string()),
+            uses: vec![dynamic_binding()],
             name: ToolName::new("dynamic_scan"),
             tags: vec![],
             delta: Some(Delta {
@@ -879,7 +895,8 @@ mod tests {
     #[test]
     fn a_scoped_cast_applies_only_to_covered_tool_results() {
         let fetch = ToolContract {
-            resolvers: vec![],
+            description: Some("A test tool.".to_string()),
+            uses: vec![],
             name: ToolName::new("fetch"),
             tags: vec![crate::names::TagName::new("web")],
             delta: Some(Delta {
@@ -891,7 +908,8 @@ mod tests {
             requires: Default::default(),
         };
         let note = ToolContract {
-            resolvers: vec![],
+            description: Some("A test tool.".to_string()),
+            uses: vec![],
             name: ToolName::new("note"),
             tags: vec![],
             delta: Some(Delta {
@@ -1204,7 +1222,8 @@ mod tests {
     #[test]
     fn a_public_resolution_is_admitted_under_a_public_cap() {
         let fetch = ToolContract {
-            resolvers: vec![],
+            description: Some("A test tool.".to_string()),
+            uses: vec![],
             name: ToolName::new("fetch_page"),
             tags: vec![],
             delta: Some(Delta {

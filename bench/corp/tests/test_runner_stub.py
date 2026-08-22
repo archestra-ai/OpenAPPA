@@ -411,21 +411,17 @@ for request, expected in [
         {
             "version": 1,
             "resolver": "document-acl",
-            "tool": "share_legal_packet",
-            "input": {"scope": "argument", "argument": "file", "value": "project-onyx-packet.md"},
-            "returns": {"delta": ["audience"], "requires": []},
+            "args": {"subject": "project-onyx-packet.md"},
         },
-        {"version": 1, "delta": {"audience": readers}},
+        {"version": 1, "result": {"delta.audience": readers}},
     ),
     (
         {
             "version": 1,
             "resolver": "distribution-list-members",
-            "tool": "share_legal_packet",
-            "input": {"scope": "argument", "argument": "to", "value": "onyx-steering@northwind.example"},
-            "returns": {"delta": [], "requires": ["audience"]},
+            "args": {"subject": "onyx-steering@northwind.example"},
         },
-        {"version": 1, "requires": {"audience": {"includes": readers}}},
+        {"version": 1, "result": {"requires.audience": {"includes": readers}}},
     ),
 ]:
     wire = urllib.request.Request(url, data=json.dumps(request).encode(), headers={"Content-Type": "application/json"})

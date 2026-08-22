@@ -53,13 +53,17 @@ const TERMS = {
   "[membership]":
     "The one registration every @name group resolves through. A group mention without it is a load error.",
   "[[dynamic_resolver]]":
-    "A named external that classifies proposed tool calls: it reads what its binding shows it and returns its declared trust, audience, or attention fields. It is distinct from @group membership resolution.",
-  argument:
-    "In a resolver binding, the one required top-level string tool argument the resolver reads instead of the complete argument object.",
-  resolvers:
-    "A tool's dynamic resolver bindings. Each names a registered resolver, what it reads — the complete canonical argument object, or one declared argument — and the exact scoped fields it must return.",
+    "A named external that classifies proposed tool calls. It declares the inputs a tool must supply and the results it always returns. It is distinct from @group membership resolution.",
+  inputs:
+    "The values a resolver reads. A tool maps each one from $tool_call; a resolver that declares none reads the complete call.",
+  uses:
+    "A tool's dynamic resolvers. Each entry names a registered resolver and maps every input that resolver declares. Omit it when the tool uses none.",
   returns:
-    "The trust, audience, and attention fields a tool-level resolver must return. Trust values select from the policy trust chain; attention values select from marks named by authority mandates. Trust and audience have one owner; attention is additive.",
+    "The results a resolver always answers with, each named for the one contract field it establishes: delta.trust, delta.audience, requires.trust, requires.audience, requires.attention. Trust values select from the policy trust chain; attention values select from marks named by authority mandates.",
+  "$tool_call":
+    "The only source a resolver input reads. Its five forms are the complete call, its name, its description, its arguments, and one top-level argument.",
+  "resolver.<name>.<result>":
+    "A tool field reading one resolver result. The field supplies the scope, so the same reference reads delta.trust under delta and requires.trust under requires.",
   "[externals.dynamic]":
     "The shared HTTP endpoint for every dynamic resolver without an inline builtin. Requests carry the resolver name.",
   internal:

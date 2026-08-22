@@ -892,7 +892,7 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
         }
     }
     for tool in &rc.tools {
-        for binding in &tool.resolvers {
+        for binding in &tool.uses {
             let name = binding.resolver.as_str();
             // A resolver with a declared builtin never uses the shared endpoint; every other
             // bound name requires it.
@@ -993,9 +993,13 @@ mod deployment_tests {
                 [[dynamic_resolver]]
                 name = "classifier"
                 builtin = "claude-code"
+                returns = ["delta.trust", "delta.audience", "requires.attention"]
                 [[tool]]
                 name = "lookup"
-                resolvers = [{ resolver = "classifier", returns = { delta = ["trust", "audience"], requires = ["attention"] } }]
+                description = "Looks one record up."
+                uses = [{ resolver = "classifier" }]
+                delta = { trust = "resolver.classifier.trust", audience = "resolver.classifier.audience" }
+                requires = { attention = "resolver.classifier.attention" }
             "#,
         );
         assert!(Deployment::load(tool_level, &crate::builtins::ModuleRegistry::empty(), test_permits()).is_ok());
@@ -1011,9 +1015,12 @@ mod deployment_tests {
                 [[dynamic_resolver]]
                 name = "classifier"
                 builtin = "claude-code"
+                returns = ["delta.trust"]
                 [[tool]]
                 name = "fetch"
-                resolvers = [{ resolver = "classifier", returns = { delta = ["trust"] } }]
+                description = "Fetches one URL."
+                uses = [{ resolver = "classifier" }]
+                delta = { trust = "resolver.classifier.trust" }
             "#,
             )
         };
@@ -1056,16 +1063,22 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 [[dynamic_resolver]]
                 name = "bash-classifier"
                 builtin = "claude-code"
+                returns = ["requires.attention"]
                 [[dynamic_resolver]]
                 name = "other-classifier"
+                returns = ["requires.attention"]
                 [[tool]]
                 name = "Bash"
+                description = "Runs one shell command."
                 delta = {}
-                resolvers = [{ resolver = "bash-classifier", returns = { requires = ["attention"] } }]
+                uses = [{ resolver = "bash-classifier" }]
+                requires = { attention = "resolver.bash-classifier.attention" }
                 [[tool]]
                 name = "Other"
+                description = "Does something else."
                 delta = {}
-                resolvers = [{ resolver = "other-classifier", returns = { requires = ["attention"] } }]
+                uses = [{ resolver = "other-classifier" }]
+                requires = { attention = "resolver.other-classifier.attention" }
             "#,
         );
         config.externals.dynamic = Some(crate::config::Endpoint {

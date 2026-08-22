@@ -67,14 +67,16 @@ OpenAPPA can also call the installed Claude Code CLI as a built-in tool-level dy
 
 ```toml
 [[dynamic_resolver]]
-name = "classify-customer"
+name    = "classify-customer"
 builtin = "claude-code"
+returns = ["delta.trust", "delta.audience", "requires.trust", "requires.audience", "requires.attention"]
 
 [[tool]]
-name = "get_customer"
-resolvers = [
-  { resolver = "classify-customer", returns = { delta = ["trust", "audience"], requires = ["trust", "audience", "attention"] } }
-]
+name        = "get_customer"
+description = "Reads one customer record."
+uses        = [{ resolver = "classify-customer" }]
+delta       = { trust = "resolver.classify-customer.trust", audience = "resolver.classify-customer.audience" }
+requires    = { trust = "resolver.classify-customer.trust", audience = "resolver.classify-customer.audience", attention = "resolver.classify-customer.attention" }
 
 [[authority]]
 name = "operator"
@@ -96,7 +98,7 @@ timeout_ms = 60000                  # the consult's own budget — a model call 
 builtin = "hitl"
 ```
 
-The runtime uses the current user's Claude Code authentication. It starts one fresh safe-mode process per consult with no tools, hooks, project settings, or persisted session, in a temporary working directory, with every `APPA_*` environment variable removed. The classifier sees what the binding shows it — the complete canonical arguments, or one declared argument — plus current trust and audience, the policy trust chain, the attention marks named by authority mandates, and existing static attention requirements. It may return output `delta` and call-time `requires` together. Dynamic requirements support a trust floor, an audience `includes` floor and `cap` ceiling, and a fresh attention mark selected from that policy-provided list; history remains static. If no authority attends any mark, the only valid dynamic attention answer is an empty list. At most four Claude consults run at once.
+The runtime uses the current user's Claude Code authentication. It starts one fresh safe-mode process per consult with no tools, hooks, project settings, or persisted session, in a temporary working directory, with every `APPA_*` environment variable removed. The classifier sees what the tool's `uses` entry selected — the complete call, or one value per declared input — plus current trust and audience, the policy trust chain, the attention marks named by authority mandates, and existing static attention requirements. It answers every result its resolver declares, so it may establish the output label and demand a call-time constraint in one consult. Requirements support a trust floor, an audience `includes` floor and `cap` ceiling, and a fresh attention mark selected from that policy-provided list; history remains static. If no authority attends any mark, the only valid dynamic attention answer is an empty list. At most four Claude consults run at once.
 
 This is a trusted classifier rather than a sandboxed policy authority: there is no additional ceiling on its answer, and argument-level prompt-injection resistance is best-effort. Process errors, timeouts, invalid fields, and trust or attention values outside policy produce no answer: the call is not checked, nothing is recorded, and the failure surfaces operationally — never as a policy denial.
 

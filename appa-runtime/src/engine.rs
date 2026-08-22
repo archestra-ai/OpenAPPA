@@ -37,7 +37,7 @@
 
 use appa_engine::candidate::DerivedVia;
 use appa_engine::check::UnestablishedFact;
-use appa_engine::contract::{PinnedMembership, PinnedToolResolution, RequiredAudience, ToolResolverBinding};
+use appa_engine::contract::{PinnedMembership, PinnedToolResolution, RequiredAudience, ToolResolverUse};
 pub(crate) use appa_engine::engine::ForkStatus;
 use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
@@ -110,9 +110,9 @@ pub enum ExternalRequest {
         body: ValueBody,
     },
     ToolResolution {
-        binding: ToolResolverBinding,
-        tool: String,
-        arguments: serde_json::Value,
+        uses: ToolResolverUse,
+        /// Exactly what this use selected: the value the request carries as `args`.
+        args: serde_json::Value,
         context: ToolResolutionContext,
     },
     Membership {
@@ -168,6 +168,9 @@ pub enum ExternalEvidence {
     },
     ToolResolution {
         resolver: String,
+        /// The `args` the classifier answered for, by digest. Evidence matches that value only,
+        /// so two calls sharing a resolver and a context never take each other's answer.
+        args: appa_engine::contract::ResolverArgsDigest,
         answer: ToolResolutionAnswer,
         /// The label context the classifier answered under. Evidence matches only while the
         /// call's current context is the one it described; a moved trajectory consults again.
@@ -1438,31 +1441,36 @@ impl RuntimeEngine {
                 call.tool
             )));
         };
-        if contract.resolvers.is_empty() {
+        if contract.uses.is_empty() {
             return Ok(Vec::new());
         }
         let chain = self.engine.registry().trust_chain();
         // The consult payload — the canonical arguments and the classifier context — is also
         // the clock resolver evidence is matched against: an answer given under a context this
-        // view no longer shows is not evidence for this call, and the binding consults again.
+        // view no longer shows, or for other arguments, is not evidence for this call, and the
+        // use consults again.
         let (resolved, current_context) = self.tool_resolution_payload(view, trajectory, call, contract, &tool)?;
         let mut pins = Vec::new();
         let mut requests = Vec::new();
-        for binding in &contract.resolvers {
+        for uses in &contract.uses {
+            let args = contract.resolver_args(uses, resolved.arguments());
+            let asked = contract.resolver_args_digest(uses, resolved.arguments());
             let answer = evidence.iter().find_map(|entry| match entry {
                 ExternalEvidence::ToolResolution {
                     resolver,
+                    args: answered_for,
                     answer,
                     context,
-                } if resolver == binding.resolver.as_str() && *context == current_context => Some(answer.clone()),
+                } if resolver == uses.resolver.as_str() && *answered_for == asked && *context == current_context => {
+                    Some(answer.clone())
+                }
                 _ => None,
             });
             match answer {
                 None => {
                     requests.push(ExternalRequest::ToolResolution {
-                        binding: binding.clone(),
-                        tool: call.tool.clone(),
-                        arguments: resolved.arguments().clone(),
+                        uses: uses.clone(),
+                        args,
                         context: current_context.clone(),
                     });
                 }
@@ -1472,7 +1480,7 @@ impl RuntimeEngine {
                             Resolution::Feedback(format!(
                                 "[appa] {}: dynamic resolver {} returned an unknown {what}",
                                 call.tool,
-                                binding.resolver.as_str()
+                                uses.resolver.as_str()
                             ))
                         })
                     };
@@ -1495,7 +1503,8 @@ impl RuntimeEngine {
                         .attention
                         .map(|marks| marks.into_iter().map(MarkName::new).collect());
                     match PinnedToolResolution::from_answer(
-                        binding.clone(),
+                        uses.clone(),
+                        asked,
                         trust,
                         audience,
                         required_trust,
@@ -1507,7 +1516,7 @@ impl RuntimeEngine {
                             return Err(Resolution::Feedback(format!(
                                 "[appa] {}: dynamic resolver {} returned malformed fields",
                                 call.tool,
-                                binding.resolver.as_str()
+                                uses.resolver.as_str()
                             )));
                         }
                     }
@@ -2483,10 +2492,15 @@ mod tests {
                 version = 1
                 [[dynamic_resolver]]
                 name = "classifier"
+                returns = ["delta.trust", "delta.audience", "requires.trust", "requires.audience"]
                 [[tool]]
                 name = "lookup"
-                resolvers = [{ resolver = "classifier", returns = { delta = ["trust", "audience"], requires = ["trust", "audience", "attention"] } }]
-                requires = { attention = ["static-review"] }
+                description = "Looks one record up."
+                uses = [{ resolver = "classifier" }]
+                delta = { trust = "resolver.classifier.trust", audience = "resolver.classifier.audience" }
+                # The tool keeps its own attention mark: `requires.attention` has one owner, and
+                # here it is the policy, so the classifier sees the mark under `static_attention`.
+                requires = { trust = "resolver.classifier.trust", audience = "resolver.classifier.audience", attention = ["static-review"] }
                 [[authority]]
                 name = "reviewer"
                 [authority.mandate]
@@ -2506,23 +2520,27 @@ mod tests {
             )
             .expect("arguments serialize"),
         };
-        let consulted_context = match engine.resolve_tool_resolutions(&view, &trajectory, &call, &[]) {
+        let (consulted_args, consulted_context) = match engine.resolve_tool_resolutions(&view, &trajectory, &call, &[])
+        {
             Err(Resolution::Consult(requests)) => match requests.as_slice() {
-                [
-                    ExternalRequest::ToolResolution {
-                        binding,
-                        tool,
-                        arguments,
-                        context,
-                    },
-                ] => {
-                    assert_eq!(binding.resolver.as_str(), "classifier");
-                    assert_eq!(tool, "lookup");
-                    assert_eq!(arguments, &serde_json::json!({"nested": {"id": 7}, "deep": true}));
+                [ExternalRequest::ToolResolution { uses, args, context }] => {
+                    assert_eq!(uses.resolver.as_str(), "classifier");
+                    // The resolver declares no inputs, so `args` is the complete call.
+                    assert_eq!(
+                        args,
+                        &serde_json::json!({
+                            "name": "lookup",
+                            "description": "Looks one record up.",
+                            "arguments": {"nested": {"id": 7}, "deep": true}
+                        })
+                    );
                     assert_eq!(context.trust_ranks, ["suspicious", "trusted"]);
                     assert_eq!(context.attention_marks, ["privacy-review"]);
                     assert_eq!(context.static_attention, ["static-review"]);
-                    context.clone()
+                    (
+                        appa_engine::contract::ResolverArgsDigest::of(&appa_engine::params::canonical_bytes(args)),
+                        context.clone(),
+                    )
                 }
                 other => panic!("expected one tool-resolution consult, got {other:?}"),
             },
@@ -2543,6 +2561,7 @@ mod tests {
                 &call,
                 &[ExternalEvidence::ToolResolution {
                     resolver: "classifier".to_string(),
+                    args: consulted_args,
                     answer: ToolResolutionAnswer {
                         trust: Some("suspicious".to_string()),
                         audience: Some(CastAudience::Public),
@@ -2551,7 +2570,7 @@ mod tests {
                             includes: Some(CastAudience::Readers(vec!["support".to_string()])),
                             cap: Some(CastAudience::Public),
                         }),
-                        attention: Some(vec!["privacy-review".to_string()]),
+                        attention: None,
                     },
                     context: foreign_context,
                 }],
@@ -2566,6 +2585,7 @@ mod tests {
                 &call,
                 &[ExternalEvidence::ToolResolution {
                     resolver: "classifier".to_string(),
+                    args: consulted_args,
                     answer: ToolResolutionAnswer {
                         trust: Some("suspicious".to_string()),
                         audience: Some(CastAudience::Public),
@@ -2574,9 +2594,9 @@ mod tests {
                             includes: Some(CastAudience::Readers(vec!["support".to_string()])),
                             cap: Some(CastAudience::Public),
                         }),
-                        attention: Some(vec!["privacy-review".to_string(), "privacy-review".to_string()]),
+                        attention: None,
                     },
-                    context: consulted_context,
+                    context: consulted_context.clone(),
                 }],
             )
             .expect("a complete answer pins");
@@ -2591,11 +2611,43 @@ mod tests {
                 cap: Some(Audience::Public),
             })
         );
-        assert_eq!(
-            pins[0].attention(),
-            &[appa_engine::names::MarkName::new("privacy-review")],
-            "attention is additive set data"
+        assert!(
+            pins[0].attention().is_empty(),
+            "this resolver returns no attention result: `requires.attention` is the policy's"
         );
+
+        // An answer given for other arguments is not evidence for this call either: the
+        // resolver is consulted again rather than handed a sibling's classification.
+        let other_call = ProposedCall {
+            tool: "lookup".to_string(),
+            arguments: serde_json::value::RawValue::from_string(
+                serde_json::json!({"nested": {"id": 8}, "deep": true}).to_string(),
+            )
+            .expect("arguments serialize"),
+        };
+        assert!(matches!(
+            engine.resolve_tool_resolutions(
+                &view,
+                &trajectory,
+                &other_call,
+                &[ExternalEvidence::ToolResolution {
+                    resolver: "classifier".to_string(),
+                    args: consulted_args,
+                    answer: ToolResolutionAnswer {
+                        trust: Some("suspicious".to_string()),
+                        audience: Some(CastAudience::Public),
+                        required_trust: Some("trusted".to_string()),
+                        required_audience: Some(RequiredAudienceAnswer {
+                            includes: Some(CastAudience::Readers(vec!["support".to_string()])),
+                            cap: Some(CastAudience::Public),
+                        }),
+                        attention: None,
+                    },
+                    context: consulted_context,
+                }],
+            ),
+            Err(Resolution::Consult(_))
+        ));
     }
 
     #[test]

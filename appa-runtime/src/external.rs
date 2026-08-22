@@ -180,52 +180,18 @@ struct ConsultResponse {
     answer: serde_json::Value,
 }
 
+/// One consult, as both implementations receive it. `args` carries exactly what the tool's
+/// `uses` entry selected — the complete call when its resolver declares no inputs, otherwise one
+/// entry per declared input. There is no `tool`, `input`, `scope`, `returns`, or `expects` key: a
+/// resolver that needs the tool's name or description reads it as an input.
 #[derive(Debug, Serialize)]
 pub(crate) struct ToolResolutionRequest<'a> {
     pub(crate) version: u32,
     pub(crate) resolver: &'a str,
-    pub(crate) tool: &'a str,
-    pub(crate) returns: ScopedReturns<'a>,
-    pub(crate) input: ToolResolutionInput<'a>,
+    pub(crate) args: &'a serde_json::Value,
     pub(crate) context: &'a ToolResolutionContext,
     pub(crate) trust_ranks: &'a [String],
     pub(crate) attention_marks: &'a [String],
-}
-
-/// What the binding shows its resolver: the complete canonical argument object, or the one
-/// declared argument's string value. The `scope` tag keeps the two shapes unambiguous on
-/// the wire.
-#[derive(Debug, Serialize)]
-#[serde(tag = "scope", rename_all = "snake_case")]
-pub(crate) enum ToolResolutionInput<'a> {
-    Call { arguments: &'a serde_json::Value },
-    Argument { argument: &'a str, value: &'a str },
-}
-
-/// The binding's declared `returns` set, serialized in its wire scopes:
-/// `{"delta": [...], "requires": [...]}`. A view over the one set, so the wire form and the
-/// declared form cannot disagree.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ScopedReturns<'a>(pub(crate) &'a std::collections::BTreeSet<ResolverReturn>);
-
-impl Serialize for ScopedReturns<'_> {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-
-        use appa_engine::contract::ReturnScope;
-
-        let scoped = |scope: ReturnScope| -> Vec<&'static str> {
-            self.0
-                .iter()
-                .filter(|field| field.scope() == scope)
-                .map(|field| field.wire_name())
-                .collect()
-        };
-        let mut state = serializer.serialize_struct("ScopedReturns", 2)?;
-        state.serialize_field("delta", &scoped(ReturnScope::Delta))?;
-        state.serialize_field("requires", &scoped(ReturnScope::Requires))?;
-        state.end()
-    }
 }
 
 #[derive(Debug, Serialize)]
@@ -241,27 +207,13 @@ struct ReadersResponse {
     readers: Vec<String>,
 }
 
+/// The answer envelope: a version and one `result` object holding every result the resolver
+/// declares, keyed by the result's own name. No other key at either level.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ToolResolutionResponse {
     version: u32,
-    delta: Option<ToolDeltaWire>,
-    requires: Option<ToolRequiresWire>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ToolDeltaWire {
-    trust: Option<String>,
-    audience: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ToolRequiresWire {
-    trust: Option<String>,
-    audience: Option<RequiredAudienceWire>,
-    attention: Option<Vec<String>>,
+    result: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -535,33 +487,21 @@ impl ExternalServices {
 
     /// Resolve one binding's declared fields from what its scope shows the resolver:
     /// the complete canonical argument object, or the one declared argument's value.
+    /// Consult one resolver. `args` is what the tool's `uses` entry selected, built once by
+    /// [`appa_engine::contract::ToolContract::resolver_args`] so the value sent and the value the
+    /// check later rebuilds cannot diverge.
     pub async fn resolve_tool(
         &self,
-        binding: &appa_engine::contract::ToolResolverBinding,
-        tool: &str,
-        arguments: &serde_json::Value,
+        uses: &appa_engine::contract::ToolResolverUse,
+        args: &serde_json::Value,
         context: &ToolResolutionContext,
     ) -> ToolResolution {
-        let resolver = binding.resolver.as_str();
-        let returns = &binding.returns;
-        let input = match &binding.argument {
-            None => ToolResolutionInput::Call { arguments },
-            Some(argument) => {
-                // Load validation pins the scoped argument to a required top-level string,
-                // and every proposal is schema-validated before resolution runs.
-                let Some(value) = arguments.get(argument.as_str()).and_then(|value| value.as_str()) else {
-                    tracing::debug!(resolver, argument, "a scoped consult found no string value");
-                    return ToolResolution::Unresolved(NoAnswerReason::Malformed);
-                };
-                ToolResolutionInput::Argument { argument, value }
-            }
-        };
+        let resolver = uses.resolver.as_str();
+        let returns = &uses.returns;
         let request = ToolResolutionRequest {
             version: 1,
             resolver,
-            tool,
-            returns: ScopedReturns(returns),
-            input,
+            args,
             context,
             trust_ranks: &context.trust_ranks,
             attention_marks: &context.attention_marks,
@@ -592,7 +532,7 @@ impl ExternalServices {
                         return ToolResolution::Unresolved(NoAnswerReason::Timeout);
                     }
                 };
-                let answered = claude.resolve(&request, deadline).await;
+                let answered = claude.resolve(&request, returns, deadline).await;
                 drop(permit);
                 answered
             }
@@ -600,7 +540,7 @@ impl ExternalServices {
         let raw = match answered {
             Ok(raw) => raw,
             Err(reason) => {
-                tracing::debug!(resolver, tool, ?reason, "tool resolution produced no answer");
+                tracing::debug!(resolver, ?reason, "tool resolution produced no answer");
                 return ToolResolution::Unresolved(reason);
             }
         };
@@ -705,38 +645,59 @@ fn parse_tool_resolution(
     if !object.values().all(no_nulls) {
         return ToolResolution::Unresolved(NoAnswerReason::Malformed);
     }
-    let has_delta = object.contains_key("delta");
-    let has_requires = object.contains_key("requires");
-    let response: ToolResolutionResponse = match serde_json::from_value(raw) {
+    let mut response: ToolResolutionResponse = match serde_json::from_value(raw) {
         Ok(response) => response,
         Err(_) => return ToolResolution::Unresolved(NoAnswerReason::Malformed),
     };
     if response.version != 1 {
         return ToolResolution::Unresolved(NoAnswerReason::UnsupportedVersion);
     }
-    let wants_trust = returns.contains(&ResolverReturn::Trust);
-    let wants_audience = returns.contains(&ResolverReturn::Audience);
-    let wants_required_trust = returns.contains(&ResolverReturn::RequiredTrust);
-    let wants_required_audience = returns.contains(&ResolverReturn::RequiredAudience);
-    let wants_attention = returns.contains(&ResolverReturn::Attention);
-    let (trust, audience) = match response.delta {
-        Some(delta) => (delta.trust, delta.audience),
-        None => (None, None),
-    };
-    let (required_trust, required_audience, attention) = match response.requires {
-        Some(requires) => (requires.trust, requires.audience, requires.attention),
-        None => (None, None, None),
-    };
-    if has_delta != (wants_trust || wants_audience)
-        || has_requires != (wants_required_trust || wants_required_audience || wants_attention)
-        || wants_trust != trust.is_some()
-        || wants_audience != audience.is_some()
-        || wants_required_trust != required_trust.is_some()
-        || wants_required_audience != required_audience.is_some()
-        || wants_attention != attention.is_some()
+    // Exactly the declared results, no more and no fewer. Taking each declared key out and then
+    // requiring an empty remainder rejects a missing result and an undeclared one in one pass.
+    let mut take = |result: ResolverReturn| response.result.remove(result.wire_name());
+    let trust = take(ResolverReturn::Trust);
+    let audience = take(ResolverReturn::Audience);
+    let required_trust = take(ResolverReturn::RequiredTrust);
+    let required_audience = take(ResolverReturn::RequiredAudience);
+    let attention = take(ResolverReturn::Attention);
+    if !response.result.is_empty() {
+        return ToolResolution::Unresolved(NoAnswerReason::Malformed);
+    }
+    let declared =
+        |result: ResolverReturn, value: &Option<serde_json::Value>| returns.contains(&result) == value.is_some();
+    if !declared(ResolverReturn::Trust, &trust)
+        || !declared(ResolverReturn::Audience, &audience)
+        || !declared(ResolverReturn::RequiredTrust, &required_trust)
+        || !declared(ResolverReturn::RequiredAudience, &required_audience)
+        || !declared(ResolverReturn::Attention, &attention)
     {
         return ToolResolution::Unresolved(NoAnswerReason::Malformed);
     }
+    // Each result now carries its own type, named by its own key.
+    let text = |value: Option<serde_json::Value>| -> Result<Option<String>, ()> {
+        match value {
+            None => Ok(None),
+            Some(serde_json::Value::String(text)) => Ok(Some(text)),
+            Some(_) => Err(()),
+        }
+    };
+    let (Ok(trust), Ok(required_trust)) = (text(trust), text(required_trust)) else {
+        return ToolResolution::Unresolved(NoAnswerReason::Malformed);
+    };
+    let attention = match attention {
+        None => None,
+        Some(value) => match serde_json::from_value::<Vec<String>>(value) {
+            Ok(marks) => Some(marks),
+            Err(_) => return ToolResolution::Unresolved(NoAnswerReason::Malformed),
+        },
+    };
+    let required_audience = match required_audience {
+        None => None,
+        Some(value) => match serde_json::from_value::<RequiredAudienceWire>(value) {
+            Ok(wire) => Some(wire),
+            Err(_) => return ToolResolution::Unresolved(NoAnswerReason::Malformed),
+        },
+    };
     if trust
         .iter()
         .chain(required_trust.iter())
@@ -855,15 +816,17 @@ mod tests {
         .expect("no builtin references are configured")
     }
 
-    fn binding(
+    /// A use whose tool reads everything its resolver returns, reading the complete call.
+    fn uses(
         resolver: &str,
-        argument: Option<&str>,
         returns: impl IntoIterator<Item = ResolverReturn>,
-    ) -> appa_engine::contract::ToolResolverBinding {
-        appa_engine::contract::ToolResolverBinding {
+    ) -> appa_engine::contract::ToolResolverUse {
+        let returns: std::collections::BTreeSet<ResolverReturn> = returns.into_iter().collect();
+        appa_engine::contract::ToolResolverUse {
             resolver: appa_engine::names::DynamicResolverName::new(resolver),
-            argument: argument.map(str::to_string),
-            returns: returns.into_iter().collect(),
+            inputs: BTreeMap::new(),
+            reads: returns.clone(),
+            returns,
         }
     }
 
@@ -936,31 +899,26 @@ mod tests {
                 let request: serde_json::Value = serde_json::from_str(&body).expect("the request is JSON");
                 assert_eq!(request["version"], 1);
                 assert_eq!(request["resolver"], "classifier");
-                assert_eq!(request["tool"], "lookup");
                 assert_eq!(request["trust_ranks"], serde_json::json!(["suspicious", "trusted"]));
                 assert_eq!(
                     request["attention_marks"],
                     serde_json::json!(["privacy-review", "review"])
                 );
                 assert_eq!(
-                    request["returns"],
-                    serde_json::json!({
-                        "delta": ["trust", "audience"],
-                        "requires": ["trust", "audience", "attention"]
-                    })
-                );
-                assert_eq!(
-                    request["input"],
-                    serde_json::json!({"scope": "call", "arguments": {"customer": {"id": 7}, "deep": true}})
+                    request["args"],
+                    serde_json::json!({"customer": {"id": 7}, "deep": true})
                 );
                 assert_eq!(request["context"]["current_trust"], "trusted");
-                r#"{"version":1,"delta":{"trust":"suspicious","audience":"public"},"requires":{"trust":"trusted","audience":{"includes":["support"],"cap":["support","audit"]},"attention":["review"]}}"#
+                // No `tool`, `input`, `scope`, `returns`, or `expects` key rides the wire.
+                for absent in ["tool", "input", "scope", "returns", "expects"] {
+                    assert!(request.get(absent).is_none(), "the request carries no {absent:?} key");
+                }
+                r#"{"version":1,"result":{"delta.trust":"suspicious","delta.audience":"public","requires.trust":"trusted","requires.audience":{"includes":["support"],"cap":["support","audit"]},"requires.attention":["review"]}}"#
             }),
         ))
         .await;
-        let returns = binding(
+        let returns = uses(
             "classifier",
-            None,
             [
                 ResolverReturn::Trust,
                 ResolverReturn::Audience,
@@ -972,7 +930,6 @@ mod tests {
         let outcome = services(Some(url), 2000, 65536)
             .resolve_tool(
                 &returns,
-                "lookup",
                 &serde_json::json!({"customer": {"id": 7}, "deep": true}),
                 &context(),
             )
@@ -994,34 +951,46 @@ mod tests {
 
     #[tokio::test]
     async fn a_tool_resolution_must_return_exactly_its_declared_fields() {
-        let returns = binding("review", None, [ResolverReturn::Attention]);
+        let returns = uses("review", [ResolverReturn::Attention]);
+        let good = r#"{"version":1,"result":{"requires.attention":[]}}"#;
         for response in [
-            r#"{"version":1,"requires":{"attention":[]}}"#,
-            r#"{"version":1,"delta":{},"requires":{"attention":[]}}"#,
-            r#"{"version":1,"requires":{"trust":"trusted","attention":[]}}"#,
-            r#"{"version":1,"requires":{"trust":null,"attention":[]}}"#,
-            r#"{"version":1,"requires":{"audience":{"includes":null,"cap":["a"]},"attention":[]}}"#,
-            r#"{"version":1,"requires":null}"#,
-            r#"{"version":1,"requires":{"attention":null}}"#,
+            good,
+            // An undeclared result, a missing one, a null, an unscoped key, an extra envelope
+            // key, a `result` that is not an object, and the retired `{delta, requires}` shape.
+            r#"{"version":1,"result":{"requires.attention":[],"delta.trust":"trusted"}}"#,
+            r#"{"version":1,"result":{}}"#,
+            r#"{"version":1,"result":{"requires.attention":null}}"#,
+            r#"{"version":1,"result":{"attention":[]}}"#,
+            r#"{"version":1,"result":{"requires.attention":[]},"extra":1}"#,
+            r#"{"version":1,"result":[]}"#,
             r#"{"version":1}"#,
+            r#"{"result":{"requires.attention":[]}}"#,
+            r#"{"version":"1","result":{"requires.attention":[]}}"#,
+            r#"{"version":1,"requires":{"attention":[]}}"#,
         ] {
             let url = stub(Router::new().route("/", post(move || async move { response }))).await;
             let actual = services(Some(url), 2000, 65536)
-                .resolve_tool(&returns, "lookup", &serde_json::json!({}), &context())
+                .resolve_tool(&returns, &serde_json::json!({}), &context())
                 .await;
-            if response == r#"{"version":1,"requires":{"attention":[]}}"# {
-                assert!(matches!(actual, ToolResolution::Resolved(_)));
+            if response == good {
+                assert!(
+                    matches!(actual, ToolResolution::Resolved(_)),
+                    "must resolve: {response}"
+                );
             } else {
-                assert_eq!(actual, ToolResolution::Unresolved(NoAnswerReason::Malformed));
+                assert_eq!(
+                    actual,
+                    ToolResolution::Unresolved(NoAnswerReason::Malformed),
+                    "must refuse: {response}"
+                );
             }
         }
     }
 
     #[tokio::test]
     async fn a_tool_resolution_rejects_trust_and_attention_outside_policy() {
-        let returns = binding(
+        let returns = uses(
             "classifier",
-            None,
             [
                 ResolverReturn::Trust,
                 ResolverReturn::RequiredTrust,
@@ -1029,14 +998,17 @@ mod tests {
             ],
         );
         for response in [
-            r#"{"version":1,"delta":{"trust":"invented"},"requires":{"trust":"trusted","attention":["review"]}}"#,
-            r#"{"version":1,"delta":{"trust":"suspicious"},"requires":{"trust":"invented","attention":["review"]}}"#,
-            r#"{"version":1,"delta":{"trust":"suspicious"},"requires":{"trust":"trusted","attention":["invented-review"]}}"#,
+            r#"{"version":1,"result":{"delta.trust":"invented","requires.trust":"trusted","requires.attention":["review"]}}"#,
+            r#"{"version":1,"result":{"delta.trust":"suspicious","requires.trust":"invented","requires.attention":["review"]}}"#,
+            r#"{"version":1,"result":{"delta.trust":"suspicious","requires.trust":"trusted","requires.attention":["invented-review"]}}"#,
+            // A result of the wrong JSON type for its name.
+            r#"{"version":1,"result":{"delta.trust":["suspicious"],"requires.trust":"trusted","requires.attention":["review"]}}"#,
+            r#"{"version":1,"result":{"delta.trust":"suspicious","requires.trust":"trusted","requires.attention":"review"}}"#,
         ] {
             let url = stub(Router::new().route("/", post(move || async move { response }))).await;
             assert_eq!(
                 services(Some(url), 2000, 65536)
-                    .resolve_tool(&returns, "lookup", &serde_json::json!({}), &context())
+                    .resolve_tool(&returns, &serde_json::json!({}), &context())
                     .await,
                 ToolResolution::Unresolved(NoAnswerReason::Malformed)
             );
@@ -1048,7 +1020,7 @@ mod tests {
         let returns = [ResolverReturn::Attention].into_iter().collect();
         assert!(matches!(
             parse_tool_resolution(
-                serde_json::json!({"version": 1, "requires": {"attention": []}}),
+                serde_json::json!({"version": 1, "result": {"requires.attention": []}}),
                 &returns,
                 &["suspicious".to_string(), "trusted".to_string()],
                 &[],
@@ -1057,7 +1029,7 @@ mod tests {
         ));
         assert_eq!(
             parse_tool_resolution(
-                serde_json::json!({"version": 1, "requires": {"attention": ["invented-review"]}}),
+                serde_json::json!({"version": 1, "result": {"requires.attention": ["invented-review"]}}),
                 &returns,
                 &["suspicious".to_string(), "trusted".to_string()],
                 &[],
@@ -1080,35 +1052,40 @@ mod tests {
         .collect();
         let marks = vec!["privacy-review".to_string(), "review".to_string()];
         let schema = claude_response_schema(&combined, &ranks, &marks);
-        assert_eq!(schema["required"], serde_json::json!(["version", "delta", "requires"]));
+        assert_eq!(schema["required"], serde_json::json!(["version", "result"]));
+        assert_eq!(schema["additionalProperties"], false);
+        let result = &schema["properties"]["result"];
         assert_eq!(
-            schema["properties"]["delta"]["required"],
-            serde_json::json!(["trust", "audience"])
+            result["required"],
+            serde_json::json!([
+                "delta.trust",
+                "delta.audience",
+                "requires.trust",
+                "requires.audience",
+                "requires.attention"
+            ])
         );
+        assert_eq!(result["additionalProperties"], false);
         assert_eq!(
-            schema["properties"]["delta"]["properties"]["trust"]["enum"],
+            result["properties"]["delta.trust"]["enum"],
             serde_json::json!(["suspicious", "trusted"])
         );
-        assert_eq!(schema["additionalProperties"], false);
-        assert_eq!(schema["properties"]["delta"]["additionalProperties"], false);
         assert_eq!(
-            schema["properties"]["requires"]["required"],
-            serde_json::json!(["trust", "audience", "attention"])
+            result["properties"]["requires.trust"]["enum"],
+            serde_json::json!(["suspicious", "trusted"])
         );
-        assert_eq!(schema["properties"]["requires"]["additionalProperties"], false);
         assert_eq!(
-            schema["properties"]["requires"]["properties"]["attention"]["items"]["enum"],
+            result["properties"]["requires.attention"]["items"]["enum"],
             serde_json::json!(["privacy-review", "review"])
         );
+        assert_eq!(result["properties"]["requires.audience"]["minProperties"], 1);
 
         let attention = [ResolverReturn::Attention].into_iter().collect();
         let schema = claude_response_schema(&attention, &ranks, &[]);
-        assert_eq!(schema["required"], serde_json::json!(["version", "requires"]));
-        assert!(schema["properties"].get("delta").is_none());
-        assert_eq!(
-            schema["properties"]["requires"]["properties"]["attention"]["maxItems"],
-            0
-        );
+        let result = &schema["properties"]["result"];
+        assert_eq!(result["required"], serde_json::json!(["requires.attention"]));
+        assert!(result["properties"].get("delta.trust").is_none());
+        assert_eq!(result["properties"]["requires.attention"]["maxItems"], 0);
     }
 
     #[tokio::test]
@@ -1128,9 +1105,7 @@ mod tests {
         let request = ToolResolutionRequest {
             version: 1,
             resolver: "customer-classifier",
-            tool: "lookup",
-            returns: ScopedReturns(&returns),
-            input: ToolResolutionInput::Call { arguments: &arguments },
+            args: &arguments,
             context: &classifier_context,
             trust_ranks: &classifier_context.trust_ranks,
             attention_marks: &classifier_context.attention_marks,
@@ -1142,11 +1117,12 @@ mod tests {
             "type": "result",
             "structured_output": {
                 "version": 1,
-                "delta": {"trust": "suspicious", "audience": ["support", "audit"]},
-                "requires": {
-                    "trust": "trusted",
-                    "audience": {"includes": ["support"], "cap": ["support", "audit"]},
-                    "attention": ["privacy-review"]
+                "result": {
+                    "delta.trust": "suspicious",
+                    "delta.audience": ["support", "audit"],
+                    "requires.trust": "trusted",
+                    "requires.audience": {"includes": ["support"], "cap": ["support", "audit"]},
+                    "requires.attention": ["privacy-review"]
                 }
             }
         })
@@ -1165,6 +1141,7 @@ mod tests {
         let raw = run_claude_code(
             &claude_backend(command, 2000, 65_536),
             &request,
+            &returns,
             tokio::time::Instant::now() + Duration::from_millis(2000),
         )
         .await
@@ -1184,8 +1161,9 @@ mod tests {
             serde_json::from_slice(&std::fs::read(input_path).expect("the fake captured stdin"))
                 .expect("stdin is JSON");
         assert_eq!(sent["resolver"], "customer-classifier");
-        assert_eq!(sent["input"]["scope"], "call");
-        assert_eq!(sent["input"]["arguments"], arguments);
+        assert_eq!(sent["args"], arguments);
+        assert!(sent.get("input").is_none(), "the request carries no `input` key");
+        assert!(sent.get("returns").is_none(), "the request carries no `returns` key");
         assert_eq!(sent["trust_ranks"], serde_json::json!(["suspicious", "trusted"]));
         assert_eq!(sent["attention_marks"], serde_json::json!(["privacy-review", "review"]));
         assert_eq!(sent["context"]["current_trust"], "trusted");
@@ -1225,9 +1203,7 @@ mod tests {
         let request = ToolResolutionRequest {
             version: 1,
             resolver: "review",
-            tool: "lookup",
-            returns: ScopedReturns(&returns),
-            input: ToolResolutionInput::Call { arguments: &arguments },
+            args: &arguments,
             context: &classifier_context,
             trust_ranks: &classifier_context.trust_ranks,
             attention_marks: &classifier_context.attention_marks,
@@ -1235,9 +1211,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("a fixture directory is created");
         let run = |command: std::path::PathBuf, timeout_ms: u64, cap: usize| {
             let request = &request;
+            let returns = &returns;
             async move {
                 let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
-                run_claude_code(&claude_backend(command, timeout_ms, cap), request, deadline).await
+                run_claude_code(&claude_backend(command, timeout_ms, cap), request, returns, deadline).await
             }
         };
         assert_eq!(

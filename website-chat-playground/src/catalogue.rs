@@ -60,13 +60,18 @@ fn describe(contract: &ToolContract, chain: &TrustChain) -> String {
             }
         }
     }
-    for binding in &contract.resolvers {
-        let read = match &binding.argument {
-            Some(argument) => format!("argument {argument}"),
-            None => "the complete arguments".to_string(),
+    for uses in &contract.uses {
+        let read = match uses.inputs.is_empty() {
+            true => "the complete call".to_string(),
+            false => {
+                let sources: Vec<String> = uses.inputs.values().map(|source| source.spelling()).collect();
+                sources.join(", ")
+            }
         };
-        let returned: Vec<&str> = binding
-            .returns
+        // Only the results this tool references say anything about it; the rest of the
+        // resolver's answer is validated and dropped.
+        let returned: Vec<&str> = uses
+            .reads
             .iter()
             .map(|field| match field {
                 appa_engine::contract::ResolverReturn::Trust => "output trust",
@@ -78,7 +83,7 @@ fn describe(contract: &ToolContract, chain: &TrustChain) -> String {
             .collect();
         clauses.push(format!(
             "resolver {} classifies {read} into {}",
-            binding.resolver.as_str(),
+            uses.resolver.as_str(),
             returned.join(", ")
         ));
     }

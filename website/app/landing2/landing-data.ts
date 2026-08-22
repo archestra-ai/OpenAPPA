@@ -332,7 +332,7 @@ export const SCENARIOS: Scenario[] = [
           audience: "audience: legal",
         },
       ],
-      ['  ⎿  resolver returned delta: audience = exactly ["legal"]', "dim", null],
+      ['  ⎿  resolver returned delta.audience = ["legal"]', "dim", null],
       ["Now filing it on the **main tracker**, archestra/openappa.", "say", null],
       [
         '● github__create_issue(repo: "archestra/openappa", title: …)',

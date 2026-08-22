@@ -341,7 +341,8 @@ fn identity_document(
                 "name": tool.name,
                 "tags": sorted_set(&tool.tags),
                 "parameters": tool.parameters.normalized(),
-                "resolvers": sorted_set(&tool.resolvers),
+                "description": tool.description,
+                "uses": sorted_set(&tool.uses),
                 "delta": tool.delta,
                 "emits": tool.emits,
                 "requires": {
@@ -521,7 +522,7 @@ pub(crate) fn validate_coverage(
             Some(ProviderRunConstruct::Requires)
         } else if contract.pending_cast_dim().is_some() {
             Some(ProviderRunConstruct::PendingCastDelta)
-        } else if !contract.resolvers.is_empty() {
+        } else if !contract.uses.is_empty() {
             Some(ProviderRunConstruct::DynamicDelta)
         } else {
             None
@@ -597,7 +598,7 @@ mod tests {
         Authority, DeclaredLabel, DeclaredTransition, Hint, Mandate, Sanitizer, SanitizerPoints, Scope,
     };
     use crate::contract::{
-        AudienceDelta, Delta, LabelRequirements, Requires, ResolverReturn, ToolContract, ToolResolverBinding,
+        AudienceDelta, Delta, LabelRequirements, Requires, ResolverReturn, ToolContract, ToolResolverUse,
     };
     use crate::engine::Engine;
     use crate::fact::EffectSet;
@@ -611,7 +612,8 @@ mod tests {
 
     fn tool(name: &str) -> ToolContract {
         ToolContract {
-            resolvers: vec![],
+            description: Some("A test tool.".to_string()),
+            uses: vec![],
             name: ToolName::new(name),
             tags: vec![],
             delta: Some(Delta::NONE),
@@ -750,10 +752,11 @@ mod tests {
             }),
             (ProviderRunConstruct::DynamicDelta, {
                 let mut t = tool("search");
-                t.resolvers = vec![ToolResolverBinding {
+                t.uses = vec![ToolResolverUse {
                     resolver: DynamicResolverName::new("directory"),
-                    argument: None,
+                    inputs: std::collections::BTreeMap::new(),
                     returns: [ResolverReturn::Audience].into_iter().collect(),
+                    reads: [ResolverReturn::Audience].into_iter().collect(),
                 }];
                 t
             }),
@@ -1281,10 +1284,11 @@ mod tests {
         assert_ne!(identity(&delta_edit, &ReturnPolicy::Raw, &profile), base);
 
         let mut resolver_edit = cfg.clone();
-        resolver_edit.tools[0].resolvers = vec![crate::contract::ToolResolverBinding {
+        resolver_edit.tools[0].uses = vec![crate::contract::ToolResolverUse {
             resolver: crate::names::DynamicResolverName::new("classifier"),
-            argument: None,
+            inputs: std::collections::BTreeMap::new(),
             returns: [crate::contract::ResolverReturn::Trust].into_iter().collect(),
+            reads: [crate::contract::ResolverReturn::Trust].into_iter().collect(),
         }];
         assert_ne!(identity(&resolver_edit, &ReturnPolicy::Raw, &profile), base);
 
