@@ -141,7 +141,7 @@ pub struct Config {
     engine: Engine,
     registry_config: RegistryConfig,
     boundary_label: Label,
-    declarations: BTreeMap<DynamicResolverName, ResolverDeclaration>,
+    dynamic_resolver_names: BTreeSet<DynamicResolverName>,
     dynamic_resolver_builtins: BTreeMap<DynamicResolverName, String>,
 }
 
@@ -327,7 +327,7 @@ impl Config {
             engine,
             registry_config,
             boundary_label,
-            declarations,
+            dynamic_resolver_names: declarations.keys().cloned().collect(),
             dynamic_resolver_builtins,
         })
     }
@@ -353,7 +353,7 @@ impl Config {
     /// Every `[[dynamic_resolver]]` the policy registers — the validated superset of every
     /// resolver name a tool binding or dynamic read references.
     pub fn dynamic_resolver_names(&self) -> impl Iterator<Item = &DynamicResolverName> {
-        self.declarations.keys()
+        self.dynamic_resolver_names.iter()
     }
 
     /// Inline builtin implementations attached to individual dynamic resolver

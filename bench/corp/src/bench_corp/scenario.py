@@ -178,19 +178,19 @@ def _policy_requires_of(name: str, table: dict) -> dict[str, dict[str, dict]]:
     return parsed
 
 
-def _declared_results(name: str, policy: Path) -> dict[str, str]:
-    """The one result each resolver in this scenario's APPA policy declares.
+def _declared_resolvers(name: str, policy: Path) -> dict[str, tuple[set[str], str]]:
+    """Each resolver this scenario's APPA policy declares: its input names and its one result.
 
-    Reading it here keeps the fixture from holding a second copy of the contract: a scenario
-    that renames a resolver, or answers for one the policy never declares, fails at load
-    instead of at the first request.
+    Reading it here keeps the fixture from holding a second copy of the contract. A scenario
+    that renames a resolver, answers for one the policy never declares, or keys an answer on
+    an input the resolver does not read, fails at load instead of at the first request.
     """
     try:
         document = tomllib.loads(policy.read_text())
     except (OSError, tomllib.TOMLDecodeError) as error:
         raise ScenarioError(f"{name}: cannot read {policy}: {error}") from error
     section = document.get("policy", document)
-    results = {}
+    declared = {}
     for declaration in section.get("dynamic_resolver", []):
         returns = declaration.get("returns", [])
         if len(returns) != 1:
@@ -198,12 +198,12 @@ def _declared_results(name: str, policy: Path) -> dict[str, str]:
                 f"{name}: resolver {declaration.get('name')!r} declares {len(returns)} results; "
                 "the loopback fixture answers resolvers that declare exactly one"
             )
-        results[declaration["name"]] = returns[0]
-    return results
+        declared[declaration["name"]] = (set(declaration.get("inputs", [])), returns[0])
+    return declared
 
 
 def _dynamic_resolver_answers_of(
-    name: str, declarations: object, declared_results: dict[str, str]
+    name: str, declarations: object, declared: dict[str, tuple[set[str], str]]
 ) -> tuple[DynamicResolverAnswer, ...]:
     """Parse the exact wire answers served to this scenario's APPA episodes."""
     if not isinstance(declarations, list):
@@ -228,12 +228,18 @@ def _dynamic_resolver_answers_of(
             raise ScenarioError(f"{name}: {location}.readers must be a list of strings")
         if any(reader == "public" or reader.startswith("@") for reader in readers):
             raise ScenarioError(f"{name}: {location}.readers must contain literal reader IDs")
-        if resolver not in declared_results:
+        if resolver not in declared:
             raise ScenarioError(f"{name}: {location}.resolver {resolver!r} is not declared by the scenario's policy")
+        inputs, result = declared[resolver]
+        if set(args) != inputs:
+            raise ScenarioError(
+                f"{name}: {location}.args keys {sorted(args)} cannot match a request to {resolver!r}, "
+                f"which reads {sorted(inputs)}"
+            )
         answer = DynamicResolverAnswer(
             resolver=resolver,
             args=canonical_args(args),
-            result=declared_results[resolver],
+            result=result,
             readers=tuple(readers),
         )
         if answer.request_key in seen:
@@ -326,8 +332,8 @@ def load_scenario(root: Path) -> Scenario:
     sanitizer_answers = _sanitizer_answers_of(name, data.get("sanitizer_answer", []))
     if (raw_dynamic or authority_answers or sanitizer_answers) and policy_profile is None:
         raise ScenarioError(f"{name}: external fixture answers require a policy_profile")
-    declared_results = _declared_results(name, policy_profile.appa) if policy_profile else {}
-    dynamic_resolver_answers = _dynamic_resolver_answers_of(name, raw_dynamic, declared_results)
+    declared = _declared_resolvers(name, policy_profile.appa) if policy_profile else {}
+    dynamic_resolver_answers = _dynamic_resolver_answers_of(name, raw_dynamic, declared)
 
     utility = _checks_of(name, "utility", data.get("utility", {}))
     security = _checks_of(name, "security", data.get("security", {}))

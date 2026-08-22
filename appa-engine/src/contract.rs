@@ -129,6 +129,13 @@ impl ToolCallSource {
         }
     }
 
+    /// The source reading one top-level argument, or `None` when the name is not one a
+    /// spelling can carry. Constructing [`ToolCallSource::Argument`] directly with an empty or
+    /// dotted name would serialize into a spelling that no longer parses.
+    pub fn argument(name: &str) -> Option<ToolCallSource> {
+        ToolCallSource::parse(&format!("{TOOL_CALL_ROOT}.arguments.{name}"))
+    }
+
     pub fn spelling(&self) -> String {
         match self {
             ToolCallSource::Call => TOOL_CALL_ROOT.to_string(),
@@ -851,6 +858,26 @@ mod tests {
             delta: Some(Delta::NONE),
             emits: EffectSet::default(),
             requires: Requires::default(),
+        }
+    }
+
+    #[test]
+    fn every_source_a_policy_can_write_survives_its_own_spelling() {
+        // A source rides policy identity and every persisted pin as its spelling, so the two
+        // directions have to agree or a stored trajectory stops replaying.
+        let sources = [
+            ToolCallSource::Call,
+            ToolCallSource::Name,
+            ToolCallSource::Description,
+            ToolCallSource::Arguments,
+            ToolCallSource::argument("customer_id").expect("a plain name is a source"),
+        ];
+        for source in sources {
+            assert_eq!(ToolCallSource::parse(&source.spelling()), Some(source.clone()));
+        }
+        // The names a spelling cannot carry are refused at construction, not silently kept.
+        for name in ["", "a.b"] {
+            assert_eq!(ToolCallSource::argument(name), None, "{name:?} is not an argument name");
         }
     }
 
