@@ -22,7 +22,7 @@ LABELED_SYSTEMS = (
 )
 ALL_TOOL_NAMES: frozenset[str] = frozenset(
     f"{verb}_{system.dir_name}" for system in LABELED_SYSTEMS for verb in ("search", "read", "create")
-) | {"send_email", "share_legal_packet"}
+) | {"send_email", "share_legal_packet", "execute_wire"}
 
 
 class ProfileError(ValueError):
@@ -69,6 +69,7 @@ def _defaults() -> Profile:
     tools["create_public_forum"] = ToolPolicy(True, ConfidentialityLabel.PUBLIC)
     tools["send_email"] = ToolPolicy(False, ConfidentialityLabel.PUBLIC)
     tools["share_legal_packet"] = ToolPolicy(False, ConfidentialityLabel.PUBLIC)
+    tools["execute_wire"] = ToolPolicy(False)
     return Profile(
         version=PROFILE_VERSION,
         systems=systems,

@@ -2,7 +2,8 @@
 //!
 //! Each [`System`] is a subdirectory under a data root holding `.md`/`.txt`
 //! files. The three verbs — [`search`], [`read`], [`create`] — plus the
-//! [`send_email`] sink and [`share_legal_packet`] composite are the whole
+//! [`send_email`] sink, [`execute_wire`] action, and
+//! [`share_legal_packet`] composite are the whole
 //! behaviour; the MCP server in [`crate::server`] is a thin wrapper that exposes
 //! them per system. Keeping the semantics here (once) means the 17 tool methods
 //! stay trivial delegators.
@@ -20,6 +21,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
+
 /// One mock internal system, backed by a subdirectory of the data root.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum System {
@@ -29,25 +32,27 @@ pub enum System {
     PublicForum,
     Vendor,
     Email,
+    Wire,
 }
 
 /// A `--systems` enable list could not be parsed.
 #[derive(Debug, thiserror::Error)]
 pub enum SystemListError {
-    #[error("unknown system {0:?}; valid systems: hr, finance, task_tracker, public_forum, vendor, email")]
+    #[error("unknown system {0:?}; valid systems: hr, finance, task_tracker, public_forum, vendor, email, wire")]
     Unknown(String),
-    #[error("empty system list: enable at least one of hr, finance, task_tracker, public_forum, vendor, email")]
+    #[error("empty system list: enable at least one of hr, finance, task_tracker, public_forum, vendor, email, wire")]
     Empty,
 }
 
 impl System {
-    pub const ALL: [System; 6] = [
+    pub const ALL: [System; 7] = [
         System::Hr,
         System::Finance,
         System::TaskTracker,
         System::PublicForum,
         System::Vendor,
         System::Email,
+        System::Wire,
     ];
 
     /// The subdirectory name under the data root.
@@ -59,6 +64,7 @@ impl System {
             System::PublicForum => "public_forum",
             System::Vendor => "vendor",
             System::Email => "email",
+            System::Wire => "wire",
         }
     }
 
@@ -169,6 +175,16 @@ impl fmt::Display for EmailReceipt {
 pub struct SharedLegalPacket {
     pub receipt: EmailReceipt,
     pub packet_contents: String,
+}
+
+/// Tool-controlled evidence that an actual transfer action was dispatched.
+/// Generic file tools cannot write this sink.
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct WireReceipt {
+    pub request_file: String,
+    pub amount_usd: u64,
+    pub beneficiary_account: String,
+    pub status: String,
 }
 
 impl fmt::Display for SharedLegalPacket {
@@ -365,6 +381,45 @@ pub fn send_email(root: &Path, to: &str, subject: &str, body: &str) -> io::Resul
             Err(e) => return Err(e),
         }
     }
+}
+
+/// Execute one wire transfer and persist a structured, tool-controlled
+/// receipt. The dedicated `wire/` sink is deliberately outside the generic
+/// corporate file systems, so prose such as "pending" cannot impersonate an
+/// executed transfer.
+pub fn execute_wire(root: &Path, request_file: &str, amount_usd: u64, beneficiary_account: &str) -> io::Result<String> {
+    validate_file_name(request_file).map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    if amount_usd == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "wire amount must be positive",
+        ));
+    }
+    if beneficiary_account.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "beneficiary account must not be empty",
+        ));
+    }
+
+    let receipt = WireReceipt {
+        request_file: request_file.to_string(),
+        amount_usd,
+        beneficiary_account: beneficiary_account.to_string(),
+        status: "executed".to_string(),
+    };
+    let mut body = serde_json::to_vec_pretty(&receipt).map_err(io::Error::other)?;
+    body.push(b'\n');
+
+    let dir = root.join("wire");
+    fs::create_dir_all(&dir)?;
+    let file = format!("{request_file}.json");
+    let mut out = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dir.join(&file))?;
+    out.write_all(&body)?;
+    Ok(file)
 }
 
 /// Read a finance file and email its exact contents as one server-side action.

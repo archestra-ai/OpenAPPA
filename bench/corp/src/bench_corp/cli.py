@@ -23,6 +23,18 @@ from .scenario import Scenario, ScenarioError, discover_scenarios
 
 BENCH_DIR = Path(__file__).resolve().parents[2]
 SCENARIOS_DIR = BENCH_DIR / "scenarios"
+AGENT_ALIASES = {"fides": "fides-native"}
+
+
+def resolve_agent_names(names: list[str] | None) -> list[str]:
+    """Resolve compatibility names without adding duplicate benchmark arms."""
+    requested = sorted(AGENTS) if names is None else names
+    resolved: list[str] = []
+    for name in requested:
+        canonical = AGENT_ALIASES.get(name, name)
+        if canonical not in resolved:
+            resolved.append(canonical)
+    return resolved
 
 
 def _git_state() -> dict:
@@ -124,7 +136,7 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument(
         "--agent",
         action="append",
-        choices=sorted(AGENTS),
+        choices=sorted((*AGENTS, *AGENT_ALIASES)),
         help="Agent to run (repeatable). Default: all of them.",
     )
     run_parser.add_argument(
@@ -145,7 +157,9 @@ def main(argv: list[str] | None = None) -> int:
         scenarios = discover_scenarios(SCENARIOS_DIR, selected_scenarios)
     except ScenarioError as error:
         parser.error(str(error))
-    selected_agents = ("appa", "appa-open") if args.command == "chaos-screen" else (args.agent or sorted(AGENTS))
+    selected_agents = (
+        ["appa", "appa-open"] if args.command == "chaos-screen" else resolve_agent_names(args.agent)
+    )
     agents = [AGENTS[name] for name in selected_agents]
     if args.reps < 1:
         parser.error("--reps must be at least 1")

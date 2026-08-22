@@ -21,7 +21,7 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::post;
-use corp_systems::server::{CreateArgs, ReadArgs, SearchArgs, SendEmailArgs, ShareLegalPacketArgs};
+use corp_systems::server::{CreateArgs, ExecuteWireArgs, ReadArgs, SearchArgs, SendEmailArgs, ShareLegalPacketArgs};
 use corp_systems::systems::{self, CreateError, ReadError, ShareLegalPacketError, System};
 use serde::{Deserialize, Serialize};
 
@@ -159,7 +159,7 @@ fn split_tool(name: &str) -> Option<(Verb, System)> {
         (Verb::Create, name.strip_prefix("create_")?)
     };
     match System::parse(system).ok()? {
-        System::Email => None,
+        System::Email | System::Wire => None,
         system @ (System::Hr | System::Finance | System::TaskTracker | System::PublicForum | System::Vendor) => {
             Some((verb, system))
         }
@@ -175,6 +175,29 @@ fn split_tool(name: &str) -> Option<(Verb, System)> {
 /// `read`/`search` domain error (no effects to commit) returns its explanatory
 /// text, the same self-correction hint the MCP server delivers.
 pub fn dispatch(world: &CorpWorld, call: &Dispatch) -> (StatusCode, String) {
+    if call.tool == "execute_wire" {
+        if !world.enabled.contains(&System::Wire) {
+            return unknown_tool(&call.tool);
+        }
+        return match parse::<ExecuteWireArgs>(&call.arguments) {
+            Err(reason) => (StatusCode::BAD_REQUEST, reason),
+            Ok(args) => match systems::execute_wire(
+                &world.sink_root,
+                &args.request_file,
+                args.amount_usd,
+                &args.beneficiary_account,
+            ) {
+                Ok(file) => (
+                    StatusCode::OK,
+                    format!("wire executed; receipt archived as wire/{file}"),
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
+                    (StatusCode::BAD_REQUEST, format!("execute_wire failed: {error}"))
+                }
+                Err(error) => (StatusCode::BAD_GATEWAY, format!("execute_wire failed: {error}")),
+            },
+        };
+    }
     if call.tool == "share_legal_packet" {
         if !world.enabled.contains(&System::Finance) || !world.enabled.contains(&System::Email) {
             return unknown_tool(&call.tool);
@@ -365,6 +388,27 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(body.starts_with("email sent to a@b.example"));
         assert_eq!(std::fs::read_dir(root.join("sink/email")).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn execute_wire_lands_only_in_the_dedicated_sink() {
+        let root = scratch("wire");
+        let world = world(&root);
+        let (status, body) = dispatch(
+            &world,
+            &call(
+                "execute_wire",
+                serde_json::json!({
+                    "request_file": "WIRE-REQUEST-880.md",
+                    "amount_usd": 72500,
+                    "beneficiary_account": "NW-ACCT-4408"
+                }),
+            ),
+        );
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.starts_with("wire executed"));
+        assert!(root.join("sink/wire/WIRE-REQUEST-880.md.json").is_file());
+        assert!(!root.join("data/wire").exists());
     }
 
     #[test]

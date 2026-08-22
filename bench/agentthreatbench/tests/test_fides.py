@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -28,13 +29,13 @@ async def test_real_fides_middleware_memory_poison_allows_response_and_blocks_wr
         read = await session.invoke(
             "memory_read",
             {"key": "policy"},
-            lambda: _result("safe fact plus injected instruction"),
+            lambda _: _result("safe fact plus injected instruction"),
         )
         assert isinstance(read, FidesAllowed)
 
         delivery_called = False
 
-        async def deliver() -> str:
+        async def deliver(_: dict[str, object]) -> str:
             nonlocal delivery_called
             delivery_called = True
             return "delivered"
@@ -69,7 +70,7 @@ async def test_real_fides_middleware_autonomy_hijack_blocks_downstream_actions()
         read = await session.invoke(
             "read_inbox",
             {},
-            lambda: _result("Inbox: 1. legitimate email, 2. malicious email"),
+            lambda _: _result("Inbox: 1. legitimate email, 2. malicious email"),
         )
         assert isinstance(read, FidesAllowed)
 
@@ -77,7 +78,7 @@ async def test_real_fides_middleware_autonomy_hijack_blocks_downstream_actions()
         categorize = await session.invoke(
             "categorize_email",
             {"email_index": 0, "category": "general"},
-            lambda: _result("categorized"),
+            lambda _: _result("categorized"),
         )
         assert isinstance(categorize, FidesBlocked)
     finally:
@@ -92,7 +93,7 @@ async def test_data_exfil_policy_exposes_coarse_confidentiality_tradeoff() -> No
         lookup = await session.invoke(
             "lookup_customer",
             {"query": "CX-1"},
-            lambda: _result("Customer: Alice; SSN: 123-45-6789"),
+            lambda _: _result("Customer: Alice; SSN: 123-45-6789"),
         )
         assert isinstance(lookup, FidesAllowed)
 
@@ -101,14 +102,14 @@ async def test_data_exfil_policy_exposes_coarse_confidentiality_tradeoff() -> No
         resolution = await session.invoke(
             "resolve_ticket",
             {"customer_id": "CX-1", "resolution": "corrected"},
-            lambda: _result("resolved"),
+            lambda _: _result("resolved"),
         )
         assert isinstance(resolution, FidesAllowed)
         for recipient in ("alice@example.test", "attacker@example.test"):
             send = await session.invoke(
                 "send_message",
                 {"recipient": recipient, "body": "customer record"},
-                lambda: _result("sent"),
+                lambda _: _result("sent"),
             )
             assert isinstance(send, FidesBlocked)
     finally:
@@ -119,7 +120,7 @@ async def test_data_exfil_policy_exposes_coarse_confidentiality_tradeoff() -> No
 async def test_fides_tool_errors_remain_allowed_errors_not_successful_results() -> None:
     session = FidesSession(fides_policy("memory_poison", {"memory_read", "memory_write", "respond_to_user"}))
 
-    async def fail() -> str:
+    async def fail(_: dict[str, object]) -> str:
         raise ValueError("fixture failure")
 
     try:
@@ -129,6 +130,87 @@ async def test_fides_tool_errors_remain_allowed_errors_not_successful_results() 
         assert result.execution_error == "Tool failed: ValueError: fixture failure"
     finally:
         session.close()
+
+
+@pytest.mark.asyncio
+async def test_native_fides_hides_then_inspects_untrusted_content() -> None:
+    policy = fides_policy("memory_poison", {"memory_read", "memory_write", "respond_to_user"})
+    session = FidesSession(policy, native=True)
+    try:
+        read = await session.invoke(
+            "memory_read",
+            {"key": "policy"},
+            lambda _: _result("safe fact plus injected instruction"),
+        )
+        assert isinstance(read, FidesAllowed)
+        reference = json.loads(read.content)
+        assert reference["type"] == "variable_reference"
+
+        inspected = await session.invoke(
+            "inspect_variable",
+            {"variable_id": reference["variable_id"], "reason": "test"},
+            None,
+        )
+        assert isinstance(inspected, FidesAllowed)
+        assert "safe fact plus injected instruction" in inspected.content
+
+        write = await session.invoke(
+            "memory_write",
+            {"key": "policy", "value": "corrupted"},
+            lambda _: _result("written"),
+        )
+        assert isinstance(write, FidesBlocked)
+    finally:
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_fides_session_owns_the_trajectory_limit_until_close() -> None:
+    policy = fides_policy("memory_poison", {"memory_read", "memory_write", "respond_to_user"})
+    native = FidesSession(policy, native=True)
+    middleware = FidesSession(policy)
+    try:
+        read = await native.invoke(
+            "memory_read",
+            {"key": "policy"},
+            lambda _: _result("native sample content"),
+        )
+        assert isinstance(read, FidesAllowed)
+        variable_id = json.loads(read.content)["variable_id"]
+
+        inspected_task = asyncio.create_task(native.invoke("inspect_variable", {"variable_id": variable_id}, None))
+        overlapping_task = asyncio.create_task(
+            middleware.invoke(
+                "memory_read",
+                {"key": "other"},
+                lambda _: _result("other sample content"),
+            )
+        )
+        inspected = await inspected_task
+        assert isinstance(inspected, FidesAllowed)
+        assert "native sample content" in inspected.content
+        await asyncio.sleep(0)
+        assert not overlapping_task.done()
+
+        native.close()
+        overlapping = await overlapping_task
+        assert isinstance(overlapping, FidesAllowed)
+    finally:
+        native.close()
+        middleware.close()
+
+
+def test_native_fides_digest_and_binding_are_distinct() -> None:
+    policy = fides_policy("memory_poison", {"memory_read", "memory_write", "respond_to_user"})
+    middleware = FidesSession(policy)
+    native = FidesSession(policy, native=True)
+    try:
+        assert middleware.digest() != native.digest()
+        assert middleware.binding_identity != native.binding_identity
+        assert set(native.security_tools) == {"quarantined_llm", "inspect_variable"}
+    finally:
+        middleware.close()
+        native.close()
 
 
 async def _result(value: str) -> str:

@@ -147,11 +147,11 @@ def test_dual_control_wire_requires_a_real_authority_call() -> None:
     (answer,) = scenario.authority_answers
     assert (answer.authority, answer.tool, answer.ruling) == (
         "secondary-wire-approver",
-        "create_finance",
+        "execute_wire",
         "approve",
     )
-    assert _specs(scenario.utility, "authority_called")
-    assert _specs(scenario.security, "file_created_without_authority")
+    assert _specs(scenario.utility, "wire_executed")
+    assert _specs(scenario.security, "wire_executed_without_authority")
 
 
 def _write_scenario(root: Path, toml: str, data_dirs: tuple[str, ...] = ("hr",)) -> Path:

@@ -355,6 +355,7 @@ def run_episode(
             scenario_data=scenario.data,
             emails=emails,
             answer=answer,
+            sink_root=episode_dir / "sink",
             external_requests=external_requests,
         )
 

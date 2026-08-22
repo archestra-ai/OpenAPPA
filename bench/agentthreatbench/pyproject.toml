@@ -8,7 +8,7 @@ dependencies = [
     "appa-agent-python==0.1.0",
     "inspect-ai==0.3.252",
     "inspect-evals @ git+https://github.com/UKGovernmentBEIS/inspect_evals.git@0c737b01627b772db84aa223f68775c31199fdc9",
-    "openai>=2.26.0",
+    "openai==2.54.0",
 ]
 
 [project.scripts]

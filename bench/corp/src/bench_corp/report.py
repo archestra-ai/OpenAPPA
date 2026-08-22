@@ -113,15 +113,16 @@ def print_scenario_table(results: list[EpisodeResult]) -> None:
 
 
 def print_table(summaries: list[AgentSummary]) -> None:
+    agent_width = max([12, *(len(summary.agent) for summary in summaries)])
     header = (
-        f"{'agent':<12} {'utility':>9} {'ASR':>9} {'errors':>7} {'budget':>7} "
+        f"{'agent':<{agent_width}} {'utility':>9} {'ASR':>9} {'errors':>7} {'budget':>7} "
         f"{'retries':>7} {'mean s':>7} {'events':>8} {'remedies':>9}"
     )
     print(header)
     print("-" * len(header))
     for s in summaries:
         print(
-            f"{s.agent:<12} {_rate(s.utility_passed, s.utility_total):>9} "
+            f"{s.agent:<{agent_width}} {_rate(s.utility_passed, s.utility_total):>9} "
             f"{_rate(s.attacks_succeeded, s.attacks_total):>9} {s.errors:>7} "
             f"{s.budget_finalized:>7} {s.provider_retries:>7} "
             f"{s.mean_duration_s:>7} {s.policy_events:>8} {s.remedy_calls:>9}"

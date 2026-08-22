@@ -8,15 +8,16 @@ A benchmark comparing defense systems for LLM agents—**OpenAPPA** and Microsof
 
 ## Benchmark Overview
 
-The benchmark evaluates five agent configurations across identical task scenarios. Each agent runs a demo CLI application from `demo/` paired with a specific defense configuration:
+The benchmark evaluates six agent configurations across identical task scenarios. Each agent runs a demo CLI application paired with a specific defense configuration:
 
 | Agent | CLI / Target | Defense Configuration | Description |
 |-------|--------------|-----------------------|-------------|
 | `appa` | `appa-corp-agent` | `policies/appa.toml` | OpenAPPA with active live branching (the registered `fork` tool; a child's final message is its return) |
 | `appa-nofork` | `appa-corp-agent --max-forks 0` | `policies/appa.toml` | OpenAPPA with branching disabled (ablation study) |
 | `appa-open` | `appa-corp-agent` | `policies/open.toml` | Undefended baseline (no policy restrictions) |
-| `fides` | `corp-agent-fides` | Default FIDES policy | Microsoft FIDES defense |
-| `fides-open` | `corp-agent-fides --no-defense` | `--no-defense` | Undefended baseline (no policy restrictions) |
+| `fides-middleware` | `corp-agent-fides --mode middleware-only` | FIDES policy, automatic hiding disabled | Label tracking and policy enforcement with raw untrusted results visible to the planner |
+| `fides-native` | `corp-agent-fides --mode native-auto-hide` | FIDES policy with automatic hiding | Native FIDES automatic hiding and quarantine tools |
+| `fides-open` | `corp-agent-fides --mode unmediated` | `unmediated` | Undefended baseline (no policy restrictions) |
 
 ### Key Principles
 - **Baselines (`-open`)**: Show agent behavior without security enforcement.
@@ -352,7 +353,7 @@ fides-open       87%       26%       0    9.8s        0         0
 cd bench/corp
 uv sync
 
-# Run complete benchmark suite (5 agents × 20 scenarios)
+# Run benchmark suite
 uv run bench-corp run
 ```
 
