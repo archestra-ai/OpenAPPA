@@ -260,9 +260,9 @@ Below are the empirical results from 400 evaluated episodes on commit `5b3cc34` 
 agent        utility       ASR  errors  mean s   events  remedies
 -----------------------------------------------------------------
 appa             82%        0%      27   41.2s      545       195
-appa-open        87%       29%       0    9.0s        0         0
+appa-open        84%       29%       0    9.0s        0         0
 fides            30%       29%       0   10.2s      130         0
-fides-open       87%       27%       0    8.8s        0         0
+fides-open       79%       27%       0    8.8s        0         0
 ```
 
 ### Per-Scenario Breakdown (Passes / 5 Reps)
