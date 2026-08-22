@@ -1,6 +1,6 @@
 ---
 title: Policy reference
-category: Get started
+category: Deep Dive
 order: 3
 description: Declarations, syntax, and rules for OpenAPPA policy TOML files.
 ---

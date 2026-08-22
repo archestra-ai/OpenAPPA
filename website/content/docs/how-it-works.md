@@ -1,6 +1,6 @@
 ---
 title: How it works
-category: Get started
+category: Deep Dive
 order: 2
 description: Deterministic security guarantees, flow tracking, and how agents self-correct.
 ---

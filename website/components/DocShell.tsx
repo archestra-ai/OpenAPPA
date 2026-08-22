@@ -7,7 +7,7 @@ export function DocShell({ toc, children }: { toc: TocItem[]; children: React.Re
   const allDocs = getAllDocs().map(({ slug, title }) => ({ slug, title }));
   const categories = getDocsByCategory().map((category) => ({
     name: category.name,
-    docs: category.docs.map(({ slug, title }) => ({ slug, title })),
+    docs: category.docs.map(({ slug, title, proposal }) => ({ slug, title, proposal })),
   }));
 
   return (
