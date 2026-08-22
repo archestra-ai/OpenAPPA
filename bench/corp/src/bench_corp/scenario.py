@@ -198,8 +198,18 @@ def _declared_resolvers(name: str, policy: Path) -> dict[str, tuple[set[str], st
                 f"{name}: resolver {declaration.get('name')!r} declares {len(returns)} results; "
                 "the loopback fixture answers resolvers that declare exactly one"
             )
+        if returns[0] not in _FIXTURE_RESULTS:
+            raise ScenarioError(
+                f"{name}: resolver {declaration.get('name')!r} returns {returns[0]!r}; the loopback "
+                f"fixture answers with reader sets, so it serves {' or '.join(sorted(_FIXTURE_RESULTS))}"
+            )
         declared[declaration["name"]] = (set(declaration.get("inputs", [])), returns[0])
     return declared
+
+
+#: The results the loopback fixture knows how to build. It answers with reader sets, so an
+#: output audience and a required audience are the two it can spell.
+_FIXTURE_RESULTS = frozenset({"delta.audience", "requires.audience"})
 
 
 def _dynamic_resolver_answers_of(
