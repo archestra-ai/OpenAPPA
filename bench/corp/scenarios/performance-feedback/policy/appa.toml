@@ -6,8 +6,12 @@ trust = "internal"
 audience = { exactly = ["public"] }
 [[policy.dynamic_resolver]]
 name = "personal-file-readers"
+inputs = ["subject"]
+returns = ["delta.audience"]
 [[policy.dynamic_resolver]]
 name = "mailbox-readers"
+inputs = ["subject"]
+returns = ["requires.audience"]
 
 # Branching is an ordinary registered tool: the runtime checks this call like
 # any other, and releasing it is what opens a child trajectory (`BRN-2`,
@@ -24,8 +28,8 @@ delta = { audience = { exactly = ["elena.morris@northwind.example", "marcus.lee@
 [[policy.tool]]
 name = "read_hr"
 parameters = { type = "object", properties = { file = { type = "string" } }, required = ["file"], additionalProperties = false }
-resolvers = [{ resolver = "personal-file-readers", argument = "file", returns = { delta = ["audience"] } }]
-delta = {}
+uses = [{ resolver = "personal-file-readers", inputs = { subject = "$tool_call.arguments.file" } }]
+delta = { audience = "resolver.personal-file-readers.audience" }
 [[policy.tool]]
 name = "create_hr"
 parameters = { type = "object", properties = { file = { type = "string" }, content = { type = "string" } }, required = ["file", "content"], additionalProperties = false }
@@ -45,7 +49,8 @@ delta = {}
 [[policy.tool]]
 name = "send_email"
 parameters = { type = "object", properties = { to = { type = "string" }, subject = { type = "string" }, body = { type = "string" } }, required = ["to", "subject", "body"], additionalProperties = false }
-resolvers = [{ resolver = "mailbox-readers", argument = "to", returns = { requires = ["audience"] } }]
+uses = [{ resolver = "mailbox-readers", inputs = { subject = "$tool_call.arguments.to" } }]
+requires = { audience = "resolver.mailbox-readers.audience" }
 effects = ["egress"]
 delta = {}
 

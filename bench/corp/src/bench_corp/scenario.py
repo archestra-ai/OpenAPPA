@@ -15,6 +15,7 @@ Check vocabulary (see :mod:`.checks`): ``email_sent``, ``no_email``,
 
 from __future__ import annotations
 
+import json
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,17 +35,25 @@ class PolicyProfile:
 
 @dataclass(frozen=True)
 class DynamicResolverAnswer:
-    """One exact request answered by the scenario's loopback dynamic resolver."""
+    """One exact request answered by the scenario's loopback dynamic resolver.
+
+    The request carries no tool name, so the resolver and the exact `args` it was sent are
+    the whole key. `args` is held in its canonical JSON spelling, which is what the fixture
+    compares an arriving request against.
+    """
 
     resolver: str
-    tool: str
-    argument: str
-    value: str
+    args: str
     readers: tuple[str, ...]
 
     @property
-    def request_key(self) -> tuple[str, str, str, str]:
-        return (self.resolver, self.tool, self.argument, self.value)
+    def request_key(self) -> tuple[str, str]:
+        return (self.resolver, self.args)
+
+
+def canonical_args(args: object) -> str:
+    """The one spelling of a request's `args`, so declaration and request compare equal."""
+    return json.dumps(args, sort_keys=True, separators=(",", ":"))
 
 
 @dataclass(frozen=True)
@@ -172,7 +181,7 @@ def _dynamic_resolver_answers_of(name: str, declarations: object) -> tuple[Dynam
     """Parse the exact wire answers served to this scenario's APPA episodes."""
     if not isinstance(declarations, list):
         raise ScenarioError(f"{name}: 'dynamic_resolver_answer' must be an array of tables")
-    fields = {"resolver", "tool", "argument", "value", "readers"}
+    fields = {"resolver", "args", "readers"}
     answers = []
     seen = set()
     for index, declaration in enumerate(declarations, start=1):
@@ -181,20 +190,20 @@ def _dynamic_resolver_answers_of(name: str, declarations: object) -> tuple[Dynam
             raise ScenarioError(f"{name}: {location} must be a table")
         if set(declaration) != fields:
             raise ScenarioError(f"{name}: {location} takes exactly: {', '.join(sorted(fields))}")
-        for field_name in ("resolver", "tool", "argument", "value"):
-            value = declaration[field_name]
-            if not isinstance(value, str) or not value:
-                raise ScenarioError(f"{name}: {location}.{field_name} must be a non-empty string")
+        resolver = declaration["resolver"]
+        if not isinstance(resolver, str) or not resolver:
+            raise ScenarioError(f"{name}: {location}.resolver must be a non-empty string")
+        args = declaration["args"]
+        if not isinstance(args, dict) or not args:
+            raise ScenarioError(f"{name}: {location}.args must be a non-empty table")
         readers = declaration["readers"]
         if not isinstance(readers, list) or any(not isinstance(reader, str) for reader in readers):
             raise ScenarioError(f"{name}: {location}.readers must be a list of strings")
         if any(reader == "public" or reader.startswith("@") for reader in readers):
             raise ScenarioError(f"{name}: {location}.readers must contain literal reader IDs")
         answer = DynamicResolverAnswer(
-            resolver=declaration["resolver"],
-            tool=declaration["tool"],
-            argument=declaration["argument"],
-            value=declaration["value"],
+            resolver=resolver,
+            args=canonical_args(args),
             readers=tuple(readers),
         )
         if answer.request_key in seen:

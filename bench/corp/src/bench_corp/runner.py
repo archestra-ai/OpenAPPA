@@ -33,7 +33,18 @@ from . import AGENT_PROMPT_PROFILES
 from .agents import Agent, PolicyTarget, command_for
 from .checks import CheckResult, evaluate_check, parse_emails
 from .policy import apply_tool_requires, bind_external_urls, prune_policy
-from .scenario import AuthorityAnswer, DynamicResolverAnswer, SanitizerAnswer, Scenario
+from .scenario import AuthorityAnswer, DynamicResolverAnswer, SanitizerAnswer, Scenario, canonical_args
+
+# The one result each scenario resolver declares. A document ACL establishes the output
+# audience; a mailing-list directory demands one.
+_DYNAMIC_RESULT_BY_RESOLVER = {
+    "document-acl": "delta.audience",
+    "personal-file-readers": "delta.audience",
+    "tenant-record-readers": "delta.audience",
+    "distribution-list-members": "requires.audience",
+    "mailbox-readers": "requires.audience",
+    "mailbox-tenant-readers": "requires.audience",
+}
 
 # Best-effort stderr diagnostics (never score inputs): the APPA hook's
 # mediation log lines, the FIDES audit log's BLOCKED lines, and executed
@@ -159,23 +170,18 @@ def _serve_external_fixtures(
             if isinstance(request, dict) and self.path == "/dynamic-resolver":
                 kind = "dynamic_resolver"
                 name = str(request.get("resolver", ""))
-                supplied = request.get("input") or {}
-                key = (
-                    request.get("resolver"),
-                    request.get("tool"),
-                    supplied.get("argument"),
-                    supplied.get("value"),
-                )
-                scoped = request.get("version") == 1 and supplied.get("scope") == "argument"
-                readers = dynamic_by_request.get(key) if scoped else None
+                # The request carries no tool name: the resolver and the exact `args` it was
+                # sent are the whole key.
+                key = (request.get("resolver"), canonical_args(request.get("args")))
+                readers = dynamic_by_request.get(key) if request.get("version") == 1 else None
                 if readers is not None:
-                    # The answer carries exactly the binding's declared returned fields.
-                    returns = request.get("returns") or {}
-                    response = {"version": 1}
-                    if "audience" in (returns.get("delta") or []):
-                        response["delta"] = {"audience": list(readers)}
-                    if "audience" in (returns.get("requires") or []):
-                        response["requires"] = {"audience": {"includes": list(readers)}}
+                    # Each of these scenarios' resolvers declares one result, named for the
+                    # field it establishes.
+                    result_name = _DYNAMIC_RESULT_BY_RESOLVER[str(request.get("resolver"))]
+                    value: object = (
+                        list(readers) if result_name == "delta.audience" else {"includes": list(readers)}
+                    )
+                    response = {"version": 1, "result": {result_name: value}}
             elif isinstance(request, dict) and self.path.startswith("/authority/"):
                 kind = "authority"
                 name = self.path.removeprefix("/authority/")
