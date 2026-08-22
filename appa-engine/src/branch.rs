@@ -72,7 +72,7 @@ pub(crate) fn submit_void_return(parent: &Views, child: &TrajectoryId) -> Result
 /// The one place a return's facts are assembled: the child's `ChildReturn` record, the optional
 /// return-scoped acceptance, the parent's `ValueAdmitted` under the returned value's own label,
 /// and the `Merge` boundary — always one batch, never split across commit points. The parent
-/// *fold* absorbs the crossing at projection (intersect readers, min trust) — identical to folding
+/// *fold* absorbs the crossing at projection (audience meet, min trust) — identical to folding
 /// `parent.combine(returned)`, since `combine` is idempotent — while the stored per-value label
 /// stays the value's intrinsic one, so authority review context and cast targeting see what the
 /// value *is*, not the parent's unrelated restrictions.

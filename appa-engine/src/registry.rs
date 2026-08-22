@@ -1160,7 +1160,7 @@ mod tests {
 
     #[test]
     fn every_declared_audience_refuses_a_reserved_or_group_reader() {
-        for reserved in ["public", "@auditors"] {
+        for reserved in ["public", "private", "@auditors"] {
             for (context, cfg) in audience_sites(reserved) {
                 match Registry::build_covered(cfg) {
                     Err(LoadError::NonLiteralReader {
@@ -1206,17 +1206,22 @@ mod tests {
 
     #[test]
     fn public_and_the_empty_set_stay_loadable_audiences() {
-        let mut public_ceiling = base();
-        public_ceiling.authorities = vec![Authority {
-            name: AuthorityName::new("officer"),
-            mandate: Mandate {
-                reader_ceiling: Some(DeclaredAudience::literal(Audience::Public)),
-                ..Mandate::default()
-            },
-            scope: Scope::default(),
-            hint: None,
-        }];
-        assert!(Registry::build_covered(public_ceiling).is_ok());
+        for state in [Audience::Public, Audience::Private] {
+            let mut ceiling = base();
+            ceiling.authorities = vec![Authority {
+                name: AuthorityName::new("officer"),
+                mandate: Mandate {
+                    reader_ceiling: Some(DeclaredAudience::literal(state.clone())),
+                    ..Mandate::default()
+                },
+                scope: Scope::default(),
+                hint: None,
+            }];
+            assert!(
+                Registry::build_covered(ceiling).is_ok(),
+                "a {state:?} reader ceiling loads",
+            );
+        }
 
         let mut empty_cap = base();
         let mut cap_tool = tool("emit");
@@ -2305,6 +2310,38 @@ mod tests {
         cfg.tools[0].requires.label.audience =
             vec![AudienceRequirement::Cap(DeclaredAudience::literal(Audience::Public))];
         assert!(Registry::build_covered_with_cap(cfg, cap).is_ok());
+    }
+
+    #[test]
+    fn a_private_cap_and_a_private_delta_each_count_toward_the_bound() {
+        let cap = PlannerCap::new(4).expect("nonzero");
+
+        // A private cap is a real ceiling. Read as vacuous, it would arm no redispatch count, and
+        // the registry would admit a tool whose runtime remedy menu is larger than the bound it was
+        // checked against — planning is algebraic and does not consult this lint.
+        let mut private_cap = cap_target_config(4);
+        private_cap.tools[0].requires.label.audience =
+            vec![AudienceRequirement::Cap(DeclaredAudience::literal(Audience::Private))];
+        assert!(
+            matches!(
+                Registry::build_covered_with_cap(private_cap, cap),
+                Err(LoadError::TooManyPlanAlternatives { count: 5, max: 4, .. })
+            ),
+            "a private cap arms the redispatch count",
+        );
+
+        // A private delta narrows, so a tool carrying one is a redispatch candidate. Swapping one
+        // reader-set narrower for a private one must leave the count where it was.
+        let mut private_delta = cap_target_config(4);
+        private_delta.tools[1].delta.as_mut().unwrap().audience =
+            Some(AudienceDelta::Static(DeclaredAudience::literal(Audience::Private)));
+        assert!(
+            matches!(
+                Registry::build_covered_with_cap(private_delta, cap),
+                Err(LoadError::TooManyPlanAlternatives { count: 5, max: 4, .. })
+            ),
+            "a private delta counts as a narrowing contribution",
+        );
     }
 
     #[test]

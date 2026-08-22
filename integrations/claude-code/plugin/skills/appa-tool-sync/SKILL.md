@@ -89,9 +89,13 @@ List which tools the policy already declares.
 ## 4. Mark each tool
 
 Use two audience states only. **Public** is the absence of any
-restriction. **Private** is one restricted reader set: reuse the
-reader ID the config already writes for private data, or write
-`private` when it has none.
+restriction. **Private** is the built-in state for data that must not
+reach a public destination. Write it as `private`.
+
+`private` is a state, not a reader ID. It stands alone in its list and
+never appears beside a name. Do not reuse whatever reader ID the config
+happens to write for private data: a named reader set is stricter than
+`private`, and mixing the two costs reach for no gain.
 
 Decide two things per tool, from its name and its description.
 
@@ -121,12 +125,15 @@ Only a Public audience includes `public`, so this is the
 wall: nothing a private tool returned reaches that sink. A tool that
 publishes nowhere gets no `requires`.
 
-Two rules the loader enforces:
+Three rules the loader enforces:
 
 - Write a `delta` key on every entry. A `requires` on an entry with no
   `delta` is refused at load.
 - Every audience mention carries its operator — `exactly`, `includes`,
   `cap`, `may_add`. A bare list is a load error.
+- `public` and `private` are states. Each stands alone in its list;
+  written beside a name or beside each other, the entry is refused at
+  load.
 
 A tool can be both. One that reads private data and sends it outward
 carries the private `delta` and the public `requires` together, and is

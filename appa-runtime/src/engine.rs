@@ -1555,15 +1555,7 @@ impl RuntimeEngine {
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("unnamed-rank-{}", bound.trust.rank())),
             current_trust_rank: bound.trust.rank(),
-            current_audience: match &bound.audience {
-                Audience::Public => serde_json::Value::String("public".to_string()),
-                Audience::Restricted(readers) => serde_json::Value::Array(
-                    readers
-                        .iter()
-                        .map(|reader| serde_json::Value::String(reader.as_str().to_string()))
-                        .collect(),
-                ),
-            },
+            current_audience: audience_json(&bound.audience),
             trust_unresolved: !current.is_established(Dimension::Trust),
             audience_unresolved: !current.is_established(Dimension::Audience),
             trust_ranks: (0..chain.len())
@@ -1917,7 +1909,24 @@ enum CastAnswerState {
 fn resolved_audience(audience: &CastAudience) -> Audience {
     match audience {
         CastAudience::Public => Audience::Public,
+        CastAudience::Private => Audience::Private,
         CastAudience::Readers(readers) => Audience::restricted(readers.iter().map(ReaderId::new)),
+    }
+}
+
+/// One audience as every JSON surface spells it: a state as its reserved token, a reader set as an
+/// array. The resolver request and the authority payload are the same grammar a resolver answers
+/// in, so they are written once here rather than twice at the two call sites.
+fn audience_json(audience: &Audience) -> serde_json::Value {
+    match audience {
+        Audience::Public => serde_json::Value::String("public".to_string()),
+        Audience::Private => serde_json::Value::String("private".to_string()),
+        Audience::Restricted(readers) => serde_json::Value::Array(
+            readers
+                .iter()
+                .map(|reader| serde_json::Value::String(reader.as_str().to_string()))
+                .collect(),
+        ),
     }
 }
 
@@ -2218,6 +2227,7 @@ fn effect_names(effects: &EffectSet) -> Vec<String> {
 fn audience_wire(audience: &Audience) -> String {
     match audience {
         Audience::Public => "public".to_string(),
+        Audience::Private => "private".to_string(),
         Audience::Restricted(readers) if readers.is_empty() => "∅".to_string(),
         Audience::Restricted(readers) => {
             let shown: Vec<&str> = readers.iter().take(3).map(ReaderId::as_str).collect();
@@ -2267,7 +2277,7 @@ fn label_wire(
     label: &appa_engine::label::PartialLabel,
     chain: &appa_engine::registry::TrustChain,
 ) -> serde_json::Value {
-    use appa_engine::label::{Audience, Dimension};
+    use appa_engine::label::Dimension;
 
     let bound = label.bound();
     let unresolved = |dim| label.unresolved(dim).map(|value| value.index()).collect::<Vec<_>>();
@@ -2278,10 +2288,7 @@ fn label_wire(
     serde_json::json!({
         "trust": trust,
         "trust_rank": bound.trust.rank(),
-        "audience": match &bound.audience {
-            Audience::Public => serde_json::Value::String("public".to_string()),
-            Audience::Restricted(readers) => readers.iter().map(|reader| reader.as_str()).collect(),
-        },
+        "audience": audience_json(&bound.audience),
         "unresolved_trust": unresolved(Dimension::Trust),
         "unresolved_audience": unresolved(Dimension::Audience),
     })
@@ -2295,6 +2302,7 @@ fn gap_text(gap: &appa_engine::check::Gap) -> String {
         }
         Gap::Includes { recipients } => match recipients {
             appa_engine::label::Audience::Public => "the readers are not the public audience".to_string(),
+            appa_engine::label::Audience::Private => "the readers are narrower than the private audience".to_string(),
             appa_engine::label::Audience::Restricted(readers) => {
                 format!("the readers do not include {} required recipient(s)", readers.len())
             }
@@ -2385,6 +2393,7 @@ fn narrowing_feedback(narrowing: &appa_engine::check::Narrowing, chain: &TrustCh
 fn audience_count(audience: &Audience) -> String {
     match audience {
         Audience::Public => "public".to_string(),
+        Audience::Private => "private".to_string(),
         Audience::Restricted(readers) => match readers.len() {
             1 => "1 reader".to_string(),
             count => format!("{count} readers"),
@@ -2693,6 +2702,7 @@ mod tests {
     #[test]
     fn audience_wire_spells_every_reader_shape() {
         assert_eq!(audience_wire(&Audience::Public), "public");
+        assert_eq!(audience_wire(&Audience::Private), "private");
         assert_eq!(audience_wire(&Audience::Restricted(BTreeSet::new())), "∅");
         assert_eq!(audience_wire(&restricted(&["hr"])), "hr");
         assert_eq!(
@@ -2739,13 +2749,20 @@ mod tests {
             }),
         );
 
+        let private = PartialLabel::established(EstablishedLabel::new(Trust::new(1), Audience::Private));
+        assert_eq!(
+            wire(&private)["audience"],
+            serde_json::json!("private"),
+            "the private state crosses as its token, not as a one-reader set",
+        );
+
         let restricted = PartialLabel::established(EstablishedLabel::new(
             Trust::new(0),
-            Audience::restricted([ReaderId::new("private")]),
+            Audience::restricted([ReaderId::new("hr")]),
         ));
         assert_eq!(
             wire(&restricted)["audience"],
-            serde_json::json!(["private"]),
+            serde_json::json!(["hr"]),
             "the bound readers cross by name",
         );
         assert_eq!(wire(&restricted)["trust"], serde_json::json!("suspicious"));
@@ -2754,7 +2771,7 @@ mod tests {
         assert_eq!(
             wire(&nobody)["audience"],
             serde_json::json!([]),
-            "an empty reader set is not public",
+            "an empty reader set is neither public nor private",
         );
 
         let neutral = PartialLabel::established(EstablishedLabel::top());

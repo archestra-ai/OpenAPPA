@@ -356,6 +356,7 @@ fn resolve_recipients(spec: &RecipientSpec, call: &ResolvedCall, expansions: &Ex
         RecipientSpec::Static(audience) => Some(audience.resolve(expansions)),
         RecipientSpec::Placeholder(key) => match placeholder_argument(key, call)? {
             AudienceArgument::Public => Some(Audience::Public),
+            AudienceArgument::Private => Some(Audience::Private),
             AudienceArgument::Reader(reader) => Some(Audience::restricted([reader])),
             AudienceArgument::Group(_) => call
                 .membership(key)

@@ -169,6 +169,134 @@ url = "{url}"
     )
 }
 
+fn audience_policy(url: &str) -> String {
+    format!(
+        r#"
+[policy]
+version = 1
+
+[[policy.dynamic_resolver]]
+name = "acl"
+returns = ["delta.audience"]
+
+[[policy.tool]]
+name = "fetch"
+description = "Fetches one record and returns its body."
+parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
+uses = [{{ resolver = "acl" }}]
+delta = {{ trust = "trusted", audience = "resolver.acl.audience" }}
+
+[[policy.tool]]
+name = "send"
+parameters = {{ type = "object", properties = {{ to = {{ type = "string" }} }}, required = ["to"] }}
+requires = {{ audience = {{ includes = ["$to"] }} }}
+effects = ["egress"]
+delta = {{}}
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+
+[externals.dynamic]
+url = "{url}"
+"#
+    )
+}
+
+fn send(to: &str) -> ProposedCall {
+    ProposedCall {
+        tool: "send".to_string(),
+        arguments: raw(serde_json::json!({ "to": to })),
+    }
+}
+
+fn last_offer(feedback: &str) -> appa_runtime::api::OfferId {
+    feedback
+        .lines()
+        .filter_map(|line| {
+            let after = line.split("offer_id:").nth(1)?;
+            let rest = after.trim_start().strip_prefix('"')?;
+            Some(appa_runtime::api::OfferId(rest[..rest.find('"')?].to_string()))
+        })
+        .next_back()
+        .unwrap_or_else(|| panic!("no offer id in feedback: {feedback}"))
+}
+
+/// Run a call that may cost reach: where the engine offers the narrowing first, accept it and
+/// propose again. A read whose audience is already the trajectory's costs nothing and just runs.
+async fn ran_accepting_narrowing(runtime: &Arc<Runtime>, call: ProposedCall) {
+    if let HookDecision::DenyCall { feedback } = propose(runtime, call.clone()).await {
+        assert!(
+            matches!(
+                runtime.execute_remedy(&actor(), last_offer(&feedback)).await,
+                appa_runtime::api::RemedyOutcome::Authorized { .. }
+            ),
+            "the narrowing is acceptable: {feedback}",
+        );
+        assert_eq!(
+            propose(runtime, call.clone()).await,
+            HookDecision::AllowCall { spawn: None },
+            "the accepted narrowing releases the call",
+        );
+    }
+    ran(runtime, call).await;
+}
+
+/// The dynamic-resolver audience path, end to end, over every shape the wire admits. A resolver
+/// that owns the output audience decides who may later receive what the call returned.
+#[tokio::test]
+async fn a_resolver_owned_audience_decides_every_later_recipient() {
+    for (answer, alice, public, private, case) in [
+        (
+            serde_json::json!("public"),
+            true,
+            true,
+            true,
+            "public reaches everything",
+        ),
+        (
+            serde_json::json!("private"),
+            true,
+            false,
+            true,
+            "private reaches a named recipient and a private sink, never a public one",
+        ),
+        (
+            serde_json::json!(["alice"]),
+            true,
+            false,
+            false,
+            "a named reader set reaches only its own reader",
+        ),
+        (
+            serde_json::json!([]),
+            false,
+            false,
+            false,
+            "the empty audience reaches nobody at all",
+        ),
+    ] {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let (url, classifier) = serve_classifier().await;
+        classifier.set(
+            "acl",
+            Answer::Wire(serde_json::json!({"version": 1, "result": {"delta.audience": answer}})),
+        );
+        let runtime = open_runtime(&dir, &audience_policy(&url)).await;
+
+        ran_accepting_narrowing(&runtime, fetch("https://records.example/1")).await;
+
+        for (recipient, expected) in [("alice", alice), ("public", public), ("private", private)] {
+            let decision = propose(&runtime, send(recipient)).await;
+            let released = matches!(decision, HookDecision::AllowCall { .. });
+            assert_eq!(released, expected, "{case}: send to {recipient} — got {decision:?}");
+            if released {
+                ran(&runtime, send(recipient)).await;
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn an_http_resolver_classifies_the_whole_call_and_a_fresh_proposal_consults_again() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");

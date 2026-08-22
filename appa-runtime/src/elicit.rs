@@ -249,7 +249,7 @@ mod tests {
             "digest": "ab12",
             "trajectory_label": {
                 "trust": "suspicious",
-                "audience": ["private"],
+                "audience": ["hr"],
                 "unresolved_trust": [3],
                 "unresolved_audience": [],
             },
@@ -280,7 +280,7 @@ mod tests {
     fn the_label_reads_as_prose_not_as_a_debug_string() {
         let text = review_text(&payload());
         assert!(text.contains("trust: suspicious"), "the bound rank is named");
-        assert!(text.contains("readers: private"), "the bound readers are named");
+        assert!(text.contains("readers: hr"), "the bound readers are named");
         assert!(
             text.contains("1 source is still unresolved for trust"),
             "an unresolved source is stated, singular: {text}"
@@ -296,6 +296,19 @@ mod tests {
     fn an_unrestricted_audience_reads_as_public() {
         let text = label_text(Some(&serde_json::json!({"trust": "trusted", "audience": "public"})));
         assert!(text.contains("readers: public"));
+    }
+
+    #[test]
+    fn each_audience_state_reads_as_itself_and_the_empty_set_reads_as_nobody() {
+        for (audience, shown) in [
+            (serde_json::json!("public"), "readers: public"),
+            (serde_json::json!("private"), "readers: private"),
+            (serde_json::json!(["hr", "legal"]), "readers: hr, legal"),
+            (serde_json::json!([]), "readers: nobody"),
+        ] {
+            let text = label_text(Some(&serde_json::json!({"trust": "trusted", "audience": audience})));
+            assert!(text.contains(shown), "expected {shown:?} in: {text}");
+        }
     }
 
     #[test]

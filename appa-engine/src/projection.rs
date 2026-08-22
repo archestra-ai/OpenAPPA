@@ -1948,6 +1948,7 @@ mod tests {
         fn audience_strategy() -> impl Strategy<Value = Audience> {
             prop_oneof![
                 Just(Audience::Public),
+                Just(Audience::Private),
                 proptest::collection::btree_set("[a-c]", 0..3)
                     .prop_map(|readers| Audience::restricted(readers.into_iter().map(ReaderId::new))),
             ]

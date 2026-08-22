@@ -71,13 +71,14 @@ pub struct CastAnswer {
     pub audience: CastAudience,
 }
 
-/// The audience half of a cast answer. `Public` is legal here — unlike a dynamic
+/// The audience half of a cast answer. Both reader-free states are legal here — unlike a dynamic
 /// resolver's reader set, a cast may resolve to public where its `may_cast` cap admits
-/// it — but `public` may never appear beside literal readers, and a group name is never a
-/// classifier's to write.
+/// it — but neither may appear beside literal readers, and a group name is never a
+/// classifier's to write. An empty `Readers` is the empty audience, not a state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CastAudience {
     Public,
+    Private,
     Readers(Vec<String>),
 }
 
@@ -94,16 +95,23 @@ impl CastAnswer {
     }
 }
 
+/// Is this spelling one of the reserved audience states? Neither names a reader, so neither is
+/// admissible inside a reader array — a classifier or directory that writes one is malformed.
+pub(crate) fn is_audience_state(spelling: &str) -> bool {
+    spelling == "public" || spelling == "private"
+}
+
 impl CastAudience {
-    /// Read one audience off the wire: the `public` token or a literal reader array —
-    /// never `public` inside the array, an empty reader, or a group name.
+    /// Read one audience off the wire: a state token or a literal reader array — never a state
+    /// inside the array, an empty reader, or a group name.
     pub fn from_wire(value: &serde_json::Value) -> Option<CastAudience> {
         match value {
             serde_json::Value::String(token) if token == "public" => Some(CastAudience::Public),
+            serde_json::Value::String(token) if token == "private" => Some(CastAudience::Private),
             serde_json::Value::Array(readers) => readers
                 .iter()
                 .map(|reader| match reader.as_str() {
-                    Some(reader) if !reader.is_empty() && reader != "public" && !reader.starts_with('@') => {
+                    Some(reader) if !reader.is_empty() && !is_audience_state(reader) && !reader.starts_with('@') => {
                         Some(reader.to_string())
                     }
                     _ => None,
@@ -581,7 +589,7 @@ impl ExternalServices {
         if response
             .readers
             .iter()
-            .any(|reader| reader == "public" || reader.starts_with('@'))
+            .any(|reader| is_audience_state(reader) || reader.starts_with('@'))
         {
             return Err(NoAnswerReason::Malformed);
         }
@@ -850,6 +858,41 @@ mod tests {
 
     fn services(dynamic_url: Option<String>, timeout_ms: u64, cap: usize) -> ExternalServices {
         services_over(externals(dynamic_url, timeout_ms, cap))
+    }
+
+    #[test]
+    fn the_audience_wire_reads_both_states_a_reader_set_and_nobody() {
+        use serde_json::json;
+
+        assert_eq!(CastAudience::from_wire(&json!("public")), Some(CastAudience::Public));
+        assert_eq!(CastAudience::from_wire(&json!("private")), Some(CastAudience::Private));
+        assert_eq!(
+            CastAudience::from_wire(&json!(["hr", "legal"])),
+            Some(CastAudience::Readers(vec!["hr".to_string(), "legal".to_string()])),
+        );
+        assert_eq!(
+            CastAudience::from_wire(&json!([])),
+            Some(CastAudience::Readers(vec![])),
+            "an empty array is the empty audience, never a state",
+        );
+
+        for malformed in [
+            json!(["alice", "public"]),
+            json!(["alice", "private"]),
+            json!(["private"]),
+            json!(["@team"]),
+            json!([""]),
+            json!("Private"),
+            json!("internal"),
+            json!(null),
+            json!(1),
+        ] {
+            assert_eq!(
+                CastAudience::from_wire(&malformed),
+                None,
+                "{malformed} is not an audience",
+            );
+        }
     }
 
     fn context() -> ToolResolutionContext {
@@ -1344,6 +1387,14 @@ mod tests {
 
         let url =
             stub(Router::new().route("/", post(|| async { r#"{"version":1,"readers":["alice","public"]}"# }))).await;
+        assert_eq!(
+            resolve(&services(Some(url), 2000, 65536)).await,
+            ReadersResolution::Unresolved(NoAnswerReason::Malformed),
+        );
+
+        // A directory names people, never audience states. Both spellings are refused the same way.
+        let url =
+            stub(Router::new().route("/", post(|| async { r#"{"version":1,"readers":["alice","private"]}"# }))).await;
         assert_eq!(
             resolve(&services(Some(url), 2000, 65536)).await,
             ReadersResolution::Unresolved(NoAnswerReason::Malformed),

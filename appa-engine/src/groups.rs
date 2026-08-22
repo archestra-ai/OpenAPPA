@@ -7,14 +7,15 @@ use serde::{Deserialize, Serialize};
 use crate::label::{Audience, ReaderId};
 use crate::names::GroupName;
 
-/// A reader set as configuration writes it: the whole audience, or literal reader IDs
+/// An audience as configuration writes it: one of the two reader-free states, or literal reader IDs
 /// beside the groups whose members join them when an operation reads the declaration. A written
 /// list means the union of its literal readers and each named group's members. Only literal
-/// readers are representable in `readers` — `public` and an `@`-marked name are refused by the
-/// constructor — so a group can reach the algebra through [`resolve`](Self::resolve) alone.
+/// readers are representable in `readers` — `public`, `private` and an `@`-marked name are refused
+/// by the constructor — so a group can reach the algebra through [`resolve`](Self::resolve) alone.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum DeclaredAudience {
     Public,
+    Private,
     Restricted {
         readers: BTreeSet<ReaderId>,
         groups: BTreeSet<GroupName>,
@@ -33,6 +34,7 @@ impl DeclaredAudience {
     pub fn literal(audience: Audience) -> DeclaredAudience {
         match audience {
             Audience::Public => DeclaredAudience::Public,
+            Audience::Private => DeclaredAudience::Private,
             Audience::Restricted(readers) => DeclaredAudience::Restricted {
                 readers,
                 groups: BTreeSet::new(),
@@ -65,7 +67,7 @@ impl DeclaredAudience {
 
     pub fn groups(&self) -> impl Iterator<Item = &GroupName> {
         match self {
-            DeclaredAudience::Public => None,
+            DeclaredAudience::Public | DeclaredAudience::Private => None,
             DeclaredAudience::Restricted { groups, .. } => Some(groups.iter()),
         }
         .into_iter()
@@ -77,7 +79,7 @@ impl DeclaredAudience {
     /// particular has no reader to spell wrongly.
     pub(crate) fn readers(&self) -> Option<&BTreeSet<ReaderId>> {
         match self {
-            DeclaredAudience::Public => None,
+            DeclaredAudience::Public | DeclaredAudience::Private => None,
             DeclaredAudience::Restricted { readers, .. } => Some(readers),
         }
     }
@@ -89,7 +91,7 @@ impl DeclaredAudience {
     pub(crate) fn narrows(&self) -> bool {
         match self {
             DeclaredAudience::Public => false,
-            DeclaredAudience::Restricted { .. } => true,
+            DeclaredAudience::Private | DeclaredAudience::Restricted { .. } => true,
         }
     }
 
@@ -99,6 +101,7 @@ impl DeclaredAudience {
     pub(crate) fn resolve(&self, expansions: &Expansions) -> Audience {
         match self {
             DeclaredAudience::Public => Audience::Public,
+            DeclaredAudience::Private => Audience::Private,
             DeclaredAudience::Restricted { readers, groups } => {
                 let mut resolved = readers.clone();
                 for group in groups {
@@ -124,6 +127,7 @@ impl<'de> Deserialize<'de> for DeclaredAudience {
         #[derive(Deserialize)]
         enum Wire {
             Public,
+            Private,
             Restricted {
                 readers: BTreeSet<ReaderId>,
                 groups: BTreeSet<GroupName>,
@@ -132,6 +136,7 @@ impl<'de> Deserialize<'de> for DeclaredAudience {
 
         match Wire::deserialize(deserializer)? {
             Wire::Public => Ok(DeclaredAudience::Public),
+            Wire::Private => Ok(DeclaredAudience::Private),
             Wire::Restricted { readers, groups } => {
                 DeclaredAudience::declared(readers, groups).map_err(serde::de::Error::custom)
             }
@@ -373,14 +378,38 @@ mod tests {
             declared.resolve(&expansions),
             Audience::restricted([reader("finance"), reader("ann"), reader("bob")])
         );
-        assert!(DeclaredAudience::declared([reader("public")], []).is_err());
-        assert!(DeclaredAudience::declared([reader("@auditors")], []).is_err());
-        assert!(GroupExpansion::new(group("auditors"), [reader("public")]).is_err());
-        assert!(GroupExpansion::new(group("auditors"), [reader("@nested")]).is_err());
+        for reserved in ["public", "private", "@auditors"] {
+            assert!(
+                DeclaredAudience::declared([reader(reserved)], []).is_err(),
+                "{reserved} is not a literal reader",
+            );
+            assert!(
+                GroupExpansion::new(group("auditors"), [reader(reserved)]).is_err(),
+                "a directory answering {reserved} is malformed",
+            );
+        }
         assert_eq!(
             DeclaredAudience::restricted([reader("finance")]).resolve(&Expansions::default()),
             Audience::restricted([reader("finance")])
         );
+    }
+
+    #[test]
+    fn the_two_reader_free_states_declare_and_resolve_as_themselves() {
+        for (declared, resolved) in [
+            (DeclaredAudience::Public, Audience::Public),
+            (DeclaredAudience::Private, Audience::Private),
+        ] {
+            assert_eq!(declared.resolve(&Expansions::default()), resolved);
+            assert_eq!(DeclaredAudience::literal(resolved.clone()), declared);
+            assert_eq!(declared.groups().count(), 0, "a state names no group");
+            assert_eq!(declared.readers(), None, "a state names no reader");
+            let bytes = serde_json::to_string(&declared).expect("a declaration serializes");
+            let back: DeclaredAudience = serde_json::from_str(&bytes).expect("and deserializes");
+            assert_eq!(back, declared);
+        }
+        assert!(DeclaredAudience::Private.narrows(), "private restricts the audience");
+        assert!(!DeclaredAudience::Public.narrows(), "public is the fold identity");
     }
 
     #[test]

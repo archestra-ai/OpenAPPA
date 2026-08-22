@@ -10,7 +10,7 @@
 //!
 //! The model is two monoids: a **checked** monoid of label actions
 //! (audience × trust) and a **free** monoid of events. Propagation folds the label
-//! restrictively (min trust, intersect audience) into a partial label — an established bound
+//! restrictively (min trust, audience meet) into a partial label — an established bound
 //! plus the unresolved source identities per dimension; checking is the
 //! sink-side adequacy relation, unresolved at exactly the consumers that care. The
 //! two are never conflated.

@@ -3483,6 +3483,7 @@ mod tests {
         fn intersect(a: &Audience, b: &Audience) -> Audience {
             match (a, b) {
                 (Audience::Public, other) | (other, Audience::Public) => other.clone(),
+                (Audience::Private, other) | (other, Audience::Private) => other.clone(),
                 (Audience::Restricted(a), Audience::Restricted(b)) => {
                     Audience::Restricted(a.intersection(b).cloned().collect())
                 }
@@ -3492,7 +3493,9 @@ mod tests {
         fn within(audience: &Audience, cap: &Audience) -> bool {
             match (audience, cap) {
                 (_, Audience::Public) => true,
-                (Audience::Public, Audience::Restricted(_)) => false,
+                (Audience::Public, _) => false,
+                (_, Audience::Private) => true,
+                (Audience::Private, Audience::Restricted(_)) => false,
                 (Audience::Restricted(a), Audience::Restricted(c)) => a.is_subset(c),
             }
         }
@@ -3578,6 +3581,7 @@ mod tests {
     fn small_audience() -> impl Strategy<Value = Audience> {
         prop_oneof![
             Just(Audience::Public),
+            Just(Audience::Private),
             Just(Audience::restricted([ReaderId::new("r0")])),
             Just(Audience::restricted([ReaderId::new("r0"), ReaderId::new("r1")])),
             // The bottom: an audience nothing can be released to. Reachable at runtime whenever two

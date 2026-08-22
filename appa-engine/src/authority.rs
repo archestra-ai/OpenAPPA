@@ -187,6 +187,7 @@ impl DeclaredTransition {
             DeclaredTransition::Audience { from_includes, .. } => {
                 let widest = match from_includes {
                     DeclaredAudience::Public => Audience::Public,
+                    DeclaredAudience::Private => Audience::Private,
                     DeclaredAudience::Restricted { readers, .. } => Audience::restricted(readers.iter().cloned()),
                 };
                 raw.audience.covers(&widest) == Adequacy::Holds

@@ -103,6 +103,7 @@ impl LabelText {
             },
             audience: match &label.audience {
                 Dim::Known(Audience::Public) => "public".to_string(),
+                Dim::Known(Audience::Private) => "private".to_string(),
                 Dim::Known(Audience::Restricted(readers)) if readers.is_empty() => "nobody".to_string(),
                 Dim::Known(Audience::Restricted(readers)) => readers
                     .iter()
