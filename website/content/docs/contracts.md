@@ -171,7 +171,7 @@ A result is named for the one contract field it establishes. These five names ar
 
 Every contract field has one owner. A field the policy writes and a field a resolver establishes are the same field, so the two never overlap and requirements do not combine across resolvers. A dimension no owner describes stays fail-closed `Unknown`. History requirements are always static.
 
-Resolution occurs when a proposed call first checks. The validated answer is pinned to the exact `args` its resolver received. The pin holds through rechecks, remedy plans, rulings, dispatch, and admission; the dispatch record stores the answer, and a replay rebuilds those `args` and revalidates. A new proposal resolves again. An answer given for other arguments is never evidence for this call.
+Resolution occurs when a proposed call first checks. The validated answer is pinned to the exact `args` its resolver received. The pin holds through rechecks, remedy plans, rulings, dispatch, and admission. The dispatch record stores the answer and a digest of those `args`, not a second copy of them: the arguments and the `uses` entry are already on the record, so a replay rebuilds the value and compares. A new proposal resolves again. An answer given for other arguments is never evidence for this call.
 
 A substitution keeps a pin only while it rebuilds the same `args`. So a use that reads the complete call, `$tool_call`, or `$tool_call.arguments` loses its pin on any substitution, and the engine does not offer input-substitution remedies on such a tool. A use that reads named arguments keeps its pin while those arguments are unchanged.
 
@@ -263,7 +263,7 @@ Response:
 }
 ```
 
-OpenAPPA rejects a missing result, an extra result, and a `null` result. It rejects an extra key beside `version` and `result`. Trust and attention values must come from the lists in the request. `delta.audience` is `"public"` or a list of reader names, and never a group. `requires.audience` is an object with an `includes` floor, a `cap` ceiling, or both. An empty reader list is a valid, maximally restrictive answer. An empty attention list is valid, and it is the only valid attention answer when `attention_marks` is empty.
+OpenAPPA rejects a missing result, an extra result, and a `null` result. It rejects an extra key beside `version` and `result`. Trust and attention values must come from the lists in the request, whether or not the tool reads them: a result no field reads establishes nothing, but the record keeps it, so it answers to the same vocabulary. `delta.audience` is `"public"` or a list of reader names, and never a group. `requires.audience` is an object with an `includes` floor, a `cap` ceiling, or both. An empty reader list is a valid, maximally restrictive answer. An empty attention list is valid, and it is the only valid attention answer when `attention_marks` is empty.
 
 ### Deployment coverage
 
