@@ -724,6 +724,9 @@ mod tests {
 
     #[test]
     fn each_audience_shape_round_trips_through_serde_and_keeps_its_own_spelling() {
+        // The spellings are the record's identity, in both directions: an event log written by a
+        // build that had no `Private` holds exactly these bytes for the other three, so pinning
+        // them is what says adding a variant cannot strand an existing log.
         let shapes = [
             (Audience::Public, r#""Public""#),
             (Audience::Private, r#""Private""#),
@@ -736,23 +739,6 @@ mod tests {
             let back: Audience = serde_json::from_str(&bytes).expect("and deserializes");
             assert_eq!(back, audience);
         }
-    }
-
-    #[test]
-    fn a_record_written_before_the_private_state_existed_still_reads_back() {
-        // Adding a variant must not move the bytes already on disk: an event log holds facts
-        // written by an earlier build, and every one of them still has to replay.
-        let public: Audience = serde_json::from_str(r#""Public""#).expect("the old public spelling reads");
-        let restricted: Audience =
-            serde_json::from_str(r#"{"Restricted":["hr","legal"]}"#).expect("the old reader-set spelling reads");
-        let empty: Audience = serde_json::from_str(r#"{"Restricted":[]}"#).expect("the old empty spelling reads");
-
-        assert_eq!(public, Audience::Public);
-        assert_eq!(
-            restricted,
-            Audience::restricted([ReaderId::new("hr"), ReaderId::new("legal")])
-        );
-        assert_eq!(empty, Audience::restricted([]));
     }
 
     #[test]

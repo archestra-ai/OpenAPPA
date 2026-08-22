@@ -236,7 +236,7 @@ def _dynamic_resolver_answers_of(
         readers = declaration["readers"]
         if not isinstance(readers, list) or any(not isinstance(reader, str) for reader in readers):
             raise ScenarioError(f"{name}: {location}.readers must be a list of strings")
-        if any(reader == "public" or reader.startswith("@") for reader in readers):
+        if any(reader in ("public", "private") or reader.startswith("@") for reader in readers):
             raise ScenarioError(f"{name}: {location}.readers must contain literal reader IDs")
         if resolver not in declared:
             raise ScenarioError(f"{name}: {location}.resolver {resolver!r} is not declared by the scenario's policy")
