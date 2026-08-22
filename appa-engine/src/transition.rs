@@ -1551,7 +1551,7 @@ impl<'a> Sequence<'a> {
                 {
                     return Err(TransitionRefusal::ForeignOffer);
                 }
-                let candidate = subject_call(views, subject).ok_or(TransitionRefusal::UnbackedOffer)?;
+                let candidate = views.standing_call(subject).ok_or(TransitionRefusal::UnbackedOffer)?;
                 if candidate.digest() != *call {
                     return Err(TransitionRefusal::UnbackedOffer);
                 }
@@ -1563,8 +1563,7 @@ impl<'a> Sequence<'a> {
                 let stage = views.call_stage(subject);
                 let role = views.call_role(subject);
                 required(expansions, contract.groups())?;
-                let CheckOutcome::Block(block) =
-                    crate::check::evaluate(contract, views, &candidate, &stage, expansions)
+                let CheckOutcome::Block(block) = crate::check::evaluate(contract, views, candidate, &stage, expansions)
                 else {
                     return Err(TransitionRefusal::UnbackedOffer);
                 };
@@ -1575,7 +1574,7 @@ impl<'a> Sequence<'a> {
                 Ok(crate::plan::plan(
                     self.engine.registry(),
                     views,
-                    &candidate,
+                    candidate,
                     &block,
                     &stage,
                     role,
@@ -1766,7 +1765,7 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::ApprovalRepeated);
         }
         let offered = &recorded.plan;
-        if subject_call(&views, &recorded.subject).as_ref() != Some(call)
+        if views.standing_call(&recorded.subject) != Some(call)
             || call.digest() != recorded.call
             || plan != &offered.id
             || acceptance.as_ref() != offered.narrowing()
@@ -3329,7 +3328,7 @@ impl<'a> Sequence<'a> {
         if recorded.plan.hop() != Some(sanitizer) || &recorded.subject != subject {
             return Err(TransitionRefusal::UnbackedOffer);
         }
-        let predecessor = subject_call(&views, subject).ok_or(TransitionRefusal::UnbackedOffer)?;
+        let predecessor = views.standing_call(subject).ok_or(TransitionRefusal::UnbackedOffer)?;
         if predecessor.digest() != recorded.call {
             return Err(TransitionRefusal::UnbackedOffer);
         }
@@ -3377,7 +3376,7 @@ impl<'a> Sequence<'a> {
         }
         // The check the hop improves reads the callee's declared groups.
         required(expansions, contract.groups())?;
-        let CheckOutcome::Block(before) = crate::check::evaluate(contract, &views, &predecessor, &stage, expansions)
+        let CheckOutcome::Block(before) = crate::check::evaluate(contract, &views, predecessor, &stage, expansions)
         else {
             return Err(TransitionRefusal::UnbackedOffer);
         };
@@ -3505,10 +3504,6 @@ fn taken_offer<'v>(
         return Err(TransitionRefusal::OfferEnded);
     }
     Ok(recorded)
-}
-
-fn subject_call(views: &Views<'_>, subject: &crate::basis::SubjectKey) -> Option<ResolvedCall> {
-    views.standing_call(subject).cloned()
 }
 
 fn confines(sequence: &Sequence<'_>, offer: &crate::value::OfferId, dispatch: &DispatchId) -> bool {
