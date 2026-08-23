@@ -1281,6 +1281,37 @@ impl Views<'_> {
         }
     }
 
+    /// The call this subject was proposed as, before any input hop rewrote it. A resolver
+    /// answered about this call and is never asked again, so it is the second call a pinned
+    /// answer may be admitted for — see [`crate::check::validate_tool_resolutions`]. `None`
+    /// wherever the record does not name one, which fails the pin closed: a subject that is
+    /// not a call's, a batch this view's trajectory did not decide, or a position that batch
+    /// does not hold.
+    pub(crate) fn proposed_call(&self, subject: &SubjectKey) -> Option<&ResolvedCall> {
+        let SubjectKey::Call {
+            trajectory,
+            batch,
+            position,
+        } = subject
+        else {
+            return None;
+        };
+        if trajectory != self.trajectory() {
+            return None;
+        }
+        let decided = self.decided_batch(batch)?;
+        (&decided.trajectory == trajectory)
+            .then(|| decided.proposals.get(*position as usize))
+            .flatten()
+    }
+
+    /// The call this subject stands on now: the candidate an input hop derived, or the proposal
+    /// where no hop has run. The one home of that precedence — every read of "the call this
+    /// subject is about" goes through it.
+    pub(crate) fn standing_call(&self, subject: &SubjectKey) -> Option<&ResolvedCall> {
+        self.call_candidate(subject).or_else(|| self.proposed_call(subject))
+    }
+
     /// The sanitizers this subject's chain has already spent. Empty for a subject no
     /// hop has touched, so a first hop and an unspent chain read alike.
     pub(crate) fn lineage(&self, subject: &SubjectKey) -> SanitizerLineage {
@@ -1349,6 +1380,73 @@ mod tests {
             trajectory: traj(t),
             value,
             provenance: Provenance::ToolResult { dispatch: dispatch(t) },
+        }
+    }
+
+    #[test]
+    fn a_proposal_is_read_back_only_for_the_position_its_own_trajectory_decided() {
+        let proposal = |body: &str| {
+            ResolvedCall::new(
+                ToolName::new("post"),
+                crate::params::test_arguments(&json!({ "body": body })),
+            )
+        };
+        let batch = crate::transition::ProposalBatchId::new("b1");
+        let mut log = vec![opened("a")];
+        log.extend(fork_pair("a", "b", ForkSnapshot::freeze(base(), [], [])));
+        log.push(Fact::ProposalBatchDecided {
+            trajectory: traj("a"),
+            batch: batch.clone(),
+            proposals: vec![proposal("first"), proposal("second")],
+            spawn: None,
+            released: vec![],
+            resolutions: vec![],
+        });
+        let projection = build(&log);
+        let subject = |trajectory: &str, position: u32| SubjectKey::Call {
+            trajectory: traj(trajectory),
+            batch: batch.clone(),
+            position,
+        };
+        let a = traj("a");
+        let views = projection.view(&a);
+
+        assert_eq!(views.proposed_call(&subject("a", 1)), Some(&proposal("second")));
+        assert_eq!(
+            views.proposed_call(&subject("a", 2)),
+            None,
+            "a position the batch does not hold"
+        );
+        assert_eq!(
+            views.proposed_call(&subject("b", 0)),
+            None,
+            "a subject of another trajectory, whatever batch it names"
+        );
+        assert_eq!(
+            projection.view(&traj("b")).proposed_call(&subject("b", 0)),
+            None,
+            "the batch belongs to trajectory a; b decided nothing"
+        );
+        assert_eq!(
+            views.proposed_call(&SubjectKey::Call {
+                trajectory: traj("a"),
+                batch: crate::transition::ProposalBatchId::new("unknown"),
+                position: 0,
+            }),
+            None
+        );
+        let block = crate::value::BlockId::of_proposal(
+            &crate::value::OfferNonce::new([7u8; 32]),
+            &traj("a"),
+            &batch,
+            0,
+            &proposal("first").digest(),
+        );
+        for other in [
+            SubjectKey::Approval(crate::value::OfferId::of_plan(&block, 0, b"plan")),
+            SubjectKey::ConfinedResult(dispatch("a")),
+        ] {
+            assert_eq!(views.proposed_call(&other), None, "a subject that is not a call's");
         }
     }
 

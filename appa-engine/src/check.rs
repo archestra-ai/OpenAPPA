@@ -410,21 +410,52 @@ pub(crate) enum ToolResolutionRefusal {
     OutsidePolicy(String),
 }
 
+/// Which calls a checked call's pinned answers may have been given for. A resolver answers once,
+/// about the call the agent proposed, and an input-substitution remedy rewrites that call's
+/// arguments through a registered sanitizer without consulting again — so a rewritten call's
+/// answers were given for the proposal it descends from, not for its own arguments.
+///
+/// This settles what a pinned answer may be *about*. What the answer itself says is bound to the
+/// record elsewhere, by the complete-[`ResolvedCall`] comparisons a substitution and an opening
+/// each pass; neither check stands in for the other.
+pub(crate) enum AnsweredFor<'a> {
+    /// The call is the proposal. Every pin rebuilds this call's own arguments or it is foreign.
+    ThisCall,
+    /// The proposal on the record this call descends from. A pin rebuilds either call's
+    /// arguments. A caller that cannot read the proposal refuses its own record rather than
+    /// falling back here.
+    Proposal(&'a ResolvedCall),
+}
+
+impl AnsweredFor<'_> {
+    /// The call a pin must rebuild the `args` of. One call, not a set: a pin is only ever created
+    /// about a proposal, so where a proposal is on the record it is the whole test — a rewritten
+    /// call that happens to rebuild its own `args` rebuilds the proposal's too.
+    fn reference<'a>(&'a self, call: &'a ResolvedCall) -> &'a ResolvedCall {
+        match self {
+            AnsweredFor::ThisCall => call,
+            AnsweredFor::Proposal(proposal) => proposal,
+        }
+    }
+}
+
 pub(crate) fn validate_tool_resolutions(
     registry: &crate::registry::Registry,
     contract: &ToolContract,
     call: &ResolvedCall,
+    answered_for: AnsweredFor<'_>,
 ) -> Result<(), ToolResolutionRefusal> {
     let declared = &contract.uses;
+    let answered_for = answered_for.reference(call);
     let mut seen: Vec<&ToolResolverUse> = Vec::new();
     for pinned in call.tool_resolutions() {
         let uses = pinned.uses();
-        // An answer belongs to this call only if the tool declares that use *and* the answer was
-        // given for the exact value this call would send it. Rebuilding the payload is what keeps
-        // one call's answer from standing in for another's.
+        // An answer belongs here only if the tool declares that use *and* the answer was given for
+        // the exact value the call it is about would send it. Rebuilding the payload is what keeps
+        // one call's answer from standing in for an unrelated call's.
         if !declared.contains(uses)
             || seen.contains(&uses)
-            || pinned.args() != contract.resolver_args_digest(uses, call.canonical_arguments().value())
+            || pinned.args() != contract.resolver_args_digest(uses, answered_for.canonical_arguments().value())
         {
             return Err(ToolResolutionRefusal::Foreign(uses.resolver.as_str().to_string()));
         }
@@ -766,6 +797,7 @@ mod tests {
                 &registry,
                 contract,
                 &call(Trust::new(0), Trust::new(1), "operator-signoff"),
+                AnsweredFor::ThisCall,
             )
             .is_ok()
         );
@@ -775,7 +807,7 @@ mod tests {
             call(Trust::new(0), Trust::new(2), "operator-signoff"),
         ] {
             assert!(matches!(
-                validate_tool_resolutions(&registry, contract, &invalid),
+                validate_tool_resolutions(&registry, contract, &invalid, AnsweredFor::ThisCall),
                 Err(ToolResolutionRefusal::OutsidePolicy(resolver)) if resolver == "classifier"
             ));
         }
@@ -836,10 +868,10 @@ mod tests {
             ])
         };
 
-        assert!(validate_tool_resolutions(&registry, contract, &call(Trust::new(1))).is_ok());
+        assert!(validate_tool_resolutions(&registry, contract, &call(Trust::new(1)), AnsweredFor::ThisCall).is_ok());
         assert!(
             matches!(
-                validate_tool_resolutions(&registry, contract, &call(Trust::new(9))),
+                validate_tool_resolutions(&registry, contract, &call(Trust::new(9)), AnsweredFor::ThisCall),
                 Err(ToolResolutionRefusal::OutsidePolicy(resolver)) if resolver == "classifier"
             ),
             "a rank outside the chain is refused even where no field reads it"
@@ -847,7 +879,7 @@ mod tests {
     }
 
     #[test]
-    fn an_answer_given_for_other_arguments_is_not_evidence_for_this_call() {
+    fn an_answer_is_evidence_only_for_the_call_or_the_proposal_it_was_given_about() {
         use crate::names::DynamicResolverName;
         use crate::registry::{Registry, RegistryConfig};
         use crate::value::ToolName;
@@ -909,11 +941,16 @@ mod tests {
             .expect("the declared audience answer pins")
         };
 
+        let payroll = call("payroll.md");
+        let packet = call("packet.md");
+
+        // An answer about the arguments it is checked against.
         assert!(
             validate_tool_resolutions(
                 &registry,
                 contract,
-                &call("payroll.md").with_tool_resolutions(vec![answer_for("payroll.md")]),
+                &payroll.clone().with_tool_resolutions(vec![answer_for("payroll.md")]),
+                AnsweredFor::ThisCall,
             )
             .is_ok()
         );
@@ -923,7 +960,42 @@ mod tests {
             validate_tool_resolutions(
                 &registry,
                 contract,
-                &call("packet.md").with_tool_resolutions(vec![answer_for("payroll.md")]),
+                &packet.clone().with_tool_resolutions(vec![answer_for("payroll.md")]),
+                AnsweredFor::ThisCall,
+            ),
+            Err(ToolResolutionRefusal::Foreign(resolver)) if resolver == "acl"
+        ));
+        // A sanitizer rewrote `payroll.md` into `packet.md`. The answer is about the proposal on
+        // the record, so it stands on the rewrite the resolver was never asked about.
+        assert!(
+            validate_tool_resolutions(
+                &registry,
+                contract,
+                &packet.clone().with_tool_resolutions(vec![answer_for("payroll.md")]),
+                AnsweredFor::Proposal(&payroll),
+            )
+            .is_ok()
+        );
+        // A third file the resolver was asked about neither: naming a proposal does not admit an
+        // answer about some other call.
+        assert!(matches!(
+            validate_tool_resolutions(
+                &registry,
+                contract,
+                &packet.clone().with_tool_resolutions(vec![answer_for("ledger.md")]),
+                AnsweredFor::Proposal(&payroll),
+            ),
+            Err(ToolResolutionRefusal::Foreign(resolver)) if resolver == "acl"
+        ));
+        // Nor an answer about the rewrite itself. A resolver is asked about a proposal and never
+        // about a rewrite of one, so an answer that rebuilds only the rewrite came from nowhere
+        // this record names.
+        assert!(matches!(
+            validate_tool_resolutions(
+                &registry,
+                contract,
+                &packet.with_tool_resolutions(vec![answer_for("packet.md")]),
+                AnsweredFor::Proposal(&payroll),
             ),
             Err(ToolResolutionRefusal::Foreign(resolver)) if resolver == "acl"
         ));

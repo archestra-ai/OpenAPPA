@@ -1177,14 +1177,28 @@ impl<'a> Sequence<'a> {
                 {
                     return Err(TransitionRefusal::ForgedMembership);
                 }
-                // And its resolver answers, one per binding the contract spells.
-                if crate::check::validate_tool_resolutions(self.engine.registry(), contract, &call).is_err() {
+                let views = self.projection.view(trajectory);
+                // And its resolver answers, one per binding the contract spells. An opening whose
+                // call an input hop rewrote carries the answers given about the proposal it
+                // descends from, so that proposal is the second call they may be about. Every
+                // opening names the call subject its decision released it for, so a record with
+                // no readable proposal is refused rather than judged on the call alone.
+                let proposal = views
+                    .proposed_call(subject)
+                    .ok_or(TransitionRefusal::ForgedResolution)?;
+                if crate::check::validate_tool_resolutions(
+                    self.engine.registry(),
+                    contract,
+                    &call,
+                    crate::check::AnsweredFor::Proposal(proposal),
+                )
+                .is_err()
+                {
                     return Err(TransitionRefusal::ForgedResolution);
                 }
                 if proposed_effects != &contract.emits {
                     return Err(TransitionRefusal::EffectsMismatch);
                 }
-                let views = self.projection.view(trajectory);
                 let current = views.current_label();
                 if proposed_label
                     != crate::check::committed_label_for_call(contract, &current, &call, &expansions).bound()
@@ -1537,7 +1551,7 @@ impl<'a> Sequence<'a> {
                 {
                     return Err(TransitionRefusal::ForeignOffer);
                 }
-                let candidate = subject_call(views, subject).ok_or(TransitionRefusal::UnbackedOffer)?;
+                let candidate = views.standing_call(subject).ok_or(TransitionRefusal::UnbackedOffer)?;
                 if candidate.digest() != *call {
                     return Err(TransitionRefusal::UnbackedOffer);
                 }
@@ -1549,8 +1563,7 @@ impl<'a> Sequence<'a> {
                 let stage = views.call_stage(subject);
                 let role = views.call_role(subject);
                 required(expansions, contract.groups())?;
-                let CheckOutcome::Block(block) =
-                    crate::check::evaluate(contract, views, &candidate, &stage, expansions)
+                let CheckOutcome::Block(block) = crate::check::evaluate(contract, views, candidate, &stage, expansions)
                 else {
                     return Err(TransitionRefusal::UnbackedOffer);
                 };
@@ -1561,7 +1574,7 @@ impl<'a> Sequence<'a> {
                 Ok(crate::plan::plan(
                     self.engine.registry(),
                     views,
-                    &candidate,
+                    candidate,
                     &block,
                     &stage,
                     role,
@@ -1752,7 +1765,7 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::ApprovalRepeated);
         }
         let offered = &recorded.plan;
-        if subject_call(&views, &recorded.subject).as_ref() != Some(call)
+        if views.standing_call(&recorded.subject) != Some(call)
             || call.digest() != recorded.call
             || plan != &offered.id
             || acceptance.as_ref() != offered.narrowing()
@@ -2243,7 +2256,14 @@ impl<'a> Sequence<'a> {
             if crate::check::validate_memberships(contract, call).is_err() {
                 return Err(TransitionRefusal::ForgedMembership);
             }
-            if crate::check::validate_tool_resolutions(self.engine.registry(), contract, call).is_err() {
+            if crate::check::validate_tool_resolutions(
+                self.engine.registry(),
+                contract,
+                call,
+                crate::check::AnsweredFor::ThisCall,
+            )
+            .is_err()
+            {
                 return Err(TransitionRefusal::ForgedResolution);
             }
         }
@@ -3308,7 +3328,7 @@ impl<'a> Sequence<'a> {
         if recorded.plan.hop() != Some(sanitizer) || &recorded.subject != subject {
             return Err(TransitionRefusal::UnbackedOffer);
         }
-        let predecessor = subject_call(&views, subject).ok_or(TransitionRefusal::UnbackedOffer)?;
+        let predecessor = views.standing_call(subject).ok_or(TransitionRefusal::UnbackedOffer)?;
         if predecessor.digest() != recorded.call {
             return Err(TransitionRefusal::UnbackedOffer);
         }
@@ -3330,10 +3350,20 @@ impl<'a> Sequence<'a> {
             .parameters
             .validate(call.arguments())
             .map_err(TransitionRefusal::InvalidPayload)?;
-        if call != &predecessor.substituting(contract, call.canonical_arguments().clone()) {
+        if call != &predecessor.substituting(call.canonical_arguments().clone()) {
             return Err(TransitionRefusal::ForgedLabel);
         }
-        if crate::check::validate_tool_resolutions(self.engine.registry(), contract, call).is_err() {
+        // The predecessor comparison binds *which* answers this rewrite carries; this binds what
+        // they may be about — the proposal a resolver was asked about, on the record.
+        let proposal = views.proposed_call(subject).ok_or(TransitionRefusal::UnbackedOffer)?;
+        if crate::check::validate_tool_resolutions(
+            self.engine.registry(),
+            contract,
+            call,
+            crate::check::AnsweredFor::Proposal(proposal),
+        )
+        .is_err()
+        {
             return Err(TransitionRefusal::SanitizerUnapplicable);
         }
 
@@ -3346,7 +3376,7 @@ impl<'a> Sequence<'a> {
         }
         // The check the hop improves reads the callee's declared groups.
         required(expansions, contract.groups())?;
-        let CheckOutcome::Block(before) = crate::check::evaluate(contract, &views, &predecessor, &stage, expansions)
+        let CheckOutcome::Block(before) = crate::check::evaluate(contract, &views, predecessor, &stage, expansions)
         else {
             return Err(TransitionRefusal::UnbackedOffer);
         };
@@ -3474,19 +3504,6 @@ fn taken_offer<'v>(
         return Err(TransitionRefusal::OfferEnded);
     }
     Ok(recorded)
-}
-
-fn subject_call(views: &Views<'_>, subject: &crate::basis::SubjectKey) -> Option<ResolvedCall> {
-    if let Some(candidate) = views.call_candidate(subject) {
-        return Some(candidate.clone());
-    }
-    let crate::basis::SubjectKey::Call { batch, position, .. } = subject else {
-        return None;
-    };
-    let decided = views.decided_batch(batch)?;
-    (&decided.trajectory == views.trajectory())
-        .then(|| decided.proposals.get(*position as usize).cloned())
-        .flatten()
 }
 
 fn confines(sequence: &Sequence<'_>, offer: &crate::value::OfferId, dispatch: &DispatchId) -> bool {
