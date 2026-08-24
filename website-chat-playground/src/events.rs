@@ -48,6 +48,8 @@ pub enum WireEvent {
         trajectory: String,
         trust: String,
         audience: String,
+        unresolved_trust: Vec<u64>,
+        unresolved_audience: Vec<u64>,
     },
     Remedy {
         trajectory: String,
@@ -111,15 +113,6 @@ impl LabelText {
                     .join(", "),
                 Dim::Unknown => "unknown".to_string(),
             },
-        }
-    }
-}
-
-impl From<AuditLabel> for LabelText {
-    fn from(label: AuditLabel) -> LabelText {
-        LabelText {
-            trust: label.trust,
-            audience: label.audience,
         }
     }
 }
@@ -247,5 +240,7 @@ fn label_event(trajectory: String, label: AuditLabel) -> WireEvent {
         trajectory,
         trust: label.trust,
         audience: label.audience,
+        unresolved_trust: label.unresolved_trust,
+        unresolved_audience: label.unresolved_audience,
     }
 }
