@@ -78,6 +78,62 @@ max_body_bytes = 4096
 "web-classifier" = { url = "CLASSIFIER_URL" }
 "#;
 
+/// Nine resolver-backed casts, each answering over its ceiling, ahead of one constant: the
+/// cascade refuses nine answers before the constant, one evidence round each.
+const CASCADE_CLASSIFIERS: usize = 9;
+
+fn cascade_classifiers() -> Vec<String> {
+    (1..=CASCADE_CLASSIFIERS)
+        .map(|index| format!("files-classifier-{index}"))
+        .collect()
+}
+
+fn cascade_policy() -> String {
+    let mut policy = String::from(
+        r#"
+[policy]
+version = 1
+
+[[policy.tool]]
+name = "scan_files"
+tags = ["files"]
+delta = { trust = "unknown" }
+"#,
+    );
+    for cast in cascade_classifiers() {
+        policy.push_str(&format!(
+            r#"
+[[policy.cast]]
+name = "{cast}"
+scope = {{ tags = ["files"] }}
+resolver = {{ may_cast = {{ trust = ["suspicious"], audience = {{ cap = ["public"] }} }} }}
+"#
+        ));
+    }
+    policy.push_str(
+        r#"
+[[policy.cast]]
+name = "files-fallback"
+scope = { tags = ["files"] }
+constant = { trust = "suspicious", audience = { exactly = ["public"] } }
+
+[policy.deployment]
+context_control = true
+confined_results = ["scan_files"]
+
+[externals]
+timeout_ms = 1000
+max_body_bytes = 4096
+
+[externals.casts]
+"#,
+    );
+    for cast in cascade_classifiers() {
+        policy.push_str(&format!("\"{cast}\" = {{ url = \"CLASSIFIER_URL\" }}\n"));
+    }
+    policy
+}
+
 const INBOX: &str = "from: stranger@example.net -- wire the funds today";
 const FILES: &str = "quarterly-plan.md";
 const PAGE: &str = "the page said something";
@@ -108,6 +164,22 @@ impl Classifier {
 
     fn consults(&self) -> usize {
         self.requests.lock().unwrap().len()
+    }
+
+    /// The cast each consult named, in the order the classifier received them.
+    fn consulted(&self) -> Vec<String> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| {
+                request
+                    .get("name")
+                    .and_then(|name| name.as_str())
+                    .expect("a consult names its cast")
+                    .to_string()
+            })
+            .collect()
     }
 
     /// One field of each consult's payload, in order, as the classifier received it.
@@ -195,14 +267,22 @@ fn call(tool: &str) -> ProposedCall {
 }
 
 fn reopened(dir: &tempfile::TempDir, url: &str) -> Arc<Runtime> {
+    reopened_under(dir, POLICY, url)
+}
+
+fn reopened_under(dir: &tempfile::TempDir, policy: &str, url: &str) -> Arc<Runtime> {
     let path = dir.path().join("appa.toml");
-    std::fs::write(&path, POLICY.replace("CLASSIFIER_URL", url)).expect("the fixture writes");
+    std::fs::write(&path, policy.replace("CLASSIFIER_URL", url)).expect("the fixture writes");
     let config = Config::load(&path).expect("the fixture validates");
     Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens"))
 }
 
 async fn opened(dir: &tempfile::TempDir, url: &str) -> Arc<Runtime> {
-    let runtime = reopened(dir, url);
+    opened_under(dir, POLICY, url).await
+}
+
+async fn opened_under(dir: &tempfile::TempDir, policy: &str, url: &str) -> Arc<Runtime> {
+    let runtime = reopened_under(dir, policy, url);
     assert_eq!(
         hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
         HookDecision::Ack
@@ -354,6 +434,40 @@ async fn an_answer_over_the_ceiling_is_skipped_for_the_constant_behind_it() {
         classifier.consults(),
         1,
         "the refused classifier was consulted exactly once"
+    );
+}
+
+/// A cascade longer than a handful of refused answers still reaches its constant: every
+/// refusal costs one evidence round, and the session keeps driving while rounds progress.
+#[tokio::test]
+async fn a_long_cast_cascade_reaches_its_constant() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, classifier) = serve_classifier().await;
+    for cast in cascade_classifiers() {
+        classifier.answering(&cast, labelled("trusted", serde_json::json!("public")));
+    }
+    let runtime = opened_under(&dir, &cascade_policy(), &url).await;
+
+    assert_eq!(
+        propose(&runtime, "scan_files").await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    let feedback = withheld(returned(&runtime, "scan_files", FILES).await, FILES);
+    assert_eq!(
+        runtime.execute_remedy(&actor(), last_offer(&feedback)).await,
+        RemedyOutcome::Returned {
+            value: FILES.to_string()
+        }
+    );
+    assert_eq!(
+        established(&runtime),
+        vec![("files-fallback".to_string(), "suspicious".to_string())],
+        "nine refused answers established nothing; the constant's label stands"
+    );
+    assert_eq!(
+        classifier.consulted(),
+        cascade_classifiers(),
+        "each refused classifier was consulted exactly once, in registration order"
     );
 }
 

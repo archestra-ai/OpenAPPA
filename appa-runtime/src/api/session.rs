@@ -136,7 +136,9 @@ fn return_decision(decision: EngineDecision) -> Result<ChildReturnDecision, Even
 
 const REPLAY_LIMIT: u32 = 8;
 
-const EVIDENCE_LIMIT: u32 = 8;
+/// Backstop only: a cast cascade shrinks by one cast per refused answer, so registered-cast
+/// count bounds the rounds it needs; this stops a round that keeps re-asking the same thing.
+const EVIDENCE_LIMIT: u32 = 64;
 
 fn fresh_entropy() -> OfferNonce {
     OfferNonce(rand::random::<[u8; 32]>())
@@ -690,6 +692,9 @@ impl Session {
                     }
                 },
                 _ => return Ok(decision),
+            }
+            if evidence == carried {
+                return Err(EventError::UnexpectedDecision);
             }
         }
         Err(EventError::UnexpectedDecision)
