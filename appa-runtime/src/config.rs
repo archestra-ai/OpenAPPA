@@ -173,6 +173,8 @@ pub enum ConfigError {
         section: String,
         name: String,
     },
+    #[error("invalid internal composition metadata: {reason}")]
+    InvalidComposedMetadata { reason: String },
     #[error("the {section} endpoint {name:?} has an invalid url: {url}")]
     InvalidEndpoint {
         section: &'static str,
@@ -224,8 +226,15 @@ pub enum ConfigError {
 struct RawConfig {
     #[serde(default)]
     include: Vec<String>,
+    appa_composed: Option<RawComposedMetadata>,
     policy: toml::Value,
     externals: RawExternals,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawComposedMetadata {
+    dynamic_command_cwd: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -304,12 +313,12 @@ impl Config {
             .remove("include");
 
         let root_version = policy_version(&root.policy).ok_or(ConfigError::InvalidPolicyVersion)?;
-        let mut origins = root
-            .externals
-            .dynamic
-            .keys()
-            .map(|name| (name.clone(), source_dir.clone()))
-            .collect::<BTreeMap<_, _>>();
+        if root.appa_composed.is_some() && !root.include.is_empty() {
+            return Err(ConfigError::InvalidComposedMetadata {
+                reason: "stored composition metadata cannot appear with include".to_string(),
+            });
+        }
+        let mut origins = root_dynamic_origins(&root, &source_dir)?;
         let mut seen = std::collections::BTreeSet::new();
         for authored in &root.include {
             let include = Path::new(authored);
@@ -337,7 +346,7 @@ impl Config {
 
         let composed = toml::to_string(&document).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
         let raw: RawConfig = toml::from_str(&composed).map_err(|source| ConfigError::UnparsablePolicy { source })?;
-        add_composed_metadata(&mut document, &raw.externals.dynamic, &origins);
+        add_composed_metadata(&mut document, &raw.externals.dynamic, &origins)?;
         let stored = toml::to_string(&document).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
         Config::validate_composed(stored, raw, origins, |var| std::env::var(var).ok())
     }
@@ -431,11 +440,50 @@ fn policy_version(policy: &toml::Value) -> Option<i64> {
     policy.as_table()?.get("version")?.as_integer()
 }
 
+fn root_dynamic_origins(root: &RawConfig, source_dir: &Path) -> Result<BTreeMap<String, PathBuf>, ConfigError> {
+    let commands = root
+        .externals
+        .dynamic
+        .iter()
+        .filter(|(_, implementation)| implementation.command.is_some())
+        .map(|(name, _)| name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let Some(metadata) = &root.appa_composed else {
+        return Ok(commands
+            .into_iter()
+            .map(|name| (name.to_string(), source_dir.to_path_buf()))
+            .collect());
+    };
+    let recorded = metadata
+        .dynamic_command_cwd
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    if commands != recorded {
+        return Err(ConfigError::InvalidComposedMetadata {
+            reason: "dynamic command names do not match the recorded working directories".to_string(),
+        });
+    }
+    metadata
+        .dynamic_command_cwd
+        .iter()
+        .map(|(name, cwd)| {
+            let cwd = PathBuf::from(cwd);
+            if !cwd.is_absolute() {
+                return Err(ConfigError::InvalidComposedMetadata {
+                    reason: format!("dynamic command {name:?} has a non-absolute working directory"),
+                });
+            }
+            Ok((name.clone(), cwd))
+        })
+        .collect()
+}
+
 fn add_composed_metadata(
     document: &mut toml::Value,
     dynamic: &BTreeMap<String, RawDynamicImplementation>,
     origins: &BTreeMap<String, PathBuf>,
-) {
+) -> Result<(), ConfigError> {
     let command_cwds = dynamic
         .iter()
         .filter(|(_, implementation)| implementation.command.is_some())
@@ -443,31 +491,29 @@ fn add_composed_metadata(
             let cwd = origins
                 .get(name)
                 .expect("every composed dynamic binding records its source");
-            let encoded = cwd.as_os_str().as_encoded_bytes();
-            let mut fingerprint = String::with_capacity(encoded.len() * 2);
-            const HEX: &[u8; 16] = b"0123456789abcdef";
-            for byte in encoded {
-                fingerprint.push(HEX[(byte >> 4) as usize] as char);
-                fingerprint.push(HEX[(byte & 0x0f) as usize] as char);
-            }
-            (name.clone(), toml::Value::String(fingerprint))
+            let cwd = cwd.to_str().ok_or_else(|| ConfigError::InvalidComposedMetadata {
+                reason: format!("dynamic command {name:?} has a non-UTF-8 working directory"),
+            })?;
+            Ok((name.clone(), toml::Value::String(cwd.to_string())))
         })
-        .collect::<toml::map::Map<_, _>>();
+        .collect::<Result<toml::map::Map<_, _>, ConfigError>>()?;
     if command_cwds.is_empty() {
-        return;
+        document
+            .as_table_mut()
+            .expect("a TOML document is always a table")
+            .remove("appa_composed");
+        return Ok(());
     }
     let metadata = toml::Value::Table(
-        [(
-            "dynamic_command_cwd_bytes".to_string(),
-            toml::Value::Table(command_cwds),
-        )]
-        .into_iter()
-        .collect(),
+        [("dynamic_command_cwd".to_string(), toml::Value::Table(command_cwds))]
+            .into_iter()
+            .collect(),
     );
     document
         .as_table_mut()
         .expect("a TOML document is always a table")
         .insert("appa_composed".to_string(), metadata);
+    Ok(())
 }
 
 fn compose_include(
@@ -1132,6 +1178,16 @@ mod tests {
             moved.policy_file().bytes(),
             "moving a command config changes the deployment behavior and identity"
         );
+
+        let standalone_dir = tempfile::tempdir().expect("standalone temp directory");
+        let standalone_path = standalone_dir.path().join("appa.toml");
+        std::fs::write(&standalone_path, config.policy_file().bytes()).expect("write stored config");
+        let standalone = Config::load(&standalone_path).expect("stored command config reloads");
+        let Some(DynamicImplementation::Command(command)) = standalone.externals.dynamic.get("battery") else {
+            panic!("stored battery binding is a command")
+        };
+        assert_eq!(command.cwd, canonical.join("battery"));
+        assert_eq!(standalone.policy_file().bytes(), config.policy_file().bytes());
     }
 
     #[test]
