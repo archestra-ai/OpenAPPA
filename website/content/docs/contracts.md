@@ -32,7 +32,7 @@ A set declaration without an explicit operator causes a policy load error.
 
 ### Groups
 
-A reader list may name a **group**, written `@name`, and so may the actual argument an `includes($arg)` placeholder reads. The registered membership resolver turns the name into its literal reader set at the moment the engine first reads it for an operation — at the admission of an exposed provider-run result, at the pre-dispatch check, at mandate validation, at sanitizer application, at cast selection and the validation of a cast's answer. A name without the mark is a literal reader ID. A reader ID starting with `@` is a load error, as is a group mention in a policy with no `[membership]` registration.
+A reader list can name a **group**, written `@name`. An argument placeholder (`includes = ["$recipient"]`) can also resolve to a group. When OpenAPPA evaluates an operation, the registered `[membership]` resolver converts the group name into its literal list of readers. A name without `@` is a literal reader ID. Using `@` in a literal reader ID or referencing a group without registering `[membership]` causes a policy load error.
 
 ```toml
 [membership]                    # one per deployment; every @group resolves here
@@ -44,9 +44,9 @@ requires = { audience = { cap = ["finance", "@auditors"] } }  # group in a cap
 delta    = {}
 ```
 
-Resolution is fresh per operation, and pinned within one: the set resolved at a call's check is the set its block, its plan offers, its release and its admission use, and a written list means its literal readers plus the current members of each group it names. Directory updates take effect on the next policy check without a reload. Once resolved for a specific tool call, reader sets stay pinned to that call. Records keep the resolved readers, never the group name. `public` is reserved and never a group member; a directory answer containing it is malformed.
+Each tool call resolves group membership freshly, then pins that reader set for the duration of the call (including checks, remedy plans, dispatch, and logging). Directory updates apply to new calls immediately without reloading the policy. Execution records store the resolved reader IDs, never the group name. The reserved word `public` cannot be a group member.
 
-A resolver that produces no answer — a timeout, an error, malformed or oversized data — resumes nothing: the check does not complete and no engine fact is appended. An empty reader set is a successful answer. The endpoint accepts a versioned JSON POST request: `{version:1,resolver,group}`, with `group` the name without its `@` mark. It returns `{version:1,readers:[...]}`.
+If a membership resolver fails (timeout, network error, or invalid payload), OpenAPPA halts the check with an operational error and records nothing to the log. An empty reader list is a valid response. The resolver endpoint receives a JSON POST request (`{"version": 1, "resolver": "...", "group": "..."}`) and returns `{"version": 1, "readers": [...]}`.
 
 ### Dynamic resolvers
 
@@ -54,27 +54,7 @@ A dynamic resolver classifies a proposed tool call before the engine checks it. 
 
 A `[[dynamic_resolver]]` declares two things: the `inputs` a tool must supply, and the `returns` it always answers with. A `[[tool]]` attaches one with `uses`, maps each declared input from the proposed call, and points its own fields at the results it wants.
 
-#### Example: pass one argument
-
-```toml
-[[dynamic_resolver]]            # registration only; the deployment binds the implementation endpoint
-name    = "classify-customer"
-inputs  = ["subject"]
-returns = ["delta.trust", "delta.audience"]
-
-[[tool]]
-name       = "get_customer"
-parameters = { type = "object", properties = { customer_id = { type = "string" } }, required = ["customer_id"] }
-uses       = [{ resolver = "classify-customer", inputs = { subject = "$tool_call.arguments.customer_id" } }]
-
-# This tool uses only the resolver's trust result.
-delta    = { trust = "resolver.classify-customer.trust" }
-requires = { trust = "trusted" }
-```
-
-The resolver receives only `customer_id`, under the name `subject`. It returns both of its results. This tool reads one.
-
-The result path is `resolver.<resolver name>.<result name>`. It is a string because an unquoted dotted value is not valid TOML. The field it sits in supplies the scope, so `delta.trust` and `requires.trust` spell the same reference and read different results.
+The result path is `resolver.<resolver name>.<result name>`. Writing it under `delta` or under `requires` decides which one it fills, so `delta.trust` and `requires.trust` name the same result but read it into different places.
 
 #### Example: pass the complete tool call
 
@@ -107,6 +87,26 @@ The resolver receives this value in `args`:
 
 This form does not need a tool parameter schema. It does need a tool `description`: the value carries one.
 
+#### Example: pass one argument
+
+```toml
+[[dynamic_resolver]]
+name    = "classify-customer"
+inputs  = ["subject"]
+returns = ["delta.trust", "delta.audience"]
+
+[[tool]]
+name       = "get_customer"
+parameters = { type = "object", properties = { customer_id = { type = "string" } }, required = ["customer_id"] }
+uses       = [{ resolver = "classify-customer", inputs = { subject = "$tool_call.arguments.customer_id" } }]
+
+# This tool uses only the resolver's trust result.
+delta    = { trust = "resolver.classify-customer.trust" }
+requires = { trust = "trusted" }
+```
+
+The resolver receives only `customer_id`, under the name `subject`. It returns both of its results. This tool reads one.
+
 #### Example: use several resolvers
 
 ```toml
@@ -132,9 +132,16 @@ delta = { trust = "resolver.trust-classifier.trust", audience = "resolver.record
 
 OpenAPPA sends one request to each resolver. Both requests use the same current state.
 
-#### Available call values
+#### Rules
 
-`$tool_call` is the only special source.
+- A resolver declares its inputs and all results it returns.
+- A tool can use zero or more resolvers. Omit `uses` when it uses none.
+- A resolver always returns every declared result. A tool can use any part of that result.
+- A tool field holds one value: a value the policy wrote, or one resolver result. So a tool reads at most one result per field, and it uses at most five resolvers.
+- A tool must read a result of every resolver it uses. A `uses` entry no field reads does not load.
+- If a resolver fails or returns an invalid result, OpenAPPA does not run the tool.
+
+A tool maps each declared input from the proposed call. `$tool_call` is the only special source.
 
 | Value | Meaning |
 |---|---|
@@ -146,42 +153,19 @@ OpenAPPA sends one request to each resolver. Both requests use the same current 
 
 Any read of the description needs a tool `description`. A single argument needs a tool parameter schema, and the schema must mark that top-level argument as required. The resolver then receives whatever JSON value the call carries under that name.
 
-#### Results and their destinations
+A result is named for the one contract field it fills. These five names are the whole vocabulary:
 
-A result is named for the one contract field it establishes. These five names are the whole vocabulary:
+| Result | Value |
+|---|---|
+| `delta.trust` | A rank from the trust chain |
+| `delta.audience` | `"public"` or a list of literal readers |
+| `requires.trust` | A rank from the trust chain |
+| `requires.audience` | `includes`, `cap`, or both |
+| `requires.attention` | Marks from the attended list |
 
-| Result | Destination | Value |
-|---|---|---|
-| `delta.trust` | `delta.trust` | A rank from the trust chain |
-| `delta.audience` | `delta.audience` | `"public"` or a list of literal readers |
-| `requires.trust` | `requires.trust` | A rank from the trust chain |
-| `requires.audience` | `requires.audience` | `includes`, `cap`, or both |
-| `requires.attention` | `requires.attention` | Marks from the attended list |
+Ownership, pinning, and what a `tool_input` sanitizer can do to a pinned answer are in [How it works](/how-it-works).
 
-#### Rules
-
-- A resolver declares its inputs and all results it returns.
-- A tool can use zero or more resolvers. Omit `uses` when it uses none.
-- A resolver always returns every declared result. A tool can use any part of that result.
-- A tool field holds one value: a value the policy wrote, or one resolver result. So a tool reads at most one result per field, and it uses at most five resolvers.
-- A tool must read a result of every resolver it uses. A `uses` entry no field reads does not load.
-- If a resolver fails or returns an invalid result, OpenAPPA does not run the tool.
-
-#### Ownership and pinning
-
-Every contract field has one owner. A field the policy writes and a field a resolver establishes are the same field, so the two never overlap and requirements do not combine across resolvers. A dimension no owner describes contributes nothing inside a declared `delta` and checks nothing under `requires`. A tool with no `delta` key and no resolver-owned output dimension is unannotated: its result enters `Unknown` in both dimensions. History requirements are always static.
-
-Resolution occurs when a proposed call first checks. The validated answer is pinned to the exact `args` its resolver received. The pin holds through rechecks, remedy plans, rulings, dispatch, and admission. The dispatch record stores the answer and a digest of those `args`, not a second copy of them: the arguments and the `uses` entry are already on the record, so a replay rebuilds the value and compares. A new proposal resolves again. An answer given about an unrelated call is never evidence here.
-
-An input-substitution remedy rewrites the arguments of a proposal through a registered sanitizer. The pins survive the rewrite and the resolver is not consulted again: the answer is about the proposal, and the proposal stays on the record for the rebuild to compare against. This holds for every read shape, including a use that reads the complete call, `$tool_call`, or `$tool_call.arguments`. So a resolver-backed tool is offered input-substitution remedies like any other.
-
-A `tool_input` sanitizer therefore holds one power more than its declared transition names. Its rewrite keeps the classification a resolver gave about the arguments before the rewrite, even where the rewrite changes exactly what that resolver read. A rewrite that turns one recipient, path, or resource into another one dispatches under the answer given for the first.
-
-A `tool_input` sanitizer replaces the whole argument object, and it declares no list of the arguments it writes. So the policy cannot state that a rewrite leaves one resolver input alone, and it has one control here: `scope`. Give a resolver-backed tool a tag no `tool_input` sanitizer covers, unless you accept that sanitizer's rewrite standing under the resolver's earlier answer. Scope permits the hop; it does not produce one. The engine offers it only where the call blocks on an `includes` gap the sanitizer's declared transition clears.
-
-A resolver that produces no answer — an unbound or unreachable implementation, a timeout, a process failure, a malformed, out-of-policy, unsupported-version, or oversized response — resumes nothing: the call was not checked, no engine fact is appended, and the answer is not a policy denial. The hook fails operationally and the reason lands in the runtime's own log; the next proposal consults again.
-
-#### Implementations
+#### Implementing a resolver
 
 One `[externals.dynamic]` HTTP endpoint serves every resolver that does not declare a builtin; each request carries the resolver name. A resolver can instead name an in-process builtin on its declaration — the one implementation choice the policy itself may carry. The builtin available today is the Claude Code classifier (`builtin = "claude-code"`); it is one implementation, not the definition of how resolvers work.
 
@@ -196,82 +180,66 @@ A resolver with `builtin = "claude-code"` never uses the endpoint. The builtin s
 
 The deployment tunes the builtin in `[externals.claude_code]`: `command` sets the executable path (a service environment often strips `PATH`), `model` pins the model, and `timeout_ms` gives the consult its own budget instead of the shared machine-consult `timeout_ms` — a model call is slower than an ordinary endpoint. At most four Claude consults run at once per runtime. Each consult has model latency and account cost; a pinned recheck and a replay never invoke it again.
 
-Both implementations receive the same request and answer under the same validation. A deployment upgrades OpenAPPA and its resolver endpoints together: the request keeps version `1`, so an endpoint cannot tell the two shapes apart.
+Both implementations receive the same request and answer under the same validation.
 
-#### Wire format
+Request, for the one-argument example above:
 
-The comments below explain each key. They are not sent.
-
-Request with one mapped argument:
-
-```jsonc
+```json
 {
-  // WHY: Identifies the request shape.
   "version": 1,
-
-  // WHY: Selects the resolver when one service handles several resolvers.
   "resolver": "classify-customer",
-
-  // WHY: Contains only the data selected by the resolver input mapping.
-  "args": {
-    // WHY: Gives the resolver's subject input the selected customer ID.
-    "subject": "cust-7"
-  },
-
-  // WHY: Gives the resolver the current state before this tool call.
+  "args": { "subject": "cust-7" },
   "context": {
-    // WHY: Gives the current trust name.
     "current_trust": "trusted",
-
-    // WHY: Gives the current trust position in the ordered trust list.
     "current_trust_rank": 1,
-
-    // WHY: Gives the current readers.
     "current_audience": "public",
-
-    // WHY: Says whether trust is still unknown.
     "trust_unresolved": false,
-
-    // WHY: Says whether audience is still unknown.
     "audience_unresolved": false,
-
-    // WHY: Lists attention marks already required by the tool policy.
     "static_attention": []
   },
-
-  // WHY: Limits trust results to names defined by the policy.
   "trust_ranks": ["suspicious", "trusted"],
-
-  // WHY: Limits attention results to names defined by the policy.
   "attention_marks": ["privacy-review"]
 }
 ```
 
-The request has no `tool`, `input`, `scope`, `returns`, or `expects` key. A resolver that needs the tool name or its description reads it as an input.
+| Key | Meaning |
+|---|---|
+| `version` | The request shape. It is `1`. |
+| `resolver` | Which resolver answers, when one service handles several |
+| `args` | Only the data the tool's input mapping selected, under the resolver's declared input names |
+| `context` | The state before this tool call: current trust name and rank, current readers, whether each dimension is still unknown, and the attention marks the tool policy already requires |
+| `trust_ranks` | The policy's trust chain, least-trusted first. A trust result must name one of these. |
+| `attention_marks` | The attended marks. An attention result must name these only. |
+
+A resolver that needs the tool name or its description reads it as an input.
 
 Response:
 
-```jsonc
+```json
 {
-  // WHY: Identifies the response shape. It must match the request version.
   "version": 1,
-
-  // WHY: Holds every result declared by this resolver, keyed by the result's own name.
   "result": {
-    // WHY: Supplies the declared trust result.
     "delta.trust": "trusted",
-
-    // WHY: Supplies the declared audience result, even if this tool does not use it.
     "delta.audience": ["finance"]
   }
 }
 ```
 
+`version` must match the request. `result` holds every result the resolver declared, keyed by the result's own name — including a result this tool does not read.
+
 OpenAPPA rejects a missing result, an extra result, and a `null` result. It rejects an extra key beside `version` and `result`. Trust and attention values must come from the lists in the request, whether or not the tool reads them: a result no field reads establishes nothing, but the record keeps it, so it answers to the same vocabulary. `delta.audience` is `"public"` or a list of reader names, and never a group. `requires.audience` is an object with an `includes` floor, a `cap` ceiling, or both. An empty reader list is a valid, maximally restrictive answer. An empty attention list is valid, and it is the only valid attention answer when `attention_marks` is empty.
 
 ### Deployment coverage
 
-The deployment declares what it covers in the policy file's `[deployment]` table — the starting label every root opens at, which tools have enforced execution, where raw results can be withheld, whether child branches are controlled. The policy loader validates the file against that declaration, and a construct that names an engine behavior the deployment cannot perform is a load error naming the missing coverage: a `tool_output` sanitizer with no covered application point, a pending-cast `delta` on a tool whose raw result the model would see anyway, a `[child]` section without child-context control, a `requires`, dynamic `delta`, or pending-cast `delta` on a provider-run tool. A weaker executor class is not a construct — it loads, and its weakness is the open vector. Writing a policy therefore starts from the deployment's coverage, not from the full feature list. What stays uncovered is an open vector the deployment names explicitly and auditably — nothing is removed or silently degraded.
+The `[deployment]` table declares the capabilities of your hosting environment—such as starting security labels, enforced execution points, raw output withholding, and child branch isolation.
+
+During policy load, OpenAPPA validates that all declared constructs are supported by the deployment. If a policy requires a capability the deployment lacks, loading fails with an explicit error:
+- A `tool_output` sanitizer requires a deployment that can withhold raw tool results.
+- A pending cast (`delta = { trust = "unknown" }`) requires raw results to be withheld until classified.
+- A `[child]` section requires child context isolation.
+- Provider-run tools (tools executed directly inside a provider inference call) cannot declare `requires`, dynamic resolvers, or pending casts.
+
+Uncovered vectors are explicitly declared in the deployment configuration so security leaders can audit them, rather than silently degrading guarantees.
 
 ## What to check when reviewing
 
@@ -283,11 +251,11 @@ A tool contract is typically four lines long. Use this checklist during policy r
 | **Unannotated Tools** | Omitting `delta` while declaring `requires`. | Use `delta = {}` if output carries no labels, or separate unannotated tools. | Loader refuses `requires` on unannotated tools; unannotated output enters as `Unknown`. |
 | **`effects` Completeness** | Mutation or deployment tool omits `effects`. | Declare all side effects, e.g., `effects = ["migration.applied", "mutation"]`. | Under-declared effects pass `no_prior` checks silently without triggering history constraints. |
 | **Dynamic Recipients** | Static readers when an ACL depends on an argument. | Use a placeholder for a recipient the call names — a literal reader, `public`, or an `@group` — or a dynamic resolver for an argument-derived reader set. | Static readers can ignore the proposed argument; placeholder groups and dynamic resolution pin their answer to the call. |
-| **Unread resolver** | A `uses` entry whose results no field of the tool reads. | Remove the entry, or point a field at one of its results. | It does not load. A consult that changes nothing but blocks the tool on failure is a policy mistake, and it costs a request on every call. |
-| **Input sanitizer over a resolver** | A `tool_input` sanitizer whose `scope` tags cover a resolver-backed tool. | Tag the tool so no `tool_input` sanitizer covers it, unless that sanitizer's rewrite is one you accept under the resolver's earlier answer. | The rewrite dispatches under the answer given before it: a rewrite that changes a recipient, path, or resource carries the classification of the original one. A sanitizer declares no write set, so only `scope` controls this. |
+| **Unread resolver** | A `uses` entry whose results no field of the tool reads. | Remove the entry, or point a field at one of its results. | It does not load. An unread resolver costs an unnecessary consult on every call and blocks execution if it fails. |
+| **Input sanitizer over a resolver** | A `tool_input` sanitizer whose `scope` tags cover a resolver-backed tool. | Tag the tool so no `tool_input` sanitizer covers it, unless that sanitizer's rewrite is one you accept under the resolver's earlier answer. | The rewrite runs under the resolver answer given for the original call. If a rewrite changes arguments (such as a recipient or file path), it retains the classification of the original input. |
 | **Combined Read & Release** | Single tool `share_doc(doc, recipient)` fetching and releasing in one step. | Split into `fetch_doc` (read) and `grant_doc_access` (release). | Combined tools force authorities to approve releases before content is fetched. |
 | **Authority Mandates** | Overly permissive mandates like `can_cover_readers = { may_add = ["public"] }`. | Restrict authority `mandate` and `scope.tags` to the minimum necessary desk. | Authorities cannot exceed mandates, but overly broad mandates weaken review gates. |
-| **Auto-Approval Wiring** | `builtin = "approve"` behind a wide mandate — an automated yes across everything the mandate covers. | Keep auto-approval mandates narrow; reserve wide mandates for `hitl` or a reviewed resolver. | Mandate powers do not depend on the implementation behind them: the open gate is legitimate, deliberate, and visible in review. |
+| **Auto-Approval Wiring** | `builtin = "approve"` behind a wide mandate — an automated yes across everything the mandate covers. | Keep auto-approval mandates narrow; reserve wide mandates for `hitl` or a reviewed resolver. | `builtin = "approve"` creates an automated open gate for all matching actions. Keep its scope minimal. |
 | **Hint Accuracy** | A `hint` describing a power the mandate does not hold, or content the sanitizer does not remove. | Restate the declared mandate in your own words: say what the entity covers or strips, and nothing more. | A hint reaches the agent with every plan naming the entity, and grants nothing. A misleading one steers plan choice wrongly and misleads review. |
 
 ## Tools
@@ -314,14 +282,14 @@ attention = ["sre-signoff"]                            # Fresh per-call demand
 
 ### Key contract rules
 
-- **`delta` is strictly restrictive**: A tool's delta can only narrow the audience or lower trust. Within an annotated `delta`, an omitted dimension defaults to identity.
+- **`delta` is strictly restrictive**: A tool's delta can only narrow the audience or lower trust. Within an annotated `delta`, an omitted dimension defaults to identity (unchanged).
 - **Pending-cast deltas (`delta = { trust = "unknown" }` or `delta = { audience = "unknown" }`)**: Holds one label dimension pending resolution by a registered `[[cast]]` at admission. At most one dimension may be pending-cast. Declaring both `requires` and `unknown` delta on the same dimension is a load error. `"unknown"` is reserved: it can name neither a trust rank nor a reader.
-- **Dynamic argument placeholders (`$arg`)**: `requires.audience = { includes = ["$recipient"] }` evaluates `$recipient` against the actual call argument at runtime, as one audience expression: an ordinary string is one literal reader ID, `public` is the Public audience — only a Public trajectory includes it — and `@name` is a group the membership resolver expands, pinned to that proposed call. Placeholders are valid only inside `includes`, and `recipient` must be a required top-level string property of the tool's `parameters` — an omitted `parameters`, an optional, non-string, or nested property is a load error. A call that omits the argument or passes a non-string fails schema validation as an `InvalidCall` before the check runs.
-- **Dynamic resolvers (`uses`)**: Each entry names a registered resolver and maps every input that resolver declares from `$tool_call`. The tool's own fields then read results by name. A mapped `$tool_call.arguments.<name>` must be a required top-level property of the tool's `parameters`, at any type; a resolver that declares no inputs reads the complete call and needs no `parameters`, but does need a `description`.
-- **A field has one owner**: `delta.trust` holds a written value or one resolver result, never both — the TOML key takes one value, so the two cannot be spelled together. Write a value for a field no resolver reads: a concrete one (`delta = { trust = "trusted" }`), `delta = {}` to make the output neutral (pass-through), or omit `delta` to leave it `Unknown` (fail-closed — the safe default). Because each field takes one result, requirements do not combine across resolvers, and a tool uses at most five.
-- **History checks (`requires.effects`)**: `has` verifies `prior(k)` against appended effects; `has_no` verifies `no_prior(k)` against appended effects plus unsettled reservations — emits reserved at release and not yet observed to succeed or fail.
-- **Attention demands (`requires.attention`)**: Forces fresh authority sign-off on *every* call, never satisfied by execution history.
-- **Dual-gate contracts**: When a contract defines both a restrictive `delta` and a `requires` check (e.g., `search_and_share`), the engine evaluates both gates.
+- **Dynamic argument placeholders (`$arg`)**: `requires.audience = { includes = ["$recipient"] }` evaluates `$recipient` against the actual call argument at runtime. The argument value can be a literal reader ID, the reserved word `public`, or an `@group` expanded by the membership resolver. Placeholders are supported only inside `includes`. The argument must be declared as a required top-level string in the tool's `parameters` schema.
+- **Dynamic resolvers (`uses`)**: Attaches registered resolvers to classify proposed calls. Each entry maps required inputs from `$tool_call`. Mapped arguments must be required top-level properties in the tool schema. A resolver with no inputs reads the entire tool call and requires a tool `description`.
+- **Single field ownership**: Each contract field has one source: a static policy value or a resolver result. You cannot configure both on the same field. Because each field accepts at most one resolver result, a tool uses at most five resolver outputs.
+- **History checks (`requires.effects`)**: `has` verifies `prior(k)` against recorded effects in the log; `has_no` verifies `no_prior(k)` against recorded effects plus unsettled reservations (effects reserved at release that have not yet succeeded or failed).
+- **Attention demands (`requires.attention`)**: Forces fresh authority sign-off on *every* call; never satisfied by execution history.
+- **Dual-gate contracts**: When a contract defines both a restrictive `delta` and a `requires` check (e.g., `search_and_share`), OpenAPPA evaluates both gates before dispatch.
 
 ## Authorities
 
@@ -402,11 +370,11 @@ A mandate binds exactly one dimension. Trust is declared on the same terms, as a
 trust = { from = "suspicious", to = "trusted" } # Instead of `audience`, never alongside it
 ```
 
-A registered `tool_output` sanitizer is offered at each narrowing its mandate can strictly improve. The deployment must be able to withhold the raw result at that point. Executing the plan binds the sanitizer to the dispatch and accepts no raw or guessed residual. On success, the host withholds the raw result and the engine validates the derivation. A derivation that no longer narrows enters the trajectory. Otherwise it remains confined and opens a new stage. That stage offers acceptance of the exact current residual and any further applicable, helpful sanitizers. A sanitizer whose declared transition cannot help is never offered.
+When a tool result would narrow the trajectory label, OpenAPPA checks if a registered `tool_output` sanitizer can improve the label. If selected, the host withholds the raw result and runs the sanitizer. If the cleaned derivation prevents narrowing, it enters the trajectory label. If residual narrowing remains, the agent can accept the residual or apply another compatible sanitizer. A sanitizer whose declared transition cannot improve the label is never offered.
 
 Like a cast or an authority, a sanitizer may scope itself by tags: it applies only to values whose originating tool carries a covered tag. A child sub-execution return originates from no tool, so only unscoped sanitizers apply at that crossing.
 
-At `tool_input`, the sanitizer derives a replacement for the whole argument set of one call, and the harness dispatches exactly the substituted bytes. The substitution can clear an `includes` gap — the derivation's `to` stands in for the argument contribution — but never a `cap` or trust gap: a cap bounds the run's own reach, and rewriting the bytes does not rewrite the decision to call. The rewritten call keeps the resolver answers pinned to the proposal it replaces, and it keeps a membership answer only where the argument naming that group is unchanged.
+At `tool_input`, the sanitizer derives a replacement for the whole argument set of one call, and the harness dispatches exactly the substituted bytes. This substitution can satisfy an unmet `includes` audience requirement, but cannot clear a `cap` or trust requirement (a cap bounds the run's own reach, and rewriting arguments does not change the decision to invoke the tool). The rewritten call keeps the resolver answers pinned to the proposal it replaces, and preserves a group membership answer only if the argument naming that group is unchanged.
 
 To enforce automated return sanitization across all child sub-executions, policies can bind a default return sanitizer:
 
@@ -415,7 +383,10 @@ To enforce automated return sanitization across all child sub-executions, polici
 return_sanitizer = "pii-redactor"   # Forces all child sub-execution returns through pii-redactor
 ```
 
-The reserved builtin `attest-schema` covers the quarantine exit without touching bytes. It raises trust on a structured child return when three conditions hold: every returned field is shape-bounded (values the schema declares and bounds — ranged numbers, booleans, closed enums, bounded formats, arrays under a length bound; no free text), the structure was bound at fork before the child read anything, and the parent's fork-time rank covers the mandate's `to`. It claims instruction-cleanliness only — a sink that acts on the returned value keeps its own gates.
+The reserved builtin `attest-schema` validates structured sub-agent returns without altering data bytes. It safely raises trust from `suspicious` to `trusted` when:
+1. All returned fields are strictly shape-bounded (numbers, booleans, fixed enums, bounded formats; no free text).
+2. The schema structure was bound before the sub-agent read untrusted data.
+3. The parent agent had trusted status when spawning the sub-agent.
 
 ```toml
 [[sanitizer]]
@@ -427,7 +398,7 @@ hint = "Verifies the sub-agent returned valid structured data matching the schem
 trust = { from = "suspicious", to = "trusted" }
 ```
 
-Registering the reserved name is the whole wiring: the engine applies `attest-schema` itself, so the deployment binds no `[externals]` entry for it — an explicit binding, builtin or resolver, is a load error.
+Registering `name = "attest-schema"` is sufficient; OpenAPPA applies it natively without requiring an `[externals]` entry (configuring one is a load error).
 
 ## Casts
 
@@ -456,11 +427,11 @@ constant = { trust = "suspicious", audience = { exactly = ["public"] } }
 url = "https://classify.corp/label"
 ```
 
-A resolver is the only implementation a cast takes: the answer is a label the `may_cast` ceiling has to bound, not a stock transform, so `builtin` is refused. A constant is answered from the policy, so it binds nothing and an `[externals]` entry for it is a load error.
+A dynamic cast requires a resolver bounded by a `may_cast` ceiling (`builtin` is not supported for casts). A constant cast is defined directly in policy, so it requires no `[externals]` binding.
 
-Applicable casts — matched by scope tags — evaluate in registration order until one answers. A resolver that cannot answer — unreachable, timed out, malformed — is skipped, which is what makes a trailing constant the deployment's declared fallback. Register constant casts last: a cast placed after a constant that covers it can never run, and the loader refuses it.
+When resolving an `Unknown` value, OpenAPPA evaluates applicable casts (matched by `scope.tags`) in registration order until one returns an answer. If a resolver is unreachable or fails, OpenAPPA moves to the next registered cast. Place fallback constant casts last, as any cast registered after an unscoped constant will never be reached.
 
-The engine validates every resolver response against its declared `may_cast` ceiling before admitting the value. An answer over the ceiling is refused, and the cascade continues with the next applicable cast in registration order; the first answer the engine admits stands. A `public` audience cap is an open gate: it lets a single resolver answer resolve a value to `public` and lift its audience restriction entirely — review it like any covering mandate.
+OpenAPPA validates every resolver answer against the declared `may_cast` ceiling before admitting the value. An answer outside the ceiling is refused, and the cascade continues with the next applicable cast in registration order; the first answer OpenAPPA admits stands. A `public` audience cap allows a resolver to lift audience restrictions entirely; review such ceilings carefully.
 
 A classifier can be consulted again for the same value after a runtime restart or a concurrent-write retry, so a cast implementation must be idempotent.
 
@@ -499,4 +470,4 @@ The runtime consults a resolver-backed cast with a JSON POST. The comments expla
 
 The response is `{"version": 1, "answer": {"trust": "suspicious", "audience": "public"}}`, where `audience` is `"public"` or an array of literal reader ids.
 
-A tool that declares its own pending dimension — `delta = { trust = "unknown" }` — is held rather than annotated late: the deployment lists it in `confined_results`, the runtime keeps the raw result from the model, and the cast reads it first. A restricting answer reaches the agent as a narrowing offer, and the bytes are delivered only if it accepts.
+A tool contract can also declare a pending dimension with `delta = { trust = "unknown" }`. When configured in `confined_results`, the runtime withholds raw results from the model until the cast evaluates the payload. If the resolved label restricts the trajectory, OpenAPPA presents a narrowing prompt to the agent before delivering the data.

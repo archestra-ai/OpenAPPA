@@ -12,7 +12,7 @@ OpenAPPA is designed for multiple agent surfaces. **Claude Code is simply the fi
 ```sh
 claude plugin marketplace add archestra-ai/OpenAPPA &&
   claude plugin install appa-runtime@appa &&
-  claude "set up APPA"
+  claude /appa-setup
 ```
 
 The setup installs the local runtime and adds `clappa`, a protected way to start Claude Code. It does not replace `claude` or change how your ordinary sessions start.

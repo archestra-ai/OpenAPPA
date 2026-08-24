@@ -10,11 +10,9 @@ The plugin protects only sessions launched with `APPA_GATE=1` (the
 `clappa` alias). The hooks read the variable from the Claude Code
 process environment, fixed at launch, so a session cannot turn the
 protection off. In every other session the plugin is inert: it checks
-nothing, starts nothing, and only announces once, at session start,
-that the beta is available and `clappa` starts a protected session
-(`hooks/beta-announcement.md`) — or, when the runtime binary is not
-installed, offers its installation as a prompted task
-(`hooks/setup-appa.md`).
+nothing, starts nothing, and prints nothing. Installing the runtime is
+the `appa-setup` skill's job (`skills/appa-setup`), run only when the
+user invokes it.
 
 The plugin ships the POSIX hook commands (`hooks/hooks.json`). Native
 Windows swaps in `hooks/hooks.windows.json`, which drives the
@@ -22,7 +20,7 @@ Windows swaps in `hooks/hooks.windows.json`, which drives the
 successful tool-result admission; WSL runs the POSIX hooks as-is.
 `statusline.sh` and `statusline.ps1` provide matching status displays
 without changing Claude's settings automatically; unprotected sessions show
-the mascot with a `clappa` reminder instead of runtime status.
+the mascot alone instead of runtime status.
 
 The install and every protected session share one starter,
 `hooks/ensure-runtime.sh` (on Windows, `hook.ps1 -EnsureRuntime`): it
@@ -30,9 +28,9 @@ launches the installed `appa-runtime` when nothing healthy answers
 `/health` and returns only once one does. The last step of the install
 runs it, so a protected session normally finds the runtime already up and
 its SessionStart start is a single health probe. When the binary is not
-installed at all, an unprotected session offers the install as a prompted
-task: `hooks/setup-appa.md` tells the model how to download, verify,
-install, and start the release binary on request, under the session's
+installed at all, the `appa-setup` skill installs it:
+`skills/appa-setup/SKILL.md` tells the model how to download, verify,
+install, and start the release binary, under the session's
 normal command approval — so the plugin alone completes the install. A
 runtime that dies mid-session still blocks the session until the next
 session start brings it back.

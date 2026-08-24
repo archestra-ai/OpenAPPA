@@ -12,11 +12,10 @@
 # curl, malformed stdin — prints the mascot alone and exits 0.
 #
 # An unprotected session (no APPA_GATE=1) never queries the runtime; it
-# prints the mascot with a reminder that clappa starts a protected
-# session.
+# prints the mascot alone.
 input=$(cat)
 if [ "${APPA_GATE:-}" != 1 ]; then
-  printf '▄█▄▄▄█▄  unprotected — run clappa to protect\n██▄█▄██\n'
+  printf '▄█▄▄▄█▄\n██▄█▄██\n'
   exit 0
 fi
 chips=''
