@@ -136,10 +136,6 @@ fn return_decision(decision: EngineDecision) -> Result<ChildReturnDecision, Even
 
 const REPLAY_LIMIT: u32 = 8;
 
-/// Backstop only: a cast cascade shrinks by one cast per refused answer, so registered-cast
-/// count bounds the rounds it needs; this stops a round that keeps re-asking the same thing.
-const EVIDENCE_LIMIT: u32 = 64;
-
 fn fresh_entropy() -> OfferNonce {
     OfferNonce(rand::random::<[u8; 32]>())
 }
@@ -661,8 +657,11 @@ impl Session {
         // Resolver answers carry the label context they were classified under, and the
         // engine matches them only while the call's current context is that one — a moved
         // trajectory consults again by construction, so this loop carries evidence blindly.
+        // Every round either decides or gathers an answer the engine did not hold: a missing
+        // resolver answer, or the cast behind a refused one. Both are finite, so a round that
+        // changes nothing is the only way this loop fails to converge.
         let mut evidence: Vec<ExternalEvidence> = Vec::new();
-        for _ in 0..EVIDENCE_LIMIT {
+        loop {
             let carried = evidence.clone();
             let entering = carried.is_empty();
             let decision = self.drive(&policy, opened.take(), entering, |context| {
@@ -697,7 +696,6 @@ impl Session {
                 return Err(EventError::UnexpectedDecision);
             }
         }
-        Err(EventError::UnexpectedDecision)
     }
 
     fn drive(

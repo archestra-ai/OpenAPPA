@@ -78,9 +78,10 @@ max_body_bytes = 4096
 "web-classifier" = { url = "CLASSIFIER_URL" }
 "#;
 
-/// Nine resolver-backed casts, each answering over its ceiling, ahead of one constant: the
-/// cascade refuses nine answers before the constant, one evidence round each.
-const CASCADE_CLASSIFIERS: usize = 9;
+/// Resolver-backed casts, each answering over its ceiling, ahead of one constant: the cascade
+/// refuses every one of them before the constant, one evidence round each, with no round
+/// ceiling to run into.
+const CASCADE_CLASSIFIERS: usize = 65;
 
 fn cascade_classifiers() -> Vec<String> {
     (1..=CASCADE_CLASSIFIERS)
@@ -462,7 +463,7 @@ async fn a_long_cast_cascade_reaches_its_constant() {
     assert_eq!(
         established(&runtime),
         vec![("files-fallback".to_string(), "suspicious".to_string())],
-        "nine refused answers established nothing; the constant's label stands"
+        "every refused answer established nothing; the constant's label stands"
     );
     assert_eq!(
         classifier.consulted(),
