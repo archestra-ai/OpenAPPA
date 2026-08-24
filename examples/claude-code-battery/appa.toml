@@ -1,0 +1,48 @@
+# Proposal example: compose complete Claude Code and Slack battery configurations.
+
+include = [
+  "./batteries/claude-code/appa.toml",
+  "./batteries/slack/appa.toml",
+]
+
+[policy]
+version = 1
+
+[policy.deployment]
+dispatch = "enforced"
+
+[[policy.authority]]
+name = "hitl"
+hint = "Ask the person running the session."
+
+[policy.authority.mandate]
+attends = ["hitl"]
+
+[externals]
+timeout_ms = 5000
+review_timeout_ms = 600000
+max_body_bytes = 65536
+
+[externals.authorities.hitl]
+builtin = "hitl"
+
+# Root contracts run before every included battery. This local rule overrides
+# the shipped exact `cargo test` rule with a fresh approval step.
+[[policy.tool]]
+name = "Bash(command:cargo test)"
+requires = { trust = "trusted", attention = ["hitl"] }
+delta = { trust = "suspicious", audience = { exactly = ["claude-session"] } }
+
+# A root contract can also replace a battery's fallback with a local resolver.
+[[policy.dynamic_resolver]]
+name = "local.read-sensitivity"
+returns = ["delta.audience"]
+
+[[policy.tool]]
+name = "Read"
+description = "Reads a file and returns its contents."
+uses = [{ resolver = "local.read-sensitivity" }]
+delta = { trust = "suspicious" }
+
+[externals.dynamic."local.read-sensitivity"]
+command = ["python3", "./local/read-sensitivity.py"]

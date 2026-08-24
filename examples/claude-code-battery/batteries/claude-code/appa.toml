@@ -1,0 +1,56 @@
+# Included proposal battery: first matching Bash contract wins.
+
+[policy]
+version = 1
+
+# Exact common commands do not start the resolver.
+[[policy.tool]]
+name = "Bash(command:cargo test)"
+requires = { trust = "trusted" }
+delta = { trust = "suspicious", audience = { exactly = ["claude-session"] } }
+
+[[policy.tool]]
+name = "Bash(command:git status --short)"
+requires = { trust = "trusted" }
+delta = { trust = "suspicious", audience = { exactly = ["claude-session"] } }
+
+# An obviously destructive command always requires fresh approval.
+[[policy.tool]]
+name = "Bash(command:rm -rf *)"
+requires = { trust = "trusted", attention = ["hitl"] }
+delta = { trust = "suspicious", audience = { exactly = ["claude-session"] } }
+
+# Everything not matched above asks one resolver whether approval is needed.
+[[policy.dynamic_resolver]]
+name = "claude-code.bash-review"
+returns = ["requires.attention"]
+
+[[policy.tool]]
+name = "Bash"
+description = "Runs one shell command and returns its output."
+uses = [{ resolver = "claude-code.bash-review" }]
+requires = { trust = "trusted" }
+
+# Command text cannot prove that output is safe to release. Every Bash result
+# is suspicious and restricted to this local session.
+delta = { trust = "suspicious", audience = { exactly = ["claude-session"] } }
+
+# Read labels a path through a separate one-shot resolver. This example uses a
+# deliberately simple rule: a path beginning with `.` is Private.
+[[policy.dynamic_resolver]]
+name = "claude-code.read-sensitivity"
+returns = ["delta.audience"]
+
+[[policy.tool]]
+name = "Read"
+description = "Reads a file and returns its contents."
+uses = [{ resolver = "claude-code.read-sensitivity" }]
+delta = { trust = "suspicious" }
+
+# One implementation binding per resolver name. Paths are relative to this
+# battery configuration.
+[externals.dynamic."claude-code.bash-review"]
+command = ["python3", "./bash-review.py"]
+
+[externals.dynamic."claude-code.read-sensitivity"]
+command = ["python3", "./read-sensitivity.py"]

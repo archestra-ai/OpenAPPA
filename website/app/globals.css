@@ -821,6 +821,22 @@ samp {
   color: inherit;
 }
 
+.battery-figure {
+  width: 100%;
+  max-width: 45rem;
+  margin: 1rem 0 2rem;
+}
+
+.battery-order-figure {
+  max-width: 32.5rem;
+}
+
+.battery-figure svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
 .prose blockquote {
   border-left: 2px solid var(--border);
   padding-left: 1rem;
