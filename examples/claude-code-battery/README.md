@@ -32,6 +32,8 @@ default with `local.read-sensitivity`, implemented by the script in `local/`.
 The local resolver keeps `.env.example` Public, restricts other dot-prefixed
 paths, and additionally restricts `clients/`.
 
+This command-based example requires a Unix system.
+
 The Claude Code battery uses first-match Bash contracts. Exact common commands
 avoid a resolver call. The default contract invokes `bash-review.py` for one
 call. OpenAPPA writes one JSON request to standard input, reads one JSON answer

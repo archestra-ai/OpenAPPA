@@ -706,12 +706,16 @@ impl Drop for CommandTask {
 
 #[cfg(unix)]
 struct CommandProcess {
-    child: tokio::process::Child,
+    child: Option<tokio::process::Child>,
     process_group: Option<i32>,
 }
 
 #[cfg(unix)]
 impl CommandProcess {
+    fn child_mut(&mut self) -> &mut tokio::process::Child {
+        self.child.as_mut().expect("a live command process owns its child")
+    }
+
     fn terminate_group(&mut self) {
         let Some(process_group) = self.process_group.take() else {
             return;
@@ -724,9 +728,19 @@ impl CommandProcess {
         }
     }
 
-    async fn terminate_and_reap(&mut self) {
+    async fn terminate_and_reap(&mut self) -> Result<std::process::ExitStatus, NoAnswerReason> {
         self.terminate_group();
-        let _ = self.child.wait().await;
+        self.child_mut().wait().await.map_err(|_| NoAnswerReason::Transport)
+    }
+
+    fn terminate_and_reap_later(mut self) {
+        self.terminate_group();
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        tokio::spawn(async move {
+            let _ = child.wait().await;
+        });
     }
 }
 
@@ -776,20 +790,19 @@ async fn run_command_process(
         .and_then(|pid| i32::try_from(pid).ok())
         .ok_or(NoAnswerReason::Transport)?;
     let mut process = CommandProcess {
-        child,
+        child: Some(child),
         process_group: Some(process_group),
     };
-    let Some(mut stdin) = process.child.stdin.take() else {
-        process.terminate_and_reap().await;
+    let Some(mut stdin) = process.child_mut().stdin.take() else {
+        process.terminate_and_reap_later();
         return Err(NoAnswerReason::Transport);
     };
-    let Some(mut stdout) = process.child.stdout.take() else {
-        process.terminate_and_reap().await;
+    let Some(mut stdout) = process.child_mut().stdout.take() else {
+        process.terminate_and_reap_later();
         return Err(NoAnswerReason::Transport);
     };
 
     let outcome = {
-        let child = &mut process.child;
         let exchange = async {
             stdin.write_all(&input).await.map_err(|_| NoAnswerReason::Transport)?;
             stdin.shutdown().await.map_err(|_| NoAnswerReason::Transport)?;
@@ -809,15 +822,9 @@ async fn run_command_process(
                     bytes.extend_from_slice(&chunk[..read]);
                 }
             };
-            let wait = async {
-                let status = child.wait().await.map_err(|_| NoAnswerReason::Transport)?;
-                if status.success() {
-                    Ok(())
-                } else {
-                    Err(NoAnswerReason::Transport)
-                }
-            };
-            let (bytes, ()) = tokio::try_join!(output, wait)?;
+            // Observe exit without reaping. The zombie keeps its pid and process-group id
+            // reserved until group cleanup runs, so the id cannot be recycled underneath us.
+            let (bytes, ()) = tokio::try_join!(output, wait_for_child_exit(process_group))?;
             Ok(bytes)
         };
         tokio::select! {
@@ -827,8 +834,51 @@ async fn run_command_process(
             outcome = exchange => outcome,
         }
     };
-    process.terminate_and_reap().await;
-    outcome
+    match outcome {
+        Ok(output) => {
+            let status = process.terminate_and_reap().await?;
+            if status.success() {
+                Ok(output)
+            } else {
+                Err(NoAnswerReason::Transport)
+            }
+        }
+        Err(reason) => {
+            // Do not let a child stuck in uninterruptible I/O extend the caller's deadline.
+            // The detached task retains reaping responsibility after the group is killed.
+            process.terminate_and_reap_later();
+            Err(reason)
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn wait_for_child_exit(pid: i32) -> Result<(), NoAnswerReason> {
+    loop {
+        let exited = {
+            let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    info.as_mut_ptr(),
+                    libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+                )
+            };
+            if result == -1 {
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(NoAnswerReason::Transport);
+            }
+            let info = unsafe { info.assume_init() };
+            (unsafe { info.si_pid() }) == pid
+        };
+        if exited {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
 }
 
 fn parse_tool_resolution(

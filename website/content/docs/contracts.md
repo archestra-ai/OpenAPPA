@@ -184,9 +184,9 @@ Ownership, pinning, and what a `tool_input` sanitizer can do to a pinned answer 
 
 #### Implementing a resolver
 
-A resolver either carries its implementation or leaves it to the deployment. A resolver that carries the stock Claude Code classifier names it on its declaration with `builtin = "claude-code"` and takes no `[externals.dynamic]` binding. Every other resolver is bound by name under `[externals.dynamic.<name>]` to an HTTP endpoint or a local command.
+A resolver either carries its implementation or leaves it to the deployment. A resolver that carries the stock Claude Code classifier names it on its declaration with `builtin = "claude-code"` and takes no `[externals.dynamic]` binding. Every other resolver is bound by name under `[externals.dynamic.<name>]` to an HTTP endpoint or a Unix command.
 
-A local command uses `command = ["program", "arg"]` under `[externals.dynamic.<name>]`. OpenAPPA invokes this argument list directly, without a shell. It sends one request on standard input and reads one answer from standard output. The command runs in the folder of the config that declares it. The shared `timeout_ms` and `max_body_bytes` settings bound the complete exchange. A missing command, failed process, timeout, oversized answer, or invalid answer returns no resolver evidence. The tool does not run.
+On Unix systems, a local command uses `command = ["program", "arg"]` under `[externals.dynamic.<name>]`. OpenAPPA invokes this argument list directly, without a shell. It sends one request on standard input and reads one answer from standard output. The command runs in the folder of the config that declares it. The shared `timeout_ms` and `max_body_bytes` settings bound the complete exchange. OpenAPPA rejects a command binding on unsupported platforms. A missing command, failed process, timeout, oversized answer, or invalid answer returns no resolver evidence. The tool does not run.
 
 ```toml
 [[dynamic_resolver]]

@@ -112,7 +112,7 @@ command = ["python3", "./read-sensitivity.py"]
 
 ### Run a local resolver
 
-OpenAPPA starts the command only when the selected tool rule uses the resolver. It writes one JSON request, reads one JSON result, then waits for the script to exit.
+On Unix systems, OpenAPPA starts the command only when the selected tool rule uses the resolver. It writes one JSON request, reads one JSON result, then waits for the script to exit. Other platforms reject the command binding when the configuration loads.
 
 Request:
 
