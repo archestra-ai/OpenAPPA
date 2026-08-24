@@ -150,7 +150,7 @@ async fn deployment_with(review_timeout_ms: u64) -> Deployment {
         },
     )
     .await;
-    let HookDecision::DenyCall { feedback } = blocked else {
+    let HookDecision::DenyCall { feedback, .. } = blocked else {
         panic!("a tool behind an attention mark must not release unruled: {blocked:?}");
     };
     let offer = offer_id(&feedback);
@@ -262,7 +262,7 @@ builtin = "hitl"
         },
     )
     .await;
-    let HookDecision::DenyCall { feedback } = blocked else {
+    let HookDecision::DenyCall { feedback, .. } = blocked else {
         panic!("the dynamic trust and attention requirements must block: {blocked:?}");
     };
     assert!(

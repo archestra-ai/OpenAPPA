@@ -13,7 +13,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub use crate::engine::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, TrajectoryStatus};
-pub use appa_runtime_api::{Actor, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId};
+pub use appa_runtime_api::{
+    Actor, LabelDimension, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
+    UnestablishedValue,
+};
 pub(crate) use session::{LateOpen, Session, is_control_tool};
 
 use crate::config::Config;
@@ -47,8 +50,13 @@ impl ExactCall {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ToolCallDecision {
-    Allow { spawn: Option<SpawnBinding> },
-    Deny { feedback: String },
+    Allow {
+        spawn: Option<SpawnBinding>,
+    },
+    Deny {
+        feedback: String,
+        unestablished: Vec<UnestablishedValue>,
+    },
     Control,
 }
 

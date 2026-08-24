@@ -44,8 +44,6 @@ pub enum ConfigError {
     UnsupportedVersion { found: u32 },
     #[error("unknown trust rank {name:?} in {context} (not in the trust chain)")]
     UnknownTrustRank { name: String, context: String },
-    #[error("trust rank name \"unknown\" is reserved: it declares a pending-cast delta dimension")]
-    ReservedRankName,
     #[error("bad reader set in {context}: {reason}")]
     BadAudience { context: String, reason: String },
     #[error("bad sanitizer point {token:?}: expected \"tool_input\" or \"tool_output\"")]
@@ -160,10 +158,6 @@ impl Config {
         };
         // Validate the chain up front so `parse_trust` never truncates a rank index into a u8.
         trust_chain.validate()?;
-        // "unknown" in a trust position is the pending-cast token, never a rank name.
-        if trust_chain.rank_of(UNKNOWN_TOKEN).is_some() {
-            return Err(ConfigError::ReservedRankName);
-        }
 
         let boundary_label = match raw.boundary {
             Some(b) => b.convert(&trust_chain)?,
@@ -1399,6 +1393,28 @@ confined_results = ["lookup"]
                     Err(ConfigError::ForbiddenInlineBinding { kind: found, .. }) if found == kind
                 ),
                 "{kind} inline binding was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn the_reserved_rank_name_is_refused_by_the_engine() {
+        assert!(matches!(
+            Config::from_toml_str("version = 1\ntrust_chain = [\"unknown\", \"trusted\"]\n"),
+            Err(ConfigError::Registry(LoadError::ReservedRankName))
+        ));
+    }
+
+    #[test]
+    fn the_reserved_state_is_never_a_declared_reader() {
+        for site in [
+            "delta = { audience = { exactly = [\"unknown\"] } }",
+            "requires = { audience = { includes = [\"unknown\"] } }\ndelta = {}",
+        ] {
+            let policy = format!("version = 1\n[[tool]]\nname = \"send\"\n{site}\n");
+            assert!(
+                matches!(Config::from_toml_str(&policy), Err(ConfigError::BadAudience { .. })),
+                "{site} admitted `unknown` as a reader"
             );
         }
     }

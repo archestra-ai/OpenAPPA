@@ -195,10 +195,10 @@ pub struct PlannedBlock {
 
 impl PlannedBlock {
     /// Is any remedy available? **Empty is a proof no plan exists** over the implemented remedy
-    /// subset — the assertion concerns requirement gaps and narrowing: an
-    /// unestablished-only block is plan-free *by design*, cleared by a fact landing rather than
-    /// by anything the agent executes, so its emptiness is not unliftability. Fork advice is not
-    /// a remedy and never enters this verdict.
+    /// subset — the assertion concerns requirement gaps and narrowing. A block with any
+    /// `unestablished` source offers no plan *by design*: only a cast fact clears it, and that
+    /// fact must land before its gaps are planned, so its emptiness is not unliftability. Fork
+    /// advice is not a remedy and never enters this verdict.
     pub fn is_curable(&self) -> bool {
         !self.plans.is_empty()
     }
@@ -216,8 +216,10 @@ pub(crate) enum CallRole {
 
 /// Plan the remedies for a raw block. Emits the executable plans when the block clears in one
 /// atomic step, and every direct redispatch when only a prior tool call unlocks it. Both land in
-/// the one `plans` list; fork advice is separate and never a remedy. See the module docs
-/// for the direct-clearing model.
+/// the one `plans` list; fork advice is separate and never a remedy. A block with an
+/// `unestablished` source lists nothing: no plan clears the missing fact, and the engine
+/// requests every applicable cast before it composes, so the block arises only where no cast
+/// applies. See the module docs for the direct-clearing model.
 pub(crate) fn plan(
     registry: &Registry,
     views: &Views,
@@ -231,14 +233,17 @@ pub(crate) fn plan(
     let no_denials = BTreeSet::new();
     let denied = views.denied_authorities(&call.digest()).unwrap_or(&no_denials);
 
-    let mut plans: Vec<RemedyPlan> = enumerate_plans(registry, &current, views, call, stage, role, expansions)
-        .into_iter()
-        .filter(|plan| !denied.iter().any(|authority| plan.names_authority(authority)))
-        .map(RemedyPlan::Executable)
-        .collect();
+    let mut plans: Vec<RemedyPlan> = match raw.unestablished.is_empty() {
+        true => enumerate_plans(registry, &current, views, call, stage, role, expansions)
+            .into_iter()
+            .filter(|plan| !denied.iter().any(|authority| plan.names_authority(authority)))
+            .map(RemedyPlan::Executable)
+            .collect(),
+        false => Vec::new(),
+    };
 
     let terminal = |plan: &RemedyPlan| plan.executable().is_some_and(|plan| plan.hop().is_none());
-    if !plans.iter().any(terminal) && !raw.requirement_gaps.is_empty() {
+    if raw.unestablished.is_empty() && !plans.iter().any(terminal) && !raw.requirement_gaps.is_empty() {
         plans.extend(
             direct_redispatches(registry, &current, raw, expansions)
                 .into_iter()
@@ -1153,7 +1158,7 @@ mod tests {
     };
     use crate::fact::{EffectSet, Fact};
     use crate::groups::DeclaredAudience;
-    use crate::label::{Audience, Dim, ReaderId, Trust};
+    use crate::label::{Audience, Dim, Dimension, ReaderId, Trust};
     use crate::names::MarkName;
     use crate::projection::Projection;
     use crate::registry::{RegistryConfig, TrustChain};
@@ -1228,7 +1233,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unestablished_only_block_mints_no_plan_and_a_mixed_block_keeps_its_offers() {
+    fn a_block_with_an_unestablished_source_mints_no_plan_and_still_reports_its_gap() {
         let gate = ToolContract {
             description: Some("A test tool.".to_string()),
             uses: vec![],
@@ -1272,20 +1277,35 @@ mod tests {
 
         let planned = plan_of(&registry, &log, &call("gate", json!({})));
         assert!(planned.plans.is_empty(), "an unestablished-only block offers nothing");
+        assert!(!planned.is_curable());
 
         let planned = plan_of(&registry, &log, &call("vault", json!({})));
+        assert!(planned.plans.is_empty(), "a mixed block offers nothing either");
+        assert!(!planned.is_curable());
+        assert_eq!(
+            planned.raw.requirement_gaps,
+            vec![Gap::Attention(MarkName::new("signoff"))]
+        );
+        assert_eq!(planned.raw.unestablished.len(), 1);
+        assert_eq!(
+            planned.raw.unestablished[0].dimensions,
+            BTreeSet::from([Dimension::Trust])
+        );
+
+        let established_log = vec![
+            opened(known(TRUSTED, Audience::Public)),
+            admitted(known(TRUSTED, Audience::Public)),
+        ];
+        let planned = plan_of(&registry, &established_log, &call("vault", json!({})));
         let executables: Vec<_> = planned.plans.iter().filter_map(RemedyPlan::executable).collect();
-        assert_eq!(executables.len(), 1, "the mixed block keeps its attention offer");
+        assert_eq!(
+            executables.len(),
+            1,
+            "the same gap plans once its sources are established"
+        );
         assert_eq!(
             executables[0].required[0].covers,
             vec![Gap::Attention(MarkName::new("signoff"))]
-        );
-        assert!(
-            executables[0]
-                .steps
-                .iter()
-                .all(|step| !matches!(step, RemedyStep::Accept(_))),
-            "no acceptance step: the block carries no narrowing"
         );
     }
 
@@ -1822,7 +1842,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_blocks_keep_their_prior_and_cap_redispatches_while_a_fact_is_missing() {
+    fn a_block_with_an_unestablished_source_offers_no_redispatch_until_the_fact_lands() {
         let emitter = ToolContract {
             description: Some("A test tool.".to_string()),
             uses: vec![],
@@ -1888,19 +1908,33 @@ mod tests {
             casts: vec![],
             membership: None,
         });
-        let log = vec![
+        let unresolved = vec![
             opened(known(TRUSTED, Audience::Public)),
             admitted(Label::new(Dim::Unknown, Dim::Known(Audience::Public))),
         ];
+        for tool in ["wipe", "send"] {
+            let planned = plan_of(&registry, &unresolved, &call(tool, json!({})));
+            assert!(planned.plans.is_empty(), "{tool}: a missing fact plans nothing");
+            assert_eq!(
+                planned.raw.requirement_gaps.len(),
+                1,
+                "{tool}: the gap is still reported"
+            );
+            assert_eq!(planned.raw.unestablished.len(), 1);
+        }
 
-        let planned = plan_of(&registry, &log, &call("wipe", json!({})));
+        let established_log = vec![
+            opened(known(TRUSTED, Audience::Public)),
+            admitted(known(TRUSTED, Audience::Public)),
+        ];
+        let planned = plan_of(&registry, &established_log, &call("wipe", json!({})));
         assert!(planned.plans.iter().any(|plan| matches!(
             plan,
             RemedyPlan::Redispatch(r)
                 if r.tool().as_str() == "backup" && r.clears() == [Gap::Prior(EffectKind::new("backup"))]
         )));
 
-        let planned = plan_of(&registry, &log, &call("send", json!({})));
+        let planned = plan_of(&registry, &established_log, &call("send", json!({})));
         assert!(planned.plans.iter().any(|plan| matches!(
             plan,
             RemedyPlan::Redispatch(r)

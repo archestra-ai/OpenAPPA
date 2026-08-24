@@ -30,12 +30,15 @@ trust = "internal"
 audience = { exactly = ["public"] }
 
 # Branching is an ordinary registered tool: the runtime checks this call like
-# any other, and releasing it is what opens a child trajectory (`BRN-2`,
-# `BRN-3`). No delta, because releasing it admits no value — a child's return
-# crosses through the return channel and is checked there.
+# any other, and releasing it is what opens a child trajectory. A child's
+# return crosses through the return channel and is checked there. When the
+# harness reports the spawn's own success without the spawn mark, that body is
+# admitted as an ordinary result. `delta = {}` declares that it carries no
+# restriction.
 [[policy.tool]]
 name = "fork"
 parameters = { type = "object", properties = { task = { type = "string", description = "The self-contained task for the child trajectory.", minLength = 1 } }, required = ["task"], additionalProperties = false }
+delta = {}
 
 # --- public forum: external, untrusted content taints the trajectory ---------
 

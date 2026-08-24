@@ -438,17 +438,17 @@ A block lists each Unknown source by value under `unestablished`, together with 
 ```toml
 [[cast]]
 name     = "content-classifier"
-resolver = { may_cast = { trust = ["suspicious"],
-                          audience = { cap = ["public"] } } } # Complete product ceiling;
-                                              # the ceiling is policy, the endpoint deployment
+resolver = { may_cast = { trust = ["suspicious"], audience = { cap = ["public"] } } }
+                                              # Complete product ceiling; the ceiling is policy,
+                                              # the endpoint deployment
 
 [cast.scope]
 tags = ["support"]                            # Applies only to values from tools with these tags
 
 [[cast]]
 name     = "paranoid-default"
-constant = { trust = "suspicious",
-             audience = { exactly = ["public"] } }  # Complete label; unscoped fallback, registered last
+constant = { trust = "suspicious", audience = { exactly = ["public"] } }
+                                              # Complete label; unscoped fallback, registered last
 ```
 
 ```toml
@@ -460,6 +460,43 @@ A resolver is the only implementation a cast takes: the answer is a label the `m
 
 Applicable casts — matched by scope tags — evaluate in registration order until one answers. A resolver that cannot answer — unreachable, timed out, malformed — is skipped, which is what makes a trailing constant the deployment's declared fallback. Register constant casts last: a cast placed after a constant that covers it can never run, and the loader refuses it.
 
-The engine validates every resolver response against its declared `may_cast` ceiling before admitting the value. An answer over the ceiling is refused outright and falls through to nothing: a classifier answering wider than its policy allows is misbehaving, not silent, and the result stays withheld. A `public` audience cap is an open gate: it lets a single resolver answer resolve a value to `public` and lift its audience restriction entirely — review it like any covering mandate.
+The engine validates every resolver response against its declared `may_cast` ceiling before admitting the value. An answer over the ceiling is refused, and the cascade continues with the next applicable cast in registration order; the first answer the engine admits stands. A `public` audience cap is an open gate: it lets a single resolver answer resolve a value to `public` and lift its audience restriction entirely — review it like any covering mandate.
+
+A classifier can be consulted again for the same value after a runtime restart or a concurrent-write retry, so a cast implementation must be idempotent.
+
+The runtime consults a resolver-backed cast with a JSON POST. The comments explain each key; they are not sent.
+
+```jsonc
+{
+  // WHY: Identifies the request shape.
+  "version": 1,
+
+  // WHY: Says which external kind is consulted.
+  "kind": "cast",
+
+  // WHY: Selects the cast when one service answers for several.
+  "name": "content-classifier",
+
+  "payload": {
+    // WHY: Gives the classifier the value's bytes.
+    "body": "the ticket text",
+
+    // WHY: Names the tool whose result the value is; null for a subagent's return.
+    "tool": "read_ticket",
+
+    // WHY: Gives the current state, in the shape a dynamic resolver receives.
+    "context": {
+      "current_trust": "trusted",
+      "current_trust_rank": 1,
+      "current_audience": "public",
+      "trust_unresolved": true,
+      "audience_unresolved": true,
+      "static_attention": []
+    }
+  }
+}
+```
+
+The response is `{"version": 1, "answer": {"trust": "suspicious", "audience": "public"}}`, where `audience` is `"public"` or an array of literal reader ids.
 
 A tool that declares its own pending dimension — `delta = { trust = "unknown" }` — is held rather than annotated late: the deployment lists it in `confined_results`, the runtime keeps the raw result from the model, and the cast reads it first. A restricting answer reaches the agent as a narrowing offer, and the bytes are delivered only if it accepts.

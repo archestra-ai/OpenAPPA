@@ -40,11 +40,13 @@ pub enum ReturnDerivation {
 }
 
 /// Why a mandatory return sanitizer was inapplicable at submission. Closed and
-/// body-free: the reason names the failed precondition, never the refused bytes.
+/// body-free: the reason names the failed precondition, never the refused bytes. A consumed
+/// dimension no cast can establish names every source unresolved on it by value id, with all
+/// of that source's unresolved dimensions — never a bare verdict.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReturnRejection {
     MandateUnmet,
-    ConsumedDimensionUnresolvable,
+    ConsumedDimensionUnresolvable(Vec<crate::check::UnestablishedFact>),
     PreconditionUnmet,
 }
 

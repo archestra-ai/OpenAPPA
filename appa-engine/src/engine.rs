@@ -731,7 +731,10 @@ impl Engine {
                     id,
                     fork,
                     digest,
-                    ReturnRejection::ConsumedDimensionUnresolvable,
+                    ReturnRejection::ConsumedDimensionUnresolvable(check::unestablished_facts(
+                        &fold,
+                        &[registered.transition.dimension()],
+                    )),
                     facts,
                     expansions,
                 ),
@@ -9732,6 +9735,272 @@ mod tests {
         ));
     }
 
+    /// A pending-cast tool whose delta also narrows the audience statically: the narrowing is
+    /// accepted at the check, and the cast resolves trust at admission.
+    fn narrowing_pending_cast_tool(name: &str, tag: &str) -> ToolContract {
+        ToolContract {
+            delta: Some(Delta {
+                trust: Some(Dim::Unknown),
+                audience: Some(Dim::Known(Audience::restricted([ReaderId::new("internal")])).into()),
+            }),
+            ..pending_cast_tool(name, tag)
+        }
+    }
+
+    fn narrowing_cast_engine() -> Engine {
+        open_engine(RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: vec![
+                narrowing_pending_cast_tool("scan_internal", "mail"),
+                pending_cast_tool("scan_inbox", "mail"),
+            ],
+            authorities: vec![],
+            sanitizers: vec![],
+            casts: vec![resolver_cast("paranoid", vec![SUSPICIOUS, TRUSTED], vec![])],
+            membership: None,
+        })
+    }
+
+    /// Accept `scan_internal`'s audience narrowing at its check, release it under that
+    /// acceptance, and report its raw result so the dispatch awaits its resolution.
+    fn accepted_resolving_dispatch(
+        e: &Engine,
+    ) -> (
+        Vec<Fact>,
+        crate::value::DispatchId,
+        ValueBody,
+        crate::value::RawResultDigest,
+    ) {
+        let call = call("scan_internal", json!({}));
+        let log = vec![opened(e)];
+        let blocked = appended_facts(proposed(e, &log, "b1", nonce(), call.clone()).expect("the narrowing blocks"));
+        let (offer, plan) = opened_offers(&blocked)
+            .into_iter()
+            .find(|(_, plan)| plan.narrowing().is_some() && plan.sanitizer().is_none())
+            .expect("the block offers acceptance");
+        assert_eq!(
+            plan.narrowing(),
+            Some(&crate::check::Narrowing {
+                from: established(TRUSTED, Audience::Public),
+                to: established(TRUSTED, Audience::restricted([ReaderId::new("internal")])),
+            })
+        );
+        let log = [log, blocked].concat();
+        let approved =
+            appended_facts(execute_offer(e, &log, offer, OfferOutcome::Approved(Vec::new())).expect("accepted"));
+        let log = [log, approved].concat();
+        let released = proposed(e, &log, "b2", nonce(), call).expect("the approval releases");
+        let dispatch = match &released.follow_up {
+            FollowUp::Proposals { released, .. } => released[0].dispatch.clone(),
+            other => panic!("the approved call releases, got {other:?}"),
+        };
+        let release = appended_facts(released);
+        assert!(
+            release
+                .iter()
+                .any(|fact| matches!(fact, Fact::Acceptance { dispatch: accepted, .. } if accepted == &dispatch)),
+            "the release records the acceptance on its dispatch"
+        );
+        let log = [log, release].concat();
+        let raw = ValueBody::new("internal mail");
+        let source = crate::value::RawResultDigest::of(raw.as_str().as_bytes());
+        let asked = e
+            .handle(
+                &replayed(e, &log),
+                EngineEvent::Outcome(cast_report(&dispatch, &raw, Vec::new())),
+            )
+            .expect("the confined result asks for its resolution");
+        let log = [log, appended_facts(asked)].concat();
+        (log, dispatch, raw, source)
+    }
+
+    fn internal() -> Audience {
+        Audience::restricted([ReaderId::new("internal")])
+    }
+
+    #[test]
+    fn a_resolution_within_the_accepted_narrowing_admits_directly() {
+        let e = narrowing_cast_engine();
+        let (log, dispatch, raw, source) = accepted_resolving_dispatch(&e);
+        let resolved = established(TRUSTED, internal());
+        let crossed = e
+            .handle(
+                &replayed(&e, &log),
+                EngineEvent::Outcome(cast_report(
+                    &dispatch,
+                    &raw,
+                    vec![crate::transition::Evidence::PendingCast {
+                        cast: crate::names::CastName::new("paranoid"),
+                        source,
+                        resolved: resolved.clone(),
+                    }],
+                )),
+            )
+            .expect("the accepted narrowing is not owed twice");
+        assert_eq!(
+            crossed.follow_up,
+            FollowUp::Outcome(OutcomeFollowUp::Closed {
+                admitted: Some(raw.clone())
+            })
+        );
+        let facts = appended_facts(crossed);
+        assert!(facts.iter().any(|fact| matches!(
+            fact,
+            Fact::OutputCastApplied { resolved: restated, .. } if restated == &resolved
+        )));
+        assert!(facts.iter().any(|fact| matches!(fact, Fact::ValueAdmitted { .. })));
+        assert!(
+            !facts.iter().any(|fact| matches!(fact, Fact::CandidateDerived { .. })),
+            "nothing is staged: {facts:?}"
+        );
+        let whole = [log, facts].concat();
+        assert_eq!(e.validate_replay(&whole), Ok(()));
+        assert_eq!(
+            replayed(&e, &whole).projection().view(&traj()).current_label().bound(),
+            &established(TRUSTED, internal())
+        );
+    }
+
+    #[test]
+    fn a_resolution_narrowing_past_the_acceptance_stages_only_the_residual() {
+        let e = narrowing_cast_engine();
+        let (log, dispatch, raw, source) = accepted_resolving_dispatch(&e);
+        // A cast moves only the pending dimension — an established one must match exactly — so
+        // the resolution narrows past the acceptance on trust, the dimension it resolves.
+        let staged = e
+            .handle(
+                &replayed(&e, &log),
+                EngineEvent::Outcome(cast_report(
+                    &dispatch,
+                    &raw,
+                    vec![crate::transition::Evidence::PendingCast {
+                        cast: crate::names::CastName::new("paranoid"),
+                        source,
+                        resolved: established(SUSPICIOUS, internal()),
+                    }],
+                )),
+            )
+            .expect("the further narrowing stages");
+        let confined = confined_of(&staged.follow_up).clone();
+        assert_eq!(
+            confined.residual,
+            crate::check::Narrowing {
+                from: established(TRUSTED, internal()),
+                to: established(SUSPICIOUS, internal()),
+            },
+            "the residual is measured from the accepted bound, not the pre-delta one"
+        );
+        assert_eq!(
+            confined.offers.len(),
+            1,
+            "the stage is the acceptance of the residual alone"
+        );
+        let facts = appended_facts(staged);
+        assert!(
+            !facts
+                .iter()
+                .any(|fact| matches!(fact, Fact::ValueAdmitted { .. } | Fact::DispatchClosed { .. }))
+        );
+        let log = [log, facts].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+        let accepted = execute_offer(&e, &log, confined.offers[0].0, OfferOutcome::Approved(Vec::new()))
+            .expect("the residual acceptance admits");
+        assert_eq!(offer_answer(&accepted), &OfferFollowUp::Admitted { value: raw });
+        let whole = [log, appended_facts(accepted)].concat();
+        assert_eq!(e.validate_replay(&whole), Ok(()));
+        assert_eq!(
+            replayed(&e, &whole).projection().view(&traj()).current_label().bound(),
+            &established(SUSPICIOUS, internal())
+        );
+    }
+
+    #[test]
+    fn a_direct_admission_under_a_narrowing_no_acceptance_covers_is_refused_on_replay() {
+        let e = narrowing_cast_engine();
+        let (log, dispatch, raw, source) = resolving_dispatch(&e);
+        let crossed = e
+            .handle(
+                &replayed(&e, &log),
+                EngineEvent::Outcome(cast_report(
+                    &dispatch,
+                    &raw,
+                    vec![crate::transition::Evidence::PendingCast {
+                        cast: crate::names::CastName::new("paranoid"),
+                        source,
+                        resolved: established(TRUSTED, Audience::Public),
+                    }],
+                )),
+            )
+            .expect("the non-narrowing resolution admits");
+        let mut forged = appended_facts(crossed);
+        for fact in &mut forged {
+            match fact {
+                Fact::OutputCastApplied { resolved, .. } => *resolved = established(SUSPICIOUS, Audience::Public),
+                Fact::ValueAdmitted { value, .. } => value.label = known(SUSPICIOUS, Audience::Public),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            e.validate_replay(&[log, forged].concat()),
+            Err(crate::transition::TransitionRefusal::AcceptanceMismatch),
+            "the dispatch recorded no acceptance, so the narrowing the record claims is unaccepted"
+        );
+    }
+
+    #[test]
+    fn a_pending_cast_tool_with_a_static_narrowing_offers_acceptance_and_no_output_sanitizer() {
+        let scrub = crate::authority::Sanitizer {
+            name: crate::names::SanitizerName::new("scrub"),
+            on: crate::authority::SanitizerPoints {
+                input: false,
+                output: true,
+            },
+            transition: crate::authority::DeclaredTransition::Audience {
+                from_includes: DeclaredAudience::literal(internal()),
+                to: DeclaredAudience::literal(Audience::Public),
+            },
+            scope: crate::authority::Scope::default(),
+            hint: None,
+        };
+        let e = open_engine(RegistryConfig {
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: vec![
+                narrowing_pending_cast_tool("scan_internal", "mail"),
+                ToolContract {
+                    delta: Some(Delta {
+                        trust: Some(Dim::Known(TRUSTED)),
+                        audience: Some(Dim::Known(internal()).into()),
+                    }),
+                    ..pending_cast_tool("scan_static", "mail")
+                },
+            ],
+            authorities: vec![],
+            sanitizers: vec![scrub],
+            casts: vec![resolver_cast("paranoid", vec![SUSPICIOUS, TRUSTED], vec![])],
+            membership: None,
+        });
+        let log = vec![opened(&e)];
+        let plans_for = |tool: &str| {
+            let blocked = appended_facts(proposed(&e, &log, tool, nonce(), call(tool, json!({}))).expect("blocks"));
+            opened_offers(&blocked)
+                .into_iter()
+                .map(|(_, plan)| plan)
+                .collect::<Vec<_>>()
+        };
+
+        let static_plans = plans_for("scan_static");
+        assert!(
+            static_plans.iter().any(|plan| plan.sanitizer().is_some()),
+            "the same narrowing without a pending cast offers the sanitizer path: {static_plans:?}"
+        );
+
+        let pending_plans = plans_for("scan_internal");
+        assert_eq!(pending_plans.len(), 1, "{pending_plans:?}");
+        assert!(pending_plans[0].narrowing().is_some());
+        assert!(pending_plans[0].sanitizer().is_none());
+        assert!(pending_plans[0].required.is_empty());
+    }
+
     fn reservation_tools() -> Vec<ToolContract> {
         vec![
             emitting("send", "email.sent"),
@@ -10155,6 +10424,45 @@ mod tests {
             }
             other => panic!("expected a three-slot block, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_offer_is_stale_once_its_call_acquires_an_unestablished_source() {
+        let e = engine(vec![crm_tool(), unknown_read()]);
+        let log = vec![opened(&e)];
+        let opened = appended_facts(blocked_batch(&e, &log, "b1", nonce()));
+        let (offer, _) = opened_offers(&opened)[0].clone();
+        let mut log = [log, opened].concat();
+        reads(&e, &mut log, &traj(), "read_unknown");
+
+        assert_eq!(
+            execute_offer(&e, &log, offer, OfferOutcome::Approved(Vec::new())),
+            Err(TransitionError::StaleOffer),
+            "the admission that brought the unresolved source advanced the basis the offer was stamped with"
+        );
+
+        let decided = proposed(&e, &log, "b2", nonce(), call("get_ticket", json!({}))).expect("the call decides");
+        match &decided.follow_up {
+            FollowUp::Proposals { blocked, .. } => {
+                assert_eq!(blocked.len(), 1);
+                assert!(
+                    blocked[0].block.plans.is_empty(),
+                    "no plan while a source is unestablished"
+                );
+                assert!(
+                    blocked[0].block.raw.narrowing.is_some(),
+                    "the narrowing is still reported"
+                );
+                assert_eq!(blocked[0].block.raw.unestablished.len(), 1);
+            }
+            other => panic!("expected a blocked call, got {other:?}"),
+        }
+        assert!(
+            !appended_facts(decided)
+                .iter()
+                .any(|fact| matches!(fact, Fact::OfferOpened { .. })),
+            "a plan-free block opens no offer"
+        );
     }
 
     #[test]
@@ -13659,7 +13967,7 @@ mod tests {
         let mut flipped = ended;
         for fact in &mut flipped {
             if let Fact::ReturnRejected { reason, .. } = fact {
-                *reason = ReturnRejection::ConsumedDimensionUnresolvable;
+                *reason = ReturnRejection::ConsumedDimensionUnresolvable(Vec::new());
             }
         }
         assert_eq!(
@@ -13735,19 +14043,46 @@ mod tests {
         );
         let mut log = spawn_family(&e, None, &child);
         reads(&e, &mut log, &child, "fetch");
+        let fetched = ValueId::new(
+            log.iter()
+                .filter(|fact| matches!(fact, Fact::ValueAdmitted { .. }))
+                .count() as u64
+                - 1,
+        );
         let rejected = e
             .handle(
                 &viewing(&e, &log),
                 child_report(&log, &child, ChildSubmission::Value { body: body.clone() }),
             )
             .expect("the unresolvable dimension rejects terminally");
+        let named = ReturnRejection::ConsumedDimensionUnresolvable(vec![crate::check::UnestablishedFact {
+            value: fetched,
+            dimensions: BTreeSet::from([Dimension::Trust, Dimension::Audience]),
+        }]);
         assert_eq!(
             rejected.follow_up,
-            FollowUp::Child(ChildFollowUp::Rejected {
-                reason: ReturnRejection::ConsumedDimensionUnresolvable,
-            })
+            FollowUp::Child(ChildFollowUp::Rejected { reason: named.clone() }),
+            "the rejection names the unannotated fetch by value with both unresolved dimensions"
         );
-        assert_eq!(e.validate_replay(&[log, appended_facts(rejected)].concat()), Ok(()));
+        let appended = appended_facts(rejected);
+        assert!(
+            appended
+                .iter()
+                .any(|fact| matches!(fact, Fact::ReturnRejected { reason, .. } if reason == &named))
+        );
+        let ended = [log, appended].concat();
+        assert_eq!(e.validate_replay(&ended), Ok(()));
+        let mut unnamed = ended.clone();
+        for fact in &mut unnamed {
+            if let Fact::ReturnRejected { reason, .. } = fact {
+                *reason = ReturnRejection::ConsumedDimensionUnresolvable(Vec::new());
+            }
+        }
+        assert_eq!(
+            e.validate_replay(&unnamed),
+            Err(TransitionRefusal::ReturnRecordMismatch),
+            "a record that names no source is not the rejection the fold derives"
+        );
 
         let e = open_engine(returning_registry(vec![lifting_sanitizer("redactor")], vec![]));
         let mut log = spawn_family(&e, None, &child);

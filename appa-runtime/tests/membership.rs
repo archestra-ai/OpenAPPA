@@ -164,7 +164,7 @@ async fn narrowed(dir: &tempfile::TempDir, membership_url: &str) -> Arc<Runtime>
         HookDecision::Ack
     );
     let blocked = propose(&runtime, read_hr()).await;
-    let HookDecision::DenyCall { feedback } = blocked else {
+    let HookDecision::DenyCall { feedback, .. } = blocked else {
         panic!("the narrowing read is offered for acceptance, got {blocked:?}");
     };
     assert!(matches!(
@@ -300,7 +300,7 @@ async fn a_cap_written_with_a_group_is_read_per_act_from_the_directory() {
     ran(&runtime, send_capped()).await;
 
     directory.set(Answer::Readers(vec!["carol"]));
-    let HookDecision::DenyCall { feedback } = propose(&runtime, send_capped()).await else {
+    let HookDecision::DenyCall { feedback, .. } = propose(&runtime, send_capped()).await else {
         panic!("the moved cap blocks");
     };
     assert!(

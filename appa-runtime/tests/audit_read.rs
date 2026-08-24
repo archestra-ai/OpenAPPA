@@ -165,7 +165,7 @@ fn opaque_offer_id(text: &str) -> Option<String> {
 
 fn feedback_of(decision: &HookDecision) -> String {
     match decision {
-        HookDecision::DenyCall { feedback } | HookDecision::Block { reason: feedback } => feedback.clone(),
+        HookDecision::DenyCall { feedback, .. } | HookDecision::Block { reason: feedback } => feedback.clone(),
         other => panic!("expected a refusal carrying feedback, got {other:?}"),
     }
 }
@@ -178,6 +178,8 @@ fn label(trust: &str, audience: &str) -> AuditLabel {
     AuditLabel {
         trust: trust.to_string(),
         audience: audience.to_string(),
+        unresolved_trust: Vec::new(),
+        unresolved_audience: Vec::new(),
     }
 }
 

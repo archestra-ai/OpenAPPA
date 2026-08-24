@@ -43,7 +43,7 @@ use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
 use appa_engine::fact::{BoundaryKind, CloseOutcome, EffectSet, Fact, ReturnDerivation};
 use appa_engine::groups::GroupExpansion;
-use appa_engine::label::{Audience, Dim, Dimension, EstablishedLabel, Label, PartialLabel, ReaderId, Trust};
+use appa_engine::label::{Audience, Dimension, EstablishedLabel, Label, PartialLabel, ReaderId, Trust};
 use appa_engine::names::{GroupName, MarkName};
 use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RequiredRuling};
 use appa_engine::profile::PolicyFileKey as EnginePolicyFileKey;
@@ -61,10 +61,11 @@ use appa_engine::transition::{
     ToolOutcome as CoreToolOutcome, ToolReport, TransitionError, TransitionRefusal, ValidatedFactBatch,
 };
 use appa_engine::value::{
-    DispatchId as EngineDispatchId, ForkId, OfferId as EngineOfferId, OfferNonce as EngineOfferNonce, Provenance,
-    RawResultDigest, ResolvedCall, ToolName, ValueBody, ValueId,
+    ChildReturnId, DispatchId as EngineDispatchId, ForkId, OfferId as EngineOfferId, OfferNonce as EngineOfferNonce,
+    Provenance, RawResultDigest, ResolvedCall, ToolName, TrajectoryId as EngineTrajectoryId, ValueBody, ValueId,
 };
 use appa_eventlog::Log;
+use appa_runtime_api::{LabelDimension, UnestablishedValue};
 use std::collections::BTreeMap;
 
 use crate::api::OutcomeBody;
@@ -93,6 +94,8 @@ pub struct ReleasedCall {
 pub struct Feedback {
     pub text: String,
     pub offers: Vec<OfferId>,
+    /// The sources the block names as unestablished, typed; `text` says the same in prose.
+    pub unestablished: Vec<UnestablishedValue>,
 }
 
 /// One external consult the session must resolve before the same semantic
@@ -123,17 +126,46 @@ pub enum ExternalRequest {
     /// registration order and a constant among them arrives already resolved, so the
     /// session answers it without a call.
     PendingCast {
-        casts: Vec<ApplicableCast>,
         source: RawResultDigest,
-        body: ValueBody,
+        ask: CastAsk,
     },
     /// Classify one admitted value a blocked act reads. Same cascade, same order: the two
     /// asks differ only in what the answer resolves.
     Cast {
-        casts: Vec<ApplicableCast>,
         value: ValueId,
-        body: ValueBody,
+        ask: CastAsk,
     },
+}
+
+/// One cast ask as the session answers it: the casts still to try, in registration order,
+/// and what every classifier consult carries beside the cast's name — the value's bytes, the
+/// tool whose result the value is (a child return has none), and the label context a tool
+/// resolver also receives. Evidence carries the ask it answers, so an answer the engine
+/// refuses is followed by the ask's next cast without recomputing anything.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CastAsk {
+    pub casts: Vec<ApplicableCast>,
+    pub body: ValueBody,
+    pub tool: Option<String>,
+    pub context: ToolResolutionContext,
+}
+
+impl CastAsk {
+    /// The same ask continued past `cast`: only the casts registered after it are left.
+    fn after(&self, cast: &str) -> CastAsk {
+        CastAsk {
+            casts: self
+                .casts
+                .iter()
+                .skip_while(|applicable| applicable.name.as_str() != cast)
+                .skip(1)
+                .cloned()
+                .collect(),
+            body: self.body.clone(),
+            tool: self.tool.clone(),
+            context: self.context.clone(),
+        }
+    }
 }
 
 /// One cast's answer as the session obtained it.
@@ -181,15 +213,59 @@ pub enum ExternalEvidence {
         group: String,
         readers: Option<Vec<String>>,
     },
-    /// `None` means every applicable cast was asked and none answered usably.
+    /// `None` means every cast the ask still carried was asked and none answered usably.
     PendingCast {
         source: RawResultDigest,
         verdict: Option<CastVerdict>,
+        ask: CastAsk,
     },
     Cast {
         value: ValueId,
         verdict: Option<CastVerdict>,
+        ask: CastAsk,
     },
+}
+
+impl ExternalEvidence {
+    /// Does this answer the same cast ask as `other`? A later answer for the same source
+    /// supersedes the earlier one: the cascade continued past a refused cast.
+    pub(crate) fn answers_same_ask(&self, other: &ExternalEvidence) -> bool {
+        match (self, other) {
+            (ExternalEvidence::Cast { value: mine, .. }, ExternalEvidence::Cast { value: theirs, .. }) => {
+                mine == theirs
+            }
+            (
+                ExternalEvidence::PendingCast { source: mine, .. },
+                ExternalEvidence::PendingCast { source: theirs, .. },
+            ) => mine == theirs,
+            _ => false,
+        }
+    }
+
+    /// The ask continued past the cast that gave this answer, for an answer the engine
+    /// refused. An ask with no cast left is still repeated: the session answers it with no
+    /// answer, which supersedes the refused one and ends the cascade.
+    fn continued(&self) -> Option<ExternalRequest> {
+        match self {
+            ExternalEvidence::Cast {
+                value,
+                verdict: Some(verdict),
+                ask,
+            } => Some(ExternalRequest::Cast {
+                value: *value,
+                ask: ask.after(&verdict.cast),
+            }),
+            ExternalEvidence::PendingCast {
+                source,
+                verdict: Some(verdict),
+                ask,
+            } => Some(ExternalRequest::PendingCast {
+                source: *source,
+                ask: ask.after(&verdict.cast),
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// An authority's wire verdict: `{"ruling": "approve"|"deny"}`; anything
@@ -319,15 +395,20 @@ pub struct TrajectoryStatus {
     pub trajectory: String,
     pub trust: String,
     pub audience: String,
+    /// The ids of the admitted values whose trust is still unresolved. `trust` is the
+    /// established bound: every known restriction, readable while these stand.
+    pub unresolved_trust: Vec<u64>,
+    pub unresolved_audience: Vec<u64>,
 }
 
-/// One label rendered for a display surface: chain names and reader ids as
-/// plain strings, per dimension, with `unknown` where a source is still
-/// unresolved.
+/// One label rendered for a display surface: the established bound per dimension as chain
+/// names and reader ids, plus the ids of the sources still unresolved on it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AuditLabel {
     pub trust: String,
     pub audience: String,
+    pub unresolved_trust: Vec<u64>,
+    pub unresolved_audience: Vec<u64>,
 }
 
 /// One decision the family log recorded, in log order (the
@@ -651,37 +732,44 @@ impl RuntimeEngine {
     /// gated.
     pub(crate) fn trajectory_status(&self, view: &EngineView, trajectory: &TrajectoryId) -> Option<TrajectoryStatus> {
         let current = view.views(&engine_id(trajectory))?.current_label();
-        let label = self.render_label(&as_label(&current))?;
+        let label = self.render_label(&current)?;
         Some(TrajectoryStatus {
             trajectory: terminal_safe(&trajectory.0),
             trust: label.trust,
             audience: label.audience,
+            unresolved_trust: label.unresolved_trust,
+            unresolved_audience: label.unresolved_audience,
         })
     }
 
-    fn render_label(&self, label: &Label) -> Option<AuditLabel> {
+    /// The established bound by name, and the ids of the sources still unresolved beside
+    /// it: an unresolved source never hides a known restriction.
+    fn render_label(&self, label: &PartialLabel) -> Option<AuditLabel> {
         let chain = self.engine.registry().trust_chain();
-        let trust = match label.trust {
-            Dim::Known(bound) if bound == Trust::new(u8::MAX) => chain
+        let bound = label.bound();
+        let trust = if bound.trust == Trust::new(u8::MAX) {
+            chain
                 .name_of(Trust::new((chain.len() - 1) as u8))
                 .expect("a validated chain names its top rank")
-                .to_string(),
-            Dim::Known(bound) => match chain.name_of(bound) {
+                .to_string()
+        } else {
+            match chain.name_of(bound.trust) {
                 Some(name) => name.to_string(),
                 None => {
-                    tracing::warn!(rank = bound.rank(), "render refused: the trust bound has no chain name");
+                    tracing::warn!(
+                        rank = bound.trust.rank(),
+                        "render refused: the trust bound has no chain name"
+                    );
                     return None;
                 }
-            },
-            Dim::Unknown => "unknown".to_string(),
+            }
         };
-        let audience = match &label.audience {
-            Dim::Known(audience) => audience_wire(audience),
-            Dim::Unknown => "unknown".to_string(),
-        };
+        let unresolved = |dim| label.unresolved(dim).map(ValueId::index).collect();
         Some(AuditLabel {
             trust: terminal_safe(&trust),
-            audience: terminal_safe(&audience),
+            audience: terminal_safe(&audience_wire(&bound.audience)),
+            unresolved_trust: unresolved(Dimension::Trust),
+            unresolved_audience: unresolved(Dimension::Audience),
         })
     }
 
@@ -693,23 +781,44 @@ impl RuntimeEngine {
         // The validator takes the records; this read keeps its own copy of
         // them, which is why the audit — and only the audit — clones a log.
         self.validated(facts.clone(), &root, log.basis())?;
-        let mut prepared: std::collections::HashMap<ForkId, (String, Label)> = std::collections::HashMap::new();
+        let mut prepared: std::collections::HashMap<ForkId, (String, PartialLabel)> = std::collections::HashMap::new();
+        // A value's id is its admission's position in the family log, as the projection
+        // numbers it; a child return is cited by the admission its merge appended.
+        let mut returned: std::collections::HashMap<ChildReturnId, ValueId> = std::collections::HashMap::new();
+        let mut admissions: u64 = 0;
         for fact in &facts {
-            if let Fact::ForkPrepared {
-                fork,
-                snapshot,
-                trajectory,
-                ..
-            } = fact
-            {
-                prepared.insert(
-                    fork.clone(),
-                    (terminal_safe(trajectory.as_str()), as_label(snapshot.seed())),
-                );
+            match fact {
+                Fact::ForkPrepared {
+                    fork,
+                    snapshot,
+                    trajectory,
+                    ..
+                } => {
+                    prepared.insert(
+                        fork.clone(),
+                        (terminal_safe(trajectory.as_str()), snapshot.seed().clone()),
+                    );
+                }
+                Fact::ValueAdmitted { provenance, .. } => {
+                    if let Provenance::ChildReturn { id, .. } = provenance {
+                        returned.insert(id.clone(), ValueId::new(admissions));
+                    }
+                    admissions += 1;
+                }
+                _ => {}
             }
         }
+        let mut admissions: u64 = 0;
         let mut entries = Vec::new();
         for fact in &facts {
+            let admitted = match fact {
+                Fact::ValueAdmitted { .. } => {
+                    admissions += 1;
+                    Some(ValueId::new(admissions - 1))
+                }
+                Fact::ChildReturn { id, .. } => returned.get(id).copied(),
+                _ => None,
+            };
             let event = match fact {
                 Fact::ForkOpened { fork, .. } => match prepared.get(fork) {
                     Some((parent, seed)) => match self.render_label(seed) {
@@ -723,7 +832,7 @@ impl RuntimeEngine {
                     // A child opened with no recorded preparation in this read.
                     None => continue,
                 },
-                _ => match self.audit_event(fact) {
+                _ => match self.audit_event(fact, admitted) {
                     Some(Some(event)) => event,
                     // A record the audit does not show.
                     Some(None) => continue,
@@ -739,7 +848,8 @@ impl RuntimeEngine {
         Ok(Some(entries))
     }
 
-    fn audit_event(&self, fact: &Fact) -> Option<Option<AuditEvent>> {
+    /// `admitted` is the id of the value this fact admits, where it admits one.
+    fn audit_event(&self, fact: &Fact, admitted: Option<ValueId>) -> Option<Option<AuditEvent>> {
         let event = match fact {
             Fact::DispatchOpened {
                 tool,
@@ -748,7 +858,7 @@ impl RuntimeEngine {
                 ..
             } => AuditEvent::Released {
                 tool: terminal_safe(tool.as_str()),
-                label: self.render_label(&proposed_label.clone().into_label())?,
+                label: self.render_label(&PartialLabel::established(proposed_label.clone()))?,
                 effects: effect_names(proposed_effects),
             },
             Fact::DispatchSucceeded { effects, .. } => AuditEvent::EffectsCommitted {
@@ -764,7 +874,10 @@ impl RuntimeEngine {
                 },
             },
             Fact::ValueAdmitted { value, .. } => AuditEvent::Admitted {
-                label: self.render_label(&value.label)?,
+                label: self.render_label(&value_fold(
+                    admitted.expect("the audit numbers every admission it reads"),
+                    &value.label,
+                ))?,
             },
             Fact::Ruling { authority, .. } => AuditEvent::Ruled {
                 authority: terminal_safe(authority.as_str()),
@@ -775,13 +888,13 @@ impl RuntimeEngine {
             Fact::Acceptance { narrowing, .. }
             | Fact::ChildReturnAcceptance { narrowing, .. }
             | Fact::CandidateAccepted { narrowing, .. } => AuditEvent::Narrowed {
-                from: self.render_label(&narrowing.from.clone().into_label())?,
-                to: self.render_label(&narrowing.to.clone().into_label())?,
+                from: self.render_label(&PartialLabel::established(narrowing.from.clone()))?,
+                to: self.render_label(&PartialLabel::established(narrowing.to.clone()))?,
             },
             Fact::CastApplied { cast, resolved, .. } | Fact::OutputCastApplied { cast, resolved, .. } => {
                 AuditEvent::Cast {
                     cast: terminal_safe(cast.as_str()),
-                    resolved: self.render_label(&resolved.clone().into_label())?,
+                    resolved: self.render_label(&PartialLabel::established(resolved.clone()))?,
                 }
             }
             Fact::OutputSanitizerBound { sanitizer, .. } => AuditEvent::SanitizerBound {
@@ -798,7 +911,10 @@ impl RuntimeEngine {
                     ReturnDerivation::Raw => None,
                     ReturnDerivation::Sanitized { sanitizer, .. } => Some(terminal_safe(sanitizer.as_str())),
                 },
-                label: self.render_label(&value.label)?,
+                label: self.render_label(&value_fold(
+                    admitted.expect("a merge admits the value its crossing carries"),
+                    &value.label,
+                ))?,
             },
             Fact::Boundary { kind, .. } => match kind {
                 BoundaryKind::Merge { .. } => AuditEvent::Merged,
@@ -891,29 +1007,26 @@ impl RuntimeEngine {
         // A deployment that does not control context releases the marked call
         // unmarked, so the batch may be decided twice. The mark is all that
         // differs between the two attempts.
-        let decide = |proposed: CoreProposedCall, marked: bool| {
-            let batch = ProposalBatch {
-                id: batch_id(entropy),
-                trajectory: engine_id(trajectory),
-                provider_results: Vec::new(),
-                proposals: vec![proposed],
-                spawn: marked.then(|| SpawnMark::at(0)),
-                offer_nonce: engine_nonce(entropy),
-                evidence: cast_evidence(self.engine.registry().trust_chain(), evidence),
-                expansions: expansions.expansions(),
+        let judge = |evidence: &[ExternalEvidence]| {
+            let decide = |marked: bool| {
+                let batch = ProposalBatch {
+                    id: batch_id(entropy),
+                    trajectory: engine_id(trajectory),
+                    provider_results: Vec::new(),
+                    proposals: vec![proposed.clone()],
+                    spawn: marked.then(|| SpawnMark::at(0)),
+                    offer_nonce: engine_nonce(entropy),
+                    evidence: cast_evidence(self.engine.registry().trust_chain(), evidence),
+                    expansions: expansions.expansions(),
+                };
+                self.engine.handle(view, CoreEvent::Proposals(batch))
             };
-            self.engine.handle(view, CoreEvent::Proposals(batch))
-        };
-        let decided = if spawn {
-            match decide(proposed.clone(), true) {
-                Ok(decision) => Ok(decision),
-                Err(TransitionError::SpawnUncontrolled) => decide(proposed, false),
-                Err(error) => Err(error),
+            match decide(spawn) {
+                Err(TransitionError::SpawnUncontrolled) if spawn => decide(false),
+                decided => decided,
             }
-        } else {
-            decide(proposed, false)
         };
-        let decision = match decided {
+        let decision = match judge(evidence) {
             Ok(decision) => decision,
             Err(TransitionError::MembershipNeeded { needed }) => {
                 return match self.membership_consult(&expansions, needed)? {
@@ -923,11 +1036,17 @@ impl RuntimeEngine {
                     MembershipConsult::Unresolved(group) => Ok(deny(unresolved_group(&call.tool, &group))),
                 };
             }
-            Err(TransitionError::InadmissibleResolution) => {
-                return Ok(deny(
-                    "[appa] the classifier's answer was not admissible; the call is blocked and may be proposed again"
-                        .to_string(),
-                ));
+            Err(error) if refused_cast(&error) => {
+                let continued = continued_casts(evidence, |subset| {
+                    judge(subset).is_err_and(|error| refused_cast(&error))
+                });
+                return Ok(match continued.is_empty() {
+                    true => deny(
+                        "[appa] the classifier's answer was not admissible; the call is not decided and may be proposed again"
+                            .to_string(),
+                    ),
+                    false => EngineDecision::deliver(Next::ResolveExternal(continued)),
+                });
             }
             Err(error) => return Err(proposal_refusal(error)),
         };
@@ -946,9 +1065,10 @@ impl RuntimeEngine {
         match follow_up {
             // The engine wants a value classified before it decides. Every ask goes out in one
             // round so a batch naming several unresolved sources costs one redrive, not one per
-            // source; a cast already asked and unanswered blocks instead of being asked again.
+            // source; a cast already asked and unanswered is not asked again.
             FollowUp::ProposalsResolve(requests) => {
                 let chain = self.engine.registry().trust_chain();
+                let acting = engine_id(trajectory);
                 let mut consults = Vec::new();
                 for request in requests {
                     let EvidenceRequest::Cast { casts, value, body } = request else {
@@ -957,12 +1077,13 @@ impl RuntimeEngine {
                         });
                     };
                     match cast_state(chain, evidence, value) {
-                        CastAnswerState::Missing => consults.push(ExternalRequest::Cast { casts, value, body }),
+                        CastAnswerState::Missing => consults.push(ExternalRequest::Cast {
+                            value,
+                            ask: self.cast_ask(view, &acting, value_tool(view, &acting, value), casts, body),
+                        }),
+                        CastAnswerState::Unreadable(continued) => consults.push(*continued),
                         CastAnswerState::NoAnswer | CastAnswerState::Resolved => {
-                            return Ok(deny_next(
-                                "[appa] no registered cast could establish what this call reads; the call is blocked"
-                                    .to_string(),
-                            ));
+                            return Ok(deny_next(NO_CAST_ANSWERED.to_string()));
                         }
                     }
                 }
@@ -1010,7 +1131,18 @@ impl RuntimeEngine {
             .views(&owner)
             .expect("a block is delivered for the opened trajectory whose proposal the engine decided");
         let (text, offers) = self.rendered_block(&views, block);
-        Feedback { text, offers }
+        let unestablished = block
+            .block
+            .raw
+            .unestablished
+            .iter()
+            .map(|fact| unestablished_value(&views, fact))
+            .collect();
+        Feedback {
+            text,
+            offers,
+            unestablished,
+        }
     }
 
     fn rendered_block(&self, views: &Views, block: &CoreBlocked) -> (String, Vec<OfferId>) {
@@ -1032,30 +1164,40 @@ impl RuntimeEngine {
         entropy: &OfferNonce,
     ) -> Result<EngineDecision, EngineRefusal> {
         let expansions = self.membership_evidence(evidence);
-        let report = ToolReport {
-            dispatch: dispatch.clone(),
-            outcome: engine_outcome(outcome),
-            evidence: [
-                sanitizer_evidence(evidence),
-                cast_evidence(self.engine.registry().trust_chain(), evidence),
-            ]
-            .concat(),
-            offer_nonce: engine_nonce(entropy),
-            expansions: expansions.expansions(),
+        let judge = |evidence: &[ExternalEvidence]| {
+            let report = ToolReport {
+                dispatch: dispatch.clone(),
+                outcome: engine_outcome(outcome),
+                evidence: [
+                    sanitizer_evidence(evidence),
+                    cast_evidence(self.engine.registry().trust_chain(), evidence),
+                ]
+                .concat(),
+                offer_nonce: engine_nonce(entropy),
+                expansions: expansions.expansions(),
+            };
+            self.engine.handle(view, CoreEvent::Outcome(report))
         };
-        let decision = match self.engine.handle(view, CoreEvent::Outcome(report)) {
+        let decision = match judge(evidence) {
             Ok(decision) => decision,
             // A classifier's answer the engine will not admit — over its ceiling, out of
             // scope, or disagreeing with a dimension already established. The classifier
-            // misbehaved; the log is not in question, so the result is withheld and the
-            // report stays repeatable rather than refusing the session.
-            Err(TransitionError::InadmissibleResolution) => {
-                return Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
-                    feedback:
-                        "[appa] the classifier's answer was not admissible; the result is withheld and may be retried"
-                            .to_string(),
-                    offers: Vec::new(),
-                })));
+            // misbehaved; the log is not in question, so the cascade continues with the
+            // cast registered after it, and the report stays repeatable rather than
+            // refusing the session.
+            Err(error) if refused_cast(&error) => {
+                let continued = continued_casts(evidence, |subset| {
+                    judge(subset).is_err_and(|error| refused_cast(&error))
+                });
+                return Ok(match continued.is_empty() {
+                    true => EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
+                        feedback:
+                            "[appa] the classifier's answer was not admissible; the result is withheld and may be retried"
+                                .to_string(),
+                        offers: Vec::new(),
+                    })),
+                    false => EngineDecision::deliver(Next::ResolveExternal(continued)),
+                });
             }
             Err(TransitionError::MembershipNeeded { needed }) => {
                 return match self.membership_consult(&expansions, needed)? {
@@ -1079,8 +1221,10 @@ impl RuntimeEngine {
             FollowUp::Outcome(OutcomeFollowUp::Closed { admitted }) => {
                 Next::PresentToModel(outcome_presentation(outcome, admitted))
             }
-            FollowUp::Outcome(OutcomeFollowUp::Resolve(request)) => resolve_or_withhold(
-                self.engine.registry().trust_chain(),
+            FollowUp::Outcome(OutcomeFollowUp::Resolve(request)) => self.resolve_or_withhold(
+                view,
+                dispatch.trajectory(),
+                Some(dispatch),
                 request,
                 evidence,
                 "[appa] no registered cast or sanitizer answered; the result is withheld and may be retried",
@@ -1358,27 +1502,36 @@ impl RuntimeEngine {
             },
         };
         let expansions = self.membership_evidence(evidence);
-        let report = ChildReport {
-            child: engine_id(child),
-            fork,
-            submission,
-            evidence: [
-                sanitizer_evidence(evidence),
-                cast_evidence(self.engine.registry().trust_chain(), evidence),
-            ]
-            .concat(),
-            offer_nonce: engine_nonce(entropy),
-            expansions: expansions.expansions(),
+        let judge = |evidence: &[ExternalEvidence]| {
+            let report = ChildReport {
+                child: engine_id(child),
+                fork: fork.clone(),
+                submission: submission.clone(),
+                evidence: [
+                    sanitizer_evidence(evidence),
+                    cast_evidence(self.engine.registry().trust_chain(), evidence),
+                ]
+                .concat(),
+                offer_nonce: engine_nonce(entropy),
+                expansions: expansions.expansions(),
+            };
+            self.engine.handle(view, CoreEvent::ChildReturn(report))
         };
-        let decision = match self.engine.handle(view, CoreEvent::ChildReturn(report)) {
+        let decision = match judge(evidence) {
             Ok(decision) => decision,
-            Err(TransitionError::InadmissibleResolution) => {
-                return Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
-                    feedback:
-                        "[appa] the classifier's answer was not admissible; the return is withheld and may be retried"
-                            .to_string(),
-                    offers: Vec::new(),
-                })));
+            Err(error) if refused_cast(&error) => {
+                let continued = continued_casts(evidence, |subset| {
+                    judge(subset).is_err_and(|error| refused_cast(&error))
+                });
+                return Ok(match continued.is_empty() {
+                    true => EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
+                        feedback:
+                            "[appa] the classifier's answer was not admissible; the return is withheld and may be retried"
+                                .to_string(),
+                        offers: Vec::new(),
+                    })),
+                    false => EngineDecision::deliver(Next::ResolveExternal(continued)),
+                });
             }
             Err(TransitionError::MembershipNeeded { needed }) => {
                 return match self.membership_consult(&expansions, needed)? {
@@ -1412,8 +1565,10 @@ impl RuntimeEngine {
                 feedback: format!("[appa] the child's return could not cross: {reason:?}"),
                 offers: Vec::new(),
             }),
-            FollowUp::Child(ChildFollowUp::Resolve(request)) => resolve_or_withhold(
-                self.engine.registry().trust_chain(),
+            FollowUp::Child(ChildFollowUp::Resolve(request)) => self.resolve_or_withhold(
+                view,
+                &engine_id(child),
+                None,
                 request,
                 evidence,
                 "[appa] no registered cast or return sanitizer answered; the return is withheld and may be retried",
@@ -1543,13 +1698,35 @@ impl RuntimeEngine {
             .engine
             .resolve_call(tool.clone(), call.arguments.get().as_bytes())
             .map_err(|_| Resolution::Feedback(format!("[appa] {} has invalid arguments", call.tool)))?;
+        let static_attention = contract
+            .requires
+            .attention
+            .iter()
+            .map(|mark| mark.as_str().to_string())
+            .collect();
+        Ok((
+            resolved,
+            self.label_context(view, &engine_id(trajectory), static_attention),
+        ))
+    }
+
+    /// The label context every classifier consult carries — a tool resolver's and a cast's
+    /// alike: the trajectory's current bound, whether either dimension is still unresolved,
+    /// and the names the policy defines. `static_attention` is what the policy already
+    /// requires of the tool named beside it.
+    fn label_context(
+        &self,
+        view: &EngineView,
+        trajectory: &EngineTrajectoryId,
+        static_attention: Vec<String>,
+    ) -> ToolResolutionContext {
         let current = view
-            .views(&engine_id(trajectory))
+            .views(trajectory)
             .expect("the event's trajectory was validated as open")
             .current_label();
         let bound = current.bound();
         let chain = self.engine.registry().trust_chain();
-        let context = ToolResolutionContext {
+        ToolResolutionContext {
             current_trust: chain
                 .name_of(bound.trust)
                 .map(str::to_string)
@@ -1575,14 +1752,102 @@ impl RuntimeEngine {
                 .attention_marks()
                 .map(|mark| mark.as_str().to_string())
                 .collect(),
-            static_attention: contract
-                .requires
-                .attention
-                .iter()
-                .map(|mark| mark.as_str().to_string())
-                .collect(),
+            static_attention,
+        }
+    }
+
+    /// One cast ask, ready for the session: the casts the engine selected, the value's bytes,
+    /// the tool whose result it is, and the label context of the trajectory acting.
+    fn cast_ask(
+        &self,
+        view: &EngineView,
+        trajectory: &EngineTrajectoryId,
+        tool: Option<ToolName>,
+        casts: Vec<ApplicableCast>,
+        body: ValueBody,
+    ) -> CastAsk {
+        let static_attention = tool
+            .as_ref()
+            .and_then(|tool| self.engine.registry().tool(tool))
+            .map(|contract| {
+                contract
+                    .requires
+                    .attention
+                    .iter()
+                    .map(|mark| mark.as_str().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        CastAsk {
+            casts,
+            body,
+            tool: tool.map(|tool| tool.as_str().to_string()),
+            context: self.label_context(view, trajectory, static_attention),
+        }
+    }
+
+    /// The next step for an evidence request an outcome or a return raised: the ask, or the
+    /// withheld presentation where every applicable answer was already obtained. `dispatch`
+    /// is the one a pending cast classifies the result of.
+    fn resolve_or_withhold(
+        &self,
+        view: &EngineView,
+        trajectory: &EngineTrajectoryId,
+        dispatch: Option<&EngineDispatchId>,
+        request: EvidenceRequest,
+        evidence: &[ExternalEvidence],
+        withheld: &str,
+    ) -> Result<Next, EngineRefusal> {
+        let chain = self.engine.registry().trust_chain();
+        let blocked = || {
+            Ok(Next::PresentToModel(Presentation::Blocked {
+                feedback: withheld.to_string(),
+                offers: Vec::new(),
+            }))
         };
-        Ok((resolved, context))
+        match request {
+            EvidenceRequest::Sanitizer {
+                sanitizer,
+                source,
+                body,
+            } => {
+                if matches!(
+                    sanitizer_derivation(evidence, sanitizer.as_str(), &source),
+                    SanitizerAnswer::NoAnswer
+                ) {
+                    return blocked();
+                }
+                Ok(Next::ResolveExternal(vec![ExternalRequest::Sanitizer {
+                    sanitizer: sanitizer.as_str().to_string(),
+                    source,
+                    body,
+                }]))
+            }
+            EvidenceRequest::PendingCast { casts, source, body } => {
+                match pending_cast_state(chain, evidence, &source) {
+                    CastAnswerState::Missing => {
+                        let tool = dispatch.and_then(|dispatch| {
+                            view.views(trajectory)
+                                .and_then(|views| views.dispatch_tool(dispatch).cloned())
+                        });
+                        Ok(Next::ResolveExternal(vec![ExternalRequest::PendingCast {
+                            source,
+                            ask: self.cast_ask(view, trajectory, tool, casts, body),
+                        }]))
+                    }
+                    CastAnswerState::Unreadable(continued) => Ok(Next::ResolveExternal(vec![*continued])),
+                    CastAnswerState::NoAnswer | CastAnswerState::Resolved => blocked(),
+                }
+            }
+            EvidenceRequest::Cast { casts, value, body } => match cast_state(chain, evidence, value) {
+                CastAnswerState::Missing => Ok(Next::ResolveExternal(vec![ExternalRequest::Cast {
+                    value,
+                    ask: self.cast_ask(view, trajectory, value_tool(view, trajectory, value), casts, body),
+                }])),
+                CastAnswerState::Unreadable(continued) => Ok(Next::ResolveExternal(vec![*continued])),
+                CastAnswerState::NoAnswer | CastAnswerState::Resolved => blocked(),
+            },
+        }
     }
 
     fn membership_evidence(&self, evidence: &[ExternalEvidence]) -> MembershipEvidence {
@@ -1765,6 +2030,7 @@ fn deny_next(text: String) -> Next {
         feedback: vec![Feedback {
             text,
             offers: Vec::new(),
+            unestablished: Vec::new(),
         }],
     }
 }
@@ -1903,14 +2169,53 @@ fn outcome_presentation(outcome: &ToolOutcome, admitted: Option<ValueBody>) -> P
     }
 }
 
-/// Whether the session has an answer for a cast the engine asked about. The three states
-/// are what stops a redrive loop: an answer the policy cannot read is `NoAnswer`, never a
-/// fresh request, so a classifier naming a rank outside the chain withholds once instead
-/// of being asked forever.
+/// Whether the session has an answer for a cast the engine asked about. The states are what
+/// stops a redrive loop: an answer the policy cannot read — a rank outside the chain — is
+/// `Unreadable`, and the ask continues past the cast that gave it rather than being repeated,
+/// so a classifier that cannot be read is asked once.
 enum CastAnswerState {
     Missing,
     NoAnswer,
+    Unreadable(Box<ExternalRequest>),
     Resolved,
+}
+
+/// Did the engine refuse a submitted cast answer — over its ceiling, out of scope, or
+/// disagreeing with a dimension already established? A pending cast reports it as one
+/// refusal; a lazily driven cast names the reason. Either way the log is untouched.
+fn refused_cast(error: &TransitionError) -> bool {
+    matches!(
+        error,
+        TransitionError::InadmissibleResolution | TransitionError::Resolution(_)
+    )
+}
+
+/// The feedback for a call whose casts were all asked and none established the value.
+const NO_CAST_ANSWERED: &str = "[appa] no registered cast could establish what this call reads; the call is not decided yet and may be proposed again";
+
+/// Which submitted cast answers the engine refused, continued past the refusing cast. The
+/// refusal names no answer, so each one is judged on its own beside the non-cast evidence
+/// — the core validates every submitted answer before it asks for a missing one — and a
+/// single submitted answer is the refused one without a second judgment.
+fn continued_casts(
+    evidence: &[ExternalEvidence],
+    refuses: impl Fn(&[ExternalEvidence]) -> bool,
+) -> Vec<ExternalRequest> {
+    let (answers, rest): (Vec<ExternalEvidence>, Vec<ExternalEvidence>) =
+        evidence.iter().cloned().partition(|entry| entry.continued().is_some());
+    let refused = |answer: &ExternalEvidence| {
+        if answers.len() == 1 {
+            return true;
+        }
+        let mut alone = rest.clone();
+        alone.push(answer.clone());
+        refuses(&alone)
+    };
+    answers
+        .iter()
+        .filter(|answer| refused(answer))
+        .filter_map(ExternalEvidence::continued)
+        .collect()
 }
 
 /// The engine-side audience a classifier's wire audience resolves to.
@@ -1938,6 +2243,7 @@ fn cast_evidence(chain: &TrustChain, evidence: &[ExternalEvidence]) -> Vec<Evide
             ExternalEvidence::PendingCast {
                 source,
                 verdict: Some(verdict),
+                ..
             } => Some(Evidence::PendingCast {
                 cast: appa_engine::names::CastName::new(verdict.cast.clone()),
                 source: *source,
@@ -1946,6 +2252,7 @@ fn cast_evidence(chain: &TrustChain, evidence: &[ExternalEvidence]) -> Vec<Evide
             ExternalEvidence::Cast {
                 value,
                 verdict: Some(verdict),
+                ..
             } => Some(Evidence::Cast {
                 cast: appa_engine::names::CastName::new(verdict.cast.clone()),
                 value: *value,
@@ -1961,13 +2268,11 @@ fn pending_cast_state(chain: &TrustChain, evidence: &[ExternalEvidence], source:
         if let ExternalEvidence::PendingCast {
             source: reported,
             verdict,
+            ..
         } = entry
             && reported == source
         {
-            return match verdict.as_ref().and_then(|verdict| cast_label(chain, verdict)) {
-                Some(_) => CastAnswerState::Resolved,
-                None => CastAnswerState::NoAnswer,
-            };
+            return answer_state(chain, entry, verdict.as_ref());
         }
     }
     CastAnswerState::Missing
@@ -1978,16 +2283,27 @@ fn cast_state(chain: &TrustChain, evidence: &[ExternalEvidence], value: ValueId)
         if let ExternalEvidence::Cast {
             value: reported,
             verdict,
+            ..
         } = entry
             && *reported == value
         {
-            return match verdict.as_ref().and_then(|verdict| cast_label(chain, verdict)) {
-                Some(_) => CastAnswerState::Resolved,
-                None => CastAnswerState::NoAnswer,
-            };
+            return answer_state(chain, entry, verdict.as_ref());
         }
     }
     CastAnswerState::Missing
+}
+
+fn answer_state(chain: &TrustChain, entry: &ExternalEvidence, verdict: Option<&CastVerdict>) -> CastAnswerState {
+    match verdict {
+        None => CastAnswerState::NoAnswer,
+        Some(verdict) => match cast_label(chain, verdict) {
+            Some(_) => CastAnswerState::Resolved,
+            None => match entry.continued() {
+                Some(continued) => CastAnswerState::Unreadable(Box::new(continued)),
+                None => CastAnswerState::NoAnswer,
+            },
+        },
+    }
 }
 
 fn sanitizer_evidence(evidence: &[ExternalEvidence]) -> Vec<Evidence> {
@@ -2036,58 +2352,6 @@ fn authority_verdict(evidence: &[ExternalEvidence], name: &str) -> Option<(Autho
         } if authority == name => Some((*verdict, review.clone())),
         _ => None,
     })
-}
-
-fn resolve_or_withhold(
-    chain: &TrustChain,
-    request: EvidenceRequest,
-    evidence: &[ExternalEvidence],
-    withheld: &str,
-) -> Result<Next, EngineRefusal> {
-    match request {
-        EvidenceRequest::Sanitizer {
-            sanitizer,
-            source,
-            body,
-        } => {
-            if matches!(
-                sanitizer_derivation(evidence, sanitizer.as_str(), &source),
-                SanitizerAnswer::NoAnswer
-            ) {
-                return Ok(Next::PresentToModel(Presentation::Blocked {
-                    feedback: withheld.to_string(),
-                    offers: Vec::new(),
-                }));
-            }
-            Ok(Next::ResolveExternal(vec![ExternalRequest::Sanitizer {
-                sanitizer: sanitizer.as_str().to_string(),
-                source,
-                body,
-            }]))
-        }
-        EvidenceRequest::PendingCast { casts, source, body } => match pending_cast_state(chain, evidence, &source) {
-            CastAnswerState::Missing => Ok(Next::ResolveExternal(vec![ExternalRequest::PendingCast {
-                casts,
-                source,
-                body,
-            }])),
-            CastAnswerState::NoAnswer | CastAnswerState::Resolved => Ok(Next::PresentToModel(Presentation::Blocked {
-                feedback: withheld.to_string(),
-                offers: Vec::new(),
-            })),
-        },
-        EvidenceRequest::Cast { casts, value, body } => match cast_state(chain, evidence, value) {
-            CastAnswerState::Missing => Ok(Next::ResolveExternal(vec![ExternalRequest::Cast {
-                casts,
-                value,
-                body,
-            }])),
-            CastAnswerState::NoAnswer | CastAnswerState::Resolved => Ok(Next::PresentToModel(Presentation::Blocked {
-                feedback: withheld.to_string(),
-                offers: Vec::new(),
-            })),
-        },
-    }
 }
 
 fn malformed_feedback(error: &EngineError) -> String {
@@ -2197,18 +2461,12 @@ fn authority_payload(
     })
 }
 
-fn as_label(fold: &PartialLabel) -> Label {
-    let bound = fold.bound();
-    Label::new(
-        match fold.is_established(Dimension::Trust) {
-            true => Dim::Known(bound.trust),
-            false => Dim::Unknown,
-        },
-        match fold.is_established(Dimension::Audience) {
-            true => Dim::Known(bound.audience.clone()),
-            false => Dim::Unknown,
-        },
-    )
+/// One admitted value's own contribution as a fold: a known dimension is the bound, an
+/// unknown one names the value itself as the unresolved source.
+fn value_fold(id: ValueId, label: &Label) -> PartialLabel {
+    let mut fold = PartialLabel::established(EstablishedLabel::top());
+    fold.fold_value(id, label);
+    fold
 }
 
 fn effect_names(effects: &EffectSet) -> Vec<String> {
@@ -2329,6 +2587,42 @@ fn unestablished_source(views: &Views, value: ValueId) -> String {
     match source {
         Some(source) => format!("{source} ({value:?})"),
         None => format!("value {value:?}"),
+    }
+}
+
+/// The tool whose result `value` is, as a cast's classifier is told it. A child return
+/// originates from no tool.
+fn value_tool(view: &EngineView, trajectory: &EngineTrajectoryId, value: ValueId) -> Option<ToolName> {
+    let views = view.views(trajectory)?;
+    match views.value_provenance(value)? {
+        Provenance::ToolResult { dispatch } => views.dispatch_tool(dispatch).cloned(),
+        Provenance::ProviderRun { tool, .. } => Some(tool.clone()),
+        Provenance::ChildReturn { .. } => None,
+    }
+}
+
+/// The typed form of one unestablished source, under the same ownership rule as the prose:
+/// a value the receiving trajectory did not admit itself is cited by id alone.
+fn unestablished_value(views: &Views, fact: &UnestablishedFact) -> UnestablishedValue {
+    let tool = match views.owns_value(fact.value) {
+        false => None,
+        true => match views.value_provenance(fact.value) {
+            Some(Provenance::ToolResult { dispatch }) => views.dispatch_tool(dispatch).map(ToolName::as_str),
+            Some(Provenance::ProviderRun { tool, .. }) => Some(tool.as_str()),
+            Some(Provenance::ChildReturn { .. }) | None => None,
+        },
+    };
+    UnestablishedValue {
+        value: fact.value.index(),
+        tool: tool.map(terminal_safe),
+        dimensions: fact
+            .dimensions
+            .iter()
+            .map(|dim| match dim {
+                Dimension::Trust => LabelDimension::Trust,
+                Dimension::Audience => LabelDimension::Audience,
+            })
+            .collect(),
     }
 }
 

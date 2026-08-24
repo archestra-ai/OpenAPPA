@@ -5,12 +5,10 @@ use std::sync::Arc;
 
 use crate::elicit::Elicitation;
 use crate::engine::{
-    AuthorityVerdict, CastLabel, CastVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence,
+    AuthorityVerdict, CastAsk, CastLabel, CastVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence,
     ExternalRequest, Feedback, ForkStatus, Liveness, Next, OfferNonce, OpenDispatch, Presentation, engine_id,
 };
 use crate::external::{CastAnswer, ConsultKind, ConsultOutcome, ReadersResolution, ToolResolution};
-use appa_engine::transition::ApplicableCast;
-use appa_engine::value::ValueBody;
 
 use super::{
     ChildReturnDecision, Deployment, EventError, ExactCall, Inner, OfferId, OutcomeBody, ProposedCall, RemedyDecision,
@@ -281,6 +279,10 @@ impl Session {
                     tracing::debug!(trajectory = %self.trajectory.0, "call blocked");
                     Ok(ToolCallDecision::Deny {
                         feedback: join_feedback(feedback),
+                        unestablished: feedback
+                            .iter()
+                            .flat_map(|entry| entry.unestablished.iter().cloned())
+                            .collect(),
                     })
                 }
                 _ => Err(EventError::UnexpectedDecision),
@@ -677,12 +679,13 @@ impl Session {
                         // siblings' answers, before another engine round or any append.
                         let consults = requests.into_iter().map(|request| self.consult(request, None));
                         for answered in futures_util::future::join_all(consults).await {
-                            evidence.push(answered?);
+                            supersede(&mut evidence, answered?);
                         }
                     }
                     Some(_) => {
                         for request in requests {
-                            evidence.push(self.consult(request, elicitation).await?);
+                            let answered = self.consult(request, elicitation).await?;
+                            supersede(&mut evidence, answered);
                         }
                     }
                 },
@@ -826,13 +829,15 @@ impl Session {
                     context: context.clone(),
                 }
             }
-            ExternalRequest::PendingCast { casts, source, body } => ExternalEvidence::PendingCast {
+            ExternalRequest::PendingCast { source, ask } => ExternalEvidence::PendingCast {
                 source: *source,
-                verdict: self.cascade(casts, body).await,
+                verdict: self.cascade(ask).await,
+                ask: ask.clone(),
             },
-            ExternalRequest::Cast { casts, value, body } => ExternalEvidence::Cast {
+            ExternalRequest::Cast { value, ask } => ExternalEvidence::Cast {
                 value: *value,
-                verdict: self.cascade(casts, body).await,
+                verdict: self.cascade(ask).await,
+                ask: ask.clone(),
             },
             // The membership resolver wire is the declared external contract verbatim.
             ExternalRequest::Membership { resolver, group } => {
@@ -849,13 +854,18 @@ impl Session {
         })
     }
 
-    /// Every applicable cast, in registration order, until one answers. A constant arrives
-    /// already resolved and answers without a call; a resolver is consulted. A cast that gives
-    /// no answer is skipped so a constant registered last serves as the declared fallback —
-    /// but the first answer obtained is the one submitted, and the engine alone judges it.
-    async fn cascade(&self, casts: &[ApplicableCast], body: &ValueBody) -> Option<CastVerdict> {
-        let payload = serde_json::json!({ "body": body.as_str() });
-        for cast in casts {
+    /// Every cast the ask still carries, in registration order, until one answers. A constant
+    /// arrives already resolved and answers without a call; a resolver is consulted. A cast
+    /// that gives no answer is skipped so a constant registered last serves as the declared
+    /// fallback. The first answer obtained is the one submitted, and the engine alone judges
+    /// it: an answer it refuses comes back as the same ask continued past that cast.
+    async fn cascade(&self, ask: &CastAsk) -> Option<CastVerdict> {
+        let payload = serde_json::json!({
+            "body": ask.body.as_str(),
+            "tool": ask.tool,
+            "context": ask.context,
+        });
+        for cast in &ask.casts {
             let name = cast.name.as_str().to_string();
             if let Some(constant) = &cast.constant {
                 return Some(CastVerdict {
@@ -936,6 +946,13 @@ impl Decided<'_> {
     }
 }
 
+/// Keep `answered` and drop the earlier answer to the same cast ask, if any: the cascade
+/// continued past a cast the engine refused, and the later answer is the one that stands.
+fn supersede(evidence: &mut Vec<ExternalEvidence>, answered: ExternalEvidence) {
+    evidence.retain(|held| !answered.answers_same_ask(held));
+    evidence.push(answered);
+}
+
 fn join_feedback(feedback: &[Feedback]) -> String {
     feedback
         .iter()
@@ -957,7 +974,10 @@ pub(crate) fn raw(value: serde_json::Value) -> Box<serde_json::value::RawValue> 
 mod real_engine_tests {
     use super::super::{OpenError, OutcomeBody, Runtime, SessionError};
     use super::*;
-    use crate::api::{RemedyDecision, SpawnBinding, ToolCallDecision, ToolOutcome, ToolResultDecision};
+    use crate::api::{
+        LabelDimension, RemedyDecision, SpawnBinding, ToolCallDecision, ToolOutcome, ToolResultDecision,
+        UnestablishedValue,
+    };
     use crate::config::Config;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1836,12 +1856,17 @@ delta = { audience = { exactly = ["@team"] } }
             )
             .await
             .expect("the block is delivered");
-        let ToolCallDecision::Deny { feedback } = decision else {
+        let ToolCallDecision::Deny { unestablished, .. } = decision else {
             panic!("a consumed Unknown dimension must block the sink");
         };
-        assert!(
-            feedback.contains("the result of fetch (ValueId(0))"),
-            "the block must name the producing tool: {feedback}"
+        assert_eq!(
+            unestablished,
+            vec![UnestablishedValue {
+                value: 0,
+                tool: Some("fetch".to_string()),
+                dimensions: vec![LabelDimension::Trust, LabelDimension::Audience],
+            }],
+            "the block names the source by value, its producing tool, and every dimension still unresolved on it"
         );
         assert!(runtime.open_dispatches(&root(), &root()).pop().is_none());
     }
@@ -2035,7 +2060,7 @@ context_control = false
             )
             .await
             .expect("the block is delivered");
-        let ToolCallDecision::Deny { feedback } = decision else {
+        let ToolCallDecision::Deny { feedback, .. } = decision else {
             panic!("the crossed unresolved identity must charge the parent's send, got {decision:?}");
         };
         assert!(
@@ -3378,15 +3403,25 @@ context_control = true
     }
 
     #[tokio::test]
-    async fn an_unresolved_dimension_renders_unknown() {
+    async fn an_unresolved_dimension_keeps_its_bound_and_names_its_sources() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime =
             Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        admit_success(&runtime, &mut session, mark()).await;
         admit_success(&runtime, &mut session, fetch(serde_json::json!({"a": 1}))).await;
         let status = runtime.status(&root()).expect("the root answers");
-        assert_eq!(status.trust, "unknown");
-        assert_eq!(status.audience, "unknown");
+        assert_eq!(
+            status.trust, "suspicious",
+            "the restriction already known is not hidden"
+        );
+        assert_eq!(status.audience, "public");
+        assert_eq!(
+            status.unresolved_trust,
+            vec![1],
+            "the unannotated result is the unresolved source"
+        );
+        assert_eq!(status.unresolved_audience, vec![1]);
     }
 
     #[tokio::test]

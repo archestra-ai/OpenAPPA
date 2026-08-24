@@ -1,6 +1,6 @@
 //! Synchronous Python adapter over the runtime.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -155,6 +155,9 @@ struct ExternalsConfig {
     dynamic: Option<EndpointConfig>,
     #[serde(default)]
     membership: Option<EndpointConfig>,
+    /// The classifier endpoint of every resolver-backed cast, by cast name.
+    #[serde(default)]
+    casts: BTreeMap<String, EndpointConfig>,
 }
 
 #[derive(serde::Deserialize)]
@@ -192,7 +195,19 @@ impl SessionInner {
                 max_body_bytes: parsed.max_body_bytes.unwrap_or(MAX_BODY_BYTES),
                 authorities: Default::default(),
                 sanitizers: Default::default(),
-                casts: Default::default(),
+                casts: parsed
+                    .casts
+                    .into_iter()
+                    .map(|(cast, endpoint)| {
+                        (
+                            cast,
+                            Endpoint {
+                                url: endpoint.url,
+                                token: None,
+                            },
+                        )
+                    })
+                    .collect(),
                 dynamic: parsed.dynamic.map(|endpoint| Endpoint {
                     url: endpoint.url,
                     token: None,
@@ -347,7 +362,7 @@ impl SessionInner {
                 *self.slot(child)? = Some(Pending { call: call.clone() });
                 Ok(Decision::Allowed { call, binding })
             }
-            HookDecision::DenyCall { feedback } => Ok(Decision::Blocked { feedback }),
+            HookDecision::DenyCall { feedback, .. } => Ok(Decision::Blocked { feedback }),
             HookDecision::PassControl => Ok(Decision::Control {
                 reply: self.execute_remedy(child, &call),
             }),
