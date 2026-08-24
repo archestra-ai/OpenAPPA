@@ -26,6 +26,7 @@ delta = { audience = { exactly = ["promotion-review-private"] } }
 [[policy.tool]]
 name = "create_hr"
 parameters = { type = "object", properties = { file = { type = "string" }, content = { type = "string" } }, required = ["file", "content"], additionalProperties = false }
+requires = { trust = "internal", audience = { includes = ["promotion-review-private"] } }
 delta = {}
 [[policy.tool]]
 name = "send_email"

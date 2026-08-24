@@ -28,6 +28,7 @@ delta = { audience = { resolver = "personal-file-readers", argument = "file" } }
 [[policy.tool]]
 name = "create_hr"
 parameters = { type = "object", properties = { file = { type = "string" }, content = { type = "string" } }, required = ["file", "content"], additionalProperties = false }
+requires = { trust = "internal", audience = { includes = { resolver = "personal-file-readers", argument = "file" } } }
 delta = {}
 [[policy.tool]]
 name = "search_task_tracker"
@@ -40,6 +41,7 @@ delta = {}
 [[policy.tool]]
 name = "create_task_tracker"
 parameters = { type = "object", properties = { file = { type = "string" }, content = { type = "string" } }, required = ["file", "content"], additionalProperties = false }
+requires = { trust = "internal", audience = { includes = ["public"] } }
 delta = {}
 [[policy.tool]]
 name = "send_email"

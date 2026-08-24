@@ -35,6 +35,7 @@ delta = { audience = { resolver = "document-acl", argument = "file" } }
 [[policy.tool]]
 name = "create_finance"
 parameters = { type = "object", properties = { file = { type = "string", description = "The file name to create." }, content = { type = "string", description = "The full contents to write." } }, required = ["file", "content"], additionalProperties = false }
+requires = { trust = "internal", audience = { includes = { resolver = "document-acl", argument = "file" } } }
 delta = {}
 
 [[policy.tool]]

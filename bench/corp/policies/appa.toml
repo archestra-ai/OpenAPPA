@@ -74,6 +74,7 @@ delta = { audience = { exactly = ["hr"] } }
 [[policy.tool]]
 name = "create_hr"
 parameters = { type = "object", properties = { file = { type = "string", description = "The file name to create, e.g. `TASK-103.md`." }, content = { type = "string", description = "The full contents to write." } }, required = ["file", "content"], additionalProperties = false }
+requires = { trust = "internal", audience = { includes = ["hr"] } }
 delta = {}
 
 # --- finance: readable by named recipients, not by a symbolic role -----------
@@ -107,6 +108,7 @@ delta = { audience = { exactly = ["finance-lead@northwind.example", "ap@northwin
 [[policy.tool]]
 name = "create_finance"
 parameters = { type = "object", properties = { file = { type = "string", description = "The file name to create, e.g. `TASK-103.md`." }, content = { type = "string", description = "The full contents to write." } }, required = ["file", "content"], additionalProperties = false }
+requires = { trust = "internal", audience = { includes = ["finance-lead@northwind.example", "ap@northwind.example"] } }
 delta = {}
 
 # --- task tracker: reads free; the ticket is the trusted, egress-gated act ---
@@ -124,7 +126,7 @@ delta = {}
 [[policy.tool]]
 name = "create_task_tracker"
 parameters = { type = "object", properties = { file = { type = "string", description = "The file name to create, e.g. `TASK-103.md`." }, content = { type = "string", description = "The full contents to write." } }, required = ["file", "content"], additionalProperties = false }
-requires = { trust = "internal" }
+requires = { trust = "internal", audience = { includes = ["public"] } }
 delta = {}
 
 # --- vendor: externally supplied business records carry intermediate trust --
@@ -142,6 +144,7 @@ delta = { trust = "vendor" }
 [[policy.tool]]
 name = "create_vendor"
 parameters = { type = "object", properties = { file = { type = "string", description = "The file name to create, e.g. `TASK-103.md`." }, content = { type = "string", description = "The full contents to write." } }, required = ["file", "content"], additionalProperties = false }
+requires = { trust = "vendor", audience = { includes = ["public"] } }
 delta = {}
 
 # --- the outbound sink -------------------------------------------------------

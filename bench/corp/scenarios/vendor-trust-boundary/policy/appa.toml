@@ -27,7 +27,7 @@ delta = { trust = "vendor" }
 [[policy.tool]]
 name = "create_vendor"
 parameters = { type = "object", properties = { file = { type = "string", description = "The file name to create." }, content = { type = "string", description = "The full contents to write." } }, required = ["file", "content"], additionalProperties = false }
-requires = { trust = "vendor" }
+requires = { trust = "vendor", audience = { includes = ["public"] } }
 effects = ["vendor.ack"]
 delta = {}
 
@@ -44,7 +44,7 @@ delta = {}
 [[policy.tool]]
 name = "create_task_tracker"
 parameters = { type = "object", properties = { file = { type = "string", description = "The file name to create." }, content = { type = "string", description = "The full contents to write." } }, required = ["file", "content"], additionalProperties = false }
-requires = { trust = "internal" }
+requires = { trust = "internal", audience = { includes = ["public"] } }
 delta = {}
 
 # --- deployment coverage -----------------------------------------------------

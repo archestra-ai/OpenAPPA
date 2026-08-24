@@ -28,6 +28,7 @@ delta = { audience = { resolver = "tenant-record-readers", argument = "file" } }
 [[policy.tool]]
 name = "create_vendor"
 parameters = { type = "object", properties = { file = { type = "string" }, content = { type = "string" } }, required = ["file", "content"], additionalProperties = false }
+requires = { trust = "internal", audience = { includes = { resolver = "tenant-record-readers", argument = "file" } } }
 delta = {}
 [[policy.tool]]
 name = "send_email"
