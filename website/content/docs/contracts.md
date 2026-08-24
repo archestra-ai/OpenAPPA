@@ -169,7 +169,7 @@ A result is named for the one contract field it establishes. These five names ar
 
 #### Ownership and pinning
 
-Every contract field has one owner. A field the policy writes and a field a resolver establishes are the same field, so the two never overlap and requirements do not combine across resolvers. A dimension no owner describes contributes nothing inside a declared `delta` and checks nothing under `requires`. Only a tool with no `delta` key at all is unannotated: its result enters `Unknown` in both dimensions. History requirements are always static.
+Every contract field has one owner. A field the policy writes and a field a resolver establishes are the same field, so the two never overlap and requirements do not combine across resolvers. A dimension no owner describes contributes nothing inside a declared `delta` and checks nothing under `requires`. A tool with no `delta` key and no resolver-owned output dimension is unannotated: its result enters `Unknown` in both dimensions. History requirements are always static.
 
 Resolution occurs when a proposed call first checks. The validated answer is pinned to the exact `args` its resolver received. The pin holds through rechecks, remedy plans, rulings, dispatch, and admission. The dispatch record stores the answer and a digest of those `args`, not a second copy of them: the arguments and the `uses` entry are already on the record, so a replay rebuilds the value and compares. A new proposal resolves again. An answer given about an unrelated call is never evidence here.
 

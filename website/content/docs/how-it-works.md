@@ -151,7 +151,7 @@ A non-empty remedy list indicates that candidate paths exist, though external co
 
 Real-world deployments can be difficult to annotate in a single pass. Similar to gradual typing in Python or TypeScript codebases, OpenAPPA supports partial annotation—delivering immediate value from day one. 
 
-Unannotated tools return data with an **Unknown** label state, representing unverified classification rather than a specific trust rank. A tool is unannotated when its contract has no `delta` key at all; `delta = {}` is the opposite, declaring that the result carries no restriction. Unknown labels propagate through trajectory operations per dimension: the trajectory keeps every known restriction, and each dimension the value left unresolved stays Unknown for that source until a cast establishes it. Unregistered tool calls are refused directly rather than returning Unknown values.
+Unannotated tools return data with an **Unknown** label state, representing unverified classification rather than a specific trust rank. A tool is unannotated when its contract has no `delta` key and no resolver establishes an output dimension; `delta = {}` is the opposite, declaring that the result carries no restriction. Unknown labels propagate through trajectory operations per dimension: the trajectory keeps every known restriction, and each dimension the value left unresolved stays Unknown for that source until a cast establishes it. Unregistered tool calls are refused directly rather than returning Unknown values.
 
 | Execution Context | Impact of Unknown State |
 |---|---|
