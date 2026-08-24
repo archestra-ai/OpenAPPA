@@ -126,8 +126,13 @@ pub enum HookDecision {
         spawn: Option<SpawnBinding>,
     },
     PassControl,
+    /// The call is blocked. `unestablished` names every value the call reads
+    /// whose label no registered cast can establish; the prose in `feedback`
+    /// says the same to the model, but a harness that acts on it reads the
+    /// typed entries.
     DenyCall {
         feedback: String,
+        unestablished: Vec<UnestablishedValue>,
     },
     Block {
         reason: String,
@@ -147,6 +152,29 @@ pub enum HookDecision {
     Refuse {
         detail: String,
     },
+}
+
+/// One value a blocked call reads whose label stays unestablished: no
+/// registered cast reaches it, so no remedy plan can clear the block
+/// until a cast fact does.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct UnestablishedValue {
+    /// The value's id, as the audit's `unresolved_trust` and
+    /// `unresolved_audience` lists cite it.
+    pub value: u64,
+    /// The tool whose result the value is. `None` for a subagent's
+    /// return, and for a value the blocked trajectory did not admit
+    /// itself.
+    pub tool: Option<String>,
+    /// The dimensions still unresolved on the value.
+    pub dimensions: Vec<LabelDimension>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LabelDimension {
+    Trust,
+    Audience,
 }
 
 /// A refusal at the parse stage, before any event exists. `Unreadable`

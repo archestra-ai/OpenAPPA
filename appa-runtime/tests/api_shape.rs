@@ -104,7 +104,7 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
         HookDecision::AllowCall { spawn } => {
             let _: Option<SpawnBinding> = spawn;
         }
-        HookDecision::DenyCall { feedback } => {
+        HookDecision::DenyCall { feedback, .. } => {
             let _: String = feedback;
         }
         HookDecision::Block { reason } => {

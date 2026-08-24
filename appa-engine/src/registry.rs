@@ -39,6 +39,9 @@ impl TrustChain {
             });
         }
         for (i, rank) in self.ranks.iter().enumerate() {
+            if rank == crate::label::UNKNOWN_STATE {
+                return Err(LoadError::ReservedRankName);
+            }
             if self.ranks[..i].contains(rank) {
                 return Err(LoadError::DuplicateRank(rank.clone()));
             }
@@ -89,6 +92,8 @@ pub enum LoadError {
     TrustChainTooLong { len: usize, max: usize },
     #[error("duplicate trust rank {0:?} in the chain")]
     DuplicateRank(String),
+    #[error("trust rank name \"unknown\" is reserved: it spells the unestablished state, not a rank")]
+    ReservedRankName,
     #[error("duplicate tool contract: {0}")]
     DuplicateTool(String),
     #[error("tool {tool} uses resolver {resolver}, but no field of the tool reads a result of it")]
@@ -134,7 +139,7 @@ pub enum LoadError {
     #[error("{context}: hint is {len} characters, over the {max} a plan offer carries")]
     HintTooLong { context: String, len: usize, max: usize },
     #[error(
-        "{context}: {reader:?} is not a literal reader ID — `public` names the whole audience, and the `@` mark is reserved for groups a membership resolver expands"
+        "{context}: {reader:?} is not a literal reader ID — `public` and `unknown` are label states, and the `@` mark is reserved for groups a membership resolver expands"
     )]
     NonLiteralReader { context: String, reader: String },
     #[error("group {group} is written in a configuration that registers no membership resolver")]
@@ -1156,7 +1161,7 @@ mod tests {
 
     #[test]
     fn every_declared_audience_refuses_a_reserved_or_group_reader() {
-        for reserved in ["public", "@auditors"] {
+        for reserved in ["public", "unknown", "@auditors"] {
             for (context, cfg) in audience_sites(reserved) {
                 match Registry::build_covered(cfg) {
                     Err(LoadError::NonLiteralReader {
@@ -1579,6 +1584,29 @@ mod tests {
             Registry::build_covered(cfg),
             Err(LoadError::TrustChainTooLong { len, max }) if len == MAX_RANKS + 1 && max == MAX_RANKS
         ));
+    }
+
+    #[test]
+    fn refuses_the_reserved_rank_name() {
+        let mut cfg = base();
+        cfg.trust_chain = TrustChain::new(vec!["suspicious".into(), "unknown".into()]);
+        assert!(matches!(Registry::build_covered(cfg), Err(LoadError::ReservedRankName)));
+    }
+
+    #[test]
+    fn an_unannotated_tool_composes_with_history_and_attention_requirements() {
+        let mut cfg = base();
+        let mut guard = tool("guard");
+        guard.delta = None;
+        guard.requires = Requires {
+            label: LabelRequirements::default(),
+            history: vec![HistoryRequirement::NoPrior(EffectKind::new("email.sent"))],
+            attention: vec![MarkName::new("signoff")],
+        };
+        cfg.tools = vec![guard];
+        cfg.authorities = vec![attends_authority("steward")];
+        let registry = Registry::build_covered(cfg).expect("history and attention consume no label dimension");
+        assert!(registry.tool(&ToolName::new("guard")).is_some());
     }
 
     #[test]

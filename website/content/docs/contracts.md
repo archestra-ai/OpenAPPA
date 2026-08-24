@@ -12,8 +12,8 @@ This document is a reference guide for writing and reviewing OpenAPPA policy TOM
 ```toml
 version = 1
 
-# Optional. The trust chain, least-trusted first; the rank names are yours.
-# Omitted, it defaults to `suspicious < trusted`.
+# Optional. The trust chain, least-trusted first; the rank names are yours,
+# except `unknown`, which is reserved. Omitted, it defaults to `suspicious < trusted`.
 trust_chain = ["suspicious", "trusted"]
 ```
 
@@ -283,7 +283,7 @@ attention = ["sre-signoff"]                            # Fresh per-call demand
 ### Key contract rules
 
 - **`delta` is strictly restrictive**: A tool's delta can only narrow the audience or lower trust. Within an annotated `delta`, an omitted dimension defaults to identity (unchanged).
-- **Pending-cast deltas (`delta = { trust = "unknown" }`)**: Holds a label dimension pending resolution by a registered `[[cast]]` at admission. Declaring both `requires` and `unknown` delta on the same dimension is a load error.
+- **Pending-cast deltas (`delta = { trust = "unknown" }` or `delta = { audience = "unknown" }`)**: Holds one label dimension pending resolution by a registered `[[cast]]` at admission. At most one dimension may be pending-cast. Declaring both `requires` and `unknown` delta on the same dimension is a load error. `"unknown"` is reserved: it can name neither a trust rank nor a reader.
 - **Dynamic argument placeholders (`$arg`)**: `requires.audience = { includes = ["$recipient"] }` evaluates `$recipient` against the actual call argument at runtime. The argument value can be a literal reader ID, the reserved word `public`, or an `@group` expanded by the membership resolver. Placeholders are supported only inside `includes`. The argument must be declared as a required top-level string in the tool's `parameters` schema.
 - **Dynamic resolvers (`uses`)**: Attaches registered resolvers to classify proposed calls. Each entry maps required inputs from `$tool_call`. Mapped arguments must be required top-level properties in the tool schema. A resolver with no inputs reads the entire tool call and requires a tool `description`.
 - **Single field ownership**: Each contract field has one source: a static policy value or a resolver result. You cannot configure both on the same field. Because each field accepts at most one resolver result, a tool uses at most five resolver outputs.
@@ -404,20 +404,22 @@ Registering `name = "attest-schema"` is sufficient; OpenAPPA applies it natively
 
 Unannotated tools return data in an `Unknown` label state. A `[[cast]]` resolves the whole value at once, using static rules or external classifiers: its answer is one complete label that preserves every dimension already established and makes every unresolved dimension concrete, admitted atomically or not at all.
 
+A block lists each Unknown source by value under `unestablished`, together with the dimensions no applicable cast reaches. No remedy plan clears that slot; only an admitted cast does. While any source in a block is unestablished, the block offers no executable plan.
+
 ```toml
 [[cast]]
 name     = "content-classifier"
-resolver = { may_cast = { trust = ["suspicious"],
-                          audience = { cap = ["public"] } } } # Complete product ceiling;
-                                              # the ceiling is policy, the endpoint deployment
+resolver = { may_cast = { trust = ["suspicious"], audience = { cap = ["public"] } } }
+                                              # Complete product ceiling; the ceiling is policy,
+                                              # the endpoint deployment
 
 [cast.scope]
 tags = ["support"]                            # Applies only to values from tools with these tags
 
 [[cast]]
 name     = "paranoid-default"
-constant = { trust = "suspicious",
-             audience = { exactly = ["public"] } }  # Complete label; unscoped fallback, registered last
+constant = { trust = "suspicious", audience = { exactly = ["public"] } }
+                                              # Complete label; unscoped fallback, registered last
 ```
 
 ```toml
@@ -429,6 +431,43 @@ A dynamic cast requires a resolver bounded by a `may_cast` ceiling (`builtin` is
 
 When resolving an `Unknown` value, OpenAPPA evaluates applicable casts (matched by `scope.tags`) in registration order until one returns an answer. If a resolver is unreachable or fails, OpenAPPA moves to the next registered cast. Place fallback constant casts last, as any cast registered after an unscoped constant will never be reached.
 
-OpenAPPA validates all resolver answers against the declared `may_cast` ceiling before admitting the value. If a resolver returns a label outside this ceiling, the answer is rejected and the value remains `Unknown`. A `public` audience cap allows a resolver to lift audience restrictions entirely; review such ceilings carefully.
+OpenAPPA validates every resolver answer against the declared `may_cast` ceiling before admitting the value. An answer outside the ceiling is refused, and the cascade continues with the next applicable cast in registration order; the first answer OpenAPPA admits stands. A `public` audience cap allows a resolver to lift audience restrictions entirely; review such ceilings carefully.
+
+A classifier can be consulted again for the same value after a runtime restart or a concurrent-write retry, so a cast implementation must be idempotent.
+
+The runtime consults a resolver-backed cast with a JSON POST. The comments explain each key; they are not sent.
+
+```jsonc
+{
+  // WHY: Identifies the request shape.
+  "version": 1,
+
+  // WHY: Says which external kind is consulted.
+  "kind": "cast",
+
+  // WHY: Selects the cast when one service answers for several.
+  "name": "content-classifier",
+
+  "payload": {
+    // WHY: Gives the classifier the value's bytes.
+    "body": "the ticket text",
+
+    // WHY: Names the tool whose result the value is; null for a subagent's return.
+    "tool": "read_ticket",
+
+    // WHY: Gives the current state, in the shape a dynamic resolver receives.
+    "context": {
+      "current_trust": "trusted",
+      "current_trust_rank": 1,
+      "current_audience": "public",
+      "trust_unresolved": true,
+      "audience_unresolved": true,
+      "static_attention": []
+    }
+  }
+}
+```
+
+The response is `{"version": 1, "answer": {"trust": "suspicious", "audience": "public"}}`, where `audience` is `"public"` or an array of literal reader ids. Anything else — an error status, a timeout, a malformed body, or an empty answer — is no answer: nothing is recorded, the next applicable cast is consulted, and when none answers the call stays undecided and can be proposed again.
 
 A tool contract can also declare a pending dimension with `delta = { trust = "unknown" }`. When configured in `confined_results`, the runtime withholds raw results from the model until the cast evaluates the payload. If the resolved label restricts the trajectory, OpenAPPA presents a narrowing prompt to the agent before delivering the data.

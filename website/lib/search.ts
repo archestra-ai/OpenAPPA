@@ -46,7 +46,7 @@ const STATIC_SECTIONS = [
   { title: "Reading data costs the agent reach", url: "/how-it-works#reading-data-costs-the-agent-reach", docTitle: "How OpenAPPA works" },
   { title: "A child's narrowing dies with it", url: "/how-it-works#a-childs-narrowing-dies-with-it", docTitle: "How OpenAPPA works" },
   { title: "Engine refusals enumerate every valid remedy", url: "/how-it-works#engine-refusals-enumerate-every-valid-remedy", docTitle: "How OpenAPPA works" },
-  { title: "Unknown labels propagate until a requirement checks them", url: "/how-it-works#unknown-labels-propagate-until-a-requirement-checks-them", docTitle: "How OpenAPPA works" },
+  { title: "Unknown labels propagate until a consumer checks them", url: "/how-it-works#unknown-labels-propagate-until-a-consumer-checks-them", docTitle: "How OpenAPPA works" },
   { title: "Model guarantees depend on four explicit assumptions", url: "/how-it-works#model-guarantees-depend-on-four-explicit-assumptions", docTitle: "How OpenAPPA works" },
   { title: "Set operators", url: "/contracts#set-operators", docTitle: "Policy reference" },
   { title: "What to check when reviewing", url: "/contracts#what-to-check-when-reviewing", docTitle: "Policy reference" },

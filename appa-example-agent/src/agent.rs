@@ -413,7 +413,7 @@ impl Run<'_> {
         };
         match hooks::handle(&self.agent.runtime, event).await {
             HookDecision::AllowCall { spawn } => self.run_released(frame, &id, proposed, spawn).await,
-            HookDecision::DenyCall { feedback } => {
+            HookDecision::DenyCall { feedback, .. } => {
                 let feedback = self.with_spawn_context(frame, feedback);
                 self.record(
                     frame,
@@ -682,7 +682,7 @@ impl Run<'_> {
         };
         match hooks::handle(&self.agent.runtime, event).await {
             HookDecision::AllowCall { spawn } => self.run_released(frame, id, call, spawn).await,
-            HookDecision::DenyCall { feedback } => Ok(Answered::Reply(feedback)),
+            HookDecision::DenyCall { feedback, .. } => Ok(Answered::Reply(feedback)),
             HookDecision::Refuse { detail } => Err(StopReason::Refused(detail)),
             other => Err(unexpected("a substituted call", &other)),
         }

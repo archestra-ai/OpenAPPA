@@ -16,7 +16,7 @@ use crate::value::{ResolvedCall, ValueId};
 /// A source whose consumed dimension no registered cast has established: named once,
 /// with every dimension still unresolved on it — a whole-source cast establishes them all in one
 /// fact. A missing fact, cleared by a cast landing, never by a ruling or a plan.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnestablishedFact {
     pub value: ValueId,
     pub dimensions: BTreeSet<Dimension>,

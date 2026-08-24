@@ -96,16 +96,14 @@ impl CastAnswer {
 
 impl CastAudience {
     /// Read one audience off the wire: the `public` token or a literal reader array —
-    /// never `public` inside the array, an empty reader, or a group name.
+    /// never a reserved word or a group name inside the array.
     pub fn from_wire(value: &serde_json::Value) -> Option<CastAudience> {
         match value {
             serde_json::Value::String(token) if token == "public" => Some(CastAudience::Public),
             serde_json::Value::Array(readers) => readers
                 .iter()
                 .map(|reader| match reader.as_str() {
-                    Some(reader) if !reader.is_empty() && reader != "public" && !reader.starts_with('@') => {
-                        Some(reader.to_string())
-                    }
+                    Some(reader) if is_literal_reader(reader) => Some(reader.to_string()),
                     _ => None,
                 })
                 .collect::<Option<Vec<String>>>()
@@ -113,6 +111,13 @@ impl CastAudience {
             _ => None,
         }
     }
+}
+
+/// Is `reader` an id a resolver may name? `public` is the unrestricted audience and
+/// `unknown` the unresolved state, neither a reader; an `@` mark is a group only a
+/// membership resolver expands; an empty id names no one.
+fn is_literal_reader(reader: &str) -> bool {
+    !reader.is_empty() && reader != "public" && reader != "unknown" && !reader.starts_with('@')
 }
 
 /// The outcome of one reader-set resolution — dynamic or membership:
@@ -578,11 +583,7 @@ impl ExternalServices {
         if response.version != 1 {
             return Err(NoAnswerReason::UnsupportedVersion);
         }
-        if response
-            .readers
-            .iter()
-            .any(|reader| reader == "public" || reader.starts_with('@'))
-        {
+        if !response.readers.iter().all(|reader| is_literal_reader(reader)) {
             return Err(NoAnswerReason::Malformed);
         }
         Ok(response.readers)
@@ -753,6 +754,26 @@ fn classify_transport(error: reqwest::Error) -> NoAnswerReason {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_cast_audience_holds_literal_readers_only() {
+        use super::CastAudience;
+        assert_eq!(
+            CastAudience::from_wire(&serde_json::json!(["alice", "bob"])),
+            Some(CastAudience::Readers(vec!["alice".to_string(), "bob".to_string()]))
+        );
+        assert_eq!(
+            CastAudience::from_wire(&serde_json::json!("public")),
+            Some(CastAudience::Public)
+        );
+        for reserved in ["public", "unknown", "@admins", ""] {
+            assert_eq!(
+                CastAudience::from_wire(&serde_json::json!(["alice", reserved])),
+                None,
+                "{reserved:?} is not a literal reader"
+            );
+        }
+    }
+
     use std::collections::BTreeMap;
     use std::time::Duration;
 
@@ -1286,6 +1307,14 @@ mod tests {
                 .resolve_membership("directory", "auditors")
                 .await,
             ReadersResolution::Unresolved(NoAnswerReason::Malformed),
+        );
+        let url = stub(Router::new().route("/", post(|| async { r#"{"version":1,"readers":["unknown"]}"# }))).await;
+        assert_eq!(
+            services(Some(url), 2000, 65536)
+                .resolve_membership("directory", "auditors")
+                .await,
+            ReadersResolution::Unresolved(NoAnswerReason::Malformed),
+            "the unresolved state is not a reader a directory may name"
         );
         let url = stub(Router::new().route(
             "/",

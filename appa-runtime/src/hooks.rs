@@ -73,7 +73,13 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             {
                 Ok(ToolCallDecision::Allow { spawn }) => HookDecision::AllowCall { spawn },
                 Ok(ToolCallDecision::Control) => HookDecision::PassControl,
-                Ok(ToolCallDecision::Deny { feedback }) => HookDecision::DenyCall { feedback },
+                Ok(ToolCallDecision::Deny {
+                    feedback,
+                    unestablished,
+                }) => HookDecision::DenyCall {
+                    feedback,
+                    unestablished,
+                },
                 Err(error) => fold(error, deny),
             }
         }
@@ -179,9 +185,7 @@ fn control_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall) -> HookDe
         }
         _ => {
             tracing::debug!(trajectory = %acting.0, "control tool refused: no such offer here");
-            HookDecision::DenyCall {
-                feedback: "[appa] this offer no longer stands; re-propose the call".to_string(),
-            }
+            deny("[appa] this offer no longer stands; re-propose the call".to_string())
         }
     }
 }
@@ -232,7 +236,10 @@ fn fold(error: EventError, family: fn(String) -> HookDecision) -> HookDecision {
 }
 
 fn deny(feedback: String) -> HookDecision {
-    HookDecision::DenyCall { feedback }
+    HookDecision::DenyCall {
+        feedback,
+        unestablished: Vec::new(),
+    }
 }
 
 fn block(reason: String) -> HookDecision {

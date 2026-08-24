@@ -181,6 +181,9 @@ pub struct Projection {
     occurrences: BTreeMap<(TrajectoryId, CanonicalDigest), u32>,
     dispatch_calls: BTreeMap<DispatchId, ResolvedCall>,
     receiving_bounds: BTreeMap<DispatchId, EstablishedLabel>,
+    /// The narrowing accepted at the check of each dispatch released under an acceptance: the
+    /// one narrowing a pending-cast resolution on that dispatch need not be accepted again.
+    accepted_narrowings: BTreeMap<DispatchId, crate::check::Narrowing>,
     dispatch_resolutions: BTreeMap<DispatchId, Vec<GroupResolution>>,
     subject_dispatches: BTreeMap<crate::basis::SubjectKey, DispatchId>,
     observations: BTreeMap<DispatchId, ObservedResult>,
@@ -228,6 +231,7 @@ impl Projection {
             occurrences: BTreeMap::new(),
             dispatch_calls: BTreeMap::new(),
             receiving_bounds: BTreeMap::new(),
+            accepted_narrowings: BTreeMap::new(),
             dispatch_resolutions: BTreeMap::new(),
             subject_dispatches: BTreeMap::new(),
             observations: BTreeMap::new(),
@@ -313,6 +317,7 @@ impl Projection {
             occurrences,
             dispatch_calls,
             receiving_bounds,
+            accepted_narrowings,
             dispatch_resolutions,
             subject_dispatches,
             observations,
@@ -525,7 +530,12 @@ impl Projection {
                         v.label = resolved.clone().into_label();
                     }
                 }
-                Fact::Acceptance { .. } | Fact::Ruling { .. } | Fact::ChildReturnAcceptance { .. } => {}
+                Fact::Acceptance {
+                    dispatch, narrowing, ..
+                } => {
+                    accepted_narrowings.insert(dispatch.clone(), narrowing.clone());
+                }
+                Fact::Ruling { .. } | Fact::ChildReturnAcceptance { .. } => {}
                 Fact::Denial {
                     trajectory,
                     digest,
@@ -1327,6 +1337,12 @@ impl Views<'_> {
     /// a race-dependent second acceptance when the live fold has moved since the opening.
     pub(crate) fn receiving_bound(&self, dispatch: &DispatchId) -> Option<&EstablishedLabel> {
         self.projection.receiving_bounds.get(dispatch)
+    }
+
+    /// The narrowing this dispatch was released under, where its check-time block was cleared
+    /// by an acceptance. `None` where the call narrowed nothing at its check.
+    pub(crate) fn accepted_narrowing(&self, dispatch: &DispatchId) -> Option<&crate::check::Narrowing> {
+        self.projection.accepted_narrowings.get(dispatch)
     }
 
     pub(crate) fn dispatch_resolutions(&self, dispatch: &DispatchId) -> Option<&[GroupResolution]> {

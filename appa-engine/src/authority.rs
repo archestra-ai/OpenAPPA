@@ -552,7 +552,12 @@ mod tests {
     #[test]
     fn a_resolution_must_hold_literal_reader_ids() {
         let wide = resolver(&[0], Audience::Public);
-        for bad in [readers(&["@hr"]), readers(&["public"]), readers(&["ap@corp", "@hr"])] {
+        for bad in [
+            readers(&["@hr"]),
+            readers(&["public"]),
+            readers(&["unknown"]),
+            readers(&["ap@corp", "@hr"]),
+        ] {
             assert_eq!(
                 wide.validate(&both_unknown(), &answer(0, bad), &Expansions::default()),
                 Err(CastRefusal::NonLiteralReader)

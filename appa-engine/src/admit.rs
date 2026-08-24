@@ -164,6 +164,19 @@ pub(crate) fn bound_candidate(
     ))
 }
 
+/// The bound a pending-cast resolution on `dispatch` is measured from: the receiving bound the
+/// dispatch pinned, narrowed by the acceptance its release recorded, if one did. The static
+/// part of the tool's delta was accepted at the check, so admission owes no second acceptance
+/// for it; anything the resolution narrows beyond that accepted bound stays owed. Only the
+/// dispatch's own facts move the baseline — never the live fold.
+pub(crate) fn cast_baseline(views: &Views, dispatch: &DispatchId) -> Option<EstablishedLabel> {
+    let receiving = views.receiving_bound(dispatch)?;
+    Some(match views.accepted_narrowing(dispatch) {
+        Some(accepted) => receiving.combine(&accepted.to),
+        None => receiving.clone(),
+    })
+}
+
 /// The candidate a validated pending-cast resolution makes of one confined result.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cast_candidate(
@@ -179,9 +192,9 @@ pub(crate) fn cast_candidate(
     let output_label =
         contract.output_label_for_resolutions(views.tool_resolutions(dispatch).unwrap_or_default(), expansions);
     validate_pending_cast(registry, contract, &output_label, cast, resolved, expansions)?;
-    let receiving = views.receiving_bound(dispatch).ok_or(AdmitError::NotOpen)?;
+    let baseline = cast_baseline(views, dispatch).ok_or(AdmitError::NotOpen)?;
     let label = resolved.clone().into_label();
-    let residual = confined_residual(receiving, &label);
+    let residual = confined_residual(&baseline, &label);
     Ok(DerivedCandidate::Result {
         dispatch: dispatch.clone(),
         source: RawResultDigest::of(body.as_str().as_bytes()),

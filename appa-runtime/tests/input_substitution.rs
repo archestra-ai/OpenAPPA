@@ -91,7 +91,7 @@ async fn report(runtime: &Arc<Runtime>, call: ProposedCall, body: &str) -> HookD
 
 fn feedback_of(decision: &HookDecision) -> String {
     match decision {
-        HookDecision::DenyCall { feedback } => feedback.clone(),
+        HookDecision::DenyCall { feedback, .. } => feedback.clone(),
         other => panic!("expected a deny carrying feedback, got {other:?}"),
     }
 }

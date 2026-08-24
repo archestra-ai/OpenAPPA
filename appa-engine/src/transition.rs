@@ -398,9 +398,10 @@ pub enum FollowUp {
         spent: Vec<ResolvedCall>,
         settled: Vec<Settled>,
     },
-    /// A call in this batch is blocked only for want of a fact a registered cast could
-    /// establish. Nothing is decided and nothing is appended: a resolution advances the family
-    /// basis, so every release and offer this batch would open must be stamped after it.
+    /// A blocked call in this batch consumes an unestablished value a registered cast could
+    /// establish. Nothing is decided; the batch's own admissions and any cast the evidence
+    /// already carried are appended, and no release or offer is: a resolution advances the
+    /// family basis, so every release and offer this batch would open must be stamped after it.
     ProposalsResolve(Vec<EvidenceRequest>),
     Malformed {
         position: usize,
@@ -2496,10 +2497,9 @@ impl<'a> Sequence<'a> {
                         if RawResultDigest::of(value.body.as_str().as_bytes()) != raw_digest {
                             return Err(TransitionRefusal::ForgedLabel);
                         }
-                        let receiving = views
-                            .receiving_bound(dispatch)
-                            .ok_or(TransitionRefusal::UnknownDispatch)?;
-                        if crate::admit::confined_residual(receiving, &resolved.clone().into_label()).is_some() {
+                        let baseline =
+                            crate::admit::cast_baseline(&views, dispatch).ok_or(TransitionRefusal::UnknownDispatch)?;
+                        if crate::admit::confined_residual(&baseline, &resolved.clone().into_label()).is_some() {
                             return Err(TransitionRefusal::AcceptanceMismatch);
                         }
                         resolved.into_label()
@@ -2831,10 +2831,11 @@ impl<'a> Sequence<'a> {
         let fold = views.branch_label(child);
         let dim = registered.transition.dimension();
         let derives = match reason {
-            crate::fact::ReturnRejection::ConsumedDimensionUnresolvable => {
+            crate::fact::ReturnRejection::ConsumedDimensionUnresolvable(unestablished) => {
                 required(&expansions, &crate::plan::cast_selection_groups(self.engine.registry()))?;
                 !fold.is_established(dim)
                     && crate::plan::resolvable_source(self.engine.registry(), &views, &fold, dim, &expansions).is_none()
+                    && *unestablished == crate::check::unestablished_facts(&fold, &[dim])
             }
             crate::fact::ReturnRejection::MandateUnmet => {
                 required(&expansions, registered.groups())?;
@@ -3187,10 +3188,8 @@ impl<'a> Sequence<'a> {
         crate::admit::validate_pending_cast(self.engine.registry(), contract, &raw, cast, &resolved, expansions)
             .map_err(|_| TransitionRefusal::InadmissibleResolution)?;
         let views = self.projection.view(trajectory);
-        let receiving = views
-            .receiving_bound(dispatch)
-            .ok_or(TransitionRefusal::UnknownDispatch)?;
-        match crate::admit::confined_residual(receiving, &value.label) {
+        let baseline = crate::admit::cast_baseline(&views, dispatch).ok_or(TransitionRefusal::UnknownDispatch)?;
+        match crate::admit::confined_residual(&baseline, &value.label) {
             derived_residual @ Some(_) if residual == &derived_residual => Ok(()),
             _ => Err(TransitionRefusal::AcceptanceMismatch),
         }
