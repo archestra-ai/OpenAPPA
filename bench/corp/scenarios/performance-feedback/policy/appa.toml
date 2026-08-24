@@ -3,7 +3,7 @@ version = 1
 trust_chain = ["suspicious", "internal"]
 [policy.boundary]
 trust = "internal"
-audience = { exactly = ["public"] }
+audience = ["public"]
 [[policy.dynamic_resolver]]
 name = "personal-file-readers"
 inputs = ["subject"]

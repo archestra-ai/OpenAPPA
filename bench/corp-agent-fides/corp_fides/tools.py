@@ -78,7 +78,7 @@ resolves ``$to`` to the literal address at dispatch. A ceiling ranks
 sensitivity; a reader set answers "released to whom".
 
 The **hr** row still transcribes exactly, because its audience is one symbolic
-token: ``exactly = ["hr"]`` admits no address, so ``includes($to)`` degenerates
+token: ``audience = ["hr"]`` admits no address, so ``includes($to)`` degenerates
 there into "is this trajectory still ``Public``?" — which is precisely
 ``max_allowed_confidentiality=public``. Private-or-not is the whole question,
 and a ceiling can ask it.

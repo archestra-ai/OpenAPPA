@@ -83,7 +83,7 @@ const TERMS = {
   emits:
     "What a successful tool call appends to the log, declared as effects = [...] in the contract.",
   exactly:
-    "In a boundary label, a starting label, a sanitizer mandate, or a cast constant: the reader set becomes precisely this list. A delta names the whole reader set already, so it writes its list directly and takes no operator.",
+    "In a sanitizer mandate's destination or a cast constant: the reader set becomes precisely this list. A field that states a whole reader set on its own — a delta, the boundary label, the starting label — writes its list directly and takes no operator.",
   includes: "In a requires condition: the run's allowed readers must contain these.",
   cap: "In a requires condition: the run's allowed readers must stay within this set. In may_cast: the ceiling a resolved audience must stay within; only a public cap admits a public resolution.",
   tags: "Routing names with no algebraic life; the currency of authority, cast, and sanitizer scope.",

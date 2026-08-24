@@ -4,7 +4,7 @@ trust_chain = ["suspicious", "internal"]
 
 [policy.boundary]
 trust = "internal"
-audience = { exactly = ["public"] }
+audience = ["public"]
 
 # The benchmark runner replaces this non-routable URL with an isolated
 # loopback fixture for each episode. Both declarations use the EXT-2 protocol.

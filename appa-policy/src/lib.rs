@@ -121,12 +121,6 @@ pub enum ConfigError {
     BadAttention { context: String, found: String },
     #[error("[limits] planner_cap is 0: a tool's worst case is at least one plan, so a zero cap refuses every tool")]
     ZeroPlannerCap,
-    #[error("[deployment] {field}: expected one of {expected}, found {found:?}")]
-    BadDeploymentToken {
-        field: &'static str,
-        expected: &'static str,
-        found: String,
-    },
     #[error("[deployment] names tool {tool} in both assumed_tools and provider_run_tools")]
     ConflictingExecutorException { tool: String },
     #[error("registry rejected: {0}")]
@@ -407,14 +401,26 @@ struct RawDeployment {
 #[serde(deny_unknown_fields)]
 struct RawStartingLabel {
     trust: Option<String>,
-    audience: Option<RawStartingAudience>,
+    audience: Option<RawWholeAudience>,
 }
 
+/// A field that names a whole reader set instead of bounding one: the list itself, or a bare
+/// string as its one-entry spelling. It carries no operator, because it leaves nothing for an
+/// operator to choose between.
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum RawStartingAudience {
-    Token(String),
-    Exactly(RawExactly),
+enum RawWholeAudience {
+    Reader(String),
+    Readers(Vec<String>),
+}
+
+impl RawWholeAudience {
+    fn list(&self) -> &[String] {
+        match self {
+            RawWholeAudience::Reader(reader) => std::slice::from_ref(reader),
+            RawWholeAudience::Readers(readers) => readers,
+        }
+    }
 }
 
 impl RawDeployment {
@@ -431,17 +437,7 @@ impl RawDeployment {
                 };
                 let audience = match label.audience {
                     None => Audience::Public,
-                    Some(RawStartingAudience::Token(token)) if token == "public" => Audience::Public,
-                    Some(RawStartingAudience::Token(token)) => {
-                        return Err(ConfigError::BadDeploymentToken {
-                            field: "starting_label audience",
-                            expected: r#""public" or { exactly = [...] }"#,
-                            found: token,
-                        });
-                    }
-                    Some(RawStartingAudience::Exactly(a)) => {
-                        parse_audience(&a.exactly, "deployment starting_label audience")?
-                    }
+                    Some(written) => parse_audience(written.list(), "deployment starting_label audience")?,
                 };
                 Label::new(Dim::Known(trust), Dim::Known(audience))
             }
@@ -522,7 +518,7 @@ struct RawChild {
 #[serde(deny_unknown_fields)]
 struct RawBoundary {
     trust: Option<String>,
-    audience: Option<RawExactly>,
+    audience: Option<RawWholeAudience>,
 }
 
 impl RawBoundary {
@@ -532,7 +528,7 @@ impl RawBoundary {
             None => top_trust(chain),
         };
         let audience = match self.audience {
-            Some(a) => parse_audience(&a.exactly, "boundary audience")?,
+            Some(written) => parse_audience(written.list(), "boundary audience")?,
             None => Audience::Public,
         };
         Ok(Label::new(Dim::Known(trust), Dim::Known(audience)))
@@ -786,13 +782,13 @@ impl RawDelta {
                         references.record(ResolverReturn::Audience, reference?);
                         None
                     }
-                    None => Some(AudienceDelta::Static(parse_delta_audience(
+                    None => Some(AudienceDelta::Static(parse_whole_audience(
                         std::slice::from_ref(&token),
                         &context,
                     )?)),
                 }
             }
-            Some(RawDeltaAudience::Readers(readers)) => Some(AudienceDelta::Static(parse_delta_audience(
+            Some(RawDeltaAudience::Readers(readers)) => Some(AudienceDelta::Static(parse_whole_audience(
                 &readers,
                 &format!("{ctx} delta audience"),
             )?)),
@@ -1220,8 +1216,10 @@ fn parse_trust(name: &str, chain: &TrustChain, context: &str) -> Result<Trust, C
     })
 }
 
+/// A whole reader set the algebra holds directly — the `[boundary]` label and the deployment's
+/// `starting_label`. A label names literal readers only, so a group mention is refused here.
 fn parse_audience(list: &[String], context: &str) -> Result<Audience, ConfigError> {
-    match parse_declared_audience(list, context)? {
+    match parse_whole_audience(list, context)? {
         DeclaredAudience::Public => Ok(Audience::Public),
         DeclaredAudience::Restricted { readers, groups } => match groups.into_iter().next() {
             None => Ok(Audience::Restricted(readers)),
@@ -1235,10 +1233,11 @@ fn parse_audience(list: &[String], context: &str) -> Result<Audience, ConfigErro
     }
 }
 
-/// The reader set a `delta.audience` declares. The empty list is legal here and nowhere else: a
-/// delta states what the result carries, and a result no reader may hold is a set with no members.
-/// Every other reader set bounds or extends an existing one, where an empty list says nothing.
-fn parse_delta_audience(list: &[String], context: &str) -> Result<DeclaredAudience, ConfigError> {
+/// The reader set a field that names a whole set declares: a `delta`, the `[boundary]` label, the
+/// deployment's `starting_label`. The empty list is legal here and nowhere else. A field that
+/// names the whole set can name one with no members; every other reader set bounds or extends a
+/// set that already exists, where an empty list says nothing.
+fn parse_whole_audience(list: &[String], context: &str) -> Result<DeclaredAudience, ConfigError> {
     if list.is_empty() {
         return Ok(DeclaredAudience::restricted(Vec::new()));
     }
@@ -1928,13 +1927,6 @@ delta = { trust = "resolver.one.trust", audience = "resolver.two.audience" }
             ));
         }
         assert!(matches!(
-            Config::from_toml_str(&with("starting_label = { audience = \"everyone\" }")),
-            Err(ConfigError::BadDeploymentToken {
-                field: "starting_label audience",
-                ..
-            })
-        ));
-        assert!(matches!(
             Config::from_toml_str(&with("assumed_tools = [\"t\"]\nprovider_run_tools = [\"t\"]")),
             Err(ConfigError::ConflictingExecutorException { tool }) if tool == "t"
         ));
@@ -2039,6 +2031,66 @@ delta = { trust = "resolver.one.trust", audience = "resolver.two.audience" }
         );
     }
 
+    /// The `[boundary]` label and the deployment's `starting_label` name a whole reader set the
+    /// same way a delta does, so each is written as the list itself. A label holds literal readers
+    /// only, so a group mention is still refused at both.
+    #[test]
+    fn a_label_audience_is_the_reader_list_itself() {
+        let base = "version = 1\n[[tool]]\nname = \"t\"\ndelta = {}\n";
+        let boundary = |written: &str| format!("{base}[boundary]\naudience = {written}\n");
+        let starting = |written: &str| format!("{base}[deployment]\nstarting_label = {{ audience = {written} }}\n");
+        let boundary_audience = |written: &str| {
+            Config::from_toml_str(&boundary(written))
+                .expect("the boundary label loads")
+                .boundary_label()
+                .audience
+                .clone()
+        };
+        let starting_audience = |written: &str| {
+            Config::from_toml_str(&starting(written))
+                .expect("the starting label loads")
+                .engine()
+                .profile()
+                .starting_label()
+                .audience
+                .clone()
+        };
+        for audience in [&boundary_audience as &dyn Fn(&str) -> Dim<Audience>, &starting_audience] {
+            assert_eq!(
+                audience(r#"["alice", "bob"]"#),
+                Dim::Known(Audience::restricted([ReaderId::new("alice"), ReaderId::new("bob")]))
+            );
+            assert_eq!(
+                audience(r#""alice""#),
+                Dim::Known(Audience::restricted([ReaderId::new("alice")])),
+                "a bare string is the one-entry list"
+            );
+            assert_eq!(audience(r#""public""#), Dim::Known(Audience::Public));
+            assert_eq!(audience(r#"["public"]"#), Dim::Known(Audience::Public));
+            assert_eq!(
+                audience("[]"),
+                Dim::Known(Audience::restricted(Vec::new())),
+                "the empty list is a label no reader holds"
+            );
+        }
+        for site in [&boundary as &dyn Fn(&str) -> String, &starting] {
+            assert!(
+                matches!(
+                    Config::from_toml_str(&site(r#""@team""#)),
+                    Err(ConfigError::BadAudience { .. })
+                ),
+                "a label names literal readers only"
+            );
+            assert!(
+                matches!(
+                    Config::from_toml_str(&site(r#"{ exactly = ["alice"] }"#)),
+                    Err(ConfigError::Parse(_))
+                ),
+                "a label names the whole set and takes no operator"
+            );
+        }
+    }
+
     #[test]
     fn a_group_written_in_a_declaration_registers_and_labels_refuse_it() {
         let policy = r#"
@@ -2127,8 +2179,8 @@ confined_results = ["read", "send"]
 
         let base = "version = 1\n[membership]\nname = \"directory\"\n[[tool]]\nname = \"t\"\ndelta = {}\n";
         for site in [
-            "[deployment]\nstarting_label = { audience = { exactly = [\"@team\"] } }\n",
-            "[boundary]\naudience = { exactly = [\"@team\"] }\n",
+            "[deployment]\nstarting_label = { audience = [\"@team\"] }\n",
+            "[boundary]\naudience = [\"@team\"]\n",
         ] {
             assert!(
                 matches!(

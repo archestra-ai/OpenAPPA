@@ -19,27 +19,27 @@ trust_chain = ["suspicious", "trusted"]
 
 ### Reader sets
 
-A `delta` states the reader set the tool's own result carries. It names the whole set, so it is written as the list itself and takes no operator:
+Three fields state a whole reader set on their own: `delta.audience`, the reader set a tool's result carries, and the `[boundary]` and `[deployment].starting_label` audiences, the reader set a turn enters at. Each is written as the list itself and takes no operator:
 
 | Form | Meaning | Example |
 |---|---|---|
-| A list | The result reaches exactly these readers. | `delta = { audience = ["support", "@auditors"] }` |
+| A list | Exactly these readers. | `delta = { audience = ["support", "@auditors"] }` |
 | A bare string | The one-entry list. | `delta = { audience = "@support" }` |
-| `"public"` | The result reaches every reader. | `delta = { audience = "public" }` |
-| `[]` | No reader holds the result. Once it folds in, every `includes` check fails. | `delta = { audience = [] }` |
+| `"public"` | Every reader. | `delta = { audience = "public" }` |
+| `[]` | No reader. Once an empty set folds in, every `includes` check fails. | `delta = { audience = [] }` |
 
-Two bare strings are reserved and never read as a reader ID: `"unknown"` declares a pending cast, and a string starting with `resolver.` reads a dynamic resolver result. Write either name in a list to mean the reader.
+A label holds literal readers, so `[boundary]` and `starting_label` refuse an `@group`; a `delta` accepts one and resolves it per call. In a `delta`, two bare strings are reserved and never read as a reader ID: `"unknown"` declares a pending cast, and a string starting with `resolver.` reads a dynamic resolver result. Write either name in a list to mean the reader.
 
-Every other reader set bounds or extends a set that already exists. Each one requires an explicit **operator** to prevent ambiguity between exact matches and lower/upper bounds:
+Every other reader set names an explicit **operator**, which prevents ambiguity between exact matches and lower/upper bounds:
 
 | Operator | Meaning | Example Use |
 |---|---|---|
-| **`exactly`** | Fixes the set to these exact members. | `[boundary]` `audience = { exactly = ["public"] }` |
 | **`includes`** | Requires at least these members (`audience ⊇ recipients`). | `requires = { audience = { includes = ["$recipient"] } }` |
 | **`cap`** | Bounds the allowed audience from above (`audience ⊆ C`). | `requires = { audience = { cap = ["internal"] } }` |
+| **`exactly`** | Fixes the set to these exact members. Only a sanitizer mandate's `to` and a cast's `constant` take it. | `to = { exactly = ["public"] }` |
 | **`may_add`** | Bounds the readers an authority is permitted to cover. | `can_cover_readers = { may_add = ["public"] }` |
 
-One of these declarations written without its operator causes a policy load error.
+Writing the wrong form for a field causes a policy load error.
 
 ### Groups
 

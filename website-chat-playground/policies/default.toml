@@ -4,7 +4,7 @@ trust_chain = ["suspicious", "trusted"]
 # User turns enter at trusted with a public audience.
 [boundary]
 trust = "trusted"
-audience = { exactly = ["public"] }
+audience = ["public"]
 
 # A policy registers a component; the deployment binds who performs it.
 # You declare that recipients are resolved by a directory — the service

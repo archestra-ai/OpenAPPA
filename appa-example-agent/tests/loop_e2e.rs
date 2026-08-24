@@ -222,7 +222,7 @@ name = "read_hr"
 delta = { audience = ["hr"] }
 
 [policy.boundary]
-audience = { exactly = ["public"] }
+audience = ["public"]
 "#;
     let host = ToolHost::default();
     host.answers("read_hr", "Alice Chen, SSN 4821-9930");
