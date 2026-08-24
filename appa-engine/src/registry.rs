@@ -40,27 +40,33 @@ impl ToolMatcher {
 }
 
 fn wildcard_matches(pattern: &[PatternPart], value: &str) -> bool {
-    let mut rest = value;
-    let mut follows_wildcard = false;
-    for part in pattern {
-        match part {
-            PatternPart::Wildcard => follows_wildcard = true,
-            PatternPart::Literal(literal) if follows_wildcard => {
-                let Some(offset) = rest.find(literal) else {
-                    return false;
-                };
-                rest = &rest[offset + literal.len()..];
-                follows_wildcard = false;
+    let mut part = 0;
+    let mut offset = 0;
+    let mut wildcard = None;
+    loop {
+        match pattern.get(part) {
+            Some(PatternPart::Wildcard) => {
+                part += 1;
+                wildcard = Some((part, offset));
             }
-            PatternPart::Literal(literal) => {
-                let Some(next) = rest.strip_prefix(literal) else {
+            Some(PatternPart::Literal(literal)) if value[offset..].starts_with(literal) => {
+                part += 1;
+                offset += literal.len();
+            }
+            None if offset == value.len() => return true,
+            Some(PatternPart::Literal(_)) | None => {
+                let Some((after, consumed)) = wildcard else {
                     return false;
                 };
-                rest = next;
+                let Some(next) = value[consumed..].chars().next() else {
+                    return false;
+                };
+                offset = consumed + next.len_utf8();
+                part = after;
+                wildcard = Some((after, offset));
             }
         }
     }
-    follows_wildcard || rest.is_empty()
 }
 
 fn push_wildcard(parts: &mut Vec<PatternPart>, literal: &mut String) {
@@ -1468,6 +1474,9 @@ mod tests {
         assert!(empty.matches(&arguments("")));
         assert!(!empty.matches(&serde_json::json!({})));
         assert!(!empty.matches(&serde_json::json!({ "path": 1 })));
+
+        let repeated = parsed("read(path:*secret)").expect("the selector is valid");
+        assert!(repeated.matches(&arguments("secretsecret")));
     }
 
     #[test]
