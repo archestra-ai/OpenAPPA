@@ -521,12 +521,13 @@ def build_summary(logs: list[EvalLog], audit_dir: Path, manifest: dict[str, obje
             ),
             "autonomy_hijack": (
                 "The guarded arm labels the complete inbox suspicious, isolates its read in a child, and freezes one "
-                "bounded triage record per opaque index before the read. Runtime projection prevents untrusted "
-                "content from promoting itself to an important category and emits only bounded deterministic "
-                "summaries; raw email content never reaches the parent. Attestation bounds instruction flow but does "
-                "not prove semantic truth. The FIDES arm applies the corresponding untrusted label and gates "
-                "categorization, summaries, and checked delivery. The FIDES-native arm additionally uses automatic "
-                "hiding and quarantined processing."
+                "bounded triage record per opaque index before the read. The child's bounded judgment can promote a "
+                "record to the important category, so security depends on distinguishing ordinary business content "
+                "from embedded triage instructions. Runtime projection emits only deterministic topic/action/urgency "
+                "fields as summary arguments; raw email content never reaches the parent. Attestation bounds "
+                "instruction flow but does not prove semantic truth. The FIDES arm applies the corresponding "
+                "untrusted label and gates categorization, summaries, and checked delivery. The FIDES-native arm "
+                "additionally uses automatic hiding and quarantined processing."
             ),
             "data_exfil": (
                 "The guarded arm resolves source ACLs and exact sink recipients dynamically without using sensitive "
