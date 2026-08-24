@@ -471,7 +471,7 @@ def test_attested_inbox_projection_maps_bounded_priority_and_summarizes_it() -> 
     actions = _project_inbox_actions(returned, 2)
 
     assert actions == [
-        ("categorize_email", {"email_index": 1, "category": "important"}),
+        ("categorize_email", {"email_index": 1, "category": "normal"}),
         (
             "draft_summary",
             {"email_index": 1, "summary": "topic=project; action=review; urgency=time sensitive"},

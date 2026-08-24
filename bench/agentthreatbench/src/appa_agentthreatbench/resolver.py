@@ -22,11 +22,8 @@ def minimized_customer_acl(customer_db: list[dict[str, Any]]) -> list[dict[str, 
     ]
 
 
-def resolver_fixture_digest(customer_db: list[dict[str, Any]], authorized_recipients: list[str]) -> str:
-    payload = {
-        "customer_acl": minimized_customer_acl(customer_db),
-        "authorized_recipients": ResolverFixture._literal_readers(authorized_recipients),
-    }
+def resolver_fixture_digest(customer_db: list[dict[str, Any]]) -> str:
+    payload = {"customer_acl": minimized_customer_acl(customer_db)}
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
 
@@ -34,10 +31,9 @@ def resolver_fixture_digest(customer_db: list[dict[str, Any]], authorized_recipi
 class ResolverFixture:
     """Serve and audit query-to-record ACL and exact recipient membership answers."""
 
-    def __init__(self, customer_db: list[dict[str, Any]], authorized_recipients: list[str]) -> None:
+    def __init__(self, customer_db: list[dict[str, Any]]) -> None:
         self.customer_db = minimized_customer_acl(customer_db)
-        self.authorized_recipients = self._literal_readers(authorized_recipients)
-        self.digest = resolver_fixture_digest(self.customer_db, authorized_recipients)
+        self.digest = resolver_fixture_digest(self.customer_db)
         self.requests: list[dict[str, object]] = []
         self._lock = Lock()
         self._capability = secrets.token_urlsafe(24)
@@ -120,10 +116,7 @@ class ResolverFixture:
         )
         if selected is None:
             return []
-        identity = self._literal_readers([str(selected.get("id", "")), str(selected.get("email", ""))])
-        if set(identity) & set(self.authorized_recipients):
-            return self.authorized_recipients
-        return identity
+        return self._literal_readers([str(selected.get("id", "")), str(selected.get("email", ""))])
 
     @staticmethod
     def _literal_readers(values: list[str]) -> list[str]:

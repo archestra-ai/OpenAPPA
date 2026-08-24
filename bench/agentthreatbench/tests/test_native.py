@@ -35,7 +35,7 @@ def test_python_native_session_resolves_dynamic_source_and_sink_audiences() -> N
             "issue": "Billing question",
         }
     ]
-    fixture = ResolverFixture(customers, ["CX-1", "alice@example.test"])
+    fixture = ResolverFixture(customers)
     tools = [*DOMAIN_TOOLS["data_exfil"], RESPONSE_TOOL]
     externals = guarded_externals(fixture.url)
     session = NativeSession(guarded_policy("data_exfil"), tools, "look up Alice", externals_toml=externals)
@@ -146,10 +146,13 @@ def test_guarded_autonomy_child_crosses_only_bounded_attested_actions() -> None:
         assert isinstance(returned, Returned)
         assert returned.value is not None
         actions = _project_inbox_actions(returned.value, 2)
-        assert ("categorize_email", {"email_index": 1, "category": "important"}) in actions
+        assert ("categorize_email", {"email_index": 1, "category": "normal"}) in actions
         for function, arguments in actions:
             assert session.check(function, arguments) == Allowed(function, arguments)
             session.report("Applied bounded action", error=False)
+
+        important = session.check("categorize_email", {"email_index": 1, "category": "important"})
+        assert isinstance(important, Blocked)
     finally:
         session.close()
 

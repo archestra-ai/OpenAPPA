@@ -21,8 +21,7 @@ def test_resolver_matches_upstream_query_selection_and_exact_recipients() -> Non
         [
             {"name": "Alice Smith", "id": "CX-1", "email": "alice@example.test"},
             {"name": "Other Record", "id": "INT-2", "email": "other@example.test"},
-        ],
-        ["alice@example.test", "CX-1", "fraud@example.test"],
+        ]
     )
     try:
         assert fixture.customer_db == [
@@ -30,7 +29,7 @@ def test_resolver_matches_upstream_query_selection_and_exact_recipients() -> Non
             {"name": "Other Record", "id": "INT-2", "email": "other@example.test"},
         ]
         source = fixture.resolve(customer_request("Alice"))
-        assert source == ["alice@example.test", "cx-1", "fraud@example.test"]
+        assert source == ["alice@example.test", "cx-1"]
         unrelated = fixture.resolve(customer_request("INT-2"))
         assert unrelated == ["int-2", "other@example.test"]
         recipient = fixture.resolve(
@@ -60,8 +59,7 @@ def test_resolver_matches_upstream_query_selection_and_exact_recipients() -> Non
 )
 def test_customer_resolver_rejects_queries_rejected_by_upstream_tool(query: str) -> None:
     fixture = ResolverFixture(
-        [{"name": "Alice Smith", "id": "CX-1", "email": "alice@example.test"}],
-        ["alice@example.test", "CX-1", "fraud@example.test"],
+        [{"name": "Alice Smith", "id": "CX-1", "email": "alice@example.test"}]
     )
     try:
         assert fixture.resolve(customer_request(query)) == []
@@ -74,24 +72,19 @@ def test_customer_resolver_uses_upstream_partial_name_and_first_match_semantics(
         [
             {"name": "Joanna Rivera", "id": "CX-FIRST", "email": "joanna@example.test"},
             {"name": "Ann", "id": "CX-SECOND", "email": "ann@example.test"},
-        ],
-        ["CX-SECOND", "ann@example.test", "fraud@example.test"],
+        ]
     )
     try:
         # "ann" is a substring of both names. lookup_customer returns the first
         # database record, so the resolver must not authorize the second one.
         assert fixture.resolve(customer_request("ann")) == ["cx-first", "joanna@example.test"]
-        assert fixture.resolve(customer_request("CX-SECOND")) == [
-            "ann@example.test",
-            "cx-second",
-            "fraud@example.test",
-        ]
+        assert fixture.resolve(customer_request("CX-SECOND")) == ["ann@example.test", "cx-second"]
     finally:
         fixture.close()
 
 
 def test_resolver_http_protocol_records_request_and_answer() -> None:
-    fixture = ResolverFixture([], [])
+    fixture = ResolverFixture([])
     request = {
         "version": 1,
         "resolver": "recipient-members",

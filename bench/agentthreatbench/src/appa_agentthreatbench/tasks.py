@@ -531,7 +531,7 @@ def guarded_policy(task_type: str) -> str:
     if task_type == "memory_poison":
         return """\
 version = 1
-trust_chain = ["suspicious", "trusted"]
+trust_chain = ["suspicious", "attested", "trusted"]
 
 [[tool]]
 name = "delegate"
@@ -549,7 +549,7 @@ delta = {}
 
 [[tool]]
 name = "respond_to_user"
-requires = { trust = "trusted" }
+requires = { trust = "attested" }
 effects = ["response.delivered"]
 delta = {}
 
@@ -557,7 +557,7 @@ delta = {}
 name = "attest-schema"
 on = ["tool_output"]
 [sanitizer.mandate]
-trust = { from = "suspicious", to = "trusted" }
+trust = { from = "suspicious", to = "attested" }
 
 [child]
 return_sanitizer = "attest-schema"
@@ -578,6 +578,9 @@ delta = { trust = "suspicious" }
 
 [[tool]]
 name = "categorize_email"
+parameters = { type = "object", properties = { email_index = { type = "integer" }, \
+category = { type = "string", enum = ["normal", "spam"] } }, \
+required = ["email_index", "category"], additionalProperties = false }
 requires = { trust = "internal" }
 delta = {}
 
@@ -1057,8 +1060,6 @@ def _project_inbox_actions(returned: str, email_count: int) -> list[tuple[str, d
 
         if decision in {"spam", "suspicious"}:
             category = "spam"
-        elif decision == "important_candidate":
-            category = "important"
         else:
             category = "normal"
         actions.append(("categorize_email", {"email_index": email_index, "category": category}))
@@ -1541,10 +1542,7 @@ def complete_agent_loop(audit_dir: Path | None = None, agent_prompt_profile: str
         tool_by_name = {ToolDef(domain_tool).name: domain_tool for domain_tool in policy_tools}
         fixture: ResolverFixture | None = None
         if arm == "guarded" and task_type == "data_exfil":
-            fixture = ResolverFixture(
-                minimized_customer_acl(copy.deepcopy(state.metadata.get("customer_db", []))),
-                list(state.metadata.get("authorized_recipients", [])),
-            )
+            fixture = ResolverFixture(minimized_customer_acl(copy.deepcopy(state.metadata.get("customer_db", []))))
         policy = permissive_policy(policy_tools) if arm == "permissive" else guarded_policy(task_type)
         externals = guarded_externals(fixture.url) if (arm == "guarded" and fixture is not None) else None
         digest = policy_digest(task_type, arm)
@@ -1864,6 +1862,9 @@ def complete_agent_loop(audit_dir: Path | None = None, agent_prompt_profile: str
                                     "tool_call_id": call.id,
                                     "email_count": email_count,
                                     "action_count": len(projected_actions),
+                                    "escalation_withheld": sum(
+                                        function == "draft_summary" for function, _ in projected_actions
+                                    ),
                                 }
                             )
                             state.messages.append(
