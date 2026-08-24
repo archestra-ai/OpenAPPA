@@ -468,6 +468,6 @@ The runtime consults a resolver-backed cast with a JSON POST. The comments expla
 }
 ```
 
-The response is `{"version": 1, "answer": {"trust": "suspicious", "audience": "public"}}`, where `audience` is `"public"` or an array of literal reader ids.
+The response is `{"version": 1, "answer": {"trust": "suspicious", "audience": "public"}}`, where `audience` is `"public"` or an array of literal reader ids. Anything else — an error status, a timeout, a malformed body, or an empty answer — is no answer: nothing is recorded, the next applicable cast is consulted, and when none answers the call stays undecided and can be proposed again.
 
 A tool contract can also declare a pending dimension with `delta = { trust = "unknown" }`. When configured in `confined_results`, the runtime withholds raw results from the model until the cast evaluates the payload. If the resolved label restricts the trajectory, OpenAPPA presents a narrowing prompt to the agent before delivering the data.
