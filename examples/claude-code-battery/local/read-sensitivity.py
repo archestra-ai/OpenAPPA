@@ -1,0 +1,33 @@
+import json
+import sys
+
+
+def main():
+    request = json.load(sys.stdin)
+
+    if request.get("version") != 1:
+        raise ValueError("unsupported request version")
+    if request.get("resolver") != "local.read-sensitivity":
+        raise ValueError("unexpected resolver name")
+
+    args = request.get("args")
+    file_path = args.get("file_path") if isinstance(args, dict) else None
+    if not isinstance(file_path, str) or not file_path:
+        raise ValueError("args.file_path must be a non-empty string")
+
+    sensitive = file_path != ".env.example" and (
+        file_path.startswith(".") or file_path.startswith("clients/")
+    )
+    audience = ["claude-session"] if sensitive else "public"
+    json.dump(
+        {"version": 1, "result": {"delta.audience": audience}},
+        sys.stdout,
+    )
+    sys.stdout.write("\n")
+
+
+try:
+    main()
+except Exception as error:
+    print(f"local-read-sensitivity: {error}", file=sys.stderr)
+    raise SystemExit(1)

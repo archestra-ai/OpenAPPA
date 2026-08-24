@@ -1,0 +1,28 @@
+# Included proposal battery: first matching Slack contract wins.
+
+[policy]
+version = 1
+
+# Engineering channels accept trusted internal flows without a fresh prompt.
+[[policy.tool]]
+name = "mcp__slack__slack_send_message(channel_id:C123*)"
+requires = { trust = "trusted" }
+effects = ["egress", "mutation"]
+delta = {}
+
+# Every unmatched channel requires fresh approval.
+[[policy.tool]]
+name = "mcp__slack__slack_send_message"
+requires = { trust = "trusted", attention = ["hitl"] }
+effects = ["egress", "mutation"]
+delta = {}
+
+# Engineering history is private to the Slack-internal audience.
+[[policy.tool]]
+name = "mcp__slack__slack_get_channel_history(channel_id:C123*)"
+delta = { trust = "suspicious", audience = { exactly = ["slack-internal"] } }
+
+# An unmatched channel stays conservatively restricted.
+[[policy.tool]]
+name = "mcp__slack__slack_get_channel_history"
+delta = { trust = "suspicious", audience = { exactly = ["slack-unclassified"] } }
