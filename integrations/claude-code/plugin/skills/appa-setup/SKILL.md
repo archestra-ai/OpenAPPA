@@ -1,6 +1,6 @@
 ---
 name: appa-setup
-description: Install or upgrade the OpenAPPA runtime for this Claude Code plugin - download the appa-runtime release binary, verify its checksum and version, install the clappa command and the APPA statusline, and start the runtime. Use when the user asks to set up APPA, install or upgrade appa-runtime, or when a session reports that the runtime binary is not installed.
+description: Install or upgrade the OpenAPPA runtime for this Claude Code plugin - download the appa-runtime release binary, verify its checksum and version, install the clappa command and the APPA statusline, start the runtime, and ask whether the install may be counted. Use when the user asks to set up APPA, install or upgrade appa-runtime, or when a session reports that the runtime binary is not installed.
 ---
 
 # appa-setup
@@ -59,6 +59,35 @@ Resolve both paths in a shell; do not guess.
 
    If the starter exits non-zero, the runtime is not running. Report that, quote the last lines of `runtime.stderr.log` in the data directory, and stop. Do not describe the setup as finished.
 
-9. Finish by telling the user that the runtime is running and that `clappa` starts a protected session. Add a tip on the next line: run the `/appa-tool-sync` skill in the `clappa` session to build the initial security policy. Format both `clappa` and `/appa-tool-sync` as inline code.
+9. Ask whether to report the install, and send nothing unless the answer is
+   yes. Ask in one short question, in your own words, covering exactly this:
+   the project counts installs, one event says which version and which OS and
+   architecture, nothing that identifies them or their machine is included or
+   stored, and `APPA_TELEMETRY=0` refuses it permanently.
+
+   Treat only a clear yes as yes. Silence, a shrug, "whatever", or moving on to
+   another question are all no. Do not ask twice, do not argue with a no, and
+   do not report it later in the session. A no costs the user nothing else: the
+   install is already finished either way.
+
+   On a yes, run the reporter once, taking `<version>` from the `version.txt`
+   downloaded in step 2 and `<os>` and `<arch>` from the asset you picked in
+   step 1:
+
+   ```sh
+   sh "<plugin files>/report-install.sh" <version> <os> <arch>
+   ```
+
+   On native Windows:
+
+   ```powershell
+   powershell.exe -NoProfile -File "<plugin files>\report-install.ps1" -Version <version> -Os <os> -Arch <arch>
+   ```
+
+   It exits 0 whether or not the event reaches anyone. Do not check it, retry
+   it, or mention it again — a failed count is not the user's problem, and an
+   install that worked must not be reported as broken because a metric missed.
+
+10. Finish by telling the user that the runtime is running and that `clappa` starts a protected session. Add a tip on the next line: run the `/appa-tool-sync` skill in the `clappa` session to build the initial security policy. Format both `clappa` and `/appa-tool-sync` as inline code.
 
 If the `curl` download fails, ask the user to install the GitHub CLI, then try again with `gh release download`.

@@ -2669,6 +2669,130 @@ samp {
   }
 }
 
+/* ————————————————————————————————————————————————
+   Analytics consent notice
+   ———————————————————————————————————————————————— */
+
+/* A bar rather than a dialog: unanswered, it must still leave the docs
+   readable. It sits below the search overlay (50) so a search the reader
+   opened deliberately is never covered by a notice that arrived on a timer. */
+.cookie-notice {
+  position: fixed;
+  z-index: 45;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  width: calc(100% - 32px);
+  max-width: 620px;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 14px 16px 14px 20px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.16);
+  animation: cookie-notice-in 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.cookie-notice.is-closing {
+  animation: cookie-notice-out 160ms ease both;
+}
+
+.cookie-notice-text {
+  flex: 1 1 auto;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-weak);
+}
+
+.cookie-notice-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Declining is a plain control, not a styled button: the two answers carry the
+   same weight here, and dressing only one of them would be a thumb on the
+   scale of a question the reader is meant to answer freely. */
+.cookie-notice-skip {
+  padding: 8px 10px;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text-weak);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 120ms ease;
+}
+
+.cookie-notice-skip:hover {
+  color: var(--text-strong);
+}
+
+.cookie-notice-accept {
+  padding: 8px 16px;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-inverted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 120ms ease;
+}
+
+.cookie-notice-accept:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.cookie-notice-skip:focus-visible,
+.cookie-notice-accept:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@keyframes cookie-notice-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(12px);
+  }
+}
+
+@keyframes cookie-notice-out {
+  to {
+    opacity: 0;
+    transform: translateX(-50%) translateY(6px);
+  }
+}
+
+@media (max-width: 560px) {
+  .cookie-notice {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+    padding: 16px;
+  }
+
+  .cookie-notice-actions {
+    justify-content: flex-end;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cookie-notice,
+  .cookie-notice.is-closing {
+    animation: none;
+  }
+}
+
 /* Tailwind utility names for the shadcn tokens. Two remaps on purpose:
    `--color-accent` reads the ui hover-surface token (the site's `--accent`
    is the strong green and stays out of component hover backgrounds), and

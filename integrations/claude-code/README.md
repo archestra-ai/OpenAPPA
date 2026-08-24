@@ -267,3 +267,13 @@ every statusline refresh:
   unprotected session.
 - **The plugin adds roughly zero tokens to a session.** The protection
   is hooks and an MCP server, not prompt text.
+- **The install asks once whether it may be counted.** On yes, `/appa-setup`
+  sends a single event naming the version, OS and architecture, and nothing
+  else — no identifier for you or the machine, and nothing kept on disk to
+  recognise you later. On no, or on no answer, it sends nothing. Set
+  `APPA_TELEMETRY=0` to refuse it without being asked, which is the way to
+  handle a scripted or fleet install. The runtime itself never reports
+  anything: it still binds loopback only and makes no outbound call of its
+  own. The reporters are `report-install.sh` and `report-install.ps1` in the
+  plugin directory; read them before you answer if you would rather see it
+  than take our word.

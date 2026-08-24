@@ -67,12 +67,35 @@ function rememberSuppression() {
   document.cookie = `${OFF_COOKIE}=1; Max-Age=${OFF_MAX_AGE_S}; Path=/; SameSite=Lax${secure}`;
 }
 
+/* Fired once the reader has answered this prompt, so the cookie notice knows it
+   is free to appear. Both want the first visit, and this one gets it: it is a
+   modal with a backdrop, and stacking a second prompt underneath would leave
+   the reader answering two questions through a blur. */
+export const READER_PING_RESOLVED_EVENT = "openappa:reader-ping-resolved";
+
+/** Whether this prompt still owes the reader a first-visit appearance.
+
+    Mirrors the open decision in the effect below, and has to keep mirroring it:
+    the cookie notice waits on this, so a case that returns true here but never
+    opens the dialog would leave the notice waiting for an event that never
+    comes. In particular a reader who arrived with ?popup=no is not pending —
+    that prompt is gone for them, and the notice should just show. */
+export function isReaderPingPending(): boolean {
+  if (suppressionRequested()) return false;
+  if (forcedOpen()) return true;
+  return !alreadySeen() && !suppressedByCookie();
+}
+
 function remember(outcome: "sent" | "skipped") {
   try {
     localStorage.setItem(SEEN_KEY, outcome);
   } catch {
     /* Nothing to do: the prompt simply may appear again next visit. */
   }
+
+  /* Announced even when the write above failed. The cookie notice is waiting on
+     the reader having answered, not on our having recorded it. */
+  window.dispatchEvent(new Event(READER_PING_RESOLVED_EVENT));
 }
 
 export function ReaderPing() {

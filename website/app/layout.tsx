@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { IBM_Plex_Mono, IBM_Plex_Sans } from "next/font/google";
 
+import { Analytics } from "@/components/Analytics";
+import { CookieNotice } from "@/components/CookieNotice";
 import { MobileNavProvider } from "@/components/MobileNav";
 import { ReaderPing } from "@/components/ReaderPing";
 import { SearchProvider } from "@/components/SearchProvider";
@@ -41,6 +43,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         {/* Mounted at the root so it greets a reader landing on any page, not
             only the home page. Shows once per browser, then never again. */}
         <ReaderPing />
+        {/* PostHog is not fetched, started, or given anything to store until
+            the notice below is answered, so an undecided reader is never
+            measured. The notice waits for ReaderPing so that a first visit asks
+            one thing at a time. */}
+        <Analytics apiKey={process.env.NEXT_PUBLIC_POSTHOG_KEY ?? ""} />
+        <CookieNotice />
       </body>
     </html>
   );
