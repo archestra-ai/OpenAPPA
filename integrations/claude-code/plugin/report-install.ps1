@@ -6,11 +6,17 @@
 # whether to send it. Nothing here fires unless a person said yes to a question
 # they were shown. See report-install.sh for why the installer reports this and
 # the runtime does not.
+# Deliberately not Mandatory. A missing or empty value on a Mandatory
+# parameter makes PowerShell stop and prompt for it — "Supply values for the
+# following parameters" — which, at the end of an install with nothing on
+# stdin, hangs and then dies instead of returning. The check below does the
+# same job and keeps the promise the rest of this file makes: never block the
+# install, always exit 0.
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory = $true)][string]$Version,
-  [Parameter(Mandatory = $true)][string]$Os,
-  [Parameter(Mandatory = $true)][string]$Arch
+  [string]$Version,
+  [string]$Os,
+  [string]$Arch
 )
 
 # Failure here never becomes a problem for the install.
@@ -22,6 +28,14 @@ $posthogHost = if ($env:APPA_POSTHOG_HOST) { $env:APPA_POSTHOG_HOST } else { 'ht
 
 # The non-interactive way to say no, for scripted or fleet installs.
 if ($env:APPA_TELEMETRY -eq '0') { exit 0 }
+
+# Written straight to stderr: $ErrorActionPreference above would swallow
+# Write-Error, and a caller that passed the wrong arguments should still see why
+# nothing was sent.
+if (-not $Version -or -not $Os -or -not $Arch) {
+  [Console]::Error.WriteLine('usage: report-install.ps1 -Version <version> -Os <os> -Arch <arch>')
+  exit 0
+}
 
 # Constrained rather than trusted, matching the sh version: anything outside
 # this set is dropped rather than escaped.
