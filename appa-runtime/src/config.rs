@@ -219,6 +219,10 @@ pub enum ConfigError {
     },
     #[error("the dynamic resolver {name:?} command must contain at least one non-empty argument")]
     InvalidCommand { name: String },
+    #[error("embedded endpoint {name:?} in {section} has a token that cannot be stored safely")]
+    EmbeddedToken { section: &'static str, name: String },
+    #[error("embedded setting {field} cannot be represented in TOML")]
+    UnrepresentableEmbeddedSetting { field: &'static str },
 }
 
 #[derive(Debug, Deserialize)]
@@ -356,14 +360,11 @@ impl Config {
     /// the bindings it binds itself.
     pub fn embedded(policy: String, externals: Externals) -> Result<Config, ConfigError> {
         let value: toml::Value = toml::from_str(&policy).map_err(|source| ConfigError::UnparsablePolicy { source })?;
-        let mut file = toml::value::Table::new();
-        file.insert("policy".to_string(), value.clone());
-        let text =
-            toml::to_string(&toml::Value::Table(file)).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
-        Ok(Config {
-            policy: PolicyFile::new(text.into_bytes(), value),
-            externals,
-        })
+        let document = embedded_document(value, &externals)?;
+        let text = toml::to_string(&document).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
+        let raw: RawConfig = toml::from_str(&text).map_err(|source| ConfigError::UnparsablePolicy { source })?;
+        let origins = root_dynamic_origins(&raw, Path::new("."))?;
+        Config::validate_composed(text, raw, origins, |_| None)
     }
 
     pub fn policy_file(&self) -> &PolicyFile {
@@ -434,6 +435,155 @@ impl Config {
             },
         })
     }
+}
+
+fn embedded_document(policy: toml::Value, externals: &Externals) -> Result<toml::Value, ConfigError> {
+    let mut external_table = toml::value::Table::new();
+    external_table.insert(
+        "timeout_ms".to_string(),
+        embedded_integer("externals.timeout_ms", externals.timeout.as_millis())?,
+    );
+    external_table.insert(
+        "review_timeout_ms".to_string(),
+        embedded_integer("externals.review_timeout_ms", externals.review_timeout.as_millis())?,
+    );
+    external_table.insert(
+        "max_body_bytes".to_string(),
+        embedded_integer("externals.max_body_bytes", externals.max_body_bytes as u128)?,
+    );
+
+    let mut authorities = toml::value::Table::new();
+    for (name, implementation) in &externals.authorities {
+        authorities.insert(
+            name.clone(),
+            embedded_implementation("authorities", name, implementation)?,
+        );
+    }
+    external_table.insert("authorities".to_string(), toml::Value::Table(authorities));
+
+    let mut sanitizers = toml::value::Table::new();
+    for (name, implementation) in &externals.sanitizers {
+        sanitizers.insert(
+            name.clone(),
+            embedded_implementation("sanitizers", name, implementation)?,
+        );
+    }
+    external_table.insert("sanitizers".to_string(), toml::Value::Table(sanitizers));
+
+    let mut casts = toml::value::Table::new();
+    for (name, endpoint) in &externals.casts {
+        casts.insert(name.clone(), embedded_endpoint("casts", name, endpoint)?);
+    }
+    external_table.insert("casts".to_string(), toml::Value::Table(casts));
+
+    let mut dynamic = toml::value::Table::new();
+    let mut command_cwds = toml::value::Table::new();
+    for (name, implementation) in &externals.dynamic {
+        let value = match implementation {
+            DynamicImplementation::Resolver(endpoint) => embedded_endpoint("dynamic", name, endpoint)?,
+            DynamicImplementation::Builtin(builtin) => toml::Value::Table(
+                [("builtin".to_string(), toml::Value::String(builtin.clone()))]
+                    .into_iter()
+                    .collect(),
+            ),
+            DynamicImplementation::Command(command) => {
+                let cwd = command
+                    .cwd
+                    .to_str()
+                    .ok_or(ConfigError::UnrepresentableEmbeddedSetting {
+                        field: "externals.dynamic command cwd",
+                    })?;
+                command_cwds.insert(name.clone(), toml::Value::String(cwd.to_string()));
+                toml::Value::Table(
+                    [(
+                        "command".to_string(),
+                        toml::Value::Array(command.argv.iter().cloned().map(toml::Value::String).collect()),
+                    )]
+                    .into_iter()
+                    .collect(),
+                )
+            }
+        };
+        dynamic.insert(name.clone(), value);
+    }
+    external_table.insert("dynamic".to_string(), toml::Value::Table(dynamic));
+
+    if let Some(endpoint) = &externals.membership {
+        external_table.insert(
+            "membership".to_string(),
+            embedded_endpoint("membership", "membership", endpoint)?,
+        );
+    }
+    let mut claude_code = toml::value::Table::new();
+    let claude_command = externals
+        .claude_code
+        .command
+        .to_str()
+        .ok_or(ConfigError::UnrepresentableEmbeddedSetting {
+            field: "externals.claude_code.command",
+        })?;
+    claude_code.insert("command".to_string(), toml::Value::String(claude_command.to_string()));
+    claude_code.insert(
+        "model".to_string(),
+        toml::Value::String(externals.claude_code.model.clone()),
+    );
+    if let Some(timeout) = externals.claude_code.timeout {
+        claude_code.insert(
+            "timeout_ms".to_string(),
+            embedded_integer("externals.claude_code.timeout_ms", timeout.as_millis())?,
+        );
+    }
+    external_table.insert("claude_code".to_string(), toml::Value::Table(claude_code));
+
+    let mut document = toml::value::Table::new();
+    if !command_cwds.is_empty() {
+        document.insert(
+            "appa_composed".to_string(),
+            toml::Value::Table(
+                [("dynamic_command_cwd".to_string(), toml::Value::Table(command_cwds))]
+                    .into_iter()
+                    .collect(),
+            ),
+        );
+    }
+    document.insert("policy".to_string(), policy);
+    document.insert("externals".to_string(), toml::Value::Table(external_table));
+    Ok(toml::Value::Table(document))
+}
+
+fn embedded_integer(field: &'static str, value: u128) -> Result<toml::Value, ConfigError> {
+    i64::try_from(value)
+        .map(toml::Value::Integer)
+        .map_err(|_| ConfigError::UnrepresentableEmbeddedSetting { field })
+}
+
+fn embedded_implementation(
+    section: &'static str,
+    name: &str,
+    implementation: &Implementation,
+) -> Result<toml::Value, ConfigError> {
+    match implementation {
+        Implementation::Resolver(endpoint) => embedded_endpoint(section, name, endpoint),
+        Implementation::Builtin(builtin) => Ok(toml::Value::Table(
+            [("builtin".to_string(), toml::Value::String(builtin.clone()))]
+                .into_iter()
+                .collect(),
+        )),
+    }
+}
+
+fn embedded_endpoint(section: &'static str, name: &str, endpoint: &Endpoint) -> Result<toml::Value, ConfigError> {
+    if endpoint.token.is_some() {
+        return Err(ConfigError::EmbeddedToken {
+            section,
+            name: name.to_string(),
+        });
+    }
+    Ok(toml::Value::Table(
+        [("url".to_string(), toml::Value::String(endpoint.url.clone()))]
+            .into_iter()
+            .collect(),
+    ))
 }
 
 fn policy_version(policy: &toml::Value) -> Option<i64> {
@@ -1188,6 +1338,53 @@ mod tests {
         };
         assert_eq!(command.cwd, canonical.join("battery"));
         assert_eq!(standalone.policy_file().bytes(), config.policy_file().bytes());
+    }
+
+    #[test]
+    fn embedded_command_bindings_are_stored_and_reloadable() {
+        let first_dir = tempfile::tempdir().expect("first command directory");
+        let second_dir = tempfile::tempdir().expect("second command directory");
+        let make = |argument: &str, cwd: &Path| {
+            let mut dynamic = BTreeMap::new();
+            dynamic.insert(
+                "classifier".to_string(),
+                DynamicImplementation::Command(ResolverCommand {
+                    argv: vec!["python3".to_string(), argument.to_string()],
+                    cwd: std::fs::canonicalize(cwd).expect("canonical command directory"),
+                }),
+            );
+            Config::embedded(
+                "version = 1".to_string(),
+                Externals {
+                    timeout: Duration::from_millis(5000),
+                    review_timeout: Duration::from_millis(600_000),
+                    max_body_bytes: 65_536,
+                    authorities: BTreeMap::new(),
+                    sanitizers: BTreeMap::new(),
+                    casts: BTreeMap::new(),
+                    dynamic,
+                    membership: None,
+                    claude_code: ClaudeCode::default(),
+                },
+            )
+            .expect("embedded command config loads")
+        };
+
+        let first = make("resolver.py", first_dir.path());
+        let changed_argv = make("other.py", first_dir.path());
+        let changed_cwd = make("resolver.py", second_dir.path());
+        assert_ne!(first.policy_file().bytes(), changed_argv.policy_file().bytes());
+        assert_ne!(first.policy_file().bytes(), changed_cwd.policy_file().bytes());
+
+        let stored = first_dir.path().join("stored.toml");
+        std::fs::write(&stored, first.policy_file().bytes()).expect("write stored embedded config");
+        let reloaded = Config::load(&stored).expect("stored embedded config reloads");
+        assert_eq!(reloaded.policy_file().bytes(), first.policy_file().bytes());
+        let Some(DynamicImplementation::Command(command)) = reloaded.externals.dynamic.get("classifier") else {
+            panic!("reloaded classifier is a command")
+        };
+        assert_eq!(command.argv, ["python3", "resolver.py"]);
+        assert_eq!(command.cwd, std::fs::canonicalize(first_dir.path()).unwrap());
     }
 
     #[test]
