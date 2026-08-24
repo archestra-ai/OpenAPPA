@@ -37,6 +37,7 @@ fn every_shipped_example_opens() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn the_complete_battery_example_opens() {
     opens(&repo_root().join("examples/claude-code-battery/appa.toml"));

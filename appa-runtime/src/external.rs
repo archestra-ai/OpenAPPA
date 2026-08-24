@@ -1244,6 +1244,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn command_services(dir: &std::path::Path, script: &str, timeout_ms: u64, cap: usize) -> ExternalServices {
         std::fs::write(dir.join("resolver.sh"), script).expect("the resolver script writes");
         let mut config = externals(None, 2000, 65536);
@@ -1263,6 +1264,7 @@ mod tests {
         services_over(config)
     }
 
+    #[cfg(unix)]
     async fn resolve_command(services: &ExternalServices) -> ToolResolution {
         services
             .resolve_tool(
@@ -1273,6 +1275,7 @@ mod tests {
             .await
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_command_resolver_receives_one_request_in_its_directory_and_returns_an_answer() {
         let dir = tempfile::tempdir().expect("a fixture directory is created");
@@ -1312,6 +1315,7 @@ printf '%s' '{"version":1,"result":{"delta.trust":"trusted"}}'"#,
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn every_command_resolver_failure_is_no_answer() {
         let dir = tempfile::tempdir().expect("a fixture directory is created");
@@ -1395,6 +1399,7 @@ printf '%s' '{"version":1,"result":{"delta.trust":"trusted"}}'"#,
 
         let timeout = tempfile::tempdir().expect("timeout fixture directory");
         let timeout_pid = timeout.path().join("descendant.pid");
+        let started = std::time::Instant::now();
         let outcome = resolve_command(&command_services(
             timeout.path(),
             "sleep 30 >/dev/null 2>&1 &\necho $! > descendant.pid\nwait",
@@ -1403,6 +1408,10 @@ printf '%s' '{"version":1,"result":{"delta.trust":"trusted"}}'"#,
         ))
         .await;
         assert_eq!(outcome, ToolResolution::Unresolved(NoAnswerReason::Timeout));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "process reaping must not extend the resolver deadline"
+        );
         assert_process_gone(recorded_pid(&timeout_pid).await).await;
 
         let cancelled = tempfile::tempdir().expect("cancellation fixture directory");

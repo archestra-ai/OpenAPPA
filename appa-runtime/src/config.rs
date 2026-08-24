@@ -1221,6 +1221,16 @@ mod tests {
         assert!(matches!(parse(&token), Err(ConfigError::ImplementationChoice { .. })));
     }
 
+    #[cfg(not(unix))]
+    #[test]
+    fn a_command_binding_is_refused_on_an_unsupported_platform() {
+        let text = format!("{MINIMAL}\n[externals.dynamic.classifier]\ncommand = [\"python3\", \"resolver.py\"]\n");
+        assert!(matches!(
+            parse(&text),
+            Err(ConfigError::UnsupportedCommandPlatform { name }) if name == "classifier"
+        ));
+    }
+
     #[test]
     fn a_builtin_name_outside_the_grammar_is_refused() {
         for bad in ["Upper", "under_score", "-lead", ""] {
@@ -1281,6 +1291,7 @@ mod tests {
         assert!(!String::from_utf8_lossy(config.policy_file().bytes()).contains("include"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn included_command_paths_are_relative_to_their_declaring_configs() {
         let dir = tempfile::tempdir().expect("temp directory");
@@ -1349,6 +1360,7 @@ mod tests {
         assert_eq!(standalone.policy_file().bytes(), config.policy_file().bytes());
     }
 
+    #[cfg(unix)]
     #[test]
     fn embedded_command_bindings_are_stored_and_reloadable() {
         let first_dir = tempfile::tempdir().expect("first command directory");

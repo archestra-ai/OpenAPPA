@@ -168,6 +168,7 @@ url = "{url}"
     )
 }
 
+#[cfg(unix)]
 fn command_policy(script: &str, matched_without_resolver: bool) -> String {
     let direct = if matched_without_resolver {
         r#"
@@ -316,6 +317,7 @@ url = "{url}"
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn command_resolvers_run_only_for_the_selected_contract_and_pick_up_script_edits() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -357,6 +359,7 @@ async fn command_resolvers_run_only_for_the_selected_contract_and_pick_up_script
     );
 }
 
+#[cfg(unix)]
 async fn wait_for_file(path: &std::path::Path) {
     for _ in 0..200 {
         if path.exists() {
@@ -367,6 +370,7 @@ async fn wait_for_file(path: &std::path::Path) {
     panic!("timed out waiting for {}", path.display());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_command_consult_keeps_its_deployment_during_reload() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
