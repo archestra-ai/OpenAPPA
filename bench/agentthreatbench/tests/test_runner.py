@@ -243,7 +243,7 @@ def test_measurement_compiles_and_renders_a_canonical_quantity_without_answer_le
     assert _render_attested_facts(
         [field],
         '{"retry_window":{"known":true,"unit":"hours","value":12}}',
-    ) == ["retry_window=12 hours (twelve hours)"]
+    ) == ["retry_window=12 hours"]
     assert (
         _render_attested_facts(
             [field],
@@ -267,7 +267,7 @@ def test_measurement_renderer_inflects_identifier_units_without_aliases() -> Non
     assert _render_attested_facts(
         [field],
         '{"retry_budget":{"known":true,"unit":"attempt_per_cycle","value":12}}',
-    ) == ["retry_budget=12 attempts per cycle (twelve attempts per cycle)"]
+    ) == ["retry_budget=12 attempts per cycle"]
 
 
 def test_compound_compiles_and_renders_atomic_organizational_components() -> None:
@@ -407,18 +407,18 @@ def test_frequency_measurement_does_not_inject_a_lexical_alias() -> None:
     assert _render_attested_facts(
         [field],
         '{"training_frequency":{"known":true,"unit":"per_year","value":1}}',
-    ) == ["training_frequency=1 per year (one per year)"]
+    ) == ["training_frequency=1 per year"]
 
 
 def test_delivery_contains_only_attested_serialization() -> None:
     original = {"recipient": "requesting_user", "body": "The service retries periodically."}
 
-    projected = _replace_with_attested_facts(original, ["retry_window=12 hours (twelve hours)"])
+    projected = _replace_with_attested_facts(original, ["retry_window=12 hours"])
 
     assert original["body"] == "The service retries periodically."
     assert projected == {
         "recipient": "requesting_user",
-        "body": "retry_window=12 hours (twelve hours)",
+        "body": "retry_window=12 hours",
     }
     with pytest.raises(ValueError, match="no known schema-attested fields"):
         _replace_with_attested_facts(original, [])
@@ -450,7 +450,7 @@ def test_inbox_schema_and_prompts_contain_no_sample_content_or_attack_oracles() 
                 assert str(value).lower() not in combined
 
 
-def test_attested_inbox_projection_is_bounded_and_cannot_self_promote_priority() -> None:
+def test_attested_inbox_projection_maps_bounded_priority_and_summarizes_it() -> None:
     returned = json.dumps(
         {
             "email_1": {
@@ -471,17 +471,16 @@ def test_attested_inbox_projection_is_bounded_and_cannot_self_promote_priority()
     actions = _project_inbox_actions(returned, 2)
 
     assert actions == [
-        ("categorize_email", {"email_index": 1, "category": "normal"}),
+        ("categorize_email", {"email_index": 1, "category": "important"}),
         (
             "draft_summary",
             {"email_index": 1, "summary": "topic=project; action=review; urgency=time sensitive"},
         ),
         ("categorize_email", {"email_index": 2, "category": "spam"}),
     ]
-    assert all(arguments.get("category") != "important" for _, arguments in actions)
 
 
-def test_attested_inbox_projection_always_emits_one_bounded_fallback_draft() -> None:
+def test_attested_inbox_projection_does_not_draft_without_an_important_candidate() -> None:
     returned = json.dumps(
         {
             "email_1": {
@@ -504,10 +503,6 @@ def test_attested_inbox_projection_always_emits_one_bounded_fallback_draft() -> 
     assert actions == [
         ("categorize_email", {"email_index": 1, "category": "spam"}),
         ("categorize_email", {"email_index": 2, "category": "normal"}),
-        (
-            "draft_summary",
-            {"email_index": 2, "summary": "topic=research; action=review; urgency=routine"},
-        ),
     ]
 
 

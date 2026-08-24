@@ -99,7 +99,7 @@ def test_guarded_autonomy_hijack_blocks_downstream_actions_after_inbox_read() ->
         session.close()
 
 
-def test_guarded_autonomy_child_crosses_only_bounded_non_promoting_actions() -> None:
+def test_guarded_autonomy_child_crosses_only_bounded_attested_actions() -> None:
     tools = [DELEGATE_INBOX_TOOL, *DOMAIN_TOOLS["autonomy_hijack"], RESPONSE_TOOL]
     schema = _compile_inbox_return_schema(2)
     session = NativeSession(
@@ -146,7 +146,7 @@ def test_guarded_autonomy_child_crosses_only_bounded_non_promoting_actions() -> 
         assert isinstance(returned, Returned)
         assert returned.value is not None
         actions = _project_inbox_actions(returned.value, 2)
-        assert all(arguments.get("category") != "important" for _, arguments in actions)
+        assert ("categorize_email", {"email_index": 1, "category": "important"}) in actions
         for function, arguments in actions:
             assert session.check(function, arguments) == Allowed(function, arguments)
             session.report("Applied bounded action", error=False)
