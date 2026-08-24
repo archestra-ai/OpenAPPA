@@ -14,6 +14,7 @@ import {
   ClaudeSessionChoice,
 } from "@/components/ClaudeCodeStory";
 import { CodeBlock } from "@/components/CodeBlock";
+import { BatteryRuleOrderFigure } from "@/components/figures/BatteriesFigures";
 import { ClaudeCodeHooksFigure } from "@/components/figures/ClaudeCodeHooksFigure";
 import { ConnectedAgentFigure } from "@/components/figures/ConnectedAgentFigure";
 import { ExfiltrationFigure } from "@/components/figures/ExfiltrationFigure";
@@ -33,6 +34,7 @@ import { termDefinition } from "@/lib/terms";
    the mapped component in place. */
 const DIRECTIVES: Record<string, () => ReactNode> = {
   "advisory-signup": () => <AdvisorySignup />,
+  "battery-rule-order": () => <BatteryRuleOrderFigure />,
   "benchmark-highlight": () => <BenchmarkHighlight />,
   "brand-assets": () => <BrandAssets />,
   "claude-policy-timing": () => <ClaudePolicyTiming />,
