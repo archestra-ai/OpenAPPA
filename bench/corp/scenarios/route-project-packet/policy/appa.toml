@@ -30,13 +30,11 @@ parameters = { type = "object", properties = { task = { type = "string", descrip
 name = "search_finance"
 parameters = { type = "object", properties = { query = { type = "string", description = "Keyword or phrase to match against file names and contents." } }, required = ["query"], additionalProperties = false }
 uses = [{ resolver = "document-acl", inputs = { subject = "$tool_call.arguments.query" } }]
-delta = { audience = "resolver.document-acl.audience" }
 
 [[policy.tool]]
 name = "read_finance"
 parameters = { type = "object", properties = { file = { type = "string", description = "The exact file name to read." } }, required = ["file"], additionalProperties = false }
 uses = [{ resolver = "document-acl", inputs = { subject = "$tool_call.arguments.file" } }]
-delta = { audience = "resolver.document-acl.audience" }
 
 [[policy.tool]]
 name = "create_finance"
@@ -47,7 +45,6 @@ delta = {}
 name = "send_email"
 parameters = { type = "object", properties = { to = { type = "string", description = "Recipient email address." }, subject = { type = "string", description = "Subject line." }, body = { type = "string", description = "Message body." } }, required = ["to", "subject", "body"], additionalProperties = false }
 uses = [{ resolver = "distribution-list-members", inputs = { subject = "$tool_call.arguments.to" } }]
-requires = { audience = "resolver.distribution-list-members.audience" }
 effects = ["egress"]
 delta = {}
 
@@ -60,8 +57,6 @@ uses = [
   { resolver = "document-acl", inputs = { subject = "$tool_call.arguments.file" } },
   { resolver = "distribution-list-members", inputs = { subject = "$tool_call.arguments.to" } },
 ]
-delta = { audience = "resolver.document-acl.audience" }
-requires = { audience = "resolver.distribution-list-members.audience" }
 effects = ["egress"]
 
 # --- deployment coverage -----------------------------------------------------

@@ -186,9 +186,9 @@ struct ConsultResponse {
 }
 
 /// One consult, as both implementations receive it. `args` carries exactly what the tool's
-/// `uses` entry selected — the complete call when its resolver declares no inputs, otherwise one
-/// entry per declared input. There is no `tool`, `input`, `scope`, `returns`, or `expects` key: a
-/// resolver that needs the tool's name or description reads it as an input.
+/// `uses` entry selected — the complete arguments object when its resolver declares no inputs,
+/// otherwise one entry per declared input. There is no `tool`, `input`, `scope`, `returns`, or
+/// `expects` key: a resolver that needs the tool's name or description reads it as an input.
 #[derive(Debug, Serialize)]
 pub(crate) struct ToolResolutionRequest<'a> {
     pub(crate) version: u32,
@@ -837,7 +837,7 @@ mod tests {
         .expect("no builtin references are configured")
     }
 
-    /// A use whose tool reads everything its resolver returns, reading the complete call.
+    /// A use that owns every destination its resolver returns and reads the arguments object.
     fn uses(
         resolver: &str,
         returns: impl IntoIterator<Item = ResolverReturn>,
@@ -846,7 +846,6 @@ mod tests {
         appa_engine::contract::ToolResolverUse {
             resolver: appa_engine::names::DynamicResolverName::new(resolver),
             inputs: BTreeMap::new(),
-            reads: returns.clone(),
             returns,
         }
     }

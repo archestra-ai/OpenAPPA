@@ -214,8 +214,6 @@ name = "Bash"
 description = "Runs one shell command and returns its output."
 parameters = {{ type = "object", properties = {{ command = {{ type = "string" }} }}, required = ["command"] }}
 uses = [{{ resolver = "classifier", inputs = {{ command = "$tool_call.arguments.command" }} }}]
-delta = {{ trust = "resolver.classifier.trust" }}
-requires = {{ trust = "resolver.classifier.trust", attention = "resolver.classifier.attention" }}
 
 [[policy.authority]]
 name = "operator"

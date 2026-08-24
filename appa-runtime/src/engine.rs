@@ -1590,12 +1590,15 @@ impl RuntimeEngine {
         evidence: &[ExternalEvidence],
     ) -> Result<Vec<PinnedToolResolution>, Resolution> {
         let tool = ToolName::new(call.tool.clone());
-        let Some(contract) = self.engine.registry().tool(&tool) else {
-            return Err(Resolution::Feedback(format!(
-                "[appa] unknown tool {}: not in this deployment's policy",
-                call.tool
-            )));
-        };
+        let resolved = self
+            .engine
+            .resolve_call(tool, call.arguments.get().as_bytes())
+            .map_err(|error| Resolution::Feedback(malformed_feedback(&error)))?;
+        let contract = self
+            .engine
+            .registry()
+            .contract(&resolved)
+            .expect("a resolved call names its registered contract");
         if contract.uses.is_empty() {
             return Ok(Vec::new());
         }
@@ -1604,7 +1607,7 @@ impl RuntimeEngine {
         // the clock resolver evidence is matched against: an answer given under a context this
         // view no longer shows, or for other arguments, is not evidence for this call, and the
         // use consults again.
-        let (resolved, current_context) = self.tool_resolution_payload(view, trajectory, call, contract, &tool)?;
+        let current_context = self.tool_resolution_context(view, trajectory, contract);
         let mut pins = Vec::new();
         let mut requests = Vec::new();
         for uses in &contract.uses {
@@ -1686,28 +1689,19 @@ impl RuntimeEngine {
 
     /// What a tool-resolution consult carries beside the binding: the call's canonical
     /// argument object and the trajectory's current label context.
-    fn tool_resolution_payload(
+    fn tool_resolution_context(
         &self,
         view: &EngineView,
         trajectory: &TrajectoryId,
-        call: &ProposedCall,
         contract: &appa_engine::contract::ToolContract,
-        tool: &ToolName,
-    ) -> Result<(ResolvedCall, ToolResolutionContext), Resolution> {
-        let resolved = self
-            .engine
-            .resolve_call(tool.clone(), call.arguments.get().as_bytes())
-            .map_err(|_| Resolution::Feedback(format!("[appa] {} has invalid arguments", call.tool)))?;
+    ) -> ToolResolutionContext {
         let static_attention = contract
             .requires
             .attention
             .iter()
             .map(|mark| mark.as_str().to_string())
             .collect();
-        Ok((
-            resolved,
-            self.label_context(view, &engine_id(trajectory), static_attention),
-        ))
+        self.label_context(view, &engine_id(trajectory), static_attention)
     }
 
     /// The label context every classifier consult carries — a tool resolver's and a cast's
@@ -1914,7 +1908,10 @@ impl RuntimeEngine {
         evidence: &[ExternalEvidence],
     ) -> Result<Vec<PinnedMembership>, Resolution> {
         let tool = ToolName::new(call.tool.clone());
-        let Some(contract) = self.engine.registry().tool(&tool) else {
+        let Ok(resolved) = self.engine.resolve_call(tool, call.arguments.get().as_bytes()) else {
+            return Ok(Vec::new());
+        };
+        let Some(contract) = self.engine.registry().contract(&resolved) else {
             return Ok(Vec::new());
         };
         // Same fast path as the dynamic pass: no placeholder, nothing to read.
@@ -1928,9 +1925,6 @@ impl RuntimeEngine {
         }) {
             return Ok(Vec::new());
         }
-        let Ok(resolved) = self.engine.resolve_call(tool, call.arguments.get().as_bytes()) else {
-            return Ok(Vec::new());
-        };
         let reads = appa_engine::check::group_reads(contract, &resolved);
         if reads.is_empty() {
             return Ok(Vec::new());
@@ -2791,10 +2785,9 @@ mod tests {
                 name = "lookup"
                 description = "Looks one record up."
                 uses = [{ resolver = "classifier" }]
-                delta = { trust = "resolver.classifier.trust", audience = "resolver.classifier.audience" }
                 # The tool keeps its own attention mark: `requires.attention` has one owner, and
                 # here it is the policy, so the classifier sees the mark under `static_attention`.
-                requires = { trust = "resolver.classifier.trust", audience = "resolver.classifier.audience", attention = ["static-review"] }
+                requires = { attention = ["static-review"] }
                 [[authority]]
                 name = "reviewer"
                 [authority.permits]
@@ -2819,15 +2812,8 @@ mod tests {
             Err(Resolution::Consult(requests)) => match requests.as_slice() {
                 [ExternalRequest::ToolResolution { uses, args, context }] => {
                     assert_eq!(uses.resolver.as_str(), "classifier");
-                    // The resolver declares no inputs, so `args` is the complete call.
-                    assert_eq!(
-                        args,
-                        &serde_json::json!({
-                            "name": "lookup",
-                            "description": "Looks one record up.",
-                            "arguments": {"nested": {"id": 7}, "deep": true}
-                        })
-                    );
+                    // The resolver declares no inputs, so `args` is the complete arguments object.
+                    assert_eq!(args, &serde_json::json!({"nested": {"id": 7}, "deep": true}));
                     assert_eq!(context.trust_ranks, ["suspicious", "trusted"]);
                     assert_eq!(context.attention_marks, ["privacy-review"]);
                     assert_eq!(context.static_attention, ["static-review"]);

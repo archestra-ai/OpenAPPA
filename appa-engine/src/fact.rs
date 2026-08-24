@@ -211,6 +211,7 @@ pub enum Fact {
         trajectory: TrajectoryId,
         dispatch: DispatchId,
         tool: ToolName,
+        contract: crate::value::ToolContractId,
         arguments: crate::params::CanonicalArguments,
         proposed_label: EstablishedLabel,
         /// The established bound this dispatch's result is received against, snapshotted here

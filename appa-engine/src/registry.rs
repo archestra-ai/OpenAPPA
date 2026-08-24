@@ -10,7 +10,131 @@ use crate::contract::{AudienceDelta, AudienceRequirement, Delta, RecipientSpec, 
 use crate::groups::{DeclaredAudience, ExpansionRefusal, Expansions, GroupExpansion, GroupResolution};
 use crate::label::{Audience, Dim, Dimension, ReaderId, Trust};
 use crate::names::{AuthorityName, CastName, GroupName, MarkName, MembershipResolverName, SanitizerName, TagName};
-use crate::value::ToolName;
+use crate::value::{ToolContractId, ToolName};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) enum ToolMatcher {
+    Bare,
+    Argument {
+        argument: String,
+        pattern: Vec<PatternPart>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) enum PatternPart {
+    Literal(String),
+    Wildcard,
+}
+
+impl ToolMatcher {
+    fn matches(&self, arguments: &serde_json::Value) -> bool {
+        match self {
+            ToolMatcher::Bare => true,
+            ToolMatcher::Argument { argument, pattern } => arguments
+                .get(argument)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| wildcard_matches(pattern, value)),
+        }
+    }
+}
+
+fn wildcard_matches(pattern: &[PatternPart], value: &str) -> bool {
+    let mut rest = value;
+    let mut follows_wildcard = false;
+    for part in pattern {
+        match part {
+            PatternPart::Wildcard => follows_wildcard = true,
+            PatternPart::Literal(literal) if follows_wildcard => {
+                let Some(offset) = rest.find(literal) else {
+                    return false;
+                };
+                rest = &rest[offset + literal.len()..];
+                follows_wildcard = false;
+            }
+            PatternPart::Literal(literal) => {
+                let Some(next) = rest.strip_prefix(literal) else {
+                    return false;
+                };
+                rest = next;
+            }
+        }
+    }
+    follows_wildcard || rest.is_empty()
+}
+
+fn push_wildcard(parts: &mut Vec<PatternPart>, literal: &mut String) {
+    if !literal.is_empty() {
+        parts.push(PatternPart::Literal(std::mem::take(literal)));
+    }
+    if !matches!(parts.last(), Some(PatternPart::Wildcard)) {
+        parts.push(PatternPart::Wildcard);
+    }
+}
+
+fn parse_contract_name(authored: &str) -> Result<(ToolName, ToolMatcher), LoadError> {
+    if !authored.contains(['(', ')']) {
+        return (!authored.is_empty())
+            .then(|| (ToolName::new(authored), ToolMatcher::Bare))
+            .ok_or_else(|| LoadError::MalformedToolSelector(authored.to_string()));
+    }
+    let Some(open) = authored.find('(') else {
+        return Err(LoadError::MalformedToolSelector(authored.into()));
+    };
+    let tool = &authored[..open];
+    let rest = &authored[open + 1..];
+    let Some(colon) = rest.find(':') else {
+        return Err(LoadError::MalformedToolSelector(authored.into()));
+    };
+    let argument = &rest[..colon];
+    let pattern_source = &rest[colon + 1..];
+    if tool.is_empty()
+        || tool.contains(['(', ')'])
+        || argument.is_empty()
+        || argument
+            .chars()
+            .any(|c| matches!(c, ':' | '(' | ')' | '\\') || c.is_control())
+    {
+        return Err(LoadError::MalformedToolSelector(authored.into()));
+    }
+    let mut chars = pattern_source.chars().peekable();
+    let mut parts = Vec::new();
+    let mut literal = String::new();
+    let mut closed = false;
+    while let Some(ch) = chars.next() {
+        match ch {
+            '*' => push_wildcard(&mut parts, &mut literal),
+            '\\' => match chars.next() {
+                Some(next @ ('*' | ')' | '\\')) => literal.push(next),
+                _ => return Err(LoadError::MalformedToolSelector(authored.into())),
+            },
+            ')' if chars.peek().is_none() => {
+                closed = true;
+                break;
+            }
+            ')' => return Err(LoadError::MalformedToolSelector(authored.into())),
+            other => literal.push(other),
+        }
+    }
+    if !closed {
+        return Err(LoadError::MalformedToolSelector(authored.into()));
+    }
+    if !literal.is_empty() {
+        parts.push(PatternPart::Literal(literal));
+    }
+    Ok((
+        ToolName::new(tool),
+        ToolMatcher::Argument {
+            argument: argument.into(),
+            pattern: parts,
+        },
+    ))
+}
+
+#[cfg(test)]
+pub(crate) fn base_tool_name(authored: &ToolName) -> Result<ToolName, LoadError> {
+    parse_contract_name(authored.as_str()).map(|(name, _)| name)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrustChain {
@@ -96,10 +220,14 @@ pub enum LoadError {
     ReservedRankName,
     #[error("duplicate tool contract: {0}")]
     DuplicateTool(String),
-    #[error("tool {tool} uses resolver {resolver}, but no field of the tool reads a result of it")]
-    UnreadToolResolver { tool: String, resolver: String },
-    #[error("tool {tool} reads a result resolver {resolver} does not return")]
-    UndeclaredResolverResult { tool: String, resolver: String },
+    #[error("malformed tool selector {0:?}")]
+    MalformedToolSelector(String),
+    #[error("provider-run tool {0} cannot use an argument selector")]
+    ProviderRunSelector(String),
+    #[error("tool {0} has more than u32::MAX ordered contracts")]
+    TooManyToolVariants(String),
+    #[error("tool {tool} uses resolver {resolver}, but it owns no contract destination")]
+    ResolverOwnsNothing { tool: String, resolver: String },
     #[error("tool {tool} uses resolver {resolver} more than once")]
     DuplicateToolResolver { tool: String, resolver: String },
     #[error("tool {tool} gives {destination} to more than one static or resolver owner")]
@@ -245,7 +373,7 @@ pub const MAX_HINT_CHARS: usize = 512;
 fn worst_case_plan_alternatives(
     tool: &ToolContract,
     confined: bool,
-    tools: &BTreeMap<ToolName, ToolContract>,
+    tools: &[&ToolContract],
     authorities: &[Authority],
     sanitizers: &[Sanitizer],
     literal: &Expansions,
@@ -285,10 +413,10 @@ fn worst_case_plan_alternatives(
         );
     }
     for uses in &tool.uses {
-        if uses.reads.contains(&ResolverReturn::RequiredTrust) {
+        if uses.returns.contains(&ResolverReturn::RequiredTrust) {
             multiply(trust_cap_competent());
         }
-        if uses.reads.contains(&ResolverReturn::RequiredAudience) {
+        if uses.returns.contains(&ResolverReturn::RequiredAudience) {
             multiply(reader_cap_competent());
         }
     }
@@ -389,7 +517,7 @@ fn worst_case_plan_alternatives(
         )
     }) || tool.resolver_owns(crate::contract::ResolverReturn::RequiredAudience);
     let redispatches = tools
-        .values()
+        .iter()
         .filter(|candidate| {
             candidate.emits.iter().any(|kind| priors.contains(&kind))
                 || (has_cap
@@ -448,7 +576,7 @@ fn worst_case_return_stage(sanitizers: &[Sanitizer], confined: bool) -> u128 {
 #[derive(Clone, Debug)]
 pub struct Registry {
     trust_chain: TrustChain,
-    tools: BTreeMap<ToolName, ToolContract>,
+    tools: BTreeMap<ToolName, Vec<(ToolMatcher, ToolContract)>>,
     provider_run: BTreeMap<ToolName, ToolContract>,
     authorities: Vec<Authority>,
     attention_marks: BTreeSet<MarkName>,
@@ -504,9 +632,11 @@ impl Registry {
             }
         }
 
-        let mut tools = BTreeMap::new();
+        let mut tools: BTreeMap<ToolName, Vec<(ToolMatcher, ToolContract)>> = BTreeMap::new();
         let mut provider_run = BTreeMap::new();
-        for tool in config.tools {
+        for mut tool in config.tools {
+            let (base_name, matcher) = parse_contract_name(tool.name.as_str())?;
+            tool.name = base_name;
             let declared_trust = match tool.delta.as_ref().and_then(|d| d.trust.as_ref()) {
                 Some(Dim::Known(t)) => Some(*t),
                 Some(Dim::Unknown) | None => None,
@@ -533,13 +663,19 @@ impl Registry {
             }
             validate_pending_cast(&tool)?;
             validate_tool_resolvers(&tool)?;
-            let split = if profile.is_provider_run(&tool.name) {
-                &mut provider_run
+            if profile.is_provider_run(&tool.name) {
+                if matcher != ToolMatcher::Bare {
+                    return Err(LoadError::ProviderRunSelector(tool.name.as_str().into()));
+                }
+                if provider_run.insert(tool.name.clone(), tool.clone()).is_some() {
+                    return Err(LoadError::DuplicateTool(tool.name.as_str().to_string()));
+                }
             } else {
-                &mut tools
-            };
-            if split.insert(tool.name.clone(), tool.clone()).is_some() {
-                return Err(LoadError::DuplicateTool(tool.name.as_str().to_string()));
+                let variants = tools.entry(tool.name.clone()).or_default();
+                if ToolContractId::new(variants.len()).is_none() {
+                    return Err(LoadError::TooManyToolVariants(tool.name.as_str().to_string()));
+                }
+                variants.push((matcher, tool));
             }
         }
 
@@ -564,12 +700,14 @@ impl Registry {
             }
         }
 
-        for tool in tools.values() {
+        for tool in tools.values().flatten().map(|(_, tool)| tool) {
             check_audience_bindings(tool)?;
         }
 
         let mut groups: Vec<GroupName> = tools
             .values()
+            .flatten()
+            .map(|(_, tool)| tool)
             .chain(provider_run.values())
             .flat_map(ToolContract::groups)
             .chain(
@@ -594,11 +732,12 @@ impl Registry {
         let literal = Expansions::empty_members(&groups);
 
         let sanitizer_list: Vec<Sanitizer> = sanitizers.values().cloned().collect();
-        for tool in tools.values() {
+        let checkable_tools: Vec<&ToolContract> = tools.values().flatten().map(|(_, tool)| tool).collect();
+        for tool in tools.values().flatten().map(|(_, tool)| tool) {
             let count = worst_case_plan_alternatives(
                 tool,
                 profile.confines_result(&tool.name),
-                &tools,
+                &checkable_tools,
                 &config.authorities,
                 &sanitizer_list,
                 &literal,
@@ -649,6 +788,8 @@ impl Registry {
         for (i, cast) in casts.iter().enumerate() {
             let castable: Vec<&ToolContract> = tools
                 .values()
+                .flatten()
+                .map(|(_, tool)| tool)
                 .filter(|tool| cast.scope.covers(&tool.tags))
                 .filter(|tool| crate::label::EstablishedLabel::from_label(&tool.output_label(&literal)).is_none())
                 .collect();
@@ -762,7 +903,41 @@ impl Registry {
     }
 
     pub fn tool(&self, name: &ToolName) -> Option<&ToolContract> {
-        self.tools.get(name)
+        self.tools.get(name)?.first().map(|(_, tool)| tool)
+    }
+
+    pub fn keyed_tool(&self, name: &ToolName, id: ToolContractId) -> Option<&ToolContract> {
+        self.tools.get(name)?.get(id.ordinal()).map(|(_, tool)| tool)
+    }
+
+    pub fn contract(&self, call: &crate::value::ResolvedCall) -> Option<&ToolContract> {
+        self.keyed_tool(call.tool(), call.contract_id())
+    }
+
+    pub(crate) fn select_tool(
+        &self,
+        name: &ToolName,
+        arguments: &serde_json::Value,
+    ) -> Option<(ToolContractId, &ToolContract)> {
+        self.tools
+            .get(name)?
+            .iter()
+            .enumerate()
+            .find_map(|(ordinal, (matcher, tool))| {
+                if matcher.matches(arguments) {
+                    ToolContractId::new(ordinal).map(|id| (id, tool))
+                } else {
+                    None
+                }
+            })
+    }
+
+    pub fn contains_tool(&self, name: &ToolName) -> bool {
+        self.tools.contains_key(name)
+    }
+
+    pub fn variants(&self, name: &ToolName) -> impl Iterator<Item = &ToolContract> {
+        self.tools.get(name).into_iter().flatten().map(|(_, tool)| tool)
     }
 
     /// The declared contract of a provider-run tool: never checked or planned; its
@@ -776,7 +951,15 @@ impl Registry {
     }
 
     pub fn tools(&self) -> impl Iterator<Item = &ToolContract> {
-        self.tools.values()
+        self.tools.values().flatten().map(|(_, tool)| tool)
+    }
+
+    pub fn tool_names(&self) -> impl Iterator<Item = &ToolName> {
+        self.tools.keys()
+    }
+
+    pub(crate) fn semantic_tools(&self) -> impl Iterator<Item = (&ToolMatcher, &ToolContract)> {
+        self.tools.values().flatten().map(|(matcher, tool)| (matcher, tool))
     }
 
     pub fn authorities(&self) -> &[Authority] {
@@ -867,9 +1050,9 @@ fn validate_pending_cast(tool: &ToolContract) -> Result<(), LoadError> {
     }
 }
 
-/// Every rule a tool's `uses` list answers to: each entry is read by at least one field, each
-/// resolver appears once, each mapped argument is a required top-level property, a description is
-/// declared wherever one is read, and every destination has exactly one owner.
+/// Every rule a tool's `uses` list answers to: each resolver appears once, each mapped argument is
+/// a required top-level property, a description is declared wherever one is read, and every
+/// destination has exactly one owner.
 fn validate_tool_resolvers(tool: &ToolContract) -> Result<(), LoadError> {
     use crate::contract::ResolverReturn;
 
@@ -898,20 +1081,12 @@ fn validate_tool_resolvers(tool: &ToolContract) -> Result<(), LoadError> {
 
     for uses in &tool.uses {
         let context = || format!("tool {} resolver {}", tool.name.as_str(), uses.resolver.as_str());
-        if uses.reads.is_empty() {
-            return Err(LoadError::UnreadToolResolver {
+        if uses.returns.is_empty() {
+            return Err(LoadError::ResolverOwnsNothing {
                 tool: tool.name.as_str().to_string(),
                 resolver: uses.resolver.as_str().to_string(),
             });
         }
-        if !uses.reads.is_subset(&uses.returns) {
-            return Err(LoadError::UndeclaredResolverResult {
-                tool: tool.name.as_str().to_string(),
-                resolver: uses.resolver.as_str().to_string(),
-            });
-        }
-        // The result path names a resolver, not one attachment of it, so a tool binds each
-        // resolver once.
         if !names.insert(&uses.resolver) {
             return Err(LoadError::DuplicateToolResolver {
                 tool: tool.name.as_str().to_string(),
@@ -935,7 +1110,7 @@ fn validate_tool_resolvers(tool: &ToolContract) -> Result<(), LoadError> {
                 })?;
             }
         }
-        for result in &uses.reads {
+        for result in &uses.returns {
             if !owned.insert(*result) {
                 return Err(refuse(*result));
             }
@@ -1248,13 +1423,75 @@ mod tests {
     }
 
     #[test]
-    fn refuses_duplicate_tool() {
+    fn duplicate_checkable_tools_are_ordered_variants() {
         let mut cfg = base();
         cfg.tools = vec![tool("dup"), tool("dup")];
+        let registry = Registry::build_covered(cfg).expect("duplicate checkable names are variants");
+        assert_eq!(registry.variants(&ToolName::new("dup")).count(), 2);
+    }
+
+    #[test]
+    fn a_tool_resolver_must_own_a_contract_destination() {
+        let mut cfg = base();
+        cfg.tools = vec![ToolContract {
+            uses: vec![ToolResolverUse {
+                resolver: crate::names::DynamicResolverName::new("classifier"),
+                inputs: std::collections::BTreeMap::new(),
+                returns: std::collections::BTreeSet::new(),
+            }],
+            ..tool("lookup")
+        }];
         assert!(matches!(
             Registry::build_covered(cfg),
-            Err(LoadError::DuplicateTool(name)) if name == "dup"
+            Err(LoadError::ResolverOwnsNothing { tool, resolver })
+                if tool == "lookup" && resolver == "classifier"
         ));
+    }
+
+    #[test]
+    fn selector_grammar_and_unicode_wildcards_are_exact() {
+        let parsed = |name| parse_contract_name(name).map(|(_, matcher)| matcher);
+        let arguments = |value| serde_json::json!({ "path": value });
+        for (pattern, matching, foreign, foreign_matches) in [
+            ("read(path:*)", "", "anything", true),
+            ("read(path:**)", "東京", "anything", true),
+            (r"read(path:\*)", "*", "x", false),
+            (r"read(path:\))", ")", "x", false),
+            (r"read(path:\\)", "\\", "x", false),
+            ("read(path:a(b:c)", "a(b:c", "x", false),
+        ] {
+            let matcher = parsed(pattern).expect("the selector is valid");
+            assert!(matcher.matches(&arguments(matching)), "{pattern}");
+            assert_eq!(matcher.matches(&arguments(foreign)), foreign_matches, "{pattern}");
+        }
+        let empty = parsed("read(path:)").expect("an empty pattern is valid");
+        assert!(empty.matches(&arguments("")));
+        assert!(!empty.matches(&serde_json::json!({})));
+        assert!(!empty.matches(&serde_json::json!({ "path": 1 })));
+    }
+
+    #[test]
+    fn malformed_selector_forms_are_refused() {
+        for malformed in [
+            "",
+            "read(",
+            "read)",
+            "(x:y)",
+            "read(:x)",
+            "read(x)",
+            "read(x:y",
+            "read(x:y))",
+            "read(x:y)tail",
+            r"read(x:\q)",
+            "read(a(b:c)",
+            "read(a\\:x)",
+            "read(a\n:x)",
+        ] {
+            assert!(
+                matches!(parse_contract_name(malformed), Err(LoadError::MalformedToolSelector(_))),
+                "{malformed:?}"
+            );
+        }
     }
 
     #[test]
@@ -1712,7 +1949,6 @@ mod tests {
                 crate::contract::ToolCallSource::argument(argument).expect("a plain name is a source"),
             )]),
             returns: [ResolverReturn::Audience].into_iter().collect(),
-            reads: [ResolverReturn::Audience].into_iter().collect(),
         }
     }
     fn binding_sites(parameters: &crate::params::ToolParameters) -> Vec<(&'static str, RegistryConfig)> {
@@ -1916,7 +2152,6 @@ mod tests {
                 resolver: crate::names::DynamicResolverName::new("classifier"),
                 inputs: std::collections::BTreeMap::new(),
                 returns: [field].into_iter().collect(),
-                reads: [field].into_iter().collect(),
             }]
         };
         let trust_floor = Requires {
@@ -2006,7 +2241,6 @@ mod tests {
                 resolver: crate::names::DynamicResolverName::new("classifier"),
                 inputs: std::collections::BTreeMap::new(),
                 returns: [ResolverReturn::Audience].into_iter().collect(),
-                reads: [ResolverReturn::Audience].into_iter().collect(),
             }],
             ..tool("send")
         }];
@@ -2030,7 +2264,6 @@ mod tests {
                 resolver: crate::names::DynamicResolverName::new("classifier"),
                 inputs: std::collections::BTreeMap::new(),
                 returns: [ResolverReturn::Trust].into_iter().collect(),
-                reads: [ResolverReturn::Trust].into_iter().collect(),
             }],
             ..tool("send")
         }];

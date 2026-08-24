@@ -50,13 +50,10 @@ audience = { contains = ["public"] }
 # current members. The flow must cover every resolved
 # reader and must not derive from an untrusted source.
 [[tool]]
-name  = "send_email"
-uses  = [{ resolver = "email-recipient-readers", inputs = { to = "$tool_call.arguments.to" } }]
-delta = {}
-
-[tool.requires]
-trust    = "trusted"
-audience = "resolver.email-recipient-readers.audience"
+name     = "send_email"
+uses     = [{ resolver = "email-recipient-readers", inputs = { to = "$tool_call.arguments.to" } }]
+requires = { trust = "trusted" }
+delta    = {}
 
 # --- Finance: confidential books, human sign-off --------
 

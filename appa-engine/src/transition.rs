@@ -1148,6 +1148,7 @@ impl<'a> Sequence<'a> {
                 trajectory,
                 dispatch,
                 tool,
+                contract,
                 arguments,
                 proposed_label,
                 receiving,
@@ -1157,7 +1158,7 @@ impl<'a> Sequence<'a> {
                 subject,
                 resolutions,
             } => {
-                let call = ResolvedCall::new(tool.clone(), arguments.clone())
+                let call = ResolvedCall::new_keyed(tool.clone(), *contract, arguments.clone())
                     .with_tool_resolutions(tool_resolutions.clone())
                     .with_memberships(memberships.clone());
                 if call.tool_resolutions() != tool_resolutions.as_slice() {
@@ -1171,7 +1172,7 @@ impl<'a> Sequence<'a> {
                 let contract = self
                     .engine
                     .registry()
-                    .tool(tool)
+                    .keyed_tool(tool, *contract)
                     .ok_or_else(|| TransitionRefusal::UnknownTool(tool.as_str().to_string()))?;
                 if crate::check::validate_memberships(contract, &call).is_err()
                     || crate::check::pins_agree(contract, &call, &expansions).is_err()
@@ -1559,7 +1560,7 @@ impl<'a> Sequence<'a> {
                 let contract = self
                     .engine
                     .registry()
-                    .tool(candidate.tool())
+                    .contract(candidate)
                     .ok_or_else(|| TransitionRefusal::UnknownTool(candidate.tool().as_str().to_string()))?;
                 let stage = views.call_stage(subject);
                 let role = views.call_role(subject);
@@ -1783,7 +1784,7 @@ impl<'a> Sequence<'a> {
         let contract = self
             .engine
             .registry()
-            .tool(call.tool())
+            .contract(call)
             .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
         let live = views.current_label();
         if rulings
@@ -1955,6 +1956,7 @@ impl<'a> Sequence<'a> {
                 trajectory,
                 dispatch,
                 tool,
+                contract,
                 proposed_effects,
                 ..
             } => {
@@ -1962,7 +1964,7 @@ impl<'a> Sequence<'a> {
                 if !proposed_effects.is_empty() {
                     advance.absorb(&BasisAdvance::family());
                 }
-                if self.result_can_restrict(tool, dispatch) {
+                if self.result_can_restrict(tool, *contract, dispatch) {
                     advance.absorb(&BasisAdvance::flow(trajectory));
                 }
                 advance
@@ -2033,7 +2035,12 @@ impl<'a> Sequence<'a> {
     /// Can this release's result restrict the trajectory, leave it unresolved, or arrive through a
     /// bound sanitizer? An unannotated contract admits at `Unknown`, so it can;
     /// the deliberate neutral `delta = {}` cannot.
-    fn result_can_restrict(&self, tool: &crate::value::ToolName, dispatch: &DispatchId) -> bool {
+    fn result_can_restrict(
+        &self,
+        tool: &crate::value::ToolName,
+        contract_id: crate::value::ToolContractId,
+        dispatch: &DispatchId,
+    ) -> bool {
         if self
             .projection
             .view(dispatch.trajectory())
@@ -2042,7 +2049,7 @@ impl<'a> Sequence<'a> {
         {
             return true;
         }
-        match self.engine.registry().tool(tool) {
+        match self.engine.registry().keyed_tool(tool, contract_id) {
             Some(contract) => contract.delta.as_ref().is_none_or(|delta| !delta.is_none()),
             None => true,
         }
@@ -2103,6 +2110,7 @@ impl<'a> Sequence<'a> {
                 Fact::DispatchOpened {
                     dispatch,
                     tool,
+                    contract,
                     arguments,
                     tool_resolutions,
                     memberships,
@@ -2111,7 +2119,7 @@ impl<'a> Sequence<'a> {
                     ..
                 },
             ) if dispatch == &next.dispatch => {
-                let opened = ResolvedCall::new(tool.clone(), arguments.clone())
+                let opened = ResolvedCall::new_keyed(tool.clone(), *contract, arguments.clone())
                     .with_tool_resolutions(tool_resolutions.clone())
                     .with_memberships(memberships.clone());
                 if opened != next.call || subject != &next.subject {
@@ -2252,7 +2260,7 @@ impl<'a> Sequence<'a> {
             let contract = self
                 .engine
                 .registry()
-                .tool(call.tool())
+                .contract(call)
                 .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
             if crate::check::validate_memberships(contract, call).is_err() {
                 return Err(TransitionRefusal::ForgedMembership);
@@ -2347,7 +2355,7 @@ impl<'a> Sequence<'a> {
         let contract = self
             .engine
             .registry()
-            .tool(call.tool())
+            .contract(call)
             .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
         contract
             .parameters
@@ -2979,13 +2987,13 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::ForeignDispatch);
         }
         let views = self.projection.view(trajectory);
-        let tool = views
-            .dispatch_tool(dispatch)
+        let call = views
+            .dispatch_call(dispatch)
             .ok_or(TransitionRefusal::UnknownDispatch)?;
         self.engine
             .registry()
-            .tool(tool)
-            .ok_or_else(|| TransitionRefusal::UnknownTool(tool.as_str().to_string()))
+            .keyed_tool(call.tool(), call.contract_id())
+            .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))
     }
 
     fn open_dispatch_contract(
@@ -3343,7 +3351,7 @@ impl<'a> Sequence<'a> {
         let contract = self
             .engine
             .registry()
-            .tool(predecessor.tool())
+            .contract(predecessor)
             .ok_or_else(|| TransitionRefusal::UnknownTool(predecessor.tool().as_str().to_string()))?;
         contract
             .parameters

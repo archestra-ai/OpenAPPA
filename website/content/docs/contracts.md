@@ -50,17 +50,37 @@ Each tool call resolves group membership freshly, then pins that reader set for 
 
 If a membership resolver fails (timeout, network error, or invalid payload), OpenAPPA halts the check with an operational error and records nothing to the log. An empty reader list is a valid response. The resolver endpoint receives a JSON POST request (`{"version": 1, "resolver": "...", "group": "..."}`) and returns `{"version": 1, "readers": [...]}`.
 
+### Ordered tool contracts
+
+A policy can declare several contracts for one tool. OpenAPPA tests them in declaration order and uses the first matching contract.
+
+```toml
+[[tool]]
+name = "Bash(command:cargo test*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[tool]]
+name = "Bash"
+requires = { trust = "trusted", attention = ["hitl"] }
+delta = {}
+```
+
+Text inside parentheses selects one top-level string argument. `*` matches any text. Use `\*`, `\)`, and `\\` for literal characters.
+
+A missing or non-string argument does not match. A bare tool name matches every argument object and is typically the fallback.
+
+OpenAPPA selects the contract before it validates that contract's `parameters` schema. A schema failure does not continue to a later contract. Provider-run tools cannot use argument selectors.
+
 ### Dynamic resolvers
 
 A dynamic resolver classifies a proposed tool call before the engine checks it. It returns selected fields of the tool's contract: output-label values for `delta`, and call-time constraints for `requires`. It does not resolve `@group` membership.
 
-A `[[dynamic_resolver]]` declares two things: the `inputs` a tool must supply, and the `returns` it always answers with. A `[[tool]]` attaches one with `uses`, maps each declared input from the proposed call, and points its own fields at the results it wants.
+A `[[dynamic_resolver]]` declares two things: the `inputs` a tool must supply, and the contract destinations it owns through `returns`. A `[[tool]]` attaches one with `uses` and maps each declared input from the proposed call. Attaching it assigns every destination in `returns` to that resolver. Resolver names are opaque non-empty strings and can contain dots.
 
-The result path is `resolver.<resolver name>.<result name>`. Writing it under `delta` or under `requires` decides which one it fills, so `delta.trust` and `requires.trust` name the same result but read it into different places.
+#### Example: pass the complete arguments object
 
-#### Example: pass the complete tool call
-
-Omit `inputs` on the resolver to pass the complete call:
+Omit `inputs` on the resolver and its `uses` entry to pass the complete tool arguments object:
 
 ```toml
 [[dynamic_resolver]]
@@ -71,26 +91,18 @@ returns = ["delta.trust", "delta.audience"]
 name        = "Bash"
 description = "Runs one shell command and returns its output."
 uses        = [{ resolver = "classify-command" }]
-
-[tool.delta]
-trust    = "resolver.classify-command.trust"
-audience = "resolver.classify-command.audience"
 ```
 
 The resolver receives this value in `args`:
 
 ```json
 {
-  "name": "Bash",
-  "description": "Runs one shell command and returns its output.",
-  "arguments": {
-    "command": "git push origin main",
-    "timeout": 60000
-  }
+  "command": "git push origin main",
+  "timeout": 60000
 }
 ```
 
-This form does not need a tool parameter schema. It does need a tool `description`: the value carries one.
+This form does not need a tool parameter schema or description.
 
 #### Example: pass one argument
 
@@ -105,12 +117,10 @@ name       = "get_customer"
 parameters = { type = "object", properties = { customer_id = { type = "string" } }, required = ["customer_id"] }
 uses       = [{ resolver = "classify-customer", inputs = { subject = "$tool_call.arguments.customer_id" } }]
 
-# This tool uses only the resolver's trust result.
-delta    = { trust = "resolver.classify-customer.trust" }
 requires = { trust = "trusted" }
 ```
 
-The resolver receives only `customer_id`, under the name `subject`. It returns both of its results. This tool reads one.
+The resolver receives only `customer_id`, under the name `subject`. Its declaration owns both output-label fields. The static `requires.trust` field does not overlap.
 
 #### Example: use several resolvers
 
@@ -132,21 +142,16 @@ uses = [
   { resolver = "trust-classifier", inputs = { subject = "$tool_call.arguments.customer_id" } },
   { resolver = "record-acl", inputs = { record = "$tool_call.arguments.customer_id" } }
 ]
-
-[tool.delta]
-trust    = "resolver.trust-classifier.trust"
-audience = "resolver.record-acl.audience"
 ```
 
 OpenAPPA sends one request to each resolver. Both requests use the same current state.
 
 #### Rules
 
-- A resolver declares its inputs and all results it returns.
+- A resolver declares its inputs and all contract destinations it owns through `returns`.
 - A tool can use zero or more resolvers. Omit `uses` when it uses none.
-- A resolver always returns every declared result. A tool can use any part of that result.
-- A tool field holds one value: a value the policy wrote, or one resolver result. So a tool reads at most one result per field, and it uses at most five resolvers.
-- A tool must read a result of every resolver it uses. A `uses` entry no field reads does not load.
+- A resolver always returns every declared result. Attaching it assigns all declared destinations to it.
+- A tool field has one owner: a static policy value or one attached resolver. Static and resolver ownership cannot overlap. Two resolvers cannot own the same destination.
 - If a resolver fails or returns an invalid result, OpenAPPA does not run the tool.
 
 A tool maps each declared input from the proposed call. `$tool_call` is the only special source.
@@ -259,7 +264,7 @@ A tool contract is short: a name, a `delta`, and often `effects` and a `[tool.re
 | **Unannotated Tools** | Omitting `delta` while declaring `requires`. | Use `delta = {}` if output carries no labels, or separate unannotated tools. | Loader refuses `requires` on unannotated tools; unannotated output enters as `Unknown`. |
 | **`effects` Completeness** | Mutation or deployment tool omits `effects`. | Declare all side effects, e.g., `effects = ["migration.applied", "mutation"]`. | Under-declared effects pass `excludes` checks silently without triggering history constraints. |
 | **Dynamic Recipients** | Static readers when an ACL depends on an argument. | Use a placeholder for a recipient the call names — a literal reader, `public`, or an `@group` — or a dynamic resolver for an argument-derived reader set. | Static readers can ignore the proposed argument; placeholder groups and dynamic resolution pin their answer to the call. |
-| **Unread resolver** | A `uses` entry whose results no field of the tool reads. | Remove the entry, or point a field at one of its results. | It does not load. An unread resolver costs an unnecessary consult on every call and blocks execution if it fails. |
+| **Overlapping resolvers** | Two `uses` entries whose `returns` include the same destination. | Give each destination one owner. | It does not load because a contract field cannot have two values. |
 | **Input sanitizer over a resolver** | A `tool_input` sanitizer whose `tags` cover a resolver-backed tool. | Tag the tool so no `tool_input` sanitizer covers it, unless that sanitizer's rewrite is one you accept under the resolver's earlier answer. | The rewrite runs under the resolver answer given for the original call. If a rewrite changes arguments (such as a recipient or file path), it retains the classification of the original input. |
 | **Combined Read & Release** | Single tool `share_doc(doc, recipient)` fetching and releasing in one step. | Split into `fetch_doc` (read) and `grant_doc_access` (release). | Combined tools force authorities to approve releases before content is fetched. |
 | **What an authority permits** | A wide `permits` table, such as `audience_missing = ["public"]`. | Restrict the authority's `permits` and `tags` to the minimum the desk needs. | An authority cannot rule beyond its `permits`, but a wide `permits` weakens the review gate. |
@@ -298,8 +303,8 @@ excludes = ["migration.applied"]                       # Neither recorded nor re
 - **`delta` is strictly restrictive**: A tool's delta can only narrow the audience or lower trust. Within an annotated `delta`, an omitted dimension defaults to identity (unchanged).
 - **Pending-cast deltas (`delta = { trust = "unknown" }` or `delta = { audience = "unknown" }`)**: Holds one label dimension pending resolution by a registered `[[cast]]` at admission. At most one dimension may be pending-cast. Declaring both `requires` and `unknown` delta on the same dimension is a load error. `"unknown"` is reserved: it can name neither a trust rank nor a reader.
 - **Dynamic argument placeholders (`$arg`)**: `requires.audience = { contains = ["$recipient"] }` evaluates `$recipient` against the actual call argument at runtime. The argument value can be a literal reader ID, the reserved word `public`, or an `@group` expanded by the membership resolver. Placeholders are supported only inside `contains`. The argument must be declared as a required top-level string in the tool's `parameters` schema.
-- **Dynamic resolvers (`uses`)**: Attaches registered resolvers to classify proposed calls. Each entry maps required inputs from `$tool_call`. Mapped arguments must be required top-level properties in the tool schema. A resolver with no inputs reads the entire tool call and requires a tool `description`.
-- **Single field ownership**: Each contract field has one source: a static policy value or a resolver result. You cannot configure both on the same field. Because each field accepts at most one resolver result, a tool uses at most five resolver outputs.
+- **Dynamic resolvers (`uses`)**: Attaches registered resolvers to classify proposed calls. Each entry maps required inputs from `$tool_call`. Mapped arguments must be required top-level properties in the tool schema. Without an explicit input mapping, a resolver receives the complete tool arguments object.
+- **Single field ownership**: Each contract field has one source: a static policy value or an attached resolver whose `returns` includes that destination. Static and resolver ownership cannot overlap. Two attached resolvers cannot own the same destination.
 - **History checks (`requires.effects`)**: `contains` passes when the trajectory already recorded the effect. `excludes` passes when the effect is neither recorded nor reserved by an unsettled dispatch (a dispatch released with that effect that has not yet succeeded or failed).
 - **Attention demands (`requires.attention`)**: Forces fresh authority sign-off on *every* call; never satisfied by execution history.
 - **Dual-gate contracts**: When a contract defines both a restrictive `delta` and a `requires` check (e.g., `search_and_share`), OpenAPPA evaluates both gates before dispatch.

@@ -92,7 +92,7 @@ pub(crate) fn observe_success(
     observed: ObservedResult,
 ) -> Result<Vec<Fact>, AdmitError> {
     let contract = registry
-        .tool(call.tool())
+        .contract(call)
         .ok_or_else(|| AdmitError::UnknownTool(call.tool().as_str().to_string()))?;
     if dispatch.digest() != &call.digest() {
         return Err(AdmitError::DigestMismatch);
@@ -279,7 +279,7 @@ pub(crate) fn admit_result(
     expansions: &Expansions,
 ) -> Result<Vec<Fact>, AdmitError> {
     let contract = registry
-        .tool(call.tool())
+        .contract(call)
         .ok_or_else(|| AdmitError::UnknownTool(call.tool().as_str().to_string()))?;
     if dispatch.digest() != &call.digest() {
         return Err(AdmitError::DigestMismatch);
@@ -542,7 +542,6 @@ mod tests {
                 crate::contract::ToolCallSource::argument("room").expect("a plain name is a source"),
             )]),
             returns: [ResolverReturn::Audience].into_iter().collect(),
-            reads: [ResolverReturn::Audience].into_iter().collect(),
         }
     }
 
@@ -692,6 +691,7 @@ mod tests {
             trajectory: traj(),
             dispatch: dispatch.clone(),
             tool: call.tool().clone(),
+            contract: call.contract_id(),
             arguments: call.canonical_arguments().clone(),
             proposed_label: EstablishedLabel::top(),
             receiving: EstablishedLabel::top(),
@@ -1334,6 +1334,7 @@ mod tests {
             trajectory: traj(),
             dispatch: dispatch.clone(),
             tool: call.tool().clone(),
+            contract: call.contract_id(),
             arguments: call.canonical_arguments().clone(),
             proposed_label: EstablishedLabel::top(),
             receiving: EstablishedLabel::top(),

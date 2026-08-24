@@ -1006,8 +1006,6 @@ mod deployment_tests {
                 name = "lookup"
                 description = "Looks one record up."
                 uses = [{ resolver = "classifier" }]
-                delta = { trust = "resolver.classifier.trust", audience = "resolver.classifier.audience" }
-                requires = { attention = "resolver.classifier.attention" }
             "#,
         );
         assert!(Deployment::load(tool_level, &crate::builtins::ModuleRegistry::empty(), test_permits()).is_ok());
@@ -1028,7 +1026,6 @@ mod deployment_tests {
                 name = "fetch"
                 description = "Fetches one URL."
                 uses = [{ resolver = "classifier" }]
-                delta = { trust = "resolver.classifier.trust" }
             "#,
             )
         };
@@ -1080,13 +1077,11 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 description = "Runs one shell command."
                 delta = {}
                 uses = [{ resolver = "bash-classifier" }]
-                requires = { attention = "resolver.bash-classifier.attention" }
                 [[tool]]
                 name = "Other"
                 description = "Does something else."
                 delta = {}
                 uses = [{ resolver = "other-classifier" }]
-                requires = { attention = "resolver.other-classifier.attention" }
             "#,
         );
         config.externals.dynamic = Some(crate::config::Endpoint {

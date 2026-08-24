@@ -147,7 +147,6 @@ returns = ["delta.trust"]
 name = "list_customers"
 description = "Lists the customer records."
 uses = [{ resolver = "classify" }]
-delta = { trust = "resolver.classify.trust" }
 "#;
         assert!(matches!(
             check_policy(policy, &systems("crm")),
@@ -228,7 +227,6 @@ returns = ["requires.audience"]
 [[tool]]
 name = "send_email"
 uses = [{ resolver = "directory", inputs = { to = "$tool_call.arguments.to" } }]
-requires = { audience = "resolver.directory.audience" }
 delta = {}
 "#,
                 systems("email"),

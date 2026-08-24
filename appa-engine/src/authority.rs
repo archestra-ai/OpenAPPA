@@ -88,8 +88,8 @@ impl Scope {
     ) -> Option<bool> {
         Some(match views.value_provenance(value)? {
             crate::value::Provenance::ToolResult { dispatch } => {
-                let tool = views.dispatch_tool(dispatch)?;
-                self.covers(&registry.tool(tool)?.tags)
+                let call = views.dispatch_call(dispatch)?;
+                self.covers(&registry.contract(call)?.tags)
             }
             crate::value::Provenance::ProviderRun { tool, .. } => {
                 self.covers(&registry.provider_run_contract(tool)?.tags)

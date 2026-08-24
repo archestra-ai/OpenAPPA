@@ -89,16 +89,14 @@ fn contract_description(contract: &ToolContract, chain: &TrustChain) -> String {
     }
     for uses in &contract.uses {
         let read = match uses.inputs.is_empty() {
-            true => "the complete call".to_string(),
+            true => "all arguments".to_string(),
             false => {
                 let sources: Vec<String> = uses.inputs.values().map(|source| source.spelling()).collect();
                 sources.join(", ")
             }
         };
-        // Only the results this tool references say anything about it; the rest of the
-        // resolver's answer is validated and dropped.
         let returned: Vec<&str> = uses
-            .reads
+            .returns
             .iter()
             .map(|field| match field {
                 appa_engine::contract::ResolverReturn::Trust => "output trust",

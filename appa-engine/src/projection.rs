@@ -472,6 +472,7 @@ impl Projection {
                     trajectory,
                     dispatch,
                     tool,
+                    contract,
                     arguments,
                     receiving,
                     proposed_effects,
@@ -483,7 +484,7 @@ impl Projection {
                 } => {
                     dispatch_calls.insert(
                         dispatch.clone(),
-                        ResolvedCall::new(tool.clone(), arguments.clone())
+                        ResolvedCall::new_keyed(tool.clone(), *contract, arguments.clone())
                             .with_tool_resolutions(tool_resolutions.clone())
                             .with_memberships(memberships.clone()),
                     );
@@ -1556,6 +1557,7 @@ mod tests {
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
                 tool: ToolName::new("tool"),
+                contract: Default::default(),
                 arguments: crate::params::test_arguments(&json!({ "t": "a" })),
                 proposed_label: EstablishedLabel::top(),
                 receiving: EstablishedLabel::top(),
@@ -1586,6 +1588,7 @@ mod tests {
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
                 tool: ToolName::new("tool"),
+                contract: Default::default(),
                 arguments: crate::params::test_arguments(&json!({ "t": "a" })),
                 proposed_label: EstablishedLabel::top(),
                 receiving: EstablishedLabel::top(),
@@ -1615,6 +1618,7 @@ mod tests {
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
                 tool: ToolName::new("tool"),
+                contract: Default::default(),
                 arguments: crate::params::test_arguments(&json!({ "t": "a" })),
                 proposed_label: EstablishedLabel::top(),
                 receiving: EstablishedLabel::top(),
@@ -2008,6 +2012,7 @@ mod tests {
                 trajectory: traj("a"),
                 dispatch: dispatch("a"),
                 tool: ToolName::new("fetch_meeting"),
+                contract: Default::default(),
                 arguments: crate::params::test_arguments(&json!({ "t": "a" })),
                 proposed_label: EstablishedLabel::top(),
                 receiving: EstablishedLabel::top(),
