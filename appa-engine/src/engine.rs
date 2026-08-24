@@ -1962,13 +1962,16 @@ impl Engine {
         self.answered_proposals(&proposals)?;
 
         // A call blocked only for want of a fact asks for the fact before anything is composed.
-        // Nothing appends here: a resolution advances the family basis, so releases and offers
+        // What appends here is what the batch already established: its provider-run admissions
+        // and any cast the carried evidence already resolved. The value the ask names may be one
+        // of those admissions, so the retry can only resolve it against a log that holds it.
+        // Releases and offers do not append: a resolution advances the family basis, so any
         // stamped ahead of it would carry a basis the answer immediately stales.
         if !self.registry.casts().is_empty() {
             let requests = self.cast_requests(view, &batch.trajectory, &facts, &proposals, expansions)?;
             if !requests.is_empty() {
                 return Ok(EngineDecision {
-                    append: None,
+                    append: self.seal_admissions(view, &batch.id, facts)?,
                     follow_up: FollowUp::ProposalsResolve(requests),
                 });
             }
@@ -11221,14 +11224,20 @@ mod tests {
     }
 
     fn engine_with_provider_run(tools: Vec<ToolContract>, provider_run: &[&str]) -> Engine {
-        let cfg = RegistryConfig {
-            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
-            tools,
-            authorities: vec![],
-            sanitizers: vec![],
-            casts: vec![],
-            membership: None,
-        };
+        provider_run_engine(
+            RegistryConfig {
+                trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+                tools,
+                authorities: vec![],
+                sanitizers: vec![],
+                casts: vec![],
+                membership: None,
+            },
+            provider_run,
+        )
+    }
+
+    fn provider_run_engine(cfg: RegistryConfig, provider_run: &[&str]) -> Engine {
         let mut declaration = crate::profile::covering_declaration(&cfg);
         for name in provider_run {
             declaration
@@ -11799,6 +11808,149 @@ mod tests {
             "the results were admitted by the first attempt: {facts:?}"
         );
         assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
+    }
+
+    /// An unannotated provider-run tool beside a trusted sink, with a resolver cast that
+    /// can settle the provider result's unknown trust.
+    fn casting_provider_run_engine() -> Engine {
+        let mut seen = plain_tool("seen");
+        seen.delta = None;
+        let mut cfg = test_config(vec![seen, trusted_sink()]);
+        cfg.casts = vec![resolver_cast("classifier", vec![SUSPICIOUS, TRUSTED], vec![])];
+        provider_run_engine(cfg, &["seen"])
+    }
+
+    fn provider_result_ask(evidence: Vec<Evidence>) -> EngineEvent {
+        EngineEvent::Proposals(ProposalBatch {
+            id: crate::transition::ProposalBatchId::new("b1"),
+            trajectory: traj(),
+            provider_results: vec![exposed("seen", "the provider ran it")],
+            proposals: vec![raw(&call("send", json!({})))],
+            spawn: None,
+            offer_nonce: nonce(),
+            evidence,
+            expansions: vec![],
+        })
+    }
+
+    fn provider_admissions_for<'f>(facts: &'f [Fact], batch: &str) -> Vec<&'f Fact> {
+        facts
+            .iter()
+            .filter(|fact| {
+                matches!(
+                    fact,
+                    Fact::ValueAdmitted {
+                        provenance: Provenance::ProviderRun { batch: admitted, .. },
+                        ..
+                    } if admitted.as_str() == batch
+                )
+            })
+            .collect()
+    }
+
+    /// Drives one batch through its ask and its answered retry; returns the whole log.
+    fn asked_then_answered(e: &Engine) -> (Vec<Fact>, EngineDecision, EngineDecision) {
+        let log = opening_log(e);
+        let asked = e
+            .handle(&viewing(e, &log), provider_result_ask(Vec::new()))
+            .expect("the batch asks for the cast");
+        let log = [log, appended_facts(asked.clone())].concat();
+        let value = match &asked.follow_up {
+            FollowUp::ProposalsResolve(requests) => match requests.as_slice() {
+                [EvidenceRequest::Cast { value, .. }] => *value,
+                other => panic!("expected one cast request, got {other:?}"),
+            },
+            other => panic!("expected a resolution ask, got {other:?}"),
+        };
+        let answered = e
+            .handle(
+                &viewing(e, &log),
+                provider_result_ask(vec![Evidence::Cast {
+                    cast: crate::names::CastName::new("classifier"),
+                    value,
+                    resolved: established(TRUSTED, Audience::Public),
+                }]),
+            )
+            .expect("the answered batch decides");
+        let log = [log, appended_facts(answered.clone())].concat();
+        (log, asked, answered)
+    }
+
+    #[test]
+    fn a_provider_result_admitted_in_the_batch_is_castable_on_the_retry() {
+        let e = casting_provider_run_engine();
+        let (_, asked, retry) = asked_then_answered(&e);
+
+        match &asked.follow_up {
+            FollowUp::ProposalsResolve(requests) => match requests.as_slice() {
+                [EvidenceRequest::Cast { casts, body, .. }] => {
+                    assert_eq!(
+                        casts.iter().map(|cast| cast.name.as_str()).collect::<Vec<_>>(),
+                        ["classifier"]
+                    );
+                    assert_eq!(
+                        body.as_str(),
+                        "the provider ran it",
+                        "the ask names the provider result"
+                    );
+                }
+                other => panic!("expected one cast request, got {other:?}"),
+            },
+            other => panic!("expected a resolution ask, got {other:?}"),
+        }
+        let ask_facts = appended_facts(asked);
+        match provider_admissions_for(&ask_facts, "b1").as_slice() {
+            [Fact::ValueAdmitted { value, .. }] => {
+                assert_eq!(value.body, ValueBody::new("the provider ran it"));
+                assert_eq!(value.label, Label::new(Dim::Unknown, Dim::Unknown));
+            }
+            other => panic!("the ask seals the batch's admission, not {other:?}"),
+        }
+        assert!(
+            !ask_facts
+                .iter()
+                .any(|fact| matches!(fact, Fact::ProposalBatchDecided { .. } | Fact::DispatchOpened { .. })),
+            "an ask decides and releases nothing: {ask_facts:?}"
+        );
+
+        let (released, blocked) = answered(&retry);
+        assert_eq!(
+            tool_names(released),
+            ["send"],
+            "the cast clears the floor the sink requires"
+        );
+        assert!(blocked.is_empty());
+        let retry_facts = appended_facts(retry);
+        assert!(
+            retry_facts.iter().any(|fact| matches!(fact, Fact::CastApplied { .. })),
+            "the answer lands as a cast under the batch's act: {retry_facts:?}"
+        );
+        assert!(
+            provider_admissions_for(&retry_facts, "b1").is_empty(),
+            "the result was admitted by the ask: {retry_facts:?}"
+        );
+    }
+
+    #[test]
+    fn the_log_of_an_asked_then_answered_provider_batch_replays() {
+        let e = casting_provider_run_engine();
+        let (log, _, _) = asked_then_answered(&e);
+
+        assert_eq!(provider_admissions_for(&log, "b1").len(), 1);
+        assert_eq!(
+            log.iter()
+                .filter(|fact| matches!(fact, Fact::CastApplied { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            log.iter()
+                .filter(|fact| matches!(fact, Fact::ProposalBatchDecided { .. }))
+                .count(),
+            1
+        );
+        let revision = log.len() as u64;
+        assert!(e.view(&traj(), log, revision).is_ok());
     }
 
     #[test]
