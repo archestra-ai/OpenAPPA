@@ -1477,6 +1477,12 @@ mod tests {
 
         let repeated = parsed("read(path:*secret)").expect("the selector is valid");
         assert!(repeated.matches(&arguments("secretsecret")));
+
+        let unicode = parsed("read(path:*京)").expect("the selector is valid");
+        assert!(unicode.matches(&arguments("東京京")));
+
+        let multiple = parsed("read(path:*ab*bc)").expect("the selector is valid");
+        assert!(multiple.matches(&arguments("xxabyyabzzbc")));
     }
 
     #[test]
