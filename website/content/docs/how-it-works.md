@@ -44,6 +44,8 @@ A tool can also use dynamic resolvers that classify each proposed call before di
 
 The deployment binds each resolver name to one HTTP endpoint or in-process builtin under `[externals.dynamic.<name>]`. The policy declaration does not choose the implementation. Every request carries the policy's trust chain and the attention marks that authorities name under `permits.attention`. Trust answers must select a rank from that chain. Attention answers must select literal marks from that set, which preserves per-mark authority routing. A resolver has no `permits` or ceiling of its own, so its returned evidence is part of the trusted deployment boundary.
 
+The configuration also accepts a local `command` binding. Command execution is not available in this build. The binding returns no answer, so the tool does not run.
+
 ### A resolver's answer is pinned to the call it classified
 
 Each contract field has a single source of truth. A field written in policy and a field supplied by a dynamic resolver cannot overlap, and requirements do not combine across resolvers. An unannotated dimension remains fail-closed (`Unknown`). History requirements (`effects`) are always static.

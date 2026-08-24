@@ -186,6 +186,8 @@ Ownership, pinning, and what a `tool_input` sanitizer can do to a pinned answer 
 
 The policy declares what a resolver owns. The deployment binds that resolver name to one implementation under `[externals.dynamic.<name>]`. The implementation can be an HTTP endpoint or the Claude Code builtin.
 
+The configuration also accepts `command = ["program", "arg"]` for a local resolver. Command execution is not available in this build, so this binding returns no answer and the tool does not run.
+
 ```toml
 [[dynamic_resolver]]
 name    = "classify-call"

@@ -290,6 +290,10 @@ impl Config {
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
+        let source_dir = std::fs::canonicalize(source_dir).map_err(|source| ConfigError::Unreadable {
+            path: source_dir.display().to_string(),
+            source,
+        })?;
         let mut document: toml::Value = toml::from_str(&text).map_err(|source| ConfigError::Unparsable {
             path: path.display().to_string(),
             source,
@@ -304,7 +308,7 @@ impl Config {
             .externals
             .dynamic
             .keys()
-            .map(|name| (name.clone(), source_dir.to_path_buf()))
+            .map(|name| (name.clone(), source_dir.clone()))
             .collect::<BTreeMap<_, _>>();
         let mut seen = std::collections::BTreeSet::new();
         for authored in &root.include {
@@ -312,10 +316,14 @@ impl Config {
             if include.is_absolute() {
                 return Err(ConfigError::AbsoluteInclude { path: authored.clone() });
             }
-            if !seen.insert(authored.clone()) {
+            let include_path = source_dir.join(include);
+            let include_path = std::fs::canonicalize(&include_path).map_err(|source| ConfigError::Unreadable {
+                path: include_path.display().to_string(),
+                source,
+            })?;
+            if !seen.insert(include_path.clone()) {
                 return Err(ConfigError::DuplicateInclude { path: authored.clone() });
             }
-            let include_path = source_dir.join(include);
             let included_text = std::fs::read_to_string(&include_path).map_err(|source| ConfigError::Unreadable {
                 path: include_path.display().to_string(),
                 source,
@@ -329,7 +337,9 @@ impl Config {
 
         let composed = toml::to_string(&document).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
         let raw: RawConfig = toml::from_str(&composed).map_err(|source| ConfigError::UnparsablePolicy { source })?;
-        Config::validate_composed(composed, raw, origins, |var| std::env::var(var).ok())
+        add_composed_metadata(&mut document, &raw.externals.dynamic, &origins);
+        let stored = toml::to_string(&document).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
+        Config::validate_composed(stored, raw, origins, |var| std::env::var(var).ok())
     }
 
     /// The configuration of a host that composes its policy in memory
@@ -419,6 +429,45 @@ impl Config {
 
 fn policy_version(policy: &toml::Value) -> Option<i64> {
     policy.as_table()?.get("version")?.as_integer()
+}
+
+fn add_composed_metadata(
+    document: &mut toml::Value,
+    dynamic: &BTreeMap<String, RawDynamicImplementation>,
+    origins: &BTreeMap<String, PathBuf>,
+) {
+    let command_cwds = dynamic
+        .iter()
+        .filter(|(_, implementation)| implementation.command.is_some())
+        .map(|(name, _)| {
+            let cwd = origins
+                .get(name)
+                .expect("every composed dynamic binding records its source");
+            let encoded = cwd.as_os_str().as_encoded_bytes();
+            let mut fingerprint = String::with_capacity(encoded.len() * 2);
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            for byte in encoded {
+                fingerprint.push(HEX[(byte >> 4) as usize] as char);
+                fingerprint.push(HEX[(byte & 0x0f) as usize] as char);
+            }
+            (name.clone(), toml::Value::String(fingerprint))
+        })
+        .collect::<toml::map::Map<_, _>>();
+    if command_cwds.is_empty() {
+        return;
+    }
+    let metadata = toml::Value::Table(
+        [(
+            "dynamic_command_cwd_bytes".to_string(),
+            toml::Value::Table(command_cwds),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    document
+        .as_table_mut()
+        .expect("a TOML document is always a table")
+        .insert("appa_composed".to_string(), metadata);
 }
 
 fn compose_include(
@@ -1061,8 +1110,28 @@ mod tests {
             DynamicImplementation::Command(command) => command.cwd.as_path(),
             _ => panic!("binding is a command"),
         };
-        assert_eq!(command_cwd("local"), dir.path());
-        assert_eq!(command_cwd("battery"), dir.path().join("battery"));
+        let canonical = std::fs::canonicalize(dir.path()).expect("canonical temp directory");
+        assert_eq!(command_cwd("local"), canonical);
+        assert_eq!(command_cwd("battery"), canonical.join("battery"));
+        assert!(
+            String::from_utf8_lossy(config.policy_file().bytes()).contains("[appa_composed"),
+            "command origins are part of deployment identity"
+        );
+
+        let moved = tempfile::tempdir().expect("second temp directory");
+        std::fs::create_dir(moved.path().join("battery")).expect("create second battery directory");
+        std::fs::copy(dir.path().join("appa.toml"), moved.path().join("appa.toml")).expect("copy root config");
+        std::fs::copy(
+            dir.path().join("battery/claude.toml"),
+            moved.path().join("battery/claude.toml"),
+        )
+        .expect("copy included config");
+        let moved = Config::load(&moved.path().join("appa.toml")).expect("moved config loads");
+        assert_ne!(
+            config.policy_file().bytes(),
+            moved.policy_file().bytes(),
+            "moving a command config changes the deployment behavior and identity"
+        );
     }
 
     #[test]
@@ -1082,7 +1151,7 @@ mod tests {
         write_root("\"/absolute.toml\"");
         assert!(matches!(Config::load(&root), Err(ConfigError::AbsoluteInclude { .. })));
 
-        write_root("\"battery.toml\", \"battery.toml\"");
+        write_root("\"battery.toml\", \"./battery.toml\"");
         std::fs::write(dir.path().join("battery.toml"), "[policy]\nversion = 1\n").expect("write included config");
         assert!(matches!(Config::load(&root), Err(ConfigError::DuplicateInclude { .. })));
 
