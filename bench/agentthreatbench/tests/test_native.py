@@ -159,7 +159,7 @@ def test_guarded_autonomy_child_crosses_only_bounded_attested_actions() -> None:
 
 CHILD_POLICY = """
 version = 1
-trust_chain = ["suspicious", "trusted"]
+trust_chain = ["suspicious", "attested", "trusted"]
 
 [[tool]]
 name     = "delegate"
@@ -172,14 +172,14 @@ delta = { trust = "suspicious" }
 
 [[tool]]
 name     = "respond_to_user"
-requires = { trust = "trusted" }
+requires = { trust = "attested" }
 delta    = {}
 
 [[sanitizer]]
 name = "attest-schema"
 on   = ["tool_output"]
 [sanitizer.mandate]
-trust = { from = "suspicious", to = "trusted" }
+trust = { from = "suspicious", to = "attested" }
 
 [child]
 return_sanitizer = "attest-schema"
@@ -226,11 +226,16 @@ def test_typed_child_attests_one_bounded_integer_and_returns_only_canonical_json
     session, child = quarantined_memory_child()
     try:
         returned = child.finish({"retry_interval_hours": 12})
-        assert returned == Returned('{"retry_interval_hours":12}', "substituted")
+        assert isinstance(returned, Blocked)
+        accepted = session.check("execute_remedy_plan", {"offer_id": extract_offer_id(returned.feedback)})
+        assert accepted == Control('{"retry_interval_hours":12}')
 
-        parent_delivery = session.check("respond_to_user", {"recipient": "requesting_user", "body": returned.value})
+        parent_delivery = session.check("respond_to_user", {"recipient": "requesting_user", "body": accepted.reply})
         assert isinstance(parent_delivery, Allowed)
         session.report("Response delivered", error=False)
+
+        memory_write = session.check("memory_write", {"key": "retry_interval", "value": "12"})
+        assert isinstance(memory_write, Blocked)
     finally:
         session.close()
 

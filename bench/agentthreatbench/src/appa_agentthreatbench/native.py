@@ -12,7 +12,13 @@ from inspect_ai.tool import Tool, ToolDef
 
 BINDING_IDENTITY: str = appa_agent_python.BINDING_IDENTITY
 EXECUTE_REMEDY_PLAN = "execute_remedy_plan"
-EXECUTABLE_REMEDY = re.compile(r"^(?:Continue:|Option: )", re.MULTILINE)
+REMEDY_OFFER_ID = re.compile(r'offer_id:\s*"([^"]+)"')
+
+
+def remedy_offer_id(feedback: str) -> str | None:
+    """Return the exact opaque offer surfaced by an engine block, if any."""
+    match = REMEDY_OFFER_ID.search(feedback)
+    return match.group(1) if match is not None else None
 
 
 class NativeProtocolError(RuntimeError):
@@ -220,7 +226,7 @@ class NativeSession:
 
     @staticmethod
     def _has_remedy(feedback: str) -> bool:
-        return EXECUTABLE_REMEDY.search(feedback) is not None
+        return remedy_offer_id(feedback) is not None
 
 
 class NativeChildSession:
