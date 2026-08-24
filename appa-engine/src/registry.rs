@@ -908,11 +908,11 @@ impl Registry {
         &self.trust_chain
     }
 
-    pub fn tool(&self, name: &ToolName) -> Option<&ToolContract> {
+    pub(crate) fn tool(&self, name: &ToolName) -> Option<&ToolContract> {
         self.tools.get(name)?.first().map(|(_, tool)| tool)
     }
 
-    pub fn keyed_tool(&self, name: &ToolName, id: ToolContractId) -> Option<&ToolContract> {
+    pub(crate) fn keyed_tool(&self, name: &ToolName, id: ToolContractId) -> Option<&ToolContract> {
         self.tools.get(name)?.get(id.ordinal()).map(|(_, tool)| tool)
     }
 
@@ -938,7 +938,7 @@ impl Registry {
             })
     }
 
-    pub fn contains_tool(&self, name: &ToolName) -> bool {
+    pub(crate) fn contains_tool(&self, name: &ToolName) -> bool {
         self.tools.contains_key(name)
     }
 
@@ -960,7 +960,7 @@ impl Registry {
         self.tools.values().flatten().map(|(_, tool)| tool)
     }
 
-    pub fn tool_names(&self) -> impl Iterator<Item = &ToolName> {
+    pub(crate) fn tool_names(&self) -> impl Iterator<Item = &ToolName> {
         self.tools.keys()
     }
 

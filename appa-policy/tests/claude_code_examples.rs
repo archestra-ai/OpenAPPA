@@ -9,7 +9,6 @@ use std::path::PathBuf;
 use appa_engine::authority::CastResolution;
 use appa_engine::label::Dimension;
 use appa_engine::names::CastName;
-use appa_engine::value::ToolName;
 use appa_policy::Config;
 
 fn examples_dir() -> PathBuf {
@@ -58,20 +57,16 @@ fn every_shipped_example_loads() {
 fn the_casts_example_registers_what_it_describes() {
     let config = load("claude-code-casts.appa.toml");
     let registry = config.registry();
+    // Each example tool has one contract, so the name alone finds it.
+    let tool = |name: &str| registry.tools().find(|tool| tool.name.as_str() == name);
 
-    let unannotated = registry
-        .tool(&ToolName::new("mcp__github__issue_read"))
-        .expect("the unannotated tool registers");
+    let unannotated = tool("mcp__github__issue_read").expect("the unannotated tool registers");
     assert_eq!(unannotated.delta, None);
 
-    let pending = registry
-        .tool(&ToolName::new("WebFetch"))
-        .expect("the pending-cast tool registers");
+    let pending = tool("WebFetch").expect("the pending-cast tool registers");
     assert_eq!(pending.pending_cast_dim(), Some(Dimension::Trust));
 
-    let sink = registry
-        .tool(&ToolName::new("mcp__github__issue_write"))
-        .expect("the sink registers");
+    let sink = tool("mcp__github__issue_write").expect("the sink registers");
     assert!(sink.requires.label.trust_floor.is_some());
 
     let classifier = registry

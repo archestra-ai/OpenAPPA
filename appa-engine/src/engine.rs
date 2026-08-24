@@ -11185,6 +11185,36 @@ mod tests {
     }
 
     #[test]
+    fn replay_refuses_a_later_contract_for_arguments_matching_an_earlier_one() {
+        let e = engine(vec![plain_tool("read(path:*)"), plain_tool("read")]);
+        let call = e
+            .resolve_call(ToolName::new("read"), br#"{"path":"secret.txt"}"#)
+            .unwrap();
+        let opening = vec![opened(&e)];
+        let mut facts = appended_facts(proposed(&e, &opening, "b1", nonce(), call).expect("the call releases"));
+        assert_eq!(e.validate_replay(&[opening.clone(), facts.clone()].concat()), Ok(()));
+
+        let later = crate::value::ToolContractId::new(1).unwrap();
+        for fact in &mut facts {
+            match fact {
+                Fact::ProposalBatchDecided { proposals, .. } => {
+                    let original = &proposals[0];
+                    proposals[0] =
+                        ResolvedCall::new_keyed(original.tool().clone(), later, original.canonical_arguments().clone())
+                            .with_tool_resolutions(original.tool_resolutions().to_vec())
+                            .with_memberships(original.memberships().to_vec());
+                }
+                Fact::DispatchOpened { contract, .. } => *contract = later,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            e.validate_replay(&[opening, facts].concat()),
+            Err(TransitionRefusal::MisdecidedBatch)
+        );
+    }
+
+    #[test]
     fn replay_refuses_a_corrupt_dispatched_call() {
         let e = engine(vec![strict_tool("send")]);
         let mut log = vec![opened(&e)];

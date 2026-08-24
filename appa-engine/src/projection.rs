@@ -875,7 +875,7 @@ impl Views<'_> {
 
     /// The canonical call a dispatch released. An outcome names its dispatch, and this
     /// is what the engine reports on — never a call the caller re-supplies.
-    pub(crate) fn dispatch_call(&self, dispatch: &DispatchId) -> Option<&ResolvedCall> {
+    pub fn dispatch_call(&self, dispatch: &DispatchId) -> Option<&ResolvedCall> {
         self.projection.dispatch_calls.get(dispatch)
     }
 

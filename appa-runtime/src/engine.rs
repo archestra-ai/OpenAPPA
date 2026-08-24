@@ -1079,7 +1079,7 @@ impl RuntimeEngine {
                     match cast_state(chain, evidence, value) {
                         CastAnswerState::Missing => consults.push(ExternalRequest::Cast {
                             value,
-                            ask: self.cast_ask(view, &acting, value_tool(view, &acting, value), casts, body),
+                            ask: self.cast_ask(view, &acting, value_source(view, &acting, value), casts, body),
                         }),
                         CastAnswerState::Unreadable(continued) => consults.push(*continued),
                         CastAnswerState::NoAnswer | CastAnswerState::Resolved => {
@@ -1756,13 +1756,14 @@ impl RuntimeEngine {
         &self,
         view: &EngineView,
         trajectory: &EngineTrajectoryId,
-        tool: Option<ToolName>,
+        source: CastSource,
         casts: Vec<ApplicableCast>,
         body: ValueBody,
     ) -> CastAsk {
-        let static_attention = tool
+        let CastSource { tool, call } = source;
+        let static_attention = call
             .as_ref()
-            .and_then(|tool| self.engine.registry().tool(tool))
+            .and_then(|call| self.engine.registry().contract(call))
             .map(|contract| {
                 contract
                     .requires
@@ -1820,13 +1821,13 @@ impl RuntimeEngine {
             EvidenceRequest::PendingCast { casts, source, body } => {
                 match pending_cast_state(chain, evidence, &source) {
                     CastAnswerState::Missing => {
-                        let tool = dispatch.and_then(|dispatch| {
+                        let call = dispatch.and_then(|dispatch| {
                             view.views(trajectory)
-                                .and_then(|views| views.dispatch_tool(dispatch).cloned())
+                                .and_then(|views| views.dispatch_call(dispatch).cloned())
                         });
                         Ok(Next::ResolveExternal(vec![ExternalRequest::PendingCast {
                             source,
-                            ask: self.cast_ask(view, trajectory, tool, casts, body),
+                            ask: self.cast_ask(view, trajectory, CastSource::from_call(call), casts, body),
                         }]))
                     }
                     CastAnswerState::Unreadable(continued) => Ok(Next::ResolveExternal(vec![*continued])),
@@ -1836,7 +1837,7 @@ impl RuntimeEngine {
             EvidenceRequest::Cast { casts, value, body } => match cast_state(chain, evidence, value) {
                 CastAnswerState::Missing => Ok(Next::ResolveExternal(vec![ExternalRequest::Cast {
                     value,
-                    ask: self.cast_ask(view, trajectory, value_tool(view, trajectory, value), casts, body),
+                    ask: self.cast_ask(view, trajectory, value_source(view, trajectory, value), casts, body),
                 }])),
                 CastAnswerState::Unreadable(continued) => Ok(Next::ResolveExternal(vec![*continued])),
                 CastAnswerState::NoAnswer | CastAnswerState::Resolved => blocked(),
@@ -2586,12 +2587,35 @@ fn unestablished_source(views: &Views, value: ValueId) -> String {
 
 /// The tool whose result `value` is, as a cast's classifier is told it. A child return
 /// originates from no tool.
-fn value_tool(view: &EngineView, trajectory: &EngineTrajectoryId, value: ValueId) -> Option<ToolName> {
-    let views = view.views(trajectory)?;
-    match views.value_provenance(value)? {
-        Provenance::ToolResult { dispatch } => views.dispatch_tool(dispatch).cloned(),
-        Provenance::ProviderRun { tool, .. } => Some(tool.clone()),
-        Provenance::ChildReturn { .. } => None,
+/// The tool a cast classifies a value of, and the call that produced it where a dispatch did:
+/// under ordered contracts the call, not the name, selects the contract whose requirements
+/// the classifier sees. A provider-run value names its tool; no dispatch released it.
+#[derive(Default)]
+struct CastSource {
+    tool: Option<ToolName>,
+    call: Option<ResolvedCall>,
+}
+
+impl CastSource {
+    fn from_call(call: Option<ResolvedCall>) -> Self {
+        CastSource {
+            tool: call.as_ref().map(|call| call.tool().clone()),
+            call,
+        }
+    }
+}
+
+fn value_source(view: &EngineView, trajectory: &EngineTrajectoryId, value: ValueId) -> CastSource {
+    let Some(views) = view.views(trajectory) else {
+        return CastSource::default();
+    };
+    match views.value_provenance(value) {
+        Some(Provenance::ToolResult { dispatch }) => CastSource::from_call(views.dispatch_call(dispatch).cloned()),
+        Some(Provenance::ProviderRun { tool, .. }) => CastSource {
+            tool: Some(tool.clone()),
+            call: None,
+        },
+        Some(Provenance::ChildReturn { .. }) | None => CastSource::default(),
     }
 }
 

@@ -1,15 +1,23 @@
 //! Load outcomes of the Unknown surface: an omitted `delta`, a pending-cast dimension, the
 //! reserved `"unknown"` token, and the shape of a `[[cast]]` — pinned at the TOML entry point.
 
-use appa_engine::contract::Delta;
+use appa_engine::contract::{Delta, ToolContract};
 use appa_engine::label::Dimension;
 use appa_engine::registry::LoadError;
-use appa_engine::value::ToolName;
 use appa_policy::{Config, ConfigError};
 
 /// A tool contract under the default trust chain, with the given TOML lines after its name.
 fn tool_policy(name: &str, body: &str) -> String {
     format!("version = 1\n\n[[tool]]\nname = \"{name}\"\n{body}\n")
+}
+
+/// The one contract a policy here registers under `name`; these policies never order several.
+fn contract<'a>(config: &'a Config, name: &str) -> &'a ToolContract {
+    config
+        .registry()
+        .tools()
+        .find(|tool| tool.name.as_str() == name)
+        .unwrap_or_else(|| panic!("{name} registers"))
 }
 
 #[test]
@@ -47,7 +55,7 @@ fn an_unannotated_tool_with_history_or_attention_requirements_loads() {
         let policy = tool_policy("send", requires);
         let config = Config::from_toml_str(&policy)
             .unwrap_or_else(|error| panic!("an unannotated tool with a {case} requirement loads: {error}"));
-        let contract = config.registry().tool(&ToolName::new("send")).expect("send registers");
+        let contract = contract(&config, "send");
         assert_eq!(contract.delta, None, "{case}: the tool stays unannotated");
     }
 }
@@ -90,7 +98,7 @@ fn a_pending_cast_tool_loads_only_when_its_result_is_confined() {
 
     let confined = format!("{unconfined}\n[deployment]\nconfined_results = [\"scan\"]\n");
     let config = Config::from_toml_str(&confined).expect("a confined pending-cast tool loads");
-    let contract = config.registry().tool(&ToolName::new("scan")).expect("scan registers");
+    let contract = contract(&config, "scan");
     assert_eq!(contract.pending_cast_dim(), Some(Dimension::Trust));
 }
 
@@ -98,10 +106,9 @@ fn a_pending_cast_tool_loads_only_when_its_result_is_confined() {
 fn an_empty_delta_and_an_omitted_delta_load_as_different_contracts() {
     let omitted = Config::from_toml_str(&tool_policy("read", "")).expect("an unannotated tool loads");
     let neutral = Config::from_toml_str(&tool_policy("read", "delta = {}")).expect("a neutral tool loads");
-    let name = ToolName::new("read");
 
-    let omitted = omitted.registry().tool(&name).expect("read registers");
-    let neutral = neutral.registry().tool(&name).expect("read registers");
+    let omitted = contract(&omitted, "read");
+    let neutral = contract(&neutral, "read");
     assert_eq!(omitted.delta, None);
     assert_eq!(neutral.delta, Some(Delta::NONE));
     assert_ne!(omitted.delta, neutral.delta);

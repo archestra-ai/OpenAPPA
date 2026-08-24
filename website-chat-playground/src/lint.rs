@@ -98,7 +98,8 @@ mod tests {
         let invoices = checked
             .config
             .registry()
-            .tool(&ToolName::new("list_invoices"))
+            .variants(&ToolName::new("list_invoices"))
+            .next()
             .expect("the finance system provides list_invoices");
         assert!(matches!(
             invoices.delta.as_ref().and_then(|delta| delta.audience.as_ref()),
@@ -111,7 +112,8 @@ mod tests {
         let email = checked
             .config
             .registry()
-            .tool(&ToolName::new("send_email"))
+            .variants(&ToolName::new("send_email"))
+            .next()
             .expect("the email system provides send_email");
         assert!(matches!(
             email.uses.as_slice(),

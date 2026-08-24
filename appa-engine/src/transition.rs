@@ -2257,11 +2257,19 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::ForeignAdmission);
         }
         for call in proposals {
-            let contract = self
+            if !self.engine.registry().contains_tool(call.tool()) {
+                return Err(TransitionRefusal::UnknownTool(call.tool().as_str().to_string()));
+            }
+            let (selected, contract) = self
                 .engine
                 .registry()
-                .contract(call)
-                .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
+                .select_tool(call.tool(), call.arguments())
+                .ok_or(TransitionRefusal::InvalidPayload(
+                    crate::params::ArgumentError::NoMatchingContract,
+                ))?;
+            if selected != call.contract_id() {
+                return Err(TransitionRefusal::MisdecidedBatch);
+            }
             if crate::check::validate_memberships(contract, call).is_err() {
                 return Err(TransitionRefusal::ForgedMembership);
             }

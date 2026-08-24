@@ -1196,8 +1196,8 @@ confined_results = ["lookup"]
     #[test]
     fn declaration_only_policy_builds_the_engine_registry() {
         let config = Config::from_toml_str(DECLARATIONS).expect("the policy compiles");
-        assert!(config.registry().tool(&ToolName::new("lookup")).is_some());
-        assert!(config.registry().tool(&ToolName::new("send")).is_some());
+        assert!(config.registry().variants(&ToolName::new("lookup")).next().is_some());
+        assert!(config.registry().variants(&ToolName::new("send")).next().is_some());
         assert!(config.registry().authority(&AuthorityName::new("approver")).is_some());
         assert!(config.registry().sanitizer(&SanitizerName::new("pii")).is_some());
         assert_eq!(config.registry_config().tools.len(), 2);
@@ -1418,7 +1418,8 @@ uses = [
         let config = Config::from_toml_str(policy).expect("the policy loads");
         let tool = config
             .registry()
-            .tool(&ToolName::new("lookup"))
+            .variants(&ToolName::new("lookup"))
+            .next()
             .expect("lookup registers");
         assert_eq!(tool.uses.len(), 2);
         let classifier = &tool.uses[0];
@@ -1757,7 +1758,8 @@ uses = [{ resolver = "one" }, { resolver = "two" }]
         .expect("the schema compiles");
         let tool = config
             .registry()
-            .tool(&ToolName::new("t"))
+            .variants(&ToolName::new("t"))
+            .next()
             .expect("the tool is registered");
         assert_eq!(
             tool.parameters.normalized(),
@@ -1816,7 +1818,10 @@ confined_results = ["read", "send"]
                 GroupName::new("team")
             ]
         );
-        let read = registry.tool(&ToolName::new("read")).expect("read registers");
+        let read = registry
+            .variants(&ToolName::new("read"))
+            .next()
+            .expect("read registers");
         assert_eq!(
             read.delta.as_ref().and_then(|delta| delta.audience.as_ref()),
             Some(&AudienceDelta::Static(
@@ -1892,7 +1897,11 @@ confined_results = ["read", "send"]
             Config::from_toml_str(&policy)
         };
         let pending = delta("\"unknown\"").expect("the unknown token loads");
-        let tool = pending.registry().tool(&ToolName::new("t")).expect("t registers");
+        let tool = pending
+            .registry()
+            .tools()
+            .find(|tool| tool.name.as_str() == "t")
+            .expect("t registers");
         assert!(matches!(
             tool.delta.as_ref().and_then(|d| d.audience.as_ref()),
             Some(AudienceDelta::PendingCast)
