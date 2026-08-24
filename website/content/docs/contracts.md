@@ -12,8 +12,8 @@ This document is a reference guide for writing and reviewing OpenAPPA policy TOM
 ```toml
 version = 1
 
-# Optional. The trust chain, least-trusted first; the rank names are yours.
-# Omitted, it defaults to `suspicious < trusted`.
+# Optional. The trust chain, least-trusted first; the rank names are yours,
+# except `unknown`, which is reserved. Omitted, it defaults to `suspicious < trusted`.
 trust_chain = ["suspicious", "trusted"]
 ```
 
@@ -169,7 +169,7 @@ A result is named for the one contract field it establishes. These five names ar
 
 #### Ownership and pinning
 
-Every contract field has one owner. A field the policy writes and a field a resolver establishes are the same field, so the two never overlap and requirements do not combine across resolvers. A dimension no owner describes stays fail-closed `Unknown`. History requirements are always static.
+Every contract field has one owner. A field the policy writes and a field a resolver establishes are the same field, so the two never overlap and requirements do not combine across resolvers. A dimension no owner describes contributes nothing inside a declared `delta` and checks nothing under `requires`. Only a tool with no `delta` key at all is unannotated: its result enters `Unknown` in both dimensions. History requirements are always static.
 
 Resolution occurs when a proposed call first checks. The validated answer is pinned to the exact `args` its resolver received. The pin holds through rechecks, remedy plans, rulings, dispatch, and admission. The dispatch record stores the answer and a digest of those `args`, not a second copy of them: the arguments and the `uses` entry are already on the record, so a replay rebuilds the value and compares. A new proposal resolves again. An answer given about an unrelated call is never evidence here.
 
@@ -315,7 +315,7 @@ attention = ["sre-signoff"]                            # Fresh per-call demand
 ### Key contract rules
 
 - **`delta` is strictly restrictive**: A tool's delta can only narrow the audience or lower trust. Within an annotated `delta`, an omitted dimension defaults to identity.
-- **Pending-cast deltas (`delta = { trust = "unknown" }`)**: Holds a label dimension pending resolution by a registered `[[cast]]` at admission. Declaring both `requires` and `unknown` delta on the same dimension is a load error.
+- **Pending-cast deltas (`delta = { trust = "unknown" }` or `delta = { audience = "unknown" }`)**: Holds one label dimension pending resolution by a registered `[[cast]]` at admission. At most one dimension may be pending-cast. Declaring both `requires` and `unknown` delta on the same dimension is a load error. `"unknown"` is reserved: it can name neither a trust rank nor a reader.
 - **Dynamic argument placeholders (`$arg`)**: `requires.audience = { includes = ["$recipient"] }` evaluates `$recipient` against the actual call argument at runtime, as one audience expression: an ordinary string is one literal reader ID, `public` is the Public audience — only a Public trajectory includes it — and `@name` is a group the membership resolver expands, pinned to that proposed call. Placeholders are valid only inside `includes`, and `recipient` must be a required top-level string property of the tool's `parameters` — an omitted `parameters`, an optional, non-string, or nested property is a load error. A call that omits the argument or passes a non-string fails schema validation as an `InvalidCall` before the check runs.
 - **Dynamic resolvers (`uses`)**: Each entry names a registered resolver and maps every input that resolver declares from `$tool_call`. The tool's own fields then read results by name. A mapped `$tool_call.arguments.<name>` must be a required top-level property of the tool's `parameters`, at any type; a resolver that declares no inputs reads the complete call and needs no `parameters`, but does need a `description`.
 - **A field has one owner**: `delta.trust` holds a written value or one resolver result, never both — the TOML key takes one value, so the two cannot be spelled together. Write a value for a field no resolver reads: a concrete one (`delta = { trust = "trusted" }`), `delta = {}` to make the output neutral (pass-through), or omit `delta` to leave it `Unknown` (fail-closed — the safe default). Because each field takes one result, requirements do not combine across resolvers, and a tool uses at most five.
@@ -432,6 +432,8 @@ Registering the reserved name is the whole wiring: the engine applies `attest-sc
 ## Casts
 
 Unannotated tools return data in an `Unknown` label state. A `[[cast]]` resolves the whole value at once, using static rules or external classifiers: its answer is one complete label that preserves every dimension already established and makes every unresolved dimension concrete, admitted atomically or not at all.
+
+A block lists each Unknown source by value under `unestablished`, together with the dimensions no applicable cast reaches. No remedy plan clears that slot; only an admitted cast does. While any source in a block is unestablished, the block offers no executable plan.
 
 ```toml
 [[cast]]

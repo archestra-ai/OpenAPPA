@@ -23,9 +23,11 @@ const TERMS = {
   sanitizers:
     "Registered components that derive cleaner outputs to restore lost reach or raise trust.",
   cast:
-    "A registered component that resolves an Unknown label dimension to a concrete state under pre-configured ceilings.",
+    "A registered component that resolves one whole Unknown value to one complete label, atomically, under pre-configured ceilings.",
   casts:
-    "Registered components that resolve Unknown label dimensions to concrete audience or trust states.",
+    "Registered components that resolve whole Unknown values to complete labels, atomically, under pre-configured ceilings.",
+  "[[cast]]":
+    "The registered resolution of an Unknown value: one complete label for the whole source, atomically.",
   remedy:
     "An actionable path returned on a policy refusal explaining how to unblock execution safely.",
   remedies:
@@ -132,9 +134,15 @@ const TERMS = {
   remedy_plans:
     "Returned on a refusal: exact valid paths forward to unblock execution.",
   unestablished:
-    "Returned on a refusal: values whose needed dimension no registered cast could establish.",
+    "Returned on a refusal: each source, by value, whose needed dimension no registered cast reaches, with its unresolved dimensions. A registered cast that gives no answer decides nothing and lists nothing here.",
   Unknown:
-    "Unestablished label state on an unannotated or pending-cast value. Fails closed at requirement checks until resolved by a cast.",
+    "Unestablished label state on an unannotated or pending-cast value. Not a rank: it is ordered against no rank. Fails closed at every consumer of the dimension — label requirements, sanitizer applicability and mandate checks, pending-cast admission — until a cast resolves the value.",
+  "pending-cast":
+    "A delta dimension declared \"unknown\" on the tool itself. The runtime confines the raw result, a registered cast resolves the value before admission, and a restricting resolution is offered to the agent as a narrowing.",
+  confined_results:
+    "The deployment's list of result points the host withholds from the model. A pending-cast delta and output sanitization at a tool result both need the tool listed here.",
+  "partial label":
+    "A run dimension's state while any source is unresolved: an established bound folded from the known contributions, plus the set of unresolved sources. Checks see the bound; a consumer of the dimension fails closed on the set.",
   trajectory: "One agent run: its security label plus its append-only event log.",
 } as const satisfies Record<string, string>;
 

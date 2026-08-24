@@ -104,7 +104,7 @@ run({
 })
 ```
 
-The process will announce its resolver names when it starts. APPA will compare them with the effective policy before activating the deployment. A missing, duplicate, or unknown name will refuse activation instead of leaving part of the policy unwired.
+The process will announce its resolver names when it starts. APPA will compare them with the effective policy before activating the deployment. A missing, duplicate, or undeclared name will refuse activation instead of leaving part of the policy unwired.
 
 Requests and responses will use versioned, newline-delimited JSON over standard input and output. The first version will serialize requests, so the protocol will need no correlation identifier. Standard error will remain available for bounded operational logs; standard output will contain protocol messages only.
 
@@ -181,7 +181,7 @@ Operating-system sandboxing will remain the access-prevention boundary. It must 
 
 Installation should still be one action. The installer will place trusted battery files, update the short include list, create default resolver and settings files when they are absent, bind the managed command, and validate the complete deployment. It will not overwrite local customization.
 
-The completion summary will name the installed batteries, covered tools, resolver names, settings location, and known limits. An unknown harness tool will remain blocked until its battery is updated or a local policy declares it.
+The completion summary will name the installed batteries, covered tools, resolver names, settings location, and known limits. An undeclared harness tool will remain blocked until its battery is updated or a local policy declares it.
 
 The installer will perform mechanical setup only. It will not decide which local paths are private or which destinations deserve trust. Those decisions stay visible in the settings and policy that the deployer reviews.
 

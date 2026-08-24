@@ -141,7 +141,7 @@ Because every remedy except narrowing acceptance derives from a registered compo
 { outcome: "block",
   requirement_gaps: [...],  // unmet entries from `requires`
   narrowing: {...},         // present when the call's own delta narrows
-  unestablished: [...],     // values whose labels could not be established
+  unestablished: [...],     // sources whose unresolved dimensions no registered cast reaches
   remedy_plans: [...] }     // valid remedy plans executable by id or tool call
 ```
 
@@ -151,16 +151,16 @@ A non-empty remedy list indicates that candidate paths exist, though external co
 
 Real-world deployments can be difficult to annotate in a single pass. Similar to gradual typing in Python or TypeScript codebases, OpenAPPA supports partial annotation—delivering immediate value from day one. 
 
-Unannotated tools return data with an **Unknown** label state, representing unverified classification rather than a specific trust rank. Unknown labels propagate through trajectory operations, causing any trajectory that ingests an unknown value to become Unknown. Unregistered tool calls are refused directly rather than returning Unknown values.
+Unannotated tools return data with an **Unknown** label state, representing unverified classification rather than a specific trust rank. A tool is unannotated when its contract has no `delta` key at all; `delta = {}` is the opposite, declaring that the result carries no restriction. Unknown labels propagate through trajectory operations per dimension: the trajectory keeps every known restriction, and each dimension the value left unresolved stays Unknown for that source until a cast establishes it. Unregistered tool calls are refused directly rather than returning Unknown values.
 
 | Execution Context | Impact of Unknown State |
 |---|---|
 | **Unannotated Tool Dispatch** | Succeeds and assigns **Unknown** label state to its output. |
 | **Unregistered Tool Dispatch** | Refused directly by the engine before execution. |
-| **Requirement Check (`requires`)** | Drives the cast registered for the value, then checks the label it established; fails closed when no cast answers. |
+| **Requirement Check (`requires`)** | Drives the casts registered for the value, then checks the label the first answer establishes. When no registered cast reaches the value, the call is blocked and the block names the source under `unestablished`. When a registered cast gives no answer, nothing is decided or recorded, and the call can be tried again. |
 | **Child Merge Boundary** | Unknown child returns merge like any read: unresolved identities cross while every known restriction holds. Registered casts resolve them where the return policy consumes the dimension. |
 
-An Unknown label state does not halt execution until a tool contract's `requires` clause explicitly checks the value. At that point the engine drives the **cast** registered for the value — a component that assigns its complete label from a fixed declaration or an external classifier — and decides on the answer it establishes. A value no registered cast reaches stays Unknown, and the call that needed it is refused. This design allows deployments to start with a few high-risk tool annotations and incrementally expand policy coverage over time.
+An Unknown label state does not halt execution until a tool contract's `requires` clause explicitly checks the value. At that point the engine drives the **cast** registered for the value — a component that assigns its complete label from a fixed declaration or an external classifier — and decides on the answer it establishes. A value no registered cast reaches stays Unknown: the call that needed it is blocked, and the block names the source under `unestablished`. A registered cast that gives no answer decides nothing and records no fact; the call can be tried again. This design allows deployments to start with a few high-risk tool annotations and incrementally expand policy coverage over time.
 
 A deployment that would rather inspect the data before the model sees it declares the pending dimension on the tool itself, with `delta = { trust = "unknown" }`. The tool runs, the runtime holds its raw result back, and the cast reads the bytes the model has not: a non-restricting label releases the result, and a restricting one is offered to the agent as a narrowing to accept.
 
