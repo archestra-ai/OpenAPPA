@@ -6,9 +6,9 @@ param(
 # Hooks protect only sessions launched with APPA_GATE=1 (the clappa
 # function). The guard reads the Claude Code process environment, fixed at
 # launch, so a session cannot turn the protection off. Without the variable
-# the protection hook exits 0 and -SessionContext prints nothing — or
-# setup-appa.md when the runtime binary is not installed: instructions for
-# the model to perform the install as a prompted task when the user asks.
+# the protection hook exits 0 and -SessionContext prints nothing.
+# Installing the runtime is the appa-setup skill's job, invoked only
+# when the user asks.
 $protected = $env:APPA_GATE -eq "1"
 
 $dataDir = if ($env:APPA_DATA_DIR) { $env:APPA_DATA_DIR } else { Join-Path $env:LOCALAPPDATA "appa" }
@@ -17,17 +17,10 @@ $installDir = if ($env:APPA_INSTALL_DIR) { $env:APPA_INSTALL_DIR } else { Join-P
 $binary = Join-Path $installDir "appa-runtime.exe"
 
 if ($SessionContext) {
-    if ($protected) {
-        $document = "session-context.md"
-    } elseif (Test-Path -LiteralPath $binary) {
+    if (-not $protected) {
         exit 0
-    } else {
-        [Console]::Out.WriteLine("Install target for this machine: $binary")
-        [Console]::Out.WriteLine("Plugin files: $(Split-Path -Parent $PSScriptRoot)")
-        [Console]::Out.WriteLine("")
-        $document = "setup-appa.md"
     }
-    Get-Content -LiteralPath (Join-Path $PSScriptRoot $document) -Raw
+    Get-Content -LiteralPath (Join-Path $PSScriptRoot "session-context.md") -Raw
     exit 0
 }
 
@@ -48,8 +41,8 @@ function Test-RuntimeHealthy {
 # SessionStart starts the installed runtime when nothing healthy answers,
 # so a protected session works without any service setup, and the last step
 # of the install starts it through -EnsureRuntime. Installing the binary is
-# not this script's job: an unprotected session performs that as a prompted
-# task when the user asks.
+# not this script's job: the appa-setup skill does that when the user
+# asks.
 function Start-RuntimeIfDown {
     if (Test-RuntimeHealthy) {
         return

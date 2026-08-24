@@ -10,9 +10,9 @@ The plugin protects only sessions launched with `APPA_GATE=1` (the
 `clappa` alias). The hooks read the variable from the Claude Code
 process environment, fixed at launch, so a session cannot turn the
 protection off. In every other session the plugin is inert: it checks
-nothing, starts nothing, and prints nothing — except when the runtime
-binary is not installed, where it loads the install instructions so the
-model can perform the setup when asked (`hooks/setup-appa.md`).
+nothing, starts nothing, and prints nothing. Installing the runtime is
+the `appa-setup` skill's job (`skills/appa-setup`), run only when the
+user invokes it.
 
 The plugin ships the POSIX hook commands (`hooks/hooks.json`). Native
 Windows swaps in `hooks/hooks.windows.json`, which drives the
@@ -28,9 +28,9 @@ launches the installed `appa-runtime` when nothing healthy answers
 `/health` and returns only once one does. The last step of the install
 runs it, so a protected session normally finds the runtime already up and
 its SessionStart start is a single health probe. When the binary is not
-installed at all, an unprotected session installs it as a prompted
-task: `hooks/setup-appa.md` tells the model how to download, verify,
-install, and start the release binary on request, under the session's
+installed at all, the `appa-setup` skill installs it:
+`skills/appa-setup/SKILL.md` tells the model how to download, verify,
+install, and start the release binary, under the session's
 normal command approval — so the plugin alone completes the install. A
 runtime that dies mid-session still blocks the session until the next
 session start brings it back.

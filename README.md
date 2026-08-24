@@ -68,7 +68,7 @@ fastest way to watch a policy make a decision on real work:
 ```sh
 claude plugin marketplace add archestra-ai/OpenAPPA &&
   claude plugin install appa-runtime@appa &&
-  claude "set up APPA"
+  claude /appa-setup
 ```
 
 This installs a `clappa` command that runs Claude Code protected by OpenAPPA;
