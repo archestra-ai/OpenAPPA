@@ -17,6 +17,8 @@ claude plugin marketplace add archestra-ai/OpenAPPA &&
 
 The setup installs the local runtime and adds `clappa`, a protected way to start Claude Code. It does not replace `claude` or change how your ordinary sessions start.
 
+Setup asks once whether it may count the install. If you agree, it sends one event with the version, operating system and architecture. It sends nothing that identifies you or your machine, and it stores nothing to recognise you later. If you decline, or say nothing, it sends nothing. `APPA_TELEMETRY=0` refuses it without being asked. The runtime never reports anything at any point.
+
 ## 1. Teach OpenAPPA about your tools
 
 :::claude-policy-timing:::
