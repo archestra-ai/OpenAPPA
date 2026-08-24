@@ -1,6 +1,6 @@
 This Claude Code session is not protected by OpenAPPA. The OpenAPPA plugin is installed, but the `appa-runtime` binary is not.
 
-At the start of the session, tell the user in one short sentence: the Claude + APPA beta is available, and you can set it up for them if they want. Say it once, do not repeat it, and do not install anything without being asked.
+Do not mention OpenAPPA to the user unprompted, and do not install anything without being asked.
 
 When the user asks for the setup, install the runtime:
 
@@ -24,7 +24,7 @@ When the user asks for the setup, install the runtime:
    {"statusLine": {"type": "command", "command": "<that path>/appa-statusline.sh"}}
    ```
 
-   It shows the APPA mascot with the session's trust and audience when protected, and a `clappa` reminder when not.
+   It shows the APPA mascot with the session's trust and audience when protected, and the mascot alone when not.
 
 8. Start the runtime and confirm it answers. First ask whether one already runs: `curl -sS -m 2 http://127.0.0.1:8787/health`, or `$APPA_RUNTIME_URL/health` when that variable is set.
 

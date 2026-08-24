@@ -105,17 +105,16 @@ function clappa { $env:APPA_GATE = "1"; try { claude @args } finally { Remove-It
 Only sessions started with `APPA_GATE=1` are protected. The hooks read
 the variable from the Claude Code process environment, fixed at launch,
 so a session cannot turn the protection off mid-session. A plain
-`claude` session stays unprotected and announces once, at session
-start, that the beta is available and `clappa` starts a protected
-session.
+`claude` session stays unprotected, and the plugin prints nothing
+into it.
 
 A protected session starts the installed runtime at SessionStart when
 nothing healthy answers `/health` — normally a no-op, because the install
 left it running — then blocks every action while the runtime is
 unavailable. When the binary is not installed at all, an
 unprotected session installs it as a prompted task: its session context
-(`hooks/setup-appa.md`) has the model offer the setup and, on request,
-download the release archive for the current system, verify its
+(`hooks/setup-appa.md`) has the model, only when asked, download the
+release archive for the current system, verify its
 checksum and version, and install the binary — each step under the
 session's normal command approval. There is no login service: a runtime
 that dies mid-session blocks the session until the next session start
@@ -212,9 +211,7 @@ Claude Code reads `statusLine` only from your own settings — a plugin
 cannot set it. In a protected session the script shows the APPA pixel
 mascot plus the session's current Trust and Audience, read from the
 process's `GET /status`. In an unprotected session it shows the mascot
-with a reminder that `clappa` starts a protected session, and never
-queries the
-runtime. Both platform scripts fail open: runtime down, unknown
+alone and never queries the runtime. Both platform scripts fail open: runtime down, unknown
 trajectory, or malformed input prints the mascot alone, never a blocked
 action. The POSIX script also needs `jq` and `curl`.
 
