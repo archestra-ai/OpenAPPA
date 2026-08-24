@@ -395,7 +395,7 @@ struct Pump<'a> {
     records: tokio::sync::mpsc::Receiver<Recorded>,
     audit_seen: usize,
     audit: AuditReader,
-    last_label: Option<(String, String, Vec<u64>, Vec<u64>)>,
+    last_label: Option<(String, String)>,
 }
 
 struct ClientGone;
@@ -423,20 +423,8 @@ impl Pump<'_> {
         }
 
         for event in events {
-            if let WireEvent::Label {
-                trust,
-                audience,
-                unresolved_trust,
-                unresolved_audience,
-                ..
-            } = &event
-            {
-                let label = (
-                    trust.clone(),
-                    audience.clone(),
-                    unresolved_trust.clone(),
-                    unresolved_audience.clone(),
-                );
+            if let WireEvent::Label { trust, audience, .. } = &event {
+                let label = (trust.clone(), audience.clone());
                 if self.last_label.as_ref() == Some(&label) {
                     continue;
                 }

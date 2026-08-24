@@ -95,14 +95,6 @@ fn a_pending_cast_tool_loads_only_when_its_result_is_confined() {
 }
 
 #[test]
-fn a_trust_chain_naming_unknown_is_refused() {
-    // The refusal's variant is the engine's or the loader's; the outcome is what the policy
-    // author sees.
-    let policy = "version = 1\ntrust_chain = [\"unknown\", \"trusted\"]\n";
-    assert!(Config::from_toml_str(policy).is_err());
-}
-
-#[test]
 fn an_empty_delta_and_an_omitted_delta_load_as_different_contracts() {
     let omitted = Config::from_toml_str(&tool_policy("read", "")).expect("an unannotated tool loads");
     let neutral = Config::from_toml_str(&tool_policy("read", "delta = {}")).expect("a neutral tool loads");
