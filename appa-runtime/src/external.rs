@@ -245,7 +245,11 @@ enum SanitizerBackend {
 enum DynamicBackend {
     Resolver(Endpoint),
     ClaudeCode(ClaudeCodeBackend),
-    Command(ResolverCommand),
+    Command {
+        command: ResolverCommand,
+        timeout: std::time::Duration,
+        max_body_bytes: usize,
+    },
 }
 
 /// The dispatch tables over the configured implementations. Async and
@@ -335,7 +339,11 @@ impl ExternalServices {
         for (name, implementation) in config.dynamic {
             let backend = match implementation {
                 DynamicImplementation::Resolver(endpoint) => DynamicBackend::Resolver(endpoint),
-                DynamicImplementation::Command(command) => DynamicBackend::Command(command),
+                DynamicImplementation::Command(command) => DynamicBackend::Command {
+                    command,
+                    timeout: config.timeout,
+                    max_body_bytes: config.max_body_bytes,
+                },
             };
             dynamic.insert(name, backend);
         }
@@ -553,14 +561,11 @@ impl ExternalServices {
                 drop(permit);
                 answered
             }
-            Some(DynamicBackend::Command(command)) => {
-                tracing::debug!(
-                    resolver,
-                    cwd = %command.cwd.display(),
-                    "command resolver execution is unavailable"
-                );
-                return ToolResolution::Unresolved(NoAnswerReason::Unregistered);
-            }
+            Some(DynamicBackend::Command {
+                command,
+                timeout,
+                max_body_bytes,
+            }) => run_command_resolver(command, &request, *timeout, *max_body_bytes).await,
         };
         let raw = match answered {
             Ok(raw) => raw,
@@ -641,6 +646,189 @@ impl ExternalServices {
         }
         Ok(body)
     }
+}
+
+#[cfg(unix)]
+async fn run_command_resolver(
+    command: &ResolverCommand,
+    request: &ToolResolutionRequest<'_>,
+    timeout: std::time::Duration,
+    max_body_bytes: usize,
+) -> Result<serde_json::Value, NoAnswerReason> {
+    let input = serde_json::to_vec(request).map_err(|_| NoAnswerReason::Malformed)?;
+    let deadline = tokio::time::Instant::now() + timeout;
+    let (cancel, cancelled) = tokio::sync::oneshot::channel();
+    let command = command.clone();
+    let task =
+        tokio::spawn(async move { run_command_process(command, input, max_body_bytes, deadline, cancelled).await });
+    let output = CommandTask {
+        cancel: Some(cancel),
+        task,
+    }
+    .wait()
+    .await?;
+    serde_json::from_slice(&output).map_err(|_| NoAnswerReason::Malformed)
+}
+
+#[cfg(not(unix))]
+async fn run_command_resolver(
+    _command: &ResolverCommand,
+    _request: &ToolResolutionRequest<'_>,
+    _timeout: std::time::Duration,
+    _max_body_bytes: usize,
+) -> Result<serde_json::Value, NoAnswerReason> {
+    Err(NoAnswerReason::Unregistered)
+}
+
+#[cfg(unix)]
+struct CommandTask {
+    cancel: Option<tokio::sync::oneshot::Sender<()>>,
+    task: tokio::task::JoinHandle<Result<Vec<u8>, NoAnswerReason>>,
+}
+
+#[cfg(unix)]
+impl CommandTask {
+    async fn wait(mut self) -> Result<Vec<u8>, NoAnswerReason> {
+        let outcome = (&mut self.task).await.map_err(|_| NoAnswerReason::Transport)?;
+        self.cancel.take();
+        outcome
+    }
+}
+
+#[cfg(unix)]
+impl Drop for CommandTask {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+    }
+}
+
+#[cfg(unix)]
+struct CommandProcess {
+    child: tokio::process::Child,
+    process_group: Option<i32>,
+}
+
+#[cfg(unix)]
+impl CommandProcess {
+    fn terminate_group(&mut self) {
+        let Some(process_group) = self.process_group.take() else {
+            return;
+        };
+        // The command starts a fresh process group whose id is the direct child's pid.
+        // A negative pid addresses that whole group. SIGKILL is deliberate: cleanup runs
+        // after every outcome, so a resolver cannot keep descendants alive after answering.
+        unsafe {
+            libc::kill(-process_group, libc::SIGKILL);
+        }
+    }
+
+    async fn terminate_and_reap(&mut self) {
+        self.terminate_group();
+        let _ = self.child.wait().await;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for CommandProcess {
+    fn drop(&mut self) {
+        // Covers runtime shutdown or task abortion. `kill_on_drop` also targets the direct
+        // child; Tokio's orphan queue reaps it when an async wait cannot run.
+        self.terminate_group();
+    }
+}
+
+#[cfg(unix)]
+async fn run_command_process(
+    command: ResolverCommand,
+    input: Vec<u8>,
+    max_body_bytes: usize,
+    deadline: tokio::time::Instant,
+    mut cancelled: tokio::sync::oneshot::Receiver<()>,
+) -> Result<Vec<u8>, NoAnswerReason> {
+    use std::os::unix::process::CommandExt as _;
+    use std::process::Stdio;
+
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let Some((executable, arguments)) = command.argv.split_first() else {
+        return Err(NoAnswerReason::Unregistered);
+    };
+    let mut configured = tokio::process::Command::new(executable);
+    configured
+        .args(arguments)
+        .current_dir(&command.cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    configured.as_std_mut().process_group(0);
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("APPA_") {
+            configured.env_remove(key);
+        }
+    }
+
+    let child = configured.spawn().map_err(|_| NoAnswerReason::Unreachable)?;
+    let process_group = child
+        .id()
+        .and_then(|pid| i32::try_from(pid).ok())
+        .ok_or(NoAnswerReason::Transport)?;
+    let mut process = CommandProcess {
+        child,
+        process_group: Some(process_group),
+    };
+    let Some(mut stdin) = process.child.stdin.take() else {
+        process.terminate_and_reap().await;
+        return Err(NoAnswerReason::Transport);
+    };
+    let Some(mut stdout) = process.child.stdout.take() else {
+        process.terminate_and_reap().await;
+        return Err(NoAnswerReason::Transport);
+    };
+
+    let outcome = {
+        let child = &mut process.child;
+        let exchange = async {
+            stdin.write_all(&input).await.map_err(|_| NoAnswerReason::Transport)?;
+            stdin.shutdown().await.map_err(|_| NoAnswerReason::Transport)?;
+            drop(stdin);
+
+            let output = async {
+                let mut bytes = Vec::new();
+                let mut chunk = [0u8; 8192];
+                loop {
+                    let read = stdout.read(&mut chunk).await.map_err(|_| NoAnswerReason::Transport)?;
+                    if read == 0 {
+                        return Ok(bytes);
+                    }
+                    if bytes.len().saturating_add(read) > max_body_bytes {
+                        return Err(NoAnswerReason::Oversized);
+                    }
+                    bytes.extend_from_slice(&chunk[..read]);
+                }
+            };
+            let wait = async {
+                let status = child.wait().await.map_err(|_| NoAnswerReason::Transport)?;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(NoAnswerReason::Transport)
+                }
+            };
+            let (bytes, ()) = tokio::try_join!(output, wait)?;
+            Ok(bytes)
+        };
+        tokio::select! {
+            biased;
+            _ = &mut cancelled => Err(NoAnswerReason::Transport),
+            _ = tokio::time::sleep_until(deadline) => Err(NoAnswerReason::Timeout),
+            outcome = exchange => outcome,
+        }
+    };
+    process.terminate_and_reap().await;
+    outcome
 }
 
 fn parse_tool_resolution(
@@ -1006,24 +1194,185 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_command_resolver_fails_closed_until_command_execution_is_available() {
+    fn command_services(dir: &std::path::Path, script: &str, timeout_ms: u64, cap: usize) -> ExternalServices {
+        std::fs::write(dir.join("resolver.sh"), script).expect("the resolver script writes");
         let mut config = externals(None, 2000, 65536);
+        config.timeout = Duration::from_millis(timeout_ms);
+        config.max_body_bytes = cap;
         config.dynamic.insert(
             "classifier".to_string(),
             DynamicImplementation::Command(ResolverCommand {
-                argv: vec!["resolver".to_string()],
-                cwd: std::path::PathBuf::from("."),
+                argv: vec![
+                    "/bin/sh".to_string(),
+                    "resolver.sh".to_string(),
+                    "one argument".to_string(),
+                ],
+                cwd: dir.to_path_buf(),
             }),
         );
-        let outcome = services_over(config)
+        services_over(config)
+    }
+
+    async fn resolve_command(services: &ExternalServices) -> ToolResolution {
+        services
             .resolve_tool(
                 &uses("classifier", [ResolverReturn::Trust]),
                 &serde_json::json!({"path": "notes.txt"}),
                 &context(),
             )
-            .await;
-        assert_eq!(outcome, ToolResolution::Unresolved(NoAnswerReason::Unregistered));
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_command_resolver_receives_one_request_in_its_directory_and_returns_an_answer() {
+        let dir = tempfile::tempdir().expect("a fixture directory is created");
+        unsafe { std::env::set_var("APPA_COMMAND_TEST_SECRET", "must-not-leak") };
+        let outcome = resolve_command(&command_services(
+            dir.path(),
+            r#"cat > request.json
+printf '%s' "$1" > argument.txt
+pwd > cwd.txt
+env | grep '^APPA_' > appa-env.txt
+printf '%s' '{"version":1,"result":{"delta.trust":"trusted"}}'"#,
+            2000,
+            65_536,
+        ))
+        .await;
+        unsafe { std::env::remove_var("APPA_COMMAND_TEST_SECRET") };
+
+        assert!(matches!(outcome, ToolResolution::Resolved(_)));
+        let request: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("request.json")).expect("the script captured stdin"))
+                .expect("stdin is one JSON request");
+        assert_eq!(request["resolver"], "classifier");
+        assert_eq!(request["args"], serde_json::json!({"path": "notes.txt"}));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("argument.txt")).unwrap(),
+            "one argument",
+            "argv reaches the program directly without shell splitting"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("cwd.txt")).unwrap().trim(),
+            std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("appa-env.txt")).unwrap(),
+            "",
+            "no APPA_* variable reaches a resolver command"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_command_resolver_failure_is_no_answer() {
+        let dir = tempfile::tempdir().expect("a fixture directory is created");
+        let mut missing = externals(None, 1000, 1024);
+        missing.dynamic.insert(
+            "classifier".to_string(),
+            DynamicImplementation::Command(ResolverCommand {
+                argv: vec!["/definitely/missing/resolver".to_string()],
+                cwd: dir.path().to_path_buf(),
+            }),
+        );
+        assert_eq!(
+            resolve_command(&services_over(missing)).await,
+            ToolResolution::Unresolved(NoAnswerReason::Unreachable)
+        );
+
+        for (script, timeout_ms, cap, expected) in [
+            ("exit 7", 1000, 1024, NoAnswerReason::Transport),
+            ("sleep 5", 20, 1024, NoAnswerReason::Timeout),
+            ("printf 'xxxxxxxx'", 1000, 4, NoAnswerReason::Oversized),
+            ("printf 'not-json'", 1000, 1024, NoAnswerReason::Malformed),
+            (
+                "printf '%s' '{\"version\":1,\"result\":{\"delta.trust\":\"trusted\"}}'; exit 7",
+                1000,
+                1024,
+                NoAnswerReason::Transport,
+            ),
+        ] {
+            assert_eq!(
+                resolve_command(&command_services(dir.path(), script, timeout_ms, cap)).await,
+                ToolResolution::Unresolved(expected),
+                "failure script: {script}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    async fn recorded_pid(path: &std::path::Path) -> i32 {
+        for _ in 0..100 {
+            if let Ok(value) = std::fs::read_to_string(path)
+                && let Ok(pid) = value.trim().parse()
+            {
+                return pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the resolver did not record its descendant pid");
+    }
+
+    #[cfg(unix)]
+    fn process_exists(pid: i32) -> bool {
+        let result = unsafe { libc::kill(pid, 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+
+    #[cfg(unix)]
+    async fn assert_process_gone(pid: i32) {
+        for _ in 0..100 {
+            if !process_exists(pid) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("resolver descendant {pid} survived process-group cleanup");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_resolver_descendants_are_terminated_after_success_timeout_and_cancellation() {
+        let success = tempfile::tempdir().expect("success fixture directory");
+        let success_pid = success.path().join("descendant.pid");
+        let outcome = resolve_command(&command_services(
+            success.path(),
+            "sleep 30 >/dev/null 2>&1 &\necho $! > descendant.pid\nprintf '%s' '{\"version\":1,\"result\":{\"delta.trust\":\"trusted\"}}'",
+            2000,
+            65_536,
+        ))
+        .await;
+        assert!(matches!(outcome, ToolResolution::Resolved(_)));
+        assert_process_gone(recorded_pid(&success_pid).await).await;
+
+        let timeout = tempfile::tempdir().expect("timeout fixture directory");
+        let timeout_pid = timeout.path().join("descendant.pid");
+        let outcome = resolve_command(&command_services(
+            timeout.path(),
+            "sleep 30 >/dev/null 2>&1 &\necho $! > descendant.pid\nwait",
+            30,
+            65_536,
+        ))
+        .await;
+        assert_eq!(outcome, ToolResolution::Unresolved(NoAnswerReason::Timeout));
+        assert_process_gone(recorded_pid(&timeout_pid).await).await;
+
+        let cancelled = tempfile::tempdir().expect("cancellation fixture directory");
+        let cancelled_pid = cancelled.path().join("descendant.pid");
+        let services = Arc::new(command_services(
+            cancelled.path(),
+            "sleep 30 >/dev/null 2>&1 &\necho $! > descendant.pid\nwait",
+            10_000,
+            65_536,
+        ));
+        let consult = tokio::spawn(async move {
+            let uses = uses("classifier", [ResolverReturn::Trust]);
+            let args = serde_json::json!({"path": "notes.txt"});
+            let context = context();
+            services.resolve_tool(&uses, &args, &context).await
+        });
+        let pid = recorded_pid(&cancelled_pid).await;
+        consult.abort();
+        let _ = consult.await;
+        assert_process_gone(pid).await;
     }
 
     #[tokio::test]
