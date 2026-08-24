@@ -69,7 +69,7 @@ const TERMS = {
   "$tool_call":
     "The only source a resolver input reads. Its five forms are the complete call (name, description when declared, arguments), its name, its description, its arguments, and one top-level argument. Only $tool_call.description requires a declared description.",
   "[externals.dynamic.<name>]":
-    "The deployment binding for one dynamic resolver that does not carry a builtin on its declaration. It selects an HTTP endpoint or local command. Command execution is not available in this build, so a command binding returns no answer.",
+    "The deployment binding for one dynamic resolver that does not carry a builtin on its declaration. It selects an HTTP endpoint or local command. Every implementation receives the same request and returns an answer under the same validation.",
   internal:
     "An example reader for restricted internal data. Reading internal data closes off public destinations.",
   "{public, trusted}":

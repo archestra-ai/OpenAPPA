@@ -2,7 +2,7 @@
 title: Batteries
 category: Integration
 order: 7
-description: A proposal for combining OpenAPPA configs and running resolver scripts.
+description: Combine OpenAPPA configs and run resolver scripts.
 ---
 
 :::proposal
@@ -110,9 +110,7 @@ delta = { trust = "suspicious" }
 command = ["python3", "./read-sensitivity.py"]
 ```
 
-### Proposed local command runner
-
-> **Proposal:** Running a resolver as a local command is part of this proposal. It is not implemented.
+### Run a local resolver
 
 OpenAPPA starts the command only when the selected tool rule uses the resolver. It writes one JSON request, reads one JSON result, then waits for the script to exit.
 

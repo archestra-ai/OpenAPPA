@@ -184,9 +184,9 @@ Ownership, pinning, and what a `tool_input` sanitizer can do to a pinned answer 
 
 #### Implementing a resolver
 
-A resolver either carries its implementation or leaves it to the deployment. A resolver that carries the stock Claude Code classifier names it on its declaration with `builtin = "claude-code"` and takes no `[externals.dynamic]` binding. Every other resolver is bound by name under `[externals.dynamic.<name>]` to an HTTP endpoint.
+A resolver either carries its implementation or leaves it to the deployment. A resolver that carries the stock Claude Code classifier names it on its declaration with `builtin = "claude-code"` and takes no `[externals.dynamic]` binding. Every other resolver is bound by name under `[externals.dynamic.<name>]` to an HTTP endpoint or a local command.
 
-The configuration also accepts `command = ["program", "arg"]` under `[externals.dynamic.<name>]` for a local resolver. Command execution is not available in this build, so this binding returns no answer and the tool does not run.
+A local command uses `command = ["program", "arg"]` under `[externals.dynamic.<name>]`. OpenAPPA invokes this argument list directly, without a shell. It sends one request on standard input and reads one answer from standard output. The command runs in the folder of the config that declares it. The shared `timeout_ms` and `max_body_bytes` settings bound the complete exchange. A missing command, failed process, timeout, oversized answer, or invalid answer returns no resolver evidence. The tool does not run.
 
 ```toml
 [[dynamic_resolver]]
@@ -199,7 +199,7 @@ A resolver with `builtin = "claude-code"` never uses an endpoint. The builtin st
 
 The deployment tunes the builtin in `[externals.claude_code]`: `command` sets the executable path (a service environment often strips `PATH`), `model` pins the model, and `timeout_ms` gives the consult its own budget instead of the shared machine-consult `timeout_ms` — a model call is slower than an ordinary endpoint. At most four Claude consults run at once per runtime. Each consult has model latency and account cost; a pinned recheck and a replay never invoke it again.
 
-Both implementations receive the same request and answer under the same validation.
+All implementations receive the same request and answer under the same validation.
 
 Request, for the one-argument example above:
 

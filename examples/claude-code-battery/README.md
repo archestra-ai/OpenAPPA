@@ -1,7 +1,7 @@
 # Complete battery composition example
 
-This is a self-contained proposal example. Matcher rows, complete-configuration
-includes, and per-resolver `command` bindings are not implemented yet.
+This is a self-contained example of matcher rows, complete-configuration
+includes, and per-resolver `command` bindings.
 
 The example contains one deployment and two included batteries:
 

@@ -1,4 +1,4 @@
-# Proposal example: compose complete Claude Code and Slack battery configurations.
+# Compose complete Claude Code and Slack battery configurations.
 
 include = [
   "./batteries/claude-code/appa.toml",
