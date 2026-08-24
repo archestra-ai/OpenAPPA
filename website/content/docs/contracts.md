@@ -54,27 +54,7 @@ A dynamic resolver classifies a proposed tool call before the engine checks it. 
 
 A `[[dynamic_resolver]]` declares two things: the `inputs` a tool must supply, and the `returns` it always answers with. A `[[tool]]` attaches one with `uses`, maps each declared input from the proposed call, and points its own fields at the results it wants.
 
-#### Example: pass one argument
-
-```toml
-[[dynamic_resolver]]            # registration only; the deployment binds the implementation endpoint
-name    = "classify-customer"
-inputs  = ["subject"]
-returns = ["delta.trust", "delta.audience"]
-
-[[tool]]
-name       = "get_customer"
-parameters = { type = "object", properties = { customer_id = { type = "string" } }, required = ["customer_id"] }
-uses       = [{ resolver = "classify-customer", inputs = { subject = "$tool_call.arguments.customer_id" } }]
-
-# This tool uses only the resolver's trust result.
-delta    = { trust = "resolver.classify-customer.trust" }
-requires = { trust = "trusted" }
-```
-
-The resolver receives only `customer_id`, under the name `subject`. It returns both of its results. This tool reads one.
-
-The result path is `resolver.<resolver name>.<result name>`. It is a string because an unquoted dotted value is not valid TOML. The field it sits in supplies the scope, so `delta.trust` and `requires.trust` spell the same reference and read different results.
+The result path is `resolver.<resolver name>.<result name>`. Writing it under `delta` or under `requires` decides which one it fills, so `delta.trust` and `requires.trust` name the same result but read it into different places.
 
 #### Example: pass the complete tool call
 
@@ -107,6 +87,26 @@ The resolver receives this value in `args`:
 
 This form does not need a tool parameter schema. It does need a tool `description`: the value carries one.
 
+#### Example: pass one argument
+
+```toml
+[[dynamic_resolver]]
+name    = "classify-customer"
+inputs  = ["subject"]
+returns = ["delta.trust", "delta.audience"]
+
+[[tool]]
+name       = "get_customer"
+parameters = { type = "object", properties = { customer_id = { type = "string" } }, required = ["customer_id"] }
+uses       = [{ resolver = "classify-customer", inputs = { subject = "$tool_call.arguments.customer_id" } }]
+
+# This tool uses only the resolver's trust result.
+delta    = { trust = "resolver.classify-customer.trust" }
+requires = { trust = "trusted" }
+```
+
+The resolver receives only `customer_id`, under the name `subject`. It returns both of its results. This tool reads one.
+
 #### Example: use several resolvers
 
 ```toml
@@ -132,9 +132,16 @@ delta = { trust = "resolver.trust-classifier.trust", audience = "resolver.record
 
 OpenAPPA sends one request to each resolver. Both requests use the same current state.
 
-#### Available call values
+#### Rules
 
-`$tool_call` is the only special source.
+- A resolver declares its inputs and all results it returns.
+- A tool can use zero or more resolvers. Omit `uses` when it uses none.
+- A resolver always returns every declared result. A tool can use any part of that result.
+- A tool field holds one value: a value the policy wrote, or one resolver result. So a tool reads at most one result per field, and it uses at most five resolvers.
+- A tool must read a result of every resolver it uses. A `uses` entry no field reads does not load.
+- If a resolver fails or returns an invalid result, OpenAPPA does not run the tool.
+
+A tool maps each declared input from the proposed call. `$tool_call` is the only special source.
 
 | Value | Meaning |
 |---|---|
@@ -146,42 +153,19 @@ OpenAPPA sends one request to each resolver. Both requests use the same current 
 
 Any read of the description needs a tool `description`. A single argument needs a tool parameter schema, and the schema must mark that top-level argument as required. The resolver then receives whatever JSON value the call carries under that name.
 
-#### Results and their destinations
+A result is named for the one contract field it fills. These five names are the whole vocabulary:
 
-A result is named for the one contract field it establishes. These five names are the whole vocabulary:
+| Result | Value |
+|---|---|
+| `delta.trust` | A rank from the trust chain |
+| `delta.audience` | `"public"` or a list of literal readers |
+| `requires.trust` | A rank from the trust chain |
+| `requires.audience` | `includes`, `cap`, or both |
+| `requires.attention` | Marks from the attended list |
 
-| Result | Destination | Value |
-|---|---|---|
-| `delta.trust` | `delta.trust` | A rank from the trust chain |
-| `delta.audience` | `delta.audience` | `"public"` or a list of literal readers |
-| `requires.trust` | `requires.trust` | A rank from the trust chain |
-| `requires.audience` | `requires.audience` | `includes`, `cap`, or both |
-| `requires.attention` | `requires.attention` | Marks from the attended list |
+Ownership, pinning, and what a `tool_input` sanitizer can do to a pinned answer are in [How it works](/how-it-works).
 
-#### Rules
-
-- A resolver declares its inputs and all results it returns.
-- A tool can use zero or more resolvers. Omit `uses` when it uses none.
-- A resolver always returns every declared result. A tool can use any part of that result.
-- A tool field holds one value: a value the policy wrote, or one resolver result. So a tool reads at most one result per field, and it uses at most five resolvers.
-- A tool must read a result of every resolver it uses. A `uses` entry no field reads does not load.
-- If a resolver fails or returns an invalid result, OpenAPPA does not run the tool.
-
-#### Ownership and pinning
-
-Every contract field has one owner. A field the policy writes and a field a resolver establishes are the same field, so the two never overlap and requirements do not combine across resolvers. A dimension no owner describes stays fail-closed `Unknown`. History requirements are always static.
-
-Resolution occurs when a proposed call first checks. The validated answer is pinned to the exact `args` its resolver received. The pin holds through rechecks, remedy plans, rulings, dispatch, and admission. The dispatch record stores the answer and a digest of those `args`, not a second copy of them: the arguments and the `uses` entry are already on the record, so a replay rebuilds the value and compares. A new proposal resolves again. An answer given about an unrelated call is never evidence here.
-
-An input-substitution remedy rewrites the arguments of a proposal through a registered sanitizer. The pins survive the rewrite and the resolver is not consulted again: the answer is about the proposal, and the proposal stays on the record for the rebuild to compare against. This holds for every read shape, including a use that reads the complete call, `$tool_call`, or `$tool_call.arguments`. So a resolver-backed tool is offered input-substitution remedies like any other.
-
-A `tool_input` sanitizer therefore holds one power more than its declared transition names. Its rewrite keeps the classification a resolver gave about the arguments before the rewrite, even where the rewrite changes exactly what that resolver read. A rewrite that turns one recipient, path, or resource into another one dispatches under the answer given for the first.
-
-A `tool_input` sanitizer replaces the whole argument object, and it declares no list of the arguments it writes. So the policy cannot state that a rewrite leaves one resolver input alone, and it has one control here: `scope`. Give a resolver-backed tool a tag no `tool_input` sanitizer covers, unless you accept that sanitizer's rewrite standing under the resolver's earlier answer. Scope permits the hop; it does not produce one. The engine offers it only where the call blocks on an `includes` gap the sanitizer's declared transition clears.
-
-A resolver that produces no answer — an unbound or unreachable implementation, a timeout, a process failure, a malformed, out-of-policy, unsupported-version, or oversized response — resumes nothing: the call was not checked, no engine fact is appended, and the answer is not a policy denial. The hook fails operationally and the reason lands in the runtime's own log; the next proposal consults again.
-
-#### Implementations
+#### Implementing a resolver
 
 One `[externals.dynamic]` HTTP endpoint serves every resolver that does not declare a builtin; each request carries the resolver name. A resolver can instead name an in-process builtin on its declaration — the one implementation choice the policy itself may carry. The builtin available today is the Claude Code classifier (`builtin = "claude-code"`); it is one implementation, not the definition of how resolvers work.
 
@@ -196,76 +180,52 @@ A resolver with `builtin = "claude-code"` never uses the endpoint. The builtin s
 
 The deployment tunes the builtin in `[externals.claude_code]`: `command` sets the executable path (a service environment often strips `PATH`), `model` pins the model, and `timeout_ms` gives the consult its own budget instead of the shared machine-consult `timeout_ms` — a model call is slower than an ordinary endpoint. At most four Claude consults run at once per runtime. Each consult has model latency and account cost; a pinned recheck and a replay never invoke it again.
 
-Both implementations receive the same request and answer under the same validation. A deployment upgrades OpenAPPA and its resolver endpoints together: the request keeps version `1`, so an endpoint cannot tell the two shapes apart.
+Both implementations receive the same request and answer under the same validation.
 
-#### Wire format
+Request, for the one-argument example above:
 
-The comments below explain each key. They are not sent.
-
-Request with one mapped argument:
-
-```jsonc
+```json
 {
-  // WHY: Identifies the request shape.
   "version": 1,
-
-  // WHY: Selects the resolver when one service handles several resolvers.
   "resolver": "classify-customer",
-
-  // WHY: Contains only the data selected by the resolver input mapping.
-  "args": {
-    // WHY: Gives the resolver's subject input the selected customer ID.
-    "subject": "cust-7"
-  },
-
-  // WHY: Gives the resolver the current state before this tool call.
+  "args": { "subject": "cust-7" },
   "context": {
-    // WHY: Gives the current trust name.
     "current_trust": "trusted",
-
-    // WHY: Gives the current trust position in the ordered trust list.
     "current_trust_rank": 1,
-
-    // WHY: Gives the current readers.
     "current_audience": "public",
-
-    // WHY: Says whether trust is still unknown.
     "trust_unresolved": false,
-
-    // WHY: Says whether audience is still unknown.
     "audience_unresolved": false,
-
-    // WHY: Lists attention marks already required by the tool policy.
     "static_attention": []
   },
-
-  // WHY: Limits trust results to names defined by the policy.
   "trust_ranks": ["suspicious", "trusted"],
-
-  // WHY: Limits attention results to names defined by the policy.
   "attention_marks": ["privacy-review"]
 }
 ```
 
-The request has no `tool`, `input`, `scope`, `returns`, or `expects` key. A resolver that needs the tool name or its description reads it as an input.
+| Key | Meaning |
+|---|---|
+| `version` | The request shape. It is `1`. |
+| `resolver` | Which resolver answers, when one service handles several |
+| `args` | Only the data the tool's input mapping selected, under the resolver's declared input names |
+| `context` | The state before this tool call: current trust name and rank, current readers, whether each dimension is still unknown, and the attention marks the tool policy already requires |
+| `trust_ranks` | The policy's trust chain, least-trusted first. A trust result must name one of these. |
+| `attention_marks` | The attended marks. An attention result must name these only. |
+
+A resolver that needs the tool name or its description reads it as an input.
 
 Response:
 
-```jsonc
+```json
 {
-  // WHY: Identifies the response shape. It must match the request version.
   "version": 1,
-
-  // WHY: Holds every result declared by this resolver, keyed by the result's own name.
   "result": {
-    // WHY: Supplies the declared trust result.
     "delta.trust": "trusted",
-
-    // WHY: Supplies the declared audience result, even if this tool does not use it.
     "delta.audience": ["finance"]
   }
 }
 ```
+
+`version` must match the request. `result` holds every result the resolver declared, keyed by the result's own name — including a result this tool does not read.
 
 OpenAPPA rejects a missing result, an extra result, and a `null` result. It rejects an extra key beside `version` and `result`. Trust and attention values must come from the lists in the request, whether or not the tool reads them: a result no field reads establishes nothing, but the record keeps it, so it answers to the same vocabulary. `delta.audience` is `"public"` or a list of reader names, and never a group. `requires.audience` is an object with an `includes` floor, a `cap` ceiling, or both. An empty reader list is a valid, maximally restrictive answer. An empty attention list is valid, and it is the only valid attention answer when `attention_marks` is empty.
 
