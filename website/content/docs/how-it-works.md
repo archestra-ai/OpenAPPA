@@ -159,7 +159,7 @@ Because every remedy except narrowing acceptance derives from a registered compo
 
 A non-empty remedy list indicates that candidate paths exist, though external components may still decline a requested ruling. When an authority denies a request, that denial is appended to the log to prevent repeating the request for that specific call.
 
-## Unknown labels propagate until a requirement checks them
+## Unknown labels propagate until a consumer checks them
 
 Real-world systems rarely annotate every tool up front. Similar to gradual typing in TypeScript or Python, OpenAPPA supports partial annotation.
 
@@ -172,7 +172,7 @@ Unannotated tools return data with an **Unknown** label state, representing unve
 | **Requirement Check (`requires`)** | Drives the casts registered for the value, then checks the label the first admitted answer establishes. When no registered cast reaches the value, the call is blocked and the block names the source under `unestablished`. When a registered cast gives no answer, nothing is decided or recorded, and the call can be tried again. |
 | **Child Merge Boundary** | Unknown child returns merge like any read: unresolved identities cross while every known restriction holds. Registered casts resolve them where the return policy consumes the dimension. |
 
-An Unknown label state does not halt execution until a tool contract's `requires` clause explicitly checks the value. At that point, OpenAPPA triggers the registered **cast** for that value—resolving the label using a fixed rule or an external classifier—and validates the result against the cast's declared ceiling. If no cast reaches the value, it remains Unknown: the dependent call is blocked, and the block names the source under `unestablished`. If a registered cast gives no answer, nothing is decided or recorded, and the call can be tried again. This allows teams to annotate high-risk tools first and expand policy coverage incrementally.
+An Unknown label state does not halt execution on its own: an unannotated result is admitted, and the trajectory keeps working, until a consumer of that dimension reads it — a tool contract's `requires` clause, a sanitizer's applicability or mandate check, or a pending-cast admission. Each of those fails closed. When a `requires` clause checks the value, OpenAPPA triggers the registered **cast** for that value—resolving the label using a fixed rule or an external classifier—and validates the result against the cast's declared ceiling. If no cast reaches the value, it remains Unknown: the dependent call is blocked, and the block names the source under `unestablished`. If a registered cast gives no answer, nothing is decided or recorded, and the call can be tried again. This allows teams to annotate high-risk tools first and expand policy coverage incrementally.
 
 To inspect data before the LLM sees it, a tool contract can declare a pending dimension with `delta = { trust = "unknown" }`. When configured in `confined_results`, the runtime withholds the raw result while the cast evaluates the payload. If the cast resolves to a non-restricting label, the data is delivered directly; if it restricts the label, OpenAPPA offers the agent a narrowing choice before delivery.
 

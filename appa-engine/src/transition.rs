@@ -399,8 +399,9 @@ pub enum FollowUp {
         settled: Vec<Settled>,
     },
     /// A call in this batch is blocked only for want of a fact a registered cast could
-    /// establish. Nothing is decided and nothing is appended: a resolution advances the family
-    /// basis, so every release and offer this batch would open must be stamped after it.
+    /// establish. Nothing is decided; the batch's own admissions and any cast the evidence
+    /// already carried are appended, and no release or offer is: a resolution advances the
+    /// family basis, so every release and offer this batch would open must be stamped after it.
     ProposalsResolve(Vec<EvidenceRequest>),
     Malformed {
         position: usize,
