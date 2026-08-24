@@ -2942,9 +2942,10 @@ impl Engine {
     ///
     /// The sanitizer read the engine's own canonical argument bytes and returned one complete
     /// replacement object. Its bytes are untrusted: the engine strictly parses them, schema-checks
-    /// them against the callee's declared parameters, constructs the canonical arguments itself,
-    /// and only then has a call to measure. Nothing about the replacement is taken on the runtime's
-    /// word, and the tool is never replaced.
+    /// them against the selected contract's parameters, verifies that its arguments still select
+    /// that contract, constructs the canonical arguments itself, and only then has a call to
+    /// measure. Nothing about the replacement is taken on the runtime's word, and the tool is never
+    /// replaced.
     ///
     /// A valid strictly helpful replacement commits as the next candidate on this subject and ends
     /// every sibling offer standing on its predecessor. The engine then re-checks it: where nothing
@@ -2992,7 +2993,7 @@ impl Engine {
             .lineage()
             .extend(sanitizer.clone())
             .ok_or(TransitionError::SanitizerUnapplicable)?;
-        let substituted = substituted_call(contract, call, body)?;
+        let substituted = substituted_call(&self.registry, contract, call, body)?;
         // The rewrite carries the answers a resolver gave about the proposal this subject stands
         // on; they are admissible here because that proposal is on the record.
         let proposal = views
@@ -3592,13 +3593,18 @@ fn crossed(facts: &[Fact]) -> ValueBody {
 }
 
 fn substituted_call(
+    registry: &Registry,
     contract: &ToolContract,
     call: &ResolvedCall,
     body: &ValueBody,
 ) -> Result<ResolvedCall, TransitionError> {
     let arguments = crate::params::CanonicalArguments::from_raw(body.as_str().as_bytes(), &contract.parameters)
         .map_err(|error| TransitionError::Call(EngineError::InvalidCall(error)))?;
-    Ok(call.substituting(arguments))
+    let substituted = call.substituting(arguments);
+    if !registry.selection_matches(&substituted) {
+        return Err(TransitionError::SanitizerUnapplicable);
+    }
+    Ok(substituted)
 }
 
 fn invalidated_siblings(
@@ -11165,7 +11171,7 @@ mod tests {
     }
 
     #[test]
-    fn substitution_keeps_the_selected_contract_when_rewritten_arguments_match_an_earlier_rule() {
+    fn substitution_cannot_cross_into_another_ordered_contract() {
         let e = engine(vec![plain_tool("read(path:safe*)"), plain_tool("read(path:*)")]);
         let selected = e
             .resolve_call(ToolName::new("read"), br#"{"path":"private.txt"}"#)
@@ -11174,13 +11180,26 @@ mod tests {
 
         let rewritten = selected.substituting(crate::params::test_arguments(&json!({ "path": "safe.txt" })));
         assert_eq!(rewritten.contract_id(), selected.contract_id());
-        assert!(e.validated_contract(&rewritten).is_ok());
-        assert_eq!(
-            e.resolve_call(ToolName::new("read"), rewritten.canonical_arguments().canonical_bytes())
-                .unwrap()
-                .contract_id(),
-            crate::value::ToolContractId::new(0).unwrap(),
-            "a fresh call would select the earlier rule"
+        assert!(!e.registry.selection_matches(&rewritten));
+        let contract = e.registry.contract(&selected).unwrap();
+        assert!(matches!(
+            substituted_call(
+                &e.registry,
+                contract,
+                &selected,
+                &ValueBody::new(r#"{"path":"safe.txt"}"#)
+            ),
+            Err(TransitionError::SanitizerUnapplicable)
+        ));
+
+        assert!(
+            substituted_call(
+                &e.registry,
+                contract,
+                &selected,
+                &ValueBody::new(r#"{"path":"other-private.txt"}"#)
+            )
+            .is_ok()
         );
     }
 

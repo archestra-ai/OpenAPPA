@@ -48,9 +48,9 @@ Each contract field has a single source of truth. A field written in policy and 
 
 When a tool call is proposed, OpenAPPA evaluates attached resolvers immediately. The validated answer is pinned to the exact inputs the resolver received. This pinned answer stays with the call through requirement checks, remedy evaluation, human approval, dispatch, and execution logging. Replaying an execution log verifies the recorded answer against the same call arguments rather than re-querying the resolver. New tool proposals always consult resolvers freshly.
 
-If an input-substitution sanitizer rewrites the arguments of a tool call, the original resolver classification remains pinned to the call. The resolver is not consulted again after the rewrite.
+If an input-substitution sanitizer rewrites the arguments of a tool call, the original resolver classification remains pinned to the call. The resolver is not consulted again after the rewrite. OpenAPPA rejects the rewrite if its arguments would select a different ordered tool contract.
 
-Because a `tool_input` sanitizer rewrites the entire argument payload without specifying which fields changed, the rewrite retains the classification assigned to the original proposal. For example, if a rewrite changes a file path or recipient, the dispatched call runs under the classification given to the original input. You can restrict which tools a sanitizer can modify with its `tags`.
+Because a `tool_input` sanitizer rewrites the entire argument payload without specifying which fields changed, the rewrite retains the classification assigned to the original proposal. For example, a changed path or recipient keeps the original classification when it remains in the same ordered contract. You can restrict which tools a sanitizer can modify with its `tags`.
 
 If a resolver fails to return a valid answer (e.g. timeout, network failure, or invalid response format), OpenAPPA halts execution with an operational error. It does not record a policy denial, and the tool does not execute.
 

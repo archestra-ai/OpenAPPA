@@ -568,8 +568,9 @@ impl ResolvedCall {
     /// sanitizer's rewrite of that proposal, so the answers ride along here rather than being
     /// dropped. Riding along is not standing: whether a carried answer is admissible on the
     /// rewritten call is [`crate::check::validate_tool_resolutions`]'s to decide, against the
-    /// proposal on the record. A membership answer expands the group one argument names, so it
-    /// survives only while that argument's value is unchanged.
+    /// proposal on the record. The engine also refuses a rewrite that would select another ordered
+    /// contract. A membership answer expands the group one argument names, so it survives only
+    /// while that argument's value is unchanged.
     pub(crate) fn substituting(&self, arguments: CanonicalArguments) -> ResolvedCall {
         let unchanged = |argument: &str| arguments.value().get(argument) == self.arguments.value().get(argument);
         let memberships = self

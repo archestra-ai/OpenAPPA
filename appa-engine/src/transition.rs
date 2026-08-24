@@ -3368,6 +3368,9 @@ impl<'a> Sequence<'a> {
         if call != &predecessor.substituting(call.canonical_arguments().clone()) {
             return Err(TransitionRefusal::ForgedLabel);
         }
+        if !self.engine.registry().selection_matches(call) {
+            return Err(TransitionRefusal::SanitizerUnapplicable);
+        }
         // The predecessor comparison binds *which* answers this rewrite carries; this binds what
         // they may be about — the proposal a resolver was asked about, on the record.
         let proposal = views.proposed_call(subject).ok_or(TransitionRefusal::UnbackedOffer)?;

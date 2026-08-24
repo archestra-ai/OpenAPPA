@@ -70,7 +70,7 @@ Text inside parentheses selects one top-level string argument. `*` matches any t
 
 A missing or non-string argument does not match. A bare tool name matches every argument object and is typically the fallback.
 
-OpenAPPA selects the contract before it validates that contract's `parameters` schema. A schema failure does not continue to a later contract. Provider-run tools cannot use argument selectors.
+OpenAPPA selects the contract before it validates that contract's `parameters` schema. A schema failure does not continue to a later contract. A `tool_input` rewrite cannot move the call to another ordered contract. Provider-run tools cannot use argument selectors.
 
 ### Dynamic resolvers
 
@@ -265,7 +265,7 @@ A tool contract is short: a name, a `delta`, and often `effects` and a `[tool.re
 | **`effects` Completeness** | Mutation or deployment tool omits `effects`. | Declare all side effects, e.g., `effects = ["migration.applied", "mutation"]`. | Under-declared effects pass `excludes` checks silently without triggering history constraints. |
 | **Dynamic Recipients** | Static readers when an ACL depends on an argument. | Use a placeholder for a recipient the call names — a literal reader, `public`, or an `@group` — or a dynamic resolver for an argument-derived reader set. | Static readers can ignore the proposed argument; placeholder groups and dynamic resolution pin their answer to the call. |
 | **Overlapping resolvers** | Two `uses` entries whose `returns` include the same destination. | Give each destination one owner. | It does not load because a contract field cannot have two values. |
-| **Input sanitizer over a resolver** | A `tool_input` sanitizer whose `tags` cover a resolver-backed tool. | Tag the tool so no `tool_input` sanitizer covers it, unless that sanitizer's rewrite is one you accept under the resolver's earlier answer. | The rewrite runs under the resolver answer given for the original call. If a rewrite changes arguments (such as a recipient or file path), it retains the classification of the original input. |
+| **Input sanitizer over a resolver** | A `tool_input` sanitizer whose `tags` cover a resolver-backed tool. | Tag the tool so no `tool_input` sanitizer covers it, unless you accept its rewrite under the earlier resolver answer. | The rewrite keeps the original classification. OpenAPPA refuses it if the new arguments select another ordered contract. |
 | **Combined Read & Release** | Single tool `share_doc(doc, recipient)` fetching and releasing in one step. | Split into `fetch_doc` (read) and `grant_doc_access` (release). | Combined tools force authorities to approve releases before content is fetched. |
 | **What an authority permits** | A wide `permits` table, such as `audience_missing = ["public"]`. | Restrict the authority's `permits` and `tags` to the minimum the desk needs. | An authority cannot rule beyond its `permits`, but a wide `permits` weakens the review gate. |
 | **Auto-Approval Wiring** | `builtin = "approve"` behind a wide `permits` — an automated yes across everything it permits. | Keep what an auto-approval authority permits narrow; reserve wide `permits` for `hitl` or a reviewed resolver. | `builtin = "approve"` creates an automated open gate for all matching actions. Keep its `permits` and `tags` minimal. |
@@ -390,7 +390,7 @@ When a tool result would narrow the trajectory label, OpenAPPA checks if a regis
 
 Like a cast or an authority, a sanitizer can name `tags`: it then applies only to values whose originating tool carries one of them. A child sub-execution return originates from no tool, so only a sanitizer without `tags` applies at that crossing.
 
-At `tool_input`, the sanitizer derives a replacement for the whole argument set of one call, and the harness dispatches exactly the substituted bytes. This substitution can satisfy an unmet `contains` audience requirement, but cannot clear a `within` or trust requirement (`within` bounds the trajectory's own reach, and rewriting arguments does not change the decision to invoke the tool). The rewritten call keeps the resolver answers pinned to the proposal it replaces, and preserves a group membership answer only if the argument naming that group is unchanged.
+At `tool_input`, the sanitizer derives a replacement for the whole argument set of one call, and the harness dispatches exactly the substituted bytes. This substitution can satisfy an unmet `contains` audience requirement, but cannot clear a `within` or trust requirement (`within` bounds the trajectory's own reach, and rewriting arguments does not change the decision to invoke the tool). The rewritten call keeps the resolver answers pinned to the proposal it replaces. It cannot select another ordered contract. It preserves a group membership answer only if the argument naming that group is unchanged.
 
 To enforce automated return sanitization across all child sub-executions, policies can bind a default return sanitizer:
 

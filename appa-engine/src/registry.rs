@@ -938,6 +938,11 @@ impl Registry {
             })
     }
 
+    pub(crate) fn selection_matches(&self, call: &crate::value::ResolvedCall) -> bool {
+        self.select_tool(call.tool(), call.arguments())
+            .is_some_and(|(selected, _)| selected == call.contract_id())
+    }
+
     pub(crate) fn contains_tool(&self, name: &ToolName) -> bool {
         self.tools.contains_key(name)
     }
