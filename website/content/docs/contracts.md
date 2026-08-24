@@ -17,18 +17,29 @@ version = 1
 trust_chain = ["suspicious", "trusted"]
 ```
 
-### Set operators
+### Reader sets
 
-Every set specification in a policy requires an explicit **operator** to prevent ambiguity between exact matches and lower/upper bounds:
+A `delta` states the reader set the tool's own result carries. It names the whole set, so it is written as the list itself and takes no operator:
+
+| Form | Meaning | Example |
+|---|---|---|
+| A list | The result reaches exactly these readers. | `delta = { audience = ["support", "@auditors"] }` |
+| A bare string | The one-entry list. | `delta = { audience = "@support" }` |
+| `"public"` | The result reaches every reader. | `delta = { audience = "public" }` |
+| `[]` | No reader holds the result. Once it folds in, every `includes` check fails. | `delta = { audience = [] }` |
+
+Two bare strings are reserved and never read as a reader ID: `"unknown"` declares a pending cast, and a string starting with `resolver.` reads a dynamic resolver result. Write either name in a list to mean the reader.
+
+Every other reader set bounds or extends a set that already exists. Each one requires an explicit **operator** to prevent ambiguity between exact matches and lower/upper bounds:
 
 | Operator | Meaning | Example Use |
 |---|---|---|
-| **`exactly`** | Fixes the set to these exact members. | `delta = { audience = { exactly = ["support"] } }` |
+| **`exactly`** | Fixes the set to these exact members. | `[boundary]` `audience = { exactly = ["public"] }` |
 | **`includes`** | Requires at least these members (`audience ⊇ recipients`). | `requires = { audience = { includes = ["$recipient"] } }` |
 | **`cap`** | Bounds the allowed audience from above (`audience ⊆ C`). | `requires = { audience = { cap = ["internal"] } }` |
 | **`may_add`** | Bounds the readers an authority is permitted to cover. | `can_cover_readers = { may_add = ["public"] }` |
 
-A set declaration without an explicit operator causes a policy load error.
+One of these declarations written without its operator causes a policy load error.
 
 ### Groups
 
@@ -247,7 +258,7 @@ A tool contract is typically four lines long. Use this checklist during policy r
 
 | Review Area | Red Flag / Misconfiguration | Safe / Correct Pattern | Spec Invariant & Risk |
 |---|---|---|---|
-| **`delta` Accuracy** | Tool reads sensitive customer data but declares `delta = {}` or omits `delta`. | Declare explicit restriction, e.g. `delta = { audience = { exactly = ["support"] } }`. | Undermines downstream checks; over-restricting is safe (costs reach, doesn't leak). |
+| **`delta` Accuracy** | Tool reads sensitive customer data but declares `delta = {}` or omits `delta`. | Declare explicit restriction, e.g. `delta = { audience = ["support"] }`. | Undermines downstream checks; over-restricting is safe (costs reach, doesn't leak). |
 | **Unannotated Tools** | Omitting `delta` while declaring `requires`. | Use `delta = {}` if output carries no labels, or separate unannotated tools. | Loader refuses `requires` on unannotated tools; unannotated output enters as `Unknown`. |
 | **`effects` Completeness** | Mutation or deployment tool omits `effects`. | Declare all side effects, e.g., `effects = ["migration.applied", "mutation"]`. | Under-declared effects pass `no_prior` checks silently without triggering history constraints. |
 | **Dynamic Recipients** | Static readers when an ACL depends on an argument. | Use a placeholder for a recipient the call names — a literal reader, `public`, or an `@group` — or a dynamic resolver for an argument-derived reader set. | Static readers can ignore the proposed argument; placeholder groups and dynamic resolution pin their answer to the call. |
@@ -267,7 +278,7 @@ A `[[tool]]` entry defines its name and `description`, its output restrictions (
 name  = "fetch_support_ticket"
 tags  = ["support"]                                    # Scope tag for authority routing
 # CRM is trusted infrastructure; the ticket body is customer-written text
-delta = { trust = "suspicious", audience = { exactly = ["support"] } }
+delta = { trust = "suspicious", audience = ["support"] }
 
 [[tool]]
 name     = "apply_db_migration"

@@ -22,7 +22,7 @@ delta = {}
 [[policy.tool]]
 name = "read_task_tracker"
 parameters = { type = "object", properties = { file = { type = "string", description = "The exact file name to read." } }, required = ["file"], additionalProperties = false }
-delta = { audience = { exactly = ["customer-success@northwind.example"] } }
+delta = { audience = ["customer-success@northwind.example"] }
 
 [[policy.tool]]
 name = "create_task_tracker"

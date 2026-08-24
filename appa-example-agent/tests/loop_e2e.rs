@@ -109,7 +109,7 @@ version = 1
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["staff"] } }
+delta = { audience = ["staff"] }
 
 [[policy.tool]]
 name = "send_email"
@@ -151,7 +151,7 @@ version = 1
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["staff"] } }
+delta = { audience = ["staff"] }
 
 [[policy.tool]]
 name = "send_email"
@@ -219,7 +219,7 @@ version = 1
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["hr"] } }
+delta = { audience = ["hr"] }
 
 [policy.boundary]
 audience = { exactly = ["public"] }
@@ -403,7 +403,7 @@ parameters = { type = "object", properties = { task = { type = "string" } } }
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["hr"] } }
+delta = { audience = ["hr"] }
 
 [policy.deployment]
 context_control = true
@@ -522,7 +522,7 @@ parameters = { type = "object", properties = { task = { type = "string" } } }
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["internal"] } }
+delta = { audience = ["internal"] }
 
 [[policy.sanitizer]]
 name = "scrub"
@@ -580,7 +580,7 @@ parameters = { type = "object", properties = { task = { type = "string" } } }
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["internal"] } }
+delta = { audience = ["internal"] }
 
 [policy.deployment]
 context_control = true
@@ -684,7 +684,7 @@ version = 1
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["staff"] } }
+delta = { audience = ["staff"] }
 
 [[policy.tool]]
 name = "send_email"
@@ -697,7 +697,7 @@ version = 1
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["staff"] } }
+delta = { audience = ["staff"] }
 
 [[policy.tool]]
 name = "send_email"
@@ -766,7 +766,7 @@ version = 1
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["staff"] } }
+delta = { audience = ["staff"] }
 
 [[policy.tool]]
 name = "send"

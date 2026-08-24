@@ -217,7 +217,7 @@ name = "confluence__get_issue"
 #   ← {
 #       "_meta": {
 ~#         "appa/contract": {
-~#           "delta": { "audience": { "exactly": ["legal"] } }
+~#           "delta": { "audience": ["legal"] }
 ~#         }
 #       }
 #     }`,
@@ -232,7 +232,7 @@ name = "confluence__get_issue"
 {
   "_meta": {
 ~    "appa/contract": {
-~      "delta": { "audience": { "exactly": ["legal"] } }
+~      "delta": { "audience": ["legal"] }
 ~    }
   }
 }`,
@@ -246,7 +246,7 @@ spec:
 ~  resolver:                     # contract fetched per call
 ~    endpoint: https://confluence.internal/appa/resolve
 ~    method: tools/resolve
-~  # ← delta: { audience: { exactly: [legal] } }`,
+~  # ← delta: { audience: [legal] }`,
       rego: `
 package appa.confluence
 
@@ -275,7 +275,7 @@ def confluence__get_issue(issue_key: str):
 ~        # out of Confluence's own ACLs, per call
 ~        endpoint="https://confluence.internal/appa/resolve",
 ~        method="tools/resolve",
-~    )   # ← delta: {"audience": {"exactly": ["legal"]}}`,
+~    )   # ← delta: {"audience": ["legal"]}`,
     },
   },
 ];

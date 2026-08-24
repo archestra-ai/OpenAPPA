@@ -18,11 +18,11 @@ parameters = { type = "object", properties = { task = { type = "string", descrip
 [[policy.tool]]
 name = "search_hr"
 parameters = { type = "object", properties = { query = { type = "string" } }, required = ["query"], additionalProperties = false }
-delta = { audience = { exactly = ["quiet.wren@identity.example"] } }
+delta = { audience = ["quiet.wren@identity.example"] }
 [[policy.tool]]
 name = "read_hr"
 parameters = { type = "object", properties = { file = { type = "string" } }, required = ["file"], additionalProperties = false }
-delta = { audience = { exactly = ["quiet.wren@identity.example"] } }
+delta = { audience = ["quiet.wren@identity.example"] }
 [[policy.tool]]
 name = "create_hr"
 parameters = { type = "object", properties = { file = { type = "string" }, content = { type = "string" } }, required = ["file", "content"], additionalProperties = false }

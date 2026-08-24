@@ -214,7 +214,7 @@ mod tests {
 version = 1
 [[tool]]
 name  = "list_customers"
-delta = { audience = { exactly = ["crm"] } }
+delta = { audience = ["crm"] }
 "#,
             &systems("crm"),
         )
@@ -226,7 +226,7 @@ delta = { audience = { exactly = ["crm"] } }
             .iter()
             .find(|tool| tool["name"].as_str() == Some("list_customers"))
             .unwrap();
-        assert!(contract["delta"]["audience"].get("exactly").is_some(), "terms survive");
+        assert!(contract["delta"]["audience"].as_array().is_some(), "terms survive");
         assert!(contract.get("parameters").is_some(), "schema injected");
         assert_eq!(merged.defaulted, vec!["create_customer_data"]);
     }

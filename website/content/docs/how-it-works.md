@@ -85,7 +85,7 @@ To illustrate policy enforcement, consider an agent configured with three tools:
 ```toml
 [[tool]]
 name  = "get_ticket_from_crm"
-delta = { audience = { exactly = ["internal"] } }   # "internal" is a single reader id
+delta = { audience = ["internal"] }   # "internal" is a single reader id
 
 [[tool]]
 name       = "send_email"                  # send_email(body, recipient)

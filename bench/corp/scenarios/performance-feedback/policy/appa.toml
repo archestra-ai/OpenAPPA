@@ -24,7 +24,7 @@ parameters = { type = "object", properties = { task = { type = "string", descrip
 [[policy.tool]]
 name = "search_hr"
 parameters = { type = "object", properties = { query = { type = "string" } }, required = ["query"], additionalProperties = false }
-delta = { audience = { exactly = ["elena.morris@northwind.example", "marcus.lee@northwind.example"] } }
+delta = { audience = ["elena.morris@northwind.example", "marcus.lee@northwind.example"] }
 [[policy.tool]]
 name = "read_hr"
 parameters = { type = "object", properties = { file = { type = "string" } }, required = ["file"], additionalProperties = false }

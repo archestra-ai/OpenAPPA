@@ -19,7 +19,7 @@ name = "directory"
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["alice", "bob"] } }
+delta = { audience = ["alice", "bob"] }
 
 [[policy.tool]]
 name = "send"

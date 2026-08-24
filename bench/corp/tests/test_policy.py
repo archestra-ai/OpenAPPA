@@ -66,7 +66,7 @@ def test_prune_preserves_tool_annotations() -> None:
     policy = AGENTS["appa"].policy_file.read_text()
     by_name = {tool["name"]: tool for tool in _tools_of(prune_policy(policy, ("hr", "public_forum", "email")))}
     assert by_name["read_public_forum"]["delta"] == {"trust": "suspicious"}
-    assert by_name["read_hr"]["delta"] == {"audience": {"exactly": ["hr"]}}
+    assert by_name["read_hr"]["delta"] == {"audience": ["hr"]}
     assert by_name["send_email"]["requires"]["trust"] == "internal"
     assert by_name["send_email"]["effects"] == ["egress"]
 

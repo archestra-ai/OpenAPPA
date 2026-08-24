@@ -50,9 +50,9 @@ demo's labels are the same design expressed in two vocabularies:
 | Concept | OpenAPPA (`bench/corp/policies/appa.toml`) | FIDES (this demo) |
 |---|---|---|
 | Taint axis | `trust`: `suspicious` → `internal` | `integrity`: `untrusted` → `trusted` |
-| Audience axis | `audience = { exactly = ["hr"] }` | `confidentiality`: `private` |
+| Audience axis | `audience = ["hr"]` | `confidentiality`: `private` |
 | Forum read | `delta = { trust = "suspicious" }` | result label `integrity=untrusted` |
-| HR read | `delta = { audience = exactly ["hr"] }` | result label `confidentiality=private` |
+| HR read | `delta = { audience = ["hr"] }` | result label `confidentiality=private` |
 | Finance read | restricted reader set | `integrity=trusted, confidentiality=private` |
 | Task/vendor read | `delta = {}` (unconstrained) | `integrity=trusted, confidentiality=public` |
 | The taint fold | monoid fold over the trajectory | `combine_labels` (untrusted & most-private win) |

@@ -750,11 +750,16 @@ struct RawDelta {
     audience: Option<RawDeltaAudience>,
 }
 
+/// `delta.audience` is one field with one owner: the reader set the tool's result carries, the
+/// pending-cast token, or one resolver result. A delta names the whole set, so it takes the list
+/// itself and no operator. A bare string is the one-entry spelling of that list — `"@internal"`
+/// and `["@internal"]` declare the same set — which leaves `"unknown"` and a `resolver.` path
+/// free to keep their own meanings.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum RawDeltaAudience {
     Token(String),
-    Exactly(RawExactly),
+    Readers(Vec<String>),
 }
 
 const UNKNOWN_TOKEN: &str = "unknown";
@@ -781,18 +786,14 @@ impl RawDelta {
                         references.record(ResolverReturn::Audience, reference?);
                         None
                     }
-                    None => {
-                        return Err(ConfigError::BadAudience {
-                            context,
-                            reason: format!(
-                                "expected {{ exactly = [...] }}, \"unknown\", or a resolver result, found {token:?}"
-                            ),
-                        });
-                    }
+                    None => Some(AudienceDelta::Static(parse_delta_audience(
+                        std::slice::from_ref(&token),
+                        &context,
+                    )?)),
                 }
             }
-            Some(RawDeltaAudience::Exactly(a)) => Some(AudienceDelta::Static(parse_declared_audience(
-                &a.exactly,
+            Some(RawDeltaAudience::Readers(readers)) => Some(AudienceDelta::Static(parse_delta_audience(
+                &readers,
                 &format!("{ctx} delta audience"),
             )?)),
             None => None,
@@ -1232,6 +1233,16 @@ fn parse_audience(list: &[String], context: &str) -> Result<Audience, ConfigErro
             }),
         },
     }
+}
+
+/// The reader set a `delta.audience` declares. The empty list is legal here and nowhere else: a
+/// delta states what the result carries, and a result no reader may hold is a set with no members.
+/// Every other reader set bounds or extends an existing one, where an empty list says nothing.
+fn parse_delta_audience(list: &[String], context: &str) -> Result<DeclaredAudience, ConfigError> {
+    if list.is_empty() {
+        return Ok(DeclaredAudience::restricted(Vec::new()));
+    }
+    parse_declared_audience(list, context)
 }
 
 fn parse_declared_audience(list: &[String], context: &str) -> Result<DeclaredAudience, ConfigError> {
@@ -1969,6 +1980,65 @@ delta = { trust = "resolver.one.trust", audience = "resolver.two.audience" }
         );
     }
 
+    /// A `delta.audience` names the whole reader set, so it is written as the list itself. A bare
+    /// string is the one-entry spelling of that list, which leaves `"unknown"` and a `resolver.`
+    /// path free to keep their own meanings.
+    #[test]
+    fn a_delta_audience_is_the_reader_list_itself() {
+        let policy = |audience: &str| {
+            format!(
+                "version = 1\n[membership]\nname = \"directory\"\n\
+                 [[tool]]\nname = \"t\"\ndelta = {{ audience = {audience} }}\n\
+                 [deployment]\ndispatch = \"enforced\"\nconfined_results = [\"t\"]\n"
+            )
+        };
+        let declared = |audience: &str| {
+            Config::from_toml_str(&policy(audience))
+                .expect("the delta loads")
+                .registry()
+                .tool(&ToolName::new("t"))
+                .expect("t registers")
+                .delta
+                .clone()
+                .expect("t is annotated")
+                .audience
+                .expect("the delta declares an audience")
+        };
+        let readers = |audience: &str| match declared(audience) {
+            AudienceDelta::Static(readers) => readers,
+            AudienceDelta::PendingCast => panic!("{audience} is a written reader set"),
+        };
+        assert_eq!(
+            readers(r#"["alice", "bob"]"#),
+            DeclaredAudience::restricted([ReaderId::new("alice"), ReaderId::new("bob")])
+        );
+        assert_eq!(
+            readers(r#""@internal""#),
+            DeclaredAudience::declared([], [GroupName::new("internal")]).unwrap(),
+            "a bare string is the one-entry list"
+        );
+        assert_eq!(readers(r#""public""#), DeclaredAudience::Public);
+        assert_eq!(readers(r#"["public"]"#), DeclaredAudience::Public);
+        assert_eq!(
+            readers("[]"),
+            DeclaredAudience::restricted(Vec::new()),
+            "the empty list declares a result no reader holds"
+        );
+        assert_eq!(declared(r#""unknown""#), AudienceDelta::PendingCast);
+        assert_eq!(
+            readers(r#"["unknown", "resolver.r.audience"]"#),
+            DeclaredAudience::restricted([ReaderId::new("unknown"), ReaderId::new("resolver.r.audience")]),
+            "a reserved bare string is an ordinary reader inside a list"
+        );
+        assert!(
+            matches!(
+                Config::from_toml_str(&policy(r#"{ exactly = ["alice"] }"#)),
+                Err(ConfigError::Parse(_))
+            ),
+            "a delta names the whole set and takes no operator"
+        );
+    }
+
     #[test]
     fn a_group_written_in_a_declaration_registers_and_labels_refuse_it() {
         let policy = r#"
@@ -1979,7 +2049,7 @@ name = "directory"
 
 [[tool]]
 name = "read"
-delta = { audience = { exactly = ["auditor", "@team"] } }
+delta = { audience = ["auditor", "@team"] }
 
 [[tool]]
 name = "send"

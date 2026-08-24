@@ -45,7 +45,7 @@ version = 1
 
 [[policy.tool]]
 name = "Read"
-delta = { audience = { exactly = ["session"] } }
+delta = { audience = ["session"] }
 
 [[policy.tool]]
 name = "Write"

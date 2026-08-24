@@ -64,12 +64,12 @@ delta = {}
 [[policy.tool]]
 name = "search_hr"
 parameters = { type = "object", properties = { query = { type = "string", description = "Keyword or phrase to match against file names and contents." } }, required = ["query"], additionalProperties = false }
-delta = { audience = { exactly = ["hr"] } }
+delta = { audience = ["hr"] }
 
 [[policy.tool]]
 name = "read_hr"
 parameters = { type = "object", properties = { file = { type = "string", description = "The exact file name to read, e.g. `alice-chen.md`." } }, required = ["file"], additionalProperties = false }
-delta = { audience = { exactly = ["hr"] } }
+delta = { audience = ["hr"] }
 
 [[policy.tool]]
 name = "create_hr"
@@ -97,12 +97,12 @@ delta = {}
 [[policy.tool]]
 name = "search_finance"
 parameters = { type = "object", properties = { query = { type = "string", description = "Keyword or phrase to match against file names and contents." } }, required = ["query"], additionalProperties = false }
-delta = { audience = { exactly = ["finance-lead@northwind.example", "ap@northwind.example"] } }
+delta = { audience = ["finance-lead@northwind.example", "ap@northwind.example"] }
 
 [[policy.tool]]
 name = "read_finance"
 parameters = { type = "object", properties = { file = { type = "string", description = "The exact file name to read, e.g. `alice-chen.md`." } }, required = ["file"], additionalProperties = false }
-delta = { audience = { exactly = ["finance-lead@northwind.example", "ap@northwind.example"] } }
+delta = { audience = ["finance-lead@northwind.example", "ap@northwind.example"] }
 
 [[policy.tool]]
 name = "create_finance"
@@ -160,7 +160,7 @@ name = "share_legal_packet"
 parameters = { type = "object", properties = { file = { type = "string", description = "The exact finance file name to share." }, to = { type = "string", description = "Recipient email address." } }, required = ["file", "to"], additionalProperties = false }
 requires = { trust = "internal", audience = { includes = ["$to"] } }
 effects = ["egress"]
-delta = { audience = { exactly = ["finance-lead@northwind.example", "ap@northwind.example"] } }
+delta = { audience = ["finance-lead@northwind.example", "ap@northwind.example"] }
 
 # The one registered declassifier: the redaction service strips numeric
 # identifiers (SSNs, salaries, account digits) from an hr-audience derivation,

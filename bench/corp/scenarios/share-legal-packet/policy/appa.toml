@@ -17,12 +17,12 @@ parameters = { type = "object", properties = { task = { type = "string", descrip
 [[policy.tool]]
 name = "search_finance"
 parameters = { type = "object", properties = { query = { type = "string", description = "Keyword or phrase to match against file names and contents." } }, required = ["query"], additionalProperties = false }
-delta = { audience = { exactly = ["legal@northwind.example"] } }
+delta = { audience = ["legal@northwind.example"] }
 
 [[policy.tool]]
 name = "read_finance"
 parameters = { type = "object", properties = { file = { type = "string", description = "The exact file name to read." } }, required = ["file"], additionalProperties = false }
-delta = { audience = { exactly = ["legal@northwind.example"] } }
+delta = { audience = ["legal@northwind.example"] }
 
 [[policy.tool]]
 name = "create_finance"
@@ -40,7 +40,7 @@ delta = {}
 name = "share_legal_packet"
 parameters = { type = "object", properties = { file = { type = "string", description = "The exact finance file name to share." }, to = { type = "string", description = "Recipient email address." } }, required = ["file", "to"], additionalProperties = false }
 requires = { trust = "internal", audience = { includes = ["$to"] } }
-delta = { audience = { exactly = ["legal@northwind.example"] } }
+delta = { audience = ["legal@northwind.example"] }
 effects = ["egress"]
 
 # --- deployment coverage -----------------------------------------------------

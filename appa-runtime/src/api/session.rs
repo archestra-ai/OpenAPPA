@@ -1766,7 +1766,7 @@ name = "directory"
 
 [[policy.tool]]
 name = "read"
-delta = { audience = { exactly = ["@team"] } }
+delta = { audience = ["@team"] }
 "#;
         let text = format!(
             "[policy]\n{policy}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.membership]\nurl = \"{directory}\"\n"
@@ -2294,7 +2294,7 @@ version = 1
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["hr"] } }
+delta = { audience = ["hr"] }
 
 [[policy.tool]]
 name = "send"
@@ -2314,7 +2314,7 @@ version = 1
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["hr"] } }
+delta = { audience = ["hr"] }
 
 [[policy.tool]]
 name = "send"
@@ -2339,7 +2339,7 @@ version = 1
 
 [[policy.tool]]
 name = "read_hr"
-delta = { audience = { exactly = ["hr"] } }
+delta = { audience = ["hr"] }
 
 [[policy.tool]]
 name = "send"
@@ -3002,7 +3002,7 @@ version = 1
 [[policy.tool]]
 name = "leak"
 parameters = { type = "object", properties = { q = { type = "string" } } }
-delta = { audience = { exactly = ["internal"] } }
+delta = { audience = ["internal"] }
 
 [[policy.sanitizer]]
 name = "scrub"
@@ -3028,7 +3028,7 @@ version = 1
 name = "leak"
 parameters = { type = "object", properties = { q = { type = "string" } } }
 effects = ["leak"]
-delta = { audience = { exactly = ["internal"] } }
+delta = { audience = ["internal"] }
 
 [[policy.sanitizer]]
 name = "scrub"
@@ -3112,7 +3112,7 @@ version = 1
 [[policy.tool]]
 name = "leak"
 parameters = { type = "object", properties = { q = { type = "string" } } }
-delta = { audience = { exactly = ["internal"] }, trust = "suspicious" }
+delta = { audience = ["internal"], trust = "suspicious" }
 
 [[policy.sanitizer]]
 name = "scrub"

@@ -240,7 +240,7 @@ version = 1
 
 [[tool]]
 name = "list_customers"
-delta = { audience = { exactly = ["crm"] } }
+delta = { audience = ["crm"] }
 
 [[sanitizer]]
 name = "leaky"

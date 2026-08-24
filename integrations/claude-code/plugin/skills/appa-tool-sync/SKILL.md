@@ -99,7 +99,7 @@ Decide two things per tool, from its name and its description.
 from a private source narrows the audience:
 
 ```toml
-delta = { audience = { exactly = ["private"] } }
+delta = { audience = ["private"] }
 ```
 
 Every other tool carries nothing:
@@ -125,8 +125,9 @@ Two rules the loader enforces:
 
 - Write a `delta` key on every entry. A `requires` on an entry with no
   `delta` is refused at load.
-- Every audience mention carries its operator — `exactly`, `includes`,
-  `cap`, `may_add`. A bare list is a load error.
+- A `delta` writes its reader list directly. Every other audience
+  mention carries its operator — `includes`, `cap`, `may_add`,
+  `exactly`. A bare list there is a load error.
 
 A tool can be both. One that reads private data and sends it outward
 carries the private `delta` and the public `requires` together, and is

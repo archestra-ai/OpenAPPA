@@ -20,7 +20,7 @@ returns = ["requires.audience"]
 
 [[tool]]
 name  = "list_customers"
-delta = { audience = { exactly = ["internal"] } }
+delta = { audience = ["internal"] }
 
 [[tool]]
 name  = "create_customer_data"
@@ -56,7 +56,7 @@ delta    = {}
 
 [[tool]]
 name  = "list_invoices"
-delta = { audience = { exactly = ["cfo@corp.example", "ap-lead@corp.example"] } }
+delta = { audience = ["cfo@corp.example", "ap-lead@corp.example"] }
 
 # Every transfer demands a human sign-off (an attention
 # mark): the treasurer must rule on the exact call before
@@ -70,7 +70,7 @@ delta    = {}
 
 [[tool]]
 name  = "list_recordings"
-delta = { audience = { exactly = ["internal"] } }
+delta = { audience = ["internal"] }
 
 # In this playground the human every authority consults is you: a transfer
 # pauses until you approve or deny it in the chat. No answer within the
